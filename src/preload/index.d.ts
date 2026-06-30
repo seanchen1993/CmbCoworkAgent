@@ -1868,8 +1868,17 @@ interface CustomAPI {
       range: { from: string; to: string },
       skillNames: string[]
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
-    awardsUserApplications: (
-      range: { from: string; to: string }
+    awardsUserApplications: (range: {
+      from: string
+      to: string
+    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    awardsTeamBenchmark: (range: {
+      from: string
+      to: string
+    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    awardsTeamSkillCoverage: (
+      range: { from: string; to: string },
+      groups: Array<{ shi: string; skillNames: string[] }>
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     esQuery: (input: {
       indexAlias: "event" | "trace"

@@ -552,6 +552,33 @@ interface DashboardAwardUserApplication {
   codeStats: DashboardCodeStats | null
 }
 
+/**
+ * 团队标杆奖一行（室级或其下组级）：使用深度 + 代码产出，按 室(upperOrgLv1) → 组(upperOrgLv0) 两级。
+ * 贡献技能数 / 技能试用覆盖室数依赖应用市场作者归属（ES 无该维度），由前端补，不在此结构。
+ */
+interface DashboardAwardTeamBenchmarkRow {
+  /** 室（upperOrgLv1）。 */
+  shi: string
+  /** 组（upperOrgLv0）；室级行为空。 */
+  group?: string
+  /** 使用次数（trace 数）。 */
+  usageCount: number
+  /** 去重用户数。 */
+  userCount: number
+  /** 人均使用次数 = usageCount / userCount。 */
+  perCapitaUsage: number
+  /** 使用次数超过本行人均的用户数。 */
+  aboveAvgUserCount: number
+  /** 技能使用次数（value_count usedSkills，含重复）。 */
+  skillUsageCount: number
+  /** 去重技能种类数（cardinality usedSkills）。 */
+  distinctSkillsUsed: number
+  /** 代码统计：代码提交量取 adoptedLines，提交率取 measuredAdoptionRate。 */
+  codeStats: DashboardCodeStats | null
+  /** 组级细分（仅室级行携带）。 */
+  children?: DashboardAwardTeamBenchmarkRow[]
+}
+
 interface DashboardUserDetail {
   sapId: string
   ystId?: string
@@ -6068,6 +6095,212 @@ async function fetchAwardUserApplications(
     .filter((x): x is DashboardAwardUserApplication => x !== null)
 }
 
+/** 团队标杆奖：单个组织桶的 trace 侧指标聚合（室级与组级共用）。 */
+function teamBenchmarkTraceMetricAggs(): Record<string, unknown> {
+  return {
+    usage_count: { value_count: { field: "traceId" } },
+    user_count: { cardinality: { field: "ystId" } },
+    skill_usage_count: { value_count: { field: "usedSkills" } },
+    distinct_skills: { cardinality: { field: "usedSkills" } },
+    // 各用户使用次数（doc_count），用于统计「超过人均次数的人数」。
+    users: { terms: { field: "ystId", size: 5000 } }
+  }
+}
+
+/** 把一个组织桶（含 teamBenchmarkTraceMetricAggs）解析为标杆奖行的 trace 侧部分。 */
+function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
+  usageCount: number
+  userCount: number
+  perCapitaUsage: number
+  aboveAvgUserCount: number
+  skillUsageCount: number
+  distinctSkillsUsed: number
+} {
+  const usageCount = asNumber(asRecord(bucket.usage_count).value, asNumber(bucket.doc_count))
+  const userCount = asNumber(asRecord(bucket.user_count).value)
+  const perCapitaUsage = userCount > 0 ? usageCount / userCount : 0
+  const userBuckets = asRecord(bucket.users).buckets
+  const aboveAvgUserCount = Array.isArray(userBuckets)
+    ? userBuckets.filter((u) => asNumber(asRecord(u).doc_count) > perCapitaUsage).length
+    : 0
+  return {
+    usageCount,
+    userCount,
+    perCapitaUsage,
+    aboveAvgUserCount,
+    skillUsageCount: asNumber(asRecord(bucket.skill_usage_count).value),
+    distinctSkillsUsed: asNumber(asRecord(bucket.distinct_skills).value)
+  }
+}
+
+/** 组织桶 join key：室 或 室␀组。 */
+function teamOrgKey(shi: string, group?: string): string {
+  return group ? `${shi} ${group}` : shi
+}
+
+const TEAM_BENCHMARK_SHI_LIMIT = 200
+const TEAM_BENCHMARK_GROUP_LIMIT = 500
+
+/**
+ * 团队标杆奖：按 室(upperOrgLv1) → 组(upperOrgLv0) 两级聚合使用深度（trace 侧）+ 代码产出（event 侧）。
+ * 「使用超过人均次数的人数」在服务端用各用户桶就地算出；贡献技能数/覆盖室数为市场口径，前端补。
+ */
+async function fetchAwardTeamBenchmark(
+  range: TimeRange
+): Promise<DashboardAwardTeamBenchmarkRow[]> {
+  requireDashboardAwardsAccess()
+
+  const traceBody = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { exists: { field: "upperOrgLv1" } },
+          { bool: { must_not: { term: { upperOrgLv1: "" } } } }
+        ]
+      }
+    },
+    aggs: {
+      by_shi: {
+        terms: { field: "upperOrgLv1", size: TEAM_BENCHMARK_SHI_LIMIT },
+        aggs: {
+          ...teamBenchmarkTraceMetricAggs(),
+          by_group: {
+            terms: { field: "upperOrgLv0", size: TEAM_BENCHMARK_GROUP_LIMIT },
+            aggs: teamBenchmarkTraceMetricAggs()
+          }
+        }
+      }
+    }
+  }
+
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    []
+  )
+  const eventBody = {
+    size: 0,
+    query: {
+      bool: {
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      by_shi: {
+        terms: { field: "upperOrgLv1", size: TEAM_BENCHMARK_SHI_LIMIT },
+        aggs: {
+          ...perBucketAggs,
+          by_group: {
+            terms: { field: "upperOrgLv0", size: TEAM_BENCHMARK_GROUP_LIMIT },
+            aggs: perBucketAggs
+          }
+        }
+      }
+    }
+  }
+
+  const [traceRaw, eventRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody),
+    esQuery(getEsIndex("event"), eventBody)
+  ])
+
+  // 代码统计按 室 / 室␀组 建索引，供 trace 行 join。
+  const codeByOrg = new Map<string, DashboardCodeStats>()
+  const eventShiBuckets = asRecord(asRecord(asRecord(eventRaw).aggregations).by_shi).buckets
+  for (const sb of Array.isArray(eventShiBuckets) ? eventShiBuckets : []) {
+    const shiBucket = asRecord(sb)
+    const shi = asString(shiBucket.key)
+    if (!shi) continue
+    codeByOrg.set(teamOrgKey(shi), normalizeCodeStatsFromContainer(shiBucket))
+    const groupBuckets = asRecord(shiBucket.by_group).buckets
+    for (const gb of Array.isArray(groupBuckets) ? groupBuckets : []) {
+      const groupBucket = asRecord(gb)
+      const group = asString(groupBucket.key)
+      if (!group) continue
+      codeByOrg.set(teamOrgKey(shi, group), normalizeCodeStatsFromContainer(groupBucket))
+    }
+  }
+
+  const shiBuckets = asRecord(asRecord(asRecord(traceRaw).aggregations).by_shi).buckets
+  return (Array.isArray(shiBuckets) ? shiBuckets : [])
+    .map((sb): DashboardAwardTeamBenchmarkRow | null => {
+      const shiBucket = asRecord(sb)
+      const shi = asString(shiBucket.key)
+      if (!shi) return null
+      const groupBuckets = asRecord(shiBucket.by_group).buckets
+      const children = (Array.isArray(groupBuckets) ? groupBuckets : [])
+        .map((gb): DashboardAwardTeamBenchmarkRow | null => {
+          const groupBucket = asRecord(gb)
+          const group = asString(groupBucket.key)
+          if (!group) return null
+          return {
+            shi,
+            group,
+            ...parseTeamBenchmarkTraceBucket(groupBucket),
+            codeStats: codeByOrg.get(teamOrgKey(shi, group)) ?? null
+          }
+        })
+        .filter((x): x is DashboardAwardTeamBenchmarkRow => x !== null)
+      return {
+        shi,
+        ...parseTeamBenchmarkTraceBucket(shiBucket),
+        codeStats: codeByOrg.get(teamOrgKey(shi)) ?? null,
+        children
+      }
+    })
+    .filter((x): x is DashboardAwardTeamBenchmarkRow => x !== null)
+}
+
+/**
+ * 团队标杆奖·技能试用覆盖室数：给定每个室「贡献技能名集」，返回该室技能被多少个去重室（upperOrgLv1）试用过。
+ * 单次查询用命名 filter 桶（每室一桶，usedSkills 命中该室技能集），桶内 cardinality(upperOrgLv1)。
+ */
+async function fetchAwardTeamSkillCoverage(
+  range: TimeRange,
+  groups: Array<{ shi: string; skillNames: string[] }>
+): Promise<Record<string, number>> {
+  requireDashboardAwardsAccess()
+  const filters: Record<string, unknown> = {}
+  for (const g of Array.isArray(groups) ? groups : []) {
+    const shi = String(g?.shi || "").trim()
+    const names = Array.isArray(g?.skillNames) ? g.skillNames : []
+    if (!shi || names.length === 0) continue
+    const should = names.flatMap((raw) => {
+      const norm = normalizeSkillQueryName(raw)
+      if (!norm) return []
+      const wildcard = `${escapeWildcard(norm)}**`
+      return [
+        { wildcard: { usedSkills: wildcard } },
+        { wildcard: { "usedSkills.keyword": wildcard } }
+      ]
+    })
+    if (should.length === 0) continue
+    filters[shi] = { bool: { should, minimum_should_match: 1 } }
+  }
+  if (Object.keys(filters).length === 0) return {}
+
+  const body = {
+    size: 0,
+    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    aggs: {
+      by_shi: {
+        filters: { filters },
+        aggs: { covered_shi: { cardinality: { field: "upperOrgLv1" } } }
+      }
+    }
+  }
+  const raw = await esQuery(getEsIndex("trace"), body)
+  const buckets = asRecord(asRecord(asRecord(asRecord(raw).aggregations).by_shi).buckets)
+  const result: Record<string, number> = {}
+  for (const shi of Object.keys(filters)) {
+    result[shi] = asNumber(asRecord(asRecord(buckets[shi]).covered_shi).value)
+  }
+  return result
+}
+
 /** `_source` fields needed to render a Commit 明细 row (shared by commit-detail fetchers). */
 const COMMIT_DETAIL_SOURCE_INCLUDES = [
   "eventId",
@@ -8613,9 +8846,7 @@ function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
   })
 }
 
-function makeMockAwardSkillContributions(
-  skillNames: string[]
-): DashboardAwardSkillContribution[] {
+function makeMockAwardSkillContributions(skillNames: string[]): DashboardAwardSkillContribution[] {
   const names = (Array.isArray(skillNames) ? skillNames : [])
     .map((s) => String(s || "").trim())
     .filter(Boolean)
@@ -8650,6 +8881,40 @@ function makeMockAwardUserApplications(): DashboardAwardUserApplication[] {
       threadCount: 60 - i * 3,
       featureCount: 14 - (i % 10),
       codeStats: makeMockSkillCodeStats(`user-${i}`)
+    }
+  })
+}
+
+function makeMockAwardTeamBenchmark(): DashboardAwardTeamBenchmarkRow[] {
+  const shiList = ["研发一室", "研发二室", "平台室", "数据室"]
+  const groupsByShi = ["A组", "B组", "C组"]
+  return shiList.map((shi, i) => {
+    const seed = (i + 1) * 53
+    const makeRow = (
+      label: string,
+      group: string | undefined,
+      scale: number
+    ): DashboardAwardTeamBenchmarkRow => {
+      const userCount = Math.max(1, Math.round((18 - i * 2) * scale))
+      const usageCount = Math.round((520 - i * 60) * scale)
+      const perCapitaUsage = userCount > 0 ? usageCount / userCount : 0
+      return {
+        shi,
+        group,
+        usageCount,
+        userCount,
+        perCapitaUsage,
+        aboveAvgUserCount: Math.max(1, Math.round(userCount * 0.38)),
+        skillUsageCount: Math.round((780 - i * 80) * scale),
+        distinctSkillsUsed: Math.max(1, Math.round((12 - i) * scale)),
+        codeStats: makeMockSkillCodeStats(`team-${label}`)
+      }
+    }
+    return {
+      ...makeRow(shi, undefined, 1),
+      children: groupsByShi.map((g, gi) =>
+        makeRow(`${shi}-${g}`, g, 0.45 - gi * 0.1 + ((seed + gi) % 5) / 100)
+      )
     }
   })
 }
@@ -12308,6 +12573,38 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   })
+
+  _ipcMain.handle("dashboard:awardsTeamBenchmark", async (_, range: TimeRange) => {
+    if (import.meta.env.DEV) {
+      return { success: true, data: makeMockAwardTeamBenchmark() }
+    }
+    try {
+      return { success: true, data: await fetchAwardTeamBenchmark(range) }
+    } catch (e) {
+      console.error("[Dashboard] awardsTeamBenchmark error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  _ipcMain.handle(
+    "dashboard:awardsTeamSkillCoverage",
+    async (_, range: TimeRange, groups: Array<{ shi: string; skillNames: string[] }>) => {
+      if (import.meta.env.DEV) {
+        const result: Record<string, number> = {}
+        for (const g of Array.isArray(groups) ? groups : []) {
+          const shi = String(g?.shi || "").trim()
+          if (shi) result[shi] = 1 + (shi.length % 4)
+        }
+        return { success: true, data: result }
+      }
+      try {
+        return { success: true, data: await fetchAwardTeamSkillCoverage(range, groups) }
+      } catch (e) {
+        console.error("[Dashboard] awardsTeamSkillCoverage error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
 
   _ipcMain.handle("dashboard:userProfiles", async (_, sapIds: string[]) => {
     const sanitizedSapIds = Array.isArray(sapIds)

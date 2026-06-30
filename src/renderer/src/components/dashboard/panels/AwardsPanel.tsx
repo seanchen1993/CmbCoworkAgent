@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react"
+import React, { useMemo, useState } from "react"
 import {
   Award,
   Trophy,
+  Users,
   Loader2,
   AlertCircle,
   Info,
@@ -10,6 +11,7 @@ import {
   ArrowUpDown,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   CheckCircle2,
   XCircle,
   Download
@@ -18,11 +20,27 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { formatTopUserOrgName } from "../use-dashboard"
 import type {
   DashboardAwardSkillContribution,
   DashboardAwardUserApplication,
+  DashboardAwardTeamBenchmarkRow,
   DashboardCodeStats
 } from "../use-dashboard"
+
+/** 团队标杆奖一行：后端室/组指标 + 前端按市场作者归属补的贡献技能数 / 覆盖室数。 */
+export interface TeamBenchmarkRow extends DashboardAwardTeamBenchmarkRow {
+  /** 贡献技能数（室级有值；组级为 null，该指标按室口径）。 */
+  contributedSkillCount: number | null
+  /** 技能试用覆盖室数（室级有值；组级为 null）。 */
+  skillCoverageShiCount: number | null
+  children?: TeamBenchmarkRow[]
+}
+
+/** 室/组展示，沿用运营面板规则：upperOrgLv1/upperOrgLv0。 */
+function orgLabelOf(row: { shi: string; group?: string }): string {
+  return formatTopUserOrgName("", row.shi, row.group ?? "")
+}
 
 /** 技能贡献奖一行：聚合数据 + 已 join 的应用市场构建者展示字段。 */
 export interface AwardSkillRow extends DashboardAwardSkillContribution {
@@ -41,6 +59,9 @@ interface AwardsPanelProps {
   userApps: DashboardAwardUserApplication[]
   usersLoading: boolean
   usersError: string | null
+  teamRows: TeamBenchmarkRow[]
+  teamLoading: boolean
+  teamError: string | null
   /** 导出当前奖项数据为 Excel；不传则不显示导出按钮。 */
   onExport?: () => void
   exporting?: boolean
@@ -135,7 +156,13 @@ function SortHeader({
   )
 }
 
-type AwardSubTab = "contribution" | "application"
+type AwardSubTab = "contribution" | "application" | "team"
+
+const SUB_TABS: Array<{ id: AwardSubTab; label: string; icon: typeof Award }> = [
+  { id: "contribution", label: "研发智能化技能贡献奖", icon: Award },
+  { id: "application", label: "研发智能化技能应用奖", icon: Trophy },
+  { id: "team", label: "研发智能化团队标杆奖", icon: Users }
+]
 
 export function AwardsPanel({
   skillRows,
@@ -144,6 +171,9 @@ export function AwardsPanel({
   userApps,
   usersLoading,
   usersError,
+  teamRows,
+  teamLoading,
+  teamError,
   onExport,
   exporting
 }: AwardsPanelProps): React.JSX.Element {
@@ -153,32 +183,25 @@ export function AwardsPanel({
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <div className="flex flex-1 items-center gap-1 rounded-md bg-muted/50 p-1 text-sm">
-          <button
-            type="button"
-            onClick={() => setTab("contribution")}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded px-3 py-1.5 font-medium transition-colors",
-              tab === "contribution"
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            <Award className="size-4" />
-            研发智能化技能贡献奖
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab("application")}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded px-3 py-1.5 font-medium transition-colors",
-              tab === "application"
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            <Trophy className="size-4" />
-            研发智能化技能应用奖
-          </button>
+          {SUB_TABS.map((t) => {
+            const Icon = t.icon
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTab(t.id)}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded px-3 py-1.5 font-medium transition-colors",
+                  tab === t.id
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <Icon className="size-4" />
+                {t.label}
+              </button>
+            )
+          })}
         </div>
         {onExport ? (
           <Button
@@ -186,7 +209,7 @@ export function AwardsPanel({
             size="sm"
             className="gap-1.5 text-xs"
             onClick={onExport}
-            disabled={exporting || skillsLoading || usersLoading}
+            disabled={exporting || skillsLoading || usersLoading || teamLoading}
           >
             {exporting ? (
               <Loader2 className="size-3.5 animate-spin" />
@@ -200,8 +223,10 @@ export function AwardsPanel({
 
       {tab === "contribution" ? (
         <ContributionTable rows={skillRows} loading={skillsLoading} error={skillsError} />
-      ) : (
+      ) : tab === "application" ? (
         <ApplicationTable rows={userApps} loading={usersLoading} error={usersError} />
+      ) : (
+        <TeamBenchmarkTable rows={teamRows} loading={teamLoading} error={teamError} />
       )}
     </div>
   )
@@ -526,7 +551,7 @@ function ApplicationTable({
             <tr className="border-b border-border bg-muted/40 text-left text-xs text-muted-foreground">
               <th className="px-3 py-2 font-medium">#</th>
               <th className="px-3 py-2 font-medium">用户</th>
-              <th className="px-3 py-2 font-medium">室</th>
+              <th className="px-3 py-2 font-medium">室/组</th>
               {depthColumns.map((col) => (
                 <SortHeader
                   key={col.key}
@@ -577,7 +602,13 @@ function ApplicationTable({
                     <span className="text-[11px] text-muted-foreground">{row.sapId}</span>
                   ) : null}
                 </td>
-                <td className="px-3 py-2 text-muted-foreground">{row.upperOrgLv1 || "—"}</td>
+                <td className="px-3 py-2 text-muted-foreground">
+                  {formatTopUserOrgName(
+                    row.orgName ?? "",
+                    row.upperOrgLv1 ?? "",
+                    row.upperOrgLv0 ?? ""
+                  ) || "—"}
+                </td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.callCount)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">
                   {formatNumber(row.skillCount)}
@@ -608,6 +639,205 @@ function ApplicationTable({
                 ))}
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+const TEAM_HINT =
+  "按 室(upperOrgLv1) → 组(upperOrgLv0) 两级统计。人均使用次数=使用次数/去重用户数；超过人均人数=该室/组内使用次数高于本行人均的用户数。代码提交量取已采纳行数，提交率为提交口径采纳率（采纳行/有效生成行）。贡献技能数 / 技能试用覆盖室数按应用市场作者归属（发布者所属室）统计，仅在室级展示。"
+
+type TeamSortKey =
+  | "usageCount"
+  | "perCapitaUsage"
+  | "aboveAvgUserCount"
+  | "contributedSkillCount"
+  | "skillCoverageShiCount"
+  | "skillUsageCount"
+  | "committedLines"
+  | "commitRate"
+
+function teamSortValue(row: TeamBenchmarkRow, key: TeamSortKey): number {
+  switch (key) {
+    case "usageCount":
+      return row.usageCount
+    case "perCapitaUsage":
+      return row.perCapitaUsage
+    case "aboveAvgUserCount":
+      return row.aboveAvgUserCount
+    case "contributedSkillCount":
+      return row.contributedSkillCount ?? -1
+    case "skillCoverageShiCount":
+      return row.skillCoverageShiCount ?? -1
+    case "skillUsageCount":
+      return row.skillUsageCount
+    case "committedLines":
+      return row.codeStats?.adoptedLines ?? -1
+    case "commitRate":
+      return row.codeStats?.measuredAdoptionRate ?? -1
+    default:
+      return 0
+  }
+}
+
+function TeamBenchmarkTable({
+  rows,
+  loading,
+  error
+}: {
+  rows: TeamBenchmarkRow[]
+  loading: boolean
+  error: string | null
+}): React.JSX.Element {
+  const [sortKey, setSortKey] = useState<TeamSortKey>("usageCount")
+  const [sortDesc, setSortDesc] = useState(true)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  const sortedShi = useMemo(() => {
+    return [...rows].sort((a, b) => {
+      const av = teamSortValue(a, sortKey)
+      const bv = teamSortValue(b, sortKey)
+      if (av !== bv) return sortDesc ? bv - av : av - bv
+      return b.usageCount - a.usageCount
+    })
+  }, [rows, sortKey, sortDesc])
+
+  const toggleSort = (key: TeamSortKey): void => {
+    if (key === sortKey) setSortDesc((v) => !v)
+    else {
+      setSortKey(key)
+      setSortDesc(true)
+    }
+  }
+
+  const toggleExpand = (shi: string): void => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(shi)) next.delete(shi)
+      else next.add(shi)
+      return next
+    })
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" />
+        加载团队标杆数据…
+      </div>
+    )
+  }
+  if (error) {
+    return (
+      <div className="flex items-center gap-2 py-8 text-sm text-destructive">
+        <AlertCircle className="size-4" />
+        {error}
+      </div>
+    )
+  }
+  if (rows.length === 0) {
+    return <div className="py-8 text-sm text-muted-foreground">暂无团队数据。</div>
+  }
+
+  const columns: Array<{ key: TeamSortKey; label: string }> = [
+    { key: "usageCount", label: "使用次数" },
+    { key: "perCapitaUsage", label: "人均使用次数" },
+    { key: "aboveAvgUserCount", label: "超过人均人数" },
+    { key: "contributedSkillCount", label: "贡献技能数" },
+    { key: "skillCoverageShiCount", label: "覆盖室数" },
+    { key: "skillUsageCount", label: "技能使用次数" },
+    { key: "committedLines", label: "代码提交量" },
+    { key: "commitRate", label: "提交率" }
+  ]
+
+  const renderCells = (row: TeamBenchmarkRow): React.JSX.Element => (
+    <>
+      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.usageCount)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{row.perCapitaUsage.toFixed(1)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.aboveAvgUserCount)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {row.contributedSkillCount === null ? "—" : formatNumber(row.contributedSkillCount)}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {row.skillCoverageShiCount === null ? "—" : formatNumber(row.skillCoverageShiCount)}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">{formatNumber(row.skillUsageCount)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {formatNumber(row.codeStats?.adoptedLines ?? 0)}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {formatPercent(row.codeStats?.measuredAdoptionRate ?? null)}
+      </td>
+    </>
+  )
+
+  return (
+    <div className="space-y-3">
+      <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        按室汇总，点击室名展开下属组。点击列头切换排序。 <InfoHint hint={TEAM_HINT} />
+      </p>
+      <div className="overflow-x-auto rounded-md border border-border">
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-b border-border bg-muted/40 text-left text-xs text-muted-foreground">
+              <th className="px-3 py-2 font-medium">室 / 组</th>
+              {columns.map((col) => (
+                <SortHeader
+                  key={col.key}
+                  active={sortKey === col.key}
+                  desc={sortDesc}
+                  onClick={() => toggleSort(col.key)}
+                >
+                  {col.label}
+                </SortHeader>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sortedShi.map((shiRow) => {
+              const isOpen = expanded.has(shiRow.shi)
+              const children = shiRow.children ?? []
+              return (
+                <React.Fragment key={shiRow.shi}>
+                  <tr className="border-b border-border/60">
+                    <td className="px-3 py-2">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 font-medium text-foreground hover:text-primary disabled:cursor-default disabled:hover:text-foreground"
+                        disabled={children.length === 0}
+                        onClick={() => toggleExpand(shiRow.shi)}
+                      >
+                        {children.length > 0 ? (
+                          isOpen ? (
+                            <ChevronDown className="size-3.5" />
+                          ) : (
+                            <ChevronRight className="size-3.5" />
+                          )
+                        ) : (
+                          <span className="inline-block size-3.5" />
+                        )}
+                        {orgLabelOf(shiRow)}
+                      </button>
+                    </td>
+                    {renderCells(shiRow)}
+                  </tr>
+                  {isOpen &&
+                    children.map((groupRow) => (
+                      <tr
+                        key={`${shiRow.shi}/${groupRow.group}`}
+                        className="border-b border-border/40 bg-muted/20"
+                      >
+                        <td className="px-3 py-2 pl-9 text-muted-foreground">
+                          {orgLabelOf(groupRow)}
+                        </td>
+                        {renderCells(groupRow)}
+                      </tr>
+                    ))}
+                </React.Fragment>
+              )
+            })}
           </tbody>
         </table>
       </div>

@@ -391,6 +391,21 @@ export interface DashboardAwardUserApplication {
   codeStats: DashboardCodeStats | null
 }
 
+/** 团队标杆奖一行（室级或其下组级）。贡献技能数 / 覆盖室数由前端按市场作者归属补齐。 */
+export interface DashboardAwardTeamBenchmarkRow {
+  shi: string
+  /** 组（upperOrgLv0）；室级行为空。 */
+  group?: string
+  usageCount: number
+  userCount: number
+  perCapitaUsage: number
+  aboveAvgUserCount: number
+  skillUsageCount: number
+  distinctSkillsUsed: number
+  codeStats: DashboardCodeStats | null
+  children?: DashboardAwardTeamBenchmarkRow[]
+}
+
 export interface DashboardProjectModeFeature {
   slug: string
   title: string

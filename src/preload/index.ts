@@ -2507,10 +2507,21 @@ const api = {
       skillNames: string[]
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:awardsSkillContributions", range, skillNames),
-    awardsUserApplications: (
-      range: { from: string; to: string }
-    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+    awardsUserApplications: (range: {
+      from: string
+      to: string
+    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:awardsUserApplications", range),
+    awardsTeamBenchmark: (range: {
+      from: string
+      to: string
+    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:awardsTeamBenchmark", range),
+    awardsTeamSkillCoverage: (
+      range: { from: string; to: string },
+      groups: Array<{ shi: string; skillNames: string[] }>
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:awardsTeamSkillCoverage", range, groups),
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"

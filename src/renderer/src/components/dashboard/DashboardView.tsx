@@ -69,6 +69,7 @@ import {
   type DashboardProjectModeData,
   type DashboardAwardSkillContribution,
   type DashboardAwardUserApplication,
+  type DashboardAwardTeamBenchmarkRow,
   type DashboardProjectModeProject,
   type DashboardProjectModeProjectPageData,
   type DashboardProjectModeProjectPageOptions,
@@ -80,7 +81,7 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
-import { AwardsPanel, type AwardSkillRow } from "./panels/AwardsPanel"
+import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
@@ -546,7 +547,17 @@ function resolveSkillUploaderExportInfo(
   item: MarketItem | null,
   uploaderProfiles: Record<string, SkillUploaderProfile>
 ): SkillUploaderExportInfo {
-  if (!item?.user_id) return { sapId: "", userName: "", orgName: "" }
+  if (!item) return { sapId: "", userName: "", orgName: "" }
+
+  // 组织级技能（如「精品」技能）的 user_id 常为空，创建人信息落在
+  // managerName / managerDepartment。与技能市场 getOrgSkillUploaderProfile 的回退保持一致，
+  // 否则这些技能在评奖辅助里会匹配不到创建人。
+  if (!item.user_id?.trim()) {
+    const managerName = item.managerName?.trim() ?? ""
+    const managerDepartment = item.managerDepartment?.trim() ?? ""
+    if (!managerName && !managerDepartment) return { sapId: "", userName: "", orgName: "" }
+    return { sapId: "", userName: managerName, orgName: managerDepartment }
+  }
 
   const parsed = parseUploaderIdentity(item.user_id)
   const profileCandidates = getUploaderIdCandidates(item.user_id)
@@ -2471,6 +2482,9 @@ export function DashboardView(): React.JSX.Element {
   const [awardUserApps, setAwardUserApps] = useState<DashboardAwardUserApplication[] | null>(null)
   const [awardUsersLoading, setAwardUsersLoading] = useState(false)
   const [awardUsersError, setAwardUsersError] = useState<string | null>(null)
+  const [awardTeamRows, setAwardTeamRows] = useState<TeamBenchmarkRow[] | null>(null)
+  const [awardTeamLoading, setAwardTeamLoading] = useState(false)
+  const [awardTeamError, setAwardTeamError] = useState<string | null>(null)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
   const [skillDetail, setSkillDetail] = useState<DashboardSkillDetail | null>(null)
@@ -2833,6 +2847,90 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [activeMainTab, awardsAdmin, range, marketSkillMap, marketSkillsLoading])
 
+  // 团队标杆奖懒加载：拉取室/组指标后，按市场作者归属（发布者所属室）补「贡献技能数 / 覆盖室数」。
+  useEffect(() => {
+    if (activeMainTab !== "awards" || !awardsAdmin) return
+    let cancelled = false
+
+    // 每个室（upperOrgLv1）贡献的技能名集：发布者所属室 = 上传者 profile.upperOrgLv1。
+    const skillNamesByShi = new Map<string, string[]>()
+    if (!marketSkillsLoading) {
+      for (const item of marketSkillMap.values()) {
+        const name = item.name?.trim()
+        if (!name) continue
+        const profile = getUploaderIdCandidates(item.user_id)
+          .map((candidate) => skillUploaderProfiles[candidate])
+          .find(Boolean)
+        const shi = profile?.upperOrgLv1?.trim()
+        if (!shi) continue
+        const list = skillNamesByShi.get(shi) ?? []
+        list.push(name)
+        skillNamesByShi.set(shi, list)
+      }
+    }
+
+    async function loadTeam(): Promise<void> {
+      if (marketSkillsLoading) return
+      if (!cancelled) {
+        setAwardTeamLoading(true)
+        setAwardTeamError(null)
+      }
+      try {
+        const result = await window.api.dashboard.awardsTeamBenchmark(range)
+        if (cancelled) return
+        if (!result.success) {
+          setAwardTeamError(result.error || "获取团队标杆数据失败")
+          return
+        }
+        const rawRows = (result.data as DashboardAwardTeamBenchmarkRow[]) ?? []
+
+        // 覆盖室数：把每室贡献技能集传给后端，单次查询得各室技能被多少去重室试用过。
+        const coverageGroups = Array.from(skillNamesByShi.entries()).map(([shi, skillNames]) => ({
+          shi,
+          skillNames
+        }))
+        let coverageByShi: Record<string, number> = {}
+        if (coverageGroups.length > 0) {
+          const cov = await window.api.dashboard.awardsTeamSkillCoverage(range, coverageGroups)
+          if (cancelled) return
+          if (cov.success) coverageByShi = (cov.data as Record<string, number>) ?? {}
+        }
+
+        const enriched: TeamBenchmarkRow[] = rawRows.map((row) => ({
+          ...row,
+          contributedSkillCount: skillNamesByShi.get(row.shi)?.length ?? 0,
+          skillCoverageShiCount: coverageByShi[row.shi] ?? 0,
+          children: (row.children ?? []).map((child) => ({
+            ...child,
+            // 贡献技能数 / 覆盖室数为室口径，组级不展示；组级无下钻。
+            contributedSkillCount: null,
+            skillCoverageShiCount: null,
+            children: undefined
+          }))
+        }))
+        if (!cancelled) setAwardTeamRows(enriched)
+      } catch (error) {
+        if (!cancelled) {
+          setAwardTeamError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled) setAwardTeamLoading(false)
+      }
+    }
+
+    void loadTeam()
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeMainTab,
+    awardsAdmin,
+    range,
+    marketSkillMap,
+    marketSkillsLoading,
+    skillUploaderProfiles
+  ])
+
   useEffect(() => {
     if (
       activeMainTab !== "skill-eval" ||
@@ -2914,7 +3012,7 @@ export function DashboardView(): React.JSX.Element {
           "排名",
           "用户",
           "SAP",
-          "室",
+          "室/组",
           "调用数",
           "技能种类数",
           "用技能总次数",
@@ -2930,7 +3028,7 @@ export function DashboardView(): React.JSX.Element {
           i + 1,
           r.userName || "",
           r.sapId || "",
-          r.upperOrgLv1 || "",
+          formatTopUserOrgName(r.orgName ?? "", r.upperOrgLv1 ?? "", r.upperOrgLv0 ?? ""),
           r.callCount,
           r.skillCount,
           r.skillUsageCount,
@@ -2944,6 +3042,41 @@ export function DashboardView(): React.JSX.Element {
         ])
       })
 
+      // 团队标杆奖：室级 + 缩进组级行平铺为一张表。
+      const teamSheetRows: (string | number)[][] = []
+      for (const shiRow of awardTeamRows ?? []) {
+        const emit = (row: TeamBenchmarkRow, isGroup: boolean): void => {
+          teamSheetRows.push([
+            isGroup ? `    ${formatTopUserOrgName("", row.shi, row.group ?? "")}` : row.shi,
+            row.usageCount,
+            Number(row.perCapitaUsage.toFixed(1)),
+            row.aboveAvgUserCount,
+            row.contributedSkillCount === null ? "" : row.contributedSkillCount,
+            row.skillCoverageShiCount === null ? "" : row.skillCoverageShiCount,
+            row.skillUsageCount,
+            row.codeStats?.adoptedLines ?? 0,
+            formatPercent(row.codeStats?.measuredAdoptionRate ?? null)
+          ])
+        }
+        emit(shiRow, false)
+        for (const child of shiRow.children ?? []) emit(child, true)
+      }
+      sheets.push({
+        name: "团队标杆奖",
+        header: [
+          "室/组",
+          "使用次数",
+          "人均使用次数",
+          "超过人均人数",
+          "贡献技能数",
+          "覆盖室数",
+          "技能使用次数",
+          "代码提交量",
+          "提交率"
+        ],
+        rows: teamSheetRows
+      })
+
       const result = await window.api.dashboard.exportExcel(sheets, {
         fileName: "评奖辅助看板数据"
       })
@@ -2955,7 +3088,7 @@ export function DashboardView(): React.JSX.Element {
     } finally {
       setExporting(false)
     }
-  }, [awardSkillRows, awardUserApps])
+  }, [awardSkillRows, awardUserApps, awardTeamRows])
 
   useEffect(() => {
     let cancelled = false
@@ -4668,6 +4801,9 @@ export function DashboardView(): React.JSX.Element {
                 userApps={awardUserApps ?? []}
                 usersLoading={awardUsersLoading}
                 usersError={awardUsersError}
+                teamRows={awardTeamRows ?? []}
+                teamLoading={awardTeamLoading || marketSkillsLoading}
+                teamError={awardTeamError}
                 onExport={handleAwardsExport}
                 exporting={exporting}
               />
