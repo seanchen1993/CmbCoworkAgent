@@ -356,6 +356,41 @@ export interface DashboardUserDetail {
   traceTriggerScope?: DashboardTraceTriggerScope
 }
 
+/**
+ * 技能贡献奖候选（逐 Skill）：跨室使用数 + 整体 AI 代码入库率。
+ * skillKey 与前端传入的「个人构建」技能名一致，供 join 应用市场展示字段（构建者等）。
+ */
+export interface DashboardAwardSkillContribution {
+  skillKey: string
+  /** 使用过该技能的去重室（upperOrgLv1）数；评分标准①「跨 ≥2 室」。 */
+  crossOrgCount: number
+  /** 使用过该技能的去重用户数。 */
+  userCount: number
+  /** 该技能的调用（trace）数。 */
+  callCount: number
+  /** 该技能命中代码的整体入库统计（含 inclusivePushedAdoptionRate）。 */
+  codeStats: DashboardCodeStats | null
+}
+
+/** 技能应用奖榜（逐个人）：深度使用指标 + 个人 AI 代码入库率。不自动排名。 */
+export interface DashboardAwardUserApplication {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  callCount: number
+  /** 用过的去重技能种类数。 */
+  skillCount: number
+  /** 用技能的总次数（含同技能重复）。 */
+  skillUsageCount: number
+  toolCallCount: number
+  threadCount: number
+  featureCount: number
+  codeStats: DashboardCodeStats | null
+}
+
 export interface DashboardProjectModeFeature {
   slug: string
   title: string

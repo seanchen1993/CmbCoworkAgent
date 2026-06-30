@@ -506,6 +506,52 @@ interface DashboardUserListData {
   totalActiveUsers: number
 }
 
+// ── 评奖辅助看板 ───────────────────────────────────────────────
+/**
+ * 技能贡献奖候选（逐 Skill）：跨室使用数 + 整体 AI 代码入库率。
+ * 由前端传入「个人构建」的 skill 名称集（取自应用市场 featured=个人），
+ * 后端按名称（含所有版本）聚合，结果按 skillKey 回传，前端再挂构建者等展示字段。
+ */
+interface DashboardAwardSkillContribution {
+  /** 归一化技能名（与传入名一致），供前端 join 市场展示字段。 */
+  skillKey: string
+  /** 使用过该技能的去重室（upperOrgLv1）数；评分标准①「跨 ≥2 室」。 */
+  crossOrgCount: number
+  /** 使用过该技能的去重用户数。 */
+  userCount: number
+  /** 该技能的调用（trace）数。 */
+  callCount: number
+  /** 该技能命中代码的整体入库统计（含 inclusivePushedAdoptionRate）。 */
+  codeStats: DashboardCodeStats | null
+}
+
+/**
+ * 技能应用奖榜（逐个人）：深度使用指标 + 个人 AI 代码入库率。
+ * 不自动排名，前端各列可点排序。
+ */
+interface DashboardAwardUserApplication {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  /** 调用（trace）数。 */
+  callCount: number
+  /** 用过的去重技能种类数（cardinality of usedSkills）。 */
+  skillCount: number
+  /** 用技能的总次数（value_count of usedSkills，含同技能重复）。 */
+  skillUsageCount: number
+  /** 工具调用总数。 */
+  toolCallCount: number
+  /** 去重会话（threadId）数。 */
+  threadCount: number
+  /** 去重特性（harnessFeatureSlug）数。 */
+  featureCount: number
+  /** 个人入库统计（含 inclusivePushedAdoptionRate）。 */
+  codeStats: DashboardCodeStats | null
+}
+
 interface DashboardUserDetail {
   sapId: string
   ystId?: string
@@ -740,6 +786,10 @@ const DISLIKE_TYPE_OPTIONS = [
 const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
+const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
+// 评奖辅助看板当前仅开放给这三个 ystId；env 可覆盖，留空则回退到此默认名单，
+// 保证即使未配置环境变量也严格只对这三人可见。
+const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855"
 
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
@@ -760,6 +810,13 @@ function getDashboardAllowedIds(): Set<string> {
 
 function getTraceEvolverReviewAdminIds(): Set<string> {
   return splitEnvIds(import.meta.env[TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV] as string | undefined)
+}
+
+function getDashboardAwardsAdminIds(): Set<string> {
+  const configured = String(
+    (import.meta.env[DASHBOARD_AWARDS_ADMIN_IDS_ENV] as string | undefined) || ""
+  ).trim()
+  return splitEnvIds(configured || DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS)
 }
 
 function getDashboardAccessContext(): DashboardAccessContext {
@@ -811,6 +868,26 @@ function isDashboardProjectModeAdmin(
 function requireDashboardProjectModeAccess(): DashboardAccessContext {
   const access = getDashboardAccessContext()
   if (!access.loggedIn) throw new Error("请先登录后再查看项目运营面板")
+  return access
+}
+
+// 评奖辅助看板（技能贡献奖 / 技能应用奖）的访问门禁：仅 DASHBOARD_AWARDS_ADMIN
+// 名单内的 ystId 可见（默认仅三人）。DEV 直接放行便于本地预览。
+function isDashboardAwardsAdmin(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  if (!access.loggedIn || !access.ystId) return false
+  return getDashboardAwardsAdminIds().has(access.ystId)
+}
+
+function requireDashboardAwardsAccess(): DashboardAccessContext {
+  const access = getDashboardAccessContext()
+  if (import.meta.env.DEV) return access
+  if (!access.loggedIn) throw new Error("请先登录后再查看评奖辅助看板")
+  if (!access.ystId || !getDashboardAwardsAdminIds().has(access.ystId)) {
+    throw new Error("无评奖辅助看板访问权限")
+  }
   return access
 }
 
@@ -1208,6 +1285,25 @@ function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknow
 
 function buildVersionPrefix(skillName: string): string {
   return `${skillName}-v`
+}
+
+/**
+ * code 事件侧（`properties.usedSkills`）的技能命中过滤，匹配裸名或 `name-v*` 全部版本，
+ * 与 trace 侧 buildSkillUsageWildcardFilter 同口径，用于评奖看板按技能聚合入库率。
+ */
+function buildEventSkillUsageWildcardFilter(skillName: string): Record<string, unknown> {
+  const versionPrefix = buildVersionPrefix(skillName)
+  return {
+    bool: {
+      should: [
+        { term: { "properties.usedSkills": skillName } },
+        { term: { "properties.usedSkills.keyword": skillName } },
+        { prefix: { "properties.usedSkills": versionPrefix } },
+        { prefix: { "properties.usedSkills.keyword": versionPrefix } }
+      ],
+      minimum_should_match: 1
+    }
+  }
 }
 
 const SKILL_EVAL_STATS_PAGE_SIZE = 500
@@ -5772,6 +5868,206 @@ async function fetchSkillDetail(
   }
 }
 
+// ── 评奖辅助看板 fetchers ───────────────────────────────────────
+// 单批技能命名桶上限（避免聚合体过大）。个人技能数远小于此。
+const AWARD_SKILL_CONTRIBUTION_LIMIT = 300
+// 应用奖榜返回的个人数上限（多列展示、不自动排名，前端可自行排序/裁剪 Top10）。
+const AWARD_USER_APPLICATION_LIMIT = 100
+
+/**
+ * 技能贡献奖：对给定「个人构建」技能名集，按技能聚合跨室数 / 使用人数 / 调用数（trace 侧）
+ * 与整体入库统计（code 事件侧）。两侧均用 filters 命名桶单次聚合，避免逐技能查询。
+ */
+async function fetchAwardSkillContributions(
+  range: TimeRange,
+  skillNames: string[]
+): Promise<DashboardAwardSkillContribution[]> {
+  requireDashboardAwardsAccess()
+  // 保留前端传入的原始名作为回传 key（供前端 join 市场展示字段），内部用归一化名建 ES 过滤。
+  const seen = new Set<string>()
+  const entries: Array<{ key: string; norm: string }> = []
+  for (const raw of Array.isArray(skillNames) ? skillNames : []) {
+    const key = String(raw || "").trim()
+    if (!key || seen.has(key)) continue
+    const norm = normalizeSkillQueryName(key)
+    if (!norm) continue
+    seen.add(key)
+    entries.push({ key, norm })
+    if (entries.length >= AWARD_SKILL_CONTRIBUTION_LIMIT) break
+  }
+  if (entries.length === 0) return []
+
+  // trace 侧：每个技能一个命名 filter 桶，统计去重室 / 去重用户；调用数取桶 doc_count。
+  const traceFilters: Record<string, unknown> = {}
+  for (const { key, norm } of entries) traceFilters[key] = buildSkillUsageWildcardFilter(norm)
+  const traceBody = {
+    size: 0,
+    query: { bool: { filter: [timeRangeFilter("startedAt", range)] } },
+    aggs: {
+      by_skill: {
+        filters: { filters: traceFilters },
+        aggs: {
+          cross_org: { cardinality: { field: "upperOrgLv1" } },
+          users: { cardinality: { field: "ystId" } }
+        }
+      }
+    }
+  }
+
+  // code 事件侧：每个技能一个命名 filter 桶，桶内复用 perBucketAggs 得入库统计。
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    []
+  )
+  const eventFilters: Record<string, unknown> = {}
+  for (const { key, norm } of entries) eventFilters[key] = buildEventSkillUsageWildcardFilter(norm)
+  const eventBody = {
+    size: 0,
+    query: {
+      bool: {
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      by_skill: { filters: { filters: eventFilters }, aggs: perBucketAggs }
+    }
+  }
+
+  const [traceRaw, eventRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody),
+    esQuery(getEsIndex("event"), eventBody)
+  ])
+
+  const traceBuckets = asRecord(
+    asRecord(asRecord(asRecord(traceRaw).aggregations).by_skill).buckets
+  )
+  const eventBuckets = asRecord(
+    asRecord(asRecord(asRecord(eventRaw).aggregations).by_skill).buckets
+  )
+
+  return entries.map(({ key }) => {
+    const tBucket = asRecord(traceBuckets[key])
+    const eBucket = asRecord(eventBuckets[key])
+    const codeStats =
+      asNumber(eBucket.doc_count) > 0 ? normalizeCodeStatsFromContainer(eBucket) : null
+    return {
+      skillKey: key,
+      crossOrgCount: asNumber(asRecord(tBucket.cross_org).value),
+      userCount: asNumber(asRecord(tBucket.users).value),
+      callCount: asNumber(tBucket.doc_count),
+      codeStats
+    }
+  })
+}
+
+/**
+ * 技能应用奖榜：按个人（ystId）聚合深度使用指标（trace 侧）+ 个人入库统计（code 事件侧）。
+ * 不自动排名；trace 按调用数取前 N 人，code 入库按 ystId join。
+ */
+async function fetchAwardUserApplications(
+  range: TimeRange
+): Promise<DashboardAwardUserApplication[]> {
+  requireDashboardAwardsAccess()
+
+  const traceBody = {
+    size: 0,
+    query: {
+      bool: {
+        filter: [
+          timeRangeFilter("startedAt", range),
+          { exists: { field: "ystId" } },
+          { bool: { must_not: { term: { ystId: "" } } } }
+        ]
+      }
+    },
+    aggs: {
+      users: {
+        terms: { field: "ystId", size: AWARD_USER_APPLICATION_LIMIT, order: { _count: "desc" } },
+        aggs: {
+          latest_user_info: {
+            top_hits: {
+              size: 1,
+              sort: [{ startedAt: { order: "desc" } }],
+              _source: {
+                includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+              }
+            }
+          },
+          skill_count: { cardinality: { field: "usedSkills" } },
+          skill_usage_total: { value_count: { field: "usedSkills" } },
+          tool_calls: { sum: { field: "totalToolCalls" } },
+          thread_count: { cardinality: { field: "threadId" } },
+          feature_count: { cardinality: { field: "harnessFeatureSlug" } }
+        }
+      }
+    }
+  }
+
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    []
+  )
+  const eventBody = {
+    size: 0,
+    query: {
+      bool: {
+        should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
+      users: { terms: { field: "ystId", size: 2000 }, aggs: perBucketAggs }
+    }
+  }
+
+  const [traceRaw, eventRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody),
+    esQuery(getEsIndex("event"), eventBody)
+  ])
+
+  // 个人入库统计按 ystId 建索引，供 trace 用户榜 join。
+  const codeByYst = new Map<string, DashboardCodeStats>()
+  const eventUsers = asRecord(asRecord(asRecord(eventRaw).aggregations).users)
+  const eventList = Array.isArray(eventUsers.buckets) ? eventUsers.buckets : []
+  for (const b of eventList) {
+    const bucket = asRecord(b)
+    const yst = asString(bucket.key)
+    if (!yst) continue
+    codeByYst.set(yst, normalizeCodeStatsFromContainer(bucket))
+  }
+
+  const traceUsers = asRecord(asRecord(asRecord(traceRaw).aggregations).users)
+  const traceList = Array.isArray(traceUsers.buckets) ? traceUsers.buckets : []
+  return traceList
+    .map((b): DashboardAwardUserApplication | null => {
+      const bucket = asRecord(b)
+      const yst = asString(bucket.key)
+      if (!yst) return null
+      const hits = asRecord(asRecord(bucket.latest_user_info).hits).hits
+      const firstHit = asRecord(Array.isArray(hits) ? hits[0] : undefined)
+      const src = asRecord(firstHit._source)
+      return {
+        sapId: asString(src.sapId),
+        ystId: yst,
+        userName: asString(src.userName),
+        orgName: asOptionalString(src.orgName),
+        upperOrgLv0: asOptionalString(src.upperOrgLv0),
+        upperOrgLv1: asOptionalString(src.upperOrgLv1),
+        callCount: asNumber(bucket.doc_count),
+        skillCount: asNumber(asRecord(bucket.skill_count).value),
+        skillUsageCount: asNumber(asRecord(bucket.skill_usage_total).value),
+        toolCallCount: asNumber(asRecord(bucket.tool_calls).value),
+        threadCount: asNumber(asRecord(bucket.thread_count).value),
+        featureCount: asNumber(asRecord(bucket.feature_count).value),
+        codeStats: codeByYst.get(yst) ?? null
+      }
+    })
+    .filter((x): x is DashboardAwardUserApplication => x !== null)
+}
+
 /** `_source` fields needed to render a Commit 明细 row (shared by commit-detail fetchers). */
 const COMMIT_DETAIL_SOURCE_INCLUDES = [
   "eventId",
@@ -8314,6 +8610,47 @@ function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
     effectiveGeneratedLines,
     measuredGeneratedLines,
     adoptedLines
+  })
+}
+
+function makeMockAwardSkillContributions(
+  skillNames: string[]
+): DashboardAwardSkillContribution[] {
+  const names = (Array.isArray(skillNames) ? skillNames : [])
+    .map((s) => String(s || "").trim())
+    .filter(Boolean)
+  const seedNames = names.length > 0 ? names : ["code-review", "spec-writer", "db-migrate"]
+  return seedNames.map((name) => {
+    const seed = Array.from(name).reduce((acc, c) => acc + c.charCodeAt(0), 0)
+    return {
+      skillKey: name,
+      crossOrgCount: 1 + (seed % 4),
+      userCount: 3 + (seed % 20),
+      callCount: 40 + (seed % 260),
+      codeStats: makeMockSkillCodeStats(name)
+    }
+  })
+}
+
+function makeMockAwardUserApplications(): DashboardAwardUserApplication[] {
+  const orgs = ["研发一室", "研发二室", "平台室", "数据室"]
+  return Array.from({ length: 12 }, (_, i) => {
+    const seed = (i + 1) * 37
+    return {
+      sapId: `9000${10 + i}`,
+      ystId: `8000${10 + i}`,
+      userName: `用户${i + 1}`,
+      orgName: orgs[i % orgs.length],
+      upperOrgLv0: "研发部",
+      upperOrgLv1: orgs[i % orgs.length],
+      callCount: 320 - i * 18,
+      skillCount: 3 + (seed % 9),
+      skillUsageCount: 40 + (seed % 220),
+      toolCallCount: 1800 - i * 90,
+      threadCount: 60 - i * 3,
+      featureCount: 14 - (i % 10),
+      codeStats: makeMockSkillCodeStats(`user-${i}`)
+    }
   })
 }
 
@@ -11599,6 +11936,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return isDashboardUncommittedAnalysisAllowed()
   })
 
+  _ipcMain.handle("dashboard:isAwardsAdmin", async () => {
+    return isDashboardAwardsAdmin()
+  })
+
   _ipcMain.handle("dashboard:esQuery", async (_, input: DashboardEsQueryInput) => {
     try {
       const access = requireDashboardAccess()
@@ -11940,6 +12281,33 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       }
     }
   )
+
+  _ipcMain.handle(
+    "dashboard:awardsSkillContributions",
+    async (_, range: TimeRange, skillNames: string[]) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockAwardSkillContributions(skillNames) }
+      }
+      try {
+        return { success: true, data: await fetchAwardSkillContributions(range, skillNames) }
+      } catch (e) {
+        console.error("[Dashboard] awardsSkillContributions error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle("dashboard:awardsUserApplications", async (_, range: TimeRange) => {
+    if (import.meta.env.DEV) {
+      return { success: true, data: makeMockAwardUserApplications() }
+    }
+    try {
+      return { success: true, data: await fetchAwardUserApplications(range) }
+    } catch (e) {
+      console.error("[Dashboard] awardsUserApplications error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle("dashboard:userProfiles", async (_, sapIds: string[]) => {
     const sanitizedSapIds = Array.isArray(sapIds)

@@ -67,6 +67,8 @@ import {
   type DashboardProjectModeFeatureNode,
   type DashboardPluginAggregate,
   type DashboardProjectModeData,
+  type DashboardAwardSkillContribution,
+  type DashboardAwardUserApplication,
   type DashboardProjectModeProject,
   type DashboardProjectModeProjectPageData,
   type DashboardProjectModeProjectPageOptions,
@@ -78,6 +80,7 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
+import { AwardsPanel, type AwardSkillRow } from "./panels/AwardsPanel"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
@@ -937,7 +940,7 @@ type DashboardSubPage =
       projectMode?: boolean
     }
 
-type DashboardMainTab = "overview" | "skill-eval" | "project-mode"
+type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "awards"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -1626,16 +1629,20 @@ function DashboardTabBar({
   activeTab,
   onChange,
   projectModeAllowed,
+  awardsAdmin,
   rightContent
 }: {
   activeTab: DashboardMainTab
   onChange: (tab: DashboardMainTab) => void
   projectModeAllowed: boolean
+  awardsAdmin: boolean
   rightContent?: ReactNode
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
-    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : [])
+    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
+    // 评奖辅助看板仅对管理员名单可见。
+    ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : [])
     // 技能评估 tab 暂时隐藏（仅移除入口，skill-eval 相关逻辑/内容/类型均保留，需要时取消注释即可恢复）
     // { id: "skill-eval", label: "技能评估" }
   ]
@@ -2454,6 +2461,16 @@ export function DashboardView(): React.JSX.Element {
     }, 600)
   }, [])
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
+  // 评奖辅助看板访问门禁（仅 DASHBOARD_AWARDS_ADMIN 名单）。
+  const [awardsAdmin, setAwardsAdmin] = useState(false)
+  const [awardSkillContribs, setAwardSkillContribs] = useState<
+    DashboardAwardSkillContribution[] | null
+  >(null)
+  const [awardSkillsLoading, setAwardSkillsLoading] = useState(false)
+  const [awardSkillsError, setAwardSkillsError] = useState<string | null>(null)
+  const [awardUserApps, setAwardUserApps] = useState<DashboardAwardUserApplication[] | null>(null)
+  const [awardUsersLoading, setAwardUsersLoading] = useState(false)
+  const [awardUsersError, setAwardUsersError] = useState<string | null>(null)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
   const [skillDetail, setSkillDetail] = useState<DashboardSkillDetail | null>(null)
@@ -2524,6 +2541,21 @@ export function DashboardView(): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false
+
+    window.api.dashboard
+      .isAwardsAdmin()
+      .then((allowed) => {
+        if (cancelled) return
+        setAwardsAdmin(allowed)
+        if (!allowed) {
+          setActiveMainTab((current) => (current === "awards" ? "overview" : current))
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        setAwardsAdmin(false)
+        setActiveMainTab((current) => (current === "awards" ? "overview" : current))
+      })
 
     window.api.dashboard
       .isAnalysisAgentAllowed()
@@ -2723,6 +2755,84 @@ export function DashboardView(): React.JSX.Element {
     fromLeanProjectsOnly
   ])
 
+  // 评奖辅助看板懒加载：进入 tab + 名单可见时拉取；时间范围变化重拉。
+  // 技能贡献奖需待应用市场技能（个人构建）加载完成后再查。
+  useEffect(() => {
+    if (activeMainTab !== "awards" || !awardsAdmin) return
+    let cancelled = false
+
+    // 个人构建技能名集：取应用市场（marketApi.getSkills）条目名，后端按名聚合并按名回传。
+    const personalSkillNames = Array.from(
+      new Set(
+        Array.from(marketSkillMap.values())
+          .map((item) => item.name?.trim() || "")
+          .filter(Boolean)
+      )
+    )
+
+    async function loadSkillContribs(): Promise<void> {
+      if (marketSkillsLoading) return
+      if (personalSkillNames.length === 0) {
+        if (!cancelled) {
+          setAwardSkillContribs([])
+          setAwardSkillsError(null)
+        }
+        return
+      }
+      if (!cancelled) {
+        setAwardSkillsLoading(true)
+        setAwardSkillsError(null)
+      }
+      try {
+        const result = await window.api.dashboard.awardsSkillContributions(
+          range,
+          personalSkillNames
+        )
+        if (cancelled) return
+        if (result.success) {
+          setAwardSkillContribs((result.data as DashboardAwardSkillContribution[]) ?? [])
+        } else {
+          setAwardSkillsError(result.error || "获取技能贡献数据失败")
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAwardSkillsError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled) setAwardSkillsLoading(false)
+      }
+    }
+
+    async function loadUserApps(): Promise<void> {
+      if (!cancelled) {
+        setAwardUsersLoading(true)
+        setAwardUsersError(null)
+      }
+      try {
+        const result = await window.api.dashboard.awardsUserApplications(range)
+        if (cancelled) return
+        if (result.success) {
+          setAwardUserApps((result.data as DashboardAwardUserApplication[]) ?? [])
+        } else {
+          setAwardUsersError(result.error || "获取技能应用榜数据失败")
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAwardUsersError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled) setAwardUsersLoading(false)
+      }
+    }
+
+    void loadSkillContribs()
+    void loadUserApps()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeMainTab, awardsAdmin, range, marketSkillMap, marketSkillsLoading])
+
   useEffect(() => {
     if (
       activeMainTab !== "skill-eval" ||
@@ -2734,6 +2844,118 @@ export function DashboardView(): React.JSX.Element {
     }
     setSkillEvalSelectedSkillKey(effectiveSkillEvalSelectedSkillKey)
   }, [activeMainTab, effectiveSkillEvalSelectedSkillKey, skillEval, skillEvalSelectedSkillKey])
+
+  // 技能贡献奖行：聚合结果 join 应用市场展示字段（中文名 / 构建者 / 组织）。
+  const awardSkillRows = useMemo<AwardSkillRow[]>(() => {
+    if (!awardSkillContribs) return []
+    return awardSkillContribs.map((contrib) => {
+      const marketItem = getMarketSkillItem(marketSkillMap, contrib.skillKey)
+      const builder = resolveSkillUploaderExportInfo(marketItem, skillUploaderProfiles)
+      const displayName =
+        marketItem?.chinese_name?.trim() || marketItem?.name?.trim() || contrib.skillKey
+      return {
+        ...contrib,
+        displayName,
+        builderName: builder.userName,
+        builderOrg: builder.orgName,
+        builderSapId: builder.sapId,
+        featured: marketItem?.featured?.trim() || undefined
+      }
+    })
+  }, [awardSkillContribs, marketSkillMap, skillUploaderProfiles])
+
+  // 评奖辅助看板导出：两个 sheet（技能贡献奖 / 技能应用奖），口径同界面，四个入库率全列。
+  const handleAwardsExport = useCallback(async () => {
+    setExporting(true)
+    try {
+      const sheets: DashboardExcelSheet[] = []
+
+      const contribRows = [...awardSkillRows].sort((a, b) => {
+        const ar = a.codeStats?.pushedAdoptionRate ?? -1
+        const br = b.codeStats?.pushedAdoptionRate ?? -1
+        if (ar !== br) return br - ar
+        if (a.crossOrgCount !== b.crossOrgCount) return b.crossOrgCount - a.crossOrgCount
+        return b.callCount - a.callCount
+      })
+      sheets.push({
+        name: "技能贡献奖",
+        header: [
+          "技能",
+          "构建者",
+          "构建者组织",
+          "跨室数",
+          "是否跨≥2室",
+          "使用人数",
+          "调用数",
+          "提交口径·提交",
+          "提交口径·入库",
+          "总量口径·提交",
+          "总量口径·入库"
+        ],
+        rows: contribRows.map((r) => [
+          r.displayName,
+          r.builderName || "",
+          r.builderOrg || "",
+          r.crossOrgCount,
+          r.crossOrgCount >= 2 ? "是" : "否",
+          r.userCount,
+          r.callCount,
+          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
+          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
+          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
+          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+        ])
+      })
+
+      const appRows = [...(awardUserApps ?? [])].sort((a, b) => b.callCount - a.callCount)
+      sheets.push({
+        name: "技能应用奖",
+        header: [
+          "排名",
+          "用户",
+          "SAP",
+          "室",
+          "调用数",
+          "技能种类数",
+          "用技能总次数",
+          "工具调用",
+          "会话数",
+          "特性数",
+          "提交口径·提交",
+          "提交口径·入库",
+          "总量口径·提交",
+          "总量口径·入库"
+        ],
+        rows: appRows.map((r, i) => [
+          i + 1,
+          r.userName || "",
+          r.sapId || "",
+          r.upperOrgLv1 || "",
+          r.callCount,
+          r.skillCount,
+          r.skillUsageCount,
+          r.toolCallCount,
+          r.threadCount,
+          r.featureCount,
+          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
+          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
+          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
+          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+        ])
+      })
+
+      const result = await window.api.dashboard.exportExcel(sheets, {
+        fileName: "评奖辅助看板数据"
+      })
+      if (result.success) {
+        console.log("[Dashboard] Awards exported to:", result.filePath)
+      } else if (!result.canceled && result.error) {
+        console.error("[Dashboard] Awards export failed:", result.error)
+      }
+    } finally {
+      setExporting(false)
+    }
+  }, [awardSkillRows, awardUserApps])
 
   useEffect(() => {
     let cancelled = false
@@ -4345,6 +4567,7 @@ export function DashboardView(): React.JSX.Element {
           activeTab={activeMainTab}
           onChange={setActiveMainTab}
           projectModeAllowed={projectModeAllowed}
+          awardsAdmin={awardsAdmin}
           rightContent={
             activeMainTab === "skill-eval" ? (
               <Button
@@ -4436,7 +4659,20 @@ export function DashboardView(): React.JSX.Element {
         </ScrollArea>
       ) : (
         <ScrollArea className="flex-1">
-          {activeMainTab === "skill-eval" ? (
+          {activeMainTab === "awards" && awardsAdmin ? (
+            <div className="space-y-6 p-6">
+              <AwardsPanel
+                skillRows={awardSkillRows}
+                skillsLoading={awardSkillsLoading || marketSkillsLoading}
+                skillsError={awardSkillsError}
+                userApps={awardUserApps ?? []}
+                usersLoading={awardUsersLoading}
+                usersError={awardUsersError}
+                onExport={handleAwardsExport}
+                exporting={exporting}
+              />
+            </div>
+          ) : activeMainTab === "skill-eval" ? (
             <div className="space-y-6 p-6">
               <SkillEvalDashboardPanel
                 data={skillEval}

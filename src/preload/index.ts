@@ -2501,6 +2501,16 @@ const api = {
       ipcRenderer.invoke("dashboard:isTraceEvolverReviewAdmin"),
     isUncommittedAnalysisAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
+    isAwardsAdmin: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAwardsAdmin"),
+    awardsSkillContributions: (
+      range: { from: string; to: string },
+      skillNames: string[]
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:awardsSkillContributions", range, skillNames),
+    awardsUserApplications: (
+      range: { from: string; to: string }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:awardsUserApplications", range),
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"

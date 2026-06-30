@@ -1863,6 +1863,14 @@ interface CustomAPI {
     isAnalysisAgentAllowed: () => Promise<boolean>
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
+    isAwardsAdmin: () => Promise<boolean>
+    awardsSkillContributions: (
+      range: { from: string; to: string },
+      skillNames: string[]
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    awardsUserApplications: (
+      range: { from: string; to: string }
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
