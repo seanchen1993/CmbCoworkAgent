@@ -7,6 +7,7 @@ import {
   createAgentRuntime,
   getSkillEvolutionThreshold,
   setCheckpointerBusyGuard,
+  getSkillEvolutionTurnThreshold,
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
@@ -19,6 +20,7 @@ import { resolveWorkspaceMemoryDirs, type MemoryNamespace } from "../memory/path
 import { ChatOpenAI } from "@langchain/openai"
 import {
   getCustomModelConfigs,
+  getDefaultModelConfig,
   isDreamEnabled,
   isThreadMemoryEnabled,
   getCustomSkillsDir,
@@ -192,7 +194,8 @@ import {
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
   buildHarnessFeatureAgentContext,
-  readHarnessFeatureMetadata
+  readHarnessFeatureMetadata,
+  resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -373,16 +376,31 @@ interface HarnessAgentContext {
   pluginName?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
 }
 
 function getHarnessHookContext(
   context: HarnessAgentContext
-): Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode" | "projectDir"> {
+): Pick<
+  HookContext,
+  | "pluginWorkspace"
+  | "featureId"
+  | "harnessProjectId"
+  | "harnessAdapterName"
+  | "harnessAdapterVersion"
+  | "projectCode"
+  | "projectDir"
+> {
   return {
     pluginWorkspace: context.pluginWorkspace,
     featureId: context.featureId,
+    harnessProjectId: context.harnessProjectId,
+    harnessAdapterName: context.harnessAdapterName,
+    harnessAdapterVersion: context.harnessAdapterVersion,
     projectCode: context.projectCode,
     projectDir: context.projectDir
   }
@@ -402,6 +420,9 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
       pluginName: featureContext.pluginName,
       pluginWorkspace: featureContext.pluginWorkspace,
       featureId: featureContext.featureId,
+      harnessProjectId: featureContext.harnessProjectId,
+      harnessAdapterName: featureContext.harnessAdapterName,
+      harnessAdapterVersion: featureContext.harnessAdapterVersion,
       projectCode: featureContext.projectCode,
       projectDir: featureContext.projectDir
     }
@@ -932,6 +953,9 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
   threadId: string
@@ -965,6 +989,9 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     systemId: params.systemId,
     pluginWorkspace: params.pluginWorkspace,
     featureId: params.featureId,
+    harnessProjectId: params.harnessProjectId,
+    harnessAdapterName: params.harnessAdapterName,
+    harnessAdapterVersion: params.harnessAdapterVersion,
     projectCode: params.projectCode,
     projectDir: params.projectDir,
     sessionId: params.threadId,
@@ -1152,6 +1179,9 @@ async function activateExplicitSkillFromMessage({
   systemId,
   pluginWorkspace,
   featureId,
+  harnessProjectId,
+  harnessAdapterName,
+  harnessAdapterVersion,
   projectCode,
   projectDir,
   sessionId,
@@ -1168,6 +1198,9 @@ async function activateExplicitSkillFromMessage({
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
   sessionId: string
@@ -1219,6 +1252,9 @@ async function activateExplicitSkillFromMessage({
     systemId,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
     projectCode,
     projectDir,
     sessionId,
@@ -2176,6 +2212,25 @@ async function finalizeAutoCommit({
       snapshot,
       confirm: (preview) => confirmAutoCommit(window, preview)
     })
+    // Telemetry: the existing `git.commit.created` (triggeredBy=agent-auto) only
+    // fires on success. Emit an attempt event so skip / user-cancel / fail are also
+    // visible. "disabled" (mode off) means auto-commit never engaged — don't count.
+    if (result.status !== "disabled") {
+      try {
+        const userCancelled =
+          result.status === "skipped" &&
+          (result.reasons?.some((r) => r.includes("用户取消")) ?? false)
+        trackEvent("git.auto_commit.attempted", "git", {
+          outcome: userCancelled ? "cancelled" : result.status,
+          fileCount: result.committedFiles?.length ?? 0,
+          pushed: result.pushed,
+          pushFailed: !!result.pushError,
+          threadId
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit git.auto_commit.attempted:", e)
+      }
+    }
     sendAutoCommitResult(window, channel, result)
   } catch (error) {
     // Auto-commit is best-effort: a git failure or a UI exception (the confirm
@@ -2627,6 +2682,7 @@ Steps should describe the METHOD (how to approach the problem class), not the SO
 If the conversation is narrow, lift it one level: "how we fixed X" → "systematic approach to X-type problems".
 
 Other rules:
+- Prefer Chinese for generated skill name, description, rationale, headings, and SKILL.md prose when practical; keep code identifiers, commands, file paths, package names, and API names in their original language.
 - description is the MOST important field — it controls when the skill is injected in future sessions
 - Output ONLY valid JSON, no other text`
 
@@ -2776,8 +2832,7 @@ async function judgeSkillWorthiness(
   threadId: string,
   context: SkillProposalWindowContext
 ): Promise<WorthinessResult | null> {
-  const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = getDefaultModelConfig()
   if (!config?.apiKey) {
     console.log(
       `[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`
@@ -2860,8 +2915,7 @@ async function generateSkillProposal(
   // both on the initial run and on manual retry.
   emitSkillGenerating(threadId, "start")
 
-  const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = getDefaultModelConfig()
   if (!config?.apiKey) {
     emitSkillGenerating(threadId, "error", "未配置模型或 API Key，无法生成技能草稿")
     return null
@@ -2980,7 +3034,7 @@ async function confirmAndWriteSkillProposal(
   if (!skillId) return
 
   const confirmId = uuid()
-  const adopted = await requestSkillConfirmation({
+  const decision = await requestSkillConfirmation({
     threadId,
     requestId: confirmId,
     skillId,
@@ -2989,7 +3043,7 @@ async function confirmAndWriteSkillProposal(
     content: proposal.content
   })
 
-  if (!adopted) {
+  if (!decision.approved) {
     console.log(`[Agent][${threadId}] User rejected skill detail for "${proposal.name}"`)
     return
   }
@@ -3003,7 +3057,7 @@ async function confirmAndWriteSkillProposal(
   } catch (e) {
     console.warn("[event] failed to emit skill.proposal.accepted:", e)
   }
-  await writeSkillToDisk(skillId, proposal.content, proposal.name)
+  await writeSkillToDisk(skillId, decision.content ?? proposal.content, proposal.name)
 }
 
 /**
@@ -3030,6 +3084,7 @@ async function runSkillProposalFlow(
     requestId: intentId,
     summary: latestUserMessage.slice(0, 120),
     toolCallCount: context.toolCallCount,
+    turnCount: context.turnCount,
     mode: intentMode,
     recommendationReason,
     context
@@ -3821,8 +3876,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       window.once("closed", onWindowClosed)
 
       // Resolve the Harness Board feature binding (if any) so traces can be
-      // linked back to the feature/project that owns this conversation.
-      let harnessFeatureBinding: { projectId: string; slug: string } | undefined
+      // linked back to the feature/project that owns this conversation. We also
+      // resolve the feature's *current stage* once per turn here and attach its
+      // human-readable name (group-label, e.g. "Dev-代码实现") plus the node's status
+      // at this turn (进行中/已完成/...) to the binding, so this turn's trace + code
+      // events are sliceable by stage and by status-within-stage. Best-effort: any
+      // failure leaves nodeName/nodeStatus absent (we never report the raw node id).
+      let harnessFeatureBinding:
+        | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
+        | undefined
       try {
         const bindingThread = getThread(threadId)
         if (bindingThread?.metadata) {
@@ -3831,6 +3893,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       } catch {
         // Non-project threads or unparsable metadata: leave the trace untagged.
+      }
+      if (harnessFeatureBinding) {
+        const currentStage = resolveHarnessFeatureCurrentStage(
+          harnessFeatureBinding.projectId,
+          harnessFeatureBinding.slug
+        )
+        if (currentStage?.name)
+          harnessFeatureBinding = {
+            ...harnessFeatureBinding,
+            nodeName: currentStage.name,
+            ...(currentStage.status ? { nodeStatus: currentStage.status } : {})
+          }
       }
 
       // Start trace collection for this invocation (modelId resolved later)
@@ -5975,18 +6049,28 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             // Check if this turn crossed the skill-evolution threshold.
             const sessionToolCallCount = proposalContext.toolCallCount
+            const sessionTurnCount = proposalContext.turnCount
             const threshold = getSkillEvolutionThreshold()
-            if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
+            const turnThreshold = getSkillEvolutionTurnThreshold()
+            if (
+              shouldEvaluateSkillProposalWindow(
+                sessionToolCallCount,
+                threshold,
+                sessionTurnCount,
+                turnThreshold
+              )
+            ) {
               const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
               console.log(
                 `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
                   toolCallCount: sessionToolCallCount,
                   windowToolCallCount: proposalContext.toolCallCount,
                   threshold,
+                  turnThreshold,
                   mode,
                   usedSkills: proposalContext.usedSkills,
                   recentUsedSkills,
-                  turnCount: proposalContext.turnCount,
+                  turnCount: sessionTurnCount,
                   errorCount: proposalContext.errorCount,
                   toolCallSummary: proposalContext.toolCallSummary
                 })}`
@@ -6004,6 +6088,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   console.warn("[Agent] autoProposeSKill failed:", e)
                 )
               }
+            } else if (sessionToolCallCount >= threshold) {
+              console.log(
+                `[SkillEvolution][${threadId}] Tool threshold reached, waiting for turn threshold ${JSON.stringify(
+                  {
+                    toolCallCount: sessionToolCallCount,
+                    threshold,
+                    turnCount: sessionTurnCount,
+                    turnThreshold
+                  }
+                )}`
+              )
             }
           } else if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
             resetSkillEvolutionSession(threadId)

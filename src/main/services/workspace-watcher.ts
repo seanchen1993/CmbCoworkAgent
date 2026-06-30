@@ -3,6 +3,7 @@ import * as path from "path"
 import { BrowserWindow } from "electron"
 import micromatch from "micromatch"
 import { scheduleGitHookEventSync } from "./git-hook-service"
+import { isGitCommitSignalPath } from "./git-refs"
 
 interface ActiveWorkspaceWatcher {
   watcher: fs.FSWatcher
@@ -324,7 +325,9 @@ export function startWatching(
         const hasHiddenPart = parts.some((p) => p.startsWith("."))
         const isGitInternalPath = parts[0] === ".git"
         if (isGitInternalPath) {
-          scheduleGitHookEventSync(workspacePath)
+          if (isGitCommitSignalPath(relativePath)) {
+            scheduleGitHookEventSync(workspacePath)
+          }
           return
         }
         const isGitIgnore = leaf === ".gitignore"

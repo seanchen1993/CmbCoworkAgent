@@ -308,6 +308,12 @@ export interface LocalSandboxOptions {
   pluginWorkspace?: string
   /** Optional harness feature identifier exposed to child processes as FEATURE_ID. */
   featureId?: string
+  /** Optional harness project stable id exposed to child processes as HARNESS_PROJECT_ID. */
+  harnessProjectId?: string
+  /** Optional bound adapter name exposed to child processes as HARNESS_ADAPTER_NAME. */
+  harnessAdapterName?: string
+  /** Optional bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
+  harnessAdapterVersion?: string
   /** Optional harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Optional harness project directory exposed to child processes as PROJECT_DIR. */
@@ -410,6 +416,9 @@ export class LocalSandbox
   private readonly systemId?: string
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
+  private readonly harnessProjectId?: string
+  private readonly harnessAdapterName?: string
+  private readonly harnessAdapterVersion?: string
   private readonly projectCode?: string
   private readonly projectDir?: string
   private readonly codexExePath: string
@@ -1655,6 +1664,12 @@ export class LocalSandbox
     if (pluginWorkspace) baseEnv.PLUGIN_WORKSPACE = pluginWorkspace
     const featureId = options.featureId?.trim()
     if (featureId) baseEnv.FEATURE_ID = featureId
+    const harnessProjectId = options.harnessProjectId?.trim()
+    if (harnessProjectId) baseEnv.HARNESS_PROJECT_ID = harnessProjectId
+    const harnessAdapterName = options.harnessAdapterName?.trim()
+    if (harnessAdapterName) baseEnv.HARNESS_ADAPTER_NAME = harnessAdapterName
+    const harnessAdapterVersion = options.harnessAdapterVersion?.trim()
+    if (harnessAdapterVersion) baseEnv.HARNESS_ADAPTER_VERSION = harnessAdapterVersion
     const projectCode = options.projectCode?.trim()
     if (projectCode) baseEnv.PROJECT_CODE = projectCode
     const projectDir = options.projectDir?.trim()
@@ -1673,6 +1688,9 @@ export class LocalSandbox
     this.systemId = systemId || undefined
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
+    this.harnessProjectId = harnessProjectId || undefined
+    this.harnessAdapterName = harnessAdapterName || undefined
+    this.harnessAdapterVersion = harnessAdapterVersion || undefined
     this.projectCode = projectCode || undefined
     this.projectDir = projectDir || undefined
     this.codexExePath = options.codexExePath ?? "codex"
@@ -2381,6 +2399,15 @@ export class LocalSandbox
         ? { pluginWorkspace: this.pluginWorkspace }
         : {}),
       ...(this.featureId && !context.featureId ? { featureId: this.featureId } : {}),
+      ...(this.harnessProjectId && !context.harnessProjectId
+        ? { harnessProjectId: this.harnessProjectId }
+        : {}),
+      ...(this.harnessAdapterName && !context.harnessAdapterName
+        ? { harnessAdapterName: this.harnessAdapterName }
+        : {}),
+      ...(this.harnessAdapterVersion && !context.harnessAdapterVersion
+        ? { harnessAdapterVersion: this.harnessAdapterVersion }
+        : {}),
       ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
       ...(this.projectDir && !context.projectDir ? { projectDir: this.projectDir } : {}),
       turnId: context.turnId ?? this._hookTurnId

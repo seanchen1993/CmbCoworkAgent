@@ -18,6 +18,7 @@ import {
   getCustomModelConfigs,
   getUserInfo,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
+  getSkillEvolutionTurnThreshold as getStoredSkillEvolutionTurnThreshold,
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
@@ -707,6 +708,9 @@ export function createScopedMcpCapabilityService(
     systemId?: string
     pluginWorkspace?: string
     featureId?: string
+    harnessProjectId?: string
+    harnessAdapterName?: string
+    harnessAdapterVersion?: string
     projectCode?: string
     projectDir?: string
   }
@@ -904,6 +908,9 @@ export function createScopedMcpCapabilityService(
         systemId: baseContext.systemId,
         pluginWorkspace: baseContext.pluginWorkspace,
         featureId: baseContext.featureId,
+        harnessProjectId: baseContext.harnessProjectId,
+        harnessAdapterName: baseContext.harnessAdapterName,
+        harnessAdapterVersion: baseContext.harnessAdapterVersion,
         projectCode: baseContext.projectCode,
         projectDir: baseContext.projectDir,
         pluginId,
@@ -2188,6 +2195,11 @@ export function getSkillEvolutionThreshold(): number {
   return getStoredSkillEvolutionThreshold()
 }
 
+/** Returns the current skill-evolution conversation-turn threshold from persistent storage. */
+export function getSkillEvolutionTurnThreshold(): number {
+  return getStoredSkillEvolutionTurnThreshold()
+}
+
 /** Per-thread tool-call counters (in-memory, reset on app restart) */
 const _threadToolCallCounts = new Map<string, number>()
 
@@ -2810,6 +2822,12 @@ export interface CreateAgentRuntimeOptions {
   pluginWorkspace?: string
   /** Harness feature identifier exposed to child processes as FEATURE_ID. */
   featureId?: string
+  /** Harness project stable id exposed to child processes as HARNESS_PROJECT_ID. */
+  harnessProjectId?: string
+  /** Bound adapter name exposed to child processes as HARNESS_ADAPTER_NAME. */
+  harnessAdapterName?: string
+  /** Bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
+  harnessAdapterVersion?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to child processes as PROJECT_DIR. */
@@ -2925,6 +2943,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginName,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
     projectCode,
     projectDir,
     retryHooks,
@@ -3133,6 +3154,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginName,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
     projectCode,
     projectDir,
     onFileMutation,
@@ -3260,6 +3284,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         systemId,
         pluginWorkspace,
         featureId,
+        harnessProjectId,
+        harnessAdapterName,
+        harnessAdapterVersion,
         projectCode,
         projectDir,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
@@ -3453,6 +3480,9 @@ The workspace root is: ${workspacePath}`
       systemId,
       pluginWorkspace,
       featureId,
+      harnessProjectId,
+      harnessAdapterName,
+      harnessAdapterVersion,
       projectCode,
       projectDir,
       turnId: hookTurnId
@@ -3789,6 +3819,9 @@ The workspace root is: ${workspacePath}`
     systemId,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
     projectCode,
     projectDir,
     skipToolNames: toolHookExclusions
@@ -3970,6 +4003,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       pluginName,
       pluginWorkspace,
       featureId,
+      harnessProjectId,
+      harnessAdapterName,
+      harnessAdapterVersion,
       projectCode,
       projectDir,
       pluginOutputDir,

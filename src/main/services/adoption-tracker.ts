@@ -31,7 +31,7 @@ import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises
 import { existsSync, mkdirSync, statSync } from "fs"
 import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
 import { randomUUID } from "crypto"
-import { execFile } from "child_process"
+import { execFile, execFileSync } from "child_process"
 import { promisify } from "util"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
@@ -188,6 +188,14 @@ export interface AdoptionContext {
    */
   harnessProjectId?: string
   harnessFeatureSlug?: string
+  /**
+   * Harness Board workflow stage name (group-label, e.g. "Dev-代码实现") current at
+   * gen time, so emitted code_gen/code_adopt events can be sliced by stage.
+   * Forward-only; no raw node id.
+   */
+  harnessNodeName?: string
+  /** Stage status at gen time (group-label's node status, e.g. 进行中/已完成). Forward-only. */
+  harnessNodeStatus?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
 }
@@ -320,6 +328,57 @@ export function isCodeFile(filePath: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────────
+// git work-tree gate
+//
+// code_gen is only reported for files that live inside a git work tree. Files
+// generated outside any git repo can never reach a commit, so our commit-driven
+// measurement never closes the loop on them — they would sit forever as "100%
+// uncommitted" noise. Such files are also where external platforms (e.g.
+// tag-dev / data-dev) own reporting via their own hook; gating here keeps the two
+// producers from double-counting the same generation, with the partition keyed
+// purely on a signal we own (git membership) — no coordination with that hook.
+//
+// Strict semantics: only a positive "true" from `--is-inside-work-tree` counts.
+// A missing repo, a git error, or git being unavailable all resolve to false
+// (skip). The result is cached per directory so the hot path spawns git at most
+// once per directory for the whole session. Trade-off: if git is ever
+// unavailable, code_gen reporting stops entirely — acceptable, since git is a
+// hard dependency of the rest of the app.
+// ─────────────────────────────────────────────────────────
+
+const GIT_WORKTREE_CACHE_MAX = 256
+const gitWorkTreeCache = new Map<string, boolean>()
+
+function isInsideGitWorkTree(absPath: string): boolean {
+  const dir = dirname(absPath)
+  const cached = gitWorkTreeCache.get(dir)
+  if (cached !== undefined) return cached
+
+  let inside = false
+  try {
+    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: dir,
+      encoding: "utf-8",
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"]
+    })
+    inside = out.trim() === "true"
+  } catch {
+    // Not a repo / git error / git missing — treat as outside a work tree.
+    inside = false
+  }
+
+  // Bounded cache (Map preserves insertion order → evict oldest first).
+  if (!gitWorkTreeCache.has(dir) && gitWorkTreeCache.size >= GIT_WORKTREE_CACHE_MAX) {
+    const oldest = gitWorkTreeCache.keys().next().value
+    if (oldest !== undefined) gitWorkTreeCache.delete(oldest)
+  }
+  gitWorkTreeCache.set(dir, inside)
+  return inside
+}
+
+// ─────────────────────────────────────────────────────────
 // Line hashing (FNV-1a 32-bit) + normalisation
 // ─────────────────────────────────────────────────────────
 
@@ -352,7 +411,6 @@ export function countNonBlankLines(content: string): number {
   }
   return count
 }
-
 
 function computeLineHashes(content: string): Uint32Array {
   const lines = content.split(/\r?\n/)
@@ -401,10 +459,9 @@ function subtractLineHashMultiset(source: Uint32Array, subtract: Uint32Array): U
   return new Uint32Array(kept)
 }
 
-export function buildAdoptionLineBaseline(input: Pick<
-  RecordGenInput,
-  "tool" | "generatedContent" | "oldString" | "occurrences"
->): AdoptionLineBaseline {
+export function buildAdoptionLineBaseline(
+  input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
+): AdoptionLineBaseline {
   const generationOccurrences = getGenerationOccurrenceCount(input)
   const rawGeneratedLineHashes = repeatLineHashes(
     computeLineHashes(input.generatedContent),
@@ -495,8 +552,7 @@ function deriveDeletedLineCount(input: RecordGenInput): number {
   if (occurrences === 0) return 0
 
   const oldNonBlank = countNonBlankLines(input.oldString)
-  const newNonBlank =
-    typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
+  const newNonBlank = typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
   return Math.max(0, oldNonBlank - newNonBlank) * occurrences
 }
 
@@ -707,6 +763,15 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       ? resolvePath(input.workspacePath, input.filePath)
       : resolvePath(input.filePath)
 
+    // git-gate: only report generations that live inside a git work tree (see
+    // isInsideGitWorkTree). Non-git files never reach a commit and are where
+    // external platforms own reporting via their own hook — skipping them here
+    // avoids double-counting and removes events that could never close the loop.
+    if (!isInsideGitWorkTree(absPath)) {
+      console.log(`[AdoptionTracker] recordGen skip — not in a git work tree: ${input.filePath}`)
+      return
+    }
+
     const relPath = input.workspacePath
       ? relative(input.workspacePath, absPath).replace(/\\/g, "/")
       : absPath.replace(/\\/g, "/")
@@ -753,9 +818,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     const hashes = baseline.generatedLineHashes
     const oldLineHashes = baseline.supersededLineHashes
     if (hashes.length === 0 && oldLineHashes.length === 0) {
-      console.log(
-        `[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`
-      )
+      console.log(`[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`)
       return
     }
     const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
@@ -812,6 +875,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       model_name: ctx.modelName ?? null,
       harness_project_id: ctx.harnessProjectId ?? null,
       harness_feature_slug: ctx.harnessFeatureSlug ?? null,
+      harness_node_name: ctx.harnessNodeName ?? null,
+      harness_node_status: ctx.harnessNodeStatus ?? null,
       harness_adapter_name: ctx.harnessAdapterName ?? null,
       harness_adapter_version: ctx.harnessAdapterVersion ?? null
     })
@@ -832,6 +897,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       modelName: ctx.modelName ?? null,
       harnessProjectId: ctx.harnessProjectId ?? null,
       harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+      harnessNodeName: ctx.harnessNodeName ?? null,
+      harnessNodeStatus: ctx.harnessNodeStatus ?? null,
       harnessAdapterName: ctx.harnessAdapterName ?? null,
       harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
       // note: filePath / content / fingerprint intentionally withheld
@@ -882,6 +949,8 @@ function emitSkippedLargeAtGen(args: {
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
     harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessNodeName: ctx.harnessNodeName ?? null,
+    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
     createdAt: new Date(createdAt).toISOString(),
@@ -912,6 +981,8 @@ function emitSkippedLargeAtGen(args: {
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
     harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessNodeName: ctx.harnessNodeName ?? null,
+    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null
   })
@@ -1021,6 +1092,8 @@ async function emitSupersededAdopt(
     modelName: pending.model_name ?? null,
     harnessProjectId: pending.harness_project_id ?? null,
     harnessFeatureSlug: pending.harness_feature_slug ?? null,
+    harnessNodeName: pending.harness_node_name ?? null,
+    harnessNodeStatus: pending.harness_node_status ?? null,
     harnessAdapterName: pending.harness_adapter_name ?? null,
     harnessAdapterVersion: pending.harness_adapter_version ?? null
   })
@@ -1202,6 +1275,8 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         modelName: pending.model_name ?? null,
         harnessProjectId: pending.harness_project_id ?? null,
         harnessFeatureSlug: pending.harness_feature_slug ?? null,
+        harnessNodeName: pending.harness_node_name ?? null,
+        harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
         harnessAdapterVersion: pending.harness_adapter_version ?? null
       })

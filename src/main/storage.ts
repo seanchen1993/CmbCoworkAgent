@@ -33,6 +33,7 @@ import type {
   SkillHookMetadata
 } from "./types"
 import { copyDirRecursive } from "./utils/fs"
+import Store from "electron-store"
 import {
   discoverSkills,
   discoverSkillsSync,
@@ -264,6 +265,7 @@ interface SkillEvolutionSettings {
   onlineEnabled?: boolean
   autoPropose?: boolean
   threshold?: number
+  turnThreshold?: number
 }
 
 function readSkillEvolutionSettings(): SkillEvolutionSettings {
@@ -295,7 +297,8 @@ export function setOnlineSkillEvolutionEnabled(enabled: boolean): void {
   writeSkillEvolutionSettings({
     onlineEnabled: enabled,
     autoPropose: current.autoPropose === true,
-    threshold: getSkillEvolutionThreshold()
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: getSkillEvolutionTurnThreshold()
   })
 }
 
@@ -313,13 +316,17 @@ export function setSkillAutoProposeEnabled(enabled: boolean): void {
   writeSkillEvolutionSettings({
     onlineEnabled: current.onlineEnabled === true,
     autoPropose: enabled,
-    threshold: getSkillEvolutionThreshold()
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: getSkillEvolutionTurnThreshold()
   })
 }
 
 const SKILL_EVOLUTION_THRESHOLD_DEFAULT = 10
 const SKILL_EVOLUTION_THRESHOLD_MIN = 1
 const SKILL_EVOLUTION_THRESHOLD_MAX = 99
+const SKILL_EVOLUTION_TURN_THRESHOLD_DEFAULT = 2
+const SKILL_EVOLUTION_TURN_THRESHOLD_MIN = 1
+const SKILL_EVOLUTION_TURN_THRESHOLD_MAX = 99
 
 export function getSkillEvolutionThreshold(): number {
   const value = Number(readSkillEvolutionSettings().threshold)
@@ -342,7 +349,34 @@ export function setSkillEvolutionThreshold(value: number): void {
   writeSkillEvolutionSettings({
     onlineEnabled: current.onlineEnabled === true,
     autoPropose: current.autoPropose === true,
-    threshold: clamped
+    threshold: clamped,
+    turnThreshold: getSkillEvolutionTurnThreshold()
+  })
+}
+
+export function getSkillEvolutionTurnThreshold(): number {
+  const value = Number(readSkillEvolutionSettings().turnThreshold)
+  if (
+    Number.isInteger(value) &&
+    value >= SKILL_EVOLUTION_TURN_THRESHOLD_MIN &&
+    value <= SKILL_EVOLUTION_TURN_THRESHOLD_MAX
+  ) {
+    return value
+  }
+  return SKILL_EVOLUTION_TURN_THRESHOLD_DEFAULT
+}
+
+export function setSkillEvolutionTurnThreshold(value: number): void {
+  const clamped = Math.max(
+    SKILL_EVOLUTION_TURN_THRESHOLD_MIN,
+    Math.min(SKILL_EVOLUTION_TURN_THRESHOLD_MAX, Math.round(value))
+  )
+  const current = readSkillEvolutionSettings()
+  writeSkillEvolutionSettings({
+    onlineEnabled: current.onlineEnabled === true,
+    autoPropose: current.autoPropose === true,
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: clamped
   })
 }
 
@@ -1240,6 +1274,44 @@ function assertValidBaseUrl(value: string): string {
 
 export function getCustomModelConfig(): CustomModelConfig | null {
   const configs = getCustomModelConfigs()
+  return configs[0] ?? null
+}
+
+/**
+ * Lazily-created handle to the shared electron-store "settings" file, which is
+ * where the user-designated default model id is persisted (key "defaultModel").
+ * Lazy so module init order never matters.
+ */
+let _settingsStore: Store | null = null
+function getSettingsStore(): Store {
+  if (!_settingsStore) {
+    _settingsStore = new Store({ name: "settings", cwd: getOpenworkDir() })
+  }
+  return _settingsStore
+}
+
+/**
+ * Resolve the user-designated default model config (the "默认模型" chosen in
+ * settings), falling back to the first configured model when no explicit
+ * default is set or the stored id no longer matches a config.
+ *
+ * Use this anywhere a background / sub-agent task (skill draft generation,
+ * trace optimization, worthiness judging, …) should run on the default model
+ * rather than the chat's currently-selected model.
+ */
+export function getDefaultModelConfig(): CustomModelConfig | null {
+  const configs = getCustomModelConfigs()
+  if (configs.length === 0) return null
+
+  const stored = String(getSettingsStore().get("defaultModel", "") || "").trim()
+  if (stored) {
+    const normalizedId = stored.startsWith("custom:") ? stored.slice("custom:".length) : stored
+    const matched =
+      configs.find((config) => config.id === normalizedId) ??
+      configs.find((config) => config.model === normalizedId || config.model === stored)
+    if (matched) return matched
+  }
+
   return configs[0] ?? null
 }
 

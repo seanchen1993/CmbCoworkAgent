@@ -390,6 +390,21 @@ export interface AgentTrace {
   /** Harness Board feature slug this conversation belongs to (paired with harnessProjectId). */
   harnessFeatureSlug?: string
   /**
+   * Harness Board workflow stage name (group-label, e.g. "Dev-代码实现") that was
+   * current when this turn ran, resolved per-turn from the feature's run state.
+   * Within a plugin the group+label pair is unique, so this is a stable bucket
+   * key; no raw node id is reported. Absent on pre-feature traces and on turns
+   * where the stage could not be resolved. Forward-only: historical traces have
+   * no stage name.
+   */
+  harnessNodeName?: string
+  /**
+   * Status of the current workflow node *at the time this turn ran*, as a stable
+   * enum label (进行中/已完成/未开始/...). Lets the dashboard sub-divide a stage's
+   * conversations by status-at-turn-time. Absent when unresolved. Forward-only.
+   */
+  harnessNodeStatus?: string
+  /**
    * Harness adapter (plugin) bound to this project. Only populated for
    * project-mode traces (those with harnessProjectId). Lets the dashboard see
    * which adapter plugin version drove a project conversation.

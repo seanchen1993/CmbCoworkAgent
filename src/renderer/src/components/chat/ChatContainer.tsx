@@ -1081,6 +1081,7 @@ interface SkillIntentBannerRequest {
   requestId: string
   summary: string
   toolCallCount: number
+  turnCount: number
   mode: "mode_a_rule" | "mode_b_llm"
   recommendationReason?: string
   /** Opaque context — cached so the retry button can replay generation without a new threshold. */
@@ -4068,9 +4069,9 @@ export function ChatContainer({
     return cleanup
   }, [setSkillGenerationPhase])
 
-  const handleSkillApprove = useCallback((requestId: string): void => {
+  const handleSkillApprove = useCallback((requestId: string, content: string): void => {
     console.log("[ChatContainer] Approving skill confirm request:", requestId)
-    void window.api.skillEvolution.confirmResponse(requestId, true)
+    void window.api.skillEvolution.confirmResponse(requestId, true, content)
     setSkillConfirmRequest(null)
   }, [])
 
@@ -4090,6 +4091,7 @@ export function ChatContainer({
         "[ChatContainer] Received skill intent request:",
         req.requestId,
         req.mode,
+        req.turnCount,
         req.toolCallCount
       )
       setSkillIntentRequest(req)
@@ -4999,7 +5001,8 @@ export function ChatContainer({
         {skillIntentRequest.mode === "mode_b_llm" ? (
           <>
             <div>
-              大模型判断这段流程具有复用价值，建议将它沉淀为可复用的技能。 本次累计使用了{" "}
+              大模型判断这段流程具有复用价值，建议将它沉淀为可复用的技能。本次累计{" "}
+              <strong>{skillIntentRequest.turnCount}</strong> 轮对话、{" "}
               <strong>{skillIntentRequest.toolCallCount}</strong> 次工具调用。
             </div>
             {skillIntentRequest.recommendationReason ? (
@@ -5010,7 +5013,8 @@ export function ChatContainer({
           </>
         ) : (
           <div>
-            本次对话使用了 <strong>{skillIntentRequest.toolCallCount}</strong>{" "}
+            本次累计 <strong>{skillIntentRequest.turnCount}</strong> 轮对话、{" "}
+            <strong>{skillIntentRequest.toolCallCount}</strong>{" "}
             次工具调用，是否将它沉淀为可复用的技能？
           </div>
         )}

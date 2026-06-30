@@ -142,6 +142,9 @@ export async function runPostSkillUseHooksForActivatedSkills({
   systemId,
   pluginWorkspace,
   featureId,
+  harnessProjectId,
+  harnessAdapterName,
+  harnessAdapterVersion,
   projectCode,
   projectDir,
   getStopContext,
@@ -159,6 +162,9 @@ export async function runPostSkillUseHooksForActivatedSkills({
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
   getStopContext: () => StopHookContext
@@ -186,6 +192,9 @@ export async function runPostSkillUseHooksForActivatedSkills({
       systemId,
       pluginWorkspace,
       featureId,
+      harnessProjectId,
+      harnessAdapterName,
+      harnessAdapterVersion,
       projectCode,
       projectDir,
       sessionId: threadId,
@@ -230,6 +239,9 @@ export async function runCompletionHooksWithRevision({
   systemId,
   pluginWorkspace,
   featureId,
+  harnessProjectId,
+  harnessAdapterName,
+  harnessAdapterVersion,
   projectCode,
   projectDir,
   abortSignal,
@@ -254,6 +266,9 @@ export async function runCompletionHooksWithRevision({
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
   abortSignal: AbortSignal
@@ -284,6 +299,9 @@ export async function runCompletionHooksWithRevision({
           systemId,
           pluginWorkspace,
           featureId,
+          harnessProjectId,
+          harnessAdapterName,
+          harnessAdapterVersion,
           projectCode,
           projectDir,
           getStopContext,
@@ -346,6 +364,9 @@ export async function runCompletionHooksWithRevision({
               systemId,
               pluginWorkspace,
               featureId,
+              harnessProjectId,
+              harnessAdapterName,
+              harnessAdapterVersion,
               projectCode,
               projectDir,
               sessionId: threadId,
@@ -362,6 +383,9 @@ export async function runCompletionHooksWithRevision({
             systemId,
             pluginWorkspace,
             featureId,
+            harnessProjectId,
+            harnessAdapterName,
+            harnessAdapterVersion,
             projectCode,
             projectDir,
             sessionId: threadId,
