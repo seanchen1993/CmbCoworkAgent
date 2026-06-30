@@ -165,6 +165,7 @@ function App(): React.JSX.Element {
     toggleSidebar,
     rightPanelCollapsed,
     toggleRightPanel,
+    rightPanelWorkRequest,
     setPendingEvolution,
     workerFocusView,
     subagentFocusView,
@@ -183,6 +184,7 @@ function App(): React.JSX.Element {
       toggleSidebar: state.toggleSidebar,
       rightPanelCollapsed: state.rightPanelCollapsed,
       toggleRightPanel: state.toggleRightPanel,
+      rightPanelWorkRequest: state.rightPanelWorkRequest,
       setPendingEvolution: state.setPendingEvolution,
       workerFocusView: state.workerFocusView,
       subagentFocusView: state.subagentFocusView,
@@ -452,6 +454,12 @@ function App(): React.JSX.Element {
     setRightModule("work")
     handlePreviewCollapse()
   }, [handlePreviewCollapse])
+
+  useEffect(() => {
+    if (rightPanelWorkRequest?.target !== "systemConstraints") return
+    setRightModule("work")
+    handlePreviewCollapse()
+  }, [handlePreviewCollapse, rightPanelWorkRequest])
 
   const setThreadPendingGitDiff = useCallback((threadId: string, pending: boolean) => {
     setPendingGitDiffByThread((prev) => {
@@ -1056,6 +1064,7 @@ function App(): React.JSX.Element {
                   <RightPanel
                     threadId={harnessSessionThreadId}
                     moduleMode={rightModule}
+                    showSystemConstraints={mainView === "harness"}
                     onRequestPreviewMode={selectPreviewModule}
                     onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}

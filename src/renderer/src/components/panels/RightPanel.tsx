@@ -31,7 +31,8 @@ import {
   EyeOff,
   Loader2,
   Copy,
-  Check
+  Check,
+  ShieldCheck
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -55,6 +56,10 @@ import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
 import { getRightPanelSkillPathSegments } from "@/components/panels/skill-tree-path"
+import {
+  getSystemConstraintsLoadCounts,
+  SystemConstraintsPanel
+} from "@/components/panels/SystemConstraintsPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -85,6 +90,7 @@ const PREVIEW_MAX_HEIGHT = "100vh"
 type PanelHeights = {
   tasks: number
   files: number
+  systemConstraints: number
   agents: number
   skills: number
   plugins: number
@@ -197,6 +203,7 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 interface RightPanelProps {
   threadId?: string | null
   moduleMode: "work" | "preview" | "git"
+  showSystemConstraints?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
@@ -214,6 +221,7 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 export function RightPanel({
   threadId,
   moduleMode,
+  showSystemConstraints = false,
   onRequestPreviewMode,
   onRequestWorkMode,
   onPreviewFullscreenChange
@@ -221,6 +229,7 @@ export function RightPanel({
   const {
     currentThreadId: storeCurrentThreadId,
     pluginVersion,
+    rightPanelWorkRequest,
     skillGenerationByThread,
     setSkillGenerationPhase
   } =
@@ -228,6 +237,7 @@ export function RightPanel({
       useShallow((s) => ({
         currentThreadId: s.currentThreadId,
         pluginVersion: s.pluginVersion,
+        rightPanelWorkRequest: s.rightPanelWorkRequest,
         // Subscribe to the whole map so we re-render when any thread's card changes
         skillGenerationByThread: s.skillGenerationByThread,
         setSkillGenerationPhase: s.setSkillGenerationPhase
@@ -249,8 +259,12 @@ export function RightPanel({
     () => threadState?.coordinatorWorkers ?? [],
     [threadState?.coordinatorWorkers]
   )
+  const systemConstraintCounts = getSystemConstraintsLoadCounts(
+    showSystemConstraints ? threadState?.harnessAgentmdLoadStatus : null
+  )
   const runningSubagentIdsRef = useRef<Set<string>>(new Set())
   const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
+  const handledWorkRequestIdsRef = useRef<Set<number>>(new Set())
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
@@ -262,6 +276,7 @@ export function RightPanel({
   const prevStreamLoadingRef = useRef(false)
   const [tasksOpen, setTasksOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [systemConstraintsOpen, setSystemConstraintsOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
@@ -344,6 +359,19 @@ export function RightPanel({
       setAgentsOpen(true)
     }
   }, [skillGenerationAgent.phase])
+
+  useEffect(() => {
+    setSystemConstraintsOpen(false)
+  }, [currentThreadId])
+
+  useEffect(() => {
+    if (!showSystemConstraints) return
+    if (rightPanelWorkRequest?.target !== "systemConstraints") return
+    if (rightPanelWorkRequest.threadId !== currentThreadId) return
+    if (handledWorkRequestIdsRef.current.has(rightPanelWorkRequest.id)) return
+    handledWorkRequestIdsRef.current.add(rightPanelWorkRequest.id)
+    setSystemConstraintsOpen(true)
+  }, [currentThreadId, rightPanelWorkRequest, showSystemConstraints])
 
   // Auto-open once when an ordinary task subagent starts.
   useEffect(() => {
@@ -660,6 +688,7 @@ export function RightPanel({
   // Store content heights in pixels (null = auto/equal distribution)
   const [tasksHeight, setTasksHeight] = useState<number | null>(null)
   const [filesHeight, setFilesHeight] = useState<number | null>(null)
+  const [systemConstraintsHeight, setSystemConstraintsHeight] = useState<number | null>(null)
   const [agentsHeight, setAgentsHeight] = useState<number | null>(null)
   const [skillsHeight, setSkillsHeight] = useState<number | null>(null)
   const [pluginsHeight, setPluginsHeight] = useState<number | null>(null)
@@ -670,6 +699,7 @@ export function RightPanel({
   const dragStartHeights = useRef<{
     tasks: number
     files: number
+    systemConstraints: number
     agents: number
     skills: number
     plugins: number
@@ -686,15 +716,17 @@ export function RightPanel({
     const openPanels = [
       tasksOpen,
       filesOpen,
+      showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
       pluginsOpen,
       hooksOpen,
       lspOpen
     ]
-    let used = HEADER_HEIGHT * 7
+    const sectionCount = showSystemConstraints ? 8 : 7
+    let used = HEADER_HEIGHT * sectionCount
     // Fixed visual gaps between section blocks
-    used += SECTION_GAP * 6
+    used += SECTION_GAP * (sectionCount - 1)
 
     // Count handles between consecutive open panels
     let handles = 0
@@ -706,7 +738,18 @@ export function RightPanel({
     used += HANDLE_HEIGHT * handles
 
     return Math.max(0, totalHeight - used)
-  }, [moduleMode, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
+  }, [
+    moduleMode,
+    tasksOpen,
+    filesOpen,
+    showSystemConstraints,
+    systemConstraintsOpen,
+    agentsOpen,
+    skillsOpen,
+    pluginsOpen,
+    hooksOpen,
+    lspOpen
+  ])
 
   // Get current heights for each panel's content area
   const getContentHeights = useCallback(() => {
@@ -714,6 +757,7 @@ export function RightPanel({
     const openCount = [
       tasksOpen,
       filesOpen,
+      showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
       pluginsOpen,
@@ -722,7 +766,16 @@ export function RightPanel({
     ].filter(Boolean).length
 
     if (openCount === 0) {
-      return { tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, lsp: 0 }
+      return {
+        tasks: 0,
+        files: 0,
+        systemConstraints: 0,
+        agents: 0,
+        skills: 0,
+        plugins: 0,
+        hooks: 0,
+        lsp: 0
+      }
     }
 
     const defaultHeight = available / openCount
@@ -730,6 +783,10 @@ export function RightPanel({
     return {
       tasks: tasksOpen ? (tasksHeight ?? defaultHeight) : 0,
       files: filesOpen ? (filesHeight ?? defaultHeight) : 0,
+      systemConstraints:
+        showSystemConstraints && systemConstraintsOpen
+          ? (systemConstraintsHeight ?? defaultHeight)
+          : 0,
       agents: agentsOpen ? (agentsHeight ?? defaultHeight) : 0,
       skills: skillsOpen ? (skillsHeight ?? defaultHeight) : 0,
       plugins: pluginsOpen ? (pluginsHeight ?? defaultHeight) : 0,
@@ -740,6 +797,8 @@ export function RightPanel({
     getAvailableContentHeight,
     tasksOpen,
     filesOpen,
+    showSystemConstraints,
+    systemConstraintsOpen,
     agentsOpen,
     skillsOpen,
     pluginsOpen,
@@ -747,6 +806,7 @@ export function RightPanel({
     lspOpen,
     tasksHeight,
     filesHeight,
+    systemConstraintsHeight,
     agentsHeight,
     skillsHeight,
     pluginsHeight,
@@ -1085,17 +1145,28 @@ export function RightPanel({
   useEffect(() => {
     setTasksHeight(null)
     setFilesHeight(null)
+    setSystemConstraintsHeight(null)
     setAgentsHeight(null)
     setSkillsHeight(null)
     setPluginsHeight(null)
     setHooksHeight(null)
     setLspHeight(null)
-  }, [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
+  }, [
+    tasksOpen,
+    filesOpen,
+    systemConstraintsOpen,
+    agentsOpen,
+    skillsOpen,
+    pluginsOpen,
+    hooksOpen,
+    lspOpen
+  ])
 
   // Calculate heights in an effect (refs can't be accessed during render)
   const [heights, setHeights] = useState<PanelHeights>({
     tasks: 0,
     files: 0,
+    systemConstraints: 0,
     agents: 0,
     skills: 0,
     plugins: 0,
@@ -1110,6 +1181,7 @@ export function RightPanel({
     moduleMode === "work" &&
     !tasksOpen &&
     !filesOpen &&
+    !(showSystemConstraints && systemConstraintsOpen) &&
     !agentsOpen &&
     !skillsOpen &&
     !pluginsOpen &&
@@ -1214,7 +1286,9 @@ export function RightPanel({
           </div>
 
           {/* Resize handle after TASKS */}
-          {tasksOpen && (filesOpen || agentsOpen) && <ResizeHandle onDrag={handleTasksResize} />}
+          {tasksOpen && (filesOpen || (!showSystemConstraints && agentsOpen)) && (
+            <ResizeHandle onDrag={handleTasksResize} />
+          )}
 
           {/* FILES */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
@@ -1233,7 +1307,33 @@ export function RightPanel({
           </div>
 
           {/* Resize handle after FILES */}
-          {filesOpen && agentsOpen && <ResizeHandle onDrag={handleFilesResize} />}
+          {!showSystemConstraints && filesOpen && agentsOpen && (
+            <ResizeHandle onDrag={handleFilesResize} />
+          )}
+
+          {showSystemConstraints && (
+            <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+              <SectionHeader
+                title="系统约束"
+                icon={ShieldCheck}
+                detail={
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {systemConstraintCounts.loaded}/{systemConstraintCounts.total}
+                  </span>
+                }
+                isOpen={systemConstraintsOpen}
+                onToggle={() => setSystemConstraintsOpen((prev) => !prev)}
+              />
+              {systemConstraintsOpen && (
+                <div
+                  className="overflow-auto right-panel-scroll"
+                  style={{ height: heights.systemConstraints }}
+                >
+                  <SystemConstraintsPanel state={threadState?.harnessAgentmdLoadStatus} />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* AGENTS */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">

@@ -52,7 +52,6 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { useAppStore } from "@/lib/store"
 import {
   consumePendingHarnessNextAction,
@@ -67,9 +66,7 @@ import {
   useThreadStream,
   useThreadContext,
   type HookLogBucket,
-  type ApiErrorDetailState,
-  type HarnessAgentmdLoadStatusItem,
-  type HarnessAgentmdLoadStatusState
+  type ApiErrorDetailState
 } from "@/lib/thread-context"
 import {
   filterCoordinatorNoiseMessages,
@@ -83,6 +80,11 @@ import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
+import {
+  getSystemConstraintsLoadCounts,
+  hasNoLoadedSystemConstraints,
+  SystemConstraintsPreviewPopover
+} from "@/components/panels/SystemConstraintsPanel"
 import type {
   GoalUiState,
   HITLRequest,
@@ -341,197 +343,6 @@ function formatGoalDuration(createdAt: number, updatedAt: number, active: boolea
   const minutes = Math.floor(seconds / 60)
   const rest = seconds % 60
   return rest > 0 ? `${minutes}m ${rest}s` : `${minutes}m`
-}
-
-function agentmdLoadStatusClass(item: HarnessAgentmdLoadStatusItem): string {
-  if (!item.loaded) {
-    return "border-red-300/50 bg-red-50/70 text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300"
-  }
-  if (item.source === "remote") {
-    return "border-blue-300/50 bg-blue-50/70 text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300"
-  }
-  if (item.source === "local") {
-    return "border-emerald-300/50 bg-emerald-50/70 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300"
-  }
-  return "border-border/60 bg-muted/40 text-muted-foreground"
-}
-
-function agentmdLoadStatusLabel(item: HarnessAgentmdLoadStatusItem): string {
-  const sourceLabel =
-    item.source === "remote"
-      ? "公共系统约束"
-      : item.source === "local"
-        ? "本地系统约束"
-        : item.source || "系统约束"
-  return item.loaded ? sourceLabel : `${sourceLabel}未加载`
-}
-
-async function openAgentmdLoadStatusPath(targetPath: string): Promise<void> {
-  const normalizedTargetPath = targetPath.trim()
-  if (!normalizedTargetPath) return
-  try {
-    const platform = await window.electron.ipcRenderer.invoke("get-platform")
-    const normalizedPath =
-      platform === "win32" ? normalizedTargetPath.replace(/\//g, "\\") : normalizedTargetPath
-    const result = await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
-    if (result && typeof result === "object" && "success" in result && !result.success) {
-      const error =
-        "error" in result && typeof result.error === "string" ? result.error : "无法打开路径"
-      toast.error(error)
-    }
-  } catch (error) {
-    toast.error(error instanceof Error ? error.message : "无法打开路径")
-  }
-}
-
-function AgentmdLoadStatusNotice({
-  state
-}: {
-  state: HarnessAgentmdLoadStatusState
-}): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false)
-  const [previewOpen, setPreviewOpen] = useState(false)
-  const previewHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const groupedItems = useMemo(() => {
-    const groups = new Map<string, HarnessAgentmdLoadStatusItem[]>()
-    for (const item of state.items) {
-      const group = groups.get(item.serviceUnitId) ?? []
-      group.push(item)
-      groups.set(item.serviceUnitId, group)
-    }
-    return Array.from(groups.entries())
-  }, [state.items])
-  const loadedCount = state.items.filter((item) => item.loaded).length
-  const title =
-    state.loader === "cmbdevclaw" ? "CMBDevClaw 已加载系统约束" : "插件已加载系统约束"
-  const promptPreview = state.promptPreview?.trim()
-  const handleOpenPath = useCallback((path: string): void => {
-    void openAgentmdLoadStatusPath(path)
-  }, [])
-  const showPreview = useCallback(() => {
-    if (previewHideTimerRef.current) {
-      clearTimeout(previewHideTimerRef.current)
-      previewHideTimerRef.current = null
-    }
-    if (promptPreview) setPreviewOpen(true)
-  }, [promptPreview])
-  const hidePreview = useCallback(() => {
-    if (previewHideTimerRef.current) clearTimeout(previewHideTimerRef.current)
-    previewHideTimerRef.current = setTimeout(() => {
-      previewHideTimerRef.current = null
-      setPreviewOpen(false)
-    }, 120)
-  }, [])
-  useEffect(
-    () => () => {
-      if (previewHideTimerRef.current) clearTimeout(previewHideTimerRef.current)
-    },
-    []
-  )
-  const titleContent = (
-    <span
-      className={cn(
-        "shrink-0 font-mono text-[11px] text-foreground/80",
-        promptPreview && "cursor-help decoration-dotted underline-offset-2 hover:underline"
-      )}
-    >
-      {title}： {loadedCount}/{state.items.length}
-    </span>
-  )
-
-  return (
-    <div className="rounded-md border border-border/70 bg-muted/30 text-xs text-muted-foreground">
-      <button
-        type="button"
-        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/50"
-        onClick={() => setExpanded((value) => !value)}
-        title="查看系统约束加载详情"
-      >
-        {expanded ? (
-          <ChevronDown className="size-3.5 shrink-0" />
-        ) : (
-          <ChevronRight className="size-3.5 shrink-0" />
-        )}
-        <FileText className="size-3.5 shrink-0 text-muted-foreground/80" />
-        {promptPreview ? (
-          <Popover open={previewOpen} onOpenChange={setPreviewOpen}>
-            <PopoverAnchor asChild>
-              <span
-                onPointerEnter={showPreview}
-                onPointerLeave={hidePreview}
-                onFocus={showPreview}
-                onBlur={hidePreview}
-              >
-                {titleContent}
-              </span>
-            </PopoverAnchor>
-            <PopoverContent
-              align="start"
-              side="bottom"
-              sideOffset={8}
-              className="max-h-[60vh] w-[min(720px,calc(100vw-2rem))] overflow-auto p-3 text-left"
-              onPointerEnter={showPreview}
-              onPointerLeave={hidePreview}
-            >
-              <div className="mb-2 flex items-center gap-1.5 border-b border-border/60 pb-2 text-[11px] font-medium text-foreground/80">
-                <FileText className="size-3.5" />
-                <span>系统约束预览</span>
-              </div>
-              <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">
-                {promptPreview}
-              </pre>
-            </PopoverContent>
-          </Popover>
-        ) : (
-          titleContent
-        )}
-      </button>
-      {expanded && (
-        <div className="border-t border-border/60 px-3 py-2">
-          <div className="space-y-2">
-            {groupedItems.map(([serviceUnitId, items]) => (
-              <div key={serviceUnitId} className="space-y-1">
-                <div className="font-mono text-[11px] font-semibold text-foreground/80">
-                  {serviceUnitId}
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {items.map((item, index) => (
-                    <button
-                      key={`${serviceUnitId}-${item.source}-${item.path}-${index}`}
-                      type="button"
-                      className={cn(
-                        "group inline-flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left transition-colors hover:bg-background/80 disabled:cursor-default disabled:opacity-70",
-                        agentmdLoadStatusClass(item)
-                      )}
-                      title={item.loaded && item.path ? `点击打开：${item.path}` : undefined}
-                      disabled={!item.loaded || !item.path}
-                      onClick={() => handleOpenPath(item.path)}
-                    >
-                      <span
-                        className={cn(
-                          "shrink-0 font-mono text-[10px]",
-                          !item.loaded && "rounded-sm border border-current/20 px-1 py-0.5"
-                        )}
-                      >
-                        {agentmdLoadStatusLabel(item)}
-                      </span>
-                      {!item.loaded && item.message ? (
-                        <span className="min-w-0 max-w-[16rem] truncate text-[10px] opacity-85">
-                          {item.message}
-                        </span>
-                      ) : !item.loaded ? (
-                        <span className="text-[10px] opacity-75">无详情</span>
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
 }
 
 function goalStatusView(status: "active" | "paused" | "complete"): {
@@ -2072,7 +1883,8 @@ export function ChatContainer({
     generateTitleForFirstMessage,
     setShowCustomizeView,
     rightPanelCollapsed,
-    pluginVersion
+    pluginVersion,
+    requestOpenRightPanelSystemConstraints
   } = useAppStore()
   const currentThread = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
@@ -2305,6 +2117,25 @@ export function ChatContainer({
   } = useCurrentThread(threadId)
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
+  const systemConstraintCounts = getSystemConstraintsLoadCounts(harnessAgentmdLoadStatus)
+  const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
+  const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
+  const showSystemConstraintsButton = surface === "harness-project"
+  const systemConstraintsTitle =
+    systemConstraintsLoadFailed
+      ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+      : systemConstraintCounts.total > 0
+      ? `系统约束已加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+      : "系统约束，点击查看详情"
+  const systemConstraintsLabel =
+    systemConstraintsLoadFailed
+      ? "系统约束未加载"
+      : systemConstraintCounts.loaded > 0
+        ? "系统约束已加载"
+        : "系统约束"
+  const handleOpenSystemConstraints = useCallback((): void => {
+    requestOpenRightPanelSystemConstraints(threadId)
+  }, [requestOpenRightPanelSystemConstraints, threadId])
   const harnessDialogTipsProjectId = harnessFeatureBinding?.projectId ?? null
   const harnessDialogTipsSlug = harnessFeatureBinding?.slug ?? null
   const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
@@ -5349,14 +5180,6 @@ export function ChatContainer({
                 }
               >
                 <div className="max-w-3xl mx-auto space-y-4">
-                  {harnessAgentmdLoadStatus && (
-                    <div className="mt-1 max-w-3xl">
-                      <AgentmdLoadStatusNotice
-                        key={harnessAgentmdLoadStatus.createdAt}
-                        state={harnessAgentmdLoadStatus}
-                      />
-                    </div>
-                  )}
                   {historyLoading && displayMessages.length === 0 && (
                     <div
                       className="flex min-h-[42vh] items-center justify-center px-4"
@@ -6109,6 +5932,30 @@ export function ChatContainer({
                           modelId={currentModel}
                           contextLimit={modelContextLimit}
                         />
+                      )}
+                      {showSystemConstraintsButton && (
+                        <SystemConstraintsPreviewPopover
+                          preview={systemConstraintsPromptPreview}
+                          align="start"
+                          side="top"
+                          sideOffset={8}
+                        >
+                          <button
+                            type="button"
+                            className={cn(
+                              "flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs transition-colors hover:opacity-80",
+                              systemConstraintsLoadFailed
+                                ? "bg-amber-500/20 text-amber-600 dark:text-amber-300"
+                                : "bg-emerald-500/20 text-emerald-600 dark:text-emerald-300"
+                            )}
+                            title={systemConstraintsTitle}
+                            aria-label={systemConstraintsTitle}
+                            onClick={handleOpenSystemConstraints}
+                          >
+                            <ShieldCheck className="size-3.5" />
+                            <span>{systemConstraintsLabel}</span>
+                          </button>
+                        </SystemConstraintsPreviewPopover>
                       )}
                     </div>
                     <div className="flex min-w-0 items-center gap-2">

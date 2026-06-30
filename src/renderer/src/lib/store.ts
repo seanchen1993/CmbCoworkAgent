@@ -227,6 +227,12 @@ export interface SubagentFocusView {
   status?: "pending" | "running" | "completed" | "failed" | "cancelled"
 }
 
+export interface RightPanelWorkRequest {
+  id: number
+  target: "systemConstraints"
+  threadId: string
+}
+
 interface AppState {
   // Main content view routing
   mainView: MainView
@@ -248,6 +254,7 @@ interface AppState {
   // Sidebar state
   sidebarCollapsed: boolean
   rightPanelCollapsed: boolean
+  rightPanelWorkRequest: RightPanelWorkRequest | null
 
   // Split view for inspecting a single coordinator worker stream.
   workerFocusView: WorkerFocusView | null
@@ -316,6 +323,7 @@ interface AppState {
   setSidebarCollapsed: (collapsed: boolean) => void
   toggleRightPanel: () => void
   setRightPanelCollapsed: (collapsed: boolean) => void
+  requestOpenRightPanelSystemConstraints: (threadId: string) => void
 
   // Kanban actions
   setShowKanbanView: (show: boolean) => void
@@ -408,6 +416,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
+  rightPanelWorkRequest: null,
   workerFocusView: null,
   workerFocusMessagesThreadId: null,
   workerFocusMessages: [],
@@ -594,6 +603,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setRightPanelCollapsed: (collapsed: boolean) => {
     set({ rightPanelCollapsed: collapsed })
+  },
+
+  requestOpenRightPanelSystemConstraints: (threadId: string) => {
+    set((state) => ({
+      rightPanelCollapsed: false,
+      rightPanelWorkRequest: {
+        id: (state.rightPanelWorkRequest?.id ?? 0) + 1,
+        target: "systemConstraints",
+        threadId
+      }
+    }))
   },
 
   openWorkerFocusView: (view) => {
