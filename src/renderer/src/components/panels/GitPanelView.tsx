@@ -9,7 +9,9 @@ import {
   GitCommit,
   ShieldCheck,
   TriangleAlert,
+  Folder,
   FolderOpen,
+  FileText,
   CheckCircle2,
   RefreshCw,
   ArrowDown,
@@ -28,6 +30,12 @@ import { GitCommitDialog } from "./GitCommitDialog"
 import type { CommitType } from "./GitCommitDialog"
 import { GitPushDialog } from "./GitPushDialog"
 import { GitRejectDialog, type GitRejectFile } from "./GitRejectDialog"
+import {
+  buildGitPanelFileTree,
+  flattenGitPanelFileTree,
+  type GitPanelFileTreeRow,
+  type GitPanelTreeFile
+} from "./git-panel-file-tree"
 import { insertLog } from "../../../js/mmjUtils"
 import type { ThreadGitContext } from "@/lib/thread-context"
 import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
@@ -88,11 +96,14 @@ type GitPanelDiffState = {
 }
 
 type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
+type GitPanelDiffFile = GitPanelDiffState["files"][number]
+type GitPanelTreeDiffFile = GitPanelDiffFile & GitPanelTreeFile
 
 // 同时按需拉取的文件 diff 上限，避免刷新后一次性为大量已展开文件并发拉取 diff 拖垮主进程。
 const MAX_CONCURRENT_FILE_DIFF_LOADS = 3
 const GIT_REJECT_DIALOG_FILE_LIMIT = 10_000
 const ALL_REPOSITORIES_VALUE = "__all__"
+const WORKSPACE_REPOSITORY_KEY = "__workspace__"
 
 function normalizePanelPath(filePath: string): string {
   return String(filePath || "").replace(/\\/g, "/").replace(/^\/+/, "")
@@ -175,6 +186,55 @@ function getFileStatusMeta(
   }
 }
 
+function makeDirectoryCollapseKey(repositoryKey: string, directoryId: string): string {
+  return `${repositoryKey}::${directoryId}`
+}
+
+function getCollapsedDirectoryIds(
+  repositoryKey: string,
+  collapsedDirectoryPaths: ReadonlySet<string>
+): Set<string> {
+  const prefix = `${repositoryKey}::`
+  return new Set(
+    [...collapsedDirectoryPaths]
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => key.slice(prefix.length))
+  )
+}
+
+function TreeSelectionCheckbox({
+  checked,
+  indeterminate,
+  ariaLabel,
+  onChange
+}: {
+  checked: boolean
+  indeterminate?: boolean
+  ariaLabel: string
+  onChange: () => void
+}): React.JSX.Element {
+  const ref = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.indeterminate = Boolean(indeterminate)
+    }
+  }, [indeterminate])
+
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      aria-label={ariaLabel}
+      aria-checked={indeterminate ? "mixed" : checked}
+      onChange={onChange}
+      onClick={(event) => event.stopPropagation()}
+      className="size-3.5 shrink-0 accent-blue-600"
+    />
+  )
+}
+
 /**
  * 根据 thread context 中已经恢复出的 Git 信息，构造 GitPanel 的首屏 meta 状态。
  *
@@ -248,6 +308,7 @@ export function GitPanelView({
   const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set())
   const [collapsedRepositoryPaths, setCollapsedRepositoryPaths] = useState<Set<string>>(new Set())
+  const [collapsedDirectoryPaths, setCollapsedDirectoryPaths] = useState<Set<string>>(new Set())
   const [activeRepositoryPath, setActiveRepositoryPath] = useState(ALL_REPOSITORIES_VALUE)
   const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false)
   const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
@@ -287,6 +348,7 @@ export function GitPanelView({
     setExpandedFilePaths(new Set())
     setSelectedFilePaths(new Set())
     setCollapsedRepositoryPaths(new Set())
+    setCollapsedDirectoryPaths(new Set())
     setActiveRepositoryPath(ALL_REPOSITORIES_VALUE)
     setRepositoryPickerOpen(false)
     selectionScopeRef.current = ALL_REPOSITORIES_VALUE
@@ -698,6 +760,20 @@ export function GitPanelView({
     })
   }, [])
 
+  const setFilePathsSelected = useCallback((filePaths: string[], selected: boolean): void => {
+    setSelectedFilePaths((prev) => {
+      const next = new Set(prev)
+      for (const filePath of filePaths) {
+        if (selected) {
+          next.add(filePath)
+        } else {
+          next.delete(filePath)
+        }
+      }
+      return next
+    })
+  }, [])
+
   const toggleRepositoryCollapsed = useCallback((repositoryPath: string): void => {
     setCollapsedRepositoryPaths((prev) => {
       const next = new Set(prev)
@@ -705,6 +781,19 @@ export function GitPanelView({
         next.delete(repositoryPath)
       } else {
         next.add(repositoryPath)
+      }
+      return next
+    })
+  }, [])
+
+  const toggleDirectoryCollapsed = useCallback((repositoryKey: string, directoryId: string): void => {
+    const key = makeDirectoryCollapseKey(repositoryKey, directoryId)
+    setCollapsedDirectoryPaths((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
       }
       return next
     })
@@ -1036,9 +1125,27 @@ export function GitPanelView({
     return [{ repo: null as GitRepositoryInfo | null, files: visibleDiffFiles }]
   }, [activeRepository, hasMultipleRepositories, repositories, visibleDiffFiles])
 
+  const repositoryTreeGroups = useMemo(
+    () =>
+      repositoryGroups.map((group) => {
+        const repositoryKey = group.repo?.path ?? WORKSPACE_REPOSITORY_KEY
+        const files = group.files.map((file) => ({
+          ...file,
+          displayPath: getRepositoryFileDisplayPath(file.path, group.repo)
+        }))
+        return {
+          ...group,
+          repositoryKey,
+          tree: buildGitPanelFileTree(files)
+        }
+      }),
+    [repositoryGroups]
+  )
+
   const renderDiffFileCard = (
-    file: GitPanelDiffState["files"][number],
-    repo?: GitRepositoryInfo | null
+    file: GitPanelDiffFile,
+    repo?: GitRepositoryInfo | null,
+    treeRow?: GitPanelFileTreeRow<GitPanelTreeDiffFile>
   ): React.JSX.Element => {
     const diff = file.diff
     const isExpanded = expandedFilePaths.has(file.path)
@@ -1049,19 +1156,31 @@ export function GitPanelView({
     const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
     const revertHint =
       revertingFilePath === file.path ? "回退中..." : "回退（大模型改动的上一个版本）"
-    const displayPath = getRepositoryFileDisplayPath(file.path, repo)
+    const fullDisplayPath = getRepositoryFileDisplayPath(file.path, repo)
+    const displayPath = treeRow?.name ?? fullDisplayPath
     const previousDisplayPath = file.previousPath
       ? getRepositoryFileDisplayPath(file.previousPath, repo)
       : undefined
+    const treeIndent = treeRow ? 8 + treeRow.depth * 18 : 8
+    const diffIndent = treeRow ? 30 + treeRow.depth * 18 : 8
 
     return (
-      <div key={file.path} className="rounded-md border border-border/70 bg-white">
-        <div className="flex items-center justify-between gap-2 p-2 text-xs">
+      <div
+        key={file.path}
+        className={cn(
+          "border-t border-border/60 bg-background transition-colors first:border-t-0",
+          isExpanded && "bg-muted/10"
+        )}
+      >
+        <div
+          className="flex items-center justify-between gap-2 py-1.5 pr-2 text-xs"
+          style={{ paddingLeft: treeIndent }}
+        >
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <input
               type="checkbox"
               checked={isSelected}
-              aria-label={`选择文件 ${file.path}`}
+              aria-label={`选择文件 ${fullDisplayPath}`}
               onChange={(e) => {
                 e.stopPropagation()
                 toggleFileSelected(file.path)
@@ -1073,13 +1192,14 @@ export function GitPanelView({
               type="button"
               aria-expanded={isExpanded}
               onClick={() => toggleFileExpanded(file.path)}
-              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
             >
               {isExpanded ? (
                 <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
               ) : (
                 <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
               )}
+              <FileText className="size-3.5 shrink-0 text-muted-foreground" />
               <span
                 className={cn(
                   "inline-flex h-4 shrink-0 items-center rounded border px-1 text-[9px] font-medium leading-none",
@@ -1091,18 +1211,9 @@ export function GitPanelView({
               </span>
               <span
                 className="font-mono font-semibold truncate text-left"
-                title={file.path}
+                title={fullDisplayPath}
               >
                 {displayPath}
-              </span>
-              <span className="shrink-0 flex items-center gap-1.5 text-[11px] font-semibold">
-                <span className="text-emerald-600 dark:text-emerald-400">
-                  +{file.additions}
-                </span>
-                <span className="text-muted-foreground">/</span>
-                <span className="text-rose-600 dark:text-rose-400">
-                  -{file.deletions}
-                </span>
               </span>
             </button>
           </div>
@@ -1147,7 +1258,25 @@ export function GitPanelView({
           </span>
         </div>
         {isExpanded && (
-          <div className="px-2 pb-2">
+          <div className="pb-2 pr-2" style={{ paddingLeft: diffIndent }}>
+            <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
+              <span className="text-muted-foreground">变更统计</span>
+              <span
+                className={cn(
+                  "inline-flex h-4 items-center rounded border px-1 text-[9px] font-medium leading-none",
+                  statusMeta.className
+                )}
+              >
+                {statusMeta.label}
+              </span>
+              <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                +{file.additions}
+              </span>
+              <span className="text-muted-foreground">/</span>
+              <span className="font-semibold text-rose-600 dark:text-rose-400">
+                -{file.deletions}
+              </span>
+            </div>
             {showMovePath && (
               <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
                 <div className="mb-1 flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
@@ -1170,7 +1299,7 @@ export function GitPanelView({
                       className="truncate font-semibold text-foreground"
                       title={file.path}
                     >
-                      {displayPath}
+                      {fullDisplayPath}
                     </span>
                   </div>
                 </div>
@@ -1198,6 +1327,65 @@ export function GitPanelView({
             )}
           </div>
         )}
+      </div>
+    )
+  }
+
+  const renderFileTreeRow = (
+    row: GitPanelFileTreeRow<GitPanelTreeDiffFile>,
+    repo: GitRepositoryInfo | null,
+    repositoryKey: string
+  ): React.JSX.Element | null => {
+    if (row.kind === "file") {
+      if (!row.file) return null
+      return renderDiffFileCard(row.file, repo, row)
+    }
+
+    const directoryCollapseKey = makeDirectoryCollapseKey(repositoryKey, row.id)
+    const isCollapsed = collapsedDirectoryPaths.has(directoryCollapseKey)
+    const filePaths = row.files.map((file) => file.path)
+    const selectedInDirectory = filePaths.filter((filePath) => selectedFilePaths.has(filePath)).length
+    const allDirectoryFilesSelected = filePaths.length > 0 && selectedInDirectory === filePaths.length
+    const someDirectoryFilesSelected = selectedInDirectory > 0 && !allDirectoryFilesSelected
+    const treeIndent = 8 + row.depth * 18
+
+    return (
+      <div
+        key={`${repositoryKey}:${row.id}`}
+        className="border-t border-border/60 bg-muted/20 first:border-t-0"
+      >
+        <div
+          className="flex items-center justify-between gap-2 py-1.5 pr-2 text-xs"
+          style={{ paddingLeft: treeIndent }}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <TreeSelectionCheckbox
+              checked={allDirectoryFilesSelected}
+              indeterminate={someDirectoryFilesSelected}
+              ariaLabel={`选择目录 ${row.fullPath}`}
+              onChange={() => setFilePathsSelected(filePaths, !allDirectoryFilesSelected)}
+            />
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left font-medium transition-colors hover:bg-background/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+              aria-expanded={!isCollapsed}
+              onClick={() => toggleDirectoryCollapsed(repositoryKey, row.id)}
+            >
+              {isCollapsed ? (
+                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <Folder className="size-3.5 shrink-0 text-amber-600 dark:text-amber-300" />
+              <span className="min-w-0 truncate font-mono text-foreground" title={row.fullPath}>
+                {row.name}
+              </span>
+              <span className="shrink-0 rounded-full border border-border/70 bg-background/80 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
+                {selectedInDirectory}/{row.fileCount}
+              </span>
+            </button>
+          </div>
+        </div>
       </div>
     )
   }
@@ -1241,14 +1429,6 @@ export function GitPanelView({
                         <span>(仅展示 {visibleFilesCount})</span>
                       </>
                     )}
-                    <span>,</span>
-                    <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                      +{diffState?.totals.additions ?? 0}
-                    </span>
-                    <span>/</span>
-                    <span className="text-rose-600 dark:text-rose-400 font-semibold">
-                      -{diffState?.totals.deletions ?? 0}
-                    </span>
                   </>
                 )}
               </div>
@@ -1577,12 +1757,6 @@ export function GitPanelView({
                       {selectedTotals.fileCount}
                     </span>{" "}
                     / {visibleDiffFiles.length} 个文件
-                    <span className="ml-2 text-emerald-600 dark:text-emerald-400">
-                      +{selectedTotals.additions}
-                    </span>
-                    <span className="ml-1 text-rose-600 dark:text-rose-400">
-                      -{selectedTotals.deletions}
-                    </span>
                   </div>
                   <button
                     type="button"
@@ -1599,20 +1773,19 @@ export function GitPanelView({
                   </button>
                 </div>
                 <div className="space-y-3">
-                  {repositoryGroups.map((group) => {
-                    const repositoryKey = group.repo?.path ?? "__workspace__"
+                  {repositoryTreeGroups.map((group) => {
+                    const repositoryKey = group.repositoryKey
                     const isCollapsed = collapsedRepositoryPaths.has(repositoryKey)
                     const selectedInGroup = group.files.filter((file) => selectedFilePaths.has(file.path))
-                    const groupTotals = group.files.reduce(
-                      (acc, file) => {
-                        acc.additions += file.additions
-                        acc.deletions += file.deletions
-                        return acc
-                      },
-                      { additions: 0, deletions: 0 }
-                    )
                     const allGroupFilesSelected =
                       group.files.length > 0 && selectedInGroup.length === group.files.length
+                    const someGroupFilesSelected =
+                      selectedInGroup.length > 0 && !allGroupFilesSelected
+                    const collapsedDirectoryIds = getCollapsedDirectoryIds(
+                      repositoryKey,
+                      collapsedDirectoryPaths
+                    )
+                    const treeRows = flattenGitPanelFileTree(group.tree, collapsedDirectoryIds)
                     return (
                       <section
                         key={repositoryKey}
@@ -1621,21 +1794,16 @@ export function GitPanelView({
                         {hasMultipleRepositories && group.repo && (
                           <div className="flex items-center justify-between gap-3 border-b border-border/70 bg-blue-500/5 px-3 py-2">
                             <label className="inline-flex min-w-0 flex-1 items-center gap-2 text-xs font-semibold">
-                              <input
-                                type="checkbox"
+                              <TreeSelectionCheckbox
                                 checked={allGroupFilesSelected}
-                                onChange={() => {
-                                  setSelectedFilePaths((prev) => {
-                                    const next = new Set(prev)
-                                    if (allGroupFilesSelected) {
-                                      for (const file of group.files) next.delete(file.path)
-                                    } else {
-                                      for (const file of group.files) next.add(file.path)
-                                    }
-                                    return next
-                                  })
-                                }}
-                                className="size-3.5 shrink-0 accent-blue-600"
+                                indeterminate={someGroupFilesSelected}
+                                ariaLabel={`选择仓库 ${group.repo.displayPath}`}
+                                onChange={() =>
+                                  setFilePathsSelected(
+                                    group.files.map((file) => file.path),
+                                    !allGroupFilesSelected
+                                  )
+                                }
                               />
                               <button
                                 type="button"
@@ -1671,17 +1839,11 @@ export function GitPanelView({
                               <span className="rounded-full border border-border/70 bg-background/80 px-2 py-0.5">
                                 {selectedInGroup.length}/{group.files.length}
                               </span>
-                              <span className="text-emerald-600 dark:text-emerald-400">
-                                +{groupTotals.additions}
-                              </span>
-                              <span className="text-rose-600 dark:text-rose-400">
-                                -{groupTotals.deletions}
-                              </span>
                             </div>
                           </div>
                         )}
-                        <div className={cn("space-y-2 p-2", isCollapsed && "hidden")}>
-                          {group.files.map((file) => renderDiffFileCard(file, group.repo))}
+                        <div className={cn("divide-y-0", isCollapsed && "hidden")}>
+                          {treeRows.map((row) => renderFileTreeRow(row, group.repo, repositoryKey))}
                         </div>
                       </section>
                     )

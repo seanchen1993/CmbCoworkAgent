@@ -139,6 +139,17 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
     const unsubscribe = window.api.workflows.onWorkflowAgentStream(focusThreadId, (payload) => {
       const data = payload as { runId?: string; agentIndex?: number; snapshotMessages?: unknown }
       if (data.runId !== focusRunId || data.agentIndex !== focusAgentIndex) return
+      // A live frame can land AFTER a focus switch but BEFORE this listener unsubscribes; the
+      // snapshot is GLOBAL, so re-check THIS agent is still the focus before writing — otherwise a
+      // stale frame from the previous agent overwrites the new panel. (Effect 2 only fills an
+      // `undefined` snapshot, so a finished / no-sidecar agent would then keep showing the wrong flow.)
+      const cur = useAppStore.getState().workflowAgentFocusView
+      if (
+        cur?.threadId !== focusThreadId ||
+        cur?.runId !== focusRunId ||
+        cur?.agentIndex !== focusAgentIndex
+      )
+        return
       useAppStore.getState().setWorkflowAgentFocusSnapshot(data.snapshotMessages)
     })
     return () => {
@@ -163,11 +174,25 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
     let cancelled = false
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     let attempts = 0
+    // `cancelled` only catches frames that resolve AFTER React runs this effect's PASSIVE cleanup.
+    // A focus switch A→B updates the store synchronously but DEFERS the cleanup to the passive phase,
+    // so a sidecar promise (or a fired retry) resolving in that gap still sees cancelled=false. Re-check
+    // the LIVE focus identity (same guard as the live callback) before writing the GLOBAL snapshot —
+    // else A's complete flow lands on B's panel and, since B's empty load won't overwrite a non-undefined
+    // snapshot, sticks until the user reopens.
+    const isStillFocused = (): boolean => {
+      const cur = useAppStore.getState().workflowAgentFocusView
+      return (
+        cur?.threadId === focusThreadId &&
+        cur?.runId === focusRunId &&
+        cur?.agentIndex === focusAgentIndex
+      )
+    }
     const load = (): void => {
       void window.api.workflows
         .getAgentToolStream(focusThreadId, focusRunId, focusAgentIndex)
         .then((loaded) => {
-          if (cancelled) return
+          if (cancelled || !isStillFocused()) return
           if (loaded != null) {
             // Authoritative complete flow — overwrite whatever (live frame / loading) we had.
             useAppStore.getState().setWorkflowAgentFocusSnapshot(loaded)
@@ -188,7 +213,8 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
           }
         })
         .catch(() => {
-          if (!cancelled && useAppStore.getState().workflowAgentFocusSnapshot === undefined) {
+          if (cancelled || !isStillFocused()) return
+          if (useAppStore.getState().workflowAgentFocusSnapshot === undefined) {
             useAppStore.getState().setWorkflowAgentFocusSnapshot(null)
           }
         })

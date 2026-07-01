@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -471,6 +473,8 @@ interface TraceThreadGroup {
   totalModelCalls: number
   totalUserInputRequests: number
   totalDurationMs: number
+  totalInputTokens: number
+  totalOutputTokens: number
   totalTokens: number
   /** thread 内出现过的 APP 版本（聚合去重，按出现顺序）。 */
   appVersions: string[]
@@ -499,7 +503,9 @@ function summarizeThreadGroup(
       0
     ),
     totalDurationMs: sorted.reduce((sum, trace) => sum + trace.durationMs, 0),
-    totalTokens: sorted.reduce((sum, trace) => sum + trace.totalTokens, 0),
+    totalInputTokens: sorted.reduce((sum, trace) => sum + (trace.totalInputTokens ?? 0), 0),
+    totalOutputTokens: sorted.reduce((sum, trace) => sum + (trace.totalOutputTokens ?? 0), 0),
+    totalTokens: sorted.reduce((sum, trace) => sum + (trace.totalTokens ?? 0), 0),
     appVersions: [
       ...new Set(
         sorted
@@ -827,6 +833,14 @@ export function TraceExplorer({
     metricMode === "thread"
       ? (selectedThreadGroup?.totalTokens ?? 0)
       : (selectedTrace?.totalTokens ?? 0)
+  const metricInputTokens =
+    metricMode === "thread"
+      ? (selectedThreadGroup?.totalInputTokens ?? 0)
+      : (selectedTrace?.totalInputTokens ?? 0)
+  const metricOutputTokens =
+    metricMode === "thread"
+      ? (selectedThreadGroup?.totalOutputTokens ?? 0)
+      : (selectedTrace?.totalOutputTokens ?? 0)
   const metricAppVersions =
     metricMode === "thread"
       ? (selectedThreadGroup?.appVersions ?? [])
@@ -946,7 +960,9 @@ export function TraceExplorer({
                   <Cpu className="size-3.5 shrink-0 text-muted-foreground" />
                   <div>
                     <p className="text-[10px] text-muted-foreground">模型调用</p>
-                    <p className="whitespace-nowrap text-[12px] font-semibold">{metricModelCalls}</p>
+                    <p className="whitespace-nowrap text-[12px] font-semibold">
+                      {metricModelCalls}
+                    </p>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
@@ -975,6 +991,24 @@ export function TraceExplorer({
                     <p className="text-[10px] text-muted-foreground">Token</p>
                     <p className="whitespace-nowrap text-[12px] font-semibold">
                       {fmtTokens(metricTokens)}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
+                  <ArrowUpFromLine className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
+                    <p className="text-[10px] text-muted-foreground">输入 Token</p>
+                    <p className="whitespace-nowrap text-[12px] font-semibold">
+                      {fmtTokens(metricInputTokens)}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
+                  <ArrowDownToLine className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div>
+                    <p className="text-[10px] text-muted-foreground">输出 Token</p>
+                    <p className="whitespace-nowrap text-[12px] font-semibold">
+                      {fmtTokens(metricOutputTokens)}
                     </p>
                   </div>
                 </div>

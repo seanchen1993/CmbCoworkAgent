@@ -8,8 +8,9 @@ import {
   unlinkSync,
   writeFileSync
 } from "fs"
-import { mkdir, rename, writeFile } from "fs/promises"
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "fs/promises"
 import { join, resolve } from "path"
+import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import type {
   PersistedWorkflowRun,
   WorkflowAgentStateRecord,
@@ -213,26 +214,222 @@ function journalFilePath(workspacePath: string, threadId: string, runId: string)
   )
 }
 
-/** Filename suffix of a per-agent tool-stream sidecar, e.g. `.a3.toolstream`. */
-function agentToolStreamSuffix(agentIndex: number): string {
-  return `.a${Math.max(0, Math.trunc(agentIndex))}.toolstream`
+/** Filename infix of a per-agent tool-stream sidecar = the composite key `<callHash>_c<callIndex>`
+ * (e.g. `.<hash>_c12.toolstream`). callHash distinguishes DIFFERENT agents that land on the same
+ * callIndex across a resume (cache-hit + live-miss); callIndex distinguishes same-prompt instances;
+ * a cached agent uses its ORIGINAL callIndex so it reads its OWN flow. */
+function agentToolStreamSuffix(toolStreamKey: string): string {
+  return `.${assertSafeSegment(toolStreamKey, "toolStreamKey")}.toolstream`
 }
 
-/** Per-agent tool-stream sidecar (`<runId>.a<index>.toolstream`, no `.json` so the
- * run-file scans skip it): the DISPLAY-ONLY complete tool flow of ONE subagent, written
- * once when that agent finishes so its flow can be opened on demand afterwards (a still
- * running agent streams live instead). Bounded/truncated; never read by resume/the
+/** Per-agent tool-stream sidecar (`<runId>.<callHash>_c<callIndex>.toolstream`, no `.json` so the
+ * run-file scans skip it): the DISPLAY-ONLY complete tool flow of ONE subagent, written once when
+ * that agent finishes so its flow can be opened on demand afterwards (a still running agent streams
+ * live instead). Keyed by the composite callHash+callIndex (NOT the execution-order agentIndex) —
+ * so a resumed/cached agent reads its OWN flow, two same-prompt agents never collide (callIndex),
+ * and a cache-hit/live-miss never collide on the same index (callHash). get-agent-toolstream
+ * resolves agentIndex → toolStreamKey via run.json. Bounded/truncated; never read by resume/the
  * engine; deleted with the run (prune + thread delete). */
 export function agentToolStreamPath(
   workspacePath: string,
   threadId: string,
   runId: string,
-  agentIndex: number
+  toolStreamKey: string
 ): string {
   return join(
     getWorkflowRunsDir(workspacePath, threadId),
-    `${assertSafeSegment(runId, "runId")}${agentToolStreamSuffix(agentIndex)}`
+    `${assertSafeSegment(runId, "runId")}${agentToolStreamSuffix(toolStreamKey)}`
   )
+}
+
+const WORKFLOW_AGENT_TOOLSTREAM_MAX_BYTES = 8 * 1024 * 1024
+// Upper bound (UI read path ONLY) on how long a read waits for a pending sidecar op before
+// reading anyway, so a hung write can't wedge the panel read. Normal ops settle in ms.
+const WORKFLOW_AGENT_TOOLSTREAM_READ_WAIT_MS = 3000
+
+// Per-sidecar-path serialized op chain. A re-run's clear is enqueued AFTER the prior run's write
+// and BEFORE this run's write, so the order is always write(old) → clear → write(new): clear can
+// never delete THIS run's file, and a prior write's late rename can't resurrect a cleared one —
+// purely by ordering, with NO awaited I/O on the run's critical path. The run fires these
+// fire-and-forget (display I/O must never block the agent); a hung write only stalls this chain,
+// not the run. Self-evicting when idle.
+const agentSidecarOps = new Map<string, Promise<unknown>>()
+
+function enqueueAgentSidecarOp(path: string, op: () => Promise<void>): Promise<void> {
+  const prev = agentSidecarOps.get(path) ?? Promise.resolve()
+  const next = prev.then(op, op) // run op regardless of the previous op's outcome
+  agentSidecarOps.set(path, next)
+  void next.finally(() => {
+    if (agentSidecarOps.get(path) === next) agentSidecarOps.delete(path)
+  })
+  return next
+}
+
+/** Write a FINISHED subagent's complete tool flow to its bounded per-agent sidecar so it can
+ * be opened on demand later — even an agent you never watched live, or after the run ended.
+ * Display-only + best-effort: NEVER throws into the run, NEVER touches run.json/journal/
+ * checkpoint. Skips when the agent produced no snapshot (cached/instant/early-error agent); a
+ * stale sidecar from a prior same-runId run (resume reuses the runId) is cleared at re-run
+ * start by clearAgentToolStream — NOT here — so this never races a delete against the
+ * finish-time read. */
+export function persistAgentToolStream(
+  workspacePath: string,
+  threadId: string,
+  runId: string,
+  toolStreamKey: string,
+  snapshot: unknown
+): void {
+  try {
+    if (isWorkflowRunDirDisposed(workspacePath, threadId)) return
+    const snapshotMessages = serializeWorkflowAgentSnapshotMessages(snapshot)
+    if (!snapshotMessages || snapshotMessages.length === 0) return
+    const path = agentToolStreamPath(workspacePath, threadId, runId, toolStreamKey)
+    const payload = JSON.stringify({ runId, toolStreamKey, snapshotMessages })
+    // Atomic write (tmp + rename, like run.json/journal): a crash mid-write leaves a stray
+    // .tmp (swept by prune/thread-delete), never a half-written .toolstream the reader chokes
+    // on; rename is atomic on one filesystem, so a concurrent read sees old-or-new, never torn.
+    // Enqueued on the per-path op chain so a re-run's clear is ordered BEFORE this write (clear
+    // can't delete it) and any prior write is ordered before that clear (no late-rename resurrect).
+    // Fire-and-forget — never blocks the event loop or the run's settle. No mkdir: an active run
+    // already created the dir, so a late write after thread-delete just ENOENTs.
+    void enqueueAgentSidecarOp(path, async () => {
+      try {
+        await writeFile(`${path}.tmp`, payload)
+        await rename(`${path}.tmp`, path)
+      } catch {
+        /* best-effort display-only */
+      }
+    })
+  } catch {
+    /* serialization is best-effort and display-only */
+  }
+}
+
+/** Delete a per-agent tool-stream sidecar for a (re-)running agent. resume reuses the runId
+ * (tool.ts), so without this a re-run that errors before any snapshot — or whose new write hasn't
+ * landed when the finished-state UI reads — would let the panel show the PRIOR run's stream.
+ * Enqueued on the per-path op chain (after any in-flight write, before the next write), so the
+ * delete is strictly ordered: it never races or deletes THIS run's own write, and a prior write's
+ * late rename can't resurrect a cleared file — with NO awaited I/O on the run's critical path.
+ * Returns the op promise (tests await it; the runner fires it fire-and-forget so it never blocks
+ * the agent). Cached agents skip the runner, so their valid sidecar is preserved. */
+export function clearAgentToolStream(
+  workspacePath: string,
+  threadId: string,
+  runId: string,
+  toolStreamKey: string
+): Promise<void> {
+  const path = agentToolStreamPath(workspacePath, threadId, runId, toolStreamKey)
+  return enqueueAgentSidecarOp(path, async () => {
+    try {
+      await unlink(path)
+    } catch {
+      /* no prior sidecar (fresh run) or already gone — fine */
+    }
+    try {
+      await unlink(`${path}.tmp`)
+    } catch {
+      /* no stray tmp from an interrupted write — fine */
+    }
+  })
+}
+
+/** Clear ALL per-agent tool-stream sidecars for a runId. Used when a resume DROPS the journal
+ * (script/args changed): the re-run REUSES the runId but its agents now have different callHashes,
+ * so the prior run's `<runId>.<oldHash>_cN.toolstream` files are orphaned — the per-agent runner only
+ * clears the CURRENT agent's key, never the removed/reordered ones. Sweeping them once at launch
+ * (after approval, before the fresh run writes any sidecar) stops disk garbage piling up across
+ * repeated edit-and-resume. NEVER blocks the launch on display I/O (mirrors persist/clear): an
+ * in-flight write of this run could rename a file AFTER a bare sync sweep and revive the orphan, so
+ * instead of AWAITING those writes (which would put hung display I/O on the launch path) we enqueue
+ * an ordered delete on each pending path's OWN op chain — it runs AFTER that write's rename (no
+ * revival) and BEFORE the fresh run's writes (this runs first, pre-launch). Everything already on
+ * disk is swept synchronously (fast metadata ops, never waits). Globs by the runId prefix +
+ * .toolstream suffix, same as pruneWorkflowRuns. */
+export function clearAllAgentToolStreams(
+  workspacePath: string,
+  threadId: string,
+  runId: string
+): void {
+  if (!isValidWorkflowRunId(runId)) return
+  const dir = getWorkflowRunsDir(workspacePath, threadId)
+  const prefix = `${runId}.`
+  // In-flight writes for THIS run (op map keyed by full path): enqueue an ordered delete on each so
+  // it runs after the write's rename — no await, so a hung write can't stall the launch.
+  const pathPrefix = join(dir, prefix)
+  for (const opPath of agentSidecarOps.keys()) {
+    if (!opPath.startsWith(pathPrefix)) continue
+    void enqueueAgentSidecarOp(opPath, async () => {
+      try {
+        await unlink(opPath)
+      } catch {
+        /* already gone / never written */
+      }
+      try {
+        await unlink(`${opPath}.tmp`)
+      } catch {
+        /* no stray tmp */
+      }
+    })
+  }
+  // Sweep everything ALREADY on disk (settled writes / paths with no pending op). Sync metadata ops.
+  try {
+    for (const file of readdirSync(dir)) {
+      if (
+        file.startsWith(prefix) &&
+        (file.endsWith(".toolstream") || file.endsWith(".toolstream.tmp"))
+      ) {
+        try {
+          unlinkSync(join(dir, file))
+        } catch {
+          /* best-effort cleanup */
+        }
+      }
+    }
+  } catch {
+    /* dir may not exist yet (first run) — nothing to clear */
+  }
+}
+
+/** Read a finished subagent's persisted tool flow (the serialized "values" messages), or null
+ * when there is no sidecar (cached/instant agent, pruned/pre-feature run) or it is unreadable/
+ * corrupt/over the size cap. */
+export async function readAgentToolStream(
+  workspacePath: string,
+  threadId: string,
+  runId: string,
+  toolStreamKey: string
+): Promise<unknown[] | null> {
+  const path = agentToolStreamPath(workspacePath, threadId, runId, toolStreamKey)
+  // Wait for any pending op on this path (a queued clear/write) to settle FIRST, so the UI reads
+  // the POST-op state — never a stale file a queued clear is about to delete (the chain only
+  // orders writes; without this the read could still beat the clear). This is on the UI's read
+  // path ONLY (never the run's), so it can't block the agent; bounded so a hung write can't wedge
+  // the read — on timeout we read whatever is on disk.
+  const pending = agentSidecarOps.get(path)
+  if (pending) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      pending.catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, WORKFLOW_AGENT_TOOLSTREAM_READ_WAIT_MS)
+      })
+    ])
+    if (timer) clearTimeout(timer)
+  }
+  try {
+    // Defensive size cap: a normal sidecar is bounded (~1MB content budget + JSON overhead);
+    // refuse to read+parse a corrupted/externally-grown file unbounded into memory.
+    if ((await stat(path)).size > WORKFLOW_AGENT_TOOLSTREAM_MAX_BYTES) return null
+    const parsed = JSON.parse(await readFile(path, "utf8")) as { snapshotMessages?: unknown }
+    if (!Array.isArray(parsed.snapshotMessages)) return null
+    // Drop non-object elements (null / string / primitive / old-format / half-corrupt): the renderer
+    // reads `message.kwargs` on each, so a bad element would throw and break the panel. A corrupted or
+    // externally-edited sidecar then degrades to the valid messages (or empty), never a crash.
+    return parsed.snapshotMessages.filter((m): m is object => m !== null && typeof m === "object")
+  } catch {
+    return null
+  }
 }
 
 export function toRunSummary(run: PersistedWorkflowRun): WorkflowRunSummary {
@@ -563,13 +760,17 @@ export function pruneWorkflowRuns(
           /* best-effort cleanup */
         }
       }
-      // Per-agent tool-stream sidecars (`<runId>.aN.toolstream`) are variable in count,
-      // so glob by the runId prefix instead of a fixed suffix. The leading "." before
-      // "a" keeps the prefix from matching a different run whose id extends this one.
+      // Per-agent tool-stream sidecars (`<runId>.<callHash>_c<callIndex>.toolstream`, plus any `.tmp` left by
+      // a crash mid atomic-write) are variable in count, so glob by the runId prefix + the
+      // .toolstream suffix. The trailing "." in the prefix keeps it from matching a different run
+      // whose id extends this one, and the .toolstream suffix excludes .json/.journal/etc.
       try {
-        const toolStreamPrefix = `${stale.runId}.a`
+        const toolStreamPrefix = `${stale.runId}.`
         for (const file of readdirSync(dir)) {
-          if (file.startsWith(toolStreamPrefix) && file.endsWith(".toolstream")) {
+          if (
+            file.startsWith(toolStreamPrefix) &&
+            (file.endsWith(".toolstream") || file.endsWith(".toolstream.tmp"))
+          ) {
             try {
               unlinkSync(join(dir, file))
             } catch {
@@ -731,6 +932,14 @@ export function createWorkflowRunStore(options: {
     state.agents.map((record) => [record.index, record])
   )
   let maxJournalIndex = state.journal.reduce((max, entry) => Math.max(max, entry.index), -1)
+  // Bumped on EVERY journal mutation (append OR replace-by-index). doWrite skips rewriting the
+  // (potentially tens-of-MB) .journal sidecar when this is unchanged since the last write — i.e.
+  // when only agent state / phase / log / tokens moved — so a busy run doesn't rewrite the whole
+  // journal on every throttled save (the journal-split's point is to keep that cost off the common
+  // path). Replace-by-index keeps length constant, so a length check would miss it; a monotonic
+  // version counter catches append AND replace.
+  let journalVersion = 0
+  let lastWrittenJournalVersion = -1
 
   let dirty = false
   let lastSaveAt = 0
@@ -774,8 +983,21 @@ export function createWorkflowRunStore(options: {
       // correctness. Async I/O so a long run never blocks the Electron main loop. (#3)
       // (tmp+rename each: a torn .journal would otherwise leave an empty/corrupt
       // sidecar and loadWorkflowRunForResume would silently lose the replay cache.)
-      await writeFile(`${journalPath}.tmp`, JSON.stringify(state.journal))
-      await rename(`${journalPath}.tmp`, journalPath)
+      // Skip rewriting the .journal when it hasn't changed since the last successful write (only
+      // agent state / phase / log / tokens moved) — avoids rewriting a tens-of-MB journal on every
+      // throttled save. When it HAS changed, journal-first ordering still holds (see above).
+      // Snapshot the version BEFORE the awaited write: appendJournal can fire DURING the write
+      // (an agent completing mid-flush), and recording `journalVersion` AFTER the await would mark
+      // that not-yet-written entry as persisted → a later save would skip it → the entry is lost on
+      // resume. JSON.stringify runs synchronously with this snapshot (no await between), so the
+      // bytes written and the recorded version always match; advancing only AFTER a successful
+      // rename means a failed write retries the journal next save.
+      const journalVersionAtWrite = journalVersion
+      if (journalVersionAtWrite !== lastWrittenJournalVersion) {
+        await writeFile(`${journalPath}.tmp`, JSON.stringify(state.journal))
+        await rename(`${journalPath}.tmp`, journalPath)
+        lastWrittenJournalVersion = journalVersionAtWrite
+      }
       await writeFile(`${path}.tmp`, json)
       await rename(`${path}.tmp`, path)
       if (withBak) {
@@ -876,25 +1098,31 @@ export function createWorkflowRunStore(options: {
       scheduleSave()
     },
     appendJournal(entry) {
-      // Common case: lexical call indexes are monotonic, so an append keeps the
-      // array sorted with no scan or sort (the engine reads order-independently
-      // via a Map, so order is only cosmetic). Replace-by-index — needed when a
-      // resume re-runs a changed call — falls back to a scan but is rare.
+      // Common case: lexical call indexes are monotonic, so an append keeps the array sorted with no
+      // scan/sort (the engine replays order-independently BY HASH via availableByHash, so array order
+      // is only cosmetic). Match an existing slot by index AND hash: replace ONLY when the SAME call
+      // re-runs (idempotent rewrite). A DIFFERENT hash landing on an existing index — a concurrent
+      // pipeline() reorder, or some agents left un-journaled (failure/fallback) shifting the live
+      // callSeq onto a cached index — must NOT overwrite that index: replay is by hash, so an
+      // overwrite would drop the OTHER call's cached result from availableByHash and force it to
+      // re-run on the next resume (re-applying non-idempotent file edits). So APPEND it instead —
+      // both hashes stay replayable; an unreferenced one just lingers harmlessly.
       if (entry.index > maxJournalIndex) {
         state.journal.push(entry)
         maxJournalIndex = entry.index
       } else {
         const existingIndex = state.journal.findIndex(
-          (journalEntry) => journalEntry.index === entry.index
+          (journalEntry) => journalEntry.index === entry.index && journalEntry.hash === entry.hash
         )
         if (existingIndex >= 0) {
           state.journal[existingIndex] = entry
         } else {
-          // Out-of-order insert (not expected in normal flow); keep it tidy.
+          // New index, OR a different hash at an existing index (never overwrite — see above).
           state.journal.push(entry)
           state.journal.sort((a, b) => a.index - b.index)
         }
       }
+      journalVersion += 1
       scheduleSave()
     },
     upsertAgent(record) {
@@ -906,6 +1134,7 @@ export function createWorkflowRunStore(options: {
         existing.outputTokens = record.outputTokens
         if (record.promptPreview !== undefined) existing.promptPreview = record.promptPreview
         if (record.resultPreview !== undefined) existing.resultPreview = record.resultPreview
+        if (record.toolStreamKey !== undefined) existing.toolStreamKey = record.toolStreamKey
         if (record.status !== "running") existing.endedAt = new Date().toISOString()
       } else {
         const created: WorkflowAgentStateRecord = {
@@ -917,6 +1146,7 @@ export function createWorkflowRunStore(options: {
           outputTokens: record.outputTokens,
           promptPreview: record.promptPreview,
           resultPreview: record.resultPreview,
+          toolStreamKey: record.toolStreamKey,
           startedAt: new Date().toISOString(),
           endedAt: record.status !== "running" ? new Date().toISOString() : undefined
         }

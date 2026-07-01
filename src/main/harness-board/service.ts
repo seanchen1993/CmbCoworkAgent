@@ -1057,7 +1057,10 @@ function buildConfiguredHarnessInvocation(
   return configured
 }
 
-function hasConfiguredHarnessInvocation(project: HarnessProjectMetadata, mode: HarnessInspectCommandName): boolean {
+function hasConfiguredHarnessInvocation(
+  project: HarnessProjectMetadata,
+  mode: HarnessInspectCommandName
+): boolean {
   return readBoardConfigInspectCommand(adapterPluginDir(project), mode) !== null
 }
 
@@ -1135,7 +1138,12 @@ function runHarnessJsonInvocation(
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
-    logHarnessStatusResultFailure(configured, configKey, stdoutBuffer, "Inspect adapter returned empty output")
+    logHarnessStatusResultFailure(
+      configured,
+      configKey,
+      stdoutBuffer,
+      "Inspect adapter returned empty output"
+    )
     throw new Error("Inspect adapter returned empty output")
   }
 
@@ -1247,7 +1255,9 @@ function normalizeDynamicWorkflowNodeList(value: unknown): HarnessDynamicWorkflo
   return nodes
 }
 
-function normalizeDynamicWorkflowConfigSnapshot(value: unknown): HarnessDynamicWorkflowConfig | null {
+function normalizeDynamicWorkflowConfigSnapshot(
+  value: unknown
+): HarnessDynamicWorkflowConfig | null {
   if (!isObject(value)) return null
   const templates = normalizeDynamicWorkflowTemplateList(value.templates)
   const nodes = normalizeDynamicWorkflowNodeList(value.nodes)
@@ -2235,7 +2245,11 @@ function normalizeFeatureWorkflowNodeIds(value: unknown): string[] {
   return nodes
 }
 
-function validateSkipNodeInput(input: HarnessSkipNodeInput): { projectId: string; slug: string; nodeId: string } {
+function validateSkipNodeInput(input: HarnessSkipNodeInput): {
+  projectId: string
+  slug: string
+  nodeId: string
+} {
   const projectId = normalizeText(input.projectId).trim()
   const slug = normalizeText(input.slug).trim()
   const nodeId = normalizeText(input.nodeId).trim()
@@ -2382,6 +2396,12 @@ export interface HarnessFeatureAgentContext {
   pluginName?: string
   pluginWorkspace?: string
   featureId?: string
+  /** Harness project stable id (= properties.harnessProjectId on events). Exposed to hooks as HARNESS_PROJECT_ID. */
+  harnessProjectId?: string
+  /** Bound adapter name (= properties.harnessAdapterName on events). Exposed to hooks as HARNESS_ADAPTER_NAME. */
+  harnessAdapterName?: string
+  /** Bound adapter version (= properties.harnessAdapterVersion on events). Exposed to hooks as HARNESS_ADAPTER_VERSION. */
+  harnessAdapterVersion?: string
   projectCode?: string
   projectDir?: string
 }
@@ -2481,6 +2501,9 @@ export function buildHarnessFeatureAgentContext(
   const project = requireProject(feature.projectId)
   const cwd = adapterPluginDir(project)
   const adapter = project["harness-adapter"]
+  // 与事件侧一致：用 adapter 快照（可经 plugin 解析）作为暴露给 hook 的 adapter 名/版本，
+  // 保证外部按此上报后落进与原生事件相同的 harnessAdapterName/Version 聚合桶。
+  const adapterSnapshot = getHarnessProjectAdapterSnapshot(feature.projectId)
   const plugin = findAdapterPlugin(project)
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
@@ -2544,8 +2567,64 @@ export function buildHarnessFeatureAgentContext(
     pluginName: normalizeText(plugin?.name) || adapter.name,
     pluginWorkspace: project.workspacePath,
     featureId: feature.slug,
+    harnessProjectId: feature.projectId,
+    harnessAdapterName: normalizeText(adapterSnapshot?.name).trim() || undefined,
+    harnessAdapterVersion: normalizeText(adapterSnapshot?.version).trim() || undefined,
     projectCode: project.projectCode,
     projectDir: projectDirectoryName(project)
+  }
+}
+
+/**
+ * Best-effort resolve the current stage of a feature for per-turn attribution:
+ * its human-readable name (`group-label`, e.g. "Dev-代码实现") plus the node's
+ * status at this moment as a stable enum label (进行中/已完成/未开始/...). Within a
+ * plugin the (group, label) pair is unique, so the name is a stable bucket key
+ * and no raw node id is reported. Mirrors the cheap head of getHarnessRunDetail
+ * (run inspect → current node + workflow) without building the full view model.
+ * Returns null on any failure (missing project, adapter error, no current node,
+ * unlabeled node) so it never blocks a conversation. `status` is null when the
+ * node status cannot be resolved (so an "unknown" bucket is never reported).
+ */
+export function resolveHarnessFeatureCurrentStage(
+  projectId: string,
+  slug: string
+): { name: string; status: string | null } | null {
+  try {
+    const normalizedProjectId = normalizeText(projectId).trim()
+    const normalizedSlug = normalizeText(slug).trim()
+    if (!normalizedProjectId || !normalizedSlug) return null
+    const project = requireProject(normalizedProjectId)
+    const snapshot = runInspectAdapter(project, "run", normalizedSlug)
+    const run = isObject(snapshot.run) ? snapshot.run : {}
+    const currentNodeId = normalizeText(run.currentNodeId).trim()
+    if (!currentNodeId) return null
+    const workflow = normalizeWorkflow(snapshot.workflow)
+    const node = workflow.nodes.find((n) => n.id === currentNodeId)
+    const label = normalizeText(node?.label).trim()
+    if (!label) return null
+    const group = normalizeText(node?.group).trim()
+    const name = group ? `${group}-${label}` : label
+
+    // Status of the current node *at this turn*, as a stable enum label. The run
+    // nodes array (plugin-provided) carries per-node nodeStatus; fall back to the
+    // run-level currentNodeStatus. Use the default label map so buckets stay
+    // stable regardless of any plugin-custom status label. "unknown" → null so we
+    // never report a noise bucket.
+    const runNode = Array.isArray(run.nodes)
+      ? run.nodes.find(
+          (n): n is Record<string, unknown> =>
+            isObject(n) && normalizeText(n.id).trim() === currentNodeId
+        )
+      : undefined
+    const rawStatus = runNode?.nodeStatus ?? run.currentNodeStatus
+    const nodeStatus = normalizeNodeStatus(rawStatus)
+    const status =
+      nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
+
+    return { name, status }
+  } catch {
+    return null
   }
 }
 
@@ -3070,13 +3149,9 @@ function runInspectAdapterBatch(
   }
 
   const projectDirs = projects.map((project) => projectDirectoryName(project))
-  const { executable, args } = parseInspectCommand(
-    configuredCommand,
-    firstProject,
-    mode,
-    cwd,
-    { projectDirs }
-  )
+  const { executable, args } = parseInspectCommand(configuredCommand, firstProject, mode, cwd, {
+    projectDirs
+  })
 
   const configured: ConfiguredHarnessInvocation = {
     cwd,

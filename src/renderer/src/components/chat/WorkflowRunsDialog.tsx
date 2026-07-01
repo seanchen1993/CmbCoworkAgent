@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleSlash,
+  Code2,
   Copy,
   History,
   Loader2,
@@ -13,6 +14,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import type { PersistedWorkflowRunDTO, WorkflowRunSummaryDTO } from "@/lib/workflow-run-view"
 
@@ -117,46 +119,78 @@ function Section({
   )
 }
 
-function AgentDetail({ agent }: { agent: PersistedWorkflowRunDTO["agents"][number] }): JSX.Element {
+function AgentDetail({
+  agent,
+  threadId,
+  runId,
+  onClose
+}: {
+  agent: PersistedWorkflowRunDTO["agents"][number]
+  threadId: string
+  runId: string
+  onClose: () => void
+}): JSX.Element {
   const [open, setOpen] = useState(false)
+  const openWorkflowAgentFocusView = useAppStore((state) => state.openWorkflowAgentFocusView)
   const durationMs =
     agent.endedAt && agent.startedAt
       ? Math.max(0, Date.parse(agent.endedAt) - Date.parse(agent.startedAt))
       : 0
   return (
     <div className="rounded-md border border-border/40">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-1.5 px-1.5 py-1 text-left text-[11px]"
-      >
-        {agent.status === "running" ? (
-          <Loader2 className="size-3 animate-spin text-violet-500" />
-        ) : agent.status === "completed" ? (
-          <Check className="size-3 text-emerald-500" />
-        ) : agent.status === "cached" ? (
-          <History className="size-3 text-sky-500" />
-        ) : (
-          <CircleSlash className="size-3 text-red-500" />
-        )}
-        <span className="min-w-0 flex-1 truncate text-foreground/80">{agent.label}</span>
-        {durationMs > 0 && (
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-            {formatDuration(durationMs)}
-          </span>
-        )}
-        {agent.outputTokens > 0 && (
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-            {agent.outputTokens}tk
-          </span>
-        )}
-        <ChevronRight
-          className={cn(
-            "size-3 shrink-0 text-muted-foreground transition-transform",
-            open && "rotate-90"
+      <div className="flex items-center">
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5 py-1 text-left text-[11px]"
+        >
+          {agent.status === "running" ? (
+            <Loader2 className="size-3 animate-spin text-violet-500" />
+          ) : agent.status === "completed" ? (
+            <Check className="size-3 text-emerald-500" />
+          ) : agent.status === "cached" ? (
+            <History className="size-3 text-sky-500" />
+          ) : (
+            <CircleSlash className="size-3 text-red-500" />
           )}
-        />
-      </button>
+          <span className="min-w-0 flex-1 truncate text-foreground/80">{agent.label}</span>
+          {durationMs > 0 && (
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+              {formatDuration(durationMs)}
+            </span>
+          )}
+          {agent.outputTokens > 0 && (
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+              {agent.outputTokens}tk
+            </span>
+          )}
+          <ChevronRight
+            className={cn(
+              "size-3 shrink-0 text-muted-foreground transition-transform",
+              open && "rotate-90"
+            )}
+          />
+        </button>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            openWorkflowAgentFocusView({
+              threadId,
+              runId,
+              agentIndex: agent.index,
+              label: agent.label,
+              status: agent.status
+            })
+            onClose()
+          }}
+          className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-violet-100/70 hover:text-violet-600 dark:hover:bg-violet-500/20 dark:hover:text-violet-300"
+          title="查看该子代理的工具流"
+          aria-label="查看该子代理的工具流"
+        >
+          <Code2 className="size-3" />
+        </button>
+      </div>
       {open && (
         <div className="space-y-1.5 px-2 pb-1.5">
           {agent.promptPreview && (
@@ -192,11 +226,13 @@ function AgentDetail({ agent }: { agent: PersistedWorkflowRunDTO["agents"][numbe
 function RunDetail({
   threadId,
   runId,
-  onBack
+  onBack,
+  onClose
 }: {
   threadId: string
   runId: string
   onBack: () => void
+  onClose: () => void
 }): JSX.Element {
   const [run, setRun] = useState<PersistedWorkflowRunDTO | null>(null)
   const [loading, setLoading] = useState(true)
@@ -336,7 +372,13 @@ function RunDetail({
             >
               <div className="space-y-1">
                 {agents.map((agent) => (
-                  <AgentDetail key={agent.index} agent={agent} />
+                  <AgentDetail
+                    key={agent.index}
+                    agent={agent}
+                    threadId={threadId}
+                    runId={runId}
+                    onClose={onClose}
+                  />
                 ))}
               </div>
             </Section>
@@ -414,6 +456,7 @@ export function WorkflowRunsDialog({
             threadId={threadId}
             runId={selectedRunId}
             onBack={() => setSelectedRunId(null)}
+            onClose={() => onOpenChange(false)}
           />
         ) : loading ? (
           <div className="flex h-32 items-center justify-center text-muted-foreground">

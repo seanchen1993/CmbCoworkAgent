@@ -3,6 +3,7 @@ import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import {
+  type Dirent,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -32,6 +33,7 @@ import type {
   SkillHookMetadata
 } from "./types"
 import { copyDirRecursive } from "./utils/fs"
+import Store from "electron-store"
 import {
   discoverSkills,
   discoverSkillsSync,
@@ -263,6 +265,7 @@ interface SkillEvolutionSettings {
   onlineEnabled?: boolean
   autoPropose?: boolean
   threshold?: number
+  turnThreshold?: number
 }
 
 function readSkillEvolutionSettings(): SkillEvolutionSettings {
@@ -294,7 +297,8 @@ export function setOnlineSkillEvolutionEnabled(enabled: boolean): void {
   writeSkillEvolutionSettings({
     onlineEnabled: enabled,
     autoPropose: current.autoPropose === true,
-    threshold: getSkillEvolutionThreshold()
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: getSkillEvolutionTurnThreshold()
   })
 }
 
@@ -312,13 +316,17 @@ export function setSkillAutoProposeEnabled(enabled: boolean): void {
   writeSkillEvolutionSettings({
     onlineEnabled: current.onlineEnabled === true,
     autoPropose: enabled,
-    threshold: getSkillEvolutionThreshold()
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: getSkillEvolutionTurnThreshold()
   })
 }
 
 const SKILL_EVOLUTION_THRESHOLD_DEFAULT = 10
 const SKILL_EVOLUTION_THRESHOLD_MIN = 1
 const SKILL_EVOLUTION_THRESHOLD_MAX = 99
+const SKILL_EVOLUTION_TURN_THRESHOLD_DEFAULT = 2
+const SKILL_EVOLUTION_TURN_THRESHOLD_MIN = 1
+const SKILL_EVOLUTION_TURN_THRESHOLD_MAX = 99
 
 export function getSkillEvolutionThreshold(): number {
   const value = Number(readSkillEvolutionSettings().threshold)
@@ -341,7 +349,34 @@ export function setSkillEvolutionThreshold(value: number): void {
   writeSkillEvolutionSettings({
     onlineEnabled: current.onlineEnabled === true,
     autoPropose: current.autoPropose === true,
-    threshold: clamped
+    threshold: clamped,
+    turnThreshold: getSkillEvolutionTurnThreshold()
+  })
+}
+
+export function getSkillEvolutionTurnThreshold(): number {
+  const value = Number(readSkillEvolutionSettings().turnThreshold)
+  if (
+    Number.isInteger(value) &&
+    value >= SKILL_EVOLUTION_TURN_THRESHOLD_MIN &&
+    value <= SKILL_EVOLUTION_TURN_THRESHOLD_MAX
+  ) {
+    return value
+  }
+  return SKILL_EVOLUTION_TURN_THRESHOLD_DEFAULT
+}
+
+export function setSkillEvolutionTurnThreshold(value: number): void {
+  const clamped = Math.max(
+    SKILL_EVOLUTION_TURN_THRESHOLD_MIN,
+    Math.min(SKILL_EVOLUTION_TURN_THRESHOLD_MAX, Math.round(value))
+  )
+  const current = readSkillEvolutionSettings()
+  writeSkillEvolutionSettings({
+    onlineEnabled: current.onlineEnabled === true,
+    autoPropose: current.autoPropose === true,
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: clamped
   })
 }
 
@@ -352,12 +387,16 @@ const MEMORY_SETTINGS_FILE = join(OPENWORK_DIR, "memory-settings.json")
 interface MemorySettings {
   enabled?: boolean
   dreamEnabled?: boolean
+  sessionOptInMigrated?: boolean
 }
 
 function readMemorySettings(): MemorySettings {
   if (!existsSync(MEMORY_SETTINGS_FILE)) return {}
   try {
-    return JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8")) as MemorySettings
+    const parsed = JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8"))
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as MemorySettings)
+      : {}
   } catch {
     return {}
   }
@@ -368,27 +407,90 @@ function writeMemorySettings(settings: MemorySettings): void {
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify(settings, null, 2))
 }
 
+function hasLegacyMemoryFiles(): boolean {
+  const memoryDir = join(OPENWORK_DIR, "memory")
+  if (!existsSync(memoryDir)) return false
+  const stack = [memoryDir]
+  while (stack.length > 0) {
+    const dir = stack.pop()!
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".md")) return true
+      if (entry.isDirectory()) stack.push(join(dir, entry.name))
+    }
+  }
+  return false
+}
+
+export function getMemorySessionOptInMigrationState(hasExistingThreads: boolean): {
+  migrated: boolean
+  legacyMemoryEnabled: boolean
+  legacyDreamEnabled: boolean
+} {
+  const settingsFileExists = existsSync(MEMORY_SETTINGS_FILE)
+  const current = readMemorySettings()
+  if (current.sessionOptInMigrated === true) {
+    const enabled = current.enabled === true
+    return {
+      migrated: true,
+      legacyMemoryEnabled: enabled,
+      legacyDreamEnabled: enabled && current.dreamEnabled === true
+    }
+  }
+  const legacyInstall = settingsFileExists || hasExistingThreads || hasLegacyMemoryFiles()
+  const legacyMemoryEnabled = legacyInstall && current.enabled !== false
+  return {
+    migrated: false,
+    legacyMemoryEnabled,
+    legacyDreamEnabled: legacyMemoryEnabled && current.dreamEnabled !== false
+  }
+}
+
+export function markMemorySessionOptInMigrated(options: {
+  enabled: boolean
+  dreamEnabled: boolean
+}): void {
+  const current = readMemorySettings()
+  writeMemorySettings({
+    ...current,
+    enabled: options.enabled,
+    dreamEnabled: options.enabled && options.dreamEnabled,
+    sessionOptInMigrated: true
+  })
+}
+
 export function isMemoryEnabled(): boolean {
-  return readMemorySettings().enabled !== false
+  return readMemorySettings().enabled === true
 }
 
 export function setMemoryEnabled(enabled: boolean): void {
   const current = readMemorySettings()
   writeMemorySettings({
+    ...current,
     enabled,
-    dreamEnabled: enabled ? current.dreamEnabled !== false : false
+    dreamEnabled: enabled ? current.dreamEnabled === true : false
   })
+}
+
+export function isThreadMemoryEnabled(metadata?: Record<string, unknown> | null): boolean {
+  return isMemoryEnabled() && metadata?.memoryEnabled === true
 }
 
 export function isDreamEnabled(): boolean {
   const current = readMemorySettings()
-  return current.enabled !== false && current.dreamEnabled !== false
+  return current.enabled === true && current.dreamEnabled === true
 }
 
 export function setDreamEnabled(enabled: boolean): void {
   const current = readMemorySettings()
-  const memoryEnabled = current.enabled !== false
+  const memoryEnabled = current.enabled === true
   writeMemorySettings({
+    ...current,
     enabled: memoryEnabled,
     dreamEnabled: memoryEnabled && enabled
   })
@@ -1172,6 +1274,44 @@ function assertValidBaseUrl(value: string): string {
 
 export function getCustomModelConfig(): CustomModelConfig | null {
   const configs = getCustomModelConfigs()
+  return configs[0] ?? null
+}
+
+/**
+ * Lazily-created handle to the shared electron-store "settings" file, which is
+ * where the user-designated default model id is persisted (key "defaultModel").
+ * Lazy so module init order never matters.
+ */
+let _settingsStore: Store | null = null
+function getSettingsStore(): Store {
+  if (!_settingsStore) {
+    _settingsStore = new Store({ name: "settings", cwd: getOpenworkDir() })
+  }
+  return _settingsStore
+}
+
+/**
+ * Resolve the user-designated default model config (the "默认模型" chosen in
+ * settings), falling back to the first configured model when no explicit
+ * default is set or the stored id no longer matches a config.
+ *
+ * Use this anywhere a background / sub-agent task (skill draft generation,
+ * trace optimization, worthiness judging, …) should run on the default model
+ * rather than the chat's currently-selected model.
+ */
+export function getDefaultModelConfig(): CustomModelConfig | null {
+  const configs = getCustomModelConfigs()
+  if (configs.length === 0) return null
+
+  const stored = String(getSettingsStore().get("defaultModel", "") || "").trim()
+  if (stored) {
+    const normalizedId = stored.startsWith("custom:") ? stored.slice("custom:".length) : stored
+    const matched =
+      configs.find((config) => config.id === normalizedId) ??
+      configs.find((config) => config.model === normalizedId || config.model === stored)
+    if (matched) return matched
+  }
+
   return configs[0] ?? null
 }
 
@@ -2581,8 +2721,9 @@ function parseHookInjectUserContext(raw: unknown): HookInjectUserContext | undef
 
   const record = raw as Record<string, unknown>
   const include = Array.isArray(record.include)
-    ? record.include.filter((item): item is HookUserContextField =>
-        typeof item === "string" && HOOK_USER_CONTEXT_FIELDS.has(item as HookUserContextField)
+    ? record.include.filter(
+        (item): item is HookUserContextField =>
+          typeof item === "string" && HOOK_USER_CONTEXT_FIELDS.has(item as HookUserContextField)
       )
     : undefined
   return {

@@ -555,6 +555,16 @@ function App(): React.JSX.Element {
     }
   }, [harnessSessionThreadId, mainView, subagentFocusView?.threadId])
 
+  // Same harness-session drop guard for the workflow-agent focus (parity with worker/subagent
+  // above): switching the harness board to a different session/project must not leave a stale
+  // workflowAgentFocusView that re-opens the old tool-stream panel when you return to this session.
+  useEffect(() => {
+    if (mainView !== "harness" || !workflowAgentFocusView?.threadId) return
+    if (!harnessSessionThreadId || workflowAgentFocusView.threadId !== harnessSessionThreadId) {
+      useAppStore.getState().closeWorkflowAgentFocusView()
+    }
+  }, [harnessSessionThreadId, mainView, workflowAgentFocusView?.threadId])
+
   useEffect(() => {
     if (mainView === "claudecode") {
       setClaudeCodeMounted(true)

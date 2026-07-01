@@ -2377,7 +2377,7 @@ async function testWorkflowSubagentBubblesStructuredOutputInterruptSnapshot(): P
   )
 }
 
-async function testWorkflowSubagentRepairsDanglingToolCallThenNudges(): Promise<void> {
+async function testWorkflowSubagentFailsFastOnUnrepairableDanglingToolCall(): Promise<void> {
   let streamCalls = 0
   const streamInputs: unknown[][] = []
   const schema = {
@@ -2388,15 +2388,18 @@ async function testWorkflowSubagentRepairsDanglingToolCallThenNudges(): Promise<
     required: ["answer"]
   }
 
-  // The model leaves structured_output dangling (a tool_call with no result) on EVERY turn.
-  // The subagent must NOT 400 by appending the nudge after the dangling call; instead it
-  // synthesizes a tool result for the dangling id, then nudges — on EACH attempt (initial +
-  // one fresh retry). The mock never recovers, so it ultimately fails after both attempts.
+  // The a6 shape: structured_output's args were malformed/truncated, so LangChain couldn't
+  // normalize the call — the normalized tool_calls is EMPTY and the call survives ONLY in
+  // additional_kwargs.tool_calls (dangling, no result). An in-place repair can't help here:
+  // deepagents' patchToolCalls (in the REAL runtime) builds its keep-set from normalized
+  // tool_calls only, so it drops a result whose id isn't normalized as an orphan and the nudge
+  // 400s anyway. So the subagent must FAIL FAST as retryable — skip the doomed nudge and let a
+  // FRESH session retry — instead of synthesizing a result and nudging on the poisoned transcript.
   await expectRejects(
     () =>
       runWorkflowSubagent(
         {
-          parentThreadId: "thread-structured-pending-tool-call",
+          parentThreadId: "thread-structured-unrepairable-dangling",
           defaultModelId: "default",
           cleanupThread: async () => undefined,
           isRetryableApiError: () => false,
@@ -2414,6 +2417,9 @@ async function testWorkflowSubagentRepairsDanglingToolCallThenNudges(): Promise<
                         _getType: () => "ai",
                         content: "",
                         kwargs: {
+                          // normalized EMPTY; the actual structured_output call only survives in
+                          // additional_kwargs (unparseable args) → UNREPAIRABLE in place.
+                          tool_calls: [],
                           additional_kwargs: {
                             tool_calls: [
                               {
@@ -2437,29 +2443,294 @@ async function testWorkflowSubagentRepairsDanglingToolCallThenNudges(): Promise<
           prompt: "return a structured answer",
           schema,
           agentIndex: 0,
-          label: "structured-pending-tool-call",
-          runId: "wf_structured_pending_tool_call",
+          label: "structured-unrepairable-dangling",
+          runId: "wf_structured_unrepairable_dangling",
+          signal: new AbortController().signal
+        }
+      ),
+    "unparseable tool call",
+    "additional_kwargs-only dangling must fail fast (retryable), not attempt a doomed in-place nudge"
+  )
+  // Fail-fast = ONE stream per attempt (the initial), NO nudge stream. 2 attempts (initial + 1
+  // fresh retry, tagged retryable) × 1 stream = 2. The OLD (defeated) behavior synthesized a
+  // repair and ran a 2nd nudge stream per attempt (=4), which the real patchToolCalls undid → 400.
+  assert(
+    streamCalls === 2,
+    `unrepairable dangling must fail fast before the nudge (2 attempts × 1 stream); got ${streamCalls}`
+  )
+  // And it must NOT have synthesized an in-place repair (no nudge stream carrying a tool result).
+  const attemptedRepair = streamInputs.some((messages) =>
+    messages.some((m) => (m as { tool_call_id?: unknown })?.tool_call_id === "call-structured")
+  )
+  assert(
+    !attemptedRepair,
+    "must not attempt an in-place repair for an additional_kwargs-only dangling call (patchToolCalls would drop it)"
+  )
+}
+
+async function testWorkflowSubagentFailsFastOnInvalidToolCallsDangling(): Promise<void> {
+  // A malformed call can surface ONLY in `invalid_tool_calls` (LangChain's canonical bucket for
+  // unparsed calls; AIMessage.toJSON() can put it there) with NO additional_kwargs.tool_calls. The
+  // dangling scan must STILL see it (messageToolCalls includes invalid_tool_calls) → classify it
+  // unrepairable (not in the normalized set) → fail fast as retryable, not attempt a doomed nudge.
+  // Without that candidate the scan returns [] → no dangling → it would fall through to the nudge.
+  let streamCalls = 0
+  const schema = {
+    type: "object",
+    properties: { answer: { type: "string" } },
+    required: ["answer"]
+  }
+  await expectRejects(
+    () =>
+      runWorkflowSubagent(
+        {
+          parentThreadId: "thread-structured-invalid-tool-calls",
+          defaultModelId: "default",
+          cleanupThread: async () => undefined,
+          isRetryableApiError: () => false,
+          createRuntime: async () => ({
+            stream: async () => {
+              streamCalls += 1
+              return (async function* () {
+                yield [
+                  "values",
+                  {
+                    messages: [
+                      {
+                        _getType: () => "ai",
+                        content: "",
+                        kwargs: {
+                          // ONLY invalid_tool_calls — no normalized tool_calls, no additional_kwargs.
+                          tool_calls: [],
+                          invalid_tool_calls: [
+                            {
+                              name: "structured_output",
+                              args: "{bad",
+                              id: "call-invalid",
+                              error: "parse"
+                            }
+                          ]
+                        },
+                        usage_metadata: { output_tokens: 5 }
+                      }
+                    ]
+                  }
+                ]
+              })()
+            }
+          })
+        },
+        {
+          prompt: "return a structured answer",
+          schema,
+          agentIndex: 0,
+          label: "structured-invalid-tool-calls",
+          runId: "wf_structured_invalid_tool_calls",
+          signal: new AbortController().signal
+        }
+      ),
+    "unparseable tool call",
+    "a malformed call surfacing only in invalid_tool_calls must still fail fast (retryable)"
+  )
+  // Fail-fast = one stream per attempt, no nudge stream. 2 attempts (initial + 1 fresh retry) = 2.
+  assert(
+    streamCalls === 2,
+    `invalid_tool_calls-only dangling must fail fast before the nudge (2 attempts × 1 stream); got ${streamCalls}`
+  )
+}
+
+async function testWorkflowSubagentReturnsTextDespiteInvalidToolCallArtifact(): Promise<void> {
+  // Regression guard: a NON-schema subagent returns its final TEXT answer, but a mid-tier gateway
+  // also tacks on a malformed tool-call artifact (only in invalid_tool_calls). extractFinalAssistantText
+  // must look at NORMALIZED tool calls only, so the artifact doesn't make the message look like an
+  // unfinished tool turn → the text is returned, not a false "subagent produced no assistant output".
+  const result = await runWorkflowSubagent(
+    {
+      parentThreadId: "thread-text-with-artifact",
+      defaultModelId: "default",
+      cleanupThread: async () => undefined,
+      isRetryableApiError: () => false,
+      createRuntime: async () => ({
+        stream: async () =>
+          (async function* () {
+            yield [
+              "values",
+              {
+                messages: [
+                  {
+                    _getType: () => "ai",
+                    content: "here is the final answer",
+                    kwargs: {
+                      content: "here is the final answer",
+                      tool_calls: [],
+                      invalid_tool_calls: [
+                        { name: "some_tool", args: "{bad", id: "call-artifact", error: "parse" }
+                      ]
+                    },
+                    usage_metadata: { output_tokens: 5 }
+                  }
+                ]
+              }
+            ]
+          })()
+      })
+    },
+    {
+      prompt: "answer in text",
+      agentIndex: 0,
+      label: "text-with-artifact",
+      runId: "wf_text_with_artifact",
+      signal: new AbortController().signal
+    }
+  )
+  assert(
+    result.text === "here is the final answer",
+    `non-schema subagent returns its text even with a malformed tool-call artifact, got ${JSON.stringify(result.text)}`
+  )
+}
+
+async function testWorkflowSubagentFailsFastOnMixedValidAndInvalidToolCalls(): Promise<void> {
+  // Mixed turn: the model emits a VALID tool call (parsed → tool_calls, gets a result) AND a malformed
+  // one (→ invalid_tool_calls, dangling) in the SAME assistant message. A "first non-empty" scan would
+  // return only the valid tool_calls and MISS the dangling invalid one; messageToolCalls unions all
+  // shapes so the invalid dangling call is still detected → unrepairable → fail-fast (not a 400).
+  let streamCalls = 0
+  const schema = {
+    type: "object",
+    properties: { answer: { type: "string" } },
+    required: ["answer"]
+  }
+  await expectRejects(
+    () =>
+      runWorkflowSubagent(
+        {
+          parentThreadId: "thread-structured-mixed-tool-calls",
+          defaultModelId: "default",
+          cleanupThread: async () => undefined,
+          isRetryableApiError: () => false,
+          createRuntime: async () => ({
+            stream: async () => {
+              streamCalls += 1
+              return (async function* () {
+                yield [
+                  "values",
+                  {
+                    messages: [
+                      {
+                        _getType: () => "ai",
+                        content: "",
+                        kwargs: {
+                          // VALID call (parsed) + MALFORMED call (only in invalid_tool_calls) together.
+                          tool_calls: [{ id: "call-valid", name: "helper", args: {} }],
+                          invalid_tool_calls: [
+                            {
+                              name: "structured_output",
+                              args: "{bad",
+                              id: "call-bad",
+                              error: "parse"
+                            }
+                          ]
+                        }
+                      },
+                      { _getType: () => "tool", tool_call_id: "call-valid", content: "ok" }
+                    ]
+                  }
+                ]
+              })()
+            }
+          })
+        },
+        {
+          prompt: "return a structured answer",
+          schema,
+          agentIndex: 0,
+          label: "structured-mixed-tool-calls",
+          runId: "wf_structured_mixed_tool_calls",
+          signal: new AbortController().signal
+        }
+      ),
+    "unparseable tool call",
+    "a malformed call alongside a valid one in the same turn must still be detected → fail fast"
+  )
+  assert(
+    streamCalls === 2,
+    `mixed valid+invalid dangling must fail fast before the nudge (2 attempts × 1 stream); got ${streamCalls}`
+  )
+}
+
+async function testWorkflowSubagentRepairsNormalizedDanglingThenNudges(): Promise<void> {
+  let streamCalls = 0
+  const streamInputs: unknown[][] = []
+  const schema = {
+    type: "object",
+    properties: {
+      answer: { type: "string" }
+    },
+    required: ["answer"]
+  }
+
+  // A dangling call that IS in the NORMALIZED tool_calls (e.g. a mid-tier model fired a parallel
+  // call and one came back unpaired). This is repairable in place: deepagents' patchToolCalls
+  // KEEPS a synthesized result whose id is in the normalized keep-set, so the subagent should
+  // synthesize a tool result + nudge on the SAME session (preserving round-1 context) — NOT fail
+  // fast. The mock never returns a valid structured result, so it ultimately fails after retries.
+  await expectRejects(
+    () =>
+      runWorkflowSubagent(
+        {
+          parentThreadId: "thread-structured-normalized-dangling",
+          defaultModelId: "default",
+          cleanupThread: async () => undefined,
+          isRetryableApiError: () => false,
+          createRuntime: async () => ({
+            stream: async (input: unknown) => {
+              streamCalls += 1
+              const messages = (input as { messages?: unknown[] })?.messages
+              if (Array.isArray(messages)) streamInputs.push(messages)
+              return (async function* () {
+                yield [
+                  "values",
+                  {
+                    messages: [
+                      {
+                        _getType: () => "ai",
+                        content: "",
+                        // NORMALIZED dangling call (no following tool result) → repairable.
+                        tool_calls: [{ id: "call-parallel", name: "helper", args: {} }],
+                        usage_metadata: { output_tokens: 5 }
+                      }
+                    ]
+                  }
+                ]
+              })()
+            }
+          })
+        },
+        {
+          prompt: "return a structured answer",
+          schema,
+          agentIndex: 0,
+          label: "structured-normalized-dangling",
+          runId: "wf_structured_normalized_dangling",
           signal: new AbortController().signal
         }
       ),
     "completed without calling the structured_output tool",
-    "dangling tool call must be repaired + nudged (not 400), then fail after retries"
+    "normalized dangling must be repaired + nudged (self-heal), then fail after retries"
   )
-  // Each attempt = [initial stream, nudge stream]; 2 attempts (initial + 1 fresh retry) = 4.
-  // A 400-block (old behavior) would have been 1 stream/attempt = 2.
+  // Repair-in-place = TWO streams per attempt (initial + nudge). 2 attempts × 2 = 4.
   assert(
     streamCalls === 4,
-    `repair must let the nudge proceed on each attempt (2 attempts × 2 streams); got ${streamCalls}`
+    `normalized dangling must repair + nudge on each attempt (2 attempts × 2 streams); got ${streamCalls}`
   )
-  // The nudge turn's input must carry a synthetic tool result for the dangling tool_call id
-  // (so the history is valid before the nudge HumanMessage — no 400).
+  // The nudge input must carry a synthetic tool result for the normalized dangling id.
   const repaired = streamInputs.some((messages) =>
-    messages.some((m) => {
-      const id = (m as { tool_call_id?: unknown })?.tool_call_id
-      return id === "call-structured"
-    })
+    messages.some((m) => (m as { tool_call_id?: unknown })?.tool_call_id === "call-parallel")
   )
-  assert(repaired, "nudge stream input must include a synthetic tool result for the dangling id")
+  assert(
+    repaired,
+    "nudge stream input must include a synthetic tool result for the normalized dangling id"
+  )
 }
 
 async function testWorkflowSubagentNudgesAfterClosedToolCall(): Promise<void> {
@@ -3210,7 +3481,11 @@ const tests = [
   testStructuredOutputHardStopsInvalidLoops,
   testStructuredOutputAcceptsWrappersAndNullableObjects,
   testWorkflowSubagentBubblesStructuredOutputInterruptSnapshot,
-  testWorkflowSubagentRepairsDanglingToolCallThenNudges,
+  testWorkflowSubagentFailsFastOnUnrepairableDanglingToolCall,
+  testWorkflowSubagentFailsFastOnInvalidToolCallsDangling,
+  testWorkflowSubagentReturnsTextDespiteInvalidToolCallArtifact,
+  testWorkflowSubagentFailsFastOnMixedValidAndInvalidToolCalls,
+  testWorkflowSubagentRepairsNormalizedDanglingThenNudges,
   testWorkflowSubagentNudgesAfterClosedToolCall,
   testWorkflowSubagentStopsAfterStructuredOutputSuccess,
   testStructuredOutputPatternValidationStaysLocal,

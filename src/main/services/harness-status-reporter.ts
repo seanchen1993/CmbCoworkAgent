@@ -168,6 +168,11 @@ function buildProjectDoc(
     name: project.name,
     description: project.description,
     projectCode: project.projectCode,
+    // Whether the project is bound to an enterprise (Lean) project. Carried on the
+    // self-healing snapshot so the operations dashboard can filter to Lean projects
+    // by the current flag — re-upserted every poll, so a false→true flip reflects
+    // without backfilling the append-only trace/event docs.
+    projectFromLean: project.projectFromLean === true,
     systemId: project.systemId,
     systemName: project.systemName,
     workspacePath: project.workspacePath,

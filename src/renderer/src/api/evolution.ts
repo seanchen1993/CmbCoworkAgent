@@ -1,4 +1,14 @@
 import { buildBundleUnifiedDiff, createTextBundleZip, type TextBundleFile } from "@/lib/skill-bundle-diff"
+import {
+  candidateFromAdoptionRecord,
+  compareEvolutionVersions,
+  evolutionSkillKey,
+  selectAvailableUpdates,
+  withAdoptionRecord
+} from "./evolution-matching"
+
+// Re-exported so existing consumers keep importing them from "@/api/evolution".
+export { compareEvolutionVersions, evolutionSkillKey }
 
 function normalizeBaseUrl(value: string | undefined): string {
   const raw = value?.trim().replace(/\/+$/, "") || ""
@@ -20,6 +30,14 @@ const ADOPTED_EVOLUTION_UPDATES_KEY = "trace-evolver-adopted-update-candidates"
 export interface InstalledSkillLike {
   name: string
   version?: string | null
+  /**
+   * Market plugin name when this skill is owned by an installed plugin (equals
+   * the plugin's local name, which for market-installed plugins matches the
+   * server-side candidate `plugin_name`). Undefined for standalone skills.
+   */
+  pluginName?: string | null
+  /** Absolute SKILL.md path — used to write an evolved plugin skill back in place. */
+  path?: string | null
 }
 
 export interface EvolutionCandidate {
@@ -34,6 +52,10 @@ export interface EvolutionCandidate {
   source_thread_ids: string[]
   skill_name: string
   evolution_status: string
+  /** Market plugin name — set only for candidates that evolve a skill inside a plugin. */
+  plugin_name?: string | null
+  /** POSIX path of the skill dir inside the plugin bundle, e.g. "skills/pdf". */
+  plugin_skill_path?: string | null
   source_version?: string | null
   target_version?: string | null
   source_bundle_hash?: string | null
@@ -330,72 +352,17 @@ function devSaveDraft(candidateId: string, files: TextBundleFile[], notes?: stri
   }
 }
 
-function normalizeVersion(version?: string | null): string | null {
-  const raw = String(version ?? "").trim()
-  if (!raw) return null
-  return raw.startsWith("v") ? raw.slice(1) : raw
-}
-
-export function compareEvolutionVersions(left?: string | null, right?: string | null): number {
-  const lv = normalizeVersion(left)
-  const rv = normalizeVersion(right)
-  // If either side is missing, no reliable comparison — suppress the update.
-  if (lv === null || rv === null) return 0
-  const l = lv.split(".").map((part) => Number(part) || 0)
-  const r = rv.split(".").map((part) => Number(part) || 0)
-  for (let i = 0; i < 3; i++) {
-    const diff = (l[i] || 0) - (r[i] || 0)
-    if (diff !== 0) return diff
-  }
-  return 0
-}
-
+/**
+ * Apply ignored/adopted bookkeeping (from localStorage) on top of the pure
+ * selection in {@link selectAvailableUpdates}.
+ */
 function filterAvailableUpdates(
   candidates: EvolutionCandidate[],
   installedSkills: InstalledSkillLike[]
 ): EvolutionCandidate[] {
-  const ignored = getIgnoredEvolutionCandidateIds()
-  const adopted = getAdoptedEvolutionCandidates()
-  const available = candidates
-    .filter((candidate) => !ignored.has(candidate.candidate_id))
-    .filter((candidate) => candidate.auto_optimized !== false)
-    .filter((candidate) => {
-      const installed = installedSkills.find((skill) => skill.name === candidate.skill_name)
-      if (!installed) return false
-      return compareEvolutionVersions(candidate.target_version, installed.version) > 0
-    })
-    .map((candidate) => {
-      const record = adopted.get(candidate.candidate_id)
-      return record ? withAdoptionRecord(candidate, record) : candidate
-    })
-
-  const latestBySkill = new Map<string, EvolutionCandidate>()
-  for (const candidate of available) {
-    const current = latestBySkill.get(candidate.skill_name)
-    if (!current || compareEvolutionVersions(candidate.target_version, current.target_version) > 0) {
-      latestBySkill.set(candidate.skill_name, candidate)
-    }
-  }
-
-  for (const record of adopted.values()) {
-    if (ignored.has(record.candidate_id)) continue
-    const current = latestBySkill.get(record.skill_name)
-    if (!current) {
-      latestBySkill.set(record.skill_name, candidateFromAdoptionRecord(record))
-      continue
-    }
-    if (
-      current.candidate_id === record.candidate_id &&
-      compareEvolutionVersions(record.target_version, current.target_version) >= 0
-    ) {
-      latestBySkill.set(record.skill_name, candidateFromAdoptionRecord(record))
-    }
-  }
-
-  return [...latestBySkill.values()].sort((a, b) => {
-    const statusDelta = Number(Boolean(a.local_adoption_status)) - Number(Boolean(b.local_adoption_status))
-    if (statusDelta !== 0) return statusDelta
-    return a.skill_name.localeCompare(b.skill_name)
+  return selectAvailableUpdates(candidates, installedSkills, {
+    ignoredIds: getIgnoredEvolutionCandidateIds(),
+    adopted: getAdoptedEvolutionCandidates()
   })
 }
 
@@ -439,42 +406,6 @@ function clearAdoptedEvolutionCandidate(candidateId: string): void {
   const adopted = getAdoptedEvolutionCandidates()
   adopted.delete(candidateId)
   localStorage.setItem(ADOPTED_EVOLUTION_UPDATES_KEY, JSON.stringify([...adopted.values()]))
-}
-
-function withAdoptionRecord(candidate: EvolutionCandidate, record: EvolutionAdoptionRecord): EvolutionCandidate {
-  return {
-    ...candidate,
-    local_adoption_status: "adopted",
-    local_adopted_at: record.adopted_at,
-    local_backup_id: record.backup_id,
-    local_backup_path: record.backup_path
-  }
-}
-
-function candidateFromAdoptionRecord(record: EvolutionAdoptionRecord): EvolutionCandidate {
-  const candidate = record.candidate
-  if (candidate) return withAdoptionRecord(candidate, record)
-  return withAdoptionRecord({
-    candidate_id: record.candidate_id,
-    run_id: "",
-    status: "published",
-    recommendation: null,
-    base_skill_id: record.skill_name,
-    full_bundle_path: "",
-    files_changed: [],
-    source_trace_ids: [],
-    source_thread_ids: [],
-    skill_name: record.skill_name,
-    evolution_status: "published",
-    source_version: record.source_version || null,
-    target_version: record.target_version || null,
-    source_bundle_hash: null,
-    auto_optimized: true,
-    evaluation_score: null,
-    published_at: null,
-    published_s3_path: null,
-    notes: "本地已采纳记录"
-  }, record)
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -671,13 +602,9 @@ export const evolutionApi = {
   },
 
   async deleteCandidate(candidateId: string): Promise<{ detail: string }> {
-    try {
-      return await requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}`, {
-        method: "DELETE"
-      })
-    } catch (error) {
-      throw error
-    }
+    return requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}`, {
+      method: "DELETE"
+    })
   },
 
   async publish(candidateId: string, reviewer?: string): Promise<EvolutionCandidate> {

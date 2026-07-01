@@ -306,6 +306,9 @@ export interface HookEnv {
   PLUGIN_OUTPUT_DIR?: string
   PLUGIN_WORKSPACE?: string
   FEATURE_ID?: string
+  HARNESS_PROJECT_ID?: string // harness project stable id (= properties.harnessProjectId on events)
+  HARNESS_ADAPTER_NAME?: string // bound adapter name (= properties.harnessAdapterName on events)
+  HARNESS_ADAPTER_VERSION?: string // bound adapter version (= properties.harnessAdapterVersion on events)
   PROJECT_CODE?: string
   PROJECT_DIR?: string
   USER_PROMPT?: string // UserPromptSubmit event

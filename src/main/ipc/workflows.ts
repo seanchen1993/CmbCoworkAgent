@@ -1,12 +1,11 @@
 import { ipcMain, type IpcMain } from "electron"
-import { readFile, stat } from "fs/promises"
 import { setWorkflowAgentStreamInterest, workflowRunManager } from "../agent/workflow/run-manager"
 import {
-  agentToolStreamPath,
   byNewestRun,
   listWorkflowRuns,
   loadWorkflowRun,
   markWorkflowRunInterrupted,
+  readAgentToolStream,
   toRunSummary
 } from "../agent/workflow/run-store"
 import type { PersistedWorkflowRun, WorkflowRunSummary } from "../agent/workflow/types"
@@ -19,10 +18,6 @@ import { getThread } from "../db"
  * stripJournalForRenderer), cancel the active run, and hydrate the live panel
  * after a renderer reload / app restart.
  */
-
-// Upper bound on a per-agent tool-stream sidecar we'll read: well above the ~1MB content
-// write budget (plus JSON overhead), but caps a corrupted/externally-grown file.
-const WORKFLOW_AGENT_TOOLSTREAM_MAX_BYTES = 8 * 1024 * 1024
 
 function resolveWorkspacePath(threadId: string): string | null {
   const thread = getThread(threadId)
@@ -162,18 +157,22 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
     ): Promise<unknown[] | null> => {
       const workspacePath = resolveWorkspacePath(threadId)
       if (!workspacePath) return null
-      try {
-        const path = agentToolStreamPath(workspacePath, threadId, runId, agentIndex)
-        // Defensive size cap: a normal sidecar is bounded (~1MB content write budget plus
-        // JSON overhead); refuse to read+parse a corrupted or externally-grown file
-        // unbounded into the main process.
-        if ((await stat(path)).size > WORKFLOW_AGENT_TOOLSTREAM_MAX_BYTES) return null
-        const parsed = JSON.parse(await readFile(path, "utf8")) as { snapshotMessages?: unknown }
-        return Array.isArray(parsed.snapshotMessages) ? parsed.snapshotMessages : null
-      } catch {
-        // Missing sidecar (ENOENT) or unreadable/parse error → no displayable flow.
-        return null
-      }
+      // The sidecar is keyed by the COMPOSITE toolStreamKey (<callHash>_c<callIndex>), NOT the
+      // execution-order agentIndex (which shifts across resume): callHash separates different agents
+      // that land on the same callIndex, callIndex separates same-prompt instances. Resolve
+      // agentIndex → toolStreamKey via the persisted run, so a resumed/cached agent reads its OWN
+      // flow. No key (pre-feature run, or the agent's state not yet persisted) → null, panel retries.
+      // read is centralized in run-store (size cap + parse + ENOENT→null), shared with writer/cleaner.
+      // Resolve from the flush-failed in-memory run FIRST (parity with workflow:get-run above): if
+      // the final run.json flush failed, the agent's toolStreamKey can live ONLY in the in-memory
+      // terminal state, so mapping off stale disk would miss it and return an empty stream even
+      // though the sidecar was written. Fall back to disk for the normal (flushed) path.
+      const run =
+        workflowRunManager.getFlushFailedRun(runId) ??
+        loadWorkflowRun(workspacePath, threadId, runId)
+      const toolStreamKey = run?.agents.find((agent) => agent.index === agentIndex)?.toolStreamKey
+      if (toolStreamKey === undefined) return null
+      return readAgentToolStream(workspacePath, threadId, runId, toolStreamKey)
     }
   )
 

@@ -30,6 +30,7 @@ import {
   ChevronDown,
   Check,
   Download,
+  Filter,
   ExternalLink,
   Search,
   X,
@@ -63,8 +64,15 @@ import {
   type DashboardUserListData,
   type DashboardUserListItem,
   type DashboardProjectModeFeature,
+  type DashboardProjectModeFeatureNode,
+  type DashboardPluginAggregate,
   type DashboardProjectModeData,
+  type DashboardAwardSkillContribution,
+  type DashboardAwardUserApplication,
+  type DashboardAwardTeamBenchmarkRow,
   type DashboardProjectModeProject,
+  type DashboardProjectModeProjectPageData,
+  type DashboardProjectModeProjectPageOptions,
   type DashboardProjectModeTracesData,
   type DashboardTraceDetail,
   type Granularity,
@@ -73,10 +81,12 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
+import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
+import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { ModelPanel } from "./panels/ModelPanel"
 import { UserPanel } from "./panels/UserPanel"
 import { ProductivityPanel } from "./panels/ProductivityPanel"
-import { FeedbackPanel } from "./panels/FeedbackPanel"
+import { AdvancedFeaturesPanel } from "./panels/AdvancedFeaturesPanel"
 import { TraceExplorer, TraceHistoryDialog, TraceTriggerScopeToggle } from "./TraceHistoryDialog"
 import { CommitDetailsDialog } from "./CommitDetailsDialog"
 import { UncommittedCodeDialog } from "./UncommittedCodeDialog"
@@ -112,7 +122,8 @@ const GRANULARITY_OPTIONS: { value: Granularity; label: string }[] = [
   { value: "month", label: "月" },
   { value: "custom", label: "自定义" }
 ]
-const CUSTOM_RANGE_MAX_DAYS = 31
+const DEFAULT_CUSTOM_RANGE_MAX_DAYS = 31
+const ADMIN_CUSTOM_RANGE_MAX_DAYS = 366
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
 type SkillUploaderExportInfo = {
@@ -570,6 +581,81 @@ function getMarketSkillQueryNames(item: MarketItem): string[] {
   return [item.name, item.filename].map((value) => value?.trim() || "").filter(Boolean)
 }
 
+function normalizeTeamOrgText(value?: string): string {
+  return String(value || "")
+    .replace(/／/g, "/")
+    .replace(/\s+/g, "")
+    .trim()
+}
+
+function findTeamShiInText(value: string | undefined, knownShiList: string[]): string | null {
+  const text = normalizeTeamOrgText(value)
+  if (!text) return null
+  const exact = knownShiList.find((shi) => normalizeTeamOrgText(shi) === text)
+  if (exact) return exact
+  const sortedKnownShiList = [...knownShiList].sort(
+    (a, b) => normalizeTeamOrgText(b).length - normalizeTeamOrgText(a).length
+  )
+  return (
+    sortedKnownShiList.find((shi) => {
+      const normalizedShi = normalizeTeamOrgText(shi)
+      return Boolean(normalizedShi && text.includes(normalizedShi))
+    }) ?? null
+  )
+}
+
+function resolveTeamSkillOwnerShi(
+  item: MarketItem,
+  uploaderProfiles: Record<string, SkillUploaderProfile>,
+  knownShiList: string[]
+): string | null {
+  const parsed = parseUploaderIdentity(item.user_id)
+  const profile = getUploaderIdCandidates(item.user_id)
+    .map((candidate) => uploaderProfiles[candidate])
+    .find(Boolean)
+
+  const candidates = [
+    profile?.upperOrgLv1,
+    profile?.orgName,
+    parsed?.orgName,
+    item.managerDepartment,
+    item.user_id
+  ]
+  for (const candidate of candidates) {
+    const shi = findTeamShiInText(candidate, knownShiList)
+    if (shi) return shi
+  }
+  return null
+}
+
+function buildTeamSkillContributionsByShi(
+  items: Iterable<MarketItem>,
+  uploaderProfiles: Record<string, SkillUploaderProfile>,
+  knownShiList: string[]
+): Map<string, { contributedSkillKeys: Set<string>; coverageSkillNames: Set<string> }> {
+  const byShi = new Map<
+    string,
+    { contributedSkillKeys: Set<string>; coverageSkillNames: Set<string> }
+  >()
+  for (const item of items) {
+    const shi = resolveTeamSkillOwnerShi(item, uploaderProfiles, knownShiList)
+    if (!shi) continue
+    const contributionKey =
+      normalizeMarketSkillKey(item.name) ||
+      normalizeMarketSkillKey(item.filename) ||
+      item.name?.trim()
+    if (!contributionKey) continue
+    const entry = byShi.get(shi) ?? {
+      contributedSkillKeys: new Set<string>(),
+      coverageSkillNames: new Set<string>()
+    }
+    entry.contributedSkillKeys.add(contributionKey)
+    for (const name of getMarketSkillQueryNames(item)) entry.coverageSkillNames.add(name)
+    byShi.set(shi, entry)
+  }
+  return byShi
+}
+
 function TimeControlBar({
   granularity,
   range,
@@ -578,6 +664,7 @@ function TimeControlBar({
   onCustomRange,
   onRefresh,
   loading,
+  customRangeMaxDays,
   orgFilter
 }: {
   granularity: Granularity
@@ -587,13 +674,17 @@ function TimeControlBar({
   onCustomRange: (from: string, to: string) => void
   onRefresh: () => void
   loading: boolean
+  customRangeMaxDays: number
   orgFilter?: ReactNode
 }) {
   const [showDatePicker, setShowDatePicker] = useState(false)
   const [customFrom, setCustomFrom] = useState("")
   const [customTo, setCustomTo] = useState("")
   const [customRangeError, setCustomRangeError] = useState("")
-  const customToMax = customFrom ? addDaysToDateInput(customFrom, CUSTOM_RANGE_MAX_DAYS - 1) : ""
+  const normalizedCustomRangeMaxDays = Math.max(1, Math.floor(customRangeMaxDays))
+  const customToMax = customFrom
+    ? addDaysToDateInput(customFrom, normalizedCustomRangeMaxDays - 1)
+    : ""
 
   const handleCustomConfirm = (): void => {
     if (!customFrom || !customTo) return
@@ -606,8 +697,8 @@ function TimeControlBar({
     }
 
     const selectedDays = Math.floor((toDate.getTime() - fromDate.getTime()) / MS_PER_DAY) + 1
-    if (selectedDays > CUSTOM_RANGE_MAX_DAYS) {
-      setCustomRangeError(`自定义范围最多选择 ${CUSTOM_RANGE_MAX_DAYS} 天`)
+    if (selectedDays > normalizedCustomRangeMaxDays) {
+      setCustomRangeError(`自定义范围最多选择 ${normalizedCustomRangeMaxDays} 天`)
       return
     }
 
@@ -925,7 +1016,7 @@ type DashboardSubPage =
       projectMode?: boolean
     }
 
-type DashboardMainTab = "overview" | "skill-eval" | "project-mode"
+type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "awards"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -1614,16 +1705,20 @@ function DashboardTabBar({
   activeTab,
   onChange,
   projectModeAllowed,
+  awardsAdmin,
   rightContent
 }: {
   activeTab: DashboardMainTab
   onChange: (tab: DashboardMainTab) => void
   projectModeAllowed: boolean
+  awardsAdmin: boolean
   rightContent?: ReactNode
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
-    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : [])
+    ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
+    // 评奖辅助看板仅对管理员名单可见。
+    ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : [])
     // 技能评估 tab 暂时隐藏（仅移除入口，skill-eval 相关逻辑/内容/类型均保留，需要时取消注释即可恢复）
     // { id: "skill-eval", label: "技能评估" }
   ]
@@ -2381,6 +2476,8 @@ export function DashboardView(): React.JSX.Element {
     granularity,
     range,
     selectedOrgLv1List,
+    fromLeanProjectsOnly,
+    setFromLeanProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,
@@ -2390,11 +2487,15 @@ export function DashboardView(): React.JSX.Element {
     modelStats,
     userStats,
     productivity,
-    feedback,
+    advancedFeatures,
     skillEval,
     projectMode,
     projectModeLoading,
     projectModeError,
+    projectModeCodeSource,
+    projectModeCodeStatsOverride,
+    projectModeCodeStatsLoading,
+    selectProjectModeCodeSource,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,
@@ -2415,6 +2516,7 @@ export function DashboardView(): React.JSX.Element {
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
+  const [traceEvolverReviewAdmin, setTraceEvolverReviewAdmin] = useState(false)
   // 「生成但未提交分析」下钻权限：已登录可见；主进程按身份限制为全量 / 本室 / 本人数据。
   const [uncommittedAnalysisAllowed, setUncommittedAnalysisAllowed] = useState(false)
   // 「指标分析」入口默认隐藏：在标题栏右侧的隐藏热区连续点三下才显形（不完全移除功能）。
@@ -2435,6 +2537,19 @@ export function DashboardView(): React.JSX.Element {
     }, 600)
   }, [])
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
+  // 评奖辅助看板访问门禁（仅 DASHBOARD_AWARDS_ADMIN 名单）。
+  const [awardsAdmin, setAwardsAdmin] = useState(false)
+  const [awardSkillContribs, setAwardSkillContribs] = useState<
+    DashboardAwardSkillContribution[] | null
+  >(null)
+  const [awardSkillsLoading, setAwardSkillsLoading] = useState(false)
+  const [awardSkillsError, setAwardSkillsError] = useState<string | null>(null)
+  const [awardUserApps, setAwardUserApps] = useState<DashboardAwardUserApplication[] | null>(null)
+  const [awardUsersLoading, setAwardUsersLoading] = useState(false)
+  const [awardUsersError, setAwardUsersError] = useState<string | null>(null)
+  const [awardTeamRows, setAwardTeamRows] = useState<TeamBenchmarkRow[] | null>(null)
+  const [awardTeamLoading, setAwardTeamLoading] = useState(false)
+  const [awardTeamError, setAwardTeamError] = useState<string | null>(null)
   const [skillDialogOpen, setSkillDialogOpen] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null)
   const [skillDetail, setSkillDetail] = useState<DashboardSkillDetail | null>(null)
@@ -2453,6 +2568,11 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardProjectModeProject | null>(null)
   const [projectTraceFeature, setProjectTraceFeature] =
     useState<DashboardProjectModeFeature | null>(null)
+  const [projectTraceNode, setProjectTraceNode] = useState<DashboardProjectModeFeatureNode | null>(
+    null
+  )
+  const [projectTraceStatus, setProjectTraceStatus] = useState<string | null>(null)
+  const [projectTraceStageBucket, setProjectTraceStageBucket] = useState<StageBucket | null>(null)
   const [projectTraceData, setProjectTraceData] = useState<DashboardProjectModeTracesData | null>(
     null
   )
@@ -2502,6 +2622,21 @@ export function DashboardView(): React.JSX.Element {
     let cancelled = false
 
     window.api.dashboard
+      .isAwardsAdmin()
+      .then((allowed) => {
+        if (cancelled) return
+        setAwardsAdmin(allowed)
+        if (!allowed) {
+          setActiveMainTab((current) => (current === "awards" ? "overview" : current))
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        setAwardsAdmin(false)
+        setActiveMainTab((current) => (current === "awards" ? "overview" : current))
+      })
+
+    window.api.dashboard
       .isAnalysisAgentAllowed()
       .then((allowed) => {
         if (cancelled) return
@@ -2512,6 +2647,17 @@ export function DashboardView(): React.JSX.Element {
         if (cancelled) return
         setAnalysisAgentAllowed(false)
         setAnalysisOpen(false)
+      })
+
+    window.api.dashboard
+      .isTraceEvolverReviewAdmin()
+      .then((allowed) => {
+        if (cancelled) return
+        setTraceEvolverReviewAdmin(allowed)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setTraceEvolverReviewAdmin(false)
       })
 
     window.api.dashboard
@@ -2674,11 +2820,170 @@ export function DashboardView(): React.JSX.Element {
     skillEvalScopeOptions
   ])
 
-  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
+  // 项目模式 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选 /「仅精益项目」开关变化时重拉。
   useEffect(() => {
     if (activeMainTab !== "project-mode" || !projectModeAllowed) return
-    void fetchProjectMode(range, granularity, selectedOrgLv1List)
-  }, [activeMainTab, fetchProjectMode, granularity, projectModeAllowed, range, selectedOrgLv1List])
+    void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
+  }, [
+    activeMainTab,
+    fetchProjectMode,
+    granularity,
+    projectModeAllowed,
+    range,
+    selectedOrgLv1List,
+    fromLeanProjectsOnly
+  ])
+
+  // 评奖辅助看板懒加载：进入 tab + 名单可见时拉取；时间范围变化重拉。
+  // 技能贡献奖需待应用市场技能（个人构建）加载完成后再查。
+  useEffect(() => {
+    if (activeMainTab !== "awards" || !awardsAdmin) return
+    let cancelled = false
+
+    // 个人构建技能名集：取应用市场（marketApi.getSkills）条目名，后端按名聚合并按名回传。
+    const personalSkillNames = Array.from(
+      new Set(
+        Array.from(marketSkillMap.values())
+          .map((item) => item.name?.trim() || "")
+          .filter(Boolean)
+      )
+    )
+
+    async function loadSkillContribs(): Promise<void> {
+      if (marketSkillsLoading) return
+      if (personalSkillNames.length === 0) {
+        if (!cancelled) {
+          setAwardSkillContribs([])
+          setAwardSkillsError(null)
+        }
+        return
+      }
+      if (!cancelled) {
+        setAwardSkillsLoading(true)
+        setAwardSkillsError(null)
+      }
+      try {
+        const result = await window.api.dashboard.awardsSkillContributions(
+          range,
+          personalSkillNames
+        )
+        if (cancelled) return
+        if (result.success) {
+          setAwardSkillContribs((result.data as DashboardAwardSkillContribution[]) ?? [])
+        } else {
+          setAwardSkillsError(result.error || "获取技能贡献数据失败")
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAwardSkillsError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled) setAwardSkillsLoading(false)
+      }
+    }
+
+    async function loadUserApps(): Promise<void> {
+      if (!cancelled) {
+        setAwardUsersLoading(true)
+        setAwardUsersError(null)
+      }
+      try {
+        const result = await window.api.dashboard.awardsUserApplications(range)
+        if (cancelled) return
+        if (result.success) {
+          setAwardUserApps((result.data as DashboardAwardUserApplication[]) ?? [])
+        } else {
+          setAwardUsersError(result.error || "获取技能应用榜数据失败")
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAwardUsersError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled) setAwardUsersLoading(false)
+      }
+    }
+
+    void loadSkillContribs()
+    void loadUserApps()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeMainTab, awardsAdmin, range, marketSkillMap, marketSkillsLoading])
+
+  // 团队标杆奖懒加载：拉取室/组指标后，按市场作者归属（发布者所属室）补「贡献技能数 / 覆盖室数」。
+  useEffect(() => {
+    if (activeMainTab !== "awards" || !awardsAdmin) return
+    let cancelled = false
+
+    async function loadTeam(): Promise<void> {
+      if (marketSkillsLoading) return
+      if (!cancelled) {
+        setAwardTeamLoading(true)
+        setAwardTeamError(null)
+      }
+      try {
+        const result = await window.api.dashboard.awardsTeamBenchmark(range)
+        if (cancelled) return
+        if (!result.success) {
+          setAwardTeamError(result.error || "获取团队标杆数据失败")
+          return
+        }
+        const rawRows = (result.data as DashboardAwardTeamBenchmarkRow[]) ?? []
+        const knownShiList = rawRows.map((row) => row.shi).filter(Boolean)
+        const skillContribsByShi = buildTeamSkillContributionsByShi(
+          marketSkillMap.values(),
+          skillUploaderProfiles,
+          knownShiList
+        )
+
+        // 覆盖室数：把每室贡献技能集传给后端，单次查询得各室技能被多少去重室试用过。
+        const coverageGroups = Array.from(skillContribsByShi.entries()).map(([shi, entry]) => ({
+          shi,
+          skillNames: Array.from(entry.coverageSkillNames)
+        }))
+        let coverageByShi: Record<string, number> = {}
+        if (coverageGroups.length > 0) {
+          const cov = await window.api.dashboard.awardsTeamSkillCoverage(range, coverageGroups)
+          if (cancelled) return
+          if (cov.success) coverageByShi = (cov.data as Record<string, number>) ?? {}
+        }
+
+        const enriched: TeamBenchmarkRow[] = rawRows.map((row) => ({
+          ...row,
+          contributedSkillCount: skillContribsByShi.get(row.shi)?.contributedSkillKeys.size ?? 0,
+          skillCoverageShiCount: coverageByShi[row.shi] ?? 0,
+          children: (row.children ?? []).map((child) => ({
+            ...child,
+            // 贡献技能数 / 覆盖室数为室口径，组级不展示；组级无下钻。
+            contributedSkillCount: null,
+            skillCoverageShiCount: null,
+            children: undefined
+          }))
+        }))
+        if (!cancelled) setAwardTeamRows(enriched)
+      } catch (error) {
+        if (!cancelled) {
+          setAwardTeamError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled) setAwardTeamLoading(false)
+      }
+    }
+
+    void loadTeam()
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeMainTab,
+    awardsAdmin,
+    range,
+    marketSkillMap,
+    marketSkillsLoading,
+    skillUploaderProfiles
+  ])
 
   useEffect(() => {
     if (
@@ -2692,106 +2997,226 @@ export function DashboardView(): React.JSX.Element {
     setSkillEvalSelectedSkillKey(effectiveSkillEvalSelectedSkillKey)
   }, [activeMainTab, effectiveSkillEvalSelectedSkillKey, skillEval, skillEvalSelectedSkillKey])
 
+  // 技能贡献奖行：聚合结果 join 应用市场展示字段（中文名 / 构建者 / 组织）。
+  const awardSkillRows = useMemo<AwardSkillRow[]>(() => {
+    if (!awardSkillContribs) return []
+    return awardSkillContribs.map((contrib) => {
+      const marketItem = getMarketSkillItem(marketSkillMap, contrib.skillKey)
+      const builder = resolveSkillUploaderExportInfo(marketItem, skillUploaderProfiles)
+      const displayName =
+        marketItem?.chinese_name?.trim() || marketItem?.name?.trim() || contrib.skillKey
+      return {
+        ...contrib,
+        displayName,
+        builderName: builder.userName,
+        builderOrg: builder.orgName,
+        builderSapId: builder.sapId,
+        featured: marketItem?.featured?.trim() || undefined
+      }
+    })
+  }, [awardSkillContribs, marketSkillMap, skillUploaderProfiles])
+
+  // 评奖辅助看板导出：两个 sheet（技能贡献奖 / 技能应用奖），口径同界面，四个入库率全列。
+  const handleAwardsExport = useCallback(async () => {
+    setExporting(true)
+    try {
+      const sheets: DashboardExcelSheet[] = []
+
+      const contribRows = [...awardSkillRows].sort((a, b) => {
+        const ar = a.codeStats?.pushedAdoptionRate ?? -1
+        const br = b.codeStats?.pushedAdoptionRate ?? -1
+        if (ar !== br) return br - ar
+        if (a.crossOrgCount !== b.crossOrgCount) return b.crossOrgCount - a.crossOrgCount
+        return b.callCount - a.callCount
+      })
+      sheets.push({
+        name: "技能贡献奖",
+        header: [
+          "技能",
+          "构建者",
+          "构建者组织",
+          "跨室数",
+          "是否跨≥2室",
+          "使用人数",
+          "调用数",
+          "提交口径·提交",
+          "提交口径·入库",
+          "总量口径·提交",
+          "总量口径·入库"
+        ],
+        rows: contribRows.map((r) => [
+          r.displayName,
+          r.builderName || "",
+          r.builderOrg || "",
+          r.crossOrgCount,
+          r.crossOrgCount >= 2 ? "是" : "否",
+          r.userCount,
+          r.callCount,
+          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
+          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
+          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
+          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+        ])
+      })
+
+      const appRows = [...(awardUserApps ?? [])].sort((a, b) => b.callCount - a.callCount)
+      sheets.push({
+        name: "技能应用奖",
+        header: [
+          "排名",
+          "用户",
+          "SAP",
+          "室/组",
+          "调用数",
+          "技能种类数",
+          "用技能总次数",
+          "工具调用",
+          "会话数",
+          "特性数",
+          "提交口径·提交",
+          "提交口径·入库",
+          "总量口径·提交",
+          "总量口径·入库"
+        ],
+        rows: appRows.map((r, i) => [
+          i + 1,
+          r.userName || "",
+          r.sapId || "",
+          formatTopUserOrgName(r.orgName ?? "", r.upperOrgLv1 ?? "", r.upperOrgLv0 ?? ""),
+          r.callCount,
+          r.skillCount,
+          r.skillUsageCount,
+          r.toolCallCount,
+          r.threadCount,
+          r.featureCount,
+          formatPercent(r.codeStats?.measuredAdoptionRate ?? null),
+          formatPercent(r.codeStats?.pushedAdoptionRate ?? null),
+          formatPercent(r.codeStats?.inclusiveAdoptionRate ?? null),
+          formatPercent(r.codeStats?.inclusivePushedAdoptionRate ?? null)
+        ])
+      })
+
+      // 团队标杆奖：室级 + 缩进组级行平铺为一张表。
+      const teamSheetRows: (string | number)[][] = []
+      for (const shiRow of awardTeamRows ?? []) {
+        const emit = (row: TeamBenchmarkRow, isGroup: boolean): void => {
+          teamSheetRows.push([
+            isGroup ? `    ${formatTopUserOrgName("", row.shi, row.group ?? "")}` : row.shi,
+            row.usageCount,
+            row.userCount,
+            Number(row.perCapitaUsage.toFixed(1)),
+            row.aboveAvgUserCount,
+            row.contributedSkillCount === null ? "" : row.contributedSkillCount,
+            row.skillCoverageShiCount === null ? "" : row.skillCoverageShiCount,
+            row.skillUsageCount,
+            row.codeStats?.adoptedLines ?? 0,
+            formatPercent(row.codeStats?.measuredAdoptionRate ?? null),
+            formatPercent(row.codeStats?.pushedAdoptionRate ?? null),
+            formatPercent(row.codeStats?.inclusiveAdoptionRate ?? null),
+            formatPercent(row.codeStats?.inclusivePushedAdoptionRate ?? null)
+          ])
+        }
+        emit(shiRow, false)
+        for (const child of shiRow.children ?? []) emit(child, true)
+      }
+      sheets.push({
+        name: "团队标杆奖",
+        header: [
+          "室/组",
+          "使用次数",
+          "使用人数",
+          "人均使用次数",
+          "超过人均人数",
+          "贡献技能数",
+          "技能覆盖室数",
+          "技能使用次数",
+          "代码提交行数",
+          "提交口径·提交",
+          "提交口径·入库",
+          "总量口径·提交",
+          "总量口径·入库"
+        ],
+        rows: teamSheetRows
+      })
+
+      const result = await window.api.dashboard.exportExcel(sheets, {
+        fileName: "评奖辅助看板数据"
+      })
+      if (result.success) {
+        console.log("[Dashboard] Awards exported to:", result.filePath)
+      } else if (!result.canceled && result.error) {
+        console.error("[Dashboard] Awards export failed:", result.error)
+      }
+    } finally {
+      setExporting(false)
+    }
+  }, [awardSkillRows, awardUserApps, awardTeamRows])
+
   useEffect(() => {
     let cancelled = false
 
     async function loadUploaderProfiles(items: MarketItem[]): Promise<void> {
-      const uploaderIds = Array.from(
-        new Set(
-          items
-            .map((item) => {
-              const parsed = parseUploaderIdentity(item.user_id)
-              return parsed?.sapId || item.user_id?.trim() || ""
-            })
-            .filter(Boolean)
-            .flatMap((id) => buildUploaderIdCandidates(id))
-        )
-      )
+      // 与技能市场（MarketPanel）一致：用全量用户目录 queryAllUser 反查创建人，
+      // 而不是按使用埋点聚合的 userProfiles —— 否则像精品技能这种作者本人无使用记录的，
+      // 聚合里查不到对应 SAP 桶，创建人就会显示 “—”。
+      // 每个 user_id 对应一组候选 SAP，作为 resolveSkillUploaderExportInfo 的查表 key。
+      const candidatesByUserId = new Map<string, string[]>()
+      for (const item of items) {
+        const rawUserId = item.user_id?.trim()
+        if (!rawUserId || candidatesByUserId.has(rawUserId)) continue
+        candidatesByUserId.set(rawUserId, getUploaderIdCandidates(rawUserId))
+      }
 
-      if (uploaderIds.length === 0) {
+      if (candidatesByUserId.size === 0) {
         if (!cancelled) setSkillUploaderProfiles({})
         return
       }
 
-      if (typeof window.api?.dashboard?.userProfiles !== "function") {
-        if (!cancelled) {
-          setSkillUploaderProfiles(
-            Object.fromEntries(
-              uploaderIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
-            )
-          )
+      const buildFallbackMap = (): Record<string, SkillUploaderProfile> => {
+        const map: Record<string, SkillUploaderProfile> = {}
+        for (const candidates of candidatesByUserId.values()) {
+          for (const candidate of candidates) {
+            if (!map[candidate]) map[candidate] = { sapId: candidate, userName: "", orgName: "" }
+          }
         }
+        return map
+      }
+
+      if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+        if (!cancelled) setSkillUploaderProfiles(buildFallbackMap())
         return
       }
 
       try {
-        const response = await window.api.dashboard.userProfiles(uploaderIds)
+        const response = await window.api.dashboard.queryAllUser()
         if (!response.success || !response.data) {
-          throw new Error(response.error || "获取上传用户信息失败")
+          throw new Error(response.error || "获取全量用户信息失败")
         }
 
-        const buckets =
-          (
-            response.data as {
-              aggregations?: {
-                by_sap?: {
-                  buckets?: Array<{
-                    key?: string
-                    user_name?: { buckets?: Array<{ key?: string }> }
-                    org_name?: { buckets?: Array<{ key?: string }> }
-                    latest_user_info?: {
-                      hits?: {
-                        hits?: Array<{
-                          _source?: {
-                            userName?: string
-                            orgName?: string
-                            upperOrgLv0?: string
-                            upperOrgLv1?: string
-                          }
-                        }>
-                      }
-                    }
-                  }>
-                }
-              }
-            }
-          ).aggregations?.by_sap?.buckets ?? []
-
-        const profileBySapId: Record<string, SkillUploaderProfile> = {}
-        for (const bucket of buckets) {
-          const sapId = bucket.key?.trim()
-          if (!sapId) continue
-          const latestUserInfo = bucket.latest_user_info?.hits?.hits?.[0]?._source
-          profileBySapId[sapId] = {
-            sapId,
-            userName: latestUserInfo?.userName ?? bucket.user_name?.buckets?.[0]?.key ?? "",
-            orgName: latestUserInfo?.orgName ?? bucket.org_name?.buckets?.[0]?.key ?? "",
-            upperOrgLv0: latestUserInfo?.upperOrgLv0 ?? "",
-            upperOrgLv1: latestUserInfo?.upperOrgLv1 ?? ""
-          }
-        }
-
-        const profileEntries = Object.entries(profileBySapId)
+        const allUsers = response.data.filter((user) => user.sapId?.trim())
         const nextMap: Record<string, SkillUploaderProfile> = {}
-        for (const rawId of uploaderIds) {
-          nextMap[rawId] = profileBySapId[rawId] ||
-            profileEntries.find(([sapId]) => sapId.includes(rawId))?.[1] || {
-              sapId: rawId,
-              userName: "",
-              orgName: ""
-            }
+        for (const candidates of candidatesByUserId.values()) {
+          const target = allUsers.find((user) =>
+            candidates.some((candidate) => user.sapId.includes(candidate))
+          )
+          const profile: SkillUploaderProfile = target
+            ? {
+                sapId: target.sapId,
+                userName: target.userName,
+                orgName: target.orgName ?? "",
+                upperOrgLv0: target.upperOrgLv0 ?? "",
+                upperOrgLv1: target.upperOrgLv1 ?? ""
+              }
+            : { sapId: candidates[0] ?? "", userName: "", orgName: "" }
+          for (const candidate of candidates) {
+            if (!nextMap[candidate]) nextMap[candidate] = profile
+          }
         }
 
         if (!cancelled) setSkillUploaderProfiles(nextMap)
       } catch (error) {
         console.warn("[Dashboard] Failed to load marketplace skill uploader profiles:", error)
-        if (!cancelled) {
-          setSkillUploaderProfiles(
-            Object.fromEntries(
-              uploaderIds.map((sapId) => [sapId, { sapId, userName: "", orgName: "" }])
-            )
-          )
-        }
+        if (!cancelled) setSkillUploaderProfiles(buildFallbackMap())
       }
     }
 
@@ -3005,7 +3430,7 @@ export function DashboardView(): React.JSX.Element {
       clearSkillEval()
     }
     if (activeMainTab === "project-mode") {
-      void fetchProjectMode(range, granularity, selectedOrgLv1List)
+      void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
     }
   }, [
     activeMainTab,
@@ -3014,13 +3439,23 @@ export function DashboardView(): React.JSX.Element {
     granularity,
     range,
     refresh,
-    selectedOrgLv1List
+    selectedOrgLv1List,
+    fromLeanProjectsOnly
   ])
 
   const handleProjectOpenTraces = useCallback(
-    (project: DashboardProjectModeProject, feature?: DashboardProjectModeFeature) => {
+    (
+      project: DashboardProjectModeProject,
+      feature?: DashboardProjectModeFeature,
+      node?: DashboardProjectModeFeatureNode,
+      status?: string,
+      stageBucket?: StageBucket
+    ) => {
       setProjectTraceProject(project)
       setProjectTraceFeature(feature ?? null)
+      setProjectTraceNode(node ?? null)
+      setProjectTraceStatus(status ?? null)
+      setProjectTraceStageBucket(stageBucket ?? null)
       setProjectTraceData(null)
       setProjectTracesError(null)
       setProjectTracePage(1)
@@ -3029,11 +3464,54 @@ export function DashboardView(): React.JSX.Element {
     []
   )
 
+  const loadProjectFeatureNodes = useCallback(
+    async (
+      project: DashboardProjectModeProject,
+      feature: DashboardProjectModeFeature
+    ): Promise<DashboardProjectModeFeatureNode[]> => {
+      const res = await window.api.dashboard.projectModeFeatureNodes(
+        project.projectId,
+        feature.slug,
+        range
+      )
+      if (!res.success) throw new Error(res.error ?? "获取阶段数据失败")
+      return Array.isArray(res.data) ? (res.data as DashboardProjectModeFeatureNode[]) : []
+    },
+    [range]
+  )
+
+  // 插件聚合的按阶段细分，跟随面板当前时间范围（range 变化即得到新回调，展开中的细分会重拉）。
+  const loadPluginAggregateNodes = useCallback(
+    async (adapterName: string): Promise<DashboardProjectModeFeatureNode[]> => {
+      const res = await window.api.dashboard.pluginAggregate(adapterName, range)
+      if (!res.success) throw new Error(res.error ?? "获取阶段数据失败")
+      const data = res.data as DashboardPluginAggregate | undefined
+      return Array.isArray(data?.byNode) ? data.byNode : []
+    },
+    [range]
+  )
+
+  // 插件「项目数」点击弹窗复用「项目列表」组件，需一个按当前时间范围的分页拉取器（返回整页数据）。
+  // 调用方注入锁定的 adapterName/adapterVersion（「按版本」精确到版本，「按插件」聚合全部版本）。
+  const fetchAdapterProjectPage = useCallback(
+    async (
+      options: DashboardProjectModeProjectPageOptions
+    ): Promise<DashboardProjectModeProjectPageData> => {
+      const res = await window.api.dashboard.projectModeProjects(range, options)
+      if (!res.success || !res.data) throw new Error(res.error ?? "获取项目列表失败")
+      return res.data
+    },
+    [range]
+  )
+
   useEffect(() => {
     if (!projectTraceProject) return
     let cancelled = false
     const currentProject = projectTraceProject
     const currentFeature = projectTraceFeature
+    const currentNode = projectTraceNode
+    const currentStatus = projectTraceStatus
+    const currentStageBucket = projectTraceStageBucket
 
     async function loadProjectTraces(): Promise<void> {
       setProjectTracesLoading(true)
@@ -3044,7 +3522,10 @@ export function DashboardView(): React.JSX.Element {
           tracePageSize: PROJECT_TRACE_PAGE_SIZE,
           mode: projectTraceViewMode,
           triggerScope: PROJECT_TRACE_TRIGGER_SCOPE,
-          ...(currentFeature?.slug ? { featureSlug: currentFeature.slug } : {})
+          ...(currentFeature?.slug ? { featureSlug: currentFeature.slug } : {}),
+          ...(currentNode?.nodeName ? { nodeName: currentNode.nodeName } : {}),
+          ...(currentStatus ? { nodeStatus: currentStatus } : {}),
+          ...(currentStageBucket ? { stageBucket: currentStageBucket } : {})
         })
         if (!res.success) throw new Error(res.error ?? "获取项目对话失败")
         const rawData = res.data
@@ -3077,7 +3558,16 @@ export function DashboardView(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [projectTraceFeature, projectTracePage, projectTraceProject, projectTraceViewMode, range])
+  }, [
+    projectTraceFeature,
+    projectTraceNode,
+    projectTraceStatus,
+    projectTraceStageBucket,
+    projectTracePage,
+    projectTraceProject,
+    projectTraceViewMode,
+    range
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -3824,6 +4314,13 @@ export function DashboardView(): React.JSX.Element {
             rows: modelStats.byTier.map((t) => [t.tier, t.count])
           })
         }
+        if (modelStats.smartByTier.length > 0) {
+          sheets.push({
+            name: "智能路由分流",
+            header: ["Tier", "调用次数"],
+            rows: modelStats.smartByTier.map((t) => [t.tier, t.count])
+          })
+        }
         if (modelStats.byLayer.length > 0) {
           sheets.push({
             name: "路由决策层",
@@ -4159,7 +4656,7 @@ export function DashboardView(): React.JSX.Element {
     Boolean(projectTraceData) &&
     projectTracePage * projectTracePageSize < projectTraceTotal &&
     !projectTracesLoading
-  const projectTraceScopeLabel = projectTraceFeature ? "特性" : "项目"
+  const projectTraceScopeLabel = projectTraceNode ? "阶段" : projectTraceFeature ? "特性" : "项目"
   const projectTraceTitle =
     projectTraceViewMode === "thread"
       ? `${projectTraceScopeLabel}会话（第 ${projectTracePage} 页）`
@@ -4168,12 +4665,19 @@ export function DashboardView(): React.JSX.Element {
     projectTraceViewMode === "thread"
       ? `共 ${formatNumber(projectTraceTotal)} 个会话，选择记录定位到对话`
       : `共 ${formatNumber(projectTraceTotal)} 条，选择记录定位到对话`
+  const projectTraceStageSuffix = projectTraceNode
+    ? ` · 阶段 ${projectTraceNode.nodeName}${projectTraceStatus ? ` · ${projectTraceStatus}` : ""}${
+        projectTraceStageBucket ? ` · ${STAGE_BUCKET_LABELS[projectTraceStageBucket]}` : ""
+      }`
+    : ""
   const projectTraceDialogTitle = projectTraceFeature
-    ? `特性对话 · ${projectTraceProject?.name ?? "-"} · ${projectTraceFeature.title}`
+    ? `特性对话 · ${projectTraceProject?.name ?? "-"} · ${projectTraceFeature.title}${projectTraceStageSuffix}`
     : `项目对话 · ${projectTraceProject?.name ?? "-"}`
-  const projectTraceDialogSubtitle = projectTraceFeature
-    ? "该特性在项目模式下的对话记录，选择记录定位到会话"
-    : "该项目模式下的对话记录，选择记录定位到会话"
+  const projectTraceDialogSubtitle = projectTraceNode
+    ? "该特性某阶段（工作流节点）下的对话记录，选择记录定位到会话"
+    : projectTraceFeature
+      ? "该特性在项目模式下的对话记录，选择记录定位到会话"
+      : "该项目模式下的对话记录，选择记录定位到会话"
   const analysisScope: DashboardAnalysisScope =
     activeMainTab === "project-mode" && projectModeAllowed ? "project" : "platform"
   const analysisPanelSnapshot = useMemo(
@@ -4196,6 +4700,9 @@ export function DashboardView(): React.JSX.Element {
         onCustomRange={setCustomRange}
         onRefresh={handleRefresh}
         loading={loading}
+        customRangeMaxDays={
+          traceEvolverReviewAdmin ? ADMIN_CUSTOM_RANGE_MAX_DAYS : DEFAULT_CUSTOM_RANGE_MAX_DAYS
+        }
         orgFilter={
           subPage.kind === "main" ? (
             <OrgFilterBar
@@ -4220,6 +4727,7 @@ export function DashboardView(): React.JSX.Element {
           activeTab={activeMainTab}
           onChange={setActiveMainTab}
           projectModeAllowed={projectModeAllowed}
+          awardsAdmin={awardsAdmin}
           rightContent={
             activeMainTab === "skill-eval" ? (
               <Button
@@ -4311,7 +4819,23 @@ export function DashboardView(): React.JSX.Element {
         </ScrollArea>
       ) : (
         <ScrollArea className="flex-1">
-          {activeMainTab === "skill-eval" ? (
+          {activeMainTab === "awards" && awardsAdmin ? (
+            <div className="space-y-6 p-6">
+              <AwardsPanel
+                skillRows={awardSkillRows}
+                skillsLoading={awardSkillsLoading || marketSkillsLoading}
+                skillsError={awardSkillsError}
+                userApps={awardUserApps ?? []}
+                usersLoading={awardUsersLoading}
+                usersError={awardUsersError}
+                teamRows={awardTeamRows ?? []}
+                teamLoading={awardTeamLoading || marketSkillsLoading}
+                teamError={awardTeamError}
+                onExport={handleAwardsExport}
+                exporting={exporting}
+              />
+            </div>
+          ) : activeMainTab === "skill-eval" ? (
             <div className="space-y-6 p-6">
               <SkillEvalDashboardPanel
                 data={skillEval}
@@ -4336,21 +4860,38 @@ export function DashboardView(): React.JSX.Element {
                 data={projectMode}
                 loading={projectModeLoading}
                 error={projectModeError}
+                codeSource={projectModeCodeSource}
+                codeStatsOverride={projectModeCodeStatsOverride}
+                codeStatsLoading={projectModeCodeStatsLoading}
+                onCodeSourceChange={selectProjectModeCodeSource}
                 headerAction={
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1.5 text-xs"
-                    onClick={handleProjectModeExport}
-                    disabled={exporting || projectModeLoading || !projectMode}
-                  >
-                    {exporting ? (
-                      <Loader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <Download className="size-3.5" />
-                    )}
-                    导出Excel
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant={fromLeanProjectsOnly ? "default" : "outline"}
+                      size="sm"
+                      className="gap-1.5 text-xs"
+                      onClick={() => setFromLeanProjectsOnly((v) => !v)}
+                      disabled={projectModeLoading}
+                      title="仅统计绑定了企业（精益）项目的项目"
+                    >
+                      <Filter className="size-3.5" />
+                      仅精益项目
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5 text-xs"
+                      onClick={handleProjectModeExport}
+                      disabled={exporting || projectModeLoading || !projectMode}
+                    >
+                      {exporting ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Download className="size-3.5" />
+                      )}
+                      导出Excel
+                    </Button>
+                  </div>
                 }
                 projectPages={projectModeProjectPages}
                 projectPageLoading={projectModeProjectPageLoading}
@@ -4359,6 +4900,9 @@ export function DashboardView(): React.JSX.Element {
                 onOpenTraces={handleProjectOpenTraces}
                 onOpenFeatureCommits={handleProjectOpenFeatureCommits}
                 onOpenProjectCommits={handleProjectOpenProjectCommits}
+                loadFeatureNodes={loadProjectFeatureNodes}
+                loadPluginAggregate={loadPluginAggregateNodes}
+                fetchAdapterProjectPage={fetchAdapterProjectPage}
                 onSkillClick={handleSkillClick}
                 onUserClick={(sapId) => openUserDetail(sapId, "main", true)}
                 onFunnelFirstStageClick={
@@ -4449,16 +4993,16 @@ export function DashboardView(): React.JSX.Element {
                 />
               </section>
 
+              {/* Advanced Features */}
+              <section>
+                <h2 className="mb-3 text-sm font-semibold text-foreground">高级特性运营</h2>
+                <AdvancedFeaturesPanel data={advancedFeatures} loading={loading} />
+              </section>
+
               {/* Model Analysis */}
               <section>
                 <h2 className="mb-3 text-sm font-semibold text-foreground">模型分析</h2>
                 <ModelPanel data={modelStats} loading={loading} />
-              </section>
-
-              {/* Feedback */}
-              <section>
-                <h2 className="mb-3 text-sm font-semibold text-foreground">点赞 / 点踩反馈</h2>
-                <FeedbackPanel data={feedback} loading={loading} />
               </section>
             </div>
           )}
@@ -4532,6 +5076,9 @@ export function DashboardView(): React.JSX.Element {
           if (!open) {
             setProjectTraceProject(null)
             setProjectTraceFeature(null)
+            setProjectTraceNode(null)
+            setProjectTraceStatus(null)
+            setProjectTraceStageBucket(null)
             setProjectTraceData(null)
             setProjectTracePage(1)
             setProjectTraceViewMode("thread")
@@ -4594,7 +5141,9 @@ export function DashboardView(): React.JSX.Element {
         scope={{
           upperOrgLv1: selectedOrgLv1List,
           projectMode: uncommittedProjectMode,
-          usedSkillsOnly: uncommittedUsedSkillsOnly
+          usedSkillsOnly: uncommittedUsedSkillsOnly,
+          // 与「生产效能代码指标」来源下拉同口径，从漏斗下钻时一并带入未提交分析。
+          source: projectModeCodeSource
         }}
       />
       <CommitDetailsDialog

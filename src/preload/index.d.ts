@@ -224,6 +224,60 @@ interface DashboardCommitDetailsOptions {
   orgLv1List?: string[]
 }
 
+interface DashboardNonGitAdoptionReportsOptions {
+  page?: number
+  pageSize?: number
+  upperOrgLv1?: string | null
+  userKeyword?: string | null
+  orgLv1List?: string[]
+  projectMode?: boolean
+  projectId?: string | null
+  featureSlug?: string | null
+  usedSkillsOnly?: boolean
+}
+
+interface DashboardNonGitAdoptionReportItem {
+  eventId: string
+  eventTime: string
+  generatedAt: string
+  pushedAt?: string
+  measuredAt?: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  userIp?: string
+  source?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  genEventId?: string
+  threadId?: string
+  threadIds: string[]
+  fileHint?: string
+  tool?: string
+  language?: string
+  modelName?: string
+  measureSource?: string
+  verdict?: string
+  pushed: boolean
+  usedSkills: string[]
+  generatedLineCount: number
+  effectiveGeneratedLineCount: number
+  adoptedLineCount: number
+  adoptionRate: number | null
+}
+
+interface DashboardNonGitAdoptionReportsData {
+  total: number
+  page: number
+  pageSize: number
+  items: DashboardNonGitAdoptionReportItem[]
+}
+
 interface DashboardCommitAdoptionPair {
   genEventId: string
   file: string | null
@@ -520,6 +574,7 @@ interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -552,19 +607,39 @@ interface DashboardProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: DashboardProjectModeProjectSortKey | null
   sortOrder: DashboardProjectModeProjectSortOrder
+  /**
+   * True when more projects matched than the metric-sort enumeration cap, so the
+   * ranking + total only cover the first N projects and the UI should warn that
+   * the list / metrics are incomplete. Always false on the snapshot-paginated path.
+   */
+  truncated: boolean
 }
 
 interface DashboardProjectModeProjectPageOptions {
   upperOrgLv1?: string | string[] | null
+  fromLeanOnly?: boolean | null
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
   keyword?: string | null
   adapterName?: string | null
+  /** 配合 adapterName 精确到插件版本（「按版本」口径点击项目数）；空 = 不限版本。 */
+  adapterVersion?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
   sortBy?: DashboardProjectModeProjectSortKey | null
   sortOrder?: DashboardProjectModeProjectSortOrder | null
+}
+
+interface DashboardStageBucketStat {
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+interface DashboardStageBuckets {
+  pluginConstrained: DashboardStageBucketStat
+  vibecoding: DashboardStageBucketStat
+  unattributed: DashboardStageBucketStat
 }
 
 interface DashboardProjectModeAdapter {
@@ -574,6 +649,7 @@ interface DashboardProjectModeAdapter {
   featureCount: number
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 interface DashboardProjectModeData {
@@ -589,6 +665,7 @@ interface DashboardProjectModeData {
     skillCallCount: number
     distinctSkillCount: number
     codeStats: DashboardCodeStats | null
+    skillCodeStats?: DashboardCodeStats | null
   }
   adapters: DashboardProjectModeAdapter[]
   topSkills: DashboardProjectModeSkillCount[]
@@ -598,6 +675,12 @@ interface DashboardProjectModeData {
   projectCounts: DashboardProjectModeProjectCounts
   projectPage: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
+  /**
+   * 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整。开关关闭时恒为 false。
+   */
+  leanTruncated: boolean
+  /** 当前范围内出现过的外部上报来源（properties.source 去重值）；供生产效能代码指标 source 下拉。 */
+  availableSources?: string[]
 }
 
 interface DashboardProjectModeTracesOptions {
@@ -610,6 +693,10 @@ interface DashboardProjectModeTracesOptions {
   viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
   featureSlug?: string
+  nodeName?: string
+  nodeStatus?: string
+  /** stage×skill 桶过滤（插件约束（Harness）/ VibeCoding / 未归因），用于按桶查看对话。 */
+  stageBucket?: "plugin_constrained" | "vibecoding" | "unattributed"
 }
 
 interface DashboardProjectModeTracesData {
@@ -620,6 +707,29 @@ interface DashboardProjectModeTracesData {
   total: number
   traceViewMode: DashboardTraceViewMode
   traceTriggerScope: DashboardTraceTriggerScope
+}
+
+interface DashboardProjectModeNodeStatus {
+  status: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+interface DashboardProjectModeFeatureNode {
+  nodeName: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+  byStatus: DashboardProjectModeNodeStatus[]
+  /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
+  stageBuckets: DashboardStageBuckets
+}
+
+interface DashboardPluginAggregate {
+  adapterName: string
+  conversationCount: number
+  projectCount: number
+  codeStats: DashboardCodeStats | null
+  byNode: DashboardProjectModeFeatureNode[]
 }
 
 interface CustomAPI {
@@ -1213,6 +1323,18 @@ interface CustomAPI {
     restoreCloudEvolutionBackup: (
       backupId: string
     ) => Promise<{ success: boolean; skillName?: string; error?: string }>
+    applyPluginSkillEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      buffer: ArrayBuffer
+      fileName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }) => Promise<{ success: boolean; backupId?: string; error?: string }>
+    rollbackPluginSkillEvolution: (
+      backupId: string
+    ) => Promise<{ success: boolean; skillName?: string; error?: string }>
     exportCloudEvolutionBackup: (
       backupId: string,
       targetDir: string
@@ -1571,6 +1693,7 @@ interface CustomAPI {
         requestId: string
         summary: string
         toolCallCount: number
+        turnCount: number
         mode: "mode_a_rule" | "mode_b_llm"
         recommendationReason?: string
         /** Opaque context payload — cache in renderer and pass back on retry */
@@ -1597,7 +1720,7 @@ interface CustomAPI {
         content: string
       }) => void
     ) => () => void
-    confirmResponse: (requestId: string, approved: boolean) => Promise<void>
+    confirmResponse: (requestId: string, approved: boolean, content?: string) => Promise<void>
     /** Listen to streaming generation progress from the main process */
     onGenerating: (
       callback: (event: {
@@ -1762,6 +1885,8 @@ interface CustomAPI {
     setAutoPropose: (enabled: boolean) => Promise<void>
     getThreshold: () => Promise<number>
     setThreshold: (value: number) => Promise<void>
+    getTurnThreshold: () => Promise<number>
+    setTurnThreshold: (value: number) => Promise<void>
   }
   hooks: {
     list: () => Promise<HookConfig[]>
@@ -1821,7 +1946,25 @@ interface CustomAPI {
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
     isAnalysisAgentAllowed: () => Promise<boolean>
+    isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
+    isAwardsAdmin: () => Promise<boolean>
+    awardsSkillContributions: (
+      range: { from: string; to: string },
+      skillNames: string[]
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    awardsUserApplications: (range: {
+      from: string
+      to: string
+    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    awardsTeamBenchmark: (range: {
+      from: string
+      to: string
+    }) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    awardsTeamSkillCoverage: (
+      range: { from: string; to: string },
+      groups: Array<{ shi: string; skillNames: string[] }>
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -1848,8 +1991,17 @@ interface CustomAPI {
     projectMode: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
-      opts?: { upperOrgLv1?: string | string[] | null }
+      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeData; error?: string }>
+    projectModeCodeStats: (
+      range: { from: string; to: string },
+      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      source: string | null
+    ) => Promise<{
+      success: boolean
+      data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
+      error?: string
+    }>
     projectModeProjects: (
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions
@@ -1859,6 +2011,15 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardProjectModeTracesOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeTracesData; error?: string }>
+    projectModeFeatureNodes: (
+      projectId: string,
+      featureSlug: string,
+      range: { from: string; to: string }
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeFeatureNode[]; error?: string }>
+    pluginAggregate: (
+      adapterName: string,
+      range: { from: string; to: string }
+    ) => Promise<{ success: boolean; data?: DashboardPluginAggregate; error?: string }>
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
@@ -1926,6 +2087,7 @@ interface CustomAPI {
         projectId?: string | null
         featureSlug?: string | null
         usedSkillsOnly?: boolean
+        source?: string | null
         userKeyword?: string | null
       }
     ) => Promise<{ success: boolean; data?: DashboardUncommittedRankingData; error?: string }>
@@ -1938,6 +2100,7 @@ interface CustomAPI {
         projectId?: string | null
         featureSlug?: string | null
         usedSkillsOnly?: boolean
+        source?: string | null
         userKeyword?: string | null
       }
     ) => Promise<{ success: boolean; data?: DashboardUncommittedDetailData; error?: string }>
@@ -1970,6 +2133,11 @@ interface CustomAPI {
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     feedback: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+    advancedFeatures: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | string[] | null }
@@ -2020,6 +2188,10 @@ interface CustomAPI {
       }
       error?: string
     }>
+    nonGitAdoptionReports: (
+      range: { from: string; to: string },
+      options?: DashboardNonGitAdoptionReportsOptions
+    ) => Promise<{ success: boolean; data?: DashboardNonGitAdoptionReportsData; error?: string }>
     commitAdoptionEvents: (
       commitSha: string
     ) => Promise<{ success: boolean; data?: DashboardCommitAdoptionEvents; error?: string }>

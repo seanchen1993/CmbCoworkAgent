@@ -1444,6 +1444,22 @@ const api = {
     ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
       return ipcRenderer.invoke("skills:restoreCloudEvolutionBackup", backupId)
     },
+    applyPluginSkillEvolution: (payload: {
+      skillPath: string
+      candidateId: string
+      skillName: string
+      buffer: ArrayBuffer
+      fileName: string
+      sourceVersion?: string | null
+      targetVersion?: string | null
+    }): Promise<{ success: boolean; backupId?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:applyPluginSkillEvolution", payload)
+    },
+    rollbackPluginSkillEvolution: (
+      backupId: string
+    ): Promise<{ success: boolean; skillName?: string; error?: string }> => {
+      return ipcRenderer.invoke("skills:rollbackPluginSkillEvolution", backupId)
+    },
     exportCloudEvolutionBackup: (
       backupId: string,
       targetDir: string
@@ -1899,6 +1915,7 @@ const api = {
         requestId: string
         summary: string
         toolCallCount: number
+        turnCount: number
         mode: "mode_a_rule" | "mode_b_llm"
         recommendationReason?: string
         context: unknown
@@ -1911,6 +1928,7 @@ const api = {
           requestId: string
           summary: string
           toolCallCount: number
+          turnCount: number
           mode: "mode_a_rule" | "mode_b_llm"
           recommendationReason?: string
           context: unknown
@@ -1964,8 +1982,12 @@ const api = {
         ipcRenderer.removeListener("skill:confirmRequest", handler)
       }
     },
-    confirmResponse: (requestId: string, approved: boolean): Promise<void> =>
-      ipcRenderer.invoke("skill:confirmResponse", { requestId, approved }) as Promise<void>,
+    confirmResponse: (requestId: string, approved: boolean, content?: string): Promise<void> =>
+      ipcRenderer.invoke("skill:confirmResponse", {
+        requestId,
+        approved,
+        content
+      }) as Promise<void>,
 
     // ── Streaming generation progress ──────────────────────────
     onGenerating: (
@@ -2556,7 +2578,11 @@ const api = {
     getThreshold: (): Promise<number> =>
       ipcRenderer.invoke("optimizer:getThreshold") as Promise<number>,
     setThreshold: (value: number): Promise<void> =>
-      ipcRenderer.invoke("optimizer:setThreshold", value) as Promise<void>
+      ipcRenderer.invoke("optimizer:setThreshold", value) as Promise<void>,
+    getTurnThreshold: (): Promise<number> =>
+      ipcRenderer.invoke("optimizer:getTurnThreshold") as Promise<number>,
+    setTurnThreshold: (value: number): Promise<void> =>
+      ipcRenderer.invoke("optimizer:setTurnThreshold", value) as Promise<void>
   },
   hooks: {
     list: (): Promise<HookConfig[]> => ipcRenderer.invoke("hooks:list"),
@@ -2664,8 +2690,31 @@ const api = {
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
     isAnalysisAgentAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isAnalysisAgentAllowed"),
+    isTraceEvolverReviewAdmin: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isTraceEvolverReviewAdmin"),
     isUncommittedAnalysisAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
+    isAwardsAdmin: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAwardsAdmin"),
+    awardsSkillContributions: (
+      range: { from: string; to: string },
+      skillNames: string[]
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:awardsSkillContributions", range, skillNames),
+    awardsUserApplications: (range: {
+      from: string
+      to: string
+    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:awardsUserApplications", range),
+    awardsTeamBenchmark: (range: {
+      from: string
+      to: string
+    }): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:awardsTeamBenchmark", range),
+    awardsTeamSkillCoverage: (
+      range: { from: string; to: string },
+      groups: Array<{ shi: string; skillNames: string[] }>
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:awardsTeamSkillCoverage", range, groups),
     esQuery: (input: {
       indexAlias: "event" | "trace"
       operation: "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -2697,6 +2746,12 @@ const api = {
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMode", range, granularity, opts),
+    projectModeCodeStats: (
+      range: { from: string; to: string },
+      opts: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null } | undefined,
+      source: string | null
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
     projectModeProjects: (
       range: { from: string; to: string },
       options?: {
@@ -2724,9 +2779,22 @@ const api = {
         viewMode?: "thread" | "trace"
         triggerScope?: "active" | "all"
         featureSlug?: string
+        nodeName?: string
+        nodeStatus?: string
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeTraces", projectId, range, options),
+    projectModeFeatureNodes: (
+      projectId: string,
+      featureSlug: string,
+      range: { from: string; to: string }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range),
+    pluginAggregate: (
+      adapterName: string,
+      range: { from: string; to: string }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:pluginAggregate", adapterName, range),
     projectModeFeatureCommits: (
       projectId: string,
       featureSlug: string,
@@ -2815,6 +2883,7 @@ const api = {
         projectId?: string | null
         featureSlug?: string | null
         usedSkillsOnly?: boolean
+        source?: string | null
         userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2828,6 +2897,7 @@ const api = {
         projectId?: string | null
         featureSlug?: string | null
         usedSkillsOnly?: boolean
+        source?: string | null
         userKeyword?: string | null
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
@@ -2883,6 +2953,12 @@ const api = {
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:feedback", range, granularity, opts),
+    advancedFeatures: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:advancedFeatures", range, granularity, opts),
     skillRecentTraces: (
       skill: string,
       range: { from: string; to: string },
@@ -2938,6 +3014,21 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:commitDetails", range, options),
+    nonGitAdoptionReports: (
+      range: { from: string; to: string },
+      options?: {
+        page?: number
+        pageSize?: number
+        upperOrgLv1?: string | null
+        userKeyword?: string | null
+        orgLv1List?: string[]
+        projectMode?: boolean
+        projectId?: string | null
+        featureSlug?: string | null
+        usedSkillsOnly?: boolean
+      }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:nonGitAdoptionReports", range, options),
     commitAdoptionEvents: (
       commitSha: string
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>

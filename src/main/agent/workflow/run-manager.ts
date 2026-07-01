@@ -1,17 +1,16 @@
 import { BrowserWindow, webContents, type WebContents } from "electron"
 import { mkdirSync, realpathSync, writeFileSync } from "fs"
-import { writeFile } from "fs/promises"
 import { join, resolve } from "path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import { runWorkflowEngine, toJsonSafe } from "./engine"
 import { isPathInside } from "./paths"
 import {
-  agentToolStreamPath,
+  clearAgentToolStream,
   createWorkflowRunStore,
   findUndeliveredTerminalRun,
   getWorkflowRunsDir,
-  isWorkflowRunDirDisposed,
   markWorkflowRunNotified,
+  persistAgentToolStream,
   persistRecoveredRun,
   pruneWorkflowRuns
 } from "./run-store"
@@ -114,6 +113,38 @@ export const WORKFLOW_AGENT_STREAM_CHANNEL_PREFIX = "agent:workflow-agent-stream
 const agentStreamInterest = new Map<string, Set<number>>() // interestKey -> webContents ids
 const trackedAgentStreamWebContents = new Set<number>()
 
+// Latest values frame per RUNNING agent (interestKey -> {snapshot,label}), kept so a viewer
+// who opens a long-running agent gets an IMMEDIATE catch-up frame instead of a blank panel
+// until the next super-step (values frames arrive only per super-step, so a multi-minute tool
+// call would otherwise show "waiting" the whole time). Just a ref swap per frame — the
+// cumulative snapshot is already alive in the run — and cleared when the agent finishes.
+const agentLatestSnapshot = new Map<string, { snapshot: unknown; label: string }>()
+
+/** Serialize ONE agent snapshot and send it to a single webContents (catch-up on open).
+ * Best-effort + display-only: never throws, never touches the run. */
+function sendAgentSnapshotTo(
+  wc: WebContents,
+  parentThreadId: string,
+  runId: string,
+  agentIndex: number,
+  label: string,
+  snapshot: unknown
+): void {
+  try {
+    if (wc.isDestroyed()) return
+    const snapshotMessages = serializeWorkflowAgentSnapshotMessages(snapshot)
+    if (!snapshotMessages) return
+    wc.send(`${WORKFLOW_AGENT_STREAM_CHANNEL_PREFIX}${parentThreadId}`, {
+      runId,
+      agentIndex,
+      label,
+      snapshotMessages
+    })
+  } catch {
+    /* catch-up send is best-effort */
+  }
+}
+
 function agentStreamInterestKey(threadId: string, runId: string, agentIndex: number): string {
   return `${threadId}|${runId}|${agentIndex}`
 }
@@ -160,6 +191,14 @@ export function setWorkflowAgentStreamInterest(
         trackedAgentStreamWebContents.delete(id)
         purgeAgentStreamInterestFor(id)
       })
+    }
+    // Catch-up: send the latest remembered frame immediately to THIS newly-interested
+    // webContents, so opening an agent mid-(long)-tool-call shows the flow-so-far at once
+    // instead of a blank "waiting" panel until the next super-step. The renderer attaches
+    // its stream listener synchronously right after this IPC call, so it is ready to receive.
+    const latest = agentLatestSnapshot.get(key)
+    if (latest) {
+      sendAgentSnapshotTo(webContents, threadId, runId, agentIndex, latest.label, latest.snapshot)
     }
   } else {
     const ids = agentStreamInterest.get(key)
@@ -209,12 +248,18 @@ function emitWorkflowAgentSnapshot(
   label: string,
   snapshot: unknown
 ): void {
-  // Gate: do NOTHING (no serialize, no clone, no send) unless a renderer is actively
-  // viewing THIS agent. Just a Map.has — near-zero cost for everyone else.
   const interestKey = agentStreamInterestKey(parentThreadId, runId, agentIndex)
+  // Remember the latest frame for catch-up on a LATER open (see setWorkflowAgentStreamInterest),
+  // even when nobody is watching yet — a ref swap, no serialize/clone. Cleared on finish.
+  agentLatestSnapshot.set(interestKey, { snapshot, label })
+  // Gate: do NOTHING further (no serialize, no clone, no send) unless a renderer is actively
+  // viewing THIS agent. Just a Map.has — near-zero cost for everyone else.
   if (!agentStreamInterest.has(interestKey)) return
   try {
-    coalesceAgentSnapshotEmit(`${runId}:${agentIndex}`, () => {
+    // Coalesce key matches the interest key's scoping (parentThreadId|runId|agentIndex): runId is
+    // only 48-bit random, so without the thread the throttle slots of two threads' runs that collide
+    // on runId + agentIndex could overwrite each other. Near-zero, but keep it consistent.
+    coalesceAgentSnapshotEmit(`${parentThreadId}:${runId}:${agentIndex}`, () => {
       try {
         // Re-read at flush time (a window may have closed during the coalesce window) and
         // send ONLY to the webContents that registered interest for THIS agent — never a
@@ -240,38 +285,6 @@ function emitWorkflowAgentSnapshot(
     })
   } catch {
     /* the tap must never throw into the run */
-  }
-}
-
-/** Write a FINISHED subagent's complete tool flow to its bounded per-agent sidecar so it
- * can be opened on demand afterwards (even an agent you never watched live, or after the
- * run ended). Display-only + best-effort: it NEVER throws into the run and NEVER touches
- * run.json/journal/checkpoint. Skips when the agent produced no snapshot (e.g. a cached
- * or instant-error agent) — the panel then shows a neutral note. */
-function persistAgentToolStream(
-  workspacePath: string,
-  threadId: string,
-  runId: string,
-  agentIndex: number,
-  snapshot: unknown
-): void {
-  try {
-    // Honor the thread-delete disposal guard: if the thread was deleted, a late sidecar
-    // write must NOT touch its removed run directory.
-    if (isWorkflowRunDirDisposed(workspacePath, threadId)) return
-    const snapshotMessages = serializeWorkflowAgentSnapshotMessages(snapshot)
-    if (!snapshotMessages || snapshotMessages.length === 0) return
-    const path = agentToolStreamPath(workspacePath, threadId, runId, agentIndex)
-    const payload = JSON.stringify({ runId, agentIndex, snapshotMessages })
-    // Fire-and-forget async write; never blocks the event loop or the run's settle. We do
-    // NOT mkdir the run directory: an active run already created it (run.json lives there),
-    // so a late write after the thread was deleted can't recreate an orphan directory —
-    // writeFile simply ENOENTs and is swallowed. Best-effort, display-only.
-    void writeFile(path, payload).catch(() => {
-      /* sidecar persistence is best-effort and display-only */
-    })
-  } catch {
-    /* serialization is best-effort and display-only */
   }
 }
 
@@ -388,6 +401,11 @@ class WorkflowRunManager {
     // Fresh launch (incl. a resume reusing this runId) → reset its re-notify
     // budget, so a prior run's exhausted attempts don't pre-throttle this one.
     this.renotifyAttempts.delete(request.runId)
+    // Drop any stale flush-failed terminal snapshot for this runId: a fresh run REUSES the id, so the
+    // old in-memory terminal state is superseded. Without this, get-run/hydrate (which prefer
+    // getFlushFailedRun) would keep showing the OLD terminal run instead of the NEW active one — the
+    // disk re-persist may still be failing, so it isn't cleared on the success/ack paths.
+    this.flushFailedRuns.delete(request.runId)
 
     const now = new Date().toISOString()
     const initial: PersistedWorkflowRun = {
@@ -463,6 +481,19 @@ class WorkflowRunManager {
             // viewed (gated per-agent), and persist the FINAL flow once it settles so it
             // can be opened on demand later — even if you never watched it live.
             let latestSnapshot: unknown
+            // resume REUSES the runId, so clear any stale sidecar from a PRIOR run at this
+            // <runId>.<callHash>_c<callIndex> path. FIRE-AND-FORGET (never awaited): display I/O must never
+            // block the agent. Correctness comes from ORDERING, not waiting — run-store serializes
+            // every sidecar op on a per-path chain as write(old) → clear → write(new), so this clear
+            // can't delete this run's own finish-write and a prior write's late rename can't
+            // resurrect a cleared file, all WITHOUT any awaited I/O on the run's path. A hung write
+            // stalls only that chain, not the run. Cached agents skip this runner (sidecar kept).
+            void clearAgentToolStream(
+              request.workspacePath,
+              request.threadId,
+              request.runId,
+              subRequest.toolStreamKey
+            )
             return runWorkflowSubagent(request.subagentDeps, {
               prompt: subRequest.prompt,
               schema: subRequest.schema,
@@ -484,15 +515,20 @@ class WorkflowRunManager {
                   snapshot
                 )
               }
-            }).finally(() =>
+            }).finally(() => {
               persistAgentToolStream(
                 request.workspacePath,
                 request.threadId,
                 request.runId,
-                subRequest.agentIndex,
+                subRequest.toolStreamKey,
                 latestSnapshot
               )
-            )
+              // Drop the catch-up snapshot now the agent is done — the sidecar is authoritative
+              // from here, and the map must not retain one cumulative snapshot per finished agent.
+              agentLatestSnapshot.delete(
+                agentStreamInterestKey(request.threadId, request.runId, subRequest.agentIndex)
+              )
+            })
           },
           emit: (event) =>
             broadcast(request.threadId, { type: "workflow_progress", workflowEvent: event }),

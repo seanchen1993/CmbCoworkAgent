@@ -90,11 +90,17 @@ export function buildWorkflowNotificationMessage(
   if (run.status === "completed") {
     const resultJson = JSON.stringify(toJsonSafe(run.result) ?? null, null, 2)
     const capped = escapeAndCap(resultJson, WORKFLOW_TOOL_RESULT_MAX_CHARS)
-    if (resultJson.length > WORKFLOW_TOOL_RESULT_MAX_CHARS) {
+    // Decide "truncated" on the POST-ESCAPE length: escapeAndCap escapes FIRST (which GROWS `<`, `&`,
+    // `"`, …) and only then caps, so a result under the cap RAW but over it ESCAPED is silently cut.
+    // Checking resultJson.length (pre-escape) would miss that and falsely tell the model it got the
+    // FULL result — it then works off half-cut JSON. escapeXml only grows, so the full escaped length
+    // also covers the raw>cap case.
+    const escapedResultLen = escapeXml(resultJson).length
+    if (escapedResultLen > WORKFLOW_TOOL_RESULT_MAX_CHARS) {
       // Truncated: tell the model HOW MUCH was cut and WHERE the full result lives, so
       // it reads the complete value instead of working off half-cut JSON (mirrors
       // Claude Code's "(truncated N chars, full result in <path>)").
-      const dropped = resultJson.length - WORKFLOW_TOOL_RESULT_MAX_CHARS
+      const dropped = escapedResultLen - WORKFLOW_TOOL_RESULT_MAX_CHARS
       const where = escapedOutputFile ? `, full result in ${escapedOutputFile}` : ""
       lines.push(`<result>${capped} ... (truncated ${dropped} chars${where})</result>`)
     } else {

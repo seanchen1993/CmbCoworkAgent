@@ -15,6 +15,7 @@ import {
 } from "./adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "./code-adoption-push-updater"
 import { trackEvent } from "./event-reporter"
+import { getRemoteRefsSignature } from "./git-refs"
 
 const execFileAsync = promisify(execFile)
 
@@ -139,6 +140,13 @@ const repoCommitCursor = new Map<string, { headSha: string; reflogMtimeMs: numbe
 // ({ refName → sha }). Used to detect commits newly arrived on the remote even
 // when the pre-push hook never fired or the in-app push marking failed.
 const repoPushCursor = new Map<string, Record<string, string>>()
+// Push reconciler fs gate: repoKey → content hash of the on-disk remote-tracking
+// ref SHAs. Unchanged between sweeps ⇒ no fetch/push happened, so the
+// `git for-each-ref` probe is skipped (0 git spawns when idle).
+const repoRemoteRefsSig = new Map<string, string>()
+// Normalized workspace path → git root from `rev-parse --show-toplevel`. Stable
+// for an app run, so a registered repo spawns git once then reuses it every sweep.
+const gitRootCache = new Map<string, string>()
 let registeredSyncTimer: ReturnType<typeof setInterval> | null = null
 let registeredRepoWriteQueue: Promise<void> = Promise.resolve()
 
@@ -351,6 +359,32 @@ async function resolveGitContext(workspacePath: string): Promise<GitContext | nu
       hookPaths[hook] = await resolveHookPath(gitRoot, hook)
     }
     return { gitRoot, hookPaths }
+  } catch {
+    return null
+  }
+}
+
+// Lightweight git-root resolution for the hot sync path. Unlike resolveGitContext
+// it skips per-hook path resolution (syncGitHookEvents only needs the git root;
+// resolving the 3 hook paths costs ~6 extra `git` spawns per sweep). The result
+// is cached per input path, so a registered repo spawns `rev-parse` once per app
+// run and 0 git on every subsequent 2-minute sweep.
+//
+// We deliberately keep using `rev-parse --show-toplevel` (not an fs heuristic):
+// the resolved root must match byte-for-byte what the commit/push hook helper
+// computes, otherwise repoKey() would split and the sync would read the wrong
+// events directory (ready snapshots / push-intents silently unconsumed).
+async function resolveGitRoot(workspacePath: string): Promise<string | null> {
+  const workspace = workspacePath.trim()
+  if (!workspace) return null
+  const cacheKey = normalizePathForKey(workspace)
+  const cached = gitRootCache.get(cacheKey)
+  if (cached) return cached
+  try {
+    const gitRoot = await runGit(workspace, ["rev-parse", "--show-toplevel"])
+    if (!gitRoot) return null
+    gitRootCache.set(cacheKey, gitRoot)
+    return gitRoot
   } catch {
     return null
   }
@@ -1714,7 +1748,16 @@ function remoteTipsEqual(a: Record<string, string>, b: Record<string, string>): 
 
 async function reconcilePushesForRepo(gitRoot: string): Promise<void> {
   const key = normalizePathForKey(gitRoot)
+
+  // Cheap fs gate: when no remote-tracking ref file changed on disk since the
+  // last sweep, nothing was fetched/pushed — skip the `for-each-ref` git spawn.
+  // A null signature (worktree/submodule) means we can't gate cheaply, so fall
+  // through to the normal git probe.
+  const refsSig = await getRemoteRefsSignature(gitRoot, "origin")
+  if (refsSig !== null && repoRemoteRefsSig.get(key) === refsSig) return
+
   const currentTips = await getRemoteTrackingTips(gitRoot, "origin")
+  if (refsSig !== null) repoRemoteRefsSig.set(key, refsSig)
   // No remote-tracking refs yet (never fetched/pushed) → nothing could be pushed.
   if (Object.keys(currentTips).length === 0) return
 
@@ -1773,11 +1816,11 @@ async function reconcilePushesForRepo(gitRoot: string): Promise<void> {
 }
 
 export async function syncGitHookEvents(workspacePath: string): Promise<GitHookSyncResult> {
-  const context = await resolveGitContext(workspacePath)
-  if (!context) return "unavailable"
+  const gitRoot = await resolveGitRoot(workspacePath)
+  if (!gitRoot) return "unavailable"
 
-  const repoDir = getRepoEventsDir(context.gitRoot)
-  const key = normalizePathForKey(context.gitRoot)
+  const repoDir = getRepoEventsDir(gitRoot)
+  const key = normalizePathForKey(gitRoot)
   if (syncInFlight.has(key)) {
     syncPending.add(key)
     return "busy"
@@ -1809,7 +1852,7 @@ export async function syncGitHookEvents(workspacePath: string): Promise<GitHookS
     // pre-commit/post-commit hooks never fired (e.g. IntelliJ IDEA 2026). This
     // runs even when no events dir exists yet — that is exactly the gap it fills.
     try {
-      await reconcileCommitsForRepo(context.gitRoot)
+      await reconcileCommitsForRepo(gitRoot)
     } catch (e) {
       console.warn("[GitHook] failed to reconcile commits:", e)
     }
@@ -1819,7 +1862,7 @@ export async function syncGitHookEvents(workspacePath: string): Promise<GitHookS
     // pushed — covers external pushes and in-app pushes whose background marking
     // failed (no-upstream snapshot, ES indexing race, app closed mid-retry).
     try {
-      await reconcilePushesForRepo(context.gitRoot)
+      await reconcilePushesForRepo(gitRoot)
     } catch (e) {
       console.warn("[GitHook] failed to reconcile pushes:", e)
     }
@@ -1828,7 +1871,7 @@ export async function syncGitHookEvents(workspacePath: string): Promise<GitHookS
     syncInFlight.delete(key)
     if (syncPending.delete(key)) {
       const timer = setTimeout(() => {
-        void syncGitHookEvents(context.gitRoot).catch((e) => {
+        void syncGitHookEvents(gitRoot).catch((e) => {
           console.warn("[GitHook] pending sync failed:", e)
         })
       }, 100)

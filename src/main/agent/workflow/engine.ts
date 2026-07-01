@@ -174,9 +174,12 @@ export async function runWorkflowEngine(
   // and for a file-editing subagent that re-applies non-idempotent edits onto an
   // already-modified workspace. Instead the disk journal is kept: cache hits do
   // NOT re-append (see the replay branch) and only LIVE calls append fresh, so the
-  // file grows monotonically with no DUPLICATE entries. A CHANGED script or changed
-  // args already drops the journal upstream (tool.ts → effectiveResumeJournal=
-  // undefined). It is NOT strictly "no stale tail": a same-script run whose control
+  // file grows monotonically. appendJournal REPLACES a slot only for the SAME call
+  // (same index AND hash) re-running; a DIFFERENT hash landing on an existing index
+  // (a concurrent reorder) is APPENDED, never overwritten — overwriting would drop
+  // the other call's cached result and force a re-run + re-applied edits. A CHANGED
+  // script or changed args already drops the journal upstream (tool.ts →
+  // effectiveResumeJournal=undefined). It is NOT strictly "no stale tail": a same-script run whose control
   // flow depends on workspace state (e.g. a file it reads changed) can take a
   // different branch and leave a prior entry whose hash the current run never looks
   // up — that entry is harmless (never consumed), it just lingers. Correctness
@@ -738,6 +741,11 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       })
     )
 
+    // Composite tool-stream sidecar key for a LIVE run of this call: callHash (content identity)
+    // + this run's callIndex (uniqueness). A cached replay below substitutes the journal's
+    // ORIGINAL callIndex instead, so it reads the sidecar that original run wrote.
+    const liveToolStreamKey = `${callHash}_c${callIndex}`
+
     // Content-based replay: consume one journal entry whose hash matches this
     // call's identity, regardless of call index. Index-independence is what makes
     // a concurrent pipeline replay (its stage>=2 call order differs run-to-run).
@@ -770,7 +778,13 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         status: "cached",
         outputTokens: replayedTokens,
         promptPreview,
-        resultPreview
+        resultPreview,
+        // A cached agent reuses the ORIGINAL run's result — and its ORIGINAL sidecar. The journal
+        // entry's `index` is the callIndex the original run wrote that sidecar under, so build the
+        // key from the SAME callHash + that original callIndex (NOT this run's callIndex) to read
+        // back that original flow — and so a different live agent on this run's callIndex can't
+        // collide with it (different callHash).
+        toolStreamKey: `${callHash}_c${cached.index}`
       })
       // A replay is instantaneous — one agent_end event keeps a large resume
       // from flooding the renderer with start/end pairs.
@@ -802,7 +816,8 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         phase: assignedPhase,
         status: "running",
         outputTokens: 0,
-        promptPreview
+        promptPreview,
+        toolStreamKey: liveToolStreamKey
       })
       try {
         throwIfAborted()
@@ -811,6 +826,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           schema: request.options.schema,
           model: resolvedModel,
           agentIndex,
+          toolStreamKey: liveToolStreamKey,
           label,
           phase: assignedPhase,
           signal,
@@ -1341,6 +1357,7 @@ function recordAgentState(
     outputTokens: number
     promptPreview?: string
     resultPreview?: string
+    toolStreamKey?: string
   }
 ): void {
   // Delegates to the store's O(1) by-index upsert (was an O(n) array scan per

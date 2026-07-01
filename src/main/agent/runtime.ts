@@ -17,8 +17,8 @@ import {
   getEnabledSkillMiddlewareSources,
   getCustomModelConfigs,
   getUserInfo,
-  isMemoryEnabled,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
+  getSkillEvolutionTurnThreshold as getStoredSkillEvolutionTurnThreshold,
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
@@ -101,7 +101,8 @@ import {
   getYoloMode,
   getEnabledHooks,
   isCodeExecEnabled,
-  getLspConfig
+  getLspConfig,
+  isThreadMemoryEnabled
 } from "../storage"
 import { runHooks, type HookContext } from "../hooks/runner"
 import type { HookEvent } from "../hooks/types"
@@ -752,6 +753,9 @@ export function createScopedMcpCapabilityService(
     systemId?: string
     pluginWorkspace?: string
     featureId?: string
+    harnessProjectId?: string
+    harnessAdapterName?: string
+    harnessAdapterVersion?: string
     projectCode?: string
     projectDir?: string
   }
@@ -949,6 +953,9 @@ export function createScopedMcpCapabilityService(
         systemId: baseContext.systemId,
         pluginWorkspace: baseContext.pluginWorkspace,
         featureId: baseContext.featureId,
+        harnessProjectId: baseContext.harnessProjectId,
+        harnessAdapterName: baseContext.harnessAdapterName,
+        harnessAdapterVersion: baseContext.harnessAdapterVersion,
         projectCode: baseContext.projectCode,
         projectDir: baseContext.projectDir,
         pluginId,
@@ -2175,7 +2182,7 @@ ${shellGuidance}
         : ""
 
   const memorySection =
-    options.includeMemory !== false && isMemoryEnabled() ? MEMORY_SYSTEM_PROMPT : ""
+    options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
   return (
     workingDirSection +
     backgroundExecSection +
@@ -2301,6 +2308,11 @@ function evictIdleCheckpointers(): void {
 /** Returns the current skill-evolution threshold from persistent storage. */
 export function getSkillEvolutionThreshold(): number {
   return getStoredSkillEvolutionThreshold()
+}
+
+/** Returns the current skill-evolution conversation-turn threshold from persistent storage. */
+export function getSkillEvolutionTurnThreshold(): number {
+  return getStoredSkillEvolutionTurnThreshold()
 }
 
 /** Per-thread tool-call counters (in-memory, reset on app restart) */
@@ -2955,6 +2967,12 @@ export interface CreateAgentRuntimeOptions {
   pluginWorkspace?: string
   /** Harness feature identifier exposed to child processes as FEATURE_ID. */
   featureId?: string
+  /** Harness project stable id exposed to child processes as HARNESS_PROJECT_ID. */
+  harnessProjectId?: string
+  /** Bound adapter name exposed to child processes as HARNESS_ADAPTER_NAME. */
+  harnessAdapterName?: string
+  /** Bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
+  harnessAdapterVersion?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to child processes as PROJECT_DIR. */
@@ -2984,6 +3002,9 @@ export interface CreateAgentRuntimeOptions {
    * mirrors Claude Code, whose Explore/Plan omitClaudeMd and whose built-in agents
    * inject no memory (it's per-agent opt-in via frontmatter, which they don't set). */
   disableMemoryInjection?: boolean
+  /** Effective per-session memory switch. Child runtimes inherit this because
+   * worker thread ids may not have persisted thread metadata. */
+  memoryEnabled?: boolean
   /** Turn-scoped internal coordinator context injected only into the main coordinator prompt. */
   coordinatorTurnPrompt?: string
   /** Explicit /skill selection parsed from the current coordinator turn, if any. */
@@ -3079,6 +3100,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginName,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
     projectCode,
     projectDir,
     retryHooks,
@@ -3092,6 +3116,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onAgentsPromptLoadStatus,
     onFinalSystemPrompt,
     disableMemoryInjection = false,
+    memoryEnabled: inheritedMemoryEnabled,
     agentMode = "normal",
     disableSubagents = false,
     onHookResult,
@@ -3108,11 +3133,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
-  const runtimePolicy = createRuntimePromptToolPolicy({
-    featureId,
-    agentMode,
-    memoryEnabled: isMemoryEnabled()
-  })
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -3123,6 +3143,25 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       "Workspace path is required. Please select a workspace folder before running the agent."
     )
   }
+
+  const runtimeThreadMetadata: Record<string, unknown> = (() => {
+    try {
+      const threadRow = getThread(threadId)
+      return threadRow?.metadata
+        ? (JSON.parse(threadRow.metadata) as Record<string, unknown>)
+        : {}
+    } catch {
+      console.warn("[Runtime] Failed to parse thread metadata for memory settings")
+      return {}
+    }
+  })()
+  const memoryEnabledForThread =
+    inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
+  const runtimePolicy = createRuntimePromptToolPolicy({
+    featureId,
+    agentMode,
+    memoryEnabled: memoryEnabledForThread
+  })
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -3289,6 +3328,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginName,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
     projectCode,
     projectDir,
     onFileMutation,
@@ -3416,6 +3458,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         systemId,
         pluginWorkspace,
         featureId,
+        harnessProjectId,
+        harnessAdapterName,
+        harnessAdapterVersion,
         projectCode,
         projectDir,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
@@ -3640,7 +3685,7 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] All skills sources count:", allSkillsSources.length)
   console.log("[Runtime] Skills sources:", skillsSources, "Plugin skills:", pluginSkillsSources)
 
-  // Initialize memory system (gated by user setting)
+  // Initialize memory system (gated by global setting + current thread opt-in)
   let memoryTools: ReturnType<typeof createMemorySearchTool | typeof createMemoryGetTool>[] = []
   let memorySources: string[] | undefined
   if (runtimePolicy.includeMemory) {
@@ -3661,7 +3706,7 @@ The workspace root is: ${workspacePath}`
   } else if (runtimePolicy.isProjectMode) {
     console.log("[Runtime] Memory disabled for project mode feature:", featureId)
   } else {
-    console.log("[Runtime] Memory disabled by user setting")
+    console.log("[Runtime] Memory disabled for this session")
   }
 
   const capabilityService = createScopedMcpCapabilityService(
@@ -3676,6 +3721,9 @@ The workspace root is: ${workspacePath}`
       systemId,
       pluginWorkspace,
       featureId,
+      harnessProjectId,
+      harnessAdapterName,
+      harnessAdapterVersion,
       projectCode,
       projectDir,
       turnId: hookTurnId
@@ -3892,6 +3940,7 @@ The workspace root is: ${workspacePath}`
               // claudeMd in CC. memory_search/memory_get tools stay available either way.
               enableAgentsPrompt: !restrictedRole,
               disableMemoryInjection: restrictedRole,
+              memoryEnabled: memoryEnabledForThread,
               agentMode: "normal",
               disableSubagents: true,
               // agentType-resolved tool policy. Cuts the disallowed tools and
@@ -4013,6 +4062,9 @@ The workspace root is: ${workspacePath}`
     systemId,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
     projectCode,
     projectDir,
     skipToolNames: toolHookExclusions
@@ -4194,6 +4246,9 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       pluginName,
       pluginWorkspace,
       featureId,
+      harnessProjectId,
+      harnessAdapterName,
+      harnessAdapterVersion,
       projectCode,
       projectDir,
       pluginOutputDir,
@@ -4331,6 +4386,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             retryHooks,
             maxRetryAttempts,
             hookScope: workerHookScope,
+            memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult
           })
@@ -4400,6 +4456,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             retryHooks,
             maxRetryAttempts,
             hookScope: workerHookScope,
+            memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult
           })
@@ -4450,6 +4507,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             retryHooks,
             maxRetryAttempts,
             hookScope: workerHookScope,
+            memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult
           })

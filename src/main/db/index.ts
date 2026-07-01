@@ -2,7 +2,11 @@ import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
 import { readFileSync, existsSync, mkdirSync } from "fs"
 import { writeFile, rename } from "fs/promises"
 import { dirname } from "path"
-import { getDbPath } from "../storage"
+import {
+  getDbPath,
+  getMemorySessionOptInMigrationState,
+  markMemorySessionOptInMigrated
+} from "../storage"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import {
   GOAL_UI_EVENT_LIMIT,
@@ -130,6 +134,53 @@ export function getDb(): SqlJsDatabase {
     throw new Error("Database not initialized. Call initializeDatabase() first.")
   }
   return db
+}
+
+function parseThreadMetadata(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string" || value.trim() === "") return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function hasAnyThread(database: SqlJsDatabase): boolean {
+  const rows = database.exec("SELECT 1 FROM threads LIMIT 1")
+  return (rows[0]?.values.length ?? 0) > 0
+}
+
+function migrateLegacyMemorySessionOptIn(database: SqlJsDatabase): void {
+  const migration = getMemorySessionOptInMigrationState(hasAnyThread(database))
+  if (migration.migrated) return
+
+  let updatedThreads = 0
+  if (migration.legacyMemoryEnabled) {
+    const rows = database.exec("SELECT thread_id, metadata FROM threads")
+    for (const row of rows[0]?.values ?? []) {
+      const threadId = row[0]
+      if (typeof threadId !== "string") continue
+      const metadata = parseThreadMetadata(row[1])
+      if (metadata.memoryEnabled === true) continue
+      metadata.memoryEnabled = true
+      database.run("UPDATE threads SET metadata = ? WHERE thread_id = ?", [
+        JSON.stringify(metadata),
+        threadId
+      ])
+      updatedThreads += 1
+    }
+  }
+
+  markMemorySessionOptInMigrated({
+    enabled: migration.legacyMemoryEnabled,
+    dreamEnabled: migration.legacyDreamEnabled
+  })
+  if (updatedThreads > 0) {
+    console.log(`[DB] Migrated ${updatedThreads} legacy thread(s) to explicit memory opt-in`)
+  }
 }
 
 export async function initializeDatabase(): Promise<SqlJsDatabase> {
@@ -264,6 +315,7 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
     `CREATE INDEX IF NOT EXISTS idx_thread_goal_events_thread_order ON thread_goal_events(thread_id, created_at, event_id)`
   )
 
+  migrateLegacyMemorySessionOptIn(db)
   saveToDisk()
 
   console.log("Database initialized successfully")
@@ -494,7 +546,10 @@ export function getThreadGoalEvents(
   return events
 }
 
-function readThreadGoalEvents(sql: string, params: Array<string | number | null>): ThreadGoalEventRow[] {
+function readThreadGoalEvents(
+  sql: string,
+  params: Array<string | number | null>
+): ThreadGoalEventRow[] {
   const database = getDb()
   const stmt = database.prepare(sql)
   stmt.bind(params)

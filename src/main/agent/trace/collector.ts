@@ -211,7 +211,9 @@ export class TraceCollector {
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
   private readonly triggerSource: TraceTriggerSource
-  private readonly harnessFeature: { projectId: string; slug: string } | undefined
+  private readonly harnessFeature:
+    | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
+    | undefined
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
@@ -235,7 +237,7 @@ export class TraceCollector {
     modelId: string,
     options: {
       triggerSource?: TraceTriggerSource
-      harnessFeature?: { projectId: string; slug: string }
+      harnessFeature?: { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
     } = {}
   ) {
     this.traceId = uuid()
@@ -281,6 +283,8 @@ export class TraceCollector {
           ? {
               harnessProjectId: this.harnessFeature.projectId,
               harnessFeatureSlug: this.harnessFeature.slug,
+              harnessNodeName: this.harnessFeature.nodeName,
+              harnessNodeStatus: this.harnessFeature.nodeStatus,
               harnessAdapterName: harnessAdapter.name,
               harnessAdapterVersion: harnessAdapter.version
             }
@@ -674,6 +678,12 @@ export class TraceCollector {
         ? {
             harnessProjectId: this.harnessFeature.projectId,
             harnessFeatureSlug: this.harnessFeature.slug,
+            ...(this.harnessFeature.nodeName
+              ? { harnessNodeName: this.harnessFeature.nodeName }
+              : {}),
+            ...(this.harnessFeature.nodeStatus
+              ? { harnessNodeStatus: this.harnessFeature.nodeStatus }
+              : {}),
             ...harnessAdapterFields
           }
         : {}),
