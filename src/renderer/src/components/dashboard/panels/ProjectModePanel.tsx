@@ -419,6 +419,8 @@ function formatProjectCreatedAt(value?: string): string {
   )}:${pad(date.getMinutes())}`
 }
 
+const PROJECT_LIST_PROJECT_COLUMN_CLASS = "max-w-[320px] overflow-hidden"
+
 function formatProjectCreatorDepartment(project: DashboardProjectModeProject): string {
   if (project.creatorUpperOrgLv1 && project.creatorUpperOrgLv0) {
     return `${project.creatorUpperOrgLv1}/${project.creatorUpperOrgLv0}`
@@ -1015,19 +1017,27 @@ function ProjectRow({
         className="cursor-pointer border-b border-border/50 transition-colors hover:bg-muted/30"
         onClick={onToggle}
       >
-        <td className="px-3 py-2">
-          <div className="flex items-center gap-1.5">
+        <td className={cn(PROJECT_LIST_PROJECT_COLUMN_CLASS, "px-3 py-2")}>
+          <div className="flex max-w-full items-center gap-1.5">
             {expanded ? (
               <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
             ) : (
               <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
             )}
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="truncate font-medium text-foreground">{project.name}</span>
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span
+                  className="block min-w-0 truncate font-medium text-foreground"
+                  title={project.name}
+                >
+                  {project.name}
+                </span>
               </div>
               {project.systemName && (
-                <div className="truncate text-[10px] text-muted-foreground">
+                <div
+                  className="truncate text-[10px] text-muted-foreground"
+                  title={project.systemName}
+                >
                   {project.systemName}
                 </div>
               )}
@@ -1629,7 +1639,14 @@ function ProjectListSection({
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-border bg-muted/30 text-muted-foreground">
-              <th className="px-3 py-2 text-left font-medium">项目</th>
+              <th
+                className={cn(
+                  PROJECT_LIST_PROJECT_COLUMN_CLASS,
+                  "px-3 py-2 text-left font-medium"
+                )}
+              >
+                项目
+              </th>
               <th className="px-3 py-2 text-left font-medium">插件</th>
               <th className="px-3 py-2 text-left font-medium">项目状态</th>
               <SortableTh
@@ -1691,7 +1708,7 @@ function ProjectListSection({
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={11} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={12} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -1701,7 +1718,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={11} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={12} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -1709,12 +1726,12 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={11} className="h-[49px]" />
+                  <td colSpan={12} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={11} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={12} className="px-3 py-10 text-center text-muted-foreground">
                   {emptyText}
                 </td>
               </tr>
