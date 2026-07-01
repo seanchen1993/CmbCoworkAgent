@@ -97,6 +97,11 @@ const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefi
 const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
   import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
 
+type MarketExtraJson = {
+  skills?: string[]
+  grayUserIds?: string[]
+}
+
 function sanitizeSkillNames(skills: string[]): string[] {
   return Array.from(
     new Set(
@@ -125,22 +130,74 @@ function normalizePluginSkillsForForm(skills: string[]): string[] {
   return normalized
 }
 
-function parsePluginSkillsFromExtraJson(extraJson?: string): string[] {
-  if (!extraJson?.trim()) return []
+function sanitizeUserIds(userIds: string[]): string[] {
+  return Array.from(
+    new Set(
+      userIds
+        .map((userId) => userId.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function normalizeUserIdsForForm(userIds: string[]): string[] {
+  const seen = new Set<string>()
+  const normalized: string[] = []
+
+  for (const userId of userIds) {
+    const trimmed = userId.trim()
+    if (!trimmed) {
+      normalized.push("")
+      continue
+    }
+    if (seen.has(trimmed)) continue
+    seen.add(trimmed)
+    normalized.push(trimmed)
+  }
+
+  return normalized
+}
+
+function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
+  if (!extraJson?.trim()) return {}
   try {
-    const parsed = JSON.parse(extraJson) as { skills?: unknown }
-    return Array.isArray(parsed?.skills)
-      ? sanitizeSkillNames(parsed.skills.filter((item): item is string => typeof item === "string"))
-      : []
+    const parsed = JSON.parse(extraJson) as MarketExtraJson
+    return parsed && typeof parsed === "object" ? parsed : {}
   } catch {
-    return []
+    return {}
   }
 }
 
-function buildExtraJsonForPlugin(skills: string[]): string | undefined {
-  const normalized = sanitizeSkillNames(skills)
-  if (normalized.length === 0) return undefined
-  return JSON.stringify({ skills: normalized })
+function parsePluginSkillsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  return Array.isArray(parsed.skills)
+    ? sanitizeSkillNames(parsed.skills.filter((item): item is string => typeof item === "string"))
+    : []
+}
+
+function parseGrayUserIdsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  return Array.isArray(parsed.grayUserIds)
+    ? sanitizeUserIds(
+        parsed.grayUserIds.filter((item): item is string => typeof item === "string")
+      )
+    : []
+}
+
+function buildExtraJson(skills: string[], userIds: string[]): string | undefined {
+  const normalizedSkills = sanitizeSkillNames(skills)
+  const normalizedUserIds = sanitizeUserIds(userIds)
+  const payload: MarketExtraJson = {}
+
+  if (normalizedSkills.length > 0) {
+    payload.skills = normalizedSkills
+  }
+  if (normalizedUserIds.length > 0) {
+    payload.grayUserIds = normalizedUserIds
+  }
+
+  if (Object.keys(payload).length === 0) return undefined
+  return JSON.stringify(payload)
 }
 
 export function UniversalUploadDialog({
@@ -170,6 +227,7 @@ export function UniversalUploadDialog({
   const [chineseName, setChineseName] = useState("")
   const [userId, setUserId] = useState<string | undefined>(undefined)
   const [pluginSkills, setPluginSkills] = useState<string[]>([])
+  const [grayUserIds, setGrayUserIds] = useState<string[]>([])
   const [nameFromFile, setNameFromFile] = useState(false) // name 是否来自文件解析（锁定）
   const [versionFromSkillFile, setVersionFromSkillFile] = useState(false)
   const [versionFoundInSkillFrontmatter, setVersionFoundInSkillFrontmatter] = useState(false)
@@ -207,6 +265,7 @@ export function UniversalUploadDialog({
       setPluginSkills(
         resourceType === "plugin" ? parsePluginSkillsFromExtraJson(existingItem.extra_json) : []
       )
+      setGrayUserIds(parseGrayUserIdsFromExtraJson(existingItem.extra_json))
       setNameFromFile(false)
       setVersionFromSkillFile(false)
       setVersionFoundInSkillFrontmatter(false)
@@ -219,6 +278,7 @@ export function UniversalUploadDialog({
       setGuidance("")
       setChineseName("")
       setPluginSkills([])
+      setGrayUserIds([])
       setNameFromFile(false)
     }
     if (open) {
@@ -388,9 +448,21 @@ export function UniversalUploadDialog({
       return
     }
 
+    const normalizedGrayUserIds = normalizeUserIdsForForm(grayUserIds)
     const normalizedPluginSkills = isPluginResource
       ? normalizePluginSkillsForForm(pluginSkills)
       : pluginSkills
+
+    const grayUserIdsChanged =
+      normalizedGrayUserIds.length !== grayUserIds.length ||
+      normalizedGrayUserIds.some((userId, index) => userId !== grayUserIds[index])
+    if (grayUserIdsChanged) {
+      setGrayUserIds(normalizedGrayUserIds)
+    }
+    if (normalizedGrayUserIds.some((userId) => !userId.trim())) {
+      setError("请完整填写灰度用户 User ID，或删除空白项")
+      return
+    }
 
     if (isPluginResource) {
       const pluginSkillsChanged =
@@ -413,8 +485,10 @@ export function UniversalUploadDialog({
     setUploading(true)
 
     try {
-      const extraJson =
-        resourceType === "plugin" ? buildExtraJsonForPlugin(normalizedPluginSkills) : undefined
+      const extraJson = buildExtraJson(
+        resourceType === "plugin" ? normalizedPluginSkills : [],
+        normalizedGrayUserIds
+      )
       const uploadContext: GeneratedMarketFileBuildContext = {
         name: name.trim(),
         description: description.trim(),
@@ -460,6 +534,7 @@ export function UniversalUploadDialog({
         setChineseName("")
         setUserId(undefined)
         setPluginSkills([])
+        setGrayUserIds([])
       } else {
         setError(result.error || "Upload failed")
       }
@@ -503,6 +578,7 @@ export function UniversalUploadDialog({
         setGuidance("")
         setChineseName("")
         setPluginSkills([])
+        setGrayUserIds([])
         setError(null)
         setShowJsonTemplate(false)
         setNameFromFile(false)
@@ -572,6 +648,22 @@ export function UniversalUploadDialog({
     setPluginSkills((current) => normalizePluginSkillsForForm(current))
   }
 
+  const updateGrayUserId = (index: number, value: string) => {
+    setGrayUserIds((current) => current.map((userId, i) => (i === index ? value : userId)))
+  }
+
+  const addGrayUserId = () => {
+    setGrayUserIds((current) => [...current, ""])
+  }
+
+  const removeGrayUserId = (index: number) => {
+    setGrayUserIds((current) => current.filter((_, i) => i !== index))
+  }
+
+  const normalizeGrayUserIdsState = () => {
+    setGrayUserIds((current) => normalizeUserIdsForForm(current))
+  }
+
   const getSubmitDisabledReason = () => {
     if (uploading) return submittingLabel || (isUpdate ? "更新中..." : "上传中...")
     if (!isUpdate && !file && !generatedFile) return "请选择文件"
@@ -581,6 +673,9 @@ export function UniversalUploadDialog({
     if (!category.trim()) return "请选择场景"
     if (!version.trim()) return "请填写版本号"
     if (!guidance.trim()) return "请填写使用指引"
+    if (grayUserIds.some((userId) => !userId.trim())) {
+      return "请完整填写灰度用户 User ID，或删除空白项"
+    }
     if (isPluginResource && pluginSkills.length === 0) return "请至少填写一个 Skill"
     if (isPluginResource && pluginSkills.some((skill) => !skill.trim())) {
       return "请完整填写 Skills，或删除空白项"
@@ -940,6 +1035,56 @@ export function UniversalUploadDialog({
               rows={3}
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             />
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <label className="block text-sm font-medium">灰度用户 User IDs</label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={addGrayUserId}
+                disabled={uploading}
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                新增用户
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              选填。填写后仅这些灰度用户可在市场列表看到该资源；不填写则默认所有用户可见。
+            </p>
+            {grayUserIds.length === 0 ? (
+              <div className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+                暂无灰度用户，当前默认全部用户可见。
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {grayUserIds.map((userIdValue, index) => (
+                  <div key={`${index}-${userIdValue}`} className="flex items-center gap-2">
+                    <Input
+                      value={userIdValue}
+                      placeholder="输入 SAP ID"
+                      onChange={(e) => updateGrayUserId(index, e.target.value)}
+                      onBlur={normalizeGrayUserIdsState}
+                      disabled={uploading}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-destructive"
+                      onClick={() => removeGrayUserId(index)}
+                      disabled={uploading}
+                      aria-label="删除灰度用户"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {resourceType === "plugin" && (

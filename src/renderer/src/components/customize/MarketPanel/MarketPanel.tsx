@@ -258,6 +258,45 @@ interface UserInfoLite {
   pathName?: string
 }
 
+type MarketExtraJson = {
+  skills?: string[]
+  grayUserIds?: string[]
+}
+
+function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
+  if (!extraJson?.trim()) return {}
+  try {
+    const parsed = JSON.parse(extraJson) as MarketExtraJson
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  if (!Array.isArray(parsed.grayUserIds)) return []
+  return Array.from(
+    new Set(
+      parsed.grayUserIds
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function canCurrentUserViewMarketItem(
+  item: MarketItem,
+  currentUserSapId: string | null | undefined
+): boolean {
+  const grayUserIds = getGrayUserIdsFromExtraJson(item.extra_json)
+  if (grayUserIds.length === 0) return true
+  const normalizedSapId = String(currentUserSapId || "").trim()
+  if (!normalizedSapId) return false
+  return grayUserIds.some((userId) => normalizedSapId === userId || normalizedSapId.includes(userId))
+}
+
 type UploadFilterMode = "mine" | "installed" | "featured" | "certified"
 
 const uploadFilterOptions: Array<{ value: UploadFilterMode; label: string }> = [
@@ -769,6 +808,7 @@ export function MarketPanel(): React.JSX.Element {
   const [canViewSkillUserDetail, setCanViewSkillUserDetail] = useState(false)
   const [uploaderProfiles, setUploaderProfiles] = useState<Record<string, UploaderProfile>>({})
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
+  const [currentUserSapId, setCurrentUserSapId] = useState<string | null>(null)
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
     readUploadedSkillNamesFromStorage()
   )
@@ -1026,9 +1066,11 @@ export function MarketPanel(): React.JSX.Element {
     try {
       if (typeof window.api?.models?.getUserInfo !== "function") {
         setCurrentUserUploadCandidates([])
+        setCurrentUserSapId(null)
         return
       }
       const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
+      setCurrentUserSapId(userInfo?.sapId?.trim() || null)
       const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
         .map((value) => String(value || "").trim())
         .filter(Boolean)
@@ -1039,6 +1081,7 @@ export function MarketPanel(): React.JSX.Element {
     } catch (err) {
       console.warn("[MarketPanel] Failed to load current user upload candidates:", err)
       setCurrentUserUploadCandidates([])
+      setCurrentUserSapId(null)
     }
   }, [])
 
@@ -1758,6 +1801,9 @@ export function MarketPanel(): React.JSX.Element {
   const filteredData = useMemo(
     () =>
       currentData.filter((item) => {
+        if (activeTab !== ORG_SKILL_MARKET_TYPE && !canCurrentUserViewMarketItem(item, currentUserSapId)) {
+          return false
+        }
         const query = activeSearchQuery.trim().toLowerCase()
         const matchesSearch =
           item.chinese_name?.toLowerCase().includes(query) ||
@@ -1780,7 +1826,15 @@ export function MarketPanel(): React.JSX.Element {
         if (!categoryFilter) return true
         return getCategoryFilterName(item.category) === categoryFilter
       }),
-    [activeSearchQuery, categoryFilter, currentData, isMineUploadedItem, uploadFilterModes]
+    [
+      activeSearchQuery,
+      activeTab,
+      categoryFilter,
+      currentData,
+      currentUserSapId,
+      isMineUploadedItem,
+      uploadFilterModes
+    ]
   )
 
   const sortedSkillData = useMemo(() => {
@@ -1870,7 +1924,9 @@ export function MarketPanel(): React.JSX.Element {
   useEffect(() => {
     const detailName = marketInitialSkillDetailName?.trim()
     if (!detailName || activeTab !== "skill" || loading) return
-    const targetItem = skillsData.find((item) => item.name === detailName)
+    const targetItem = skillsData.find(
+      (item) => item.name === detailName && canCurrentUserViewMarketItem(item, currentUserSapId)
+    )
     if (!targetItem) {
       if (skillsData.length > 0) setMarketInitialSkillDetailName(null)
       return
@@ -1882,6 +1938,7 @@ export function MarketPanel(): React.JSX.Element {
     activeTab,
     loading,
     marketInitialSkillDetailName,
+    currentUserSapId,
     setMarketInitialSkillDetailName,
     skillsData
   ])

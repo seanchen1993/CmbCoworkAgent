@@ -98,34 +98,58 @@ function buildPluginConsoleInfo(
   }
 }
 
-function parseSkillsFromMarketExtraJson(extraJson?: string): string[] {
-  if (!extraJson?.trim()) return []
+type MarketExtraJson = {
+  skills?: string[]
+  grayUserIds?: string[]
+}
+
+function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
+  if (!extraJson?.trim()) return {}
   try {
-    const parsed = JSON.parse(extraJson) as { skills?: unknown }
-    if (!Array.isArray(parsed?.skills)) return []
-    return Array.from(
-      new Set(
-        parsed.skills
-          .filter((skill): skill is string => typeof skill === "string")
-          .map((skill) => skill.trim())
-          .filter(Boolean)
-      )
-    )
+    const parsed = JSON.parse(extraJson) as MarketExtraJson
+    return parsed && typeof parsed === "object" ? parsed : {}
   } catch {
-    return []
+    return {}
   }
 }
 
-function buildPluginSkillsExtraJson(skills: string[]): string | undefined {
-  const normalized = Array.from(
+function sanitizeStringArray(values: string[]): string[] {
+  return Array.from(
     new Set(
-      skills
-        .map((skill) => skill.trim())
+      values
+        .map((value) => value.trim())
         .filter(Boolean)
     )
   )
-  if (normalized.length === 0) return undefined
-  return JSON.stringify({ skills: normalized })
+}
+
+function parseSkillsFromMarketExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  if (!Array.isArray(parsed.skills)) return []
+  return sanitizeStringArray(
+    parsed.skills.filter((skill): skill is string => typeof skill === "string")
+  )
+}
+
+function buildPluginSkillsExtraJson(skills: string[], existingExtraJson?: string): string | undefined {
+  const normalizedSkills = sanitizeStringArray(skills)
+  const existing = parseMarketExtraJson(existingExtraJson)
+  const normalizedUserIds = Array.isArray(existing.grayUserIds)
+    ? sanitizeStringArray(
+        existing.grayUserIds.filter((userId): userId is string => typeof userId === "string")
+      )
+    : []
+  const payload: MarketExtraJson = {}
+
+  if (normalizedSkills.length > 0) {
+    payload.skills = normalizedSkills
+  }
+  if (normalizedUserIds.length > 0) {
+    payload.grayUserIds = normalizedUserIds
+  }
+
+  if (Object.keys(payload).length === 0) return undefined
+  return JSON.stringify(payload)
 }
 
 function readLocalUploadedPluginNamesFromStorage(): Set<string> {
@@ -693,7 +717,10 @@ export function PluginsPanel(): React.JSX.Element {
       const localSkills =
         selectedPlugin?.id === plugin.id && detail ? detail.skills : []
       const fallbackSkills = parseSkillsFromMarketExtraJson(marketPluginMap[key]?.extra_json)
-      const extraJson = buildPluginSkillsExtraJson(localSkills.length > 0 ? localSkills : fallbackSkills)
+      const extraJson = buildPluginSkillsExtraJson(
+        localSkills.length > 0 ? localSkills : fallbackSkills,
+        marketPluginMap[key]?.extra_json
+      )
       setPublishMode(uploadedPluginNames.has(key) && hasMarketRecord ? "update" : "upload")
       setPublishTarget({
         type: "plugin",

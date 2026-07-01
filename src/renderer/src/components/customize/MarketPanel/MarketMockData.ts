@@ -17,7 +17,10 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       ip: "127.0.0.1",
       description: "代码质量、规范和风险审查技能。",
       filename: "代码审查.zip",
-      created_at: MOCK_CREATED_AT
+      created_at: MOCK_CREATED_AT,
+      extra_json: JSON.stringify({
+        grayUserIds: ["10010001", "10001"]
+      })
     },
     {
       name: "需求分析",
@@ -31,7 +34,10 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       ip: "127.0.0.1",
       description: "需求理解、拆解和验收点整理技能。",
       filename: "需求分析.zip",
-      created_at: MOCK_CREATED_AT
+      created_at: MOCK_CREATED_AT,
+      extra_json: JSON.stringify({
+        grayUserIds: ["1293078", "10001"]
+      })
     },
     {
       name: "接口设计",
@@ -579,7 +585,10 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       tag: "认证",
       featured: "官方推荐",
       version: "1.0.0",
-      user_id: "10010001 / 郑凯 / 数据平台部"
+      user_id: "10010001 / 郑凯 / 数据平台部",
+      extra_json: JSON.stringify({
+        grayUserIds: ["10010001"]
+      })
     },
     {
       name: "mock-jira-mcp",
@@ -616,7 +625,11 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       tag: "认证",
       featured: "热门",
       version: "1.0.0",
-      user_id: "10010001 / 郑凯 / 数据平台部"
+      user_id: "10010001 / 郑凯 / 数据平台部",
+      extra_json: JSON.stringify({
+        skills: ["mock-card-render", "mock-command-helper"],
+        grayUserIds: ["10010001", "293088"]
+      })
     },
     {
       name: "mock-plugin-ci-helper",
@@ -627,7 +640,10 @@ export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       created_at: MOCK_CREATED_AT,
       category: "工程化",
       featured: "官方推荐",
-      version: "2.0.0"
+      version: "2.0.0",
+      extra_json: JSON.stringify({
+        skills: ["mock-ci-analyzer"]
+      })
     },
     {
       name: "mock-plugin-release-note",
