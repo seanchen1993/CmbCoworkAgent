@@ -816,9 +816,9 @@ const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
 const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
-// 评奖辅助看板当前仅开放给这三个 ystId；env 可覆盖，留空则回退到此默认名单，
-// 保证即使未配置环境变量也严格只对这三人可见。
-const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855"
+// 评奖辅助看板当前仅开放给这四个 ystId；env 可覆盖，留空则回退到此默认名单，
+// 保证即使未配置环境变量也严格只对这四人可见。
+const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855,231858"
 
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
@@ -901,7 +901,7 @@ function requireDashboardProjectModeAccess(): DashboardAccessContext {
 }
 
 // 评奖辅助看板（技能贡献奖 / 技能应用奖）的访问门禁：仅 DASHBOARD_AWARDS_ADMIN
-// 名单内的 ystId 可见（默认仅三人）。DEV 直接放行便于本地预览。
+// 名单内的 ystId 可见（默认仅四人）。DEV 直接放行便于本地预览。
 function isDashboardAwardsAdmin(
   access: DashboardAccessContext = getDashboardAccessContext()
 ): boolean {
