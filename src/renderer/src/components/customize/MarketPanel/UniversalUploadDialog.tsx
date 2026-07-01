@@ -1,5 +1,15 @@
 import React, { useState } from "react"
-import { Upload, Copy, Check, ChevronDown, ChevronRight, ExternalLink, AlertCircle } from "lucide-react"
+import {
+  Upload,
+  Copy,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  AlertCircle,
+  Plus,
+  Trash2
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -32,6 +42,7 @@ export interface GeneratedMarketFileBuildContext {
   guidance: string
   chineseName: string
   userId?: string
+  extraJson?: string
 }
 
 interface UniversalUploadDialogProps {
@@ -47,7 +58,8 @@ interface UniversalUploadDialogProps {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string
   ) => Promise<{ success: boolean; error?: string }>
   isUpdate?: boolean
   existingItem?: {
@@ -58,6 +70,7 @@ interface UniversalUploadDialogProps {
     guidance?: string
     chinese_name?: string
     user_id?: string
+    extra_json?: string
   }
   generatedFile?: {
     label?: string
@@ -83,6 +96,52 @@ const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefi
 
 const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
   import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
+
+function sanitizeSkillNames(skills: string[]): string[] {
+  return Array.from(
+    new Set(
+      skills
+        .map((skill) => skill.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function normalizePluginSkillsForForm(skills: string[]): string[] {
+  const seen = new Set<string>()
+  const normalized: string[] = []
+
+  for (const skill of skills) {
+    const trimmed = skill.trim()
+    if (!trimmed) {
+      normalized.push("")
+      continue
+    }
+    if (seen.has(trimmed)) continue
+    seen.add(trimmed)
+    normalized.push(trimmed)
+  }
+
+  return normalized
+}
+
+function parsePluginSkillsFromExtraJson(extraJson?: string): string[] {
+  if (!extraJson?.trim()) return []
+  try {
+    const parsed = JSON.parse(extraJson) as { skills?: unknown }
+    return Array.isArray(parsed?.skills)
+      ? sanitizeSkillNames(parsed.skills.filter((item): item is string => typeof item === "string"))
+      : []
+  } catch {
+    return []
+  }
+}
+
+function buildExtraJsonForPlugin(skills: string[]): string | undefined {
+  const normalized = sanitizeSkillNames(skills)
+  if (normalized.length === 0) return undefined
+  return JSON.stringify({ skills: normalized })
+}
 
 export function UniversalUploadDialog({
   open,
@@ -110,12 +169,14 @@ export function UniversalUploadDialog({
   const [guidance, setGuidance] = useState("")
   const [chineseName, setChineseName] = useState("")
   const [userId, setUserId] = useState<string | undefined>(undefined)
+  const [pluginSkills, setPluginSkills] = useState<string[]>([])
   const [nameFromFile, setNameFromFile] = useState(false) // name 是否来自文件解析（锁定）
   const [versionFromSkillFile, setVersionFromSkillFile] = useState(false)
   const [versionFoundInSkillFrontmatter, setVersionFoundInSkillFrontmatter] = useState(false)
   const [submitReasonOpen, setSubmitReasonOpen] = useState(false)
 
   const isSkillResource = resourceType === "skill"
+  const isPluginResource = resourceType === "plugin"
   const isVersionReadonly = isSkillResource
 
   const resetVersionState = React.useCallback(() => {
@@ -143,6 +204,9 @@ export function UniversalUploadDialog({
       setVersion(existingItem.version || DEFAULT_MARKET_VERSION)
       setGuidance(existingItem.guidance || "")
       setChineseName(existingItem.chinese_name || "")
+      setPluginSkills(
+        resourceType === "plugin" ? parsePluginSkillsFromExtraJson(existingItem.extra_json) : []
+      )
       setNameFromFile(false)
       setVersionFromSkillFile(false)
       setVersionFoundInSkillFrontmatter(false)
@@ -154,12 +218,13 @@ export function UniversalUploadDialog({
       resetVersionState()
       setGuidance("")
       setChineseName("")
+      setPluginSkills([])
       setNameFromFile(false)
     }
     if (open) {
       void loadCurrentUserId()
     }
-  }, [isUpdate, existingItem, open, loadCurrentUserId, resetVersionState])
+  }, [isUpdate, existingItem, open, loadCurrentUserId, resetVersionState, resourceType])
 
   const getAcceptedTypes = () => {
     switch (resourceType) {
@@ -226,6 +291,9 @@ export function UniversalUploadDialog({
       setVersionFromSkillFile(false)
       setVersionFoundInSkillFrontmatter(false)
     }
+    if (resourceType !== "plugin") {
+      setPluginSkills([])
+    }
 
     // 对 skill 的 .md / .zip 文件，尝试从文件内容中提取 name
     if (resourceType === "skill") {
@@ -263,6 +331,17 @@ export function UniversalUploadDialog({
           setVersionFromSkillFile(false)
           setVersionFoundInSkillFrontmatter(false)
         }
+      }
+    }
+
+    if (resourceType === "plugin") {
+      try {
+        const buffer = await selectedFile.arrayBuffer()
+        const detail = await window.api.plugins.inspectZip(buffer)
+        setPluginSkills(sanitizeSkillNames(detail.skills))
+      } catch (e) {
+        console.warn("[UniversalUploadDialog] Failed to inspect plugin zip:", e)
+        setPluginSkills([])
       }
     }
 
@@ -309,10 +388,33 @@ export function UniversalUploadDialog({
       return
     }
 
+    const normalizedPluginSkills = isPluginResource
+      ? normalizePluginSkillsForForm(pluginSkills)
+      : pluginSkills
+
+    if (isPluginResource) {
+      const pluginSkillsChanged =
+        normalizedPluginSkills.length !== pluginSkills.length ||
+        normalizedPluginSkills.some((skill, index) => skill !== pluginSkills[index])
+      if (pluginSkillsChanged) {
+        setPluginSkills(normalizedPluginSkills)
+      }
+      if (normalizedPluginSkills.length === 0) {
+        setError("请至少填写一个 Skill")
+        return
+      }
+      if (normalizedPluginSkills.some((skill) => !skill.trim())) {
+        setError("请完整填写 Skills，或删除空白项")
+        return
+      }
+    }
+
     setError(null)
     setUploading(true)
 
     try {
+      const extraJson =
+        resourceType === "plugin" ? buildExtraJsonForPlugin(normalizedPluginSkills) : undefined
       const uploadContext: GeneratedMarketFileBuildContext = {
         name: name.trim(),
         description: description.trim(),
@@ -320,7 +422,8 @@ export function UniversalUploadDialog({
         version: version.trim(),
         guidance: guidance.trim(),
         chineseName: chineseName.trim(),
-        userId: userId?.trim() || undefined
+        userId: userId?.trim() || undefined,
+        extraJson
       }
       let uploadFile = file
       if (generatedFile) {
@@ -340,7 +443,8 @@ export function UniversalUploadDialog({
         uploadContext.version,
         uploadContext.guidance,
         uploadContext.chineseName,
-        uploadContext.userId
+        uploadContext.userId,
+        uploadContext.extraJson
       )
 
       if (result.success) {
@@ -355,6 +459,7 @@ export function UniversalUploadDialog({
         setGuidance("")
         setChineseName("")
         setUserId(undefined)
+        setPluginSkills([])
       } else {
         setError(result.error || "Upload failed")
       }
@@ -397,6 +502,7 @@ export function UniversalUploadDialog({
         resetVersionState()
         setGuidance("")
         setChineseName("")
+        setPluginSkills([])
         setError(null)
         setShowJsonTemplate(false)
         setNameFromFile(false)
@@ -437,6 +543,9 @@ export function UniversalUploadDialog({
   const [showJsonTemplate, setShowJsonTemplate] = useState(false)
   const [pluginMcpTemplateCopied, setPluginMcpTemplateCopied] = useState(false)
   const [showPluginMcpTemplate, setShowPluginMcpTemplate] = useState(false)
+  const hasValidPluginSkills =
+    !isPluginResource ||
+    (pluginSkills.length > 0 && pluginSkills.every((skill) => skill.trim().length > 0))
   const canSubmit =
     (isUpdate || !!file || !!generatedFile) &&
     !!name.trim() &&
@@ -444,7 +553,24 @@ export function UniversalUploadDialog({
     !!description.trim() &&
     !!category.trim() &&
     !!version.trim() &&
-    !!guidance.trim()
+    !!guidance.trim() &&
+    hasValidPluginSkills
+
+  const updatePluginSkill = (index: number, value: string) => {
+    setPluginSkills((current) => current.map((skill, i) => (i === index ? value : skill)))
+  }
+
+  const addPluginSkill = () => {
+    setPluginSkills((current) => [...current, ""])
+  }
+
+  const removePluginSkill = (index: number) => {
+    setPluginSkills((current) => current.filter((_, i) => i !== index))
+  }
+
+  const normalizePluginSkillsState = () => {
+    setPluginSkills((current) => normalizePluginSkillsForForm(current))
+  }
 
   const getSubmitDisabledReason = () => {
     if (uploading) return submittingLabel || (isUpdate ? "更新中..." : "上传中...")
@@ -455,6 +581,10 @@ export function UniversalUploadDialog({
     if (!category.trim()) return "请选择场景"
     if (!version.trim()) return "请填写版本号"
     if (!guidance.trim()) return "请填写使用指引"
+    if (isPluginResource && pluginSkills.length === 0) return "请至少填写一个 Skill"
+    if (isPluginResource && pluginSkills.some((skill) => !skill.trim())) {
+      return "请完整填写 Skills，或删除空白项"
+    }
     return undefined
   }
 
@@ -811,6 +941,58 @@ export function UniversalUploadDialog({
               className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
             />
           </div>
+
+          {resourceType === "plugin" && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <label className="block text-sm font-medium">Skills *</label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={addPluginSkill}
+                  disabled={uploading}
+                >
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  新增 Skill
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                上传/编辑 Plugin 时会自动从 zip 中解析 skill 名称，你也可以手动增删改。重复项会自动去重。
+              </p>
+              {pluginSkills.length === 0 ? (
+                <div className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+                  暂无 Skills，请至少新增一个。
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {pluginSkills.map((skill, index) => (
+                    <div key={`${index}-${skill}`} className="flex items-center gap-2">
+                      <Input
+                        value={skill}
+                        placeholder="输入 Skill 名称"
+                        onChange={(e) => updatePluginSkill(index, e.target.value)}
+                        onBlur={normalizePluginSkillsState}
+                        disabled={uploading}
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-destructive"
+                        onClick={() => removePluginSkill(index)}
+                        disabled={uploading}
+                        aria-label="删除 Skill"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* JSON Template for MCP */}
           {resourceType === "mcp" && (

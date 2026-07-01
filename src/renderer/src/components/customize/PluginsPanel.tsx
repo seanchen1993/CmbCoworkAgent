@@ -98,6 +98,36 @@ function buildPluginConsoleInfo(
   }
 }
 
+function parseSkillsFromMarketExtraJson(extraJson?: string): string[] {
+  if (!extraJson?.trim()) return []
+  try {
+    const parsed = JSON.parse(extraJson) as { skills?: unknown }
+    if (!Array.isArray(parsed?.skills)) return []
+    return Array.from(
+      new Set(
+        parsed.skills
+          .filter((skill): skill is string => typeof skill === "string")
+          .map((skill) => skill.trim())
+          .filter(Boolean)
+      )
+    )
+  } catch {
+    return []
+  }
+}
+
+function buildPluginSkillsExtraJson(skills: string[]): string | undefined {
+  const normalized = Array.from(
+    new Set(
+      skills
+        .map((skill) => skill.trim())
+        .filter(Boolean)
+    )
+  )
+  if (normalized.length === 0) return undefined
+  return JSON.stringify({ skills: normalized })
+}
+
 function readLocalUploadedPluginNamesFromStorage(): Set<string> {
   try {
     const raw = localStorage.getItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY)
@@ -660,17 +690,23 @@ export function PluginsPanel(): React.JSX.Element {
     (plugin: PluginMetadata) => {
       const key = plugin.name.trim().toLowerCase()
       const hasMarketRecord = Boolean(marketPluginMap[key])
+      const localSkills =
+        selectedPlugin?.id === plugin.id && detail ? detail.skills : []
+      const fallbackSkills = parseSkillsFromMarketExtraJson(marketPluginMap[key]?.extra_json)
+      const extraJson = buildPluginSkillsExtraJson(localSkills.length > 0 ? localSkills : fallbackSkills)
       setPublishMode(uploadedPluginNames.has(key) && hasMarketRecord ? "update" : "upload")
       setPublishTarget({
         type: "plugin",
         name: plugin.name,
         description: plugin.description,
         category: marketPluginMap[key]?.category,
-        chineseName: marketPluginMap[key]?.chinese_name
+        chineseName: marketPluginMap[key]?.chinese_name,
+        guidance: marketPluginMap[key]?.guidance,
+        extraJson
       })
       setPublishDialogOpen(true)
     },
-    [marketPluginMap, uploadedPluginNames]
+    [detail, marketPluginMap, selectedPlugin, uploadedPluginNames]
   )
 
   const buildPluginMarketFile = useCallback(

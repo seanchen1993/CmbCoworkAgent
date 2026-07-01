@@ -2119,7 +2119,8 @@ export function MarketPanel(): React.JSX.Element {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string
   ) => {
     try {
       if (!file) {
@@ -2138,7 +2139,8 @@ export function MarketPanel(): React.JSX.Element {
         version,
         guidance,
         chineseName,
-        userId
+        userId,
+        extraJson
       )
 
       // If upload is successful, record it in localStorage
@@ -2165,7 +2167,8 @@ export function MarketPanel(): React.JSX.Element {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string
   ) => {
     try {
       // 更新时允许文件为空，这样可以只更新元数据
@@ -2185,7 +2188,8 @@ export function MarketPanel(): React.JSX.Element {
         version,
         guidance,
         chineseName,
-        userId
+        userId,
+        extraJson
       )
 
       // Update is successful, no need to update localStorage since item already exists
@@ -2799,7 +2803,8 @@ export function MarketPanel(): React.JSX.Element {
                     version: updateDialog.item.version,
                     guidance: updateDialog.item.guidance,
                     chinese_name: updateDialog.item.chinese_name,
-                    user_id: updateDialog.item.user_id
+                    user_id: updateDialog.item.user_id,
+                    extra_json: updateDialog.item.extra_json
                   }
                 : undefined
             }
