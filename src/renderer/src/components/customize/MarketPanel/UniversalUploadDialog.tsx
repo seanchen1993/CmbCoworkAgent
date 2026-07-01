@@ -8,7 +8,8 @@ import {
   ExternalLink,
   AlertCircle,
   Plus,
-  Trash2
+  Trash2,
+  Loader2
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -21,6 +22,15 @@ import {
   DialogFooter
 } from "@/components/ui/dialog"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
+import { Separator } from "@/components/ui/separator"
 import { cn } from "@/lib/utils"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 
@@ -103,13 +113,7 @@ type MarketExtraJson = {
 }
 
 function sanitizeSkillNames(skills: string[]): string[] {
-  return Array.from(
-    new Set(
-      skills
-        .map((skill) => skill.trim())
-        .filter(Boolean)
-    )
-  )
+  return Array.from(new Set(skills.map((skill) => skill.trim()).filter(Boolean)))
 }
 
 function normalizePluginSkillsForForm(skills: string[]): string[] {
@@ -131,13 +135,7 @@ function normalizePluginSkillsForForm(skills: string[]): string[] {
 }
 
 function sanitizeUserIds(userIds: string[]): string[] {
-  return Array.from(
-    new Set(
-      userIds
-        .map((userId) => userId.trim())
-        .filter(Boolean)
-    )
-  )
+  return Array.from(new Set(userIds.map((userId) => userId.trim()).filter(Boolean)))
 }
 
 function normalizeUserIdsForForm(userIds: string[]): string[] {
@@ -178,9 +176,7 @@ function parsePluginSkillsFromExtraJson(extraJson?: string): string[] {
 function parseGrayUserIdsFromExtraJson(extraJson?: string): string[] {
   const parsed = parseMarketExtraJson(extraJson)
   return Array.isArray(parsed.grayUserIds)
-    ? sanitizeUserIds(
-        parsed.grayUserIds.filter((item): item is string => typeof item === "string")
-      )
+    ? sanitizeUserIds(parsed.grayUserIds.filter((item): item is string => typeof item === "string"))
     : []
 }
 
@@ -200,6 +196,70 @@ function buildExtraJson(skills: string[], userIds: string[]): string | undefined
   return JSON.stringify(payload)
 }
 
+function getResourceTypeLabel(resourceType: UniversalUploadDialogProps["resourceType"]): string {
+  switch (resourceType) {
+    case "skill":
+      return "Skill"
+    case "mcp":
+      return "MCP"
+    case "plugin":
+      return "Plugin"
+    default:
+      return "Resource"
+  }
+}
+
+function FormSection({
+  title,
+  description,
+  children
+}: {
+  title: string
+  description: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <section className="space-y-4 border-t border-border pt-5 first:border-t-0 first:pt-0">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 border-l-5 border-primary pl-2">
+        <h3 className="text-base font-semibold tracking-tight text-foreground">{title}</h3>
+        <p className="text-xs leading-5 text-muted-foreground">{description}</p>
+      </div>
+      <div className="space-y-4">{children}</div>
+    </section>
+  )
+}
+
+function FieldBlock({
+  label,
+  htmlFor,
+  required = false,
+  helper,
+  children
+}: {
+  label: string
+  htmlFor?: string
+  required?: boolean
+  helper?: React.ReactNode
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div className="space-y-2.5">
+      <label
+        htmlFor={htmlFor}
+        className="flex items-center gap-1 text-sm font-medium text-foreground"
+      >
+        <span>{label}</span>
+        {required ? <span className="text-destructive">*</span> : null}
+      </label>
+      {children}
+      {helper ? <div className="text-xs leading-5 text-muted-foreground">{helper}</div> : null}
+    </div>
+  )
+}
+
+const textareaClassName =
+  "min-h-[112px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+
 export function UniversalUploadDialog({
   open,
   onOpenChange,
@@ -215,6 +275,7 @@ export function UniversalUploadDialog({
   submitLabel,
   submittingLabel
 }: UniversalUploadDialogProps): React.JSX.Element {
+  const fileInputId = React.useId()
   const [dragOver, setDragOver] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -619,6 +680,7 @@ export function UniversalUploadDialog({
   const [showJsonTemplate, setShowJsonTemplate] = useState(false)
   const [pluginMcpTemplateCopied, setPluginMcpTemplateCopied] = useState(false)
   const [showPluginMcpTemplate, setShowPluginMcpTemplate] = useState(false)
+  const hasValidGrayUserIds = grayUserIds.every((item) => item.trim().length > 0)
   const hasValidPluginSkills =
     !isPluginResource ||
     (pluginSkills.length > 0 && pluginSkills.every((skill) => skill.trim().length > 0))
@@ -630,7 +692,13 @@ export function UniversalUploadDialog({
     !!category.trim() &&
     !!version.trim() &&
     !!guidance.trim() &&
+    hasValidGrayUserIds &&
     hasValidPluginSkills
+
+  const resourceTypeLabel = getResourceTypeLabel(resourceType)
+  const uploadActionText = uploading
+    ? submittingLabel || (isUpdate ? "更新中..." : "上传中...")
+    : submitLabel || (isUpdate ? "更新" : "上传")
 
   const updatePluginSkill = (index: number, value: string) => {
     setPluginSkills((current) => current.map((skill, i) => (i === index ? value : skill)))
@@ -758,425 +826,476 @@ export function UniversalUploadDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleDialogClose}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{getTitle()}</DialogTitle>
           <DialogDescription>{descriptionOverride || getFileTypeDescription()}</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 max-h-[50vh] overflow-auto p-2">
-          {/* Plugin Template */}
-          {resourceType === "plugin" && PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL && (
-            <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
-              <span>首次上传插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
-              <a
-                href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="ml-1 inline-flex items-center gap-1 font-medium text-blue-700 underline-offset-2 hover:underline"
-              >
-                下载插件模板
-                <ExternalLink className="size-3.5" />
-              </a>
-            </div>
-          )}
-
-          {resourceType === "plugin" && (
-            <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground leading-relaxed space-y-2">
-              <p>
-                插件 MCP 使用根目录 <span className="font-mono">.mcp.json</span> 配置。remote MCP
-                默认注入当前用户 Header；可用{" "}
-                <span className="font-mono">injectUserHeaders: false</span> 关闭，用{" "}
-                <span className="font-mono">priority</span> / <span className="font-mono">scope</span>{" "}
-                控制调用优先级，用 <span className="font-mono">fallback</span>{" "}
-                声明失败后是否允许切到全局同名 MCP。Fallback 需要同时声明{" "}
-                <span className="font-mono">safeToRetry: true</span>，只适合查询类或幂等工具。
-              </p>
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={handleCopyPluginMcpTemplate}
-                  disabled={uploading}
-                >
-                  {pluginMcpTemplateCopied ? (
-                    <Check className="mr-1.5 h-3.5 w-3.5" />
-                  ) : (
-                    <Copy className="mr-1.5 h-3.5 w-3.5" />
-                  )}
-                  {pluginMcpTemplateCopied ? "已复制" : "复制 .mcp.json 示例"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => setShowPluginMcpTemplate(!showPluginMcpTemplate)}
-                  disabled={uploading}
-                >
-                  {showPluginMcpTemplate ? (
-                    <ChevronDown className="mr-1.5 h-3.5 w-3.5" />
-                  ) : (
-                    <ChevronRight className="mr-1.5 h-3.5 w-3.5" />
-                  )}
-                  {showPluginMcpTemplate ? "隐藏示例" : "查看示例"}
-                </Button>
-              </div>
-              {showPluginMcpTemplate && (
-                <div className="h-[180px] overflow-auto">
-                  <pre className="bg-background p-3 rounded border text-xs overflow-x-auto">
-                    <code>{pluginMcpTemplate}</code>
-                  </pre>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* File Upload Area */}
-          {generatedFile ? (
-            <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
-              <div className="flex items-center gap-2">
-                <Upload className="size-4 text-primary" />
-                <p className="text-sm font-medium">{generatedFile.label || "将自动生成上传文件"}</p>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                点击提交时会自动打包当前资源并上传，无需手动选择文件。
-              </p>
-            </div>
-          ) : (
-            <div
-              className={cn(
-                "border-2 border-dashed rounded-lg p-6 text-center transition-colors cursor-pointer",
-                dragOver
-                  ? "border-primary bg-primary/5"
-                  : "border-muted-foreground/30 hover:border-muted-foreground/50",
-                uploading && "pointer-events-none opacity-60"
-              )}
-              onDrop={onDrop}
-              onDragOver={onDragOver}
-              onDragLeave={onDragLeave}
-              onClick={() => document.getElementById("upload-file-input")?.click()}
+        <ScrollArea className="max-h-[70vh] pr-3">
+          <div className="space-y-10 m-1">
+            <FormSection
+              title="文件与上传方式"
+              description="先选择要上传的文件。更新时也可以只修改表单信息。"
             >
-              <input
-                id="upload-file-input"
-                type="file"
-                accept={getAcceptedTypes()}
-                className="hidden"
-                onChange={onInputChange}
-                disabled={uploading}
-                required={!isUpdate}
-              />
-              {file ? (
-                <div>
-                  <Upload className="size-8 mx-auto text-green-600 mb-2" />
-                  <p className="text-sm font-medium">{file.name}</p>
-                  <p className="text-xs text-muted-foreground">点击重新选择文件</p>
+              {resourceType === "plugin" && PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL ? (
+                <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+                  <span>首次上传插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
+                  <a
+                    href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-1 inline-flex items-center gap-1 font-medium underline-offset-2 hover:underline"
+                  >
+                    下载插件模板
+                    <ExternalLink className="size-3.5" />
+                  </a>
                 </div>
-              ) : (
-                <>
-                  <Upload className="size-10 mx-auto text-muted-foreground mb-2" />
-                  <p className="text-sm text-muted-foreground">拖拽文件到此处，或点击选择</p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    支持: {getAcceptedTypes()}
-                    {isUpdate && <span className="block mt-1">更新时文件为可选项</span>}
+              ) : null}
+
+              {resourceType === "plugin" ? (
+                <div className="rounded-md border border-border bg-muted/30 px-3 py-3 text-xs leading-6 text-muted-foreground">
+                  <p>
+                    插件 MCP 使用根目录 <span className="font-mono">.mcp.json</span> 配置。remote
+                    MCP 默认注入当前用户 Header；可用{" "}
+                    <span className="font-mono">injectUserHeaders: false</span> 关闭，用{" "}
+                    <span className="font-mono">priority</span> /{" "}
+                    <span className="font-mono">scope</span> 控制调用优先级，用{" "}
+                    <span className="font-mono">fallback</span> 声明失败后是否允许切到全局同名
+                    MCP。Fallback 需要同时声明 <span className="font-mono">safeToRetry: true</span>
+                    ，只适合查询类或幂等工具。
                   </p>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* Name Input */}
-          <div className="space-y-2">
-            <label htmlFor="name" className="block text-sm font-medium">
-              英文名称 *<span>（英文名称 = zip文件名 = md里的name）</span>
-            </label>
-            <Input
-              id="name"
-              placeholder="输入资源名称"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              disabled={uploading || isUpdate || nameFromFile || lockName}
-              className={isUpdate || nameFromFile || lockName ? "bg-muted" : ""}
-              required
-            />
-            {isUpdate ? (
-              <p className="text-xs text-muted-foreground">更新时名称不可修改</p>
-            ) : lockName ? (
-              <p className="text-xs text-muted-foreground">名称来自当前资源，不可修改</p>
-            ) : nameFromFile ? (
-              <p className="text-xs text-muted-foreground">名称已从文件中自动提取，不可修改</p>
-            ) : resourceType === "skill" ? (
-              <p className="text-xs text-muted-foreground">
-                名称需与 .zip 文件名或 .md 文件中 frontmatter 的{" "}
-                <code className="bg-muted px-1 rounded">name</code> 字段保持一致
-              </p>
-            ) : null}
-          </div>
-
-          {/* Chinese Name Input */}
-          <div className="space-y-2">
-            <label htmlFor="chinese-name" className="block text-sm font-medium">
-              中文名称 *
-            </label>
-            <Input
-              id="chinese-name"
-              placeholder="输入中文名称"
-              value={chineseName}
-              onChange={(e) => setChineseName(e.target.value)}
-              disabled={uploading}
-              required
-            />
-          </div>
-
-          {/* Description Input */}
-          <div className="space-y-2">
-            <label htmlFor="description" className="block text-sm font-medium">
-              描述 *
-            </label>
-            <textarea
-              id="description"
-              placeholder="输入资源描述"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              disabled={uploading}
-              required
-              rows={3}
-              className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <label htmlFor="version" className="block text-sm font-medium">
-              版本号 *
-            </label>
-            <Input
-              id="version"
-              placeholder="输入版本号，例如 v1.0.0"
-              value={version}
-              onChange={(e) => setVersion(e.target.value)}
-              disabled={uploading || isVersionReadonly}
-              className={isVersionReadonly ? "bg-muted" : ""}
-              required
-            />
-            {isSkillResource ? (
-              <div className="space-y-2">
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  Skill 版本不再由上传弹窗维护，系统会直接读取技能文档 frontmatter 中的{" "}
-                  <code className="bg-muted px-1 rounded">version</code>；如果文档里没有，就按{" "}
-                  <code className="bg-muted px-1 rounded">{DEFAULT_MARKET_VERSION}</code>{" "}
-                  处理，所以这里不允许手动修改。
-                  {versionFromSkillFile
-                    ? versionFoundInSkillFrontmatter
-                      ? " 当前显示的是从技能文档解析出的版本。"
-                      : ""
-                    : " 当前显示的是默认版本。"}
-                </p>
-                {versionFromSkillFile && !versionFoundInSkillFrontmatter && (
-                  <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900">
-                    <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
-                    <p>
-                      当前没有从你的 <code className="rounded bg-amber-100 px-1">md / SKILL.md</code>{" "}
-                      里找到 <code className="rounded bg-amber-100 px-1">version</code>，所以展示的是默认版本{" "}
-                      <code className="rounded bg-amber-100 px-1">
-                        {DEFAULT_MARKET_VERSION}
-                      </code>
-                      。
-                    </p>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                MCP 和 Plugin 的版本由发布人维护，默认从{" "}
-                <code className="bg-muted px-1 rounded">{DEFAULT_MARKET_VERSION}</code> 开始。
-              </p>
-            )}
-          </div>
-
-          {/* Category Select */}
-          <div className="space-y-2">
-            <label htmlFor="category" className="block text-sm font-medium">
-              选择场景 *
-            </label>
-            <select
-              id="category"
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              disabled={uploading}
-              required
-              className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
-            >
-              {category &&
-                !SCENE_CATEGORY_OPTIONS.includes(
-                  category as (typeof SCENE_CATEGORY_OPTIONS)[number]
-                ) && <option value={category}>{category}</option>}
-              {SCENE_CATEGORY_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Guidance Input - Available for all modes */}
-          <div className="space-y-2">
-            <label htmlFor="guidance" className="block text-sm font-medium">
-              使用指引 *
-            </label>
-            <textarea
-              id="guidance"
-              placeholder="帮助其他用户了解如何使用这个资源。案例，你可以告诉大模型：使用xx技能给我干xx事情"
-              value={guidance}
-              onChange={(e) => setGuidance(e.target.value)}
-              disabled={uploading}
-              required
-              rows={3}
-              className="w-full p-2 text-sm border rounded-md focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-50"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <label className="block text-sm font-medium">灰度用户 User IDs</label>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-7 text-xs"
-                onClick={addGrayUserId}
-                disabled={uploading}
-              >
-                <Plus className="mr-1.5 h-3.5 w-3.5" />
-                新增用户
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              选填。填写后仅这些灰度用户可在市场列表看到该资源；不填写则默认所有用户可见。
-            </p>
-            {grayUserIds.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-                暂无灰度用户，当前默认全部用户可见。
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {grayUserIds.map((userIdValue, index) => (
-                  <div key={`${index}-${userIdValue}`} className="flex items-center gap-2">
-                    <Input
-                      value={userIdValue}
-                      placeholder="输入 SAP ID"
-                      onChange={(e) => updateGrayUserId(index, e.target.value)}
-                      onBlur={normalizeGrayUserIdsState}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={handleCopyPluginMcpTemplate}
                       disabled={uploading}
-                    />
+                    >
+                      {pluginMcpTemplateCopied ? (
+                        <Check className="mr-1.5 h-3.5 w-3.5" />
+                      ) : (
+                        <Copy className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      {pluginMcpTemplateCopied ? "已复制" : "复制 .mcp.json 示例"}
+                    </Button>
                     <Button
                       type="button"
                       variant="ghost"
                       size="sm"
-                      className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-destructive"
-                      onClick={() => removeGrayUserId(index)}
+                      className="h-8 text-xs"
+                      onClick={() => setShowPluginMcpTemplate(!showPluginMcpTemplate)}
                       disabled={uploading}
-                      aria-label="删除灰度用户"
                     >
-                      <Trash2 className="h-4 w-4" />
+                      {showPluginMcpTemplate ? (
+                        <ChevronDown className="mr-1.5 h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      {showPluginMcpTemplate ? "隐藏示例" : "查看示例"}
                     </Button>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  {showPluginMcpTemplate ? (
+                    <div className="mt-3 overflow-hidden rounded-md border border-border bg-background">
+                      <div className="max-h-[220px] overflow-auto p-3">
+                        <pre className="text-xs overflow-x-auto">
+                          <code>{pluginMcpTemplate}</code>
+                        </pre>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
-          {resourceType === "plugin" && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <label className="block text-sm font-medium">Skills *</label>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={addPluginSkill}
-                  disabled={uploading}
-                >
-                  <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  新增 Skill
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                上传/编辑 Plugin 时会自动从 zip 中解析 skill 名称，你也可以手动增删改。重复项会自动去重。
-              </p>
-              {pluginSkills.length === 0 ? (
-                <div className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-                  暂无 Skills，请至少新增一个。
+              {generatedFile ? (
+                <div className="rounded-md border border-border bg-muted/30 px-4 py-3">
+                  <div className="flex items-start gap-3">
+                    <Upload className="mt-0.5 size-4 text-primary" />
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-foreground">
+                        {generatedFile.label || "将自动生成上传文件"}
+                      </p>
+                      <p className="text-sm leading-6 text-muted-foreground">
+                        点击提交时会自动打包当前资源并上传，无需手动选择文件。
+                      </p>
+                    </div>
+                  </div>
                 </div>
               ) : (
-                <div className="space-y-2">
-                  {pluginSkills.map((skill, index) => (
-                    <div key={`${index}-${skill}`} className="flex items-center gap-2">
-                      <Input
-                        value={skill}
-                        placeholder="输入 Skill 名称"
-                        onChange={(e) => updatePluginSkill(index, e.target.value)}
-                        onBlur={normalizePluginSkillsState}
-                        disabled={uploading}
-                      />
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-destructive"
-                        onClick={() => removePluginSkill(index)}
-                        disabled={uploading}
-                        aria-label="删除 Skill"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                <div
+                  className={cn(
+                    "cursor-pointer rounded-md border-2 border-dashed p-6 text-center transition-colors",
+                    dragOver
+                      ? "border-primary bg-primary/5"
+                      : "border-muted-foreground/30 hover:border-muted-foreground/50",
+                    uploading && "pointer-events-none opacity-60"
+                  )}
+                  onDrop={onDrop}
+                  onDragOver={onDragOver}
+                  onDragLeave={onDragLeave}
+                  onClick={() => document.getElementById(fileInputId)?.click()}
+                >
+                  <input
+                    id={fileInputId}
+                    type="file"
+                    accept={getAcceptedTypes()}
+                    className="hidden"
+                    onChange={onInputChange}
+                    disabled={uploading}
+                    required={!isUpdate}
+                  />
+                  {file ? (
+                    <div className="space-y-2">
+                      <Upload className="mx-auto size-8 text-green-600" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-foreground">{file.name}</p>
+                        <p className="text-xs text-muted-foreground">点击重新选择文件</p>
+                      </div>
                     </div>
-                  ))}
+                  ) : (
+                    <div className="space-y-2">
+                      <Upload className="mx-auto size-10 text-muted-foreground" />
+                      <div className="space-y-1">
+                        <p className="text-sm text-muted-foreground">拖拽文件到此处，或点击选择</p>
+                        <p className="text-xs leading-5 text-muted-foreground">
+                          支持 {getAcceptedTypes()}
+                          {isUpdate ? "，更新时不重新上传也可以提交。" : "。"}
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
+            </FormSection>
 
-          {/* JSON Template for MCP */}
-          {resourceType === "mcp" && (
-            <div className="p-4 bg-muted rounded-md">
-              <p className="text-sm text-muted-foreground mb-3">
-                需要帮助？可以复制 JSON 模板，按需修改后上传。
-              </p>
-              <div className="flex items-center gap-2 mb-3">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCopyJsonTemplate}
-                  disabled={uploading}
+            <FormSection title="基础信息" description="这部分会直接展示在市场中。">
+              <div className="grid gap-5 lg:grid-cols-2">
+                <FieldBlock
+                  label="英文名称"
+                  htmlFor="name"
+                  required
+                  helper={
+                    isUpdate ? (
+                      "更新时名称不可修改。"
+                    ) : lockName ? (
+                      "名称来自当前资源，不可修改。"
+                    ) : nameFromFile ? (
+                      "名称已从文件中自动提取，不可修改。"
+                    ) : resourceType === "skill" ? (
+                      <>
+                        名称需与文件名或 frontmatter 中的{" "}
+                        <code className="rounded bg-muted px-1">name</code> 保持一致。
+                      </>
+                    ) : (
+                      "建议使用稳定的英文标识，便于搜索和版本管理。"
+                    )
+                  }
                 >
-                  {jsonTemplateCopied ? (
-                    <Check className="mr-2 h-4 w-4" />
-                  ) : (
-                    <Copy className="mr-2 h-4 w-4" />
-                  )}
-                  {jsonTemplateCopied ? "模板已复制" : "复制 JSON 模板"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowJsonTemplate(!showJsonTemplate)}
-                  disabled={uploading}
+                  <Input
+                    id="name"
+                    placeholder="输入资源名称"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    disabled={uploading || isUpdate || nameFromFile || lockName}
+                    className={cn("h-10", (isUpdate || nameFromFile || lockName) && "bg-muted")}
+                    required
+                  />
+                </FieldBlock>
+
+                <FieldBlock
+                  label="中文名称"
+                  htmlFor="chinese-name"
+                  required
+                  helper="建议使用业务同学容易理解的命名。"
                 >
-                  {showJsonTemplate ? (
-                    <ChevronDown className="mr-2 h-4 w-4" />
-                  ) : (
-                    <ChevronRight className="mr-2 h-4 w-4" />
-                  )}
-                  {showJsonTemplate ? "隐藏模板" : "查看模板"}
-                </Button>
+                  <Input
+                    id="chinese-name"
+                    placeholder="输入中文名称"
+                    value={chineseName}
+                    onChange={(e) => setChineseName(e.target.value)}
+                    disabled={uploading}
+                    className="h-10"
+                    required
+                  />
+                </FieldBlock>
               </div>
-              {showJsonTemplate && (
-                <div className="mt-3 h-[150px] overflow-auto">
-                  <pre className="bg-background p-3 rounded border text-xs overflow-x-auto">
-                    <code>{`{
+
+              <FieldBlock
+                label="描述"
+                htmlFor="description"
+                required
+                helper="一句话说明这个资源解决什么问题，适合什么场景。"
+              >
+                <textarea
+                  id="description"
+                  placeholder="输入资源描述"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  disabled={uploading}
+                  required
+                  rows={4}
+                  className={textareaClassName}
+                />
+              </FieldBlock>
+
+              <FieldBlock
+                label="使用指引"
+                htmlFor="guidance"
+                required
+                helper="建议给出一句可以直接复制给模型的示例提示词，帮助其他人快速上手。"
+              >
+                <textarea
+                  id="guidance"
+                  placeholder="帮助其他用户了解如何使用这个资源。案例，你可以告诉大模型：使用xx技能给我干xx事情"
+                  value={guidance}
+                  onChange={(e) => setGuidance(e.target.value)}
+                  disabled={uploading}
+                  required
+                  rows={4}
+                  className={textareaClassName}
+                />
+              </FieldBlock>
+            </FormSection>
+
+            <FormSection title="发布配置" description="这里控制分类和版本。">
+              <div className="grid gap-5 lg:grid-cols-2">
+                <FieldBlock
+                  label="选择场景"
+                  required
+                  helper="选择最贴近的使用场景，方便市场内筛选和分发。"
+                >
+                  <Select value={category} onValueChange={setCategory} disabled={uploading}>
+                    <SelectTrigger className="h-10">
+                      <SelectValue placeholder="请选择场景" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {category &&
+                      !SCENE_CATEGORY_OPTIONS.includes(
+                        category as (typeof SCENE_CATEGORY_OPTIONS)[number]
+                      ) ? (
+                        <SelectItem value={category}>{category}</SelectItem>
+                      ) : null}
+                      {SCENE_CATEGORY_OPTIONS.map((option) => (
+                        <SelectItem key={option} value={option}>
+                          {option}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </FieldBlock>
+
+                <FieldBlock
+                  label="版本号"
+                  htmlFor="version"
+                  required
+                  helper={
+                    isSkillResource ? (
+                      <div className="space-y-2">
+                        <p className="leading-5">
+                          Skill 版本由文档 frontmatter 的{" "}
+                          <code className="rounded bg-muted px-1">version</code>{" "}
+                          自动读取；未填写时按{" "}
+                          <code className="rounded bg-muted px-1">{DEFAULT_MARKET_VERSION}</code>{" "}
+                          处理，因此这里不允许手动修改。
+                          {versionFromSkillFile && versionFoundInSkillFrontmatter
+                            ? " 当前显示的是从技能文档解析出的版本。"
+                            : ""}
+                          {!versionFromSkillFile ? " 当前显示的是默认版本。" : ""}
+                        </p>
+                        {versionFromSkillFile && !versionFoundInSkillFrontmatter ? (
+                          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
+                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                            <p className="leading-5">
+                              当前没有从{" "}
+                              <code className="rounded bg-amber-100 px-1">md / SKILL.md</code>{" "}
+                              里找到 <code className="rounded bg-amber-100 px-1">version</code>
+                              ，所以展示的是默认版本{" "}
+                              <code className="rounded bg-amber-100 px-1">
+                                {DEFAULT_MARKET_VERSION}
+                              </code>
+                              。
+                            </p>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <>
+                        MCP 和 Plugin 的版本由发布人维护，默认从{" "}
+                        <code className="rounded bg-muted px-1">{DEFAULT_MARKET_VERSION}</code>{" "}
+                        开始。
+                      </>
+                    )
+                  }
+                >
+                  <Input
+                    id="version"
+                    placeholder="输入版本号，例如 v1.0.0"
+                    value={version}
+                    onChange={(e) => setVersion(e.target.value)}
+                    disabled={uploading || isVersionReadonly}
+                    className={cn("h-10", isVersionReadonly && "bg-muted")}
+                    required
+                  />
+                </FieldBlock>
+              </div>
+            </FormSection>
+
+            <FormSection title="高级配置" description="可选项，按需要填写。">
+              <div className="space-y-5">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <h4 className="text-sm font-medium text-foreground">灰度用户 User IDs</h4>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        选填。填写后仅这些用户可在市场列表看到该资源；留空则默认所有用户可见。
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={addGrayUserId}
+                      disabled={uploading}
+                    >
+                      <Plus className="mr-1.5 h-3.5 w-3.5" />
+                      新增用户
+                    </Button>
+                  </div>
+                  {grayUserIds.length === 0 ? (
+                    <div className="rounded-md border border-dashed border-border px-3 py-3 text-xs leading-5 text-muted-foreground">
+                      暂无灰度用户，当前默认全部用户可见。
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {grayUserIds.map((userIdValue, index) => (
+                        <div key={`gray-user-${index}`} className="flex items-center gap-2">
+                          <Input
+                            value={userIdValue}
+                            placeholder="输入 SAP ID 或用户标识"
+                            onChange={(e) => updateGrayUserId(index, e.target.value)}
+                            onBlur={normalizeGrayUserIdsState}
+                            disabled={uploading}
+                            className="h-10"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-10 w-10 shrink-0 p-0 text-muted-foreground hover:text-destructive"
+                            onClick={() => removeGrayUserId(index)}
+                            disabled={uploading}
+                            aria-label="删除灰度用户"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-4">
+                  {resourceType === "plugin" ? (
+                    <>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="space-y-1">
+                          <h4 className="text-sm font-medium text-foreground">Skills</h4>
+                          <p className="text-xs leading-5 text-muted-foreground">
+                            上传或编辑 Plugin 时会自动从 zip 中解析 skill
+                            名称，你也可以手动增删改。重复项会自动去重。
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={addPluginSkill}
+                          disabled={uploading}
+                        >
+                          <Plus className="mr-1.5 h-3.5 w-3.5" />
+                          新增 Skill
+                        </Button>
+                      </div>
+
+                      {pluginSkills.length === 0 ? (
+                        <div className="rounded-md border border-dashed border-border px-3 py-3 text-xs leading-5 text-muted-foreground">
+                          暂无 Skills，请至少新增一个。
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {pluginSkills.map((skill, index) => (
+                            <div key={`plugin-skill-${index}`} className="flex items-center gap-2">
+                              <Input
+                                value={skill}
+                                placeholder="输入 Skill 名称"
+                                onChange={(e) => updatePluginSkill(index, e.target.value)}
+                                onBlur={normalizePluginSkillsState}
+                                disabled={uploading}
+                                className="h-10"
+                              />
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-10 w-10 shrink-0 p-0 text-muted-foreground hover:text-destructive"
+                                onClick={() => removePluginSkill(index)}
+                                disabled={uploading}
+                                aria-label="删除 Skill"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  ) : resourceType === "mcp" ? (
+                    <>
+                      <div className="space-y-1">
+                        <h4 className="text-sm font-medium text-foreground">JSON 模板</h4>
+                        <p className="text-xs leading-5 text-muted-foreground">
+                          不确定 MCP 配置格式时，可以先复制模板，再按需修改后上传。
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={handleCopyJsonTemplate}
+                          disabled={uploading}
+                        >
+                          {jsonTemplateCopied ? (
+                            <Check className="mr-1.5 h-3.5 w-3.5" />
+                          ) : (
+                            <Copy className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          {jsonTemplateCopied ? "模板已复制" : "复制 JSON 模板"}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => setShowJsonTemplate(!showJsonTemplate)}
+                          disabled={uploading}
+                        >
+                          {showJsonTemplate ? (
+                            <ChevronDown className="mr-1.5 h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronRight className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          {showJsonTemplate ? "隐藏模板" : "查看模板"}
+                        </Button>
+                      </div>
+                      {showJsonTemplate ? (
+                        <div className="overflow-hidden rounded-md border border-border bg-background">
+                          <div className="max-h-[220px] overflow-auto p-3">
+                            <pre className="text-xs overflow-x-auto">
+                              <code>{`{
   "mcpServers": {
     "pubmed": {
       "type": "sse",
@@ -1197,39 +1316,67 @@ export function UniversalUploadDialog({
     }
   }
 }`}</code>
-                  </pre>
+                            </pre>
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="rounded-md border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
+                      当前资源没有额外的高级配置项，补齐基础信息后即可直接提交。
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            </FormSection>
 
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
+            {error ? (
+              <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                <AlertCircle className="mt-0.5 size-4 shrink-0" />
+                <p className="leading-6">{error}</p>
+              </div>
+            ) : null}
+          </div>
+        </ScrollArea>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={() => handleDialogClose(false)} disabled={uploading}>
-            取消
-          </Button>
-          <Popover open={!!submitDisabledReason && submitReasonOpen}>
-            <PopoverTrigger asChild>
-              <span
-                className="inline-flex"
-                onMouseEnter={() => setSubmitReasonOpen(true)}
-                onMouseLeave={() => setSubmitReasonOpen(false)}
-                onFocus={() => setSubmitReasonOpen(true)}
-                onBlur={() => setSubmitReasonOpen(false)}
-              >
-                <Button onClick={handleUpload} disabled={uploading || !canSubmit}>
-                  {uploading
-                    ? submittingLabel || (isUpdate ? "更新中..." : "上传中...")
-                    : submitLabel || (isUpdate ? "更新" : "上传")}
-                </Button>
-              </span>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto max-w-56 px-3 py-2 text-xs" align="end" side="top">
-              {submitDisabledReason}
-            </PopoverContent>
-          </Popover>
+        <Separator className="my-4" />
+
+        <DialogFooter className="items-center gap-3 sm:justify-between sm:space-x-0">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {uploading ? <Loader2 className="size-3.5 animate-spin" /> : null}
+            <span>
+              {submitDisabledReason ||
+                `${resourceTypeLabel} 已准备好提交${grayUserIds.length > 0 ? `，灰度用户 ${grayUserIds.length} 人` : ""}。`}
+            </span>
+          </div>
+
+          <div className="flex w-full flex-col-reverse gap-2 sm:w-auto sm:flex-row">
+            <Button variant="outline" onClick={() => handleDialogClose(false)} disabled={uploading}>
+              取消
+            </Button>
+            <Popover open={!!submitDisabledReason && submitReasonOpen}>
+              <PopoverTrigger asChild>
+                <span
+                  className="inline-flex w-full sm:w-auto"
+                  onMouseEnter={() => setSubmitReasonOpen(true)}
+                  onMouseLeave={() => setSubmitReasonOpen(false)}
+                  onFocus={() => setSubmitReasonOpen(true)}
+                  onBlur={() => setSubmitReasonOpen(false)}
+                >
+                  <Button
+                    onClick={handleUpload}
+                    disabled={uploading || !canSubmit}
+                    className="w-full sm:w-auto"
+                  >
+                    {uploadActionText}
+                  </Button>
+                </span>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto max-w-64 px-3 py-2 text-xs" align="end" side="top">
+                {submitDisabledReason}
+              </PopoverContent>
+            </Popover>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
