@@ -5335,10 +5335,10 @@ async function fetchFeedback(
 // ─────────────────────────────────────────────────────────
 // Advanced features (operations) — replaces the like/dislike feedback module.
 //
-// Two-tier model (core usage + value result) for 8 advanced capabilities.
+// Two-tier model (core usage + value result) for advanced capabilities.
 // Event-side metrics come from the `event` index by `eventName`
 // (heartbeat.run.completed / memory.write.applied / skill.evolution.* /
-// chatx.message.processed / hook.executed / git.auto_commit.attempted).
+// chatx.message.processed / hook.executed).
 // Tool-call-based metrics (memory_search/get, java_lsp, code_exec, deferred
 // tools) and post-evolution skill usage are REUSED from the `trace` index
 // (`toolNames`, `evolvedSkills`) instead of double-emitting events for things
@@ -5394,11 +5394,6 @@ interface AdvFeatureMetrics {
   hookBlocked: number
   codeExec: number
   savedTool: number
-  acCommitted: number
-  acSkipped: number
-  acCancelled: number
-  acFailed: number
-  acNeedsConfirm: number
 }
 
 function advAggDocCount(agg: unknown): number {
@@ -5435,7 +5430,6 @@ function assembleAdvancedFeatureCards(
   const memTotal = m.memSearch + m.memGet + m.memWrite
   const chatxTotal = m.chatxReplied + m.chatxCancelled + m.chatxError
   const progTotal = m.codeExec + m.savedTool
-  const acTotal = m.acCommitted + m.acSkipped + m.acCancelled + m.acFailed + m.acNeedsConfirm
 
   return {
     source,
@@ -5517,19 +5511,6 @@ function assembleAdvancedFeatureCards(
           { label: "code_exec", count: m.codeExec, tone: "neutral" },
           { label: "保存工具", count: m.savedTool, tone: "neutral" }
         ]
-      },
-      {
-        key: "autoCommit",
-        label: "自动提交",
-        value: acTotal,
-        valueLabel: "提交尝试次数",
-        hint: `成功 ${m.acCommitted} · 失败 ${m.acFailed}`,
-        items: [
-          { label: "成功", count: m.acCommitted, tone: "good" },
-          { label: "跳过", count: m.acSkipped, tone: "neutral" },
-          { label: "取消", count: m.acCancelled, tone: "warn" },
-          { label: "失败", count: m.acFailed, tone: "bad" }
-        ]
       }
     ]
   }
@@ -5572,10 +5553,6 @@ async function fetchAdvancedFeatures(
       hooks: {
         filter: { term: { eventName: "hook.executed" } },
         aggs: { blocked: { filter: { term: { "properties.blocked": true } } } }
-      },
-      auto_commit: {
-        filter: { term: { eventName: "git.auto_commit.attempted" } },
-        aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
       }
     }
   }
@@ -5617,9 +5594,6 @@ async function fetchAdvancedFeatures(
   const chatxOutcome = advTermBuckets(
     (eAggs.chatx as Record<string, unknown> | undefined)?.by_outcome
   )
-  const acOutcome = advTermBuckets(
-    (eAggs.auto_commit as Record<string, unknown> | undefined)?.by_outcome
-  )
   const toolBuckets = advTermBuckets(tAggs.by_tool)
 
   const metrics: AdvFeatureMetrics = {
@@ -5648,12 +5622,7 @@ async function fetchAdvancedFeatures(
     hookTotal: advAggDocCount(eAggs.hooks),
     hookBlocked: advAggDocCount((eAggs.hooks as Record<string, unknown> | undefined)?.blocked),
     codeExec: advBucketCount(toolBuckets, "code_exec"),
-    savedTool: advBucketCount(toolBuckets, "save_code_exec_tool"),
-    acCommitted: advBucketCount(acOutcome, "committed"),
-    acSkipped: advBucketCount(acOutcome, "skipped"),
-    acCancelled: advBucketCount(acOutcome, "cancelled"),
-    acFailed: advBucketCount(acOutcome, "failed"),
-    acNeedsConfirm: advBucketCount(acOutcome, "needs_confirmation")
+    savedTool: advBucketCount(toolBuckets, "save_code_exec_tool")
   }
 
   return assembleAdvancedFeatureCards(metrics, "es")
@@ -5694,12 +5663,7 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),
-    savedTool: k(6),
-    acCommitted: k(11),
-    acSkipped: k(7),
-    acCancelled: k(2),
-    acFailed: k(1),
-    acNeedsConfirm: 0
+    savedTool: k(6)
   }
 
   return assembleAdvancedFeatureCards(metrics, "mock")
