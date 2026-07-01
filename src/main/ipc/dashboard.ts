@@ -8150,8 +8150,11 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     Object.assign(project, mockCreators[index % mockCreators.length])
   })
   // 由各项目自身的代码/对话总量派生 stage×skill 三桶（DEV 演示用）。
-  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project) => ({
+  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => ({
     ...project,
+    lifecycleCreatedAt:
+      project.lifecycleCreatedAt ??
+      new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
     stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
   }))
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
@@ -8178,7 +8181,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     page: 1,
     pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
     keyword: "",
-    sortBy: "conversationCount",
+    sortBy: "createdAt",
     sortOrder: "desc"
   })
   const summaryCodeStats = makeDashboardCodeStats({
@@ -9483,6 +9486,8 @@ interface ProjectModeProjectView {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  /** 项目创建时间（快照 properties.lifecycleCreatedAt）；ISO 字符串。 */
+  lifecycleCreatedAt?: string
   /** 生命周期最近变更时间（归档时间用此排序）；ISO 字符串。 */
   lifecycleUpdatedAt?: string
   compatible?: boolean
@@ -9500,15 +9505,16 @@ type ProjectModeProjectStatus = "active" | "archived"
 
 /**
  * Sortable project-list columns.
- * - `featureCount` / `archivedAt` are snapshot-doc fields → sorted cheaply in
- *   the paginated snapshot query. `archivedAt` (= lifecycle updateAt) is only
- *   meaningful on the「已归档」tab and is its default ordering.
+ * - `featureCount` / `createdAt` / `archivedAt` are snapshot-doc fields → sorted
+ *   cheaply in the paginated snapshot query. `archivedAt` (= lifecycle updateAt)
+ *   is only meaningful on the「已归档」tab.
  * - `conversationCount` / `generatedLines` are per-range metrics on the trace /
  *   code indices → require the heavier metric-sort path, which is only enabled
  *   for the「进行中」(active) tab (archived projects accumulate; active are few).
  */
 type ProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -9817,8 +9823,8 @@ function normalizeProjectModeProjectStatus(value?: string | null): ProjectModePr
 
 /**
  * Resolve the requested sort. `featureCount` is always honoured; the per-range
- * metric sorts are dropped (→ default name-asc) on the archived tab, so callers
- * can blindly forward the user's choice without leaking the active-only rule.
+ * metric sorts are dropped (→ default createdAt-desc) on the archived tab, so
+ * callers can blindly forward the user's choice without leaking the active-only rule.
  */
 function normalizeProjectModeProjectSort(
   options: ProjectModeProjectPageOptions | undefined,
@@ -9827,11 +9833,12 @@ function normalizeProjectModeProjectSort(
   const sortOrder: ProjectModeProjectSortOrder = options?.sortOrder === "asc" ? "asc" : "desc"
   const key = options?.sortBy
   if (key === "featureCount") return { sortBy: "featureCount", sortOrder }
+  if (key === "createdAt") return { sortBy: "createdAt", sortOrder }
   if (key === "archivedAt" && status === "archived") return { sortBy: "archivedAt", sortOrder }
   if ((key === "conversationCount" || key === "generatedLines") && status !== "archived") {
     return { sortBy: key, sortOrder }
   }
-  return { sortBy: null, sortOrder }
+  return { sortBy: "createdAt", sortOrder: "desc" }
 }
 
 function normalizeProjectModeKeyword(value?: string | null): string {
@@ -10028,6 +10035,10 @@ function projectModeProjectSortValue(
 ): number {
   if (sortBy === "conversationCount") return project.conversationCount
   if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
+  if (sortBy === "createdAt") {
+    const t = project.lifecycleCreatedAt ? Date.parse(project.lifecycleCreatedAt) : NaN
+    return Number.isNaN(t) ? 0 : t
+  }
   if (sortBy === "archivedAt") {
     const t = project.lifecycleUpdatedAt ? Date.parse(project.lifecycleUpdatedAt) : NaN
     return Number.isNaN(t) ? 0 : t
@@ -10118,6 +10129,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     creatorUpperOrgLv1:
       asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
     lifecycleStatus: asOptionalString(props.lifecycleStatus),
+    lifecycleCreatedAt: asOptionalString(props.lifecycleCreatedAt),
     lifecycleUpdatedAt: asOptionalString(props.lifecycleUpdatedAt),
     compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
     compatibilityStatus: asOptionalString(props.compatibilityStatus),
@@ -10489,7 +10501,7 @@ async function fetchProjectModeProjectPageHits(
   const page = clampLimit(options?.page, 1, maxPage)
   const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
 
-  // `featureCount` / `archivedAt` live in the snapshot doc and sort here; the
+  // `featureCount` / `createdAt` / `archivedAt` live in the snapshot doc and sort here; the
   // metric sorts are handled upstream by the metric-sort path.
   const sort =
     sortBy === "featureCount"
@@ -10497,6 +10509,11 @@ async function fetchProjectModeProjectPageHits(
           { "properties.featureCount": { order: sortOrder } },
           { "properties.projectId": { order: "asc" } }
         ]
+      : sortBy === "createdAt"
+        ? [
+            { "properties.lifecycleCreatedAt": { order: sortOrder, missing: "_last" } },
+            { "properties.projectId": { order: "asc" } }
+          ]
       : sortBy === "archivedAt"
         ? [
             { "properties.lifecycleUpdatedAt": { order: sortOrder, missing: "_last" } },
@@ -11591,8 +11608,8 @@ async function fetchProjectMode(
         page: 1,
         pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
         keyword: "",
-        // 列表默认按对话数降序；与渲染层初始排序态一致，避免首屏二次请求。
-        sortBy: "conversationCount",
+        // 列表默认按创建时间降序；与渲染层初始排序态一致，避免首屏二次请求。
+        sortBy: "createdAt",
         sortOrder: "desc"
       },
       access

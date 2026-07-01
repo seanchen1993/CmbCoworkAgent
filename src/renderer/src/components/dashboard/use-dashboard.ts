@@ -523,6 +523,7 @@ export interface DashboardProjectModeProject {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
   featureCount: number
@@ -547,6 +548,7 @@ export interface DashboardProjectModeProjectCounts {
 
 export type DashboardProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"

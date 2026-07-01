@@ -409,6 +409,16 @@ function lifecycleLabel(status?: string): string {
   }
 }
 
+function formatProjectCreatedAt(value?: string): string {
+  if (!value) return "—"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "—"
+  const pad = (n: number): string => String(n).padStart(2, "0")
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`
+}
+
 function formatProjectCreatorDepartment(project: DashboardProjectModeProject): string {
   if (project.creatorUpperOrgLv1 && project.creatorUpperOrgLv0) {
     return `${project.creatorUpperOrgLv1}/${project.creatorUpperOrgLv0}`
@@ -997,6 +1007,7 @@ function ProjectRow({
   const creatorName = project.creatorUserName || project.creatorSapId || project.creatorYstId || "—"
   const creatorId = project.creatorSapId || project.creatorYstId || ""
   const creatorDepartment = formatProjectCreatorDepartment(project)
+  const createdAt = formatProjectCreatedAt(project.lifecycleCreatedAt)
 
   return (
     <>
@@ -1095,6 +1106,7 @@ function ProjectRow({
           ) : null}
         </td>
         <td className="px-3 py-2 text-muted-foreground">{creatorDepartment}</td>
+        <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">{createdAt}</td>
         <td className="px-3 py-2 text-right">
           <button
             type="button"
@@ -1112,7 +1124,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={11} className="px-3 py-3">
+          <td colSpan={12} className="px-3 py-3">
             <div className="space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -1391,16 +1403,17 @@ function ProjectListSection({
       : ""
   // 对话数 / 原始生成行数 排序仅在「进行中」开放（归档项目量大，按指标全量排序代价高）。
   const metricSortAllowed = tab === "active"
-  // 各 tab 默认排序：进行中→对话数降序；已归档→归档时间降序。
+  // 项目列表默认按创建时间降序，最新创建的项目排在最前。
   const tabDefaultSort: {
     key: DashboardProjectModeProjectSortKey
     order: DashboardProjectModeProjectSortOrder
-  } =
-    tab === "archived"
-      ? { key: "archivedAt", order: "desc" }
-      : { key: "conversationCount", order: "desc" }
+  } = { key: "createdAt", order: "desc" }
   const sortKeyApplicable = (key: DashboardProjectModeProjectSortKey): boolean =>
-    key === "featureCount" ? true : key === "archivedAt" ? tab === "archived" : metricSortAllowed
+    key === "featureCount" || key === "createdAt"
+      ? true
+      : key === "archivedAt"
+        ? tab === "archived"
+        : metricSortAllowed
   const useExplicitSort = sortBy !== null && sortKeyApplicable(sortBy)
   const effectiveSortBy = useExplicitSort ? sortBy : tabDefaultSort.key
   const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
@@ -1648,6 +1661,14 @@ function ProjectListSection({
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
+              <SortableTh
+                label="创建时间"
+                sortKey="createdAt"
+                activeKey={effectiveSortBy}
+                order={effectiveSortOrder}
+                enabled
+                onSort={cycleSort}
+              />
               <th className="px-3 py-2 text-right font-medium">操作</th>
             </tr>
           </thead>
