@@ -20,13 +20,19 @@ function stripMentionPrefix(label: string): string {
   return label
 }
 
+function getDisplayFilename(label: string): string {
+  const rawPath = stripMentionPrefix(label)
+  const normalizedPath = rawPath.replace(/\\/g, "/")
+  return normalizedPath.split("/").filter(Boolean).pop() || rawPath
+}
+
 export function MentionFileChip({
   label,
   popoverText,
   onRemove,
   className
 }: Props): React.ReactElement {
-  const displayLabel = stripMentionPrefix(label)
+  const displayLabel = getDisplayFilename(label)
   const [open, setOpen] = React.useState(false)
   const showPopover = Boolean(popoverText?.trim())
 
