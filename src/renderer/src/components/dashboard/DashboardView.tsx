@@ -581,6 +581,16 @@ function getMarketSkillQueryNames(item: MarketItem): string[] {
   return [item.name, item.filename].map((value) => value?.trim() || "").filter(Boolean)
 }
 
+function isMarketSkillUploadedInRange(item: MarketItem, range: TimeRange): boolean {
+  const uploadedAt = Date.parse(item.created_at)
+  const from = Date.parse(range.from)
+  const to = Date.parse(range.to)
+  if (!Number.isFinite(uploadedAt) || !Number.isFinite(from) || !Number.isFinite(to)) {
+    return false
+  }
+  return uploadedAt >= from && uploadedAt <= to
+}
+
 function normalizeTeamOrgText(value?: string): string {
   return String(value || "")
     .replace(/／/g, "/")
@@ -604,11 +614,45 @@ function findTeamShiInText(value: string | undefined, knownShiList: string[]): s
   )
 }
 
-function resolveTeamSkillOwnerShi(
+function findTeamGroupInText(value: string | undefined, knownGroupList: string[]): string | null {
+  const text = normalizeTeamOrgText(value)
+  if (!text) return null
+  const exact = knownGroupList.find((group) => normalizeTeamOrgText(group) === text)
+  if (exact) return exact
+  const sortedKnownGroupList = [...knownGroupList].sort(
+    (a, b) => normalizeTeamOrgText(b).length - normalizeTeamOrgText(a).length
+  )
+  return (
+    sortedKnownGroupList.find((group) => {
+      const normalizedGroup = normalizeTeamOrgText(group)
+      return Boolean(normalizedGroup && text.includes(normalizedGroup))
+    }) ?? null
+  )
+}
+
+function teamOrgContributionKey(shi: string, group?: string): string {
+  return group ? `${shi}/${group}` : shi
+}
+
+function buildKnownTeamGroupsByShi(
+  rows: DashboardAwardTeamBenchmarkRow[]
+): Map<string, string[]> {
+  const byShi = new Map<string, string[]>()
+  for (const row of rows) {
+    const groups = (row.children ?? [])
+      .map((child) => child.group?.trim() ?? "")
+      .filter(Boolean)
+    byShi.set(row.shi, groups)
+  }
+  return byShi
+}
+
+function resolveTeamSkillOwnerOrg(
   item: MarketItem,
   uploaderProfiles: Record<string, SkillUploaderProfile>,
-  knownShiList: string[]
-): string | null {
+  knownShiList: string[],
+  knownGroupsByShi: Map<string, string[]>
+): { shi: string; group?: string } | null {
   const parsed = parseUploaderIdentity(item.user_id)
   const profile = getUploaderIdCandidates(item.user_id)
     .map((candidate) => uploaderProfiles[candidate])
@@ -621,39 +665,72 @@ function resolveTeamSkillOwnerShi(
     item.managerDepartment,
     item.user_id
   ]
+  let shi: string | null = null
   for (const candidate of candidates) {
-    const shi = findTeamShiInText(candidate, knownShiList)
-    if (shi) return shi
+    shi = findTeamShiInText(candidate, knownShiList)
+    if (shi) break
   }
-  return null
+  if (!shi) return null
+
+  const knownGroupList = knownGroupsByShi.get(shi) ?? []
+  let group: string | null = null
+  for (const candidate of candidates) {
+    group = findTeamGroupInText(candidate, knownGroupList)
+    if (group) break
+  }
+  return group ? { shi, group } : { shi }
 }
 
-function buildTeamSkillContributionsByShi(
+type TeamSkillContributionBucket = {
+  contributedSkillKeys: Set<string>
+  coverageSkillNames: Set<string>
+}
+
+function addTeamSkillContribution(
+  map: Map<string, TeamSkillContributionBucket>,
+  key: string,
+  contributionKey: string,
+  item: MarketItem
+): void {
+  const entry = map.get(key) ?? {
+    contributedSkillKeys: new Set<string>(),
+    coverageSkillNames: new Set<string>()
+  }
+  entry.contributedSkillKeys.add(contributionKey)
+  for (const name of getMarketSkillQueryNames(item)) entry.coverageSkillNames.add(name)
+  map.set(key, entry)
+}
+
+function buildTeamSkillContributions(
   items: Iterable<MarketItem>,
   uploaderProfiles: Record<string, SkillUploaderProfile>,
-  knownShiList: string[]
-): Map<string, { contributedSkillKeys: Set<string>; coverageSkillNames: Set<string> }> {
-  const byShi = new Map<
-    string,
-    { contributedSkillKeys: Set<string>; coverageSkillNames: Set<string> }
-  >()
+  knownShiList: string[],
+  knownGroupsByShi: Map<string, string[]>
+): {
+  byShi: Map<string, TeamSkillContributionBucket>
+  byOrg: Map<string, TeamSkillContributionBucket>
+} {
+  const byShi = new Map<string, TeamSkillContributionBucket>()
+  const byOrg = new Map<string, TeamSkillContributionBucket>()
   for (const item of items) {
-    const shi = resolveTeamSkillOwnerShi(item, uploaderProfiles, knownShiList)
-    if (!shi) continue
+    const owner = resolveTeamSkillOwnerOrg(item, uploaderProfiles, knownShiList, knownGroupsByShi)
+    if (!owner) continue
     const contributionKey =
       normalizeMarketSkillKey(item.name) ||
       normalizeMarketSkillKey(item.filename) ||
       item.name?.trim()
     if (!contributionKey) continue
-    const entry = byShi.get(shi) ?? {
-      contributedSkillKeys: new Set<string>(),
-      coverageSkillNames: new Set<string>()
+    addTeamSkillContribution(byShi, owner.shi, contributionKey, item)
+    if (owner.group) {
+      addTeamSkillContribution(
+        byOrg,
+        teamOrgContributionKey(owner.shi, owner.group),
+        contributionKey,
+        item
+      )
     }
-    entry.contributedSkillKeys.add(contributionKey)
-    for (const name of getMarketSkillQueryNames(item)) entry.coverageSkillNames.add(name)
-    byShi.set(shi, entry)
   }
-  return byShi
+  return { byShi, byOrg }
 }
 
 function TimeControlBar({
@@ -2912,7 +2989,7 @@ export function DashboardView(): React.JSX.Element {
     }
   }, [activeMainTab, awardsAdmin, range, marketSkillMap, marketSkillsLoading])
 
-  // 团队标杆奖懒加载：拉取室/组指标后，按市场作者归属（发布者所属室）补「贡献技能数 / 覆盖室数」。
+  // 团队标杆奖懒加载：拉取室/组指标后，按上传时间过滤市场技能，再按作者归属补「贡献技能数 / 覆盖数」。
   useEffect(() => {
     if (activeMainTab !== "awards" || !awardsAdmin) return
     let cancelled = false
@@ -2932,35 +3009,46 @@ export function DashboardView(): React.JSX.Element {
         }
         const rawRows = (result.data as DashboardAwardTeamBenchmarkRow[]) ?? []
         const knownShiList = rawRows.map((row) => row.shi).filter(Boolean)
-        const skillContribsByShi = buildTeamSkillContributionsByShi(
-          marketSkillMap.values(),
+        const knownGroupsByShi = buildKnownTeamGroupsByShi(rawRows)
+        const uploadedInRangeSkills = Array.from(marketSkillMap.values()).filter((item) =>
+          isMarketSkillUploadedInRange(item, range)
+        )
+        const skillContribs = buildTeamSkillContributions(
+          uploadedInRangeSkills,
           skillUploaderProfiles,
-          knownShiList
+          knownShiList,
+          knownGroupsByShi
         )
 
-        // 覆盖室数：把每室贡献技能集传给后端，单次查询得各室技能被多少去重室试用过。
-        const coverageGroups = Array.from(skillContribsByShi.entries()).map(([shi, entry]) => ({
-          shi,
+        // 覆盖室数：把每个室/组的贡献技能集传给后端，单次查询得技能被多少去重室试用过。
+        const coverageGroups = [
+          ...Array.from(skillContribs.byShi.entries()),
+          ...Array.from(skillContribs.byOrg.entries())
+        ].map(([key, entry]) => ({
+          shi: key,
           skillNames: Array.from(entry.coverageSkillNames)
         }))
-        let coverageByShi: Record<string, number> = {}
+        let coverageByOrg: Record<string, number> = {}
         if (coverageGroups.length > 0) {
           const cov = await window.api.dashboard.awardsTeamSkillCoverage(range, coverageGroups)
           if (cancelled) return
-          if (cov.success) coverageByShi = (cov.data as Record<string, number>) ?? {}
+          if (cov.success) coverageByOrg = (cov.data as Record<string, number>) ?? {}
         }
 
         const enriched: TeamBenchmarkRow[] = rawRows.map((row) => ({
           ...row,
-          contributedSkillCount: skillContribsByShi.get(row.shi)?.contributedSkillKeys.size ?? 0,
-          skillCoverageShiCount: coverageByShi[row.shi] ?? 0,
-          children: (row.children ?? []).map((child) => ({
-            ...child,
-            // 贡献技能数 / 覆盖室数为室口径，组级不展示；组级无下钻。
-            contributedSkillCount: null,
-            skillCoverageShiCount: null,
-            children: undefined
-          }))
+          contributedSkillCount: skillContribs.byShi.get(row.shi)?.contributedSkillKeys.size ?? 0,
+          skillCoverageShiCount: coverageByOrg[row.shi] ?? 0,
+          children: (row.children ?? []).map((child) => {
+            const key = child.group ? teamOrgContributionKey(row.shi, child.group) : ""
+            return {
+              ...child,
+              contributedSkillCount:
+                skillContribs.byOrg.get(key)?.contributedSkillKeys.size ?? 0,
+              skillCoverageShiCount: coverageByOrg[key] ?? 0,
+              children: undefined
+            }
+          })
         }))
         if (!cancelled) setAwardTeamRows(enriched)
       } catch (error) {
