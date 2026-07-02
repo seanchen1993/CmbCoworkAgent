@@ -3894,7 +3894,7 @@ The workspace root is: ${workspacePath}`
       })
     )
   }
-  if (!options.noSchedulerTool) {
+  if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
       try {
