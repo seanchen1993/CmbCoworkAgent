@@ -258,6 +258,76 @@ interface UserInfoLite {
   pathName?: string
 }
 
+type MarketExtraJson = {
+  skills?: string[]
+  grayUserIds?: string[]
+  updated_at?: string
+}
+
+function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
+  if (!extraJson?.trim()) return {}
+  try {
+    const parsed = JSON.parse(extraJson) as MarketExtraJson
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  if (!Array.isArray(parsed.grayUserIds)) return []
+  return Array.from(
+    new Set(
+      parsed.grayUserIds
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function getMarketUpdatedAt(item: Pick<MarketItem, "created_at" | "updated_at" | "extra_json">): string {
+  return parseMarketExtraJson(item.extra_json).updated_at || item.updated_at || item.created_at
+}
+
+function doesMarketUserIdMatchCurrentUser(
+  rawUserId: string | null | undefined,
+  currentUserIdCandidates: Iterable<string>,
+  currentUserSapId?: string | null | undefined
+): boolean {
+  const normalizedCurrentIds = Array.from(
+    new Set([
+      ...Array.from(currentUserIdCandidates, (value) => String(value || "").trim()).filter(Boolean),
+      ...buildUploaderIdCandidates(currentUserSapId || undefined)
+    ])
+  )
+  if (!rawUserId || normalizedCurrentIds.length === 0) return false
+
+  const targetCandidates = getUploaderIdCandidates(rawUserId)
+  return targetCandidates.some((candidate) =>
+    normalizedCurrentIds.some(
+      (currentId) =>
+        currentId === candidate || currentId.includes(candidate) || candidate.includes(currentId)
+    )
+  )
+}
+
+function canCurrentUserViewMarketItem(
+  item: MarketItem,
+  currentUserSapId: string | null | undefined,
+  currentUserIdCandidates: Iterable<string>
+): boolean {
+  if (doesMarketUserIdMatchCurrentUser(item.user_id, currentUserIdCandidates, currentUserSapId)) {
+    return true
+  }
+  const grayUserIds = getGrayUserIdsFromExtraJson(item.extra_json)
+  if (grayUserIds.length === 0) return true
+  return grayUserIds.some((userId) =>
+    doesMarketUserIdMatchCurrentUser(userId, currentUserIdCandidates, currentUserSapId)
+  )
+}
+
 type UploadFilterMode = "mine" | "installed" | "featured" | "certified"
 
 const uploadFilterOptions: Array<{ value: UploadFilterMode; label: string }> = [
@@ -769,6 +839,7 @@ export function MarketPanel(): React.JSX.Element {
   const [canViewSkillUserDetail, setCanViewSkillUserDetail] = useState(false)
   const [uploaderProfiles, setUploaderProfiles] = useState<Record<string, UploaderProfile>>({})
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
+  const [currentUserSapId, setCurrentUserSapId] = useState<string | null>(null)
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
     readUploadedSkillNamesFromStorage()
   )
@@ -1026,9 +1097,11 @@ export function MarketPanel(): React.JSX.Element {
     try {
       if (typeof window.api?.models?.getUserInfo !== "function") {
         setCurrentUserUploadCandidates([])
+        setCurrentUserSapId(null)
         return
       }
       const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
+      setCurrentUserSapId(userInfo?.sapId?.trim() || null)
       const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
         .map((value) => String(value || "").trim())
         .filter(Boolean)
@@ -1039,6 +1112,7 @@ export function MarketPanel(): React.JSX.Element {
     } catch (err) {
       console.warn("[MarketPanel] Failed to load current user upload candidates:", err)
       setCurrentUserUploadCandidates([])
+      setCurrentUserSapId(null)
     }
   }, [])
 
@@ -1693,7 +1767,7 @@ export function MarketPanel(): React.JSX.Element {
           enabled: false,
           lazyLoad: false,
           createdAt: item.created_at,
-          updatedAt: item.created_at
+          updatedAt: getMarketUpdatedAt(item)
         })
       } else if (activeTab === "plugin") {
         // The zip is already downloaded above; parse it (without installing) to
@@ -1712,7 +1786,7 @@ export function MarketPanel(): React.JSX.Element {
           mcpServerCount: detail.mcpServers.length,
           hookCount: detail.hookCount,
           createdAt: item.created_at,
-          updatedAt: item.created_at
+          updatedAt: getMarketUpdatedAt(item)
         })
         setPluginDetailData({
           ...detail,
@@ -1735,10 +1809,9 @@ export function MarketPanel(): React.JSX.Element {
   const isMineUploadedItem = useCallback(
     (item: MarketItem): boolean => {
       if (localStorageHelper.canDeleteItem(item.name, activeTab)) return true
-      if (!item.user_id || currentUserCandidateSet.size === 0) return false
-      return getUploaderIdCandidates(item.user_id).some((id) => currentUserCandidateSet.has(id))
+      return doesMarketUserIdMatchCurrentUser(item.user_id, currentUserCandidateSet, currentUserSapId)
     },
-    [activeTab, currentUserCandidateSet]
+    [activeTab, currentUserCandidateSet, currentUserSapId]
   )
 
   const toggleUploadFilterMode = useCallback((mode: UploadFilterMode) => {
@@ -1758,6 +1831,12 @@ export function MarketPanel(): React.JSX.Element {
   const filteredData = useMemo(
     () =>
       currentData.filter((item) => {
+        if (
+          activeTab !== ORG_SKILL_MARKET_TYPE &&
+          !canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet)
+        ) {
+          return false
+        }
         const query = activeSearchQuery.trim().toLowerCase()
         const matchesSearch =
           item.chinese_name?.toLowerCase().includes(query) ||
@@ -1780,7 +1859,16 @@ export function MarketPanel(): React.JSX.Element {
         if (!categoryFilter) return true
         return getCategoryFilterName(item.category) === categoryFilter
       }),
-    [activeSearchQuery, categoryFilter, currentData, isMineUploadedItem, uploadFilterModes]
+    [
+      activeSearchQuery,
+      activeTab,
+      categoryFilter,
+      currentData,
+      currentUserCandidateSet,
+      currentUserSapId,
+      isMineUploadedItem,
+      uploadFilterModes
+    ]
   )
 
   const sortedSkillData = useMemo(() => {
@@ -1870,7 +1958,11 @@ export function MarketPanel(): React.JSX.Element {
   useEffect(() => {
     const detailName = marketInitialSkillDetailName?.trim()
     if (!detailName || activeTab !== "skill" || loading) return
-    const targetItem = skillsData.find((item) => item.name === detailName)
+    const targetItem = skillsData.find(
+      (item) =>
+        item.name === detailName &&
+        canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet)
+    )
     if (!targetItem) {
       if (skillsData.length > 0) setMarketInitialSkillDetailName(null)
       return
@@ -1880,8 +1972,10 @@ export function MarketPanel(): React.JSX.Element {
     void openItemDetailRef.current(targetItem)
   }, [
     activeTab,
+    currentUserCandidateSet,
     loading,
     marketInitialSkillDetailName,
+    currentUserSapId,
     setMarketInitialSkillDetailName,
     skillsData
   ])
@@ -2119,7 +2213,8 @@ export function MarketPanel(): React.JSX.Element {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string
   ) => {
     try {
       if (!file) {
@@ -2138,7 +2233,8 @@ export function MarketPanel(): React.JSX.Element {
         version,
         guidance,
         chineseName,
-        userId
+        userId,
+        extraJson
       )
 
       // If upload is successful, record it in localStorage
@@ -2165,7 +2261,8 @@ export function MarketPanel(): React.JSX.Element {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string
   ) => {
     try {
       // 更新时允许文件为空，这样可以只更新元数据
@@ -2185,7 +2282,8 @@ export function MarketPanel(): React.JSX.Element {
         version,
         guidance,
         chineseName,
-        userId
+        userId,
+        extraJson
       )
 
       // Update is successful, no need to update localStorage since item already exists
@@ -2307,40 +2405,39 @@ export function MarketPanel(): React.JSX.Element {
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-[#f5f4ed]">
       {/* Header */}
-      <div className="px-5 py-4 border-b border-[#e8e6dc] bg-[#faf9f5]">
-        <div className="flex items-center justify-between mb-3">
-          <div className="w-full flex items-center gap-2.5">
-            <div className="size-8 rounded-xl bg-[#fdf3e7] border border-[#f5d9c4] flex items-center justify-center">
-              <ShoppingBag className="size-4 text-[#c4956a]" />
-            </div>
-            <div className={'w-full '}>
-              <div className={'w-full flex justify-between items-center'}>
-                <h2 className="font-medium text-[15px] leading-tight text-[#141413]">
-                  {detailMode === "detail" && selectedItem
-                    ? selectedItem.chinese_name || selectedItem.name
-                    : "应用市场"}
-                </h2>
-               <span>
-                    {detailMode === "detail" && selectedItem && (<Button
-                      variant="outline"
-                      size="sm"
-                      onClick={backToList}
-                      className="h-8 px-3.5 gap-1.5 text-xs font-medium text-[#8b5e34] border-[#f2c99d] bg-[linear-gradient(135deg,#fff4e7_0%,#fde7cf_100%)] hover:bg-[linear-gradient(135deg,#ffedd8_0%,#f9d9b8_100%)] shadow-[0_6px_18px_rgba(196,149,106,0.22)] rounded-lg cursor-pointer"
-                    >
-                      <ArrowLeft className="size-3.5" />
-                      返回列表
-                    </Button>)}
-               </span>
+      {detailMode === "detail" && selectedItem  && (
+        <div className="px-5 py-4 border-b border-[#e8e6dc] bg-[#faf9f5]">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-full flex items-center gap-2.5">
+              <div className="size-8 rounded-xl bg-[#fdf3e7] border border-[#f5d9c4] flex items-center justify-center">
+                <ShoppingBag className="size-4 text-[#c4956a]" />
               </div>
-              {detailMode === "list" && (
-                <p className="text-[11px] text-[#87867f] leading-tight mt-0.5">
-                  发现并安装社区共享的工具资源
-                </p>
-              )}
+              <div className={"w-full "}>
+                <div className={"w-full flex justify-between items-center"}>
+                  <h2 className="font-medium text-[15px] leading-tight text-[#141413]">
+                    {detailMode === "detail" && selectedItem
+                      ? selectedItem.chinese_name || selectedItem.name
+                      : "应用市场"}
+                  </h2>
+                  <span>
+                    {detailMode === "detail" && selectedItem && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={backToList}
+                        className="h-8 px-3.5 gap-1.5 text-xs font-medium text-[#8b5e34] border-[#f2c99d] bg-[linear-gradient(135deg,#fff4e7_0%,#fde7cf_100%)] hover:bg-[linear-gradient(135deg,#ffedd8_0%,#f9d9b8_100%)] shadow-[0_6px_18px_rgba(196,149,106,0.22)] rounded-lg cursor-pointer"
+                      >
+                        <ArrowLeft className="size-3.5" />
+                        返回列表
+                      </Button>
+                    )}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      )}
       {detailMode === "detail" && selectedItem ? (
         <MarketDetailView
           activeTab={activeTab}
@@ -2799,7 +2896,8 @@ export function MarketPanel(): React.JSX.Element {
                     version: updateDialog.item.version,
                     guidance: updateDialog.item.guidance,
                     chinese_name: updateDialog.item.chinese_name,
-                    user_id: updateDialog.item.user_id
+                    user_id: updateDialog.item.user_id,
+                    extra_json: updateDialog.item.extra_json
                   }
                 : undefined
             }
