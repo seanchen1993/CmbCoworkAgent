@@ -158,9 +158,9 @@ export function SystemConstraintsPanel({
   const groupedItems = useMemo(() => {
     const groups = new Map<string, HarnessAgentmdLoadStatusItem[]>()
     for (const item of state?.items ?? []) {
-      const group = groups.get(item.serviceUnitId) ?? []
+      const group = groups.get(item.deployUnitId) ?? []
       group.push(item)
-      groups.set(item.serviceUnitId, group)
+      groups.set(item.deployUnitId, group)
     }
     return Array.from(groups.entries())
   }, [state?.items])
@@ -225,15 +225,15 @@ export function SystemConstraintsPanel({
       )}
 
       <div className="space-y-3">
-        {groupedItems.map(([serviceUnitId, items]) => (
-          <div key={serviceUnitId} className="rounded-lg border border-border/70 bg-background/80">
+        {groupedItems.map(([deployUnitId, items]) => (
+          <div key={deployUnitId} className="rounded-lg border border-border/70 bg-background/80">
             <div className="border-b border-border/60 px-3 py-2 font-mono text-[11px] font-semibold text-foreground/80">
-              {serviceUnitId}
+              {deployUnitId}
             </div>
             <div className="space-y-2 p-2.5">
               {items.map((item, index) => (
                 <button
-                  key={`${serviceUnitId}-${item.source}-${item.path}-${index}`}
+                  key={`${deployUnitId}-${item.source}-${item.path}-${index}`}
                   type="button"
                   className={cn(
                     "group flex w-full min-w-0 items-start gap-2 rounded-md border px-2.5 py-2 text-left transition-colors hover:bg-background disabled:cursor-default disabled:opacity-75",

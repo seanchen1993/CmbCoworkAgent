@@ -76,7 +76,7 @@ export function buildAgentsPromptLoadStatusItems(
     const globalItems = agentsPrompt.loadedPaths
       .filter((path) => !workspaceLoadedPaths.has(path))
       .map((path) => ({
-        serviceUnitId: "CMBDevClaw",
+        deployUnitId: "CMBDevClaw",
         path,
         loaded: true,
         source: "local",
@@ -84,7 +84,7 @@ export function buildAgentsPromptLoadStatusItems(
       }))
     const workspaceItems = agentsPrompt.workspaceSections.flatMap((section) =>
       section.loadedPaths.map((path) => ({
-        serviceUnitId: section.cwd,
+        deployUnitId: section.cwd,
         path,
         loaded: true,
         source: "local",
@@ -95,7 +95,7 @@ export function buildAgentsPromptLoadStatusItems(
   }
 
   return agentsPrompt.loadedPaths.map((path) => ({
-    serviceUnitId: agentsPrompt.projectRoot,
+    deployUnitId: agentsPrompt.projectRoot,
     path,
     loaded: true,
     source: "local",

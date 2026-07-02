@@ -2941,9 +2941,9 @@ function applyServiceUnitMappingsToAgentmdLoadStatus(
   if (serviceUnitByRepoPath.size === 0) return items
 
   return items.map((item) => {
-    if (!path.isAbsolute(item.serviceUnitId)) return item
-    const serviceUnitId = serviceUnitByRepoPath.get(resolve(item.serviceUnitId))
-    return serviceUnitId ? { ...item, serviceUnitId } : item
+    if (!path.isAbsolute(item.deployUnitId)) return item
+    const serviceUnitId = serviceUnitByRepoPath.get(resolve(item.deployUnitId))
+    return serviceUnitId ? { ...item, deployUnitId: serviceUnitId } : item
   })
 }
 
@@ -3641,7 +3641,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       ? `- **CRITICAL: Commands run in PowerShell (not bash).** Use \`; \` instead of \`&&\`, \`$env:VAR\` instead of \`$VAR\`, \`-and\`/\`-or\` instead of \`&&\`/\`||\`. NEVER use bash syntax.`
       : "- Use cmd.exe syntax for shell commands (e.g., dir instead of ls, type instead of cat)\n- Use && to chain commands, use ^ for line continuation, use %VAR% for environment variables"
 
-  const filesystemSystemPrompt = `You have access to a filesystem. All file paths use fully qualified absolute system paths.
+  const filesystemSystemPrompt = `\n\nYou have access to a filesystem. All file paths use fully qualified absolute system paths.
 ### userinfo
 - sap编号、员工编号:${userInfo?.sapId}
 - yst编号、一事通编号: ${userInfo?.ystId}

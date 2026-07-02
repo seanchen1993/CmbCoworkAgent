@@ -772,7 +772,7 @@ function replaceHarnessConfigPlaceholders(
     projectDir,
     projectCode: project.projectCode,
     feature: options.feature ?? "",
-    selectedServiceUnits: options.selectedServiceUnitsJson ?? "",
+    selectedDeployUnits: options.selectedServiceUnitsJson ?? "",
     sessionWorkspacePath: options.sessionWorkspacePath ?? "",
     pluginPath: cwd,
     mode,
@@ -781,7 +781,7 @@ function replaceHarnessConfigPlaceholders(
     nodeId: options.nodeId ?? ""
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|selectedServiceUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
     (_, key: string) => replacements[key] ?? ""
   )
 }

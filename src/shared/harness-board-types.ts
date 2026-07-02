@@ -108,7 +108,7 @@ export interface HarnessServiceUnitMapping {
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
 
 export interface HarnessAgentmdLoadStatusItem {
-  serviceUnitId: string
+  deployUnitId: string
   path: string
   loaded: boolean
   source: string
@@ -137,11 +137,11 @@ export function normalizeHarnessAgentmdLoadStatus(
   const status: HarnessAgentmdLoadStatusItem[] = []
   for (const item of value) {
     if (!isHarnessPlainObject(item)) continue
-    const serviceUnitId = normalizeHarnessText(item.serviceUnitId).trim()
+    const deployUnitId = normalizeHarnessText(item.deployUnitId).trim()
     const path = normalizeHarnessText(item.path).trim()
-    if (!serviceUnitId && !path) continue
+    if (!deployUnitId && !path) continue
     status.push({
-      serviceUnitId: serviceUnitId || "(unknown)",
+      deployUnitId: deployUnitId || "(unknown)",
       path,
       loaded: item.loaded === true,
       source: normalizeHarnessText(item.source).trim(),
