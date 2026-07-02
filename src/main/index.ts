@@ -207,7 +207,6 @@ import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { startFeatureGatePrefetch, stopFeatureGatePrefetch } from "./feature-gates"
 import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
@@ -688,7 +687,6 @@ if (!gotTheLock) {
     startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
-    startFeatureGatePrefetch(3000)
     markFullBackupCleanupReady(selfCheckResult)
 
     // ── Keep Awake ──
@@ -768,7 +766,6 @@ if (!gotTheLock) {
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
     stopUpdateChecker()
-    stopFeatureGatePrefetch()
     try {
       shutdownAdoptionTracker()
     } catch (err) {
