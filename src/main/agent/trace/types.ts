@@ -375,6 +375,8 @@ export interface AgentTrace {
   appVersion?: string
   /** Which skills were actually used during this run, format: "name-version" e.g. "scheduler-assistant-v1.0.0" */
   usedSkills: string[]
+  /** Source refs for plugin-owned usedSkills, format: "plugin:<pluginId>/<skillIdentifier>". */
+  skillSource?: string[]
   /** Optional skill-eval payload computed before upload. Existing trace fields remain unchanged. */
   skillEval?: TraceSkillEvalExtension
   /** Used skills that were produced by the cloud trace evolver, same format as usedSkills. */

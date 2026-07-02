@@ -2474,8 +2474,7 @@ export function ProjectModePanel({
   onUserClick,
   onFunnelFirstStageClick,
   onSkillFunnelFirstStageClick,
-  marketSkillKeys = new Set(),
-  pluginSkillKeys = new Set()
+  marketSkillKeys = new Set()
 }: {
   data: DashboardProjectModeData | null
   loading: boolean
@@ -2534,7 +2533,6 @@ export function ProjectModePanel({
   onFunnelFirstStageClick?: () => void
   onSkillFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
-  pluginSkillKeys?: Set<string>
 }): React.JSX.Element {
   const adapters = useMemo(() => data?.adapters ?? [], [data?.adapters])
   const adapterOptions = useMemo(
@@ -2878,7 +2876,6 @@ export function ProjectModePanel({
             bySkillAdoption={bySkillAdoption}
             onSkillClick={onSkillClick}
             marketSkillKeys={marketSkillKeys}
-            pluginSkillKeys={pluginSkillKeys}
           />
           <ToolRankingPanel
             byTool={tools.byTool}

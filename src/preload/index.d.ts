@@ -506,10 +506,14 @@ interface DashboardProjectModeFeature {
 interface DashboardProjectModeSkillCount {
   skill: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
   skill: string
+  isPlugin?: boolean
+  pluginName?: string
   commitCount: number
 }
 

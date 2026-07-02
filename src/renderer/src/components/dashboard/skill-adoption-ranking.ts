@@ -9,6 +9,8 @@ export type SkillAdoptionSortKey =
 
 export interface SkillAdoptionRankingItem {
   skill: string
+  isPlugin?: boolean
+  pluginName?: string
   generatedLines: number
   measuredGeneratedLines: number
   effectiveGeneratedLines: number

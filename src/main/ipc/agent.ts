@@ -74,6 +74,7 @@ import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
   getRecentSkillUsageNames,
+  getThreadActiveSkillSource,
   getThreadActiveSkills,
   setThreadActiveSkills,
   snapshotSkillProposalWindow,
@@ -3936,15 +3937,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return getThreadActiveSkills(threadId)
       }
 
+      const computeCodeGenAttributionSkillSource = (
+        currentRunSkills: string[],
+        currentRunSkillSource: string[]
+      ): string[] => {
+        if (currentRunSkills.length > 0) return currentRunSkillSource
+        return getThreadActiveSkillSource(threadId)
+      }
+
       const syncUsedSkillsContext = (): void => {
         const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+        const currentRunSkillSource = skillUsageDetector.getUsedSkillSourceRefs()
         tracer.setUsedSkills(currentRunSkills)
+        tracer.setSkillSource(currentRunSkillSource)
         tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
         // A non-empty current-run skill set becomes (supersedes) the thread's
         // active skills; a skill-less run leaves the prior active set intact.
-        if (currentRunSkills.length > 0) setThreadActiveSkills(threadId, currentRunSkills)
+        if (currentRunSkills.length > 0) {
+          setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource)
+        }
         setAdoptionContext(threadId, {
-          usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
+          usedSkills: computeCodeGenAttributionSkills(currentRunSkills),
+          skillSource: computeCodeGenAttributionSkillSource(
+            currentRunSkills,
+            currentRunSkillSource
+          )
         })
       }
 

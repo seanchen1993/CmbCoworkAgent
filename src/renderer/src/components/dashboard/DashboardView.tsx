@@ -2793,7 +2793,6 @@ export function DashboardView(): React.JSX.Element {
   const [userDetailTraceTriggerScope, setUserDetailTraceTriggerScope] =
     useState<DashboardTraceTriggerScope>("active")
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
-  const [pluginSkillKeys, setPluginSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
     Record<string, SkillUploaderProfile>
@@ -3330,49 +3329,6 @@ export function DashboardView(): React.JSX.Element {
     }
 
     void loadMarketSkills()
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadPluginSkills(): Promise<void> {
-      if (typeof window.api?.skills?.listPlugins !== "function") return
-
-      try {
-        const pluginSkills = await window.api.skills.listPlugins()
-        if (cancelled) return
-
-        const keys = new Set<string>()
-        const mockPluginSkills = import.meta.env.DEV
-          ? [
-              {
-                name: "plugin-release-note",
-                relativePath: "plugin-release-note",
-                id: "mock-plugin/plugin-release-note"
-              }
-            ]
-          : []
-        for (const skill of [...pluginSkills, ...mockPluginSkills]) {
-          const candidates = [skill.name, skill.relativePath, skill.id]
-          for (const candidate of candidates) {
-            const key = normalizeMarketSkillKey(candidate?.replace(/^plugin:[^/]+\//, ""))
-            if (key) keys.add(key)
-          }
-        }
-        setPluginSkillKeys(keys)
-      } catch (error) {
-        if (!cancelled) {
-          console.warn("[Dashboard] Failed to load plugin skills:", error)
-          setPluginSkillKeys(new Set())
-        }
-      }
-    }
-
-    void loadPluginSkills()
 
     return () => {
       cancelled = true
@@ -5014,7 +4970,6 @@ export function DashboardView(): React.JSX.Element {
                     : undefined
                 }
                 marketSkillKeys={marketSkillKeys}
-                pluginSkillKeys={pluginSkillKeys}
               />
             </div>
           ) : (
@@ -5054,7 +5009,6 @@ export function DashboardView(): React.JSX.Element {
                       : undefined
                   }
                   marketSkillKeys={marketSkillKeys}
-                  pluginSkillKeys={pluginSkillKeys}
                 />
               </section>
 

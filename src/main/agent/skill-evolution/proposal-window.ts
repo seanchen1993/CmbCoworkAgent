@@ -49,6 +49,7 @@ const recentSkillUsageTurns = new Map<string, SkillProposalWindowTurn[]>()
  * is set separately from the current run's skills and is unaffected.
  */
 const threadActiveSkills = new Map<string, string[]>()
+const threadActiveSkillSource = new Map<string, string[]>()
 
 function clip(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
@@ -172,21 +173,34 @@ export function getRecentSkillUsageNames(threadId: string): string[] {
  * superseding any previously-active set. No-op for an empty set so a skill-less
  * turn never clears the sticky attribution. See `threadActiveSkills`.
  */
-export function setThreadActiveSkills(threadId: string, skills: string[]): void {
+export function setThreadActiveSkills(
+  threadId: string,
+  skills: string[],
+  skillSource: string[] = []
+): void {
   if (!threadId) return
   const normalized = Array.from(new Set(skills.filter(Boolean)))
   if (normalized.length === 0) return
   // Evict oldest if the size cap would be exceeded (Map preserves insertion order).
   if (!threadActiveSkills.has(threadId) && threadActiveSkills.size >= MAX_ACTIVE_SKILL_THREADS) {
     const oldest = threadActiveSkills.keys().next().value
-    if (oldest !== undefined) threadActiveSkills.delete(oldest)
+    if (oldest !== undefined) {
+      threadActiveSkills.delete(oldest)
+      threadActiveSkillSource.delete(oldest)
+    }
   }
   threadActiveSkills.set(threadId, normalized)
+  threadActiveSkillSource.set(threadId, Array.from(new Set(skillSource.filter(Boolean))))
 }
 
 /** The thread's currently-active skills (empty if none used yet). */
 export function getThreadActiveSkills(threadId: string): string[] {
   return [...(threadActiveSkills.get(threadId) ?? [])]
+}
+
+/** Source map for the thread's currently-active skills. */
+export function getThreadActiveSkillSource(threadId: string): string[] {
+  return [...(threadActiveSkillSource.get(threadId) ?? [])]
 }
 
 export function buildSkillProposalWindowContext(
