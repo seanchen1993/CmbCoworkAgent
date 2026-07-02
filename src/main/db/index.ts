@@ -1,12 +1,10 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
-import { readFileSync, existsSync, mkdirSync } from "fs"
-import { writeFile, rename } from "fs/promises"
-import { dirname } from "path"
 import {
   getDbPath,
   getMemorySessionOptInMigrationState,
   markMemorySessionOptInMigrated
 } from "../storage"
+import { openRecoveredSqliteDatabase, persistSqliteSnapshot } from "../utils/sqlite-durable-file"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import {
   GOAL_UI_EVENT_LIMIT,
@@ -40,15 +38,13 @@ async function runSaveLoop(): Promise<void> {
     try {
       const data = Buffer.from(db.export())
       const path = getDbPath()
-      const tmp = `${path}.tmp`
-      await writeFile(tmp, data)
-      // shutdown flush took over: this snapshot isn't persisted, so re-mark dirty
-      // (flush's `dirty || savePromise` guard then writes it) and don't race it.
+      await persistSqliteSnapshot(path, data, "DB")
+      // shutdown flush took over while this save was in flight; re-mark dirty so
+      // flush writes the authoritative final snapshot after this save settles.
       if (blockAsyncWrite) {
         dirty = true
         return
       }
-      await rename(tmp, path)
     } catch (e) {
       // Persistent failure: keep the buffer dirty so a later save (or flush)
       // retries, but break to avoid a hot error loop.
@@ -111,9 +107,7 @@ export async function flush(): Promise<void> {
         dirty = false
         const data = Buffer.from(db.export())
         const path = getDbPath()
-        const tmp = `${path}.flush.tmp`
-        await writeFile(tmp, data)
-        await rename(tmp, path)
+        await persistSqliteSnapshot(path, data, "DB")
       }
     } catch (e) {
       dirty = true
@@ -191,18 +185,8 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
 
   const SQL = await initSqlJs()
 
-  // Load existing database if it exists
-  if (existsSync(dbPath)) {
-    const buffer = readFileSync(dbPath)
-    db = new SQL.Database(buffer)
-  } else {
-    // Ensure directory exists
-    const dir = dirname(dbPath)
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true })
-    }
-    db = new SQL.Database()
-  }
+  const recovered = await openRecoveredSqliteDatabase(SQL, dbPath, "DB")
+  db = recovered.database ?? new SQL.Database()
 
   // Create tables if they don't exist
   db.run(`

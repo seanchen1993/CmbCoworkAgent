@@ -68,6 +68,18 @@ import { runHooksEnriched } from "../hooks/required-skill"
 import { detectToolFailure, hasFailureFired, markFailureFired } from "../hooks/tool-failure"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput } from "../hooks/updated-input"
+import {
+  formatFailureFuseWarning,
+  getFailureFuseMode,
+  isFailureFuseHaltError,
+  recordToolFailure,
+  recordToolSuccess,
+  shouldAttachFailureFuseFeedback,
+  shouldSendFailureFuseNotice,
+  throwIfFailureFuseHalt,
+  type FailureFuseDecision,
+  type FailureFuseNoticeCallback
+} from "./failure-fuse"
 import type { HookScopeController } from "../hooks/scope"
 import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
@@ -282,6 +294,8 @@ export interface LocalSandboxOptions {
   hookScope?: HookScopeController
   /** Optional callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Optional callback invoked when repeated tool failures should be shown to the user. */
+  onFailureFuseNotice?: FailureFuseNoticeCallback
   /** Renderer user message id that owns this chat turn, used to group hook logs. */
   hookTurnId?: string
   /** AbortSignal for cancelling running child processes when the user aborts.
@@ -430,6 +444,7 @@ export class LocalSandbox
   private readonly resolveHooks: LocalSandboxHookResolver
   private readonly _hookScope?: HookScopeController
   private readonly _onHookResult?: HookResultCallback
+  private readonly _onFailureFuseNotice?: FailureFuseNoticeCallback
   private readonly _hookTurnId?: string
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
@@ -551,6 +566,38 @@ export class LocalSandbox
       parts.push(`[Hook requested review] ${postResult.reason}`)
     }
     return parts.length > 0 ? parts.join("\n\n") : null
+  }
+
+  private static mergeFailureFuseWarning(
+    postResult: HookResult | null,
+    decision: FailureFuseDecision | null
+  ): HookResult | null {
+    if (!shouldAttachFailureFuseFeedback(decision)) return postResult
+    const warning = formatFailureFuseWarning(decision)
+    if (!postResult) {
+      return {
+        exitCode: null,
+        stdout: "",
+        stderr: "",
+        blocked: false,
+        additionalContext: warning
+      }
+    }
+    return {
+      ...postResult,
+      additionalContext: postResult.additionalContext
+        ? `${postResult.additionalContext}\n\n${warning}`
+        : warning
+    }
+  }
+
+  private static parseToolResultForFailure(toolResult: string | undefined): unknown {
+    if (typeof toolResult !== "string") return toolResult
+    try {
+      return JSON.parse(toolResult)
+    } catch {
+      return toolResult
+    }
   }
 
   private static getElevatedSandboxUserProfileRoot(networkEnabled: boolean): string {
@@ -1703,6 +1750,7 @@ export class LocalSandbox
     this.resolveHooks = options.hookResolver ?? (() => this.getHooks())
     this._hookScope = options.hookScope
     this._onHookResult = options.onHookResult
+    this._onFailureFuseNotice = options.onFailureFuseNotice
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
@@ -2418,7 +2466,7 @@ export class LocalSandbox
     }
 
     const hooks = this.resolveHooks(event, hookContext)
-    const result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
+    let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -2428,25 +2476,48 @@ export class LocalSandbox
     // a throw-path failure already caught by toolErrorMiddleware does not
     // re-trigger here.
     if (event === "PostToolUse" && context.toolResult) {
+      const failureFuseDecision = this.recordFailureFuseDecisionFromResult(hookContext)
+      if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+        this._onFailureFuseNotice?.(failureFuseDecision)
+      }
+      result = LocalSandbox.mergeFailureFuseWarning(result, failureFuseDecision)
       this.maybeFirePostToolUseFailureFromResult(hookContext)
+      if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
     }
     return result
   }
 
-  private maybeFirePostToolUseFailureFromResult(context: HookContext): void {
-    let parsed: unknown = context.toolResult
-    if (typeof context.toolResult === "string") {
-      try {
-        parsed = JSON.parse(context.toolResult)
-      } catch {
-        // Not JSON — pass the raw string to detectToolFailure so it can
-        // pattern-match plain-text failure markers (the execute tool from
-        // deepagents returns "<output>\n[Command failed with exit code N]"
-        // rather than a structured object). Without this, every execute
-        // failure slipped past PostToolUseFailure entirely.
-        parsed = context.toolResult
-      }
+  private recordFailureFuseDecisionFromResult(context: HookContext): FailureFuseDecision | null {
+    if (!context.toolResult) return null
+    const turnId = context.turnId ?? this._hookTurnId
+    if (!turnId) return null
+
+    const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
+    const signal = detectToolFailure(context.toolName ?? "", parsed)
+    const threadId = context.sessionId ?? this.runId
+    const toolName = context.toolName
+    if (!signal) {
+      recordToolSuccess({ threadId, turnId, toolName, toolArgs: context.toolArgs })
+      return null
     }
+
+    const toolCallId = (context.toolArgs?.tool_call_id ??
+      context.toolArgs?.tool_use_id ??
+      "") as string
+
+    return recordToolFailure({
+      threadId,
+      turnId,
+      toolName,
+      toolCallId,
+      toolArgs: context.toolArgs,
+      signal,
+      mode: getFailureFuseMode()
+    })
+  }
+
+  private maybeFirePostToolUseFailureFromResult(context: HookContext): void {
+    const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
     const signal = detectToolFailure(context.toolName ?? "", parsed)
     if (!signal) return
     const toolCallId = (context.toolArgs?.tool_call_id ??
@@ -3579,7 +3650,7 @@ export class LocalSandbox
           ? updatedArgs.limit
           : limit
     } catch (error) {
-      if (isHookHaltError(error)) throw error
+      if (isHookHaltError(error) || isFailureFuseHaltError(error)) throw error
       throw error
     }
     if (this.isHiddenSkillPath(effectiveFilePath)) {
@@ -3649,7 +3720,7 @@ export class LocalSandbox
           this._skillHooksFired.add(skillHookKey)
         }
       } catch (hookError) {
-        if (isHookHaltError(hookError)) throw hookError
+        if (isHookHaltError(hookError) || isFailureFuseHaltError(hookError)) throw hookError
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
 
@@ -3748,7 +3819,7 @@ export class LocalSandbox
         hookVisibleResult
       )
     } catch (e: unknown) {
-      if (isHookHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return await this.applyPostToolUseHookToText(
         "read_file",
@@ -4057,7 +4128,7 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
-      if (isHookHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
     }
@@ -4265,12 +4336,12 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
-        if (isHookHaltError(e)) throw e
+        if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
       }
     } catch (e: unknown) {
-      if (isHookHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return { error: `Error editing file '${effectiveFilePath}': ${msg}` }
     }
@@ -5666,11 +5737,14 @@ export class LocalSandbox
         startedMessage
       )
     } catch (error) {
-      if (isHookHaltError(error)) {
+      if (isHookHaltError(error) || isFailureFuseHaltError(error)) {
         taskAbortController.abort()
         task.completed = true
+        const reason = isFailureFuseHaltError(error)
+          ? "failure fuse halted the turn"
+          : "PostToolUse halted the turn"
         task.result = {
-          output: `Background task ${taskId} cancelled because PostToolUse halted the turn.`,
+          output: `Background task ${taskId} cancelled because ${reason}.`,
           exitCode: 130,
           truncated: false
         }

@@ -10,7 +10,7 @@
  *   npx tsx tests/sqljs-saver-async-flush.spec.ts
  */
 
-import { mkdtemp, rm } from "fs/promises"
+import { mkdtemp, readdir, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import assert from "assert"
@@ -109,6 +109,46 @@ async function testFlushRemainsReusable(dir: string): Promise<void> {
   console.log("PASS flush remains reusable and coalesces concurrent callers")
 }
 
+async function testRecoverFromBackupWhenLiveFileIsCorrupt(dir: string): Promise<void> {
+  const dbPath = join(dir, "corrupt-live.sqlite")
+  const saver = new SqlJsSaver(dbPath)
+  await putCheckpoint(saver, "t1", "cp-1")
+  await saver.flush()
+  await saver.close()
+
+  await writeFile(dbPath, Buffer.from("not a sqlite database"))
+
+  const id = await readBackLatestId(dbPath, "t1")
+  assert(id === "cp-1", `expected cp-1 recovered from backup after live corruption, got ${id}`)
+
+  const files = await readdir(dir)
+  assert(
+    files.some((file) => file.startsWith("corrupt-live.sqlite.corrupt.")),
+    "corrupt live database should be archived for diagnosis"
+  )
+  console.log("PASS corrupt live database recovers from .bak")
+}
+
+async function testRecoverFromNewerTempSnapshot(dir: string): Promise<void> {
+  const dbPath = join(dir, "newer-temp.sqlite")
+  const saver = new SqlJsSaver(dbPath)
+  await putCheckpoint(saver, "t1", "cp-1")
+  await saver.flush()
+  await saver.close()
+
+  // Simulate a power loss after a newer snapshot reached the temp file but
+  // before it was renamed over the live DB.
+  await new Promise((r) => setTimeout(r, 20))
+  const tempSaver = new SqlJsSaver(`${dbPath}.tmp`)
+  await putCheckpoint(tempSaver, "t1", "cp-2")
+  await tempSaver.flush()
+  await tempSaver.close()
+
+  const id = await readBackLatestId(dbPath, "t1")
+  assert(id === "cp-2", `expected cp-2 recovered from newer temp snapshot, got ${id}`)
+  console.log("PASS newer temp snapshot wins over older live database")
+}
+
 async function main(): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "sqljs-saver-flush-"))
   try {
@@ -116,6 +156,8 @@ async function main(): Promise<void> {
     await testCloseWhileSaveInFlight(dir)
     await testAsyncDebouncedPersist(dir)
     await testFlushRemainsReusable(dir)
+    await testRecoverFromBackupWhenLiveFileIsCorrupt(dir)
+    await testRecoverFromNewerTempSnapshot(dir)
     console.log("sqljs-saver async/flush tests passed")
   } finally {
     await rm(dir, { recursive: true, force: true })

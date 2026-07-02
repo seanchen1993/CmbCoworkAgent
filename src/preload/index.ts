@@ -8,6 +8,10 @@ import type {
   SkillMetadata,
   McpConnectorConfig,
   McpConnectorUpsert,
+  McpImportApplyResult,
+  McpImportConfigApplyRequest,
+  McpImportConfigRequest,
+  McpImportPreviewResult,
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
@@ -1296,7 +1300,11 @@ const api = {
       filePaths?: string[],
       options?: { worktreePath?: string }
     ): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> => {
-      return ipcRenderer.invoke("workspace:rejectWorktreeChanges", { threadId, filePaths, options }) as Promise<{
+      return ipcRenderer.invoke("workspace:rejectWorktreeChanges", {
+        threadId,
+        filePaths,
+        options
+      }) as Promise<{
         success: boolean
         revertedFileCount?: number
         error?: string
@@ -1307,7 +1315,11 @@ const api = {
       filePath: string,
       options?: { worktreePath?: string }
     ): Promise<{ success: boolean; error?: string }> => {
-      return ipcRenderer.invoke("workspace:rejectWorktreeFile", { threadId, filePath, options }) as Promise<{
+      return ipcRenderer.invoke("workspace:rejectWorktreeFile", {
+        threadId,
+        filePath,
+        options
+      }) as Promise<{
         success: boolean
         error?: string
       }>
@@ -1540,7 +1552,11 @@ const api = {
       url?: string
       advanced?: McpConnectorConfig["advanced"]
     }): Promise<{ success: boolean; tools?: string[]; error?: string }> =>
-      ipcRenderer.invoke("mcp:testConnection", params)
+      ipcRenderer.invoke("mcp:testConnection", params),
+    previewImport: (params: McpImportConfigRequest): Promise<McpImportPreviewResult> =>
+      ipcRenderer.invoke("mcp:previewImport", params),
+    importConfig: (params: McpImportConfigApplyRequest): Promise<McpImportApplyResult> =>
+      ipcRenderer.invoke("mcp:importConfig", params)
   },
   lsp: {
     getConfig: (): Promise<LspConfig> => ipcRenderer.invoke("lsp:getConfig") as Promise<LspConfig>,
@@ -2146,6 +2162,18 @@ const api = {
       ipcRenderer.invoke("sandbox:getYoloMode") as Promise<boolean>,
     setYoloMode: (yolo: boolean): Promise<void> =>
       ipcRenderer.invoke("sandbox:setYoloMode", yolo) as Promise<void>,
+    getFailureFuseWarning: (): Promise<boolean> =>
+      ipcRenderer.invoke("sandbox:getFailureFuseWarning") as Promise<boolean>,
+    setFailureFuseWarning: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("sandbox:setFailureFuseWarning", enabled) as Promise<void>,
+    getFailureFuseModelFeedback: (): Promise<boolean> =>
+      ipcRenderer.invoke("sandbox:getFailureFuseModelFeedback") as Promise<boolean>,
+    setFailureFuseModelFeedback: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("sandbox:setFailureFuseModelFeedback", enabled) as Promise<void>,
+    getFailureFuseDebug: (): Promise<boolean> =>
+      ipcRenderer.invoke("sandbox:getFailureFuseDebug") as Promise<boolean>,
+    setFailureFuseDebug: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("sandbox:setFailureFuseDebug", enabled) as Promise<void>,
     getPendingApprovals: (threadId: string): Promise<unknown[]> =>
       ipcRenderer.invoke("sandbox:getPendingApprovals", threadId) as Promise<unknown[]>,
     // NUX (first-run sandbox setup)
