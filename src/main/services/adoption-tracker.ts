@@ -31,11 +31,13 @@ import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises
 import { existsSync, mkdirSync, statSync } from "fs"
 import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
 import { randomUUID } from "crypto"
-import { execFileSync } from "child_process"
+import { execFile, execFileSync } from "child_process"
+import { promisify } from "util"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
 import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
+import { normalizeSkillSourceRefs } from "../utils/skill-source"
 import { extractShellFileOps } from "../agent/exec-policy"
 import { trackEvent } from "./event-reporter"
 import {
@@ -180,6 +182,8 @@ export interface AdoptionContext {
    * `primarySkill` field has been removed because it was merely `usedSkills[0]`).
    */
   usedSkills?: string[]
+  /** Source refs for plugin-owned usedSkills, format: "plugin:<pluginId>/<skillIdentifier>". */
+  skillSource?: string[]
   /**
    * Harness Board attribution (project-mode conversations only). Carried onto
    * the emitted code_gen/code_adopt events so the dashboard can slice adoption
@@ -567,6 +571,24 @@ function normalizeUsedSkills(skills: unknown): string[] {
   return Array.from(normalized)
 }
 
+function parseStoredSkills(value: string | null): string[] {
+  if (!value) return []
+  try {
+    return normalizeUsedSkills(JSON.parse(value) as unknown)
+  } catch {
+    return []
+  }
+}
+
+function parseStoredSkillSource(value: string | null, usedSkills: string[]): string[] {
+  if (!value) return []
+  try {
+    return normalizeSkillSourceRefs(JSON.parse(value) as unknown, usedSkills)
+  } catch {
+    return []
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // Context (set by TraceCollector during agent lifecycle)
 // ─────────────────────────────────────────────────────────
@@ -856,6 +878,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
     const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+    const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
     insertGenEvent({
       event_id: eventId,
       file_path: absPath,
@@ -868,6 +891,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       measured: 0,
       tool: input.tool,
       used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
+      skill_source: skillSource.length > 0 ? JSON.stringify(skillSource) : null,
       thread_id: input.threadId || null,
       trace_id: ctx.traceId ?? null,
       model_id: ctx.modelId ?? null,
@@ -892,6 +916,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       lineCount: reportedLineCount,
       deletedLineCount,
       usedSkills,
+      ...(skillSource.length > 0 ? { skillSource } : {}),
       modelId: ctx.modelId ?? null,
       modelName: ctx.modelName ?? null,
       harnessProjectId: ctx.harnessProjectId ?? null,
@@ -931,6 +956,7 @@ function emitSkippedLargeAtGen(args: {
   const language = extname(absPath).slice(1).toLowerCase() || null
   const deletedLineCount = deriveDeletedLineCount(input)
   const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+  const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
 
   // L1 — record that the agent generated code (metadata only, no path/content)
   trackEvent("code_gen", "code_adoption", {
@@ -944,6 +970,7 @@ function emitSkippedLargeAtGen(args: {
     lineCount,
     deletedLineCount,
     usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
@@ -976,6 +1003,7 @@ function emitSkippedLargeAtGen(args: {
     // ES can aggregate adoption rates (including the skipped_large bucket)
     // uniformly — otherwise these rows look like they have no skill.
     usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
@@ -1061,14 +1089,8 @@ async function emitSupersededAdopt(
     commitSha
   })
 
-  let usedSkills: string[] = []
-  if (pending.used_skills) {
-    try {
-      usedSkills = normalizeUsedSkills(JSON.parse(pending.used_skills) as unknown)
-    } catch {
-      // corrupt row — treat as no skill attribution
-    }
-  }
+  const usedSkills = parseStoredSkills(pending.used_skills)
+  const skillSource = parseStoredSkillSource(pending.skill_source, usedSkills)
 
   trackEvent("code_adopt", "code_adoption", {
     schemaVersion: 1,
@@ -1087,6 +1109,7 @@ async function emitSupersededAdopt(
     measuredAt: new Date(measuredAt).toISOString(),
     commitSha,
     usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: pending.model_id ?? null,
     modelName: pending.model_name ?? null,
     harnessProjectId: pending.harness_project_id ?? null,
@@ -1244,15 +1267,8 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       // Pull attribution columns that were persisted at gen time, so cloud ES
       // can aggregate adoption rates by skill / model without a two-step join
       // against code_gen via genEventId.
-      let usedSkills: string[] = []
-      if (pending.used_skills) {
-        try {
-          const parsed = JSON.parse(pending.used_skills) as unknown
-          usedSkills = normalizeUsedSkills(parsed)
-        } catch {
-          // corrupt row — treat as no skill attribution
-        }
-      }
+      const usedSkills = parseStoredSkills(pending.used_skills)
+      const skillSource = parseStoredSkillSource(pending.skill_source, usedSkills)
 
       trackEvent("code_adopt", "code_adoption", {
         schemaVersion: 1,
@@ -1270,6 +1286,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         measuredAt: new Date(measuredAt).toISOString(),
         commitSha: opts?.commitSha ?? null,
         usedSkills,
+        ...(skillSource.length > 0 ? { skillSource } : {}),
         modelId: pending.model_id ?? null,
         modelName: pending.model_name ?? null,
         harnessProjectId: pending.harness_project_id ?? null,
@@ -1396,13 +1413,41 @@ export interface StagedSnapshot {
   stagedContent: Buffer | null
 }
 
+const execFileAsync = promisify(execFile)
+
+// Bound how many `git show` blob reads run at once so a large staged set can't
+// spawn dozens of git processes simultaneously.
+const GIT_SHOW_CONCURRENCY = 4
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight at once, preserving index.
+ */
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  let next = 0
+  const workerCount = Math.min(Math.max(1, limit), items.length)
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const idx = next++
+      if (idx >= items.length) return
+      await fn(items[idx], idx)
+    }
+  })
+  await Promise.all(workers)
+}
+
 /**
  * Capture staged snapshots right BEFORE `git commit` runs. The commit clears
  * the index, so callers must invoke this after `git add` and before `git commit`.
  *
  * Never throws; failures only skip adoption measurement for that commit.
  */
-export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnapshot[] {
+export async function captureStagedSnapshotsForCommit(
+  workingDir: string
+): Promise<StagedSnapshot[]> {
   try {
     // Resolve the git root — git diff --cached returns paths relative to the
     // top-level working tree, NOT the -C directory. When the -C directory is a
@@ -1410,33 +1455,39 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
     // relPath) would duplicate path segments and fail to match gen events later.
     let gitRoot = workingDir
     try {
-      gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      gitRoot = (
+        await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+          encoding: "utf-8",
+          cwd: workingDir,
+          timeout: 5000,
+          maxBuffer: 1024 * 1024,
+          windowsHide: true
+        })
+      ).stdout.trim()
+    } catch {
+      // Fallback to workingDir — best-effort
+    }
+
+    const raw = (
+      await execFileAsync("git", ["diff", "--cached", "--name-status", "-z"], {
         encoding: "utf-8",
         cwd: workingDir,
         timeout: 5000,
         maxBuffer: 1024 * 1024,
         windowsHide: true
-      }).trim()
-    } catch {
-      // Fallback to workingDir — best-effort
-    }
-
-    const raw = execFileSync("git", ["diff", "--cached", "--name-status", "-z"], {
-      encoding: "utf-8",
-      cwd: workingDir,
-      timeout: 5000,
-      maxBuffer: 1024 * 1024,
-      windowsHide: true
-    })
+      })
+    ).stdout
     if (!raw) {
       console.log(`[AdoptionTracker] pre-commit capture: no staged files in ${workingDir}`)
       return []
     }
 
-    const snapshots: StagedSnapshot[] = []
+    // Parse the staged list first (cheap, order-sensitive), then read blobs with
+    // bounded concurrency below.
+    type StagedEntry = { absPath: string; relPath: string; deleted: boolean }
+    const entries: StagedEntry[] = []
     let totalStaged = 0
     let skippedNonCode = 0
-    let capturedCode = 0
     // Output format with -z:
     //   Normal:      <STATUS>\0<path>\0
     //   Rename/copy: <Rnnn|Cnnn>\0<old>\0<new>\0
@@ -1458,30 +1509,43 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
       totalStaged++
       const absPath = resolvePath(gitRoot, relPath)
       if (status === "D") {
-        snapshots.push({ absPath, stagedContent: null })
-        capturedCode++
+        entries.push({ absPath, relPath, deleted: true })
         continue
       }
       if (!isCodeFile(absPath)) {
         skippedNonCode++
         continue
       }
+      entries.push({ absPath, relPath, deleted: false })
+    }
 
+    // Read each staged blob concurrently (bounded). Holes (failed reads) are
+    // filtered out afterwards; order is preserved to match the staged list.
+    const slots: (StagedSnapshot | undefined)[] = new Array(entries.length)
+    await mapWithConcurrency(entries, GIT_SHOW_CONCURRENCY, async (entry, idx) => {
+      if (entry.deleted) {
+        slots[idx] = { absPath: entry.absPath, stagedContent: null }
+        return
+      }
       try {
-        const stagedContent = execFileSync("git", ["show", `:${relPath}`], {
-          cwd: workingDir,
-          timeout: 5000,
-          maxBuffer: STAGED_BLOB_MAX_BYTES,
-          windowsHide: true
-        })
-        snapshots.push({ absPath, stagedContent })
-        capturedCode++
+        const stagedContent = (
+          await execFileAsync("git", ["show", `:${entry.relPath}`], {
+            encoding: "buffer",
+            cwd: workingDir,
+            timeout: 5000,
+            maxBuffer: STAGED_BLOB_MAX_BYTES,
+            windowsHide: true
+          })
+        ).stdout
+        slots[idx] = { absPath: entry.absPath, stagedContent }
       } catch {
         // Binary / too-large / other failure — skip silently.
       }
-    }
+    })
+
+    const snapshots = slots.filter((s): s is StagedSnapshot => s !== undefined)
     console.log(
-      `[AdoptionTracker] pre-commit capture: totalStaged=${totalStaged} codeFiles=${capturedCode} skippedNonCode=${skippedNonCode} gitRoot=${gitRoot}`
+      `[AdoptionTracker] pre-commit capture: totalStaged=${totalStaged} codeFiles=${snapshots.length} skippedNonCode=${skippedNonCode} gitRoot=${gitRoot}`
     )
     return snapshots
   } catch (e) {
@@ -1800,13 +1864,15 @@ export async function readLocalCommitAdoptionLines(
       const absPath = row.file_path
       let gitRoot: string
       try {
-        gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-          encoding: "utf-8",
-          cwd: dirname(absPath),
-          timeout: 5000,
-          maxBuffer: 1024 * 1024,
-          windowsHide: true
-        }).trim()
+        gitRoot = (
+          await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+            encoding: "utf-8",
+            cwd: dirname(absPath),
+            timeout: 5000,
+            maxBuffer: 1024 * 1024,
+            windowsHide: true
+          })
+        ).stdout.trim()
       } catch {
         results.push({ genEventId, available: false, reason: "无法定位本地 git 仓库" })
         continue
@@ -1814,12 +1880,15 @@ export async function readLocalCommitAdoptionLines(
       const relPath = relative(gitRoot, absPath).replace(/\\/g, "/")
       let blob: Buffer
       try {
-        blob = execFileSync("git", ["show", `${sha}:${relPath}`], {
-          cwd: gitRoot,
-          timeout: 5000,
-          maxBuffer: STAGED_BLOB_MAX_BYTES,
-          windowsHide: true
-        })
+        blob = (
+          await execFileAsync("git", ["show", `${sha}:${relPath}`], {
+            encoding: "buffer",
+            cwd: gitRoot,
+            timeout: 5000,
+            maxBuffer: STAGED_BLOB_MAX_BYTES,
+            windowsHide: true
+          })
+        ).stdout
       } catch {
         results.push({
           genEventId,

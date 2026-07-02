@@ -24,6 +24,7 @@ import {
   normalizeSkillQueryName,
   parseSkillNameVersionIdentifier
 } from "../utils/skill-identifiers"
+import { parsePluginSkillSourceRef } from "../utils/skill-source"
 import {
   effectiveGeneratedLinesSumAgg,
   makeDashboardCodeStats,
@@ -816,9 +817,9 @@ const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
 const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
-// 评奖辅助看板当前仅开放给这三个 ystId；env 可覆盖，留空则回退到此默认名单，
-// 保证即使未配置环境变量也严格只对这三人可见。
-const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855"
+// 评奖辅助看板当前仅开放给这四个 ystId；env 可覆盖，留空则回退到此默认名单，
+// 保证即使未配置环境变量也严格只对这四人可见。
+const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855,231858"
 
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
@@ -901,7 +902,7 @@ function requireDashboardProjectModeAccess(): DashboardAccessContext {
 }
 
 // 评奖辅助看板（技能贡献奖 / 技能应用奖）的访问门禁：仅 DASHBOARD_AWARDS_ADMIN
-// 名单内的 ystId 可见（默认仅三人）。DEV 直接放行便于本地预览。
+// 名单内的 ystId 可见（默认仅四人）。DEV 直接放行便于本地预览。
 function isDashboardAwardsAdmin(
   access: DashboardAccessContext = getDashboardAccessContext()
 ): boolean {
@@ -1562,6 +1563,29 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string")
 }
 
+function parsePluginSkillInfoFromSourceBuckets(raw: unknown): Map<string, string> {
+  const result = new Map<string, string>()
+  if (!Array.isArray(raw)) return result
+  for (const bucket of raw) {
+    const parsed = parsePluginSkillSourceRef(asString(asRecord(bucket).key))
+    if (parsed?.skill && !result.has(parsed.skill)) {
+      result.set(parsed.skill, parsed.pluginName || parsed.pluginId)
+    }
+  }
+  return result
+}
+
+function markPluginSkillAdoptionStats<T extends DashboardSkillCodeAdoptionStats>(
+  items: T[],
+  pluginSkillInfo: Map<string, string>
+): T[] {
+  if (pluginSkillInfo.size === 0) return items
+  return items.map((item) => {
+    const pluginName = pluginSkillInfo.get(item.skill)
+    return pluginName ? { ...item, isPlugin: true, pluginName } : item
+  })
+}
+
 function skillVersionKey(skillName: string, skillVersion?: string): string {
   return `${skillName}:${skillVersion ?? ""}`
 }
@@ -2212,6 +2236,7 @@ async function fetchOverview(
       total_tool_calls: { value_count: { field: "toolNames" } },
       by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
       by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
+      skill_source: { terms: { field: "skillSource", size: rankingSearchSize } },
       by_tool: {
         terms: {
           field: "toolNames",
@@ -2313,7 +2338,8 @@ async function fetchOverview(
             aggs: codeAdoptPushedAggs()
           }
         }
-      }
+      },
+      skill_source: { terms: { field: "properties.skillSource", size: rankingSearchSize } }
     }
   }
 
@@ -2323,6 +2349,9 @@ async function fetchOverview(
   ])
   const codeStats = normalizeCodeStatsFromAggs(codeRaw)
   const skillCodeAdoption = normalizeSkillCodeAdoptionBuckets(codeRaw)
+  const codePluginSkillInfo = parsePluginSkillInfoFromSourceBuckets(
+    asRecord(asRecord(asRecord(codeRaw).aggregations).skill_source).buckets
+  )
   const traceRecord = asRecord(traceRaw)
   return {
     ...traceRecord,
@@ -2341,9 +2370,12 @@ async function fetchOverview(
       code_pushed_effective_generated_lines: { value: codeStats.pushedEffectiveGeneratedLines },
       code_pushed_adopted_lines: { value: codeStats.pushedAdoptedLines },
       code_pushed_commit_count: { value: codeStats.pushedCommitCount },
+      code_skill_source: asRecord(asRecord(codeRaw).aggregations).skill_source,
       code_by_skill_adoption: {
         buckets: skillCodeAdoption.map((item) => ({
           key: item.skill,
+          is_plugin: { value: codePluginSkillInfo.has(item.skill) },
+          plugin_name: { value: codePluginSkillInfo.get(item.skill) ?? null },
           generated_lines: { value: item.generatedLines },
           measured_generated_lines: { value: item.measuredGeneratedLines },
           effective_generated_lines: { value: item.effectiveGeneratedLines },
@@ -5335,10 +5367,10 @@ async function fetchFeedback(
 // ─────────────────────────────────────────────────────────
 // Advanced features (operations) — replaces the like/dislike feedback module.
 //
-// Two-tier model (core usage + value result) for 8 advanced capabilities.
+// Two-tier model (core usage + value result) for advanced capabilities.
 // Event-side metrics come from the `event` index by `eventName`
 // (heartbeat.run.completed / memory.write.applied / skill.evolution.* /
-// chatx.message.processed / hook.executed / git.auto_commit.attempted).
+// chatx.message.processed / hook.executed).
 // Tool-call-based metrics (memory_search/get, java_lsp, code_exec, deferred
 // tools) and post-evolution skill usage are REUSED from the `trace` index
 // (`toolNames`, `evolvedSkills`) instead of double-emitting events for things
@@ -5394,11 +5426,6 @@ interface AdvFeatureMetrics {
   hookBlocked: number
   codeExec: number
   savedTool: number
-  acCommitted: number
-  acSkipped: number
-  acCancelled: number
-  acFailed: number
-  acNeedsConfirm: number
 }
 
 function advAggDocCount(agg: unknown): number {
@@ -5435,7 +5462,6 @@ function assembleAdvancedFeatureCards(
   const memTotal = m.memSearch + m.memGet + m.memWrite
   const chatxTotal = m.chatxReplied + m.chatxCancelled + m.chatxError
   const progTotal = m.codeExec + m.savedTool
-  const acTotal = m.acCommitted + m.acSkipped + m.acCancelled + m.acFailed + m.acNeedsConfirm
 
   return {
     source,
@@ -5517,19 +5543,6 @@ function assembleAdvancedFeatureCards(
           { label: "code_exec", count: m.codeExec, tone: "neutral" },
           { label: "保存工具", count: m.savedTool, tone: "neutral" }
         ]
-      },
-      {
-        key: "autoCommit",
-        label: "自动提交",
-        value: acTotal,
-        valueLabel: "提交尝试次数",
-        hint: `成功 ${m.acCommitted} · 失败 ${m.acFailed}`,
-        items: [
-          { label: "成功", count: m.acCommitted, tone: "good" },
-          { label: "跳过", count: m.acSkipped, tone: "neutral" },
-          { label: "取消", count: m.acCancelled, tone: "warn" },
-          { label: "失败", count: m.acFailed, tone: "bad" }
-        ]
       }
     ]
   }
@@ -5572,10 +5585,6 @@ async function fetchAdvancedFeatures(
       hooks: {
         filter: { term: { eventName: "hook.executed" } },
         aggs: { blocked: { filter: { term: { "properties.blocked": true } } } }
-      },
-      auto_commit: {
-        filter: { term: { eventName: "git.auto_commit.attempted" } },
-        aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
       }
     }
   }
@@ -5617,9 +5626,6 @@ async function fetchAdvancedFeatures(
   const chatxOutcome = advTermBuckets(
     (eAggs.chatx as Record<string, unknown> | undefined)?.by_outcome
   )
-  const acOutcome = advTermBuckets(
-    (eAggs.auto_commit as Record<string, unknown> | undefined)?.by_outcome
-  )
   const toolBuckets = advTermBuckets(tAggs.by_tool)
 
   const metrics: AdvFeatureMetrics = {
@@ -5648,12 +5654,7 @@ async function fetchAdvancedFeatures(
     hookTotal: advAggDocCount(eAggs.hooks),
     hookBlocked: advAggDocCount((eAggs.hooks as Record<string, unknown> | undefined)?.blocked),
     codeExec: advBucketCount(toolBuckets, "code_exec"),
-    savedTool: advBucketCount(toolBuckets, "save_code_exec_tool"),
-    acCommitted: advBucketCount(acOutcome, "committed"),
-    acSkipped: advBucketCount(acOutcome, "skipped"),
-    acCancelled: advBucketCount(acOutcome, "cancelled"),
-    acFailed: advBucketCount(acOutcome, "failed"),
-    acNeedsConfirm: advBucketCount(acOutcome, "needs_confirmation")
+    savedTool: advBucketCount(toolBuckets, "save_code_exec_tool")
   }
 
   return assembleAdvancedFeatureCards(metrics, "es")
@@ -5694,12 +5695,7 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),
-    savedTool: k(6),
-    acCommitted: k(11),
-    acSkipped: k(7),
-    acCancelled: k(2),
-    acFailed: k(1),
-    acNeedsConfirm: 0
+    savedTool: k(6)
   }
 
   return assembleAdvancedFeatureCards(metrics, "mock")
@@ -6834,6 +6830,14 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             { key: "灰度检查", doc_count: 4 }
           ]
         },
+        skill_source: {
+          buckets: [
+            {
+              key: "plugin:demo-plugin/plugin-release-note-v1.0.0?name=Demo%20Plugin",
+              doc_count: 156
+            }
+          ]
+        },
         code_by_skill_adoption: {
           buckets: [
             {
@@ -6928,10 +6932,17 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             }
           ]
         },
+        code_skill_source: {
+          buckets: [
+            {
+              key: "plugin:demo-plugin/plugin-release-note-v1.0.0?name=Demo%20Plugin",
+              doc_count: 9
+            }
+          ]
+        },
         by_tool: {
           buckets: [
             { key: "git_workflow", doc_count: 412 },
-            { key: "browser_playwright", doc_count: 356 },
             { key: "manage_skill", doc_count: 298 },
             { key: "manage_scheduler", doc_count: 241 },
             { key: "web_search", doc_count: 198 },
@@ -6955,7 +6966,6 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
         by_tool_filtered_all: {
           buckets: [
             { key: "git_workflow", doc_count: 412 },
-            { key: "browser_playwright", doc_count: 356 },
             { key: "manage_skill", doc_count: 298 },
             { key: "manage_scheduler", doc_count: 241 },
             { key: "web_search", doc_count: 198 },
@@ -6987,7 +6997,6 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             { key: "grep", doc_count: 876 },
             { key: "glob", doc_count: 654 },
             { key: "git_workflow", doc_count: 412 },
-            { key: "browser_playwright", doc_count: 356 },
             { key: "manage_skill", doc_count: 298 },
             { key: "edit_file", doc_count: 267 },
             { key: "manage_scheduler", doc_count: 241 },
@@ -7011,7 +7020,6 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             { key: "grep", doc_count: 876 },
             { key: "glob", doc_count: 654 },
             { key: "git_workflow", doc_count: 412 },
-            { key: "browser_playwright", doc_count: 356 },
             { key: "manage_skill", doc_count: 298 },
             { key: "edit_file", doc_count: 267 },
             { key: "manage_scheduler", doc_count: 241 },
@@ -7930,7 +7938,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       topSkills: [
         { skill: "代码审查", count: 40 },
         { skill: "单元测试", count: 25 },
-        { skill: "SQL优化", count: 12 }
+        { skill: "SQL优化", count: 12, isPlugin: true, pluginName: "SQL Copilot" }
       ],
       codeStats: makeDashboardCodeStats({
         generatedLines: 5200,
@@ -7986,7 +7994,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       hasError: false,
       topSkills: [
         { skill: "代码审查", count: 18 },
-        { skill: "重构助手", count: 9 }
+        { skill: "重构助手", count: 9, isPlugin: true, pluginName: "Refactor Kit" }
       ],
       codeStats: makeDashboardCodeStats({
         generatedLines: 2100,
@@ -8091,7 +8099,13 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       featureCount: (i % 3) + 1,
       conversationCount: (i * 7) % 90,
       hasError: false,
-      topSkills: [{ skill: "代码审查", count: (i * 3) % 20 }],
+      topSkills: [
+        {
+          skill: i % 2 === 0 ? "重构助手" : "代码审查",
+          count: (i * 3) % 20,
+          ...(i % 2 === 0 ? { isPlugin: true, pluginName: "Refactor Kit" } : {})
+        }
+      ],
       codeStats: null,
       features: [
         {
@@ -8154,8 +8168,11 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     Object.assign(project, mockCreators[index % mockCreators.length])
   })
   // 由各项目自身的代码/对话总量派生 stage×skill 三桶（DEV 演示用）。
-  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project) => ({
+  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => ({
     ...project,
+    lifecycleCreatedAt:
+      project.lifecycleCreatedAt ??
+      new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
     stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
   }))
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
@@ -8182,7 +8199,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     page: 1,
     pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
     keyword: "",
-    sortBy: "conversationCount",
+    sortBy: "createdAt",
     sortOrder: "desc"
   })
   const summaryCodeStats = makeDashboardCodeStats({
@@ -8280,8 +8297,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       [
         { skill: "代码审查", count: 58 },
         { skill: "单元测试", count: 31 },
-        { skill: "重构助手", count: 22 },
-        { skill: "SQL优化", count: 15 }
+        { skill: "重构助手", count: 22, isPlugin: true, pluginName: "Refactor Kit" },
+        { skill: "SQL优化", count: 15, isPlugin: true, pluginName: "SQL Copilot" }
       ],
       aggScale
     ),
@@ -8353,6 +8370,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
         },
         {
           skill: "重构助手",
+          isPlugin: true,
+          pluginName: "Refactor Kit",
           commitCount: 7,
           ...makeDashboardCodeStats({
             generatedLines: 1100,
@@ -9430,6 +9449,8 @@ interface ProjectModeFeatureView {
 interface ProjectModeSkillCount {
   skill: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 interface ProjectModeToolCount {
@@ -9487,6 +9508,8 @@ interface ProjectModeProjectView {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  /** 项目创建时间（快照 properties.lifecycleCreatedAt）；ISO 字符串。 */
+  lifecycleCreatedAt?: string
   /** 生命周期最近变更时间（归档时间用此排序）；ISO 字符串。 */
   lifecycleUpdatedAt?: string
   compatible?: boolean
@@ -9504,15 +9527,16 @@ type ProjectModeProjectStatus = "active" | "archived"
 
 /**
  * Sortable project-list columns.
- * - `featureCount` / `archivedAt` are snapshot-doc fields → sorted cheaply in
- *   the paginated snapshot query. `archivedAt` (= lifecycle updateAt) is only
- *   meaningful on the「已归档」tab and is its default ordering.
+ * - `featureCount` / `createdAt` / `archivedAt` are snapshot-doc fields → sorted
+ *   cheaply in the paginated snapshot query. `archivedAt` (= lifecycle updateAt)
+ *   is only meaningful on the「已归档」tab.
  * - `conversationCount` / `generatedLines` are per-range metrics on the trace /
  *   code indices → require the heavier metric-sort path, which is only enabled
  *   for the「进行中」(active) tab (archived projects accumulate; active are few).
  */
 type ProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -9821,8 +9845,8 @@ function normalizeProjectModeProjectStatus(value?: string | null): ProjectModePr
 
 /**
  * Resolve the requested sort. `featureCount` is always honoured; the per-range
- * metric sorts are dropped (→ default name-asc) on the archived tab, so callers
- * can blindly forward the user's choice without leaking the active-only rule.
+ * metric sorts are dropped (→ default createdAt-desc) on the archived tab, so
+ * callers can blindly forward the user's choice without leaking the active-only rule.
  */
 function normalizeProjectModeProjectSort(
   options: ProjectModeProjectPageOptions | undefined,
@@ -9831,11 +9855,12 @@ function normalizeProjectModeProjectSort(
   const sortOrder: ProjectModeProjectSortOrder = options?.sortOrder === "asc" ? "asc" : "desc"
   const key = options?.sortBy
   if (key === "featureCount") return { sortBy: "featureCount", sortOrder }
+  if (key === "createdAt") return { sortBy: "createdAt", sortOrder }
   if (key === "archivedAt" && status === "archived") return { sortBy: "archivedAt", sortOrder }
   if ((key === "conversationCount" || key === "generatedLines") && status !== "archived") {
     return { sortBy: key, sortOrder }
   }
-  return { sortBy: null, sortOrder }
+  return { sortBy: "createdAt", sortOrder: "desc" }
 }
 
 function normalizeProjectModeKeyword(value?: string | null): string {
@@ -10032,6 +10057,10 @@ function projectModeProjectSortValue(
 ): number {
   if (sortBy === "conversationCount") return project.conversationCount
   if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
+  if (sortBy === "createdAt") {
+    const t = project.lifecycleCreatedAt ? Date.parse(project.lifecycleCreatedAt) : NaN
+    return Number.isNaN(t) ? 0 : t
+  }
   if (sortBy === "archivedAt") {
     const t = project.lifecycleUpdatedAt ? Date.parse(project.lifecycleUpdatedAt) : NaN
     return Number.isNaN(t) ? 0 : t
@@ -10122,6 +10151,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     creatorUpperOrgLv1:
       asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
     lifecycleStatus: asOptionalString(props.lifecycleStatus),
+    lifecycleCreatedAt: asOptionalString(props.lifecycleCreatedAt),
     lifecycleUpdatedAt: asOptionalString(props.lifecycleUpdatedAt),
     compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
     compatibilityStatus: asOptionalString(props.compatibilityStatus),
@@ -10493,7 +10523,7 @@ async function fetchProjectModeProjectPageHits(
   const page = clampLimit(options?.page, 1, maxPage)
   const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
 
-  // `featureCount` / `archivedAt` live in the snapshot doc and sort here; the
+  // `featureCount` / `createdAt` / `archivedAt` live in the snapshot doc and sort here; the
   // metric sorts are handled upstream by the metric-sort path.
   const sort =
     sortBy === "featureCount"
@@ -10501,6 +10531,11 @@ async function fetchProjectModeProjectPageHits(
           { "properties.featureCount": { order: sortOrder } },
           { "properties.projectId": { order: "asc" } }
         ]
+      : sortBy === "createdAt"
+        ? [
+            { "properties.lifecycleCreatedAt": { order: sortOrder, missing: "_last" } },
+            { "properties.projectId": { order: "asc" } }
+          ]
       : sortBy === "archivedAt"
         ? [
             { "properties.lifecycleUpdatedAt": { order: sortOrder, missing: "_last" } },
@@ -10734,13 +10769,23 @@ function projectFeatureKey(projectId: string, featureSlug: string): string {
 }
 
 /** Convert a `terms usedSkills` bucket list into a {skill,count}[] ranking. */
-function parseSkillCountBuckets(raw: unknown): ProjectModeSkillCount[] {
+function parseSkillCountBuckets(
+  raw: unknown,
+  pluginSkillInfo: Map<string, string> = new Map()
+): ProjectModeSkillCount[] {
   if (!Array.isArray(raw)) return []
   const result: ProjectModeSkillCount[] = []
   for (const bucket of raw) {
     const b = asRecord(bucket)
     const skill = asString(b.key)
-    if (skill) result.push({ skill, count: asNumber(b.doc_count) })
+    if (skill) {
+      const pluginName = pluginSkillInfo.get(skill)
+      result.push({
+        skill,
+        count: asNumber(b.doc_count),
+        ...(pluginName ? { isPlugin: true, pluginName } : {})
+      })
+    }
   }
   return result
 }
@@ -10828,6 +10873,7 @@ async function fetchProjectModeUsage(
       total_skill_calls: { value_count: { field: "usedSkills" } },
       distinct_skills: { cardinality: { field: "usedSkills" } },
       top_skills: { terms: { field: "usedSkills", size: 20 } },
+      skill_source: { terms: { field: "skillSource", size: 1000 } },
       top_users: {
         terms: { field: "sapId", size: 10 },
         aggs: {
@@ -10918,7 +10964,10 @@ async function fetchProjectModeUsage(
     totalTokens,
     skillCallCount: asNumber(asRecord(aggs.total_skill_calls).value),
     distinctSkillCount: asNumber(asRecord(aggs.distinct_skills).value),
-    topSkills: parseSkillCountBuckets(asRecord(aggs.top_skills).buckets),
+    topSkills: parseSkillCountBuckets(
+      asRecord(aggs.top_skills).buckets,
+      parsePluginSkillInfoFromSourceBuckets(asRecord(aggs.skill_source).buckets)
+    ),
     topUsers: parseProjectModeTopUserBuckets(asRecord(aggs.top_users).buckets),
     tools: {
       byTool: parseToolCountBuckets(asRecord(aggs.by_tool).buckets),
@@ -10963,6 +11012,7 @@ async function fetchProjectModePageUsage(
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
           skills: { terms: { field: "usedSkills", size: 10 } },
+          skill_source: { terms: { field: "skillSource", size: 100 } },
           ...stageBucketTraceAggs()
         }
       }
@@ -10977,7 +11027,13 @@ async function fetchProjectModePageUsage(
     const key = asString(b.key)
     if (!key) continue
     perProject.set(key, asNumber(b.doc_count))
-    perProjectSkills.set(key, parseSkillCountBuckets(asRecord(b.skills).buckets))
+    perProjectSkills.set(
+      key,
+      parseSkillCountBuckets(
+        asRecord(b.skills).buckets,
+        parsePluginSkillInfoFromSourceBuckets(asRecord(b.skill_source).buckets)
+      )
+    )
     perProjectStageConversations.set(key, parseStageBucketConversations(b))
   }
 
@@ -11254,7 +11310,8 @@ async function fetchProjectModeAggregateCodeStats(
         by_skill: {
           terms: { field: "properties.usedSkills", size: 1000 },
           aggs: perBucketAggs
-        }
+        },
+        skill_source: { terms: { field: "properties.skillSource", size: 1000 } }
       }),
       statExtraFilters
     )
@@ -11268,7 +11325,10 @@ async function fetchProjectModeAggregateCodeStats(
     byProject: new Map<string, DashboardCodeStats>(),
     byAdapter: parseAdapterCodeStatsBuckets(asRecord(adapterAggs.by_adapter).buckets),
     byAdapterStage: parseAdapterStageBucketsBuckets(asRecord(adapterAggs.by_adapter).buckets),
-    bySkill: normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill"),
+    bySkill: markPluginSkillAdoptionStats(
+      normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill"),
+      parsePluginSkillInfoFromSourceBuckets(asRecord(skillAggs.skill_source).buckets)
+    ),
     availableSources: enumerateSources ? parseAvailableCodeSources(overallRaw) : []
   }
 }
@@ -11595,8 +11655,8 @@ async function fetchProjectMode(
         page: 1,
         pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
         keyword: "",
-        // 列表默认按对话数降序；与渲染层初始排序态一致，避免首屏二次请求。
-        sortBy: "conversationCount",
+        // 列表默认按创建时间降序；与渲染层初始排序态一致，避免首屏二次请求。
+        sortBy: "createdAt",
         sortOrder: "desc"
       },
       access

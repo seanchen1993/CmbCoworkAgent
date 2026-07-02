@@ -1,7 +1,12 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs"
+import { readFileSync, existsSync, mkdirSync } from "fs"
+import { writeFile, rename } from "fs/promises"
 import { dirname } from "path"
-import { getDbPath } from "../storage"
+import {
+  getDbPath,
+  getMemorySessionOptInMigrationState,
+  markMemorySessionOptInMigrated
+} from "../storage"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import {
   GOAL_UI_EVENT_LIMIT,
@@ -14,9 +19,48 @@ import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
 let db: SqlJsDatabase | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let dirty = false
+let savePromise: Promise<void> | null = null
+let flushPromise: Promise<void> | null = null
+let blockAsyncWrite = false
+
+// Debounce window for background saves. sql.js holds the whole DB in memory and
+// db.export() snapshots it on the main thread (~1-2ms); coalescing bursts keeps
+// that off the hot path. The disk write itself is async (libuv threadpool).
+const SAVE_DEBOUNCE_MS = 300
 
 /**
- * Save database to disk (debounced)
+ * Atomically persist the current DB snapshot off the main thread: export()
+ * snapshots synchronously, then the bytes are written to a temp file and
+ * renamed into place (rename is atomic, so a crash mid-write can't truncate the
+ * live DB). Loops if more mutations arrived while writing.
+ */
+async function runSaveLoop(): Promise<void> {
+  while (db && dirty && !blockAsyncWrite) {
+    dirty = false
+    try {
+      const data = Buffer.from(db.export())
+      const path = getDbPath()
+      const tmp = `${path}.tmp`
+      await writeFile(tmp, data)
+      // shutdown flush took over: this snapshot isn't persisted, so re-mark dirty
+      // (flush's `dirty || savePromise` guard then writes it) and don't race it.
+      if (blockAsyncWrite) {
+        dirty = true
+        return
+      }
+      await rename(tmp, path)
+    } catch (e) {
+      // Persistent failure: keep the buffer dirty so a later save (or flush)
+      // retries, but break to avoid a hot error loop.
+      dirty = true
+      console.warn("[DB] async save failed, will retry on next change:", e)
+      break
+    }
+  }
+}
+
+/**
+ * Save database to disk (debounced, async, atomic)
  */
 export function saveToDisk(): void {
   if (!db) return
@@ -28,27 +72,61 @@ export function saveToDisk(): void {
   }
 
   saveTimer = setTimeout(() => {
-    if (db && dirty) {
-      const data = db.export()
-      writeFileSync(getDbPath(), Buffer.from(data))
-      dirty = false
+    saveTimer = null
+    if (!savePromise) {
+      savePromise = runSaveLoop().finally(() => {
+        savePromise = null
+      })
     }
-  }, 100)
+  }, SAVE_DEBOUNCE_MS)
+  // Don't let a pending background save keep the event loop alive on its own;
+  // orderly shutdown explicitly awaits flush()/closeDatabase().
+  saveTimer.unref?.()
 }
 
 /**
- * Force immediate save
+ * Force an immediate durable save. Waiting for the background writer first is
+ * essential: once fs.rename() has been submitted it cannot be cancelled, so a
+ * final snapshot written before that rename settles could be overwritten by an
+ * older snapshot.
  */
 export async function flush(): Promise<void> {
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
-  }
-  if (db && dirty) {
-    const data = db.export()
-    writeFileSync(getDbPath(), Buffer.from(data))
-    dirty = false
-  }
+  if (flushPromise) return flushPromise
+
+  flushPromise = (async () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    if (!db) return
+
+    blockAsyncWrite = true
+    try {
+      const pendingSave = savePromise
+      if (pendingSave) await pendingSave
+
+      // Mutations may arrive while an earlier write is settling. Keep taking
+      // authoritative snapshots until no dirty state remains.
+      while (db && dirty) {
+        dirty = false
+        const data = Buffer.from(db.export())
+        const path = getDbPath()
+        const tmp = `${path}.flush.tmp`
+        await writeFile(tmp, data)
+        await rename(tmp, path)
+      }
+    } catch (e) {
+      dirty = true
+      console.warn("[DB] flush write failed:", e)
+    } finally {
+      blockAsyncWrite = false
+      if (dirty && db) saveToDisk()
+    }
+  })().finally(() => {
+    flushPromise = null
+  })
+
+  return flushPromise
 }
 
 export function getDb(): SqlJsDatabase {
@@ -58,9 +136,58 @@ export function getDb(): SqlJsDatabase {
   return db
 }
 
+function parseThreadMetadata(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string" || value.trim() === "") return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function hasAnyThread(database: SqlJsDatabase): boolean {
+  const rows = database.exec("SELECT 1 FROM threads LIMIT 1")
+  return (rows[0]?.values.length ?? 0) > 0
+}
+
+function migrateLegacyMemorySessionOptIn(database: SqlJsDatabase): void {
+  const migration = getMemorySessionOptInMigrationState(hasAnyThread(database))
+  if (migration.migrated) return
+
+  let updatedThreads = 0
+  if (migration.legacyMemoryEnabled) {
+    const rows = database.exec("SELECT thread_id, metadata FROM threads")
+    for (const row of rows[0]?.values ?? []) {
+      const threadId = row[0]
+      if (typeof threadId !== "string") continue
+      const metadata = parseThreadMetadata(row[1])
+      if (metadata.memoryEnabled === true) continue
+      metadata.memoryEnabled = true
+      database.run("UPDATE threads SET metadata = ? WHERE thread_id = ?", [
+        JSON.stringify(metadata),
+        threadId
+      ])
+      updatedThreads += 1
+    }
+  }
+
+  markMemorySessionOptInMigrated({
+    enabled: migration.legacyMemoryEnabled,
+    dreamEnabled: migration.legacyDreamEnabled
+  })
+  if (updatedThreads > 0) {
+    console.log(`[DB] Migrated ${updatedThreads} legacy thread(s) to explicit memory opt-in`)
+  }
+}
+
 export async function initializeDatabase(): Promise<SqlJsDatabase> {
   const dbPath = getDbPath()
   console.log("Initializing database at:", dbPath)
+  // Reset in case the DB was previously closed (flush/close set the guard).
+  blockAsyncWrite = false
 
   const SQL = await initSqlJs()
 
@@ -188,26 +315,19 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
     `CREATE INDEX IF NOT EXISTS idx_thread_goal_events_thread_order ON thread_goal_events(thread_id, created_at, event_id)`
   )
 
+  migrateLegacyMemorySessionOptIn(db)
   saveToDisk()
 
   console.log("Database initialized successfully")
   return db
 }
 
-export function closeDatabase(): void {
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
-  }
-  if (db) {
-    // Save any pending changes
-    if (dirty) {
-      const data = db.export()
-      writeFileSync(getDbPath(), Buffer.from(data))
-    }
-    db.close()
-    db = null
-  }
+export async function closeDatabase(): Promise<void> {
+  await flush()
+  blockAsyncWrite = true
+  if (!db) return
+  db.close()
+  db = null
 }
 
 // Helper functions for common operations
@@ -426,7 +546,10 @@ export function getThreadGoalEvents(
   return events
 }
 
-function readThreadGoalEvents(sql: string, params: Array<string | number | null>): ThreadGoalEventRow[] {
+function readThreadGoalEvents(
+  sql: string,
+  params: Array<string | number | null>
+): ThreadGoalEventRow[] {
   const database = getDb()
   const stmt = database.prepare(sql)
   stmt.bind(params)

@@ -5,11 +5,12 @@ import { getScheduledTasks, getCustomModelConfigs, updateScheduledTaskRunResult,
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
 import { trySendChatXReply } from "./chatx"
-import { createAgentRuntime, closeCheckpointer } from "../agent/runtime"
+import { createAgentRuntime, closeCheckpointer, pinCheckpointer } from "../agent/runtime"
 import { createThread as dbCreateThread, deleteThread as dbDeleteThread } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
+import { emitAppAttention } from "../app-attention-events"
 
 const TICK_INTERVAL_MS = 60_000
 const ONCE_EXPIRE_MS = 30 * 60_000 // once tasks older than 30 min are auto-disabled instead of executed
@@ -138,6 +139,7 @@ async function executeTask(taskId: string): Promise<void> {
   const tracer = new TraceCollector(threadId, finalPrompt, task.modelId ?? "unknown", {
     triggerSource: schedulerSource
   })
+  const releaseCheckpointerPin = pinCheckpointer(threadId)
 
   try {
     const workspacePath = task.workDir
@@ -272,6 +274,11 @@ async function executeTask(taskId: string): Promise<void> {
       }
       showTaskNotification(task.name, "ok", lastAssistantText)
       showPetCompletedTaskNotice(threadId, task.name)
+      emitAppAttention({
+        kind: "task-complete",
+        threadId,
+        key: `scheduled-task:${taskId}:${startedAt.toISOString()}`
+      })
       // If task is linked to a ChatX robot, send reply via HTTP
       if (task.chatxRobotChatId && lastAssistantText) {
         trySendChatXReply(task.chatxRobotChatId, lastAssistantText)
@@ -310,6 +317,11 @@ async function executeTask(taskId: string): Promise<void> {
       updateScheduledTaskRunResult(taskId, "error", errMsg)
       tracer.finish("error", errMsg).catch(() => {})
       showTaskNotification(task.name, "error", errMsg)
+      emitAppAttention({
+        kind: "task-error",
+        threadId,
+        key: `scheduled-task:${taskId}:${startedAt.toISOString()}`
+      })
       console.error(`[Scheduler] Task error: ${task.name}:`, errMsg)
     }
     recordRun(taskId, task.name, startedAt, "error", errMsg)
@@ -339,7 +351,8 @@ async function executeTask(taskId: string): Promise<void> {
     // see the task as still running and re-set scheduledTaskLoading = true (race).
     runningTasks.delete(taskId)
     activeAbortControllers.delete(taskId)
-    closeCheckpointer(threadId).catch(() => {})
+    releaseCheckpointerPin()
+    await closeCheckpointer(threadId).catch(() => {})
 
     // Now broadcast lifecycle event — renderer can safely call isRunning() = false
     if (taskError) {

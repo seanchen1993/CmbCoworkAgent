@@ -45,8 +45,8 @@ export interface OverviewData {
   totalSkillCalls: number
   totalToolCalls: number
   trend: Array<{ time: string; count: number; users: number }>
-  bySkill: Array<{ skill: string; count: number }>
-  bySkillAll: Array<{ skill: string; count: number }>
+  bySkill: Array<{ skill: string; count: number; isPlugin?: boolean; pluginName?: string }>
+  bySkillAll: Array<{ skill: string; count: number; isPlugin?: boolean; pluginName?: string }>
   bySkillAdoption: SkillAdoptionRankingItem[]
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
@@ -452,6 +452,8 @@ export interface DashboardPluginAggregate {
 export interface DashboardProjectModeSkillCount {
   skill: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 export interface DashboardProjectModeToolUsage {
@@ -523,6 +525,7 @@ export interface DashboardProjectModeProject {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
   featureCount: number
@@ -547,6 +550,7 @@ export interface DashboardProjectModeProjectCounts {
 
 export type DashboardProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -1104,6 +1108,39 @@ export function navigateRange(
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+function parsePluginSkillFromSourceRef(
+  ref: unknown
+): { skill: string; pluginName: string } | null {
+  if (typeof ref !== "string" || !ref.startsWith("plugin:")) return null
+  const rest = ref.slice("plugin:".length)
+  const separatorIndex = rest.indexOf("/")
+  if (separatorIndex <= 0 || separatorIndex >= rest.length - 1) return null
+  try {
+    const pluginId = decodeURIComponent(rest.slice(0, separatorIndex))
+    const rawSkillAndQuery = rest.slice(separatorIndex + 1)
+    const queryIndex = rawSkillAndQuery.indexOf("?")
+    const rawSkill = queryIndex >= 0 ? rawSkillAndQuery.slice(0, queryIndex) : rawSkillAndQuery
+    const rawQuery = queryIndex >= 0 ? rawSkillAndQuery.slice(queryIndex + 1) : ""
+    const query = new URLSearchParams(rawQuery)
+    return {
+      skill: decodeURIComponent(rawSkill),
+      pluginName: query.get("name")?.trim() || pluginId
+    }
+  } catch {
+    return null
+  }
+}
+
+function parsePluginSkillInfo(rawBuckets: any): Map<string, string> {
+  const result = new Map<string, string>()
+  const buckets = Array.isArray(rawBuckets) ? rawBuckets : []
+  for (const bucket of buckets) {
+    const parsed = parsePluginSkillFromSourceRef(bucket?.key)
+    if (parsed && !result.has(parsed.skill)) result.set(parsed.skill, parsed.pluginName)
+  }
+  return result
+}
+
 /** 根据粒度将 ES 返回的 ISO 时间串格式化为可读刻度 */
 function formatTrendTime(isoStr: string, granularity: Granularity): string {
   const d = new Date(isoStr)
@@ -1197,6 +1234,8 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
   const totalToolCalls = aggs.total_tool_calls?.value ?? 0
+  const pluginSkillInfo = parsePluginSkillInfo(aggs.skill_source?.buckets)
+  const codePluginSkillInfo = parsePluginSkillInfo(aggs.code_skill_source?.buckets)
 
   const trend: OverviewData["trend"] = (aggs.trend?.buckets ?? []).map((b: any) => ({
     time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
@@ -1206,7 +1245,10 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
 
   const bySkill: OverviewData["bySkill"] = (aggs.by_skill?.buckets ?? []).map((b: any) => ({
     skill: b.key || "unknown",
-    count: b.doc_count
+    count: b.doc_count,
+    ...(pluginSkillInfo.has(b.key)
+      ? { isPlugin: true, pluginName: pluginSkillInfo.get(b.key) }
+      : {})
   }))
 
   const bySkillAll: OverviewData["bySkillAll"] = (
@@ -1215,7 +1257,10 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     []
   ).map((b: any) => ({
     skill: b.key || "unknown",
-    count: b.doc_count
+    count: b.doc_count,
+    ...(pluginSkillInfo.has(b.key)
+      ? { isPlugin: true, pluginName: pluginSkillInfo.get(b.key) }
+      : {})
   }))
 
   const bySkillAdoption: OverviewData["bySkillAdoption"] = (
@@ -1227,6 +1272,9 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     const inclusivePushedAdoptionRate = b.inclusive_pushed_adoption_rate?.value
     return {
       skill: b.key || "unknown",
+      ...(b.is_plugin?.value === true || codePluginSkillInfo.has(b.key)
+        ? { isPlugin: true, pluginName: b.plugin_name?.value ?? codePluginSkillInfo.get(b.key) }
+        : {}),
       generatedLines: b.generated_lines?.value ?? 0,
       measuredGeneratedLines: b.measured_generated_lines?.value ?? 0,
       effectiveGeneratedLines: b.effective_generated_lines?.value ?? 0,

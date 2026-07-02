@@ -8,7 +8,7 @@ import { useState } from "react"
 import { Search, X, Info } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { hasMarketSkill, normalizeMarketSkillKey } from "../skill-market"
+import { hasMarketSkill } from "../skill-market"
 import {
   DEFAULT_SKILL_ADOPTION_SORT,
   SKILL_ADOPTION_SORT_LABELS,
@@ -700,6 +700,8 @@ export function CodeAdoptionFunnel({
 export interface SkillRankingDatum {
   skill: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 function SkillUsageTooltip(): React.JSX.Element {
@@ -754,11 +756,6 @@ function SkillRankingTabs({
   )
 }
 
-function hasPluginSkill(pluginSkillKeys: Set<string>, skillName: string): boolean {
-  const key = normalizeMarketSkillKey(skillName)
-  return Boolean(key && pluginSkillKeys.has(key))
-}
-
 function MarketSkillTag(): React.JSX.Element {
   return (
     <span className="shrink-0 rounded-sm border border-emerald-200 bg-emerald-50 px-1 py-px text-[9px] font-medium leading-3 text-emerald-700">
@@ -767,10 +764,13 @@ function MarketSkillTag(): React.JSX.Element {
   )
 }
 
-function PluginSkillTag(): React.JSX.Element {
+function PluginSkillTag({ pluginName }: { pluginName?: string }): React.JSX.Element {
   return (
-    <span className="shrink-0 rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700">
-      Plugin
+    <span
+      className="inline-flex max-w-[120px] shrink-0 items-center rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700"
+      title={pluginName ? `Plugin · ${pluginName}` : "Plugin"}
+    >
+      <span className="truncate">{pluginName ? `Plugin · ${pluginName}` : "Plugin"}</span>
     </span>
   )
 }
@@ -802,15 +802,13 @@ function SkillAdoptionRankingPanel({
   activeTab,
   onTabChange,
   onSkillClick,
-  marketSkillKeys,
-  pluginSkillKeys
+  marketSkillKeys
 }: {
   bySkillAdoption: SkillAdoptionRankingItem[]
   activeTab: SkillRankingTab
   onTabChange: (tab: SkillRankingTab) => void
   onSkillClick?: (skill: string) => void
   marketSkillKeys: Set<string>
-  pluginSkillKeys: Set<string>
 }): React.JSX.Element {
   const [query, setQuery] = useState("")
   const [sortKey, setSortKey] = useState<SkillAdoptionSortKey>(DEFAULT_SKILL_ADOPTION_SORT)
@@ -918,7 +916,7 @@ function SkillAdoptionRankingPanel({
                           {highlightRankingName(item.skill, trimmedQuery)}
                         </span>
                         {hasMarketSkill(marketSkillKeys, item.skill) ? <MarketSkillTag /> : null}
-                        {hasPluginSkill(pluginSkillKeys, item.skill) ? <PluginSkillTag /> : null}
+                        {item.isPlugin ? <PluginSkillTag pluginName={item.pluginName} /> : null}
                       </div>
                       <span className="shrink-0 text-[11px] font-medium text-foreground">
                         {formatSkillAdoptionSortValue(item, sortKey)}
@@ -990,8 +988,7 @@ export function SkillRankingPanel({
   totalSkillCalls,
   bySkillAdoption,
   onSkillClick,
-  marketSkillKeys,
-  pluginSkillKeys
+  marketSkillKeys
 }: {
   bySkill: SkillRankingDatum[]
   bySkillAll: SkillRankingDatum[]
@@ -1000,7 +997,6 @@ export function SkillRankingPanel({
   bySkillAdoption: SkillAdoptionRankingItem[]
   onSkillClick?: (skill: string) => void
   marketSkillKeys: Set<string>
-  pluginSkillKeys: Set<string>
 }): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<SkillRankingTab>("usage")
   if (activeTab === "adoption") {
@@ -1011,7 +1007,6 @@ export function SkillRankingPanel({
         onTabChange={setActiveTab}
         onSkillClick={onSkillClick}
         marketSkillKeys={marketSkillKeys}
-        pluginSkillKeys={pluginSkillKeys}
       />
     )
   }
@@ -1024,6 +1019,11 @@ export function SkillRankingPanel({
     name: item.skill,
     count: item.count
   }))
+  const pluginSkillNames = new Map(
+    [...bySkill, ...bySkillAll]
+      .filter((item) => item.isPlugin)
+      .map((item) => [item.skill, item.pluginName])
+  )
   const totalKinds = searchItems.length > 0 ? searchItems.length : totalSkills
   const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : totalSkillCalls
 
@@ -1044,7 +1044,9 @@ export function SkillRankingPanel({
       renderNameAddon={(name) => (
         <>
           {hasMarketSkill(marketSkillKeys, name) ? <MarketSkillTag /> : null}
-          {hasPluginSkill(pluginSkillKeys, name) ? <PluginSkillTag /> : null}
+          {pluginSkillNames.has(name) ? (
+            <PluginSkillTag pluginName={pluginSkillNames.get(name)} />
+          ) : null}
         </>
       )}
     />

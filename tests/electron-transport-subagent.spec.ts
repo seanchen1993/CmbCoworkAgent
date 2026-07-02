@@ -25,7 +25,7 @@ interface TestableTransport {
   convertToSDKEvents: (
     event: unknown,
     threadId: string,
-    agentMode?: "normal" | "coordinator"
+    agentMode?: "normal" | "coordinator" | "workflow"
   ) => SdkEvent[]
 }
 
@@ -220,7 +220,7 @@ async function collectStreamEvents(
 function convert(
   transport: ElectronIPCTransport,
   event: unknown,
-  agentMode: "normal" | "coordinator" = "normal"
+  agentMode: "normal" | "coordinator" | "workflow" = "normal"
 ): SdkEvent[] {
   return (transport as unknown as TestableTransport).convertToSDKEvents(
     event,
@@ -3355,7 +3355,42 @@ async function testSubagentDeltaArgsPreserveRepeatedFragments(): Promise<void> {
   )
 }
 
+function testWorkflowSnapshotConverterSurvivesCorruptToolCalls(): void {
+  // item2: a half-broken / externally edited sidecar can JSON.parse with object MESSAGES but a
+  // CORRUPTED kwargs.tool_calls — either a NON-array (string/object), OR an array with bad ELEMENTS
+  // (null / string). The converter must degrade gracefully, not throw in
+  // hydrateToolCallsWithAccumulatedArgs's .map() (`[null]` → `null.args`) and break the whole panel.
+  const transport = new ElectronIPCTransport()
+  const mk = (toolCalls: unknown): unknown => ({
+    id: ["langchain_core", "messages", "AIMessage"],
+    kwargs: { id: "a1", content: "ok", tool_calls: toolCalls }
+  })
+  const cases: Array<[string, unknown]> = [
+    ["non-array string", "BROKEN"],
+    ["non-array object", { not: "an array" }],
+    ["null element", [null]],
+    ["string element", ["NOTACALL"]]
+  ]
+  for (const [label, toolCalls] of cases) {
+    let messages: unknown
+    try {
+      messages = transport.convertWorkflowAgentValuesSnapshot([mk(toolCalls)], "wfagent:wf_x:0")
+    } catch (error) {
+      assert(false, `corrupt tool_calls (${label}) must not throw, got ${(error as Error).message}`)
+    }
+    assert(Array.isArray(messages), `converter returns a Message[] for ${label} (degraded, not crashed)`)
+  }
+  // A bogus string element must be DROPPED, not surfaced to MessageBubble as a fake tool call.
+  const out = transport.convertWorkflowAgentValuesSnapshot([mk(["NOTACALL"])], "wfagent:wf_x:0")
+  assert(
+    !JSON.stringify(out).includes("NOTACALL"),
+    "a corrupt tool-call element is dropped, not surfaced as a fake tool call"
+  )
+}
+
 async function run(): Promise<void> {
+  testWorkflowSnapshotConverterSurvivesCorruptToolCalls()
+  console.log("PASS electron transport workflow converter survives corrupt tool_calls")
   await testSubagentInternalsAreHiddenButObservable()
   console.log("PASS electron transport hides subagent internals")
   await testConcurrentSubagentsStreamingIndexZeroDoNotCrossContaminate()

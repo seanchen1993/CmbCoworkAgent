@@ -10,7 +10,8 @@ import {
   isGitCommitCommand,
   normalizeCdPrefixedGitCommitCommand,
   normalizeGitAddPrefixedGitCommitCommand,
-  resolveGitCommandCwd
+  resolveGitCommandCwd,
+  resolveGitPushCommandCwd
 } from "./exec-policy"
 
 const CWD = "C:/repo"
@@ -92,6 +93,16 @@ describe("isGitCommitCommand", () => {
 
   it("still detects a commit chained with other commands (so it can be refused)", () => {
     expect(isGitCommitCommand('git add -A && git commit -m "x"')).toBe(true)
+  })
+})
+
+describe("resolveGitPushCommandCwd", () => {
+  it("applies git -C to push commands", () => {
+    expect(resolveGitPushCommandCwd("git -C child push", CWD)).toBe(path.resolve(CWD, "child"))
+  })
+
+  it("does not reuse commit-only cwd parsing for push", () => {
+    expect(resolveGitPushCommandCwd("git push", CWD)).toBe(CWD)
   })
 })
 
@@ -276,7 +287,7 @@ describe("resolveGitCommandCwd", () => {
         : path.resolve(CWD, "/c/ai/CmbCoworkAgent")
     )
     expect(resolveGitCommandCwd('git -C "repo\\\\with spaces" commit -m x', CWD)).toBe(
-      path.resolve(CWD, "repo\\\\with spaces")
+      path.resolve(CWD, "repo\\with spaces")
     )
     expect(resolveGitCommandCwd("git -C src -C nested commit -m x -- a.ts", CWD)).toBe(
       path.resolve(CWD, "src", "nested")

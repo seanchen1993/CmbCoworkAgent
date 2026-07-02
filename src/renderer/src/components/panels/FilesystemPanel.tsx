@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
   Folder,
   File,
@@ -195,7 +195,7 @@ export function FilesystemPanel() {
     return tree
   }
 
-  const tree = buildTree(workspaceFiles)
+  const tree = useMemo(() => buildTree(workspaceFiles), [workspaceFiles])
 
   const toggleDir = (path: string) => {
     setExpandedDirs((prev) => {

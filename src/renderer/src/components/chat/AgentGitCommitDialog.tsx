@@ -159,19 +159,26 @@ function relativePathWithin(basePath: string, targetPath: string): string | null
 function normalizeSuggestedCommitPath(
   filePath: string,
   basePath?: string,
-  workspacePath?: string | null
+  workspacePath?: string | null,
+  targetWorktreePath?: string
 ): string {
   const normalized = normalizeCommitPath(filePath)
   if (!normalized) return ""
   if (normalized.startsWith(":/")) return normalizeCommitPath(normalized.slice(2))
-  if (!workspacePath) return normalized
+  if (!workspacePath && !targetWorktreePath) return normalized
   const absolutePath = isAbsoluteFsPath(normalized)
     ? collapseFsPath(normalized)
     : basePath
       ? resolveFsPath(basePath, normalized)
       : null
   if (!absolutePath) return normalized
-  return normalizeCommitPath(relativePathWithin(workspacePath, absolutePath) ?? normalized)
+  if (targetWorktreePath) {
+    const targetRelative = relativePathWithin(targetWorktreePath, absolutePath)
+    if (targetRelative) return normalizeCommitPath(targetRelative)
+  }
+  return normalizeCommitPath(
+    workspacePath ? relativePathWithin(workspacePath, absolutePath) ?? normalized : normalized
+  )
 }
 
 function pathMatchesSelection(file: DiffFile, selectedPath: string): boolean {
@@ -204,13 +211,18 @@ function buildInitialSelectedPaths(
   files: DiffFile[],
   suggestedFilePaths?: string[],
   allChangedFiles?: string[],
-  options?: { suggestedBasePath?: string; workspacePath?: string | null }
+  options?: { suggestedBasePath?: string; workspacePath?: string | null; targetWorktreePath?: string }
 ): Set<string> {
   const suggested = Array.from(
     new Set(
       (suggestedFilePaths ?? [])
         .map((filePath) =>
-          normalizeSuggestedCommitPath(filePath, options?.suggestedBasePath, options?.workspacePath)
+          normalizeSuggestedCommitPath(
+            filePath,
+            options?.suggestedBasePath,
+            options?.workspacePath,
+            options?.targetWorktreePath
+          )
         )
         .filter(Boolean)
     )
@@ -310,6 +322,8 @@ interface AgentGitCommitDialogProps {
   suggestedFilePaths?: string[]
   /** Base cwd for explicit pathspecs after applying git -C. */
   suggestedFileBasePath?: string
+  /** Git cwd resolved from cd / git -C. */
+  suggestedGitWorktreePath?: string
   /** Where suggestedFilePaths came from. */
   suggestedFileSelectionSource?: "pathspec" | "staged"
   /** Called after the commit succeeds; the parent resolves the approval with the result. */
@@ -331,6 +345,7 @@ export function AgentGitCommitDialog({
   suggestedMessage,
   suggestedFilePaths,
   suggestedFileBasePath,
+  suggestedGitWorktreePath,
   suggestedFileSelectionSource,
   onCommitted,
   onCancel
@@ -372,7 +387,8 @@ export function AgentGitCommitDialog({
     () =>
       buildInitialSelectedPaths([], initialSuggestedFilePaths, undefined, {
         suggestedBasePath: initialSuggestedFileBasePath,
-        workspacePath
+        workspacePath,
+        targetWorktreePath: suggestedGitWorktreePath
       })
   )
 
@@ -391,7 +407,8 @@ export function AgentGitCommitDialog({
       .getGitPanelDiffs(threadId, {
         includeDiffs: false,
         includeChangedFiles: true,
-        statusUntrackedMode: "normal"
+        statusUntrackedMode: "normal",
+        worktreePath: suggestedGitWorktreePath
       })
       .then((res) => {
         if (cancelled || requestId !== diffListRequestIdRef.current) return
@@ -410,7 +427,8 @@ export function AgentGitCommitDialog({
         setSelectedCommitPaths(
           buildInitialSelectedPaths(res.files ?? [], initialSuggestedFilePaths, res.changedFiles ?? [], {
             suggestedBasePath: initialSuggestedFileBasePath,
-            workspacePath
+            workspacePath,
+            targetWorktreePath: suggestedGitWorktreePath
           })
         )
       })
@@ -423,7 +441,7 @@ export function AgentGitCommitDialog({
     return () => {
       cancelled = true
     }
-  }, [open, threadId, initialSuggestedFilePaths, initialSuggestedFileBasePath, workspacePath])
+  }, [open, threadId, initialSuggestedFilePaths, initialSuggestedFileBasePath, workspacePath, suggestedGitWorktreePath])
 
   const selectedFile = useMemo(
     () => diff?.files.find((f) => f.path === selectedFilePath) ?? diff?.files[0],
@@ -446,7 +464,9 @@ export function AgentGitCommitDialog({
       })
 
       try {
-        const res = await window.api.workspace.getGitPanelFileDiff(threadId, filePath)
+        const res = await window.api.workspace.getGitPanelFileDiff(threadId, filePath, {
+          worktreePath: suggestedGitWorktreePath
+        })
         if (requestId !== diffListRequestIdRef.current || res.taskId !== activeThreadIdRef.current) return
         if (!res.success || !res.file) {
           throw new Error(res.error || "加载文件 diff 失败")
@@ -496,7 +516,7 @@ export function AgentGitCommitDialog({
         }
       }
     },
-    [threadId, diff?.files, fileDiffLoadingPaths]
+    [threadId, diff?.files, fileDiffLoadingPaths, suggestedGitWorktreePath]
   )
 
   useEffect(() => {
@@ -566,7 +586,8 @@ export function AgentGitCommitDialog({
       const result = await window.api.workspace.commitWorktree(
         threadId,
         finalMessage,
-        selectedCommitFilePaths
+        selectedCommitFilePaths,
+        { worktreePath: suggestedGitWorktreePath }
       )
       if (!result.success) {
         setError(result.error || "提交失败")

@@ -486,4 +486,3 @@ headroom CCR 的额外价值是：
 一句话版本：
 
 **Headroom 本体不适合直接引入；它的 ContentRouter/LogCompressor/SmartCrusher/CCR 思路有借鉴价值，但本工程应只借鉴算法和产品策略，做纯 TypeScript、可审计、与现有 filesystem backend 兼容的最小实现。**
-

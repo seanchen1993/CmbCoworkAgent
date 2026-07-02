@@ -506,10 +506,14 @@ interface DashboardProjectModeFeature {
 interface DashboardProjectModeSkillCount {
   skill: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
   skill: string
+  isPlugin?: boolean
+  pluginName?: string
   commitCount: number
 }
 
@@ -563,6 +567,7 @@ interface DashboardProjectModeProject {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
   featureCount: number
@@ -587,6 +592,7 @@ interface DashboardProjectModeProjectCounts {
 
 type DashboardProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -736,7 +742,7 @@ interface CustomAPI {
       message: string,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ) => () => void
@@ -746,7 +752,7 @@ interface CustomAPI {
       command: unknown,
       onEvent: (event: StreamEvent) => void,
       modelId?: string,
-      agentMode?: "normal" | "coordinator",
+      agentMode?: "normal" | "coordinator" | "workflow",
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ) => () => void
@@ -796,6 +802,32 @@ interface CustomAPI {
       }
     ) => Promise<void>
     isCoordinatorModeForced: () => Promise<boolean>
+  }
+  workflows: {
+    listRuns: (threadId: string) => Promise<unknown[]>
+    getRun: (threadId: string, runId: string) => Promise<unknown | null>
+    cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    /** Register/deregister per-agent "viewing interest" (the focus panel is showing this
+     * running agent) so the display-only live tap only serializes/broadcasts that agent. */
+    setAgentStreamInterest: (
+      threadId: string,
+      runId: string,
+      agentIndex: number,
+      interested: boolean
+    ) => Promise<boolean>
+    /** Lazily read one FINISHED subagent's persisted complete tool flow on demand; null
+     * when there is no sidecar (cached/instant agent, pruned run, or pre-feature run). */
+    getAgentToolStream: (
+      threadId: string,
+      runId: string,
+      agentIndex: number
+    ) => Promise<unknown[] | null>
+    hydrate: (threadId: string) => Promise<unknown>
+    /** Durable per-thread channel; survives past the launching turn. Returns unsubscribe. */
+    onWorkflowEvents: (threadId: string, callback: (payload: unknown) => void) => () => void
+    /** Display-only live subagent tool-stream (keyed by parent threadId; payload carries
+     * runId+agentIndex). Best-effort, not persisted. Returns unsubscribe. */
+    onWorkflowAgentStream: (threadId: string, callback: (payload: unknown) => void) => () => void
   }
   threads: {
     list: () => Promise<Thread[]>
@@ -985,6 +1017,8 @@ interface CustomAPI {
       workspacePath?: string
       error?: string
     }>
+    ensureWatching: (threadId: string) => Promise<{ success: boolean; restarted?: boolean }>
+    setActiveThread: (threadId: string | null) => Promise<{ success: boolean; restarted?: boolean }>
     readFile: (
       threadId: string,
       filePath: string
@@ -1040,6 +1074,7 @@ interface CustomAPI {
       isWorktree: boolean
       isGitRepo?: boolean
       taskId: string
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
       files: Array<{
         path: string
         previousPath?: string
@@ -1061,7 +1096,7 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelMeta: (threadId: string) => Promise<{
+    getGitPanelMeta: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -1080,6 +1115,8 @@ interface CustomAPI {
         includeDiffs?: boolean
         includeChangedFiles?: boolean
         statusUntrackedMode?: "all" | "normal" | "no"
+        visibleFileLimit?: number
+        worktreePath?: string
       }
     ) => Promise<{
       success: boolean
@@ -1105,7 +1142,8 @@ interface CustomAPI {
     }>
     getGitPanelFileDiff: (
       threadId: string,
-      filePath: string
+      filePath: string,
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       isWorktree: boolean
@@ -1152,6 +1190,7 @@ interface CustomAPI {
       gitRoot: string | null
       worktrees: Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>
       isWorktreePath: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
     }>
     listWorktrees: (
       gitRoot: string
@@ -1177,12 +1216,13 @@ interface CustomAPI {
     commitWorktree: (
       threadId: string,
       message: string,
-      filePaths?: string[]
+      filePaths?: string[],
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       error?: string
     }>
-    pushWorktree: (threadId: string) => Promise<{
+    pushWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
@@ -1192,18 +1232,24 @@ interface CustomAPI {
         detail: string
       }>
     }>
-    pullWorktree: (threadId: string) => Promise<{
+    pullWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
       success: boolean
       detail?: string
       error?: string
     }>
-    rejectWorktreeChanges: (threadId: string) => Promise<{
+    rejectWorktreeChanges: (
+      threadId: string,
+      filePaths?: string[],
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
+      revertedFileCount?: number
       error?: string
     }>
     rejectWorktreeFile: (
       threadId: string,
-      filePath: string
+      filePath: string,
+      options?: { worktreePath?: string }
     ) => Promise<{
       success: boolean
       error?: string
@@ -1331,7 +1377,23 @@ interface CustomAPI {
     }) => Promise<{ success: boolean; tools?: string[]; error?: string }>
   }
   memory: {
-    listFiles: () => Promise<
+    listProjects: (request?: { workspacePath?: string | null }) => Promise<
+      Array<{
+        projectId: string
+        displayName: string
+        memoryDir: string
+        gitRoot?: string
+        fileCount: number
+        totalSize: number
+        indexSize: number
+        isCurrent: boolean
+      }>
+    >
+    listFiles: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<
       Array<{
         name: string
         size: number
@@ -1342,21 +1404,47 @@ interface CustomAPI {
         recallCount: number
       }>
     >
-    readFile: (name: string) => Promise<string>
-    deleteFile: (name: string) => Promise<void>
+    readFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ) => Promise<string>
+    deleteFile: (
+      name: string,
+      request?: {
+        scope?: "global" | "project"
+        workspacePath?: string | null
+        projectId?: string | null
+      }
+    ) => Promise<void>
     getEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
     getDreamEnabled: () => Promise<boolean>
     setDreamEnabled: (enabled: boolean) => Promise<void>
-    getStats: () => Promise<{
+    getStats: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<{
       fileCount: number
       totalSize: number
       indexSize: number
       enabled: boolean
       dreamEnabled: boolean
       dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
+      scope: "global" | "project"
+      memoryDir: string
+      projectId?: string
+      gitRoot?: string
     }>
-    consolidate: () => Promise<{
+    consolidate: (request?: {
+      scope?: "global" | "project"
+      workspacePath?: string | null
+      projectId?: string | null
+    }) => Promise<{
       archived: number
       merged: number
       created: number
@@ -2238,7 +2326,14 @@ interface CustomAPI {
   git: {
     currentBranch: (
       cwd?: string
-    ) => Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean; error?: string }>
+    ) => Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      isMultiRepo?: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
+      error?: string
+    }>
     listBranches: (
       cwd?: string,
       options?: { refreshRemote?: boolean }

@@ -20,6 +20,8 @@ export interface DashboardCodeStats {
 
 export interface DashboardSkillCodeAdoptionStats extends DashboardCodeStats {
   skill: string
+  isPlugin?: boolean
+  pluginName?: string
   commitCount: number
 }
 

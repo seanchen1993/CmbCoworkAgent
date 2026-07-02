@@ -43,6 +43,11 @@ import {
   type CoordinatorWorkerView
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
+import {
+  hasLoadedWorkspaceFiles,
+  loadWorkspaceFilesDeduped,
+  markWorkspaceFilesStale
+} from "@/lib/workspace-file-load"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
@@ -137,14 +142,33 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
     (e: React.MouseEvent) => {
       e.preventDefault()
       startYRef.current = e.clientY
+      let frame: number | null = null
+      let latestDelta = 0
+
+      const flushDrag = (): void => {
+        frame = null
+        onDrag(latestDelta)
+      }
+
+      const scheduleDrag = (delta: number): void => {
+        latestDelta = delta
+        if (frame === null) {
+          frame = window.requestAnimationFrame(flushDrag)
+        }
+      }
 
       const handleMouseMove = (e: MouseEvent): void => {
         // Calculate total delta from drag start
         const totalDelta = e.clientY - startYRef.current
-        onDrag(totalDelta)
+        scheduleDrag(totalDelta)
       }
 
       const handleMouseUp = (): void => {
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame)
+          frame = null
+          onDrag(latestDelta)
+        }
         document.removeEventListener("mousemove", handleMouseMove)
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""
@@ -1595,45 +1619,87 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
         if (cancelled) return
         setWorkspacePath(path)
 
-        // If a folder is linked, load files from disk
-        if (path) {
-          const result = await window.api.workspace.loadFromDisk(threadId)
-          if (cancelled) return
-          if (result.success && result.files) {
-            setWorkspaceFiles(result.files)
-          }
+        if (!path) return
+
+        if (hasLoadedWorkspaceFiles(threadId, path)) {
+          // A cached tree may have missed changes while its watcher was evicted.
+          // Re-arm the watcher and refresh once only when it had to be recreated.
+          const watcherResult = await window.api.workspace.ensureWatching(threadId)
+          if (cancelled || !watcherResult.success || !watcherResult.restarted) return
+          markWorkspaceFilesStale(threadId, path)
+        }
+
+        // No successful scan for this exact thread/path, or the watcher was
+        // recreated after eviction. Share an in-flight background scan.
+        const result = await loadWorkspaceFilesDeduped(threadId, path)
+        if (cancelled) return
+        // Guard against writing a stale scan (workspace switched mid-load):
+        // only accept results that match the path we resolved.
+        if (result.success && result.files && result.workspacePath === path) {
+          setWorkspaceFiles(result.files)
         }
       }
     }
-    loadWorkspace()
+    void loadWorkspace().catch((error) => {
+      if (!cancelled) {
+        console.error("[FilesContent] Failed to load workspace files:", error)
+      }
+    })
 
     return () => {
       cancelled = true
     }
+    // The effect intentionally initializes once per thread. Successful scan
+    // state is tracked by threadId + workspacePath instead of array length, so
+    // an empty workspace is still considered loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
 
   // Listen for file changes from the workspace watcher
   useEffect(() => {
     if (!threadId || !setWorkspaceFiles) return
+    // Guards against an in-flight callback (started before a workspace switch)
+    // writing back after the effect re-ran for the new path. The closure's
+    // `workspacePath === result.workspacePath` check passes for the old path,
+    // so a flag set in cleanup is required to actually discard the stale write.
+    let cancelled = false
 
     const cleanup = window.api.workspace.onFilesChanged(async (data) => {
-      // Only reload if the event is for the current thread
-      if (data.threadId === threadId) {
-        console.log("[FilesContent] Files changed, reloading...", {
-          threadId: data.threadId,
-          workspacePath: data.workspacePath
+      // Only reload if the event is for the current thread and its workspace.
+      if (data.threadId !== threadId) return
+      if (workspacePath && data.workspacePath && data.workspacePath !== workspacePath) return
+
+      const targetPath = workspacePath ?? data.workspacePath
+      if (!targetPath) return
+
+      console.log("[FilesContent] Files changed, reloading...", {
+        threadId: data.threadId,
+        workspacePath: data.workspacePath
+      })
+      // A real file-change notification requests one trailing pass if another
+      // scan is already in progress, so changes that landed mid-scan are kept.
+      markWorkspaceFilesStale(threadId, targetPath)
+      try {
+        const result = await loadWorkspaceFilesDeduped(threadId, targetPath, {
+          requestTrailingRescan: true
         })
-        const result = await window.api.workspace.loadFromDisk(threadId)
-        if (result.success && result.files) {
+        if (cancelled) return
+        if (result.success && result.files && result.workspacePath === targetPath) {
           setWorkspaceFiles(result.files)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("[FilesContent] Failed to refresh workspace files:", error)
         }
       }
     })
 
-    return cleanup
+    return () => {
+      cancelled = true
+      cleanup()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId])
+  }, [threadId, workspacePath])
 
   return (
     <div className="flex flex-col h-full">
@@ -3196,6 +3262,111 @@ const TOOL_LABEL: Record<string, string> = {
   manage_skill: "技能管理"
 }
 
+type HookSourceGroup = {
+  key: string
+  sourceLabel: string
+  title: string
+  detail?: string
+  fullPath?: string
+  badgeClassName: string
+  priority: number
+  hooks: DisplayHook[]
+}
+
+function getHookSummary(hook: DisplayHook): string {
+  if (hook.type === "prompt") return hook.prompt ?? ""
+  if (hook.type === "http") return hook.url ?? ""
+  return hook.command ?? ""
+}
+
+function getCompactPath(pathValue?: string): string | undefined {
+  if (!pathValue) return undefined
+  const normalized = pathValue.replace(/\\/g, "/").replace(/\/+$/, "")
+  const parts = normalized.split("/").filter(Boolean)
+  if (parts.length <= 2) return normalized
+  return parts.slice(-2).join("/")
+}
+
+function getHookSourcePath(hook: DisplayHook): string | undefined {
+  return hook.hookPath ?? hook.hookSourcePath
+}
+
+function getHookSourceGroupInfo(hook: DisplayHook): Omit<HookSourceGroup, "hooks"> {
+  const sourcePath = getHookSourcePath(hook)
+  const compactPath = getCompactPath(sourcePath)
+
+  if (hook.source === "workspace") {
+    return {
+      key: `workspace:${sourcePath ?? "current"}`,
+      sourceLabel: "工作区",
+      title: compactPath ?? "当前工作区",
+      fullPath: sourcePath,
+      badgeClassName: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+      priority: 0
+    }
+  }
+
+  if (hook.source === "global") {
+    return {
+      key: "global",
+      sourceLabel: "全局",
+      title: "全局 hooks.json",
+      detail: compactPath,
+      fullPath: sourcePath,
+      badgeClassName: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
+      priority: 1
+    }
+  }
+
+  if (hook.source === "plugin") {
+    const title = hook.pluginName ?? hook.pluginId ?? compactPath ?? "未命名插件"
+    return {
+      key: `plugin:${hook.pluginId ?? hook.pluginName ?? sourcePath ?? "unknown"}`,
+      sourceLabel: "插件",
+      title,
+      detail: compactPath,
+      fullPath: sourcePath,
+      badgeClassName: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
+      priority: 2
+    }
+  }
+
+  const isPluginSkillHook = Boolean(hook.pluginName || hook.pluginId)
+  const skillTitle = hook.skillName ?? compactPath ?? "未命名技能"
+  const pluginLabel = hook.pluginName ?? hook.pluginId
+  return {
+    key: `${isPluginSkillHook ? "plugin-skill" : "skill"}:${
+      hook.pluginId ?? hook.pluginName ?? ""
+    }:${hook.skillPath ?? hook.skillName ?? sourcePath ?? "unknown"}`,
+    sourceLabel: isPluginSkillHook ? "插件技能" : "技能",
+    title: isPluginSkillHook && pluginLabel ? `${pluginLabel} · ${skillTitle}` : skillTitle,
+    detail: compactPath,
+    fullPath: sourcePath,
+    badgeClassName: isPluginSkillHook
+      ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400"
+      : "bg-teal-500/15 text-teal-600 dark:text-teal-400",
+    priority: isPluginSkillHook ? 3 : 4
+  }
+}
+
+function buildHookSourceGroups(hooks: DisplayHook[]): HookSourceGroup[] {
+  const groups = new Map<string, HookSourceGroup>()
+
+  for (const hook of hooks) {
+    const info = getHookSourceGroupInfo(hook)
+    const existing = groups.get(info.key)
+    if (existing) {
+      existing.hooks.push(hook)
+    } else {
+      groups.set(info.key, { ...info, hooks: [hook] })
+    }
+  }
+
+  return Array.from(groups.values()).sort(
+    (a, b) => a.priority - b.priority || a.title.localeCompare(b.title, "zh-Hans-CN")
+  )
+}
+
 function HooksContent({
   hooks,
   onChange
@@ -3213,8 +3384,10 @@ function HooksContent({
     )
   }
 
-  const enabled = hooks.filter((h) => h.enabled)
-  const disabled = hooks.filter((h) => !h.enabled)
+  const enabledHooks = hooks.filter((h) => h.enabled)
+  const disabledHooks = hooks.filter((h) => !h.enabled)
+  const enabledGroups = buildHookSourceGroups(enabledHooks)
+  const disabledGroups = buildHookSourceGroups(disabledHooks)
 
   const handleToggle = async (hook: DisplayHook): Promise<void> => {
     try {
@@ -3235,7 +3408,7 @@ function HooksContent({
     // A plugin-owned skill hook: source="skill" but with pluginName / pluginId set.
     // Show its origin (plugin → skill) so users can tell it apart from a stand-alone skill hook.
     const isPluginSkillHook = isSkillHook && Boolean(hook.pluginName || hook.pluginId)
-    const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
+    const summary = getHookSummary(hook)
     const ownerLabel = isPluginHook
       ? hook.pluginName
       : isPluginSkillHook && hook.skillName
@@ -3354,18 +3527,70 @@ function HooksContent({
     )
   }
 
+  const renderHookGroup = (group: HookSourceGroup): React.JSX.Element => {
+    return (
+      <details
+        key={group.key}
+        className="group/source space-y-2 border-t border-border/60 pt-2 first:border-t-0 first:pt-0"
+        open
+      >
+        <summary
+          className="flex cursor-pointer list-none items-center justify-between gap-2 px-1"
+          title={group.fullPath}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <ChevronRight className="size-3 shrink-0 text-muted-foreground transition-transform group-open/source:rotate-90" />
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                group.badgeClassName
+              )}
+            >
+              {group.sourceLabel}
+            </span>
+            <span className="min-w-0 truncate text-xs font-medium text-foreground/90">
+              {group.title}
+            </span>
+          </div>
+          <Badge
+            variant="outline"
+            className="h-5 shrink-0 text-[10px]"
+            title={`${group.hooks.length} 个 Hook`}
+          >
+            {group.hooks.length}
+          </Badge>
+        </summary>
+        {group.detail && group.detail !== group.title && (
+          <div
+            className="min-w-0 truncate px-6 text-[10px] text-muted-foreground"
+            title={group.fullPath}
+          >
+            {group.detail}
+          </div>
+        )}
+        <div className="space-y-2">{group.hooks.map(renderHookCard)}</div>
+      </details>
+    )
+  }
+
   return (
     <div className="p-3 space-y-2">
-      {enabled.length > 0 && enabled.map(renderHookCard)}
-      {disabled.length > 0 && (
-        <details className="rounded-sm border border-border/70 bg-muted/20 px-2 py-2">
+      {enabledGroups.map(renderHookGroup)}
+      {disabledGroups.length > 0 && (
+        <details
+          className="group/disabled rounded-sm border border-border/70 bg-muted/20 px-2 py-2"
+          open={enabledGroups.length === 0}
+        >
           <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
-            <span>已禁用</span>
-            <Badge variant="outline" className="text-[10px] h-5">
-              {disabled.length}
+            <span className="flex min-w-0 items-center gap-1.5">
+              <ChevronRight className="size-3 shrink-0 transition-transform group-open/disabled:rotate-90" />
+              <span>已禁用</span>
+            </span>
+            <Badge variant="outline" className="h-5 shrink-0 text-[10px]">
+              {disabledHooks.length}
             </Badge>
           </summary>
-          <div className="space-y-2 pt-2">{disabled.map(renderHookCard)}</div>
+          <div className="space-y-2 pt-2">{disabledGroups.map(renderHookGroup)}</div>
         </details>
       )}
     </div>

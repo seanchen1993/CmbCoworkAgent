@@ -1,6 +1,7 @@
 import type { IpcMain } from "electron"
 import { shell } from "electron"
 import { existsSync, statSync } from "fs"
+import * as path from "path"
 import { getIdeSettings, getPreferredIde, setPreferredIde } from "../storage"
 import type {
   ConfigurePreferredIdeRequest,
@@ -9,6 +10,21 @@ import type {
   PreferredIde
 } from "../types"
 import { configurePreferredIde, openIde } from "../utils/open-in-ide"
+
+function isWindowsReservedDevicePath(filePath: string): boolean {
+  if (process.platform !== "win32") return false
+  const baseName = path.basename(filePath).replace(/[. ]+$/, "")
+  const stem = baseName.split(".")[0]?.toUpperCase()
+  if (!stem) return false
+  return (
+    stem === "CON" ||
+    stem === "PRN" ||
+    stem === "AUX" ||
+    stem === "NUL" ||
+    /^COM[1-9]$/.test(stem) ||
+    /^LPT[1-9]$/.test(stem)
+  )
+}
 
 async function showPathInFileManager(filePath: string): Promise<{ success: boolean; error?: string }> {
   if (typeof filePath !== "string" || !filePath.trim()) {
@@ -21,6 +37,12 @@ async function showPathInFileManager(filePath: string): Promise<{ success: boole
 
   if (statSync(filePath).isDirectory()) {
     const error = await shell.openPath(filePath)
+    return error ? { success: false, error } : { success: true }
+  }
+
+  if (isWindowsReservedDevicePath(filePath)) {
+    const parentPath = path.dirname(filePath)
+    const error = await shell.openPath(parentPath)
     return error ? { success: false, error } : { success: true }
   }
 
