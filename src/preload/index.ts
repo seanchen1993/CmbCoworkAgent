@@ -1779,6 +1779,8 @@ const api = {
       }
     ): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name, request),
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
+    getProjectModeEnabled: (): Promise<boolean> =>
+      ipcRenderer.invoke("memory:getProjectModeEnabled"),
     setEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setEnabled", enabled),
     getDreamEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getDreamEnabled"),

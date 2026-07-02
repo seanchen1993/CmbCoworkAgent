@@ -162,6 +162,9 @@ import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
 
+const PROJECT_MODE_AGENT_TEAM_ENABLED =
+  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
+
 const MARKET_SKILLS_CACHE_TTL_MS = 10 * 60 * 1000
 
 interface MarketSkillsSnapshot {
@@ -1885,10 +1888,13 @@ export function ChatContainer({
     () => getHarnessFeatureBinding(currentThread),
     [currentThread]
   )
-  const disableCoordinatorModeOption =
+  const isProjectModeAgentContext =
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
+  const disableCoordinatorModeOption =
+    isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
+  const disableWorkflowModeOption = isProjectModeAgentContext
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -1902,7 +1908,10 @@ export function ChatContainer({
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
-      if (disableCoordinatorModeOption) {
+      if (
+        (disableCoordinatorModeOption && isCoordinatorModeMetadata(metadata)) ||
+        (disableWorkflowModeOption && isWorkflowModeMetadata(metadata))
+      ) {
         return "normal"
       }
       if (isWorkflowModeMetadata(metadata)) {
@@ -1917,9 +1926,11 @@ export function ChatContainer({
           console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
           return false
         })
-      return environmentForcedCoordinator ? "coordinator" : "normal"
+      return environmentForcedCoordinator && !disableCoordinatorModeOption
+        ? "coordinator"
+        : "normal"
     },
-    [disableCoordinatorModeOption]
+    [disableCoordinatorModeOption, disableWorkflowModeOption]
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
@@ -1936,13 +1947,16 @@ export function ChatContainer({
   useEffect(() => {
     let cancelled = false
     const currentThread = threads.find((thread) => thread.thread_id === threadId)
-    const metadataDerivedMode: ChatAgentMode = disableCoordinatorModeOption
-      ? "normal"
-      : isWorkflowModeMetadata(currentThread?.metadata)
-        ? "workflow"
-        : isCoordinatorModeMetadata(currentThread?.metadata)
-          ? "coordinator"
-          : "normal"
+    const metadataDerivedMode: ChatAgentMode =
+      disableCoordinatorModeOption && isCoordinatorModeMetadata(currentThread?.metadata)
+        ? "normal"
+        : disableWorkflowModeOption && isWorkflowModeMetadata(currentThread?.metadata)
+          ? "normal"
+          : isWorkflowModeMetadata(currentThread?.metadata)
+            ? "workflow"
+            : isCoordinatorModeMetadata(currentThread?.metadata)
+              ? "coordinator"
+              : "normal"
     setAgentMode(metadataDerivedMode)
     agentModeHydratedRef.current = metadataDerivedMode !== "normal"
 
@@ -1958,7 +1972,13 @@ export function ChatContainer({
     return () => {
       cancelled = true
     }
-  }, [threadId, threads, loadResolvedAgentMode, disableCoordinatorModeOption])
+  }, [
+    threadId,
+    threads,
+    loadResolvedAgentMode,
+    disableCoordinatorModeOption,
+    disableWorkflowModeOption
+  ])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -2236,22 +2256,24 @@ export function ChatContainer({
   const isLoading = streamData.isLoading || scheduledTaskLoading
   const isHarnessContextReminderEnabled =
     surface === "harness-project" && Boolean(harnessFeatureBinding) && !readOnly
-  const agentModeSwitchDisabledReason = disableCoordinatorModeOption
-    ? "项目模式暂时仅支持 Solo Agent"
-    : !canChangeAgentMode
-      ? historyLoading
-        ? "会话历史加载中，暂时不能切换执行模式。"
-        : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
-      : isLoading
-        ? "当前请求执行中，结束后才能切换执行模式。"
-        : undefined
+  const agentModeSwitchDisabledReason = !canChangeAgentMode
+    ? historyLoading
+      ? "会话历史加载中，暂时不能切换执行模式。"
+      : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
+    : isLoading
+      ? "当前请求执行中，结束后才能切换执行模式。"
+      : undefined
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
       const previousMode = agentMode
       void (async () => {
-        if (disableCoordinatorModeOption && nextMode !== "normal") {
-          toast.error("项目模式暂不支持子代理协同/工作流模式，只能使用 Solo Agent。")
+        if (disableCoordinatorModeOption && nextMode === "coordinator") {
+          toast.error("项目模式暂不支持子代理协同，只能使用 Solo Agent。")
+          return
+        }
+        if (disableWorkflowModeOption && nextMode === "workflow") {
+          toast.error("项目模式暂不支持 Workflow，只能使用 Solo Agent。")
           return
         }
         if (historyLoading) {
@@ -2306,6 +2328,7 @@ export function ChatContainer({
     [
       agentMode,
       disableCoordinatorModeOption,
+      disableWorkflowModeOption,
       historyLoading,
       threadId,
       threadMessages,
@@ -3825,17 +3848,26 @@ export function ChatContainer({
         : coordinatorPrefixed
           ? "coordinator"
           : agentMode
+      if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+        submitAgentMode = "normal"
+      }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
         submitAgentMode = await loadResolvedAgentMode().catch((error) => {
           console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
           return agentMode
         })
+        if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+          submitAgentMode = "normal"
+        }
         agentModeHydratedRef.current = true
         if (submitAgentMode !== agentMode) {
           setAgentMode(submitAgentMode)
         }
       }
-      if (disableCoordinatorModeOption && agentMode !== "normal") {
+      if (
+        (disableCoordinatorModeOption && agentMode === "coordinator") ||
+        (disableWorkflowModeOption && agentMode === "workflow")
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
       } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
@@ -5798,11 +5830,24 @@ export function ChatContainer({
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
-                            mode={disableCoordinatorModeOption ? "normal" : agentMode}
+                            mode={
+                              (disableCoordinatorModeOption && agentMode === "coordinator") ||
+                              (disableWorkflowModeOption && agentMode === "workflow")
+                                ? "normal"
+                                : agentMode
+                            }
                             locked={
-                              disableCoordinatorModeOption || isLoading || !canChangeAgentMode
+                              isLoading || !canChangeAgentMode
                             }
                             lockedReason={agentModeSwitchDisabledReason}
+                            disabledModes={
+                              disableCoordinatorModeOption || disableWorkflowModeOption
+                                ? {
+                                    coordinator: disableCoordinatorModeOption,
+                                    workflow: disableWorkflowModeOption
+                                  }
+                                : undefined
+                            }
                             onChange={handleAgentModeChange}
                           />
                           <div className="w-px h-4 bg-border mx-1" />

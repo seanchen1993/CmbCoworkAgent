@@ -20,6 +20,7 @@ import {
   type MemoryNamespace,
   type MemoryScope
 } from "../memory/paths"
+import { isProjectModeMemoryEnabled } from "../project-mode-memory"
 
 const DREAM_STATE_FILE = ".dream_state.json"
 
@@ -284,6 +285,10 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("memory:getEnabled", async (): Promise<boolean> => {
     return isMemoryEnabled()
+  })
+
+  ipcMain.handle("memory:getProjectModeEnabled", async (): Promise<boolean> => {
+    return isProjectModeMemoryEnabled()
   })
 
   ipcMain.handle("memory:setEnabled", async (_, enabled: boolean): Promise<void> => {

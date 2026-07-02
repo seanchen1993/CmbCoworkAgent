@@ -1418,6 +1418,7 @@ interface CustomAPI {
       }
     ) => Promise<void>
     getEnabled: () => Promise<boolean>
+    getProjectModeEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
     getDreamEnabled: () => Promise<boolean>
     setDreamEnabled: (enabled: boolean) => Promise<void>

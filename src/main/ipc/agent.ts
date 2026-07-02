@@ -201,6 +201,7 @@ import {
   readHarnessFeatureMetadata,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
+import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import {
@@ -4304,7 +4305,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           harnessAgentContext
         )
         const memoryEnabledForThread =
-          isThreadMemoryEnabled(metadata) && !harnessAgentContext.featureId
+          isThreadMemoryEnabled(metadata) &&
+          isMemoryAllowedForProjectMode(harnessAgentContext.featureId)
 
         if (!workspacePath) {
           pauseActiveGoalForRuntimeStop("WORKSPACE_REQUIRED")
@@ -6217,7 +6219,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const latestMetadata = latestThread?.metadata
                 ? (JSON.parse(latestThread.metadata) as Record<string, unknown>)
                 : metadata
-              return isThreadMemoryEnabled(latestMetadata) && !harnessAgentContext.featureId
+              return (
+                isThreadMemoryEnabled(latestMetadata) &&
+                isMemoryAllowedForProjectMode(harnessAgentContext.featureId)
+              )
             } catch {
               return false
             }

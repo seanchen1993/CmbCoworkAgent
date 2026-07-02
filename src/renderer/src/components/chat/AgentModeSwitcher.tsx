@@ -10,6 +10,7 @@ interface AgentModeSwitcherProps {
   mode: ChatAgentMode
   locked?: boolean
   lockedReason?: string
+  disabledModes?: Partial<Record<ChatAgentMode, boolean>>
   onChange: (mode: ChatAgentMode) => void
 }
 
@@ -100,6 +101,7 @@ function AgentModeSwitcherImpl({
   mode,
   locked,
   lockedReason,
+  disabledModes,
   onChange
 }: AgentModeSwitcherProps): JSX.Element {
   const [open, setOpen] = useState(false)
@@ -179,13 +181,14 @@ function AgentModeSwitcherImpl({
       <div className="space-y-2 p-2">
         {MODES.map((item) => {
           const selected = item.value === mode
+          const itemDisabled = (locked || Boolean(disabledModes?.[item.value])) && !selected
           const Icon = MODE_ICONS[item.value]
           const theme = MODE_THEMES[item.value]
           return (
             <button
               key={item.value}
               type="button"
-              disabled={locked && !selected}
+              disabled={itemDisabled}
               aria-current={selected ? "true" : undefined}
               onClick={() => {
                 if (selected) {
@@ -198,7 +201,7 @@ function AgentModeSwitcherImpl({
                 "group flex w-full items-start gap-3 rounded-xl border p-3 text-left transition-all",
                 selected
                   ? theme.itemSelected
-                  : locked
+                  : itemDisabled
                     ? "cursor-not-allowed border-transparent text-muted-foreground opacity-70"
                     : "border-transparent text-muted-foreground hover:border-border hover:bg-muted/50 hover:text-foreground"
               )}

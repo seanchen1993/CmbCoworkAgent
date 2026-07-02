@@ -206,6 +206,11 @@ import { createWorkflowTool } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
 import {
+  PROJECT_MODE_MEMORY_ENV,
+  isMemoryAllowedForProjectMode,
+  isProjectModeMemoryEnabled
+} from "../project-mode-memory"
+import {
   isWorkflowStructuredOutputFatalError,
   type WorkflowSubagentRuntime
 } from "./workflow/subagent"
@@ -346,11 +351,13 @@ const SHARED_TOOL_NAMES = new Set([
 ])
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
-const PROJECT_MODE_SUBAGENTS_ENV = "PROJECT_MODE_SUBAGENTS_ENABLED"
+const PROJECT_MODE_SUBAGENTS_ENV = "VITE_PROJECT_MODE_SUBAGENTS_ENABLED"
 const PROJECT_MODE_SUBAGENTS_DISABLED_VALUES = new Set(["0", "false", "off", "no", "disabled"])
 
 function isProjectModeSubagentsEnabled(): boolean {
-  const raw = process.env[PROJECT_MODE_SUBAGENTS_ENV]?.trim().toLowerCase()
+  const raw = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined)
+    ?.trim()
+    .toLowerCase()
   return raw ? !PROJECT_MODE_SUBAGENTS_DISABLED_VALUES.has(raw) : true
 }
 
@@ -376,7 +383,7 @@ function createRuntimePromptToolPolicy(input: {
     isProjectMode,
     includeCurrentTime: !isProjectMode,
     includeTimestampRule: !isProjectMode,
-    includeMemory: input.memoryEnabled && !isProjectMode,
+    includeMemory: input.memoryEnabled && isMemoryAllowedForProjectMode(input.featureId),
     includeSubagents: !isProjectMode || isProjectModeSubagentsEnabled(),
     includeCodeExecRoute: !isProjectMode && input.agentMode !== "coordinator",
     includeSavedCodeExecTools: true,
@@ -3168,9 +3175,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
   if (runtimePolicy.isProjectMode) {
-    const envValue = process.env[PROJECT_MODE_SUBAGENTS_ENV] ?? "<unset>"
+    const envValue = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
     console.log(
       `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
+    )
+    const memoryEnvValue = (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
+    console.log(
+      `[Runtime] Project mode memory enabled: ${isProjectModeMemoryEnabled()} (${PROJECT_MODE_MEMORY_ENV}=${memoryEnvValue})`
     )
   }
   const hookScope = providedHookScope ?? createHookScope()
