@@ -973,10 +973,9 @@ function formatMarkdownTableCell(value: string): string {
 function resolveHarnessAdditionalWorkspaceRootMappings(
   projectId: string,
   featureId: string,
-  workspacePath: string
+  _workspacePath: string
 ): HarnessServiceUnitMapping[] {
-  const normalizedWorkspacePath = resolve(workspacePath)
-  const seen = new Set<string>([normalizedWorkspacePath])
+  const seen = new Set<string>()
   const mappings: HarnessServiceUnitMapping[] = []
   for (const mapping of resolveFeatureServiceUnitMappings(projectId, featureId)) {
     const localRepoPath = normalizeText(mapping.localRepoPath).trim()
@@ -1002,9 +1001,11 @@ function buildHarnessAdditionalWorkspaceRootsPrompt(
   if (mappings.length === 0) return undefined
 
   return [
-    "## Multi-Repository Path Guide",
+    "## Multi-Repository Workspaces",
     "",
-    "| 描述 | 发布单元 | 对应代码路径 |",
+    "The repositories listed below are first-class working repositories for this session, equivalent to the `workspace root`. You may use these paths directly as working directories and read or edit files under them whenever they are relevant to the task.",
+    "",
+    "| repo description | deployUnit | repo path |",
     "| --- | --- | --- |",
     ...mappings.map((mapping) => {
       const description = formatMarkdownTableCell(normalizeText(mapping.description).trim())
