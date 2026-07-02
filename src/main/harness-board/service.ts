@@ -806,8 +806,8 @@ function parseInspectCommand(
     { key: "workflowNodes", placeholder: "${workflowNodes}", flag: "--workflow-nodes" },
     {
       key: "selectedServiceUnitsJson",
-      placeholder: "${selectedServiceUnits}",
-      flag: "--selected-serviceUnit"
+      placeholder: "${selectedDeployUnits}",
+      flag: "--selected-deployUnit"
     }
   ]
   const tokens = tokenizeInspectCommand(command.trim())
@@ -869,7 +869,7 @@ function readBoardConfigInspectCommand(
 
 function boardConfigPublicAgentmdServiceUnits(cwd: string): string[] {
   const parsed = readBoardConfig(cwd)
-  return parsed ? uniqueStringsInOrder(parsed.supported_service_units) : []
+  return parsed ? uniqueStringsInOrder(parsed.supported_deploy_units) : []
 }
 
 function boardConfigSupportsSessionContextInjection(cwd: string): boolean {
