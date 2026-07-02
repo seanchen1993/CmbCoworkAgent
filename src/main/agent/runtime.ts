@@ -1412,7 +1412,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const createFsMiddleware = (): any => {
+  const createFsMiddleware = (fsSystemPrompt = filesystemSystemPrompt): any => {
     // For any restricted leaf runtime — coordinator worker (workload) OR registry
     // workflow agent (explicit denylist/shell) — strip the blocked tools' docs
     // from the injected fs system prompt so a removed tool's description doesn't
@@ -1420,12 +1420,12 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     // only cleans the prompt; it changes no tool permissions or behaviour. The
     // unrestricted main agent (filesystemAccess undefined) keeps the full docs.
     const effectiveFsPrompt =
-      filesystemSystemPrompt && filesystemAccess
+      fsSystemPrompt && filesystemAccess
         ? (stripBlockedToolDocs(
-            filesystemSystemPrompt,
+            fsSystemPrompt,
             blockedToolNamesForAccess(filesystemAccess)
           ) as string)
-        : filesystemSystemPrompt
+        : fsSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
@@ -1912,7 +1912,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     tools,
     middleware: [
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled ? [createFsMiddleware()] : []),
+      ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
       ...postFsToolDocStripMiddleware,
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
@@ -3631,6 +3631,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
   const timeContext = getRuntimeTimeContext()
   const userInfo = getUserInfo()
+  const userInfoPrompt = `## Current user's employee identity information
+- sap编号、员工编号:${userInfo?.sapId}
+- yst编号、一事通编号: ${userInfo?.ystId}
+- userName、员工姓名: ${userInfo?.userName}
+- originOrgId、员工机构号: ${userInfo?.originOrgId}
+- orgName、员机构号名称: ${userInfo?.orgName}
+- ystCode、一事通code: ${userInfo?.ystCode}`
   const filesystemTimeContextLines = renderRuntimeTimeContextLines(timeContext, {
     includeCurrentTime: runtimePolicy.includeCurrentTime,
     includeTimestampRule: runtimePolicy.includeTimestampRule
@@ -3642,15 +3649,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       : "- Use cmd.exe syntax for shell commands (e.g., dir instead of ls, type instead of cat)\n- Use && to chain commands, use ^ for line continuation, use %VAR% for environment variables"
 
   const filesystemSystemPrompt = `\n\nYou have access to a filesystem. All file paths use fully qualified absolute system paths.
-### userinfo
-- sap编号、员工编号:${userInfo?.sapId}
-- yst编号、一事通编号: ${userInfo?.ystId}
-- userName、员工姓名: ${userInfo?.userName}
-- originOrgId、员工机构号: ${userInfo?.originOrgId}
-- orgName、员机构号名称: ${userInfo?.orgName}
-- ystRefreshToken、刷新token: ${userInfo?.ystRefreshToken}
-- ystCode、一事通code: ${userInfo?.ystCode}
-
 ### System Environment
 - Operating system: ${platform} (${process.arch})
 - Default shell: ${shell}
@@ -4749,6 +4747,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       systemPrompt += WORKFLOW_MODE_SYSTEM_PROMPT
     }
   }
+  systemPrompt += "\n\n" + userInfoPrompt
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
     hasAgentsPrompt: Boolean(agentsPrompt.prompt),
