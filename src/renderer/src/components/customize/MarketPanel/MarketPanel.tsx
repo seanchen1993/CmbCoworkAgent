@@ -286,15 +286,41 @@ function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
   )
 }
 
+function doesMarketUserIdMatchCurrentUser(
+  rawUserId: string | null | undefined,
+  currentUserIdCandidates: Iterable<string>,
+  currentUserSapId?: string | null | undefined
+): boolean {
+  const normalizedCurrentIds = Array.from(
+    new Set([
+      ...Array.from(currentUserIdCandidates, (value) => String(value || "").trim()).filter(Boolean),
+      ...buildUploaderIdCandidates(currentUserSapId || undefined)
+    ])
+  )
+  if (!rawUserId || normalizedCurrentIds.length === 0) return false
+
+  const targetCandidates = getUploaderIdCandidates(rawUserId)
+  return targetCandidates.some((candidate) =>
+    normalizedCurrentIds.some(
+      (currentId) =>
+        currentId === candidate || currentId.includes(candidate) || candidate.includes(currentId)
+    )
+  )
+}
+
 function canCurrentUserViewMarketItem(
   item: MarketItem,
-  currentUserSapId: string | null | undefined
+  currentUserSapId: string | null | undefined,
+  currentUserIdCandidates: Iterable<string>
 ): boolean {
+  if (doesMarketUserIdMatchCurrentUser(item.user_id, currentUserIdCandidates, currentUserSapId)) {
+    return true
+  }
   const grayUserIds = getGrayUserIdsFromExtraJson(item.extra_json)
   if (grayUserIds.length === 0) return true
-  const normalizedSapId = String(currentUserSapId || "").trim()
-  if (!normalizedSapId) return false
-  return grayUserIds.some((userId) => normalizedSapId === userId || normalizedSapId.includes(userId))
+  return grayUserIds.some((userId) =>
+    doesMarketUserIdMatchCurrentUser(userId, currentUserIdCandidates, currentUserSapId)
+  )
 }
 
 type UploadFilterMode = "mine" | "installed" | "featured" | "certified"
@@ -1778,10 +1804,9 @@ export function MarketPanel(): React.JSX.Element {
   const isMineUploadedItem = useCallback(
     (item: MarketItem): boolean => {
       if (localStorageHelper.canDeleteItem(item.name, activeTab)) return true
-      if (!item.user_id || currentUserCandidateSet.size === 0) return false
-      return getUploaderIdCandidates(item.user_id).some((id) => currentUserCandidateSet.has(id))
+      return doesMarketUserIdMatchCurrentUser(item.user_id, currentUserCandidateSet, currentUserSapId)
     },
-    [activeTab, currentUserCandidateSet]
+    [activeTab, currentUserCandidateSet, currentUserSapId]
   )
 
   const toggleUploadFilterMode = useCallback((mode: UploadFilterMode) => {
@@ -1801,7 +1826,10 @@ export function MarketPanel(): React.JSX.Element {
   const filteredData = useMemo(
     () =>
       currentData.filter((item) => {
-        if (activeTab !== ORG_SKILL_MARKET_TYPE && !canCurrentUserViewMarketItem(item, currentUserSapId)) {
+        if (
+          activeTab !== ORG_SKILL_MARKET_TYPE &&
+          !canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet)
+        ) {
           return false
         }
         const query = activeSearchQuery.trim().toLowerCase()
@@ -1831,6 +1859,7 @@ export function MarketPanel(): React.JSX.Element {
       activeTab,
       categoryFilter,
       currentData,
+      currentUserCandidateSet,
       currentUserSapId,
       isMineUploadedItem,
       uploadFilterModes
@@ -1925,7 +1954,9 @@ export function MarketPanel(): React.JSX.Element {
     const detailName = marketInitialSkillDetailName?.trim()
     if (!detailName || activeTab !== "skill" || loading) return
     const targetItem = skillsData.find(
-      (item) => item.name === detailName && canCurrentUserViewMarketItem(item, currentUserSapId)
+      (item) =>
+        item.name === detailName &&
+        canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet)
     )
     if (!targetItem) {
       if (skillsData.length > 0) setMarketInitialSkillDetailName(null)
@@ -1936,6 +1967,7 @@ export function MarketPanel(): React.JSX.Element {
     void openItemDetailRef.current(targetItem)
   }, [
     activeTab,
+    currentUserCandidateSet,
     loading,
     marketInitialSkillDetailName,
     currentUserSapId,
