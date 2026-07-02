@@ -110,6 +110,8 @@ const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
 type MarketExtraJson = {
   skills?: string[]
   grayUserIds?: string[]
+  updated_at?: string
+  [key: string]: unknown
 }
 
 function sanitizeSkillNames(skills: string[]): string[] {
@@ -180,19 +182,38 @@ function parseGrayUserIdsFromExtraJson(extraJson?: string): string[] {
     : []
 }
 
-function buildExtraJson(skills: string[], userIds: string[]): string | undefined {
+function buildMarketTimestamp(): string {
+  return new Date().toISOString()
+}
+
+function buildExtraJson(options: {
+  skills: string[]
+  userIds: string[]
+  existingExtraJson?: string
+  includeSkills?: boolean
+}): string {
+  const { skills, userIds, existingExtraJson, includeSkills = false } = options
   const normalizedSkills = sanitizeSkillNames(skills)
   const normalizedUserIds = sanitizeUserIds(userIds)
-  const payload: MarketExtraJson = {}
-
-  if (normalizedSkills.length > 0) {
-    payload.skills = normalizedSkills
+  const payload: MarketExtraJson = {
+    ...parseMarketExtraJson(existingExtraJson),
+    updated_at: buildMarketTimestamp()
   }
+
+  if (includeSkills) {
+    if (normalizedSkills.length > 0) {
+      payload.skills = normalizedSkills
+    } else {
+      delete payload.skills
+    }
+  }
+
   if (normalizedUserIds.length > 0) {
     payload.grayUserIds = normalizedUserIds
+  } else {
+    delete payload.grayUserIds
   }
 
-  if (Object.keys(payload).length === 0) return undefined
   return JSON.stringify(payload)
 }
 
@@ -546,10 +567,12 @@ export function UniversalUploadDialog({
     setUploading(true)
 
     try {
-      const extraJson = buildExtraJson(
-        resourceType === "plugin" ? normalizedPluginSkills : [],
-        normalizedGrayUserIds
-      )
+      const extraJson = buildExtraJson({
+        skills: resourceType === "plugin" ? normalizedPluginSkills : [],
+        userIds: normalizedGrayUserIds,
+        existingExtraJson: existingItem?.extra_json,
+        includeSkills: resourceType === "plugin"
+      })
       const uploadContext: GeneratedMarketFileBuildContext = {
         name: name.trim(),
         description: description.trim(),

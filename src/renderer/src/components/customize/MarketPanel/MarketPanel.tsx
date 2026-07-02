@@ -261,6 +261,7 @@ interface UserInfoLite {
 type MarketExtraJson = {
   skills?: string[]
   grayUserIds?: string[]
+  updated_at?: string
 }
 
 function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
@@ -284,6 +285,10 @@ function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
         .filter(Boolean)
     )
   )
+}
+
+function getMarketUpdatedAt(item: Pick<MarketItem, "created_at" | "updated_at" | "extra_json">): string {
+  return parseMarketExtraJson(item.extra_json).updated_at || item.updated_at || item.created_at
 }
 
 function doesMarketUserIdMatchCurrentUser(
@@ -1762,7 +1767,7 @@ export function MarketPanel(): React.JSX.Element {
           enabled: false,
           lazyLoad: false,
           createdAt: item.created_at,
-          updatedAt: item.created_at
+          updatedAt: getMarketUpdatedAt(item)
         })
       } else if (activeTab === "plugin") {
         // The zip is already downloaded above; parse it (without installing) to
@@ -1781,7 +1786,7 @@ export function MarketPanel(): React.JSX.Element {
           mcpServerCount: detail.mcpServers.length,
           hookCount: detail.hookCount,
           createdAt: item.created_at,
-          updatedAt: item.created_at
+          updatedAt: getMarketUpdatedAt(item)
         })
         setPluginDetailData({
           ...detail,

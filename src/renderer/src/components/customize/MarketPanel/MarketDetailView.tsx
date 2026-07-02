@@ -32,6 +32,30 @@ type SkillUserUsage = {
   count: number
 }
 
+type MarketExtraJson = {
+  updated_at?: string
+}
+
+function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
+  if (!extraJson?.trim()) return {}
+  try {
+    const parsed = JSON.parse(extraJson) as MarketExtraJson
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function getMarketUpdatedAt(item: MarketItem): string {
+  return parseMarketExtraJson(item.extra_json).updated_at || item.updated_at || item.created_at
+}
+
+function formatMarketDateTime(value?: string): string {
+  if (!value) return "-"
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN")
+}
+
 interface MarketDetailViewProps {
   activeTab: MarketItemType
   selectedItem: MarketItem
@@ -91,6 +115,8 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
 
   const subscribeUrl =
     activeTab === "orgSkill" ? buildOrgSkillSubscribeUrl(selectedItem) : null
+  const createdAtLabel = formatMarketDateTime(selectedItem.created_at)
+  const updatedAtLabel = formatMarketDateTime(getMarketUpdatedAt(selectedItem))
 
   const handleOpenSubscribe = () => {
     if (!subscribeUrl) {
@@ -166,7 +192,11 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                 )}
                 <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
                   <Calendar className="size-3" />
-                  {new Date(selectedItem.created_at).toLocaleDateString("zh-CN")}
+                  创建于 {createdAtLabel}
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                  <Edit className="size-3" />
+                  更新于 {updatedAtLabel}
                 </span>
                 {selectedItem.installed && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-2.5 py-1">
