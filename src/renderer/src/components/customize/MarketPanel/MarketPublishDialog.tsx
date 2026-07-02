@@ -98,7 +98,7 @@ export function MarketPublishDialog(props: {
               chinese_name: target.chineseName || marketInfo?.chinese_name || "",
               extra_json:
                 mode === "update"
-                  ? marketInfo?.extra_json || target.extraJson || undefined
+                  ? target.extraJson || marketInfo?.extra_json || undefined
                   : target.extraJson || marketInfo?.extra_json || undefined
             }
           : undefined
