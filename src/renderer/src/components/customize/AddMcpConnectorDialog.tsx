@@ -464,7 +464,9 @@ export function AddMcpConnectorDialog(props: {
               </label>
             </div>
             <p className="text-xs text-muted-foreground mt-1">
-              启用后，工具不会立即加载到上下文中，而是通过 search_tool 搜索后按需加载。适合工具数量较多的MCP server。
+              启用后，工具不会立即加载到上下文中，而是通过 search_tool
+              搜索后按需加载；大结果工具可配合字段提示只返回 required_fields、max_array_items、max_result_chars
+              指定的必要内容。适合工具数量较多或返回内容较大的 MCP server。
             </p>
           </div>
 

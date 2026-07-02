@@ -134,6 +134,12 @@ import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
+import {
+  getFailureFuseHaltError,
+  shouldSendFailureFuseNotice,
+  type FailureFuseDecision,
+  type FailureFuseHaltError
+} from "../agent/failure-fuse"
 import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
 import {
   formatSkillUseBlock,
@@ -791,6 +797,48 @@ function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltErr
     }
   })
   window.webContents.send(channel, { type: "done" })
+}
+
+function sendFailureFuseHalt(
+  window: BrowserWindow,
+  channel: string,
+  error: FailureFuseHaltError
+): void {
+  window.webContents.send(channel, {
+    type: "custom",
+    data: {
+      type: "failure_fuse_tripped",
+      action: "halt",
+      reason: error.decision.reason,
+      toolName: error.decision.toolName,
+      fingerprint: error.decision.fingerprint,
+      count: error.decision.count,
+      threshold: error.decision.threshold,
+      lastError: error.decision.lastError
+    }
+  })
+  window.webContents.send(channel, { type: "done" })
+}
+
+function sendFailureFuseNotice(
+  window: BrowserWindow,
+  channel: string,
+  decision: FailureFuseDecision
+): void {
+  if (!shouldSendFailureFuseNotice(decision)) return
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "failure_fuse_warning",
+      action: decision.action,
+      reason: decision.reason,
+      toolName: decision.toolName,
+      fingerprint: decision.fingerprint,
+      count: decision.count,
+      threshold: decision.threshold,
+      lastError: decision.lastError
+    }
+  })
 }
 
 /**
@@ -4123,6 +4171,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+        sendFailureFuseNotice(window, channel, decision)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -4880,6 +4930,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -5628,6 +5679,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            onFailureFuseNotice,
             hookTurnId: turnState.turnId,
             onHookSkippedFactory,
             hookScope,
@@ -5734,6 +5786,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -6270,6 +6323,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
+        const failureFuseHalt = getFailureFuseHaltError(error)
+        if (failureFuseHalt) {
+          clearCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn("[Agent] Failure fuse halted turn:", failureFuseHalt.decision.reason)
+          pauseActiveGoalForRuntimeStop(failureFuseHalt.decision.reason)
+          sendFailureFuseHalt(window, channel, failureFuseHalt)
+          syncUsedSkillsContext()
+          tracer.finish("cancelled", failureFuseHalt.decision.reason).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          turnStateShouldDispose = true
+          return
+        }
         // Ignore abort-related errors (expected when stream is cancelled)
         const isAbortError =
           error instanceof Error &&
@@ -6615,6 +6689,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+        sendFailureFuseNotice(window, channel, decision)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -6827,6 +6903,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -6985,6 +7062,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -7104,6 +7182,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             boundaryGoalActiveWindowId
           )
           sendHookHalt(window, channel, error)
+          turnStateShouldDispose = true
+          return
+        }
+        const failureFuseHalt = getFailureFuseHaltError(error)
+        if (failureFuseHalt) {
+          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn("[Agent] Resume failure fuse halted turn:", failureFuseHalt.decision.reason)
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            failureFuseHalt.decision.reason,
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
+          sendFailureFuseHalt(window, channel, failureFuseHalt)
           turnStateShouldDispose = true
           return
         }
@@ -7339,6 +7433,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     }
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+      sendFailureFuseNotice(window, channel, decision)
     const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
       window,
       threadId,
@@ -7542,6 +7638,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -7697,6 +7794,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -7828,6 +7926,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           boundaryGoalActiveWindowId
         )
         sendHookHalt(window, channel, error)
+        turnStateShouldDispose = true
+        return
+      }
+      const failureFuseHalt = getFailureFuseHaltError(error)
+      if (failureFuseHalt) {
+        console.warn("[Agent] Interrupt failure fuse halted turn:", failureFuseHalt.decision.reason)
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          failureFuseHalt.decision.reason,
+          boundaryGoalId,
+          boundaryGoalActiveWindowId
+        )
+        sendFailureFuseHalt(window, channel, failureFuseHalt)
         turnStateShouldDispose = true
         return
       }

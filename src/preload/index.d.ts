@@ -1649,6 +1649,12 @@ interface CustomAPI {
     runElevatedSetup: (workspacePaths?: string[]) => Promise<{ success: boolean; error?: string }>
     getYoloMode: () => Promise<boolean>
     setYoloMode: (yolo: boolean) => Promise<void>
+    getFailureFuseWarning: () => Promise<boolean>
+    setFailureFuseWarning: (enabled: boolean) => Promise<void>
+    getFailureFuseModelFeedback: () => Promise<boolean>
+    setFailureFuseModelFeedback: (enabled: boolean) => Promise<void>
+    getFailureFuseDebug: () => Promise<boolean>
+    setFailureFuseDebug: (enabled: boolean) => Promise<void>
     getPendingApprovals: (threadId: string) => Promise<unknown[]>
     isNuxNeeded: () => Promise<boolean>
     completeNux: (mode: "elevated" | "unelevated" | "none") => Promise<void>

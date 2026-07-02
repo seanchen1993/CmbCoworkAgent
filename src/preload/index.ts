@@ -2130,6 +2130,18 @@ const api = {
       ipcRenderer.invoke("sandbox:getYoloMode") as Promise<boolean>,
     setYoloMode: (yolo: boolean): Promise<void> =>
       ipcRenderer.invoke("sandbox:setYoloMode", yolo) as Promise<void>,
+    getFailureFuseWarning: (): Promise<boolean> =>
+      ipcRenderer.invoke("sandbox:getFailureFuseWarning") as Promise<boolean>,
+    setFailureFuseWarning: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("sandbox:setFailureFuseWarning", enabled) as Promise<void>,
+    getFailureFuseModelFeedback: (): Promise<boolean> =>
+      ipcRenderer.invoke("sandbox:getFailureFuseModelFeedback") as Promise<boolean>,
+    setFailureFuseModelFeedback: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("sandbox:setFailureFuseModelFeedback", enabled) as Promise<void>,
+    getFailureFuseDebug: (): Promise<boolean> =>
+      ipcRenderer.invoke("sandbox:getFailureFuseDebug") as Promise<boolean>,
+    setFailureFuseDebug: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke("sandbox:setFailureFuseDebug", enabled) as Promise<void>,
     getPendingApprovals: (threadId: string): Promise<unknown[]> =>
       ipcRenderer.invoke("sandbox:getPendingApprovals", threadId) as Promise<unknown[]>,
     // NUX (first-run sandbox setup)
