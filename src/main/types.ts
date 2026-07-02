@@ -288,6 +288,45 @@ export interface McpConnectorUpsert {
   lazyLoad?: boolean // true = lazy load tools, false/undefined = load all tools
 }
 
+export type McpImportConflict = "existing" | "duplicate"
+export type McpImportConflictStrategy = "update" | "rename" | "skip"
+
+export interface McpImportPreviewConnector {
+  name: string
+  sourceName?: string
+  kind: McpConnectorKind
+  url?: string
+  command?: string
+  args?: string[]
+  hasHeaders: boolean
+  hasEnv: boolean
+  enabled: boolean
+  lazyLoad: boolean
+  conflict?: McpImportConflict
+  existingId?: string
+}
+
+export interface McpImportPreviewResult {
+  connectors: McpImportPreviewConnector[]
+  errors: string[]
+}
+
+export interface McpImportConfigRequest {
+  rawJson: string
+  autoEnable?: boolean
+}
+
+export interface McpImportConfigApplyRequest extends McpImportConfigRequest {
+  conflictStrategy?: McpImportConflictStrategy
+}
+
+export interface McpImportApplyResult {
+  created: Array<{ id: string; name: string }>
+  updated: Array<{ id: string; name: string }>
+  skipped: Array<{ name: string; reason: string }>
+  errors: string[]
+}
+
 // Scheduled Task types
 export type ScheduledTaskFrequency =
   | "once"

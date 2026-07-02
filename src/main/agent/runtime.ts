@@ -110,6 +110,18 @@ import {
   toolFailureSignalFromThrow,
   type ToolFailureSignal
 } from "../hooks/tool-failure"
+import {
+  formatFailureFuseWarning,
+  getFailureFuseMode,
+  isFailureFuseHaltError,
+  recordToolFailure,
+  recordToolSuccess,
+  shouldAttachFailureFuseFeedback,
+  shouldSendFailureFuseNotice,
+  throwIfFailureFuseHalt,
+  type FailureFuseDecision,
+  type FailureFuseNoticeCallback
+} from "./failure-fuse"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
@@ -700,6 +712,7 @@ export function createScopedMcpCapabilityService(
     context: HookContext
   ) => ReturnType<typeof resolveEnabledHooksForRun>,
   onHookResult: HookResultCallback | undefined,
+  onFailureFuseNotice: FailureFuseNoticeCallback | undefined,
   baseContext: {
     workspacePath: string
     threadId: string
@@ -877,6 +890,39 @@ export function createScopedMcpCapabilityService(
     return parts.length > 0 ? parts.join("\n\n") : null
   }
 
+  const buildMcpFailureFuseDecision = (
+    tool: McpCapabilityTool,
+    args: Record<string, unknown>,
+    result: McpInvocationResult
+  ): FailureFuseDecision | null => {
+    const turnId = baseContext.turnId
+    if (!turnId) return null
+    if (!result.isError) {
+      recordToolSuccess({
+        threadId: baseContext.threadId,
+        turnId,
+        toolName: tool.toolId,
+        toolArgs: args
+      })
+      return null
+    }
+
+    return recordToolFailure({
+      threadId: baseContext.threadId,
+      turnId,
+      toolName: tool.toolId,
+      toolArgs: args,
+      signal: {
+        kind: "explicit-error",
+        message: result.text || `MCP tool ${tool.toolId} returned isError`,
+        errorType: "unknown",
+        isInterrupt: false,
+        isTimeout: false
+      },
+      mode: getFailureFuseMode()
+    })
+  }
+
   return {
     listTools: async () => (await getScopedToolSnapshot()).tools,
     getSnapshot: async () => {
@@ -968,6 +1014,10 @@ export function createScopedMcpCapabilityService(
         postResult,
         `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
       )
+      const failureFuseDecision = buildMcpFailureFuseDecision(tool, effectiveArgs, result)
+      if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+        onFailureFuseNotice?.(failureFuseDecision)
+      }
       // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
       // than a throw or a `success: false` shape, so `detectToolFailure` (which
       // looks at common ad-hoc shapes) doesn't see them. Translate isError →
@@ -989,16 +1039,21 @@ export function createScopedMcpCapabilityService(
           (e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
         )
       }
+      if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
       const hookFeedback = formatPostHookFeedback(postResult)
+      const failureFuseFeedback = shouldAttachFailureFuseFeedback(failureFuseDecision)
+        ? formatFailureFuseWarning(failureFuseDecision)
+        : null
+      const feedback = [hookFeedback, failureFuseFeedback].filter(Boolean).join("\n\n")
       const isError =
         result.isError || postResult?.decision === "block" || postResult?.continue === false
       return {
         ...result,
         isError,
-        text: hookFeedback ? `${result.text}\n\n${hookFeedback}` : result.text,
+        text: feedback ? `${result.text}\n\n${feedback}` : result.text,
         contentBlocks:
-          hookFeedback && result.contentBlocks
-            ? [...result.contentBlocks, { type: "text", text: hookFeedback }]
+          feedback && result.contentBlocks
+            ? [...result.contentBlocks, { type: "text", text: feedback }]
             : result.contentBlocks
       }
     },
@@ -1285,14 +1340,16 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
     // adapter keeps createDeepAgent oblivious to that wiring.
-    onToolFailureSignal
+    onToolFailureSignal,
+    onFailureFuseNotice
   }: {
     onToolFailureSignal?: (input: {
       toolName: string | undefined
       toolCallId: string | undefined
       toolArgs: unknown
       signal: ToolFailureSignal
-    }) => void
+    }) => FailureFuseDecision | void
+    onFailureFuseNotice?: FailureFuseNoticeCallback
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [k: string]: any
   } = params
@@ -1619,6 +1676,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     if (isWorkflowStructuredOutputFatalError(error)) return null
     if (isGraphBubbleUp(error) || isAbortError(error)) return null
     if (isHookHaltError(error)) return null
+    if (isFailureFuseHaltError(error)) return null
     if (isProgrammerError(error)) return null
     if (MiddlewareError.isInstance(error)) return null
 
@@ -1663,15 +1721,20 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         // failure so security/observability hooks fire on the same signal as
         // CC. Dedupe by tool_call_id so a downstream `detectToolFailure`
         // check on a recovered ToolMessage doesn't re-fire.
+        let failureFuseDecision: FailureFuseDecision | void = undefined
         if (onToolFailureSignal && toolCallId && !hasFailureFired(toolCallId)) {
           const signal = toolFailureSignalFromThrow(error, { aborted })
           markFailureFired(toolCallId)
-          onToolFailureSignal({
+          failureFuseDecision = onToolFailureSignal({
             toolName,
             toolCallId,
             toolArgs: request.toolCall?.args,
             signal
           })
+          if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+            onFailureFuseNotice?.(failureFuseDecision)
+          }
+          if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
         }
 
         if (aborted) {
@@ -1695,9 +1758,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         )
         return new ToolMessage({
           content:
-            recovered.kind === "schema"
+            (recovered.kind === "schema"
               ? `Invalid tool arguments: ${recovered.message}\nPlease fix the arguments and try again.`
-              : `Tool execution failed: ${recovered.message}\nPlease adjust your approach and try again if appropriate.`,
+              : `Tool execution failed: ${recovered.message}\nPlease adjust your approach and try again if appropriate.`) +
+            (shouldAttachFailureFuseFeedback(failureFuseDecision)
+              ? `\n\n${formatFailureFuseWarning(failureFuseDecision)}`
+              : ""),
           tool_call_id: toolCallId,
           name: toolName,
           status: "error"
@@ -2875,6 +2941,8 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Callback invoked when repeated tool failures should be shown to the user. */
+  onFailureFuseNotice?: FailureFuseNoticeCallback
   /**
    * Hook-result sink for coordinator workers. Workers run detached/async so
    * their hooks must be delivered on a durable channel rather than the spawning
@@ -2957,6 +3025,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode = "normal",
     disableSubagents = false,
     onHookResult,
+    onFailureFuseNotice,
     onCoordinatorWorkerHookResult,
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
@@ -2984,9 +3053,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const runtimeThreadMetadata: Record<string, unknown> = (() => {
     try {
       const threadRow = getThread(threadId)
-      return threadRow?.metadata
-        ? (JSON.parse(threadRow.metadata) as Record<string, unknown>)
-        : {}
+      return threadRow?.metadata ? (JSON.parse(threadRow.metadata) as Record<string, unknown>) : {}
     } catch {
       console.warn("[Runtime] Failed to parse thread metadata for memory settings")
       return {}
@@ -3146,6 +3213,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookResolver: resolveHooksForContext,
     hookScope,
     onHookResult,
+    onFailureFuseNotice,
     hookTurnId,
     pluginOutputDir,
     systemId,
@@ -3473,6 +3541,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
+    onFailureFuseNotice,
     {
       workspacePath,
       threadId,
@@ -3632,7 +3701,12 @@ The workspace root is: ${workspacePath}`
           try {
             return await Reflect.apply(originalInvoke, t, args)
           } catch (e: unknown) {
-            if (isHookHaltError(e) || isWorkflowStructuredOutputFatalError(e)) throw e
+            if (
+              isHookHaltError(e) ||
+              isFailureFuseHaltError(e) ||
+              isWorkflowStructuredOutputFatalError(e)
+            )
+              throw e
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
             console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
@@ -3720,6 +3794,7 @@ The workspace root is: ${workspacePath}`
               maxRetryAttempts,
               hookScope: createInheritedHookScope(hookScope),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId,
               additionalTools: subagentOptions.additionalTools,
               // All subagents of this run share the parent thread's tool-
@@ -3815,6 +3890,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
+    onFailureFuseNotice,
     hookTurnId,
     systemId,
     pluginWorkspace,
@@ -3824,7 +3900,28 @@ The workspace root is: ${workspacePath}`
     harnessAdapterVersion,
     projectCode,
     projectDir,
-    skipToolNames: toolHookExclusions
+    skipToolNames: toolHookExclusions,
+    onToolFailureDecision: hookTurnId
+      ? ({ toolName, toolCallId, toolArgs, signal }) =>
+          recordToolFailure({
+            threadId: options.threadId,
+            turnId: hookTurnId,
+            toolName,
+            toolCallId,
+            toolArgs,
+            signal,
+            mode: getFailureFuseMode()
+          })
+      : undefined,
+    onToolSuccess: hookTurnId
+      ? ({ toolName, toolArgs }) =>
+          recordToolSuccess({
+            threadId: options.threadId,
+            turnId: hookTurnId,
+            toolName,
+            toolArgs
+          })
+      : undefined
   })
 
   const deferredToolIds = [
@@ -4145,7 +4242,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
-            onHookResult: workerOnHookResult
+            onHookResult: workerOnHookResult,
+            onFailureFuseNotice
           })
 
           workerStream = await workerAgent.stream(
@@ -4215,7 +4313,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
-            onHookResult: workerOnHookResult
+            onHookResult: workerOnHookResult,
+            onFailureFuseNotice
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
           usedWorkerModelId = nextCandidate
@@ -4266,7 +4365,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
-            onHookResult: workerOnHookResult
+            onHookResult: workerOnHookResult,
+            onFailureFuseNotice
           })
           const handoffStream = await handoffAgent.stream(
             {
@@ -4605,6 +4705,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     threadId: options.threadId,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
+    onFailureFuseNotice,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
     // hook chain without knowing per-thread context.
@@ -4613,7 +4714,18 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       toolCallId: string | undefined
       toolArgs: unknown
       signal: ToolFailureSignal
-    }): void => {
+    }): FailureFuseDecision | void => {
+      const failureFuseDecision = hookTurnId
+        ? recordToolFailure({
+            threadId,
+            turnId: hookTurnId,
+            toolName: input.toolName,
+            toolCallId: input.toolCallId,
+            toolArgs: input.toolArgs,
+            signal: input.signal,
+            mode: getFailureFuseMode()
+          })
+        : undefined
       const context: HookContext = {
         workspacePath,
         sessionId: threadId,
@@ -4638,6 +4750,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         context,
         onHookResult
       ).catch((e) => console.warn("[Hooks] PostToolUseFailure hook error:", e))
+      return failureFuseDecision
     }
   })
 

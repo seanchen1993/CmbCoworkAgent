@@ -56,8 +56,14 @@ type ElevatedSetupStatus = "idle" | "checking" | "running" | "done" | "error"
 export function SandboxPanel(): React.JSX.Element {
   const [mode, setMode] = useState<SandboxMode>("none")
   const [yolo, setYolo] = useState(false)
+  const [failureFuseWarning, setFailureFuseWarning] = useState(false)
+  const [failureFuseModelFeedback, setFailureFuseModelFeedback] = useState(false)
+  const [failureFuseDebug, setFailureFuseDebug] = useState(false)
   const [loading, setLoading] = useState(true)
   const [yoloPending, setYoloPending] = useState(false)
+  const [failureFuseWarningPending, setFailureFuseWarningPending] = useState(false)
+  const [failureFuseModelFeedbackPending, setFailureFuseModelFeedbackPending] = useState(false)
+  const [failureFuseDebugPending, setFailureFuseDebugPending] = useState(false)
   const [modePending, setModePending] = useState(false)
   const [elevatedSetupStatus, setElevatedSetupStatus] = useState<ElevatedSetupStatus>("idle")
   const [elevatedSetupError, setElevatedSetupError] = useState<string | null>(null)
@@ -76,13 +82,25 @@ export function SandboxPanel(): React.JSX.Element {
 
   const loadSettings = useCallback(async () => {
     try {
-      const [currentMode, currentYolo] = await Promise.all([
+      const [
+        currentMode,
+        currentYolo,
+        currentFailureFuseWarning,
+        currentFailureFuseModelFeedback,
+        currentFailureFuseDebug
+      ] = await Promise.all([
         window.api.sandbox.getMode(),
-        window.api.sandbox.getYoloMode()
+        window.api.sandbox.getYoloMode(),
+        window.api.sandbox.getFailureFuseWarning(),
+        window.api.sandbox.getFailureFuseModelFeedback(),
+        window.api.sandbox.getFailureFuseDebug()
       ])
       if (mountedRef.current) {
         setMode(currentMode)
         setYolo(currentYolo)
+        setFailureFuseWarning(currentFailureFuseWarning)
+        setFailureFuseModelFeedback(currentFailureFuseModelFeedback)
+        setFailureFuseDebug(currentFailureFuseDebug)
         setLoading(false)
       }
     } catch (e) {
@@ -204,6 +222,48 @@ export function SandboxPanel(): React.JSX.Element {
     }
   }, [yolo, yoloPending, loadSettings])
 
+  const handleToggleFailureFuseWarning = useCallback(async () => {
+    if (failureFuseWarningPending) return
+    setFailureFuseWarningPending(true)
+    try {
+      await window.api.sandbox.setFailureFuseWarning(!failureFuseWarning)
+      await loadSettings()
+    } catch (e) {
+      console.error("[SandboxPanel] Failed to set failure fuse warning mode:", e)
+      await loadSettings()
+    } finally {
+      if (mountedRef.current) setFailureFuseWarningPending(false)
+    }
+  }, [failureFuseWarning, failureFuseWarningPending, loadSettings])
+
+  const handleToggleFailureFuseModelFeedback = useCallback(async () => {
+    if (failureFuseModelFeedbackPending) return
+    setFailureFuseModelFeedbackPending(true)
+    try {
+      await window.api.sandbox.setFailureFuseModelFeedback(!failureFuseModelFeedback)
+      await loadSettings()
+    } catch (e) {
+      console.error("[SandboxPanel] Failed to set failure fuse model feedback mode:", e)
+      await loadSettings()
+    } finally {
+      if (mountedRef.current) setFailureFuseModelFeedbackPending(false)
+    }
+  }, [failureFuseModelFeedback, failureFuseModelFeedbackPending, loadSettings])
+
+  const handleToggleFailureFuseDebug = useCallback(async () => {
+    if (failureFuseDebugPending) return
+    setFailureFuseDebugPending(true)
+    try {
+      await window.api.sandbox.setFailureFuseDebug(!failureFuseDebug)
+      await loadSettings()
+    } catch (e) {
+      console.error("[SandboxPanel] Failed to set failure fuse debug mode:", e)
+      await loadSettings()
+    } finally {
+      if (mountedRef.current) setFailureFuseDebugPending(false)
+    }
+  }, [failureFuseDebug, failureFuseDebugPending, loadSettings])
+
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center text-muted-foreground text-sm p-8">
@@ -262,6 +322,172 @@ export function SandboxPanel(): React.JSX.Element {
                 className={cn(
                   "inline-block size-4 rounded-full bg-white shadow transition-transform mt-0.5",
                   yolo ? "translate-x-4" : "translate-x-0.5"
+                )}
+              />
+            </div>
+          </button>
+        </div>
+
+        {/* Failure fuse warning/debug */}
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-2">
+            <Info className="size-5" />
+            <h2 className="text-lg font-bold">工具失败提醒与调试</h2>
+          </div>
+
+          <div className="flex items-start gap-2 rounded-md border border-blue-500/20 bg-blue-500/5 p-3 text-sm text-blue-700 dark:text-blue-300">
+            <Info className="size-4 mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <p>
+                重复失败提醒默认开启，只给用户弹出通知；Agent 防重试提示默认关闭，只把重复失败提示追加给模型；
+                这两个开关都不会停止本轮。
+              </p>
+              <p className="text-xs text-blue-700/80 dark:text-blue-200/80">
+                Debug 首错即停是独立调试开关；开启后工具错误第 1 次就会停止本轮。也可在启动前设置
+                <code className="mx-1 rounded bg-blue-500/10 px-1 font-mono">
+                  CMB_AGENT_FAILURE_FUSE_WARN=1
+                </code>
+                或
+                <code className="mx-1 rounded bg-blue-500/10 px-1 font-mono">
+                  CMB_AGENT_FAILURE_FUSE_WARN=0
+                </code>
+                控制用户提醒，
+                设置
+                <code className="mx-1 rounded bg-blue-500/10 px-1 font-mono">
+                  CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK=1
+                </code>
+                或
+                <code className="mx-1 rounded bg-blue-500/10 px-1 font-mono">
+                  CMB_AGENT_FAIL_FAST=1
+                </code>
+                开启模型提示或首错即停。
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={handleToggleFailureFuseWarning}
+            disabled={failureFuseWarningPending}
+            className={cn(
+              "flex items-center justify-between max-w-lg rounded-lg border-2 p-4 text-left transition-colors",
+              failureFuseWarningPending && "opacity-60 cursor-not-allowed",
+              failureFuseWarning
+                ? "border-blue-500 bg-blue-500/5"
+                : "border-border hover:border-blue-500/40 hover:bg-muted/40"
+            )}
+          >
+            <div className="flex items-center gap-3">
+              <Info
+                className={cn(
+                  "size-4 shrink-0",
+                  failureFuseWarning ? "text-blue-500" : "text-muted-foreground"
+                )}
+              />
+              <div className="flex flex-col gap-1">
+                <span className="text-sm font-medium">重复失败提醒</span>
+                <p className="text-xs text-muted-foreground">
+                  {failureFuseWarning
+                    ? "已开启：第 2 次给用户提醒，第 3 次给用户强提醒"
+                    : "已关闭：不会向用户弹出重复失败提醒"}
+                </p>
+              </div>
+            </div>
+            <div
+              className={cn(
+                "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
+                failureFuseWarning ? "bg-blue-500" : "bg-muted-foreground/30"
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block size-4 rounded-full bg-white shadow transition-transform mt-0.5",
+                  failureFuseWarning ? "translate-x-4" : "translate-x-0.5"
+                )}
+              />
+            </div>
+          </button>
+
+          <button
+            onClick={handleToggleFailureFuseModelFeedback}
+            disabled={failureFuseModelFeedbackPending}
+            className={cn(
+              "flex items-center justify-between max-w-lg rounded-lg border-2 p-4 text-left transition-colors",
+              failureFuseModelFeedbackPending && "opacity-60 cursor-not-allowed",
+              failureFuseModelFeedback
+                ? "border-blue-500 bg-blue-500/5"
+                : "border-border hover:border-blue-500/40 hover:bg-muted/40"
+            )}
+          >
+            <div className="flex items-center gap-3">
+              <Info
+                className={cn(
+                  "size-4 shrink-0",
+                  failureFuseModelFeedback ? "text-blue-500" : "text-muted-foreground"
+                )}
+              />
+              <div className="flex flex-col gap-1">
+                <span className="text-sm font-medium">Agent 防重试提示</span>
+                <p className="text-xs text-muted-foreground">
+                  {failureFuseModelFeedback
+                    ? "已开启：第 2/3 次重复失败会把防重试提示追加给模型"
+                    : "已关闭：不会改写工具结果给模型的内容"}
+                </p>
+              </div>
+            </div>
+            <div
+              className={cn(
+                "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
+                failureFuseModelFeedback ? "bg-blue-500" : "bg-muted-foreground/30"
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block size-4 rounded-full bg-white shadow transition-transform mt-0.5",
+                  failureFuseModelFeedback ? "translate-x-4" : "translate-x-0.5"
+                )}
+              />
+            </div>
+          </button>
+
+          <button
+            onClick={handleToggleFailureFuseDebug}
+            disabled={failureFuseDebugPending}
+            className={cn(
+              "flex items-center justify-between max-w-lg rounded-lg border-2 p-4 text-left transition-colors",
+              failureFuseDebugPending && "opacity-60 cursor-not-allowed",
+              failureFuseDebug
+                ? "border-blue-500 bg-blue-500/5"
+                : "border-border hover:border-blue-500/40 hover:bg-muted/40"
+            )}
+          >
+            <div className="flex items-center gap-3">
+              <Info
+                className={cn(
+                  "size-4 shrink-0",
+                  failureFuseDebug ? "text-blue-500" : "text-muted-foreground"
+                )}
+              />
+              <div className="flex flex-col gap-1">
+                <span className="text-sm font-medium">Debug 首错即停</span>
+                <p className="text-xs text-muted-foreground">
+                  {failureFuseDebug
+                    ? "已开启：下一次工具失败会立即触发熔断"
+                    : failureFuseWarning || failureFuseModelFeedback
+                      ? "已关闭：重复失败策略不会首错停止"
+                      : "已关闭：不会介入普通工具失败"}
+                </p>
+              </div>
+            </div>
+            <div
+              className={cn(
+                "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
+                failureFuseDebug ? "bg-blue-500" : "bg-muted-foreground/30"
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block size-4 rounded-full bg-white shadow transition-transform mt-0.5",
+                  failureFuseDebug ? "translate-x-4" : "translate-x-0.5"
                 )}
               />
             </div>

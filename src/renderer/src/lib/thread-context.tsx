@@ -921,6 +921,10 @@ const ThreadContext = createContext<ThreadContextValue | null>(null)
 interface CustomEventData {
   type?: string
   request?: HITLRequest
+  toolName?: string
+  fingerprint?: string
+  threshold?: number
+  lastError?: string
   files?: Array<{ path: string; is_dir?: boolean; size?: number }>
   path?: string
   subagents?: Array<{
@@ -2649,6 +2653,55 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }
           }))
           toast.warning(action === "halt" ? `Hook 已停止本轮：${reason}` : `Hook 已阻断：${reason}`)
+          break
+        }
+        case "failure_fuse_warning": {
+          const toolName =
+            typeof data.toolName === "string" && data.toolName.trim() ? data.toolName : undefined
+          const countText =
+            typeof data.count === "number" && typeof data.threshold === "number"
+              ? `（${data.count}/${data.threshold}）`
+              : ""
+          const prefix =
+            data.action === "strong_warn" ? "工具重复失败强提醒" : "工具重复失败提醒"
+          const message =
+            typeof data.count === "number"
+              ? `同类错误已重复出现 ${data.count} 次，本轮不会停止。`
+              : "同类工具错误重复出现，本轮不会停止。"
+          toast.warning(`${prefix}${toolName ? `：${toolName}` : ""}${countText}：${message}`)
+          break
+        }
+        case "failure_fuse_tripped": {
+          const reason =
+            (typeof data.reason === "string" && data.reason.trim()) ||
+            (typeof data.message === "string" && data.message.trim()) ||
+            "同类工具错误重复出现，已停止本轮以避免继续重试"
+          const toolName =
+            typeof data.toolName === "string" && data.toolName.trim() ? data.toolName : undefined
+          const details = [
+            toolName ? `tool=${toolName}` : undefined,
+            typeof data.count === "number" && typeof data.threshold === "number"
+              ? `count=${data.count}/${data.threshold}`
+              : undefined,
+            typeof data.fingerprint === "string" && data.fingerprint.trim()
+              ? `fingerprint=${data.fingerprint}`
+              : undefined,
+            typeof data.lastError === "string" && data.lastError.trim()
+              ? `lastError=${data.lastError}`
+              : undefined
+          ].filter((item): item is string => Boolean(item))
+          updateThreadState(threadId, () => ({
+            error: null,
+            errorDetail: null,
+            hookInterruption: {
+              event: toolName ? `Failure fuse: ${toolName}` : "Failure fuse",
+              action: "halt",
+              reason,
+              systemMessage: details.length > 0 ? details.join("\n") : undefined,
+              timestamp: new Date()
+            }
+          }))
+          toast.warning(`工具失败熔断已停止本轮：${reason}`)
           break
         }
         case "auto_commit_result":
