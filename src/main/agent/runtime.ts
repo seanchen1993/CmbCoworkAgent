@@ -655,6 +655,59 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
+export interface CapturedSystemPromptPreview {
+  threadId: string
+  prompt: string
+  updatedAt: number
+}
+
+const systemPromptPreviewByThread = new Map<string, CapturedSystemPromptPreview>()
+const MAX_SYSTEM_PROMPT_PREVIEW_ENTRIES = 10
+
+function setCapturedSystemPromptPreview(preview: CapturedSystemPromptPreview): void {
+  systemPromptPreviewByThread.delete(preview.threadId)
+  systemPromptPreviewByThread.set(preview.threadId, preview)
+
+  while (systemPromptPreviewByThread.size > MAX_SYSTEM_PROMPT_PREVIEW_ENTRIES) {
+    const oldestThreadId = systemPromptPreviewByThread.keys().next().value
+    if (!oldestThreadId) break
+    systemPromptPreviewByThread.delete(oldestThreadId)
+  }
+}
+
+function stringifySystemPromptForPreview(systemMessage: unknown): string {
+  if (typeof systemMessage === "string") return systemMessage
+  if (!systemMessage || typeof systemMessage !== "object") return String(systemMessage ?? "")
+
+  const content = (systemMessage as { content?: unknown }).content
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => {
+        if (typeof block === "string") return block
+        if (block && typeof block === "object") {
+          const text = (block as { text?: unknown }).text
+          if (typeof text === "string") return text
+        }
+        return ""
+      })
+      .filter(Boolean)
+      .join("\n\n")
+  }
+
+  try {
+    return JSON.stringify(systemMessage, null, 2)
+  } catch {
+    return String(systemMessage)
+  }
+}
+
+export function getCapturedSystemPromptPreview(
+  threadId: string
+): CapturedSystemPromptPreview | null {
+  return systemPromptPreviewByThread.get(threadId) ?? null
+}
+
 const SUMMARY_KEEP_RATIO = 0.1
 const SUMMARY_INPUT_RATIO = 0.65
 const SUMMARY_INPUT_TOKEN_CAP = 700_000
@@ -1905,6 +1958,23 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       })
     ]
   }
+  const systemPromptPreviewCaptureMiddleware =
+    threadId && typeof threadId === "string"
+      ? [
+          createMiddleware({
+            name: "systemPromptPreviewCapture",
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            wrapModelCall: (request: any, handler: any) => {
+              setCapturedSystemPromptPreview({
+                threadId,
+                prompt: stringifySystemPromptForPreview(request.systemMessage),
+                updatedAt: Date.now()
+              })
+              return handler(request)
+            }
+          })
+        ]
+      : []
 
   return createAgent({
     model,
@@ -1940,7 +2010,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...skillsMiddlewareArray,
       ...memoryMiddlewareArray,
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
-      ...customMiddleware
+      ...customMiddleware,
+      ...systemPromptPreviewCaptureMiddleware
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
@@ -4111,7 +4182,7 @@ The workspace root is: ${workspacePath}`
   const coordinatorWorkerProjectInstructions = [
     combinedAgentsPrompt,
     coordinatorPluginPromptInject
-      ? `### Project Mode Adapter Instructions\n\n${coordinatorPluginPromptInject}`
+      ? `### Skills Runtime Context\n\n${coordinatorPluginPromptInject}`
       : "",
     extraSystemPrompt
   ]

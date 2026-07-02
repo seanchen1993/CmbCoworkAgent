@@ -5,6 +5,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
 import {
   createAgentRuntime,
+  getCapturedSystemPromptPreview,
   getSkillEvolutionThreshold,
   setCheckpointerBusyGuard,
   getSkillEvolutionTurnThreshold,
@@ -36,6 +37,7 @@ import {
   getEnabledPluginHooks,
   getEnabledSkillHooks,
   getEnabledSkillsSources,
+  getUserInfo,
   getEnabledPluginSkillSourceMetadata,
   getDisabledSkillDirs,
   getHookLoggingConfig
@@ -226,6 +228,28 @@ const MAX_POST_RUN_ASSISTANT_TEXT_CHARS = 60_000
 const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
 const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
+const SYSTEM_PROMPT_PREVIEW_IDS_ENV = "VITE_SYSTEM_PROMPT_PREVIEW_YST_IDS"
+
+function splitEnvIds(value: string | undefined): Set<string> {
+  return new Set(
+    String(value || "")
+      .split(/[,\s;]+/)
+      .map((id) => id.trim())
+      .filter(Boolean)
+  )
+}
+
+function canPreviewSystemPrompt(): boolean {
+  if (import.meta.env.DEV) return true
+  let userInfo: ReturnType<typeof getUserInfo> = null
+  try {
+    userInfo = getUserInfo()
+  } catch {
+    userInfo = null
+  }
+  const ids = splitEnvIds(import.meta.env[SYSTEM_PROMPT_PREVIEW_IDS_ENV] as string | undefined)
+  return [userInfo?.ystId, userInfo?.sapId].some((id) => Boolean(id?.trim() && ids.has(id.trim())))
+}
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
@@ -3502,6 +3526,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("agent:coordinator-mode-forced", async (): Promise<boolean> => {
     return isCoordinatorModeForcedByEnvironment()
   })
+
+  ipcMain.handle("agent:system-prompt-preview-access", async (): Promise<boolean> => {
+    return canPreviewSystemPrompt()
+  })
+
+  ipcMain.handle(
+    "agent:system-prompt-preview",
+    async (_event, { threadId }: { threadId: string }) => {
+      if (!canPreviewSystemPrompt()) return { prompt: null, updatedAt: null }
+      const preview = getCapturedSystemPromptPreview(threadId)
+      return preview
+        ? { prompt: preview.prompt, updatedAt: preview.updatedAt }
+        : { prompt: null, updatedAt: null }
+    }
+  )
 
   // Manual retry for skill generation — triggered when the user clicks the retry button
   // in the right panel after a generation failure.  Skips the intent banner (user already

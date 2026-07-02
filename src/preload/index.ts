@@ -416,6 +416,17 @@ const api = {
     },
     isCoordinatorModeForced: (): Promise<boolean> => {
       return ipcRenderer.invoke("agent:coordinator-mode-forced") as Promise<boolean>
+    },
+    canPreviewSystemPrompt: (): Promise<boolean> => {
+      return ipcRenderer.invoke("agent:system-prompt-preview-access") as Promise<boolean>
+    },
+    getSystemPromptPreview: (
+      threadId: string
+    ): Promise<{ prompt: string | null; updatedAt: number | null }> => {
+      return ipcRenderer.invoke("agent:system-prompt-preview", { threadId }) as Promise<{
+        prompt: string | null
+        updatedAt: number | null
+      }>
     }
   },
   workflows: {

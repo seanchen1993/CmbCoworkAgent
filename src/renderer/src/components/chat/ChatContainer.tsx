@@ -52,6 +52,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useAppStore } from "@/lib/store"
 import {
   consumePendingHarnessNextAction,
@@ -1719,6 +1720,114 @@ const ChatMessageList = React.memo(function ChatMessageList({
     </>
   )
 })
+
+function SystemPromptPreviewButton({ threadId }: { threadId?: string | null }): React.JSX.Element | null {
+  const [allowed, setAllowed] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [prompt, setPrompt] = useState<string | null>(null)
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null)
+  const closeTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.agent
+      .canPreviewSystemPrompt()
+      .then((nextAllowed) => {
+        if (!cancelled) setAllowed(nextAllowed)
+      })
+      .catch(() => {
+        if (!cancelled) setAllowed(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const loadPreview = useCallback(async () => {
+    if (!threadId || loading) return
+    setLoading(true)
+    try {
+      const preview = await window.api.agent.getSystemPromptPreview(threadId)
+      setPrompt(preview.prompt)
+      setUpdatedAt(preview.updatedAt)
+    } catch {
+      setPrompt(null)
+      setUpdatedAt(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [loading, threadId])
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer()
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpen(false)
+      closeTimerRef.current = null
+    }, 120)
+  }, [clearCloseTimer])
+
+  useEffect(() => {
+    return () => clearCloseTimer()
+  }, [clearCloseTimer])
+
+  useEffect(() => {
+    setOpen(false)
+    setPrompt(null)
+    setUpdatedAt(null)
+  }, [threadId])
+
+  if (!allowed || !threadId) return null
+
+  const updatedAtLabel = updatedAt ? new Date(updatedAt).toLocaleString() : "暂无"
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onMouseEnter={() => {
+            clearCloseTimer()
+            setOpen(true)
+            void loadPreview()
+          }}
+          onMouseLeave={scheduleClose}
+          className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          title="系统提示词预览"
+          aria-label="系统提示词预览"
+        >
+          <FileText className="size-3.5" />
+          <span>系统提示词预览</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        side="top"
+        sideOffset={8}
+        onMouseEnter={() => {
+          clearCloseTimer()
+          setOpen(true)
+        }}
+        onMouseLeave={scheduleClose}
+        className="w-[720px] max-w-[calc(100vw-2rem)] p-0"
+      >
+        <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground">
+          {loading ? "加载中..." : `更新时间：${updatedAtLabel}`}
+        </div>
+        <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5">
+          {prompt || "暂无系统提示词；请先运行一次当前会话。"}
+        </pre>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 export function ChatContainer({
   threadId,
@@ -5971,6 +6080,7 @@ export function ChatContainer({
                         </button>
                       )}
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                      <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (
                         <ContextUsageIndicator

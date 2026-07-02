@@ -624,7 +624,7 @@ System environment:
 - Default shell: ${options.shell}
 ${renderTimeContext(options)}
 
-${projectModeAdapterInstructions ? `## Project Mode Adapter Instructions\n\n${projectModeAdapterInstructions}\n` : ""}
+${projectModeAdapterInstructions ? `## Skills Runtime Context\n\n${projectModeAdapterInstructions}\n` : ""}
 
 Verifier standard:
 - PASS means the requested behavior is implemented and checked by commands/tests/browser evidence.

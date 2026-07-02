@@ -799,6 +799,10 @@ interface CustomAPI {
       }
     ) => Promise<void>
     isCoordinatorModeForced: () => Promise<boolean>
+    canPreviewSystemPrompt: () => Promise<boolean>
+    getSystemPromptPreview: (
+      threadId: string
+    ) => Promise<{ prompt: string | null; updatedAt: number | null }>
   }
   workflows: {
     listRuns: (threadId: string) => Promise<unknown[]>
