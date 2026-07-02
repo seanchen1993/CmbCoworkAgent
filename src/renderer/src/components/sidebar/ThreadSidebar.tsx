@@ -606,6 +606,15 @@ export function ThreadSidebar(): React.JSX.Element {
     })
   }, [allThreadStates, pinnedProjectKeys, projectNameOverrides, threads])
 
+  const currentThreadWorkspacePath = useMemo(() => {
+    if (!currentThreadId) return null
+
+    const currentThread = threads.find((thread) => thread.thread_id === currentThreadId)
+    if (!currentThread || isHarnessFeatureThread(currentThread)) return null
+
+    return getThreadWorkspacePath(currentThread, allThreadStates[currentThreadId]?.workspacePath)
+  }, [allThreadStates, currentThreadId, threads])
+
   const toggleProject = useCallback(
     (projectKey: string) => {
       setCollapsedProjectKeys((prev) => {
@@ -743,7 +752,17 @@ export function ThreadSidebar(): React.JSX.Element {
   }, [loadRobots, showCustomizeView])
 
   const handleNewThread = async (): Promise<void> => {
-    await createThread({ title: `Thread ${new Date().toLocaleDateString()}` })
+    const metadata: Record<string, unknown> = {
+      title: `Thread ${new Date().toLocaleDateString()}`
+    }
+
+    // When the user creates a new task from an existing thread, keep it in the
+    // same workspace instead of falling back to the last globally selected one.
+    if (currentThreadWorkspacePath) {
+      metadata.workspacePath = currentThreadWorkspacePath
+    }
+
+    await createThread(metadata)
   }
 
   const handleNewProjectThread = async (project: ThreadProject): Promise<void> => {
