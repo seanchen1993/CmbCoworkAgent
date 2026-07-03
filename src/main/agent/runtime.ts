@@ -711,6 +711,8 @@ export function createScopedMcpCapabilityService(
     harnessProjectId?: string
     harnessAdapterName?: string
     harnessAdapterVersion?: string
+    harnessNodeName?: string
+    harnessNodeStatus?: string
     projectCode?: string
     projectDir?: string
   }
@@ -911,6 +913,8 @@ export function createScopedMcpCapabilityService(
         harnessProjectId: baseContext.harnessProjectId,
         harnessAdapterName: baseContext.harnessAdapterName,
         harnessAdapterVersion: baseContext.harnessAdapterVersion,
+        harnessNodeName: baseContext.harnessNodeName,
+        harnessNodeStatus: baseContext.harnessNodeStatus,
         projectCode: baseContext.projectCode,
         projectDir: baseContext.projectDir,
         pluginId,
@@ -2828,6 +2832,10 @@ export interface CreateAgentRuntimeOptions {
   harnessAdapterName?: string
   /** Bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
   harnessAdapterVersion?: string
+  /** Current harness workflow node/stage name exposed to child processes as HARNESS_NODE_NAME. */
+  harnessNodeName?: string
+  /** Current harness workflow node/stage status exposed to child processes as HARNESS_NODE_STATUS. */
+  harnessNodeStatus?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to child processes as PROJECT_DIR. */
@@ -2946,6 +2954,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     retryHooks,
@@ -3157,6 +3167,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     onFileMutation,
@@ -3287,6 +3299,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         harnessProjectId,
         harnessAdapterName,
         harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
         projectCode,
         projectDir,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
@@ -3483,6 +3497,8 @@ The workspace root is: ${workspacePath}`
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       turnId: hookTurnId
@@ -3822,6 +3838,8 @@ The workspace root is: ${workspacePath}`
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     skipToolNames: toolHookExclusions
@@ -4006,6 +4024,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       pluginOutputDir,
@@ -4618,6 +4638,17 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         workspacePath,
         sessionId: threadId,
         turnId: hookTurnId,
+        pluginOutputDir,
+        systemId,
+        pluginWorkspace,
+        featureId,
+        harnessProjectId,
+        harnessAdapterName,
+        harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
+        projectCode,
+        projectDir,
         toolName: input.toolName,
         toolArgs:
           input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
