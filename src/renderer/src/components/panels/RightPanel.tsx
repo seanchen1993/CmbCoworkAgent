@@ -37,14 +37,24 @@ import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext } from "@/lib/store"
 import { useShallow } from "zustand/react/shallow"
-import { useThreadState, useThreadStream } from "@/lib/thread-context"
+import {
+  useThreadState,
+  useThreadStream,
+  type CoordinatorWorkerView
+} from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
+import {
+  hasLoadedWorkspaceFiles,
+  loadWorkspaceFilesDeduped,
+  markWorkspaceFilesStale
+} from "@/lib/workspace-file-load"
 import { Badge } from "@/components/ui/badge"
-import { onOpenResourcePreview } from "@/lib/resource-preview-events"
+import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
+import { getRightPanelSkillPathSegments } from "@/components/panels/skill-tree-path"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -132,14 +142,33 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
     (e: React.MouseEvent) => {
       e.preventDefault()
       startYRef.current = e.clientY
+      let frame: number | null = null
+      let latestDelta = 0
+
+      const flushDrag = (): void => {
+        frame = null
+        onDrag(latestDelta)
+      }
+
+      const scheduleDrag = (delta: number): void => {
+        latestDelta = delta
+        if (frame === null) {
+          frame = window.requestAnimationFrame(flushDrag)
+        }
+      }
 
       const handleMouseMove = (e: MouseEvent): void => {
         // Calculate total delta from drag start
         const totalDelta = e.clientY - startYRef.current
-        onDrag(totalDelta)
+        scheduleDrag(totalDelta)
       }
 
       const handleMouseUp = (): void => {
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame)
+          frame = null
+          onDrag(latestDelta)
+        }
         document.removeEventListener("mousemove", handleMouseMove)
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""
@@ -166,6 +195,7 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 }
 
 interface RightPanelProps {
+  threadId?: string | null
   moduleMode: "work" | "preview" | "git"
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
@@ -182,12 +212,18 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 }
 
 export function RightPanel({
+  threadId,
   moduleMode,
   onRequestPreviewMode,
   onRequestWorkMode,
   onPreviewFullscreenChange
 }: RightPanelProps): React.JSX.Element {
-  const { currentThreadId, pluginVersion, skillGenerationByThread, setSkillGenerationPhase } =
+  const {
+    currentThreadId: storeCurrentThreadId,
+    pluginVersion,
+    skillGenerationByThread,
+    setSkillGenerationPhase
+  } =
     useAppStore(
       useShallow((s) => ({
         currentThreadId: s.currentThreadId,
@@ -197,6 +233,8 @@ export function RightPanel({
         setSkillGenerationPhase: s.setSkillGenerationPhase
       }))
     )
+  const currentThreadId = threadId ?? storeCurrentThreadId
+  const canMutateCurrentThreadState = currentThreadId === storeCurrentThreadId
   // Derive the current thread's card state from the per-thread map
   const skillGenerationAgent = selectSkillGenerationAgent(
     { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
@@ -206,7 +244,13 @@ export function RightPanel({
   const streamData = useThreadStream(currentThreadId ?? "")
   const todos = threadState?.todos ?? []
   const workspaceFiles = threadState?.workspaceFiles ?? []
-  const subagents = threadState?.subagents ?? []
+  const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
+  const coordinatorWorkers = useMemo(
+    () => threadState?.coordinatorWorkers ?? [],
+    [threadState?.coordinatorWorkers]
+  )
+  const runningSubagentIdsRef = useRef<Set<string>>(new Set())
+  const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
@@ -250,7 +294,14 @@ export function RightPanel({
         console.error("[RightPanel] Failed to load skills:", e)
       }
     }
-    load()
+    void load()
+    // Re-pull whenever main signals a skill-set change (skill evolution,
+    // optimizer patches, plugin SKILL.md edits via the file editor). Without
+    // this the right panel only refreshes when pluginVersion bumps on
+    // install/enable actions and misses content-only edits entirely.
+    return window.api.skills.onChanged(() => {
+      void load()
+    })
   }, [])
 
   useEffect(() => {
@@ -294,6 +345,43 @@ export function RightPanel({
     }
   }, [skillGenerationAgent.phase])
 
+  // Auto-open once when an ordinary task subagent starts.
+  useEffect(() => {
+    const runningIds = new Set(
+      subagents.filter((subagent) => subagent.status === "running").map((subagent) => subagent.id)
+    )
+    const hasNewRunning = Array.from(runningIds).some(
+      (id) => !runningSubagentIdsRef.current.has(id)
+    )
+
+    if (hasNewRunning) {
+      setAgentsOpen(true)
+    }
+
+    runningSubagentIdsRef.current = runningIds
+  }, [subagents])
+
+  // Auto-open once when an async coordinator worker starts or continues.
+  useEffect(() => {
+    const runningKeys = new Set(
+      coordinatorWorkers
+        .filter((worker) => worker.status === "running")
+        .map(
+          (worker) =>
+            `${worker.worker_id}:${worker.turns ?? 0}:${worker.last_started_at ?? worker.created_at}`
+        )
+    )
+    const hasNewRunning = Array.from(runningKeys).some(
+      (key) => !runningCoordinatorWorkerRunKeysRef.current.has(key)
+    )
+
+    if (hasNewRunning) {
+      setAgentsOpen(true)
+    }
+
+    runningCoordinatorWorkerRunKeysRef.current = runningKeys
+  }, [coordinatorWorkers])
+
   const lspHeaderStatus = useMemo(() => {
     if (!lspConfig) return null
 
@@ -323,12 +411,12 @@ export function RightPanel({
   // "error" is intentionally NOT auto-cleared — it stays visible so the user
   // can read the error, and must be dismissed manually via the ✕ button on the card.
   useEffect(() => {
-    if (skillGenerationAgent.phase === "done") {
+    if (canMutateCurrentThreadState && skillGenerationAgent.phase === "done") {
       const t = setTimeout(() => setSkillGenerationPhase(null), 3000)
       return () => clearTimeout(t)
     }
     return undefined
-  }, [skillGenerationAgent.phase, setSkillGenerationPhase])
+  }, [canMutateCurrentThreadState, skillGenerationAgent.phase, setSkillGenerationPhase])
 
   // Log skill generation errors to the console for easier diagnosis on Windows
   useEffect(() => {
@@ -1120,7 +1208,7 @@ export function RightPanel({
             />
             {tasksOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.tasks }}>
-                <TasksContent />
+                <TasksContent threadId={currentThreadId} />
               </div>
             )}
           </div>
@@ -1139,7 +1227,7 @@ export function RightPanel({
             />
             {filesOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.files }}>
-                <FilesContent />
+                <FilesContent threadId={currentThreadId} />
               </div>
             )}
           </div>
@@ -1152,13 +1240,17 @@ export function RightPanel({
             <SectionHeader
               title="代理"
               icon={GitBranch}
-              badge={subagents.length + (skillGenerationAgent.phase !== null ? 1 : 0)}
+              badge={
+                subagents.length +
+                coordinatorWorkers.length +
+                (skillGenerationAgent.phase !== null ? 1 : 0)
+              }
               isOpen={agentsOpen}
               onToggle={() => setAgentsOpen((prev) => !prev)}
             />
             {agentsOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.agents }}>
-                <AgentsContent />
+                <AgentsContent threadId={currentThreadId} />
               </div>
             )}
           </div>
@@ -1278,9 +1370,8 @@ const STATUS_CONFIG = {
   }
 }
 
-function TasksContent(): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
-  const threadState = useThreadState(currentThreadId)
+function TasksContent({ threadId }: { threadId: string | null }): React.JSX.Element {
+  const threadState = useThreadState(threadId)
   const todos = threadState?.todos ?? []
   const [completedExpanded, setCompletedExpanded] = useState(false)
 
@@ -1511,9 +1602,8 @@ function buildPreviewEvent(
   }
 }
 
-function FilesContent(): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
-  const threadState = useThreadState(currentThreadId)
+function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Element {
+  const threadState = useThreadState(threadId)
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const workspacePath = threadState?.workspacePath ?? null
   const setWorkspacePath = threadState?.setWorkspacePath
@@ -1524,47 +1614,92 @@ function FilesContent(): React.JSX.Element {
     let cancelled = false
 
     async function loadWorkspace(): Promise<void> {
-      if (currentThreadId && setWorkspacePath && setWorkspaceFiles) {
-        const path = await window.api.workspace.get(currentThreadId)
+      if (threadId && setWorkspacePath && setWorkspaceFiles) {
+        const path = await window.api.workspace.get(threadId)
         if (cancelled) return
         setWorkspacePath(path)
 
-        // If a folder is linked, load files from disk
-        if (path) {
-          const result = await window.api.workspace.loadFromDisk(currentThreadId)
-          if (cancelled) return
-          if (result.success && result.files) {
-            setWorkspaceFiles(result.files)
-          }
+        if (!path) return
+
+        if (hasLoadedWorkspaceFiles(threadId, path)) {
+          // A cached tree may have missed changes while its watcher was evicted.
+          // Re-arm the watcher and refresh once only when it had to be recreated.
+          const watcherResult = await window.api.workspace.ensureWatching(threadId)
+          if (cancelled || !watcherResult.success || !watcherResult.restarted) return
+          markWorkspaceFilesStale(threadId, path)
+        }
+
+        // No successful scan for this exact thread/path, or the watcher was
+        // recreated after eviction. Share an in-flight background scan.
+        const result = await loadWorkspaceFilesDeduped(threadId, path)
+        if (cancelled) return
+        // Guard against writing a stale scan (workspace switched mid-load):
+        // only accept results that match the path we resolved.
+        if (result.success && result.files && result.workspacePath === path) {
+          setWorkspaceFiles(result.files)
         }
       }
     }
-    loadWorkspace()
+    void loadWorkspace().catch((error) => {
+      if (!cancelled) {
+        console.error("[FilesContent] Failed to load workspace files:", error)
+      }
+    })
 
     return () => {
       cancelled = true
     }
+    // The effect intentionally initializes once per thread. Successful scan
+    // state is tracked by threadId + workspacePath instead of array length, so
+    // an empty workspace is still considered loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentThreadId])
+  }, [threadId])
 
   // Listen for file changes from the workspace watcher
   useEffect(() => {
-    if (!currentThreadId || !setWorkspaceFiles) return
+    if (!threadId || !setWorkspaceFiles) return
+    // Guards against an in-flight callback (started before a workspace switch)
+    // writing back after the effect re-ran for the new path. The closure's
+    // `workspacePath === result.workspacePath` check passes for the old path,
+    // so a flag set in cleanup is required to actually discard the stale write.
+    let cancelled = false
 
     const cleanup = window.api.workspace.onFilesChanged(async (data) => {
-      // Only reload if the event is for the current thread
-      if (data.threadId === currentThreadId) {
-        console.log("[FilesContent] Files changed, reloading...", data)
-        const result = await window.api.workspace.loadFromDisk(currentThreadId)
-        if (result.success && result.files) {
+      // Only reload if the event is for the current thread and its workspace.
+      if (data.threadId !== threadId) return
+      if (workspacePath && data.workspacePath && data.workspacePath !== workspacePath) return
+
+      const targetPath = workspacePath ?? data.workspacePath
+      if (!targetPath) return
+
+      console.log("[FilesContent] Files changed, reloading...", {
+        threadId: data.threadId,
+        workspacePath: data.workspacePath
+      })
+      // A real file-change notification requests one trailing pass if another
+      // scan is already in progress, so changes that landed mid-scan are kept.
+      markWorkspaceFilesStale(threadId, targetPath)
+      try {
+        const result = await loadWorkspaceFilesDeduped(threadId, targetPath, {
+          requestTrailingRescan: true
+        })
+        if (cancelled) return
+        if (result.success && result.files && result.workspacePath === targetPath) {
           setWorkspaceFiles(result.files)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("[FilesContent] Failed to refresh workspace files:", error)
         }
       }
     })
 
-    return cleanup
+    return () => {
+      cancelled = true
+      cleanup()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentThreadId])
+  }, [threadId, workspacePath])
 
   return (
     <div className="flex flex-col h-full">
@@ -1591,7 +1726,7 @@ function FilesContent(): React.JSX.Element {
         </div>
       ) : (
         <div className="py-1 overflow-auto flex-1">
-          <FileTree files={workspaceFiles} />
+          <FileTree files={workspaceFiles} threadId={threadId} />
         </div>
       )}
     </div>
@@ -1898,9 +2033,8 @@ function buildFileTree(files: FileInfo[]): TreeNode[] {
   return root
 }
 
-function FileTree({ files }: { files: FileInfo[] }): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
-  const threadState = useThreadState(currentThreadId)
+function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | null }): React.JSX.Element {
+  const threadState = useThreadState(threadId)
   const openFile = threadState?.openFile
   const tree = useMemo(() => buildFileTree(files), [files])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -2208,9 +2342,9 @@ function SkillGenerationCard({
   )
 }
 
-function AgentsContent(): React.JSX.Element {
+function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Element {
   const {
-    currentThreadId,
+    currentThreadId: storeCurrentThreadId,
     skillGenerationByThread,
     skillRetryContextByThread,
     setSkillGenerationPhase
@@ -2224,23 +2358,30 @@ function AgentsContent(): React.JSX.Element {
   )
   const skillGenerationAgent = selectSkillGenerationAgent(
     { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
-    currentThreadId
+    threadId
   )
   const skillRetryContext = selectSkillRetryContext(
     { skillRetryContextByThread } as Parameters<typeof selectSkillRetryContext>[0],
-    currentThreadId
+    threadId
   )
+  const canMutateCurrentThreadState = threadId === storeCurrentThreadId
   const retryInFlightRef = useRef(false)
-  const threadState = useThreadState(currentThreadId)
+  const threadState = useThreadState(threadId)
   const subagents = threadState?.subagents ?? []
+  const coordinatorWorkers = threadState?.coordinatorWorkers ?? []
+  const hasRunningCoordinatorWorker = coordinatorWorkers.some(
+    (worker) => worker.status === "running"
+  )
+  const [sharedNowMs, setSharedNowMs] = useState(() => Date.now())
 
   const hasSkillGen = skillGenerationAgent.phase !== null
 
   const handleRetry = useCallback((): void => {
-    if (!currentThreadId || !skillRetryContext || retryInFlightRef.current) return
+    if (!threadId || !canMutateCurrentThreadState || !skillRetryContext || retryInFlightRef.current)
+      return
     retryInFlightRef.current = true
     void window.api.skillEvolution
-      .retryGeneration(currentThreadId, skillRetryContext)
+      .retryGeneration(threadId, skillRetryContext)
       .catch((err: unknown) => {
         console.error("[SkillGen] Retry IPC failed:", err)
         setSkillGenerationPhase("error", err instanceof Error ? err.message : "重试失败")
@@ -2248,9 +2389,19 @@ function AgentsContent(): React.JSX.Element {
       .finally(() => {
         retryInFlightRef.current = false
       })
-  }, [currentThreadId, skillRetryContext, setSkillGenerationPhase])
+  }, [canMutateCurrentThreadState, threadId, skillRetryContext, setSkillGenerationPhase])
 
-  if (subagents.length === 0 && !hasSkillGen) {
+  useEffect(() => {
+    if (!hasRunningCoordinatorWorker) return
+    const timer = window.setInterval(() => setSharedNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [hasRunningCoordinatorWorker])
+
+  if (
+    subagents.length === 0 &&
+    coordinatorWorkers.length === 0 &&
+    !hasSkillGen
+  ) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <GitBranch className="size-8 mb-2 opacity-50" />
@@ -2269,9 +2420,12 @@ function AgentsContent(): React.JSX.Element {
           streamedText={skillGenerationAgent.streamedText}
           errorText={skillGenerationAgent.errorText}
           onDismiss={
-            skillGenerationAgent.phase === "error" ? () => setSkillGenerationPhase(null) : undefined
+            canMutateCurrentThreadState && skillGenerationAgent.phase === "error"
+              ? () => setSkillGenerationPhase(null)
+              : undefined
           }
           onRetry={
+            canMutateCurrentThreadState &&
             (skillGenerationAgent.phase === "error" ||
               skillGenerationAgent.phase === "generating") &&
             skillRetryContext
@@ -2281,24 +2435,384 @@ function AgentsContent(): React.JSX.Element {
         />
       )}
       {subagents.map((agent) => (
-        <SubagentCard key={agent.id} subagent={agent} />
+        <SubagentCard key={agent.id} subagent={agent} threadId={threadId} />
+      ))}
+      {coordinatorWorkers.map((worker) => (
+        <CoordinatorWorkerCard
+          key={worker.worker_id}
+          worker={worker}
+          threadId={threadId ?? undefined}
+          nowMs={sharedNowMs}
+        />
       ))}
     </div>
   )
 }
 
+function CoordinatorWorkerCard({
+  worker,
+  threadId,
+  nowMs
+}: {
+  worker: CoordinatorWorkerView
+  threadId?: string
+  nowMs: number
+}): React.JSX.Element {
+  const isRunning = worker.status === "running"
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const openWorkerFocusView = useAppStore((state) => state.openWorkerFocusView)
+  const roleLabel = worker.role === "implementer" ? "实现者" : "验证者"
+  const workload = worker.workload ?? (worker.role === "verifier" ? "verify" : "write")
+  const ownedFiles = worker.owned_files ?? []
+  const workloadLabel = workload === "read_only" ? "只读" : workload === "verify" ? "验证" : "写入"
+  const statusMeta = getCoordinatorWorkerStatusMeta(worker.status)
+  const startedAtMs = safeDateMs(worker.last_started_at ?? worker.created_at)
+  const completedAtMs = isRunning
+    ? nowMs
+    : deriveCoordinatorWorkerCompletedAtMs(worker, startedAtMs)
+  const durationMs = isRunning
+    ? Math.max(0, nowMs - startedAtMs)
+    : (worker.duration_ms ?? Math.max(0, completedAtMs - startedAtMs))
+  const activityAgoMs = worker.last_activity_at
+    ? Math.max(0, nowMs - safeDateMs(worker.last_activity_at))
+    : null
+  const activityLabel =
+    isRunning && activityAgoMs !== null ? `${formatCompactElapsed(activityAgoMs)}无新工具` : null
+  const StatusIcon = statusMeta.icon
+
+  const openWorkerFile = useCallback(
+    (filePath?: string) => {
+      if (!threadId || !filePath) return
+      const resolvedPath = resolveCoordinatorWorkerPreviewPath(worker.parent_thread_id, filePath)
+      if (!resolvedPath) {
+        toast.error("Worker 结果路径无效，已阻止打开")
+        return
+      }
+      emitOpenResourcePreview({
+        threadId,
+        filePath: resolvedPath
+      })
+    },
+    [threadId, worker.parent_thread_id]
+  )
+
+  const tokenLabel = formatCoordinatorWorkerTokenUsage(worker.token_usage)
+  const hasAnyFile = Boolean(worker.result_path || worker.report_path)
+  const canOpenToolStream = Boolean(threadId && worker.worker_thread_id)
+  const openWorkerStream = useCallback((): void => {
+    if (!threadId || !worker.worker_thread_id) return
+    openWorkerFocusView({
+      threadId,
+      workerId: worker.worker_id,
+      workerThreadId: worker.worker_thread_id,
+      role: worker.role,
+      description: worker.description,
+      status: worker.status
+    })
+  }, [
+    openWorkerFocusView,
+    threadId,
+    worker.description,
+    worker.role,
+    worker.status,
+    worker.worker_id,
+    worker.worker_thread_id
+  ])
+
+  return (
+    <div
+      className={cn(
+        "group overflow-hidden rounded-xl border bg-background/95 text-xs shadow-sm transition-colors",
+        isRunning
+          ? "border-sky-300/80 shadow-sky-500/10"
+          : worker.status === "completed"
+            ? "border-border/80"
+            : worker.status === "failed"
+              ? "border-red-300/70"
+              : "border-border/70"
+      )}
+    >
+      <div className="border-b border-border/60 px-3 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <div
+              className={cn(
+                "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border",
+                isRunning
+                  ? "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/35 dark:text-sky-300"
+                  : worker.status === "failed"
+                    ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/70 dark:bg-red-950/35 dark:text-red-300"
+                    : "border-stone-200 bg-stone-50 text-stone-700 dark:border-stone-800 dark:bg-stone-900/50 dark:text-stone-300"
+              )}
+            >
+              <StatusIcon className={cn("size-4", statusMeta.iconClass)} />
+            </div>
+            <div className="min-w-0 space-y-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="truncate text-[13px] font-semibold text-foreground">
+                  {roleLabel}
+                </span>
+                <span className="rounded-md border border-border/70 bg-muted/45 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  {worker.turns} 轮
+                </span>
+                <span className="rounded-md border border-border/70 bg-muted/45 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  {workloadLabel}
+                </span>
+              </div>
+              <div className="line-clamp-2 text-[12px] leading-relaxed text-muted-foreground">
+                {worker.description}
+              </div>
+            </div>
+          </div>
+          <Badge className={cn("shrink-0 rounded-md border px-2 py-0.5", statusMeta.badgeClass)}>
+            {statusMeta.label}
+          </Badge>
+        </div>
+      </div>
+
+      <div className="px-3 py-3">
+        {canOpenToolStream && (
+          <button
+            type="button"
+            onClick={openWorkerStream}
+            className={cn(
+              "mb-3 flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all",
+              "border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.06)]",
+              "hover:border-slate-300 hover:from-white hover:to-slate-100 hover:shadow-[0_4px_14px_rgba(15,23,42,0.08)]",
+              "dark:border-slate-700/80 dark:from-slate-900 dark:to-slate-950 dark:text-slate-100 dark:hover:border-slate-600"
+            )}
+          >
+            <span className="flex min-w-0 items-center gap-2.5">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-sky-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-sky-300">
+                <Code2 className="size-3.5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-[12px] font-semibold leading-none">打开工具流</span>
+                <span className="mt-1 block truncate text-[10px] text-slate-500 dark:text-slate-400">
+                  查看消息、工具参数和执行结果
+                </span>
+              </span>
+            </span>
+            <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 dark:text-slate-500" />
+          </button>
+        )}
+
+        <div className="rounded-lg border border-border/55 bg-muted/20 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex min-w-0 items-center gap-2 font-medium text-foreground/90">
+              <Code2 className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate">{worker.last_tool_name || "等待工具调用"}</span>
+            </span>
+            <span className="shrink-0 rounded-md border border-border/70 bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {worker.tool_call_count} 次
+            </span>
+          </div>
+          <div className="mt-2 space-y-1 text-[11px] leading-relaxed text-muted-foreground">
+            <div className="truncate">
+              <span className="text-foreground/70">状态：</span>
+              {activityLabel || compactInline(worker.last_event || statusMeta.label)}
+            </div>
+            <div className="truncate">
+              <span className="text-foreground/70">耗时：</span>
+              {formatCompactElapsed(durationMs)}
+            </div>
+            {(worker.summary || worker.error || worker.result_path || worker.report_path) && (
+              <div className="truncate">
+                <span className="text-foreground/70">
+                  {worker.status === "failed" || worker.status === "cancelled" ? "结果：" : "摘要："}
+                </span>
+                {compactInline(
+                  worker.error || worker.summary || worker.result_path || worker.report_path || ""
+                )}
+              </div>
+            )}
+            {tokenLabel && (
+              <div className="truncate">
+                <span className="text-foreground/70">Token：</span>
+                {tokenLabel}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {(hasAnyFile || ownedFiles.length > 0 || tokenLabel) && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {worker.result_path && (
+              <button
+                type="button"
+                onClick={() => openWorkerFile(worker.result_path)}
+                className="rounded-md border border-border/70 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+              >
+                结果
+              </button>
+            )}
+            {worker.report_path && (
+              <button
+                type="button"
+                onClick={() => openWorkerFile(worker.report_path)}
+                className="rounded-md border border-border/70 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+              >
+                报告
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setDetailsOpen((open) => !open)}
+              className="rounded-md border border-border/70 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+            >
+              {detailsOpen ? "收起细节" : "更多信息"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {detailsOpen && (
+        <div className="mx-3 mb-3 space-y-1 rounded-lg border border-border/50 bg-muted/25 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+          <div className="truncate">
+            <span className="text-foreground/70">Worker：</span>
+            {worker.worker_id}
+          </div>
+          <div className="truncate">
+            <span className="text-foreground/70">Thread：</span>
+            {worker.worker_thread_id}
+          </div>
+          {ownedFiles.length > 0 && (
+            <div className="line-clamp-2">
+              <span className="text-foreground/70">Owned files：</span>
+              {ownedFiles.join(", ")}
+            </div>
+          )}
+          {worker.result_path && (
+            <div className="truncate">
+              <span className="text-foreground/70">Result：</span>
+              {worker.result_path}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function getCoordinatorWorkerStatusMeta(status: CoordinatorWorkerView["status"]): {
+  label: string
+  icon: React.ElementType
+  iconClass: string
+  badgeClass: string
+} {
+  if (status === "running") {
+    return {
+      label: "运行中",
+      icon: Loader2,
+      iconClass: "animate-spin text-blue-600 dark:text-blue-400",
+      badgeClass: "bg-blue-500/10 text-blue-700 hover:bg-blue-500/10 dark:text-blue-300"
+    }
+  }
+  if (status === "completed") {
+    return {
+      label: "已完成",
+      icon: CheckCircle2,
+      iconClass: "text-stone-600 dark:text-stone-300",
+      badgeClass:
+        "border-stone-200 bg-stone-100 text-stone-700 hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/65 dark:text-stone-300"
+    }
+  }
+  if (status === "failed") {
+    return {
+      label: "失败",
+      icon: AlertCircle,
+      iconClass: "text-red-600 dark:text-red-400",
+      badgeClass: "bg-red-500/10 text-red-700 hover:bg-red-500/10 dark:text-red-300"
+    }
+  }
+  return {
+    label: "已取消",
+    icon: XCircle,
+    iconClass: "text-muted-foreground",
+    badgeClass: "bg-muted text-muted-foreground hover:bg-muted"
+  }
+}
+
+function formatCoordinatorWorkerTokenUsage(
+  usage: CoordinatorWorkerView["token_usage"] | undefined
+): string {
+  if (!usage) return ""
+  const total = usage.total_tokens
+  const input = usage.input_tokens
+  const output = usage.output_tokens
+  const parts = [
+    typeof total === "number" ? `总 ${total}` : "",
+    typeof input === "number" ? `输入 ${input}` : "",
+    typeof output === "number" ? `输出 ${output}` : ""
+  ].filter(Boolean)
+  return parts.join("，")
+}
+
+function resolveCoordinatorWorkerPreviewPath(
+  threadId: string,
+  filePath: string
+): string | undefined {
+  const normalized = filePath.trim().replace(/\\/g, "/")
+  if (!normalized) return undefined
+  if (isAbsolutePath(normalized) || normalized.split("/").includes("..")) return undefined
+  const coordinatorReportsPrefix = `.cmbdevclaw/coordinator/${threadId}/reports/`
+  if (normalized.startsWith(".cmbdevclaw/")) {
+    return normalized.startsWith(coordinatorReportsPrefix) ? normalized : undefined
+  }
+  if (normalized.startsWith("reports/") || normalized === "state.json") {
+    return `.cmbdevclaw/coordinator/${threadId}/${normalized}`
+  }
+  return undefined
+}
+
+function compactInline(value: string): string {
+  const compacted = value.replace(/\s+/g, " ").trim()
+  if (compacted.length <= 96) return compacted
+  return `${compacted.slice(0, 46)}...${compacted.slice(-32)}`
+}
+
+function safeDateMs(value: string | undefined): number {
+  if (!value) return Date.now()
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : Date.now()
+}
+
+function deriveCoordinatorWorkerCompletedAtMs(
+  worker: CoordinatorWorkerView,
+  startedAtMs: number
+): number {
+  if (worker.finished_at) return safeDateMs(worker.finished_at)
+  if (worker.last_activity_at) return safeDateMs(worker.last_activity_at)
+  if (worker.updated_at) return safeDateMs(worker.updated_at)
+  if (typeof worker.duration_ms === "number" && Number.isFinite(worker.duration_ms)) {
+    return startedAtMs + Math.max(0, worker.duration_ms)
+  }
+  return startedAtMs
+}
+
+function formatCompactElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "刚刚"
+  if (ms < 1000) return "刚刚"
+
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds} 秒`
+
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+  if (minutes < 60) {
+    return remainingSeconds === 0 ? `${minutes} 分钟` : `${minutes}分${remainingSeconds}秒`
+  }
+
+  const hours = Math.floor(minutes / 60)
+  return `${hours} 小时+`
+}
+
 type RightPanelSkillTreeNode = {
   key: string
   label: string
+  title?: string
   skill?: SkillMetadata
   children: RightPanelSkillTreeNode[]
-}
-
-function getRightPanelSkillPath(skill: SkillMetadata): string {
-  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
-  return String(skill.relativePath || id || skill.name || "")
-    .replace(/\\/g, "/")
-    .replace(/^\/+|\/+$/g, "")
 }
 
 function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeNode[] {
@@ -2308,25 +2822,34 @@ function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeN
   const getIndex = (node: RightPanelSkillTreeNode): Map<string, RightPanelSkillTreeNode> => {
     let index = indexByNode.get(node)
     if (!index) {
-      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
+      index = new Map(node.children.map((child) => [child.key, child]))
       indexByNode.set(node, index)
     }
     return index
   }
 
   for (const skill of skills) {
-    const segments = getRightPanelSkillPath(skill).split("/").filter(Boolean)
-    const fallbackSegments = segments.length > 0 ? segments : [skill.name]
+    const segments = getRightPanelSkillPathSegments(skill)
+    const fallbackSegments =
+      segments.length > 0
+        ? segments
+        : [{ key: skill.name, label: skill.name }]
     let current = root
 
     for (const segment of fallbackSegments) {
-      const normalized = normalizeSkillId(segment)
+      const normalized = normalizeSkillId(segment.key || segment.label)
       const childIndex = getIndex(current)
-      let child = childIndex.get(normalized)
+      const nodeKey = `${current.key}/${normalized}`
+      let child = childIndex.get(nodeKey)
       if (!child) {
-        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
+        child = {
+          key: nodeKey,
+          label: segment.label,
+          title: segment.title,
+          children: []
+        }
         current.children.push(child)
-        childIndex.set(normalized, child)
+        childIndex.set(nodeKey, child)
       }
       current = child
     }
@@ -2467,14 +2990,16 @@ function SkillsContent({
                       </Badge>
                     )}
                   </div>
-                  {node.skill.pluginName && (
+                  {(node.skill.pluginName || node.skill.pluginId) && (
                     <div className="mt-1 flex min-w-0 items-center gap-1">
                       <Badge
                         variant="outline"
                         className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
-                        title={`来自插件：${node.skill.pluginName}`}
+                        title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
                       >
-                        <span className="truncate">插件 · {node.skill.pluginName}</span>
+                        <span className="truncate">
+                          插件 · {node.skill.pluginName ?? node.skill.pluginId}
+                        </span>
                       </Badge>
                     </div>
                   )}
@@ -2488,6 +3013,7 @@ function SkillsContent({
                 <button
                   className="flex min-h-9 w-full items-center gap-2 rounded-sm border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35"
                   onClick={() => toggleTreeNode(node.key)}
+                  title={node.title ?? node.label}
                 >
                   {childrenExpanded ? (
                     <ChevronDown className="size-3 shrink-0" />
@@ -2736,6 +3262,111 @@ const TOOL_LABEL: Record<string, string> = {
   manage_skill: "技能管理"
 }
 
+type HookSourceGroup = {
+  key: string
+  sourceLabel: string
+  title: string
+  detail?: string
+  fullPath?: string
+  badgeClassName: string
+  priority: number
+  hooks: DisplayHook[]
+}
+
+function getHookSummary(hook: DisplayHook): string {
+  if (hook.type === "prompt") return hook.prompt ?? ""
+  if (hook.type === "http") return hook.url ?? ""
+  return hook.command ?? ""
+}
+
+function getCompactPath(pathValue?: string): string | undefined {
+  if (!pathValue) return undefined
+  const normalized = pathValue.replace(/\\/g, "/").replace(/\/+$/, "")
+  const parts = normalized.split("/").filter(Boolean)
+  if (parts.length <= 2) return normalized
+  return parts.slice(-2).join("/")
+}
+
+function getHookSourcePath(hook: DisplayHook): string | undefined {
+  return hook.hookPath ?? hook.hookSourcePath
+}
+
+function getHookSourceGroupInfo(hook: DisplayHook): Omit<HookSourceGroup, "hooks"> {
+  const sourcePath = getHookSourcePath(hook)
+  const compactPath = getCompactPath(sourcePath)
+
+  if (hook.source === "workspace") {
+    return {
+      key: `workspace:${sourcePath ?? "current"}`,
+      sourceLabel: "工作区",
+      title: compactPath ?? "当前工作区",
+      fullPath: sourcePath,
+      badgeClassName: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+      priority: 0
+    }
+  }
+
+  if (hook.source === "global") {
+    return {
+      key: "global",
+      sourceLabel: "全局",
+      title: "全局 hooks.json",
+      detail: compactPath,
+      fullPath: sourcePath,
+      badgeClassName: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
+      priority: 1
+    }
+  }
+
+  if (hook.source === "plugin") {
+    const title = hook.pluginName ?? hook.pluginId ?? compactPath ?? "未命名插件"
+    return {
+      key: `plugin:${hook.pluginId ?? hook.pluginName ?? sourcePath ?? "unknown"}`,
+      sourceLabel: "插件",
+      title,
+      detail: compactPath,
+      fullPath: sourcePath,
+      badgeClassName: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
+      priority: 2
+    }
+  }
+
+  const isPluginSkillHook = Boolean(hook.pluginName || hook.pluginId)
+  const skillTitle = hook.skillName ?? compactPath ?? "未命名技能"
+  const pluginLabel = hook.pluginName ?? hook.pluginId
+  return {
+    key: `${isPluginSkillHook ? "plugin-skill" : "skill"}:${
+      hook.pluginId ?? hook.pluginName ?? ""
+    }:${hook.skillPath ?? hook.skillName ?? sourcePath ?? "unknown"}`,
+    sourceLabel: isPluginSkillHook ? "插件技能" : "技能",
+    title: isPluginSkillHook && pluginLabel ? `${pluginLabel} · ${skillTitle}` : skillTitle,
+    detail: compactPath,
+    fullPath: sourcePath,
+    badgeClassName: isPluginSkillHook
+      ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400"
+      : "bg-teal-500/15 text-teal-600 dark:text-teal-400",
+    priority: isPluginSkillHook ? 3 : 4
+  }
+}
+
+function buildHookSourceGroups(hooks: DisplayHook[]): HookSourceGroup[] {
+  const groups = new Map<string, HookSourceGroup>()
+
+  for (const hook of hooks) {
+    const info = getHookSourceGroupInfo(hook)
+    const existing = groups.get(info.key)
+    if (existing) {
+      existing.hooks.push(hook)
+    } else {
+      groups.set(info.key, { ...info, hooks: [hook] })
+    }
+  }
+
+  return Array.from(groups.values()).sort(
+    (a, b) => a.priority - b.priority || a.title.localeCompare(b.title, "zh-Hans-CN")
+  )
+}
+
 function HooksContent({
   hooks,
   onChange
@@ -2753,8 +3384,10 @@ function HooksContent({
     )
   }
 
-  const enabled = hooks.filter((h) => h.enabled)
-  const disabled = hooks.filter((h) => !h.enabled)
+  const enabledHooks = hooks.filter((h) => h.enabled)
+  const disabledHooks = hooks.filter((h) => !h.enabled)
+  const enabledGroups = buildHookSourceGroups(enabledHooks)
+  const disabledGroups = buildHookSourceGroups(disabledHooks)
 
   const handleToggle = async (hook: DisplayHook): Promise<void> => {
     try {
@@ -2775,7 +3408,7 @@ function HooksContent({
     // A plugin-owned skill hook: source="skill" but with pluginName / pluginId set.
     // Show its origin (plugin → skill) so users can tell it apart from a stand-alone skill hook.
     const isPluginSkillHook = isSkillHook && Boolean(hook.pluginName || hook.pluginId)
-    const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
+    const summary = getHookSummary(hook)
     const ownerLabel = isPluginHook
       ? hook.pluginName
       : isPluginSkillHook && hook.skillName
@@ -2894,18 +3527,70 @@ function HooksContent({
     )
   }
 
+  const renderHookGroup = (group: HookSourceGroup): React.JSX.Element => {
+    return (
+      <details
+        key={group.key}
+        className="group/source space-y-2 border-t border-border/60 pt-2 first:border-t-0 first:pt-0"
+        open
+      >
+        <summary
+          className="flex cursor-pointer list-none items-center justify-between gap-2 px-1"
+          title={group.fullPath}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <ChevronRight className="size-3 shrink-0 text-muted-foreground transition-transform group-open/source:rotate-90" />
+            <span
+              className={cn(
+                "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                group.badgeClassName
+              )}
+            >
+              {group.sourceLabel}
+            </span>
+            <span className="min-w-0 truncate text-xs font-medium text-foreground/90">
+              {group.title}
+            </span>
+          </div>
+          <Badge
+            variant="outline"
+            className="h-5 shrink-0 text-[10px]"
+            title={`${group.hooks.length} 个 Hook`}
+          >
+            {group.hooks.length}
+          </Badge>
+        </summary>
+        {group.detail && group.detail !== group.title && (
+          <div
+            className="min-w-0 truncate px-6 text-[10px] text-muted-foreground"
+            title={group.fullPath}
+          >
+            {group.detail}
+          </div>
+        )}
+        <div className="space-y-2">{group.hooks.map(renderHookCard)}</div>
+      </details>
+    )
+  }
+
   return (
     <div className="p-3 space-y-2">
-      {enabled.length > 0 && enabled.map(renderHookCard)}
-      {disabled.length > 0 && (
-        <details className="rounded-sm border border-border/70 bg-muted/20 px-2 py-2">
+      {enabledGroups.map(renderHookGroup)}
+      {disabledGroups.length > 0 && (
+        <details
+          className="group/disabled rounded-sm border border-border/70 bg-muted/20 px-2 py-2"
+          open={enabledGroups.length === 0}
+        >
           <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
-            <span>已禁用</span>
-            <Badge variant="outline" className="text-[10px] h-5">
-              {disabled.length}
+            <span className="flex min-w-0 items-center gap-1.5">
+              <ChevronRight className="size-3 shrink-0 transition-transform group-open/disabled:rotate-90" />
+              <span>已禁用</span>
+            </span>
+            <Badge variant="outline" className="h-5 shrink-0 text-[10px]">
+              {disabledHooks.length}
             </Badge>
           </summary>
-          <div className="space-y-2 pt-2">{disabled.map(renderHookCard)}</div>
+          <div className="space-y-2 pt-2">{disabledGroups.map(renderHookGroup)}</div>
         </details>
       )}
     </div>

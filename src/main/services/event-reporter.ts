@@ -18,6 +18,7 @@ import { randomUUID } from "crypto"
 import { getUserInfo } from "../storage"
 import { getLocalIP } from "../net-utils"
 import { nowIsoLocal } from "../util/local-time"
+import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 
 // ─────────────────────────────────────────────────────────
 // Constants
@@ -32,7 +33,15 @@ type FetchTimeout = typeof FETCH_TIMEOUT
 // Types
 // ─────────────────────────────────────────────────────────
 
-export type EventCategory = "skill" | "git" | "code_adoption"
+export type EventCategory =
+  | "skill"
+  | "git"
+  | "code_adoption"
+  | "harness"
+  | "heartbeat"
+  | "memory"
+  | "hook"
+  | "chatx"
 
 /**
  * Wire format expected by the server.
@@ -55,6 +64,12 @@ export interface CoworkEvent {
   ystId?:        string
   originOrgId?:  string
   orgName?:      string
+  pathName?:     string
+  pathId?:       string
+  upperOrgLv0?:  string
+  upperOrgLv1?:  string
+  upperOrgLv2?:  string
+  upperOrgLv3?:  string
   properties?:   Record<string, unknown>
 }
 
@@ -137,10 +152,6 @@ export function getEventReporter(): IEventReporter {
   return _reporter
 }
 
-// ─────────────────────────────────────────────────────────
-// Helpers — context resolution
-// ─────────────────────────────────────────────────────────
-
 /**
  * Build a base event with all common fields prefilled from current user/system
  * state. Caller only needs to specify name, category and properties.
@@ -156,6 +167,7 @@ export function buildEvent(
   properties?: Record<string, unknown>
 ): CoworkEvent {
   const userInfo = getUserInfo()
+  const upperOrgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
   return {
     eventId:       randomUUID(),
     eventName,
@@ -167,6 +179,12 @@ export function buildEvent(
     ystId:         userInfo?.ystId,
     originOrgId:   userInfo?.originOrgId,
     orgName:       userInfo?.orgName,
+    pathName:      userInfo?.pathName,
+    pathId:        userInfo?.originPathId,
+    upperOrgLv0:   upperOrgLevels.upperOrgLv0,
+    upperOrgLv1:   upperOrgLevels.upperOrgLv1,
+    upperOrgLv2:   upperOrgLevels.upperOrgLv2,
+    upperOrgLv3:   upperOrgLevels.upperOrgLv3,
     properties
   }
 }

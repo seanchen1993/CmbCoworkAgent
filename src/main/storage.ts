@@ -3,6 +3,7 @@ import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import {
+  type Dirent,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -14,11 +15,14 @@ import {
 import {
   isSupportedHookEvent,
   type HookConfig,
+  type HookInjectUserContext,
+  type HookUserContextField,
   type HookOnBlockConfig,
   type HookSourceType,
   type HookUpsert
 } from "./hooks/types"
-import type { AgentAutoCommitSettings } from "./types"
+import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
+import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -29,6 +33,7 @@ import type {
   SkillHookMetadata
 } from "./types"
 import { copyDirRecursive } from "./utils/fs"
+import Store from "electron-store"
 import {
   discoverSkills,
   discoverSkillsSync,
@@ -111,6 +116,64 @@ export function deleteThreadCheckpoint(threadId: string): void {
   if (existsSync(path)) {
     unlinkSync(path)
   }
+}
+
+export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
+  if (!SAFE_ID_RE.test(parentThreadId)) {
+    throw new Error(`Invalid threadId: ${parentThreadId}`)
+  }
+  if (parentThreadId.includes("__worker__")) {
+    throw new Error(
+      `Invalid coordinator parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __worker__ delimiter.`
+    )
+  }
+
+  const dir = getThreadCheckpointDir()
+  const prefix = `${parentThreadId}__worker__`
+  let deleted = 0
+
+  for (const filename of readdirSync(dir)) {
+    if (!filename.endsWith(".sqlite")) continue
+    const checkpointThreadId = filename.slice(0, -".sqlite".length)
+    if (!checkpointThreadId.startsWith(prefix)) continue
+    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
+    unlinkSync(join(dir, filename))
+    deleted += 1
+  }
+
+  return deleted
+}
+
+/** Delete leftover workflow-subagent checkpoints for a thread. Workflow subagents
+ * use a `<parent>__wf_<run>_a<index>` checkpoint thread (subagent.ts), exactly like
+ * coordinator workers use `__worker__`. They self-clean in the subagent's `finally`
+ * (deleteThreadCheckpoint), so this only sweeps the rare leftovers a crash or a
+ * failed cleanup left behind — the symmetric counterpart to
+ * deleteThreadWorkerCheckpoints, which only covers `__worker__`. (#3) */
+export function deleteThreadWorkflowCheckpoints(parentThreadId: string): number {
+  if (!SAFE_ID_RE.test(parentThreadId)) {
+    throw new Error(`Invalid threadId: ${parentThreadId}`)
+  }
+  if (parentThreadId.includes("__wf_")) {
+    throw new Error(
+      `Invalid workflow parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __wf_ delimiter.`
+    )
+  }
+
+  const dir = getThreadCheckpointDir()
+  const prefix = `${parentThreadId}__wf_`
+  let deleted = 0
+
+  for (const filename of readdirSync(dir)) {
+    if (!filename.endsWith(".sqlite")) continue
+    const checkpointThreadId = filename.slice(0, -".sqlite".length)
+    if (!checkpointThreadId.startsWith(prefix)) continue
+    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
+    unlinkSync(join(dir, filename))
+    deleted += 1
+  }
+
+  return deleted
 }
 
 export function getEnvFilePath(): string {
@@ -202,6 +265,7 @@ interface SkillEvolutionSettings {
   onlineEnabled?: boolean
   autoPropose?: boolean
   threshold?: number
+  turnThreshold?: number
 }
 
 function readSkillEvolutionSettings(): SkillEvolutionSettings {
@@ -233,7 +297,8 @@ export function setOnlineSkillEvolutionEnabled(enabled: boolean): void {
   writeSkillEvolutionSettings({
     onlineEnabled: enabled,
     autoPropose: current.autoPropose === true,
-    threshold: getSkillEvolutionThreshold()
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: getSkillEvolutionTurnThreshold()
   })
 }
 
@@ -251,13 +316,17 @@ export function setSkillAutoProposeEnabled(enabled: boolean): void {
   writeSkillEvolutionSettings({
     onlineEnabled: current.onlineEnabled === true,
     autoPropose: enabled,
-    threshold: getSkillEvolutionThreshold()
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: getSkillEvolutionTurnThreshold()
   })
 }
 
 const SKILL_EVOLUTION_THRESHOLD_DEFAULT = 10
 const SKILL_EVOLUTION_THRESHOLD_MIN = 1
 const SKILL_EVOLUTION_THRESHOLD_MAX = 99
+const SKILL_EVOLUTION_TURN_THRESHOLD_DEFAULT = 2
+const SKILL_EVOLUTION_TURN_THRESHOLD_MIN = 1
+const SKILL_EVOLUTION_TURN_THRESHOLD_MAX = 99
 
 export function getSkillEvolutionThreshold(): number {
   const value = Number(readSkillEvolutionSettings().threshold)
@@ -280,7 +349,34 @@ export function setSkillEvolutionThreshold(value: number): void {
   writeSkillEvolutionSettings({
     onlineEnabled: current.onlineEnabled === true,
     autoPropose: current.autoPropose === true,
-    threshold: clamped
+    threshold: clamped,
+    turnThreshold: getSkillEvolutionTurnThreshold()
+  })
+}
+
+export function getSkillEvolutionTurnThreshold(): number {
+  const value = Number(readSkillEvolutionSettings().turnThreshold)
+  if (
+    Number.isInteger(value) &&
+    value >= SKILL_EVOLUTION_TURN_THRESHOLD_MIN &&
+    value <= SKILL_EVOLUTION_TURN_THRESHOLD_MAX
+  ) {
+    return value
+  }
+  return SKILL_EVOLUTION_TURN_THRESHOLD_DEFAULT
+}
+
+export function setSkillEvolutionTurnThreshold(value: number): void {
+  const clamped = Math.max(
+    SKILL_EVOLUTION_TURN_THRESHOLD_MIN,
+    Math.min(SKILL_EVOLUTION_TURN_THRESHOLD_MAX, Math.round(value))
+  )
+  const current = readSkillEvolutionSettings()
+  writeSkillEvolutionSettings({
+    onlineEnabled: current.onlineEnabled === true,
+    autoPropose: current.autoPropose === true,
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: clamped
   })
 }
 
@@ -288,24 +384,125 @@ export function setSkillEvolutionThreshold(value: number): void {
 
 const MEMORY_SETTINGS_FILE = join(OPENWORK_DIR, "memory-settings.json")
 
-export function isMemoryEnabled(): boolean {
-  if (!existsSync(MEMORY_SETTINGS_FILE)) return true
+interface MemorySettings {
+  enabled?: boolean
+  dreamEnabled?: boolean
+  sessionOptInMigrated?: boolean
+}
+
+function readMemorySettings(): MemorySettings {
+  if (!existsSync(MEMORY_SETTINGS_FILE)) return {}
   try {
     const parsed = JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8"))
-    return parsed.enabled !== false
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as MemorySettings)
+      : {}
   } catch {
-    return true
+    return {}
   }
 }
 
-export function setMemoryEnabled(enabled: boolean): void {
+function writeMemorySettings(settings: MemorySettings): void {
   getOpenworkDir()
-  writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify({ enabled }, null, 2))
+  writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify(settings, null, 2))
+}
+
+function hasLegacyMemoryFiles(): boolean {
+  const memoryDir = join(OPENWORK_DIR, "memory")
+  if (!existsSync(memoryDir)) return false
+  const stack = [memoryDir]
+  while (stack.length > 0) {
+    const dir = stack.pop()!
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".md")) return true
+      if (entry.isDirectory()) stack.push(join(dir, entry.name))
+    }
+  }
+  return false
+}
+
+export function getMemorySessionOptInMigrationState(hasExistingThreads: boolean): {
+  migrated: boolean
+  legacyMemoryEnabled: boolean
+  legacyDreamEnabled: boolean
+} {
+  const settingsFileExists = existsSync(MEMORY_SETTINGS_FILE)
+  const current = readMemorySettings()
+  if (current.sessionOptInMigrated === true) {
+    const enabled = current.enabled === true
+    return {
+      migrated: true,
+      legacyMemoryEnabled: enabled,
+      legacyDreamEnabled: enabled && current.dreamEnabled === true
+    }
+  }
+  const legacyInstall = settingsFileExists || hasExistingThreads || hasLegacyMemoryFiles()
+  const legacyMemoryEnabled = legacyInstall && current.enabled !== false
+  return {
+    migrated: false,
+    legacyMemoryEnabled,
+    legacyDreamEnabled: legacyMemoryEnabled && current.dreamEnabled !== false
+  }
+}
+
+export function markMemorySessionOptInMigrated(options: {
+  enabled: boolean
+  dreamEnabled: boolean
+}): void {
+  const current = readMemorySettings()
+  writeMemorySettings({
+    ...current,
+    enabled: options.enabled,
+    dreamEnabled: options.enabled && options.dreamEnabled,
+    sessionOptInMigrated: true
+  })
+}
+
+export function isMemoryEnabled(): boolean {
+  return readMemorySettings().enabled === true
+}
+
+export function setMemoryEnabled(enabled: boolean): void {
+  const current = readMemorySettings()
+  writeMemorySettings({
+    ...current,
+    enabled,
+    dreamEnabled: enabled ? current.dreamEnabled === true : false
+  })
+}
+
+export function isThreadMemoryEnabled(metadata?: Record<string, unknown> | null): boolean {
+  return isMemoryEnabled() && metadata?.memoryEnabled === true
+}
+
+export function isDreamEnabled(): boolean {
+  const current = readMemorySettings()
+  return current.enabled === true && current.dreamEnabled === true
+}
+
+export function setDreamEnabled(enabled: boolean): void {
+  const current = readMemorySettings()
+  const memoryEnabled = current.enabled === true
+  writeMemorySettings({
+    ...current,
+    enabled: memoryEnabled,
+    dreamEnabled: memoryEnabled && enabled
+  })
 }
 
 // ── Agent auto-commit settings ───────────────────────────────────────────────
 
 const AGENT_AUTO_COMMIT_SETTINGS_FILE = join(OPENWORK_DIR, "agent-auto-commit-settings.json")
+const AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE = join(
+  OPENWORK_DIR,
+  "agent-auto-commit-workspace-cards.json"
+)
 
 const DEFAULT_AGENT_AUTO_COMMIT_SETTINGS: AgentAutoCommitSettings = {
   mode: "off",
@@ -341,6 +538,57 @@ function normalizeAgentAutoCommitSettings(input: unknown): AgentAutoCommitSettin
   }
 }
 
+function normalizeWorkspaceCardEntry(
+  value: unknown,
+  fallbackPath: string
+): AgentAutoCommitWorkspaceCard | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const workspacePath =
+    typeof raw.workspacePath === "string" && raw.workspacePath.trim()
+      ? raw.workspacePath.trim()
+      : fallbackPath
+  const cardNumber =
+    typeof raw.cardNumber === "string" && raw.cardNumber.trim() ? raw.cardNumber.trim() : undefined
+  const updatedAt =
+    typeof raw.updatedAt === "string" && raw.updatedAt.trim() ? raw.updatedAt.trim() : undefined
+  return {
+    workspacePath,
+    ...(cardNumber ? { cardNumber } : {}),
+    ...(updatedAt ? { updatedAt } : {})
+  }
+}
+
+function readAgentAutoCommitWorkspaceCards(): Record<string, AgentAutoCommitWorkspaceCard> {
+  getOpenworkDir()
+  if (!existsSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE)) return {}
+  try {
+    const raw = JSON.parse(readFileSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE, "utf-8")) as unknown
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+    const entries = raw as Record<string, unknown>
+    const cards: Record<string, AgentAutoCommitWorkspaceCard> = {}
+    for (const [key, value] of Object.entries(entries)) {
+      const card = normalizeWorkspaceCardEntry(value, key)
+      if (!card?.workspacePath) continue
+      cards[normalizeWorkspacePathKey(card.workspacePath)] = card
+    }
+    return cards
+  } catch {
+    return {}
+  }
+}
+
+function writeAgentAutoCommitWorkspaceCards(
+  cards: Record<string, AgentAutoCommitWorkspaceCard>
+): void {
+  getOpenworkDir()
+  writeFileSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE, JSON.stringify(cards, null, 2))
+}
+
+function getLegacyAgentAutoCommitCardNumber(): string | undefined {
+  return getAgentAutoCommitSettings().cardNumber?.trim()
+}
+
 export function getAgentAutoCommitSettings(): AgentAutoCommitSettings {
   getOpenworkDir()
   if (!existsSync(AGENT_AUTO_COMMIT_SETTINGS_FILE)) {
@@ -363,11 +611,86 @@ export function saveAgentAutoCommitSettings(
     ...getAgentAutoCommitSettings(),
     ...updates
   })
-  if (next.mode !== "off" && !next.cardNumber?.trim()) {
-    throw new Error("开启自动提交前需要填写卡片编号")
+  const persisted: AgentAutoCommitSettings = {
+    mode: next.mode,
+    push: next.push,
+    messageStrategy: next.messageStrategy,
+    // Preserve the legacy global cardNumber so it stays available as the migration
+    // fallback for workspaces that have not been configured yet (see
+    // getAgentAutoCommitWorkspaceCard). Renderer saves never set this field.
+    ...(next.cardNumber ? { cardNumber: next.cardNumber } : {}),
+    ...(next.template ? { template: next.template } : {})
   }
-  writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(next, null, 2))
+  writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(persisted, null, 2))
+  return persisted
+}
+
+export function getAgentAutoCommitWorkspaceCard(
+  workspacePath: string
+): AgentAutoCommitWorkspaceCard {
+  const trimmedPath = workspacePath.trim()
+  if (!trimmedPath) {
+    return { workspacePath: "" }
+  }
+  const key = normalizeWorkspacePathKey(trimmedPath)
+  const cards = readAgentAutoCommitWorkspaceCards()
+  const existing = cards[key]
+  // Any explicit record for this workspace wins — including a "cleared" record
+  // with no cardNumber. This is what lets the user clear a workspace card and have
+  // it stay cleared instead of leaking the legacy global card back in on reload.
+  if (existing) return existing
+
+  // Read-only legacy fallback: only when the workspace has never been configured.
+  // Surface the old global card as a soft default without persisting; it becomes a
+  // real per-workspace entry once a card is explicitly saved or committed. This
+  // keeps the getter side-effect-free and avoids stamping the legacy card onto every
+  // workspace the user happens to open.
+  const legacyCardNumber = getLegacyAgentAutoCommitCardNumber()
+  if (legacyCardNumber) {
+    return { workspacePath: trimmedPath, cardNumber: legacyCardNumber }
+  }
+  return { workspacePath: trimmedPath }
+}
+
+export function saveAgentAutoCommitWorkspaceCard(
+  workspacePath: string,
+  cardNumber: string | undefined
+): AgentAutoCommitWorkspaceCard {
+  const trimmedPath = workspacePath.trim()
+  if (!trimmedPath) {
+    throw new Error("缺少工作区路径，无法保存任务卡片")
+  }
+  const key = normalizeWorkspacePathKey(trimmedPath)
+  const cards = readAgentAutoCommitWorkspaceCards()
+  const trimmedCard = cardNumber?.trim()
+  if (!trimmedCard) {
+    // Persist an explicit "cleared" record (no cardNumber) rather than deleting the
+    // entry, so getAgentAutoCommitWorkspaceCard does not fall back to the legacy
+    // global card for a workspace the user deliberately emptied.
+    const cleared: AgentAutoCommitWorkspaceCard = {
+      workspacePath: trimmedPath,
+      updatedAt: new Date().toISOString()
+    }
+    cards[key] = cleared
+    writeAgentAutoCommitWorkspaceCards(cards)
+    return cleared
+  }
+
+  const next: AgentAutoCommitWorkspaceCard = {
+    workspacePath: trimmedPath,
+    cardNumber: trimmedCard,
+    updatedAt: new Date().toISOString()
+  }
+  cards[key] = next
+  writeAgentAutoCommitWorkspaceCards(cards)
   return next
+}
+
+export function getAgentAutoCommitCardNumberForWorkspace(
+  workspacePath: string | undefined
+): string | undefined {
+  if (!workspacePath?.trim()) return undefined
+  return getAgentAutoCommitWorkspaceCard(workspacePath).cardNumber
 }
 
 // ── Code exec settings ──
@@ -388,7 +711,7 @@ function readCodeExecSettings(): CodeExecSettings {
 }
 
 export function isCodeExecEnabled(): boolean {
-  return readCodeExecSettings().enabled !== false
+  return readCodeExecSettings().enabled === true
 }
 
 export function setCodeExecEnabled(enabled: boolean): void {
@@ -659,6 +982,7 @@ export interface UserInfoConfig {
   originOrgId?: string
   orgName?: string
   pathName?: string
+  upperOrgLv1?: string
   originPathId?: string
   ystRefreshToken?: string
   ystIdToken?: string
@@ -714,6 +1038,39 @@ interface StoredCustomModelRecord {
 const CUSTOM_MODEL_FILE = join(OPENWORK_DIR, "custom-model.json")
 const CUSTOM_MODELS_FILE = join(OPENWORK_DIR, "custom-models.json")
 const USERINFO_MODELS_FILE = join(OPENWORK_DIR, "userinfo-models.json")
+const GOAL_SETTINGS_FILE = join(OPENWORK_DIR, "goal-settings.json")
+
+export interface GoalSettings {
+  /**
+   * Optional model used by the goal evaluator.
+   * Empty / undefined means "use the current effective chat model".
+   */
+  evaluatorModelId?: string
+}
+
+export function getGoalSettings(): GoalSettings {
+  getOpenworkDir()
+  if (!existsSync(GOAL_SETTINGS_FILE)) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(GOAL_SETTINGS_FILE, "utf-8")) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+    const evaluatorModelId = (parsed as { evaluatorModelId?: unknown }).evaluatorModelId
+    return typeof evaluatorModelId === "string" && evaluatorModelId.trim()
+      ? { evaluatorModelId: evaluatorModelId.trim() }
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+export function setGoalSettings(settings: GoalSettings): void {
+  getOpenworkDir()
+  const evaluatorModelId = settings.evaluatorModelId?.trim()
+  writeFileSync(
+    GOAL_SETTINGS_FILE,
+    JSON.stringify(evaluatorModelId ? { evaluatorModelId } : {}, null, 2)
+  )
+}
 
 function normalizeMaxTokens(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -917,6 +1274,44 @@ function assertValidBaseUrl(value: string): string {
 
 export function getCustomModelConfig(): CustomModelConfig | null {
   const configs = getCustomModelConfigs()
+  return configs[0] ?? null
+}
+
+/**
+ * Lazily-created handle to the shared electron-store "settings" file, which is
+ * where the user-designated default model id is persisted (key "defaultModel").
+ * Lazy so module init order never matters.
+ */
+let _settingsStore: Store | null = null
+function getSettingsStore(): Store {
+  if (!_settingsStore) {
+    _settingsStore = new Store({ name: "settings", cwd: getOpenworkDir() })
+  }
+  return _settingsStore
+}
+
+/**
+ * Resolve the user-designated default model config (the "默认模型" chosen in
+ * settings), falling back to the first configured model when no explicit
+ * default is set or the stored id no longer matches a config.
+ *
+ * Use this anywhere a background / sub-agent task (skill draft generation,
+ * trace optimization, worthiness judging, …) should run on the default model
+ * rather than the chat's currently-selected model.
+ */
+export function getDefaultModelConfig(): CustomModelConfig | null {
+  const configs = getCustomModelConfigs()
+  if (configs.length === 0) return null
+
+  const stored = String(getSettingsStore().get("defaultModel", "") || "").trim()
+  if (stored) {
+    const normalizedId = stored.startsWith("custom:") ? stored.slice("custom:".length) : stored
+    const matched =
+      configs.find((config) => config.id === normalizedId) ??
+      configs.find((config) => config.model === normalizedId || config.model === stored)
+    if (matched) return matched
+  }
+
   return configs[0] ?? null
 }
 
@@ -1854,37 +2249,33 @@ export function setPluginEnabled(id: string, enabled: boolean): void {
  * Backfill origin for plugins installed before the field existed.
  *
  * Used by the renderer's one-shot legacy migration. Writes plugins.json once
- * for the whole batch — for a user with N legacy plugins this avoids N IPC
- * round-trips and N file writes through the mutex.
+ * for the whole batch so users with many legacy plugins avoid N IPC calls and
+ * N file writes.
  *
- * - No-op for unknown ids or when the stored origin already matches.
- * - Does NOT touch `updatedAt`: origin is a back-fill of latent metadata, not
- *   a user-visible change; bumping the timestamp would corrupt any UI sorted
- *   by updatedAt the first time a session backfills many legacy plugins.
- * - Callers must hold `pluginMutex`.
+ * Callers must hold `pluginMutex`.
  */
 export function setPluginOriginsBatch(
   updates: ReadonlyArray<{ id: string; origin: "market" | "local" }>
 ): void {
-  // INVARIANT: caller must already hold `pluginMutex`. Same reasoning as
-  // setPluginOrigin — reads + writes plugins.json without taking the lock.
-  // The only current call site is the `plugins:setOriginsBatch` IPC handler.
-  // No `updates.length === 0` early return: the IPC handler already filters
-  // and short-circuits on empty input.
   const byId = new Map<string, "market" | "local">()
-  for (const u of updates) {
-    if (u && typeof u.id === "string" && (u.origin === "market" || u.origin === "local")) {
-      byId.set(u.id, u.origin)
+  for (const update of updates) {
+    if (
+      update &&
+      typeof update.id === "string" &&
+      (update.origin === "market" || update.origin === "local")
+    ) {
+      byId.set(update.id, update.origin)
     }
   }
   if (byId.size === 0) return
+
   const items = getPlugins()
   let changed = false
-  const next = items.map((i) => {
-    const desired = byId.get(i.id)
-    if (!desired || i.origin === desired) return i
+  const next = items.map((item) => {
+    const desired = byId.get(item.id)
+    if (!desired || item.origin === desired) return item
     changed = true
-    return { ...i, origin: desired }
+    return { ...item, origin: desired }
   })
   if (changed) writePlugins(next)
 }
@@ -2002,6 +2393,28 @@ export function parseMcpJsonFile(filePath: string): Record<string, PluginMcpServ
           if (typeof hv === "string") headers[hk] = hv
         }
         if (Object.keys(headers).length > 0) validated.headers = headers
+      }
+      if (typeof entry.injectUserHeaders === "boolean") {
+        validated.injectUserHeaders = entry.injectUserHeaders
+      }
+      if (typeof entry.priority === "number" && Number.isFinite(entry.priority)) {
+        validated.priority = Math.max(0, Math.min(100, entry.priority))
+      }
+      if (entry.scope === "plugin-active" || entry.scope === "plugin-installed") {
+        validated.scope = entry.scope
+      }
+      if (entry.fallback && typeof entry.fallback === "object" && !Array.isArray(entry.fallback)) {
+        const rawFallback = entry.fallback as Record<string, unknown>
+        validated.fallback = {
+          enabled: typeof rawFallback.enabled === "boolean" ? rawFallback.enabled : false,
+          to: rawFallback.to === "global" ? "global" : undefined,
+          match:
+            rawFallback.match === "toolName" || rawFallback.match === "toolNameAndSchema"
+              ? rawFallback.match
+              : undefined,
+          safeToRetry:
+            typeof rawFallback.safeToRetry === "boolean" ? rawFallback.safeToRetry : false
+        }
       }
       result[name] = validated
     }
@@ -2291,6 +2704,34 @@ function parseOptionalHookBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined
 }
 
+const HOOK_USER_CONTEXT_FIELDS = new Set<HookUserContextField>([
+  "sap_id",
+  "yst_id",
+  "name",
+  "origin_org_id",
+  "org_name",
+  "path_name",
+  "origin_path_id",
+  "yst_id_token"
+])
+
+function parseHookInjectUserContext(raw: unknown): HookInjectUserContext | undefined {
+  if (typeof raw === "boolean") return raw
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+
+  const record = raw as Record<string, unknown>
+  const include = Array.isArray(record.include)
+    ? record.include.filter(
+        (item): item is HookUserContextField =>
+          typeof item === "string" && HOOK_USER_CONTEXT_FIELDS.has(item as HookUserContextField)
+      )
+    : undefined
+  return {
+    enabled: typeof record.enabled === "boolean" ? record.enabled : true,
+    ...(include && include.length > 0 ? { include } : {})
+  }
+}
+
 function parseNativeHookTimeout(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
 }
@@ -2301,6 +2742,40 @@ function parseClaudeHookTimeoutMs(raw: Record<string, unknown>): number | undefi
 
   const timeoutSeconds = parseNativeHookTimeout(raw.timeout)
   return timeoutSeconds !== undefined ? Math.round(timeoutSeconds * 1000) : undefined
+}
+
+function parseHookShell(value: unknown): "bash" | "powershell" | "sh" | undefined {
+  if (value === "bash" || value === "powershell" || value === "sh") return value
+  return undefined
+}
+
+/** PR-14 — narrow an unknown JSON object to a HookType, defaulting to
+ *  "command". Only the persistable types pass; future-only types fall back to
+ *  command so an old binary can still read records written by a newer one
+ *  without crashing (graceful forward-compat in the dropped direction). */
+function parseHookType(value: unknown): "command" | "prompt" | "http" {
+  if (value === "prompt" || value === "http") return value
+  return "command"
+}
+
+/** PR-14 — headers map; tolerates absent / malformed input. */
+function parseHookHeaders(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const out: Record<string, string> = {}
+  let any = false
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof k === "string" && typeof v === "string") {
+      out[k] = v
+      any = true
+    }
+  }
+  return any ? out : undefined
+}
+
+function parseHookStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out = value.filter((v): v is string => typeof v === "string")
+  return out.length > 0 ? out : undefined
 }
 
 function parseHookOnBlock(raw: unknown): HookOnBlockConfig | undefined {
@@ -2408,8 +2883,25 @@ function ccCommandToHookConfig(
   const timeout = parseClaudeHookTimeoutMs(h)
   const once = parseOptionalHookBoolean(h.once)
   const persistAfterInterrupt = parseOptionalHookBoolean(h.persistAfterInterrupt)
-  const modelId =
-    typeof h.modelId === "string" ? h.modelId : typeof h.model === "string" ? h.model : undefined
+  // PR-13b: CC writes `model`; legacy snapshots may still carry `modelId`.
+  // Canonicalise to `model` in the in-memory HookConfig.
+  const model =
+    typeof h.model === "string" ? h.model : typeof h.modelId === "string" ? h.modelId : undefined
+  const statusMessage = normalizeOptionalHookString(h.statusMessage)
+  const shell = parseHookShell(h.shell)
+  // PR-15: accept CC's `async: true` config-layer field.
+  const asyncFlag = h.async === true ? true : undefined
+  // PR-15: warn-and-drop fields we explicitly don't implement in phase 2.
+  if (h.asyncRewake === true) {
+    console.warn(
+      "[Hooks/CC import] `asyncRewake: true` field ignored (this runtime does not yet support reverse-injection); downgraded to plain async."
+    )
+  }
+  if (h.asyncTimeout !== undefined) {
+    console.warn(
+      "[Hooks/CC import] `asyncTimeout` field ignored (stdout async protocol not implemented in phase 2; uses hook timeout instead)."
+    )
+  }
   const hookType =
     typeof h.type === "string" ? h.type : typeof h.prompt === "string" ? "prompt" : "command"
 
@@ -2419,14 +2911,19 @@ function ccCommandToHookConfig(
       id,
       event,
       matcher,
+      if: normalizeOptionalHookString(h.if),
       type: "command",
       command: h.command,
+      shell,
+      statusMessage,
       onBlock: parseHookOnBlock(h.onBlock),
       forcedOutcome: parseForcedOutcome(h.forcedOutcome),
       forcedReason: normalizeOptionalHookString(h.forcedReason),
       once,
       persistAfterInterrupt,
+      injectUserContext: parseHookInjectUserContext(h.injectUserContext),
       timeout,
+      async: asyncFlag,
       enabled,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt
@@ -2438,23 +2935,56 @@ function ccCommandToHookConfig(
       id,
       event,
       matcher,
+      if: normalizeOptionalHookString(h.if),
       type: "prompt",
       prompt: h.prompt,
-      // CC uses `model`, we use `modelId`; both are accepted.
-      modelId,
+      model,
       fallback: h.fallback === "block" ? "block" : "allow",
+      statusMessage,
+      onBlock: parseHookOnBlock(h.onBlock),
+      forcedOutcome: parseForcedOutcome(h.forcedOutcome),
+      forcedReason: normalizeOptionalHookString(h.forcedReason),
+      once,
+      persistAfterInterrupt,
+      injectUserContext: parseHookInjectUserContext(h.injectUserContext),
+      timeout,
+      async: asyncFlag,
+      enabled,
+      createdAt: meta.createdAt,
+      updatedAt: meta.updatedAt
+    }
+  }
+  // PR-14 follow-up — also import CC settings of type:"http" so OMC/
+  // oh-my-claudecode bridge configs survive a round trip. We deliberately
+  // do NOT honour CC's `if` permission-rule beyond what our runner accepts
+  // (the runner's matcher is permissive on unknown syntax). Agent hook type
+  // remains unsupported.
+  if (hookType === "http") {
+    if (typeof h.url !== "string") return null
+    return {
+      id,
+      event,
+      matcher,
+      if: normalizeOptionalHookString(h.if),
+      type: "http",
+      url: h.url,
+      headers: parseHookHeaders(h.headers),
+      allowedEnvVars: parseHookStringArray(h.allowedEnvVars),
+      fallback: h.fallback === "block" ? "block" : "allow",
+      statusMessage,
       onBlock: parseHookOnBlock(h.onBlock),
       forcedOutcome: parseForcedOutcome(h.forcedOutcome),
       forcedReason: normalizeOptionalHookString(h.forcedReason),
       once,
       persistAfterInterrupt,
       timeout,
+      async: asyncFlag,
       enabled,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt
     }
   }
-  // agent / http: not supported in this runtime — skip silently
+  // agent: not supported in this runtime — skip silently
   return null
 }
 
@@ -2531,32 +3061,50 @@ export function getHooks(): HookConfig[] {
       const h = item as Record<string, unknown>
       if (typeof h.id !== "string" || typeof h.event !== "string") return []
       if (!isSupportedHookEvent(h.event)) return []
-      const hookType = h.type ?? "command"
+      const hookType = parseHookType(h.type)
       if (hookType === "prompt" && typeof h.prompt !== "string") return []
       if (hookType === "command" && typeof h.command !== "string") return []
+      if (hookType === "http" && typeof h.url !== "string") return []
 
       return [
         {
           id: h.id,
           event: h.event as HookConfig["event"],
           matcher: typeof h.matcher === "string" ? h.matcher : undefined,
-          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+          if: normalizeOptionalHookString(h.if),
+          type: hookType,
           command: typeof h.command === "string" ? h.command : undefined,
+          shell: parseHookShell(h.shell),
+          // PR-14 — http fields
+          url: typeof h.url === "string" ? h.url : undefined,
+          headers: parseHookHeaders(h.headers),
+          allowedEnvVars: parseHookStringArray(h.allowedEnvVars),
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-          modelId:
-            typeof h.modelId === "string"
-              ? h.modelId
-              : typeof h.model === "string"
-                ? h.model
+          // PR-13b — prefer CC-aligned `model`, fall back to legacy `modelId`.
+          // Canonicalises to `model` in the in-memory HookConfig. Records that
+          // only carry `modelId` keep working; they migrate to `model` next
+          // time they round-trip through `upsertHook`.
+          model:
+            typeof h.model === "string"
+              ? h.model
+              : typeof h.modelId === "string"
+                ? h.modelId
                 : undefined,
           fallback:
-            hookType === "prompt" ? (h.fallback === "block" ? "block" : "allow") : undefined,
+            hookType === "prompt" || hookType === "http"
+              ? h.fallback === "block"
+                ? "block"
+                : "allow"
+              : undefined,
+          statusMessage: normalizeOptionalHookString(h.statusMessage),
           onBlock: parseHookOnBlock(h.onBlock),
           forcedOutcome: parseForcedOutcome(h.forcedOutcome),
           forcedReason: normalizeOptionalHookString(h.forcedReason),
           once: parseOptionalHookBoolean(h.once),
           persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+          injectUserContext: parseHookInjectUserContext(h.injectUserContext),
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
+          async: h.async === true ? true : undefined,
           enabled: h.enabled !== false,
           createdAt: typeof h.createdAt === "string" ? h.createdAt : now,
           updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : now
@@ -2624,31 +3172,40 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
         if (typeof h.event !== "string") return []
         if (!isSupportedHookEvent(h.event)) return []
 
-        const hookType = h.type ?? "command"
+        const hookType = parseHookType(h.type)
         if (hookType === "prompt" && typeof h.prompt !== "string") return []
         if (hookType === "command" && typeof h.command !== "string") return []
+        if (hookType === "http" && typeof h.url !== "string") return []
 
         return [
           {
             id: buildPluginHookId(plugin.id, h.id, index),
             event: h.event as HookConfig["event"],
             matcher: typeof h.matcher === "string" ? h.matcher : undefined,
-            type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+            if: normalizeOptionalHookString(h.if),
+            type: hookType,
             command: typeof h.command === "string" ? h.command : undefined,
+            shell: parseHookShell(h.shell),
+            url: typeof h.url === "string" ? h.url : undefined,
+            headers: parseHookHeaders(h.headers),
+            allowedEnvVars: parseHookStringArray(h.allowedEnvVars),
             prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-            modelId:
-              typeof h.modelId === "string"
-                ? h.modelId
-                : typeof h.model === "string"
-                  ? h.model
+            model:
+              typeof h.model === "string"
+                ? h.model
+                : typeof h.modelId === "string"
+                  ? h.modelId
                   : undefined,
             fallback: h.fallback === "block" ? "block" : "allow",
+            statusMessage: normalizeOptionalHookString(h.statusMessage),
             onBlock: parseHookOnBlock(h.onBlock),
             forcedOutcome: parseForcedOutcome(h.forcedOutcome),
             forcedReason: normalizeOptionalHookString(h.forcedReason),
             once: parseOptionalHookBoolean(h.once),
             persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+            injectUserContext: parseHookInjectUserContext(h.injectUserContext),
             timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
+            async: h.async === true ? true : undefined,
             enabled: h.enabled !== false,
             createdAt: plugin.createdAt,
             updatedAt: plugin.updatedAt
@@ -2824,9 +3381,10 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
       const h = raw as Record<string, unknown>
       if (typeof h.event !== "string") return []
       if (!isSupportedHookEvent(h.event)) return []
-      const hookType = h.type ?? "command"
+      const hookType = parseHookType(h.type)
       if (hookType === "prompt" && typeof h.prompt !== "string") return []
       if (hookType === "command" && typeof h.command !== "string") return []
+      if (hookType === "http" && typeof h.url !== "string") return []
       return [
         {
           id: buildSkillHookId(skillName, hooksRelPath, h.id, index),
@@ -2837,22 +3395,30 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
               : h.event === "PreSkillUse" || h.event === "PostSkillUse"
                 ? skillName
                 : undefined,
-          type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+          if: normalizeOptionalHookString(h.if),
+          type: hookType,
           command: typeof h.command === "string" ? h.command : undefined,
+          shell: parseHookShell(h.shell),
+          url: typeof h.url === "string" ? h.url : undefined,
+          headers: parseHookHeaders(h.headers),
+          allowedEnvVars: parseHookStringArray(h.allowedEnvVars),
           prompt: typeof h.prompt === "string" ? h.prompt : undefined,
-          modelId:
-            typeof h.modelId === "string"
-              ? h.modelId
-              : typeof h.model === "string"
-                ? h.model
+          model:
+            typeof h.model === "string"
+              ? h.model
+              : typeof h.modelId === "string"
+                ? h.modelId
                 : undefined,
           fallback: h.fallback === "block" ? "block" : "allow",
+          statusMessage: normalizeOptionalHookString(h.statusMessage),
           onBlock: parseHookOnBlock(h.onBlock),
           forcedOutcome: parseForcedOutcome(h.forcedOutcome),
           forcedReason: normalizeOptionalHookString(h.forcedReason),
           once: parseOptionalHookBoolean(h.once),
           persistAfterInterrupt: parseOptionalHookBoolean(h.persistAfterInterrupt),
+          injectUserContext: parseHookInjectUserContext(h.injectUserContext),
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
+          async: h.async === true ? true : undefined,
           enabled: h.enabled !== false,
           createdAt: now,
           updatedAt: now
@@ -3087,7 +3653,8 @@ export function getUntrustedWorkspaceCommandHooks(workspacePath: string): Untrus
 }
 
 function resolveWorkspaceHookType(raw: Record<string, unknown>): HookConfig["type"] | null {
-  if (raw.type === "prompt" || raw.type === "command") return raw.type
+  if (raw.type === "prompt" || raw.type === "command" || raw.type === "http") return raw.type
+  if (typeof raw.url === "string") return "http"
   if (typeof raw.prompt === "string") return "prompt"
   if (typeof raw.command === "string") return "command"
   return null
@@ -3133,6 +3700,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
         if (!hookType) continue
         if (hookType === "prompt" && typeof raw.prompt !== "string") continue
         if (hookType === "command" && typeof raw.command !== "string") continue
+        if (hookType === "http" && typeof raw.url !== "string") continue
         if (raw.enabled === false) continue
         result.push(
           withHookSource(
@@ -3140,22 +3708,30 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               id: `ws:${baseName}`,
               event: raw.event as HookConfig["event"],
               matcher: typeof raw.matcher === "string" ? raw.matcher : undefined,
-              type: (hookType === "prompt" ? "prompt" : "command") as HookConfig["type"],
+              if: normalizeOptionalHookString(raw.if),
+              type: hookType,
               command: typeof raw.command === "string" ? raw.command : undefined,
+              shell: parseHookShell(raw.shell),
+              url: typeof raw.url === "string" ? raw.url : undefined,
+              headers: parseHookHeaders(raw.headers),
+              allowedEnvVars: parseHookStringArray(raw.allowedEnvVars),
               prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
-              modelId:
-                typeof raw.modelId === "string"
-                  ? raw.modelId
-                  : typeof raw.model === "string"
-                    ? raw.model
+              model:
+                typeof raw.model === "string"
+                  ? raw.model
+                  : typeof raw.modelId === "string"
+                    ? raw.modelId
                     : undefined,
               fallback: raw.fallback === "block" ? "block" : "allow",
+              statusMessage: normalizeOptionalHookString(raw.statusMessage),
               onBlock: parseHookOnBlock(raw.onBlock),
               forcedOutcome: parseForcedOutcome(raw.forcedOutcome),
               forcedReason: normalizeOptionalHookString(raw.forcedReason),
               once: parseOptionalHookBoolean(raw.once),
               persistAfterInterrupt: parseOptionalHookBoolean(raw.persistAfterInterrupt),
+              injectUserContext: parseHookInjectUserContext(raw.injectUserContext),
               timeout: parseNativeHookTimeout(raw.timeoutMs) ?? parseNativeHookTimeout(raw.timeout),
+              async: raw.async === true ? true : undefined,
               enabled: true,
               createdAt: now,
               updatedAt: now
@@ -3202,17 +3778,37 @@ export function upsertHook(config: HookUpsert & { id?: string }): string {
     id,
     event: config.event,
     matcher: config.matcher,
+    if: normalizeOptionalHookString(config.if),
     type: hookType,
     command: hookType === "command" ? (config.command ?? "").trim() : undefined,
+    shell: hookType === "command" ? config.shell : undefined,
+    // PR-14 — http hook fields. Stored only when hookType === "http"; we
+    // intentionally drop them otherwise so a previously-saved http hook that
+    // later gets switched to command/prompt doesn't carry stale fields.
+    url: hookType === "http" ? config.url?.trim() : undefined,
+    headers: hookType === "http" ? config.headers : undefined,
+    allowedEnvVars: hookType === "http" ? config.allowedEnvVars : undefined,
     prompt: hookType === "prompt" ? config.prompt?.trim() : undefined,
-    modelId: hookType === "prompt" ? config.modelId : undefined,
-    fallback: hookType === "prompt" ? (config.fallback ?? "allow") : undefined,
+    // PR-13b — write `model` only; keep `modelId` absent in new records. The
+    // upsert call coming from existing UI may carry either field; prefer the
+    // CC-aligned `model`. Loaded records that still have `modelId` are read by
+    // `getHookModelRef` at runtime and migrate to `model` next time they're
+    // re-saved through this path.
+    model: hookType === "prompt" ? (config.model ?? config.modelId) : undefined,
+    // PR-14 follow-up — http hooks have the same fallback semantics as prompt
+    // (LLM/network failure → user-configured allow/block). Persist for both;
+    // command hooks ignore it (exit code 2 is the canonical block signal).
+    fallback:
+      hookType === "prompt" || hookType === "http" ? (config.fallback ?? "allow") : undefined,
+    statusMessage: normalizeOptionalHookString(config.statusMessage),
     onBlock: parseHookOnBlock(config.onBlock),
     forcedOutcome: parseForcedOutcome(config.forcedOutcome),
     forcedReason: normalizeOptionalHookString(config.forcedReason),
     once: config.once,
     persistAfterInterrupt: config.persistAfterInterrupt,
+    injectUserContext: parseHookInjectUserContext(config.injectUserContext),
     timeout: config.timeout,
+    async: config.async === true ? true : undefined,
     enabled: config.enabled ?? true,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
@@ -3273,6 +3869,110 @@ export function getGlobalRoutingMode(): "auto" | "pinned" {
 export function setGlobalRoutingMode(mode: "auto" | "pinned"): void {
   getOpenworkDir()
   writeFileSync(ROUTING_SETTINGS_FILE, JSON.stringify({ mode }, null, 2), "utf-8")
+}
+
+// ─── Preferred IDE ──────────────────────────────────────────────────────────
+
+const IDE_SETTINGS_FILE = join(OPENWORK_DIR, "ide-settings.json")
+
+type IdeSettings = import("./types").IdeSettings
+type PreferredIde = import("./types").PreferredIde
+type SupportedIde = import("./types").SupportedIde
+
+function isSupportedIde(value: unknown): value is Exclude<PreferredIde, null> {
+  return value === "idea" || value === "vscode" || value === "webstorm"
+}
+
+function normalizeExecutablePaths(value: unknown): Partial<Record<SupportedIde, string>> {
+  if (!value || typeof value !== "object") return {}
+  const normalized: Partial<Record<SupportedIde, string>> = {}
+
+  for (const [key, pathValue] of Object.entries(value as Record<string, unknown>)) {
+    if (!isSupportedIde(key) || typeof pathValue !== "string") continue
+    const trimmed = pathValue.trim()
+    if (trimmed) {
+      normalized[key] = trimmed
+    }
+  }
+
+  return normalized
+}
+
+function readIdeSettings(): IdeSettings {
+  if (!existsSync(IDE_SETTINGS_FILE)) return { preferredIde: null, executablePaths: {} }
+  try {
+    const content = readFileSync(IDE_SETTINGS_FILE, "utf-8")
+    const parsed = JSON.parse(content) as unknown
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>
+      const preferredIde = record.preferredIde
+      return {
+        preferredIde: isSupportedIde(preferredIde) ? preferredIde : null,
+        executablePaths: normalizeExecutablePaths(record.executablePaths)
+      }
+    }
+  } catch {
+    // ignore parse errors, fall back to default
+  }
+  return { preferredIde: null, executablePaths: {} }
+}
+
+function writeIdeSettings(settings: IdeSettings): IdeSettings {
+  getOpenworkDir()
+  const next: IdeSettings = {
+    preferredIde: isSupportedIde(settings.preferredIde) ? settings.preferredIde : null,
+    executablePaths: normalizeExecutablePaths(settings.executablePaths)
+  }
+  writeFileSync(IDE_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf-8")
+  return next
+}
+
+export function getIdeSettings(): IdeSettings {
+  return readIdeSettings()
+}
+
+export function getPreferredIde(): PreferredIde {
+  return readIdeSettings().preferredIde
+}
+
+export function setPreferredIde(preferredIde: PreferredIde): PreferredIde {
+  return saveIdeSettings({ preferredIde }).preferredIde
+}
+
+export function saveIdeSettings(
+  partial: Partial<IdeSettings> & {
+    executablePaths?: Partial<Record<SupportedIde, string | null | undefined>>
+  }
+): IdeSettings {
+  const current = readIdeSettings()
+  const mergedExecutablePaths = { ...current.executablePaths }
+
+  if (partial.executablePaths) {
+    for (const [key, pathValue] of Object.entries(partial.executablePaths)) {
+      if (!isSupportedIde(key)) continue
+      const trimmed = typeof pathValue === "string" ? pathValue.trim() : ""
+      if (trimmed) {
+        mergedExecutablePaths[key] = trimmed
+      } else {
+        delete mergedExecutablePaths[key]
+      }
+    }
+  }
+
+  return writeIdeSettings({
+    preferredIde:
+      partial.preferredIde === undefined
+        ? current.preferredIde
+        : isSupportedIde(partial.preferredIde)
+          ? partial.preferredIde
+          : null,
+    executablePaths: mergedExecutablePaths
+  })
+}
+
+export function getConfiguredIdeExecutablePath(ide: SupportedIde): string | null {
+  const path = readIdeSettings().executablePaths[ide]
+  return typeof path === "string" && path.trim().length > 0 ? path.trim() : null
 }
 
 /**

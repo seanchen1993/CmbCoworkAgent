@@ -1,8 +1,9 @@
-import { GitCommit, FilePlus, FileMinus, FileText, Users, UserCheck } from "lucide-react"
+import { GitCommit, FilePlus, FileMinus, FileText, Users, UserCheck, Info } from "lucide-react"
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer
 } from "recharts"
+import { Tooltip as UITooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ProductivityData } from "../use-dashboard"
 
 function StatCard({
@@ -10,21 +11,37 @@ function StatCard({
   label,
   value,
   color,
-  onClick
+  onClick,
+  hint
 }: {
   icon: React.ElementType
   label: string
   value: string
   color: string
   onClick?: () => void
+  hint?: string
 }) {
   const content = (
     <>
       <div className={`flex size-8 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-3.5 text-white" />
       </div>
-      <div>
-        <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="min-w-0">
+        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+          <span className="truncate">{label}</span>
+          {hint ? (
+            <TooltipProvider delayDuration={150}>
+              <UITooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex shrink-0 cursor-help">
+                    <Info className="size-3 text-muted-foreground/70" aria-label={hint} />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-64">{hint}</TooltipContent>
+              </UITooltip>
+            </TooltipProvider>
+          ) : null}
+        </div>
         <div className="text-base font-bold text-foreground leading-tight">{value}</div>
       </div>
     </>
@@ -99,12 +116,14 @@ export function ProductivityPanel({
           label="新增行数"
           value={formatNumber(data.totalInsertions)}
           color="bg-emerald-500"
+          hint="统计 Agent 生成的代码行数，非 git commit 的原始新增行数。不纳入统计：非代码文件（如 Markdown、JSON、图片等）、锁文件、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build 等）。"
         />
         <StatCard
           icon={FileMinus}
           label="删除行数"
           value={formatNumber(data.totalDeletions)}
           color="bg-red-500"
+          hint="统计 Agent 删除的代码行数，非 git commit 的原始删除行数。不纳入统计：非代码文件（如 Markdown、JSON、图片等）、锁文件、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build 等）。"
         />
         <StatCard
           icon={FileText}

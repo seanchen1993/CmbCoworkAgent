@@ -25,9 +25,30 @@ const MAX_USER_MESSAGE_CHARS = 500
 const MAX_ASSISTANT_TEXT_CHARS = 1200
 const MAX_ERROR_CHARS = 300
 const RECENT_SKILL_USAGE_LOOKBACK_TURNS = 5
+const MAX_ACTIVE_SKILL_THREADS = 200
 
 const proposalWindows = new Map<string, SkillProposalWindowTurn[]>()
 const recentSkillUsageTurns = new Map<string, SkillProposalWindowTurn[]>()
+
+/**
+ * Sticky per-thread "active skills" for code-generation attribution.
+ *
+ * Policy: once a turn uses a skill, that skill stays active for the rest of the
+ * thread and is attributed to all *subsequent* generated code — even in later
+ * turns that don't re-read the SKILL.md — until a later turn uses a *different*
+ * skill set, which then supersedes it. No turn-distance cap.
+ *
+ * This deliberately lives OUTSIDE `proposalWindows`: that window is reset
+ * mid-thread by the skill-evolution session (`resetSkillProposalWindow`), which
+ * would otherwise drop the active skill even though nothing superseded it. The
+ * active-skill memory must survive those resets, so it has its own map and is
+ * only cleared by an explicit thread-level reset / size-cap eviction.
+ *
+ * NOTE: this feeds ONLY the adoption context (code_gen / code_adopt → commit
+ * 明细的关联 Skill and skill-sliced adoption rate). A trace's own `usedSkills`
+ * is set separately from the current run's skills and is unaffected.
+ */
+const threadActiveSkills = new Map<string, string[]>()
 
 function clip(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
@@ -144,6 +165,28 @@ export function getRecentSkillUsageNames(threadId: string): string[] {
   return Array.from(
     new Set((recentSkillUsageTurns.get(threadId) ?? []).flatMap((turn) => turn.usedSkills))
   )
+}
+
+/**
+ * Record the skills the current turn used as the thread's active skill set,
+ * superseding any previously-active set. No-op for an empty set so a skill-less
+ * turn never clears the sticky attribution. See `threadActiveSkills`.
+ */
+export function setThreadActiveSkills(threadId: string, skills: string[]): void {
+  if (!threadId) return
+  const normalized = Array.from(new Set(skills.filter(Boolean)))
+  if (normalized.length === 0) return
+  // Evict oldest if the size cap would be exceeded (Map preserves insertion order).
+  if (!threadActiveSkills.has(threadId) && threadActiveSkills.size >= MAX_ACTIVE_SKILL_THREADS) {
+    const oldest = threadActiveSkills.keys().next().value
+    if (oldest !== undefined) threadActiveSkills.delete(oldest)
+  }
+  threadActiveSkills.set(threadId, normalized)
+}
+
+/** The thread's currently-active skills (empty if none used yet). */
+export function getThreadActiveSkills(threadId: string): string[] {
+  return [...(threadActiveSkills.get(threadId) ?? [])]
 }
 
 export function buildSkillProposalWindowContext(

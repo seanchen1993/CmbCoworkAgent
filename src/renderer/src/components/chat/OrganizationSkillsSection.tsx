@@ -50,11 +50,10 @@ async function loadOrganizationSkillsOnce(): Promise<OrganizationSkillsSnapshot>
       console.error("[OrganizationSkillsSection] Failed to load organization skills:", error)
       const mockResponse = getMockOrgSkillMarketResponse(1, 4)
       const items = mockResponse.data?.slice(0, 4) ?? []
-      cachedOrganizationSkillsData = {
+      return {
         items,
         total: mockResponse.total ?? items.length
       }
-      return cachedOrganizationSkillsData
     } finally {
       organizationSkillsRequestPromise = null
     }
@@ -101,7 +100,8 @@ export function OrganizationSkillsSection({
           name: item.name,
           description: item.description || "",
           path: item.filename || item.name,
-          source: "user"
+          source: "user",
+          version: "v1.0.0"
         },
         label: item.chinese_name || item.name,
         marketItem: item,

@@ -5,6 +5,10 @@ import {
   type HookScopeController,
   type ScopeSkipCallback
 } from "./scope"
+import {
+  hasWorkspaceBeenInitialised,
+  markWorkspaceInitialised
+} from "../services/setup-state"
 
 // Map<threadId, workspacePath?>. Cleanup paths:
 //   - fireSessionEnd(threadId)  ← threads:delete handler removes the entry
@@ -12,6 +16,15 @@ import {
 // As long as both call sites stay wired, this Map is bounded by live thread count.
 interface StartedSession {
   workspacePath?: string
+  pluginOutputDir?: string
+  systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  projectCode?: string
+  projectDir?: string
   hookScope?: HookScopeController
 }
 
@@ -23,27 +36,111 @@ export function hasActiveSessions(): boolean {
 }
 
 /** Fire SessionStart exactly once per threadId lifetime (within the main-process run). */
-export function fireSessionStartOnce(
+export async function fireSessionStartOnce(
   threadId: string,
   workspacePath?: string,
   onHookResult?: HookResultCallback,
   hookScope?: HookScopeController,
   onHookSkipped?: ScopeSkipCallback,
-  turnId?: string
-): void {
+  turnId?: string,
+  pluginOutputDir?: string,
+  systemId?: string,
+  harnessContext?: Pick<
+    HookContext,
+    | "pluginWorkspace"
+    | "featureId"
+    | "harnessProjectId"
+    | "harnessAdapterName"
+    | "harnessAdapterVersion"
+    | "projectCode"
+    | "projectDir"
+  >
+): Promise<void> {
   const existing = startedSessions.get(threadId)
   if (existing) {
     startedSessions.set(threadId, {
       workspacePath: workspacePath ?? existing.workspacePath,
+      pluginOutputDir: pluginOutputDir ?? existing.pluginOutputDir,
+      systemId: systemId ?? existing.systemId,
+      pluginWorkspace: harnessContext?.pluginWorkspace ?? existing.pluginWorkspace,
+      featureId: harnessContext?.featureId ?? existing.featureId,
+      harnessProjectId: harnessContext?.harnessProjectId ?? existing.harnessProjectId,
+      harnessAdapterName: harnessContext?.harnessAdapterName ?? existing.harnessAdapterName,
+      harnessAdapterVersion:
+        harnessContext?.harnessAdapterVersion ?? existing.harnessAdapterVersion,
+      projectCode: harnessContext?.projectCode ?? existing.projectCode,
+      projectDir: harnessContext?.projectDir ?? existing.projectDir,
       hookScope: hookScope ?? existing.hookScope
     })
     return
   }
-  startedSessions.set(threadId, { workspacePath, hookScope })
+  startedSessions.set(threadId, {
+    workspacePath,
+    pluginOutputDir,
+    systemId,
+    pluginWorkspace: harnessContext?.pluginWorkspace,
+    featureId: harnessContext?.featureId,
+    harnessProjectId: harnessContext?.harnessProjectId,
+    harnessAdapterName: harnessContext?.harnessAdapterName,
+    harnessAdapterVersion: harnessContext?.harnessAdapterVersion,
+    projectCode: harnessContext?.projectCode,
+    projectDir: harnessContext?.projectDir,
+    hookScope
+  })
+
+  // PR-11 — Setup fires (per-workspace) *before* SessionStart when this is
+  // the workspace's first encounter on this machine. SessionStart remains
+  // per-thread; this gives a clean "repo init" extension point that doesn't
+  // re-fire for every new thread in the same workspace.
+  //
+  // PR-11 follow-up — runHooks's "Setup" branch is now awaited and surfaces
+  // a synthetic blocking result when any hook timed out or returned non-zero
+  // exit. We only write the workspace setup-state marker when that returns
+  // null (success), so a failed init run will be retried on the next session.
+  if (workspacePath && !hasWorkspaceBeenInitialised(workspacePath)) {
+    const setupContext: HookContext = {
+      workspacePath,
+      sessionId: threadId,
+      turnId,
+      pluginOutputDir,
+      systemId,
+      ...harnessContext,
+      setupTrigger: "init"
+    }
+    try {
+      const result = await runHooks(
+        resolveEnabledHooksForRun(workspacePath, "Setup", setupContext, hookScope, onHookSkipped),
+        "Setup",
+        setupContext,
+        onHookResult
+      )
+      // null == every Setup hook completed with a zero exit code.
+      // A non-null blocking result signals timeout or non-zero exit;
+      // skip the marker so the next session retries the chain.
+      if (result === null) {
+        markWorkspaceInitialised(workspacePath)
+      } else {
+        console.warn(
+          `[Hooks] Setup(init) skipped marker write — at least one hook failed:`,
+          result.stderr || result.stdout || "(no detail)"
+        )
+      }
+    } catch (e) {
+      console.warn("[Hooks] Setup(init) hook error:", e)
+    }
+  }
+
   const context: HookContext = {
     workspacePath,
     sessionId: threadId,
-    turnId
+    turnId,
+    pluginOutputDir,
+    systemId,
+    ...harnessContext,
+    // PR-16 follow-up — CC SessionStart matcher matches on `source`. This
+    // project doesn't yet distinguish resume / clear / compact paths from a
+    // fresh launch, so the value is hard-coded "startup" here.
+    sessionStartSource: "startup"
   }
   runHooks(
     resolveEnabledHooksForRun(workspacePath, "SessionStart", context, hookScope, onHookSkipped),
@@ -53,19 +150,61 @@ export function fireSessionStartOnce(
   ).catch((e) => console.warn("[Hooks] SessionStart hook error:", e))
 }
 
+/**
+ * PR-11 — Fire Setup(maintenance) on user demand. Bypasses the per-workspace
+ * init marker so the user can deliberately re-run the maintenance hook chain
+ * without deleting state files. Fire-and-forget.
+ */
+export function fireSetupMaintenance(
+  workspacePath: string,
+  onHookResult?: HookResultCallback,
+  hookScope?: HookScopeController,
+  onHookSkipped?: ScopeSkipCallback
+): Promise<void> {
+  if (!workspacePath) return Promise.resolve()
+  const context: HookContext = {
+    workspacePath,
+    setupTrigger: "maintenance"
+  }
+  return runHooks(
+    resolveEnabledHooksForRun(workspacePath, "Setup", context, hookScope, onHookSkipped),
+    "Setup",
+    context,
+    onHookResult
+  )
+    .then(() => undefined)
+    .catch((e) => console.warn("[Hooks] Setup(maintenance) hook error:", e))
+}
+
 /** Fire SessionEnd for a thread if it previously fired SessionStart. No-op otherwise. */
 export async function fireSessionEnd(
   threadId: string,
   workspacePath?: string,
-  onHookResult?: HookResultCallback
+  onHookResult?: HookResultCallback,
+  pluginOutputDir?: string,
+  // PR-16 follow-up — CC matcher target for SessionEnd is `reason`. Default is
+  // "clear" (the thread:delete IPC path); the before-quit shutdown drain
+  // calls fireSessionEndAll which supplies "logout".
+  reason: "clear" | "logout" | "prompt_input_exit" | "other" = "clear"
 ): Promise<void> {
   const started = startedSessions.get(threadId)
   if (!started) return
   startedSessions.delete(threadId)
   const effectiveWorkspacePath = workspacePath ?? started.workspacePath
+  const effectivePluginOutputDir = pluginOutputDir ?? started.pluginOutputDir
   const context: HookContext = {
     workspacePath: effectiveWorkspacePath,
-    sessionId: threadId
+    pluginOutputDir: effectivePluginOutputDir,
+    systemId: started.systemId,
+    pluginWorkspace: started.pluginWorkspace,
+    featureId: started.featureId,
+    harnessProjectId: started.harnessProjectId,
+    harnessAdapterName: started.harnessAdapterName,
+    harnessAdapterVersion: started.harnessAdapterVersion,
+    projectCode: started.projectCode,
+    projectDir: started.projectDir,
+    sessionId: threadId,
+    sessionEndReason: reason
   }
   await runHooks(
     resolveEnabledHooksForRun(effectiveWorkspacePath, "SessionEnd", context, started.hookScope),
@@ -94,7 +233,21 @@ export async function fireSessionEndAll(
   if (entries.length === 0) return
   const all = Promise.allSettled(
     entries.map(([id, session]) => {
-      const context: HookContext = { sessionId: id, workspacePath: session.workspacePath }
+      const context: HookContext = {
+        sessionId: id,
+        workspacePath: session.workspacePath,
+        pluginOutputDir: session.pluginOutputDir,
+        systemId: session.systemId,
+        pluginWorkspace: session.pluginWorkspace,
+        featureId: session.featureId,
+        harnessProjectId: session.harnessProjectId,
+        harnessAdapterName: session.harnessAdapterName,
+        harnessAdapterVersion: session.harnessAdapterVersion,
+        projectCode: session.projectCode,
+        projectDir: session.projectDir,
+        // PR-16 follow-up — before-quit drain → CC `reason: "logout"`.
+        sessionEndReason: "logout"
+      }
       return runHooks(
         resolveEnabledHooksForRun(session.workspacePath, "SessionEnd", context, session.hookScope),
         "SessionEnd",

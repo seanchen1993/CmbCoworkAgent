@@ -2,8 +2,8 @@
 
 export interface FileAttachment {
   filename: string
-  filePath: string    // full path for display
-  content: string     // extracted text content
+  filePath: string // full path for display
+  content: string // extracted text content
   mimeType: string
   size: number
   truncated: boolean
@@ -78,19 +78,57 @@ import type {
   LspStatus,
   UserInputRequest,
   UserInputResponse,
-  UserInputAnswer,
+  UserInputAnswer
 } from "../../main/types"
 import type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard
 } from "../../shared/auto-commit-types"
 import type {
   ManagedSavedCodeExecTool,
   SavedCodeExecPreviewResult,
   SavedCodeExecToolUpdatePayload
 } from "../../main/ipc/code-exec-tools"
+import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailItem,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchItem,
+  HarnessEnterpriseProjectSearchResult,
+  HarnessArtifact,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
+  HarnessEventStatus,
+  HarnessFeatureStatus,
+  HarnessHookLogView,
+  HarnessNodeStatus,
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessDynamicWorkflowConfig,
+  HarnessDynamicWorkflowNode,
+  HarnessDynamicWorkflowTemplate,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
+  HarnessRunNode,
+  HarnessFeatureSummary,
+  HarnessSessionBinding,
+  HarnessAdapterRegistryItem,
+  HarnessBoardCompatibility,
+  HarnessStatus,
+  HarnessWatchRefChangedEvent,
+  HarnessWorkflowNextAction,
+  HarnessWorkflow
+} from "../../shared/harness-board-types"
 
 export type {
   McpConnectorAdvanced,
@@ -121,13 +159,48 @@ export type {
   AgentAutoCommitMode,
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitResult
 }
 
+export type { ManagedSavedCodeExecTool, SavedCodeExecPreviewResult, SavedCodeExecToolUpdatePayload }
+
 export type {
-  ManagedSavedCodeExecTool,
-  SavedCodeExecPreviewResult,
-  SavedCodeExecToolUpdatePayload
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailItem,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchItem,
+  HarnessEnterpriseProjectSearchResult,
+  HarnessArtifact,
+  HarnessArtifactStatus,
+  HarnessArtifactType,
+  HarnessEventStatus,
+  HarnessFeatureStatus,
+  HarnessHookLogView,
+  HarnessNodeStatus,
+  HarnessProjectCreateInput,
+  HarnessFeatureCreateInput,
+  HarnessFeatureCreateResult,
+  HarnessDynamicWorkflowConfig,
+  HarnessDynamicWorkflowNode,
+  HarnessDynamicWorkflowTemplate,
+  HarnessProjectDetailViewModel,
+  HarnessProjectListItem,
+  HarnessProjectMetadata,
+  HarnessProjectMetadataUpdateInput,
+  HarnessRunDetailViewModel,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
+  HarnessRunNode,
+  HarnessFeatureSummary,
+  HarnessSessionBinding,
+  HarnessAdapterRegistryItem,
+  HarnessBoardCompatibility,
+  HarnessStatus,
+  HarnessWatchRefChangedEvent,
+  HarnessWorkflowNextAction,
+  HarnessWorkflow
 }
 
 export type StreamEvent =
@@ -140,7 +213,7 @@ export type StreamEvent =
   | { type: "workspace"; files: FileInfo[]; path: string }
   | { type: "subagents"; subagents: Subagent[] }
   | { type: "done"; result: unknown }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; message?: string }
 
 export interface Message {
   id: string
@@ -151,11 +224,56 @@ export interface Message {
   tool_call_id?: string
   // For tool messages - the name of the tool
   name?: string
+  // For tool messages - provider/tool execution status
+  status?: string
   // For tool messages - whether the tool call failed
   is_error?: boolean
   created_at: Date
   start_at?: Date
   end_at?: Date
+  goal_id?: string | null
+  active_window_id?: string | null
+}
+
+export interface GoalEvent {
+  event_id: number
+  thread_id: string
+  goal_id: string | null
+  active_window_id?: string | null
+  message: string
+  created_at: Date | string | number
+}
+
+export interface GoalSnapshot {
+  threadId: string
+  goalId: string
+  activeWindowId: string
+  objective: string
+  completionCondition: string
+  context: {
+    explicitSkill?: { name: string; path: string }
+    transportSummary?: string
+  }
+  status: "active" | "paused" | "complete"
+  turnsUsed: number
+  maxTurns: number
+  lastVerdict: string | null
+  lastReason: string | null
+  pausedReason: string | null
+  consecutiveParseFailures: number
+  ledger: {
+    progress: string[]
+    evidence: string[]
+    blockers: string[]
+  }
+  createdAt: number
+  updatedAt: number
+}
+
+export interface GoalUiState {
+  goal: GoalSnapshot | null
+  events: GoalEvent[]
+  lastUpdated: Date | null
 }
 
 export interface ContentBlock {
@@ -208,6 +326,14 @@ export interface HITLRequest {
   allowed_decisions: HITLDecision["type"][]
   pendingCount?: number
   pendingToolCallIds?: string[]
+  allowRuntimeRestoredCheckpointResume?: boolean
+  operation?: string
+  command?: string
+  reason?: string
+  suggestedCommitMessage?: string
+  suggestedCommitFilePaths?: string[]
+  suggestedCommitFileBasePath?: string
+  suggestedCommitFileSelectionSource?: "pathspec" | "staged"
 }
 
 export interface HITLDecision {
@@ -215,6 +341,7 @@ export interface HITLDecision {
   tool_call_id: string
   edited_args?: Record<string, unknown>
   feedback?: string
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 export interface Todo {
@@ -245,11 +372,19 @@ export interface SkillMetadata {
   relativePath?: string
   pluginId?: string
   pluginName?: string
+  /** Skill version from SKILL.md frontmatter, defaults to "v1.0.0" */
+  version: string
   license?: string | null
   compatibility?: string | null
   metadata?: Record<string, string>
   allowedTools?: string[]
 }
-
-
-export type { HookConfig, HookEvent, HookType, PromptHookFallback, HookUpsert } from "../../main/hooks/types"
+export type {
+  HookConfig,
+  HookEvent,
+  HookType,
+  PromptHookFallback,
+  HookUpsert,
+  HookInjectUserContext,
+  HookUserContextField
+} from "../../main/hooks/types"

@@ -2,6 +2,7 @@ import { app } from "electron"
 import http from "http"
 import https from "https"
 import { getUserInfo, type UserInfoConfig } from "../storage"
+import type { FeatureGatesConfig } from "../../shared/feature-gates"
 import { evaluateStaging } from "./gray-release"
 import { compareSemver } from "./semver"
 
@@ -73,6 +74,8 @@ export interface LatestJson {
   platforms?: Record<string, PlatformInfo>
   /** Optional gray-release block. See StagingBlock. */
   staging?: StagingBlock
+  /** Optional app feature gates. Independent from updater gray-release staging. */
+  featureGates?: FeatureGatesConfig
 }
 
 export type UpdateType = "asar" | "full"

@@ -12,7 +12,7 @@
  *   - The JSONL shard files on disk remain the source of truth; this index
  *     is a fast query layer and can be rebuilt from JSONL if lost.
  *   - All methods are synchronous after init — sql.js runs in-process and
- *     the data volume (7-day window) is small enough that there's no need
+ *     the data volume (14-day window) is small enough that there's no need
  *     for async buffering.
  *   - Writes are debounced to disk (same pattern as db/index.ts) to avoid
  *     hot-loop IO when many gen events fire in quick succession.
@@ -63,6 +63,8 @@ function scheduleSave(): void {
 export interface GenIndexRow {
   event_id: string
   file_path: string
+  /** Tool that produced this generation ("write_file" | "edit_file"); null on legacy rows. */
+  tool: string | null
   content_fingerprint: string | null
   shard_file: string
   shard_offset: number
@@ -76,6 +78,16 @@ export interface GenIndexRow {
   trace_id: string | null
   model_id: string | null
   model_name: string | null
+  /** Harness Board project this generation belongs to (project-mode only), or null. */
+  harness_project_id: string | null
+  harness_feature_slug: string | null
+  /** Harness Board stage name (group-label) current at gen time (project-mode only), or null. */
+  harness_node_name: string | null
+  /** Stage status (the group-label node's status) current at gen time, or null. */
+  harness_node_status: string | null
+  /** Adapter plugin bound to the project at gen time, so adoption can be sliced by plugin version. */
+  harness_adapter_name: string | null
+  harness_adapter_version: string | null
 }
 
 // ─────────────────────────────────────────────────────────
@@ -102,6 +114,7 @@ export async function initializeAdoptionIndex(): Promise<void> {
       CREATE TABLE IF NOT EXISTS gen_events (
         event_id TEXT PRIMARY KEY,
         file_path TEXT NOT NULL,
+        tool TEXT,
         content_fingerprint TEXT,
         shard_file TEXT NOT NULL,
         shard_offset INTEGER NOT NULL,
@@ -113,7 +126,13 @@ export async function initializeAdoptionIndex(): Promise<void> {
         thread_id TEXT,
         trace_id TEXT,
         model_id TEXT,
-        model_name TEXT
+        model_name TEXT,
+        harness_project_id TEXT,
+        harness_feature_slug TEXT,
+        harness_node_name TEXT,
+        harness_node_status TEXT,
+        harness_adapter_name TEXT,
+        harness_adapter_version TEXT
       )
     `)
 
@@ -121,12 +140,19 @@ export async function initializeAdoptionIndex(): Promise<void> {
     // support "ADD COLUMN IF NOT EXISTS", so we swallow the "duplicate column"
     // error each ALTER may throw on an already-migrated DB.
     for (const col of [
+      "tool TEXT",
       "used_skills TEXT",
       "thread_id TEXT",
       "trace_id TEXT",
       "model_id TEXT",
       "model_name TEXT",
-      "old_line_hashes BLOB"
+      "old_line_hashes BLOB",
+      "harness_project_id TEXT",
+      "harness_feature_slug TEXT",
+      "harness_node_name TEXT",
+      "harness_node_status TEXT",
+      "harness_adapter_name TEXT",
+      "harness_adapter_version TEXT"
     ]) {
       try {
         db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
@@ -181,12 +207,14 @@ export function insertGenEvent(row: GenIndexRow): void {
   try {
     db.run(
       `INSERT OR REPLACE INTO gen_events
-       (event_id, file_path, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes, created_at, measured,
-        used_skills, thread_id, trace_id, model_id, model_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (event_id, file_path, tool, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes, created_at, measured,
+        used_skills, thread_id, trace_id, model_id, model_name,
+        harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
+        row.tool,
         row.content_fingerprint,
         row.shard_file,
         row.shard_offset,
@@ -198,7 +226,13 @@ export function insertGenEvent(row: GenIndexRow): void {
         row.thread_id,
         row.trace_id,
         row.model_id,
-        row.model_name
+        row.model_name,
+        row.harness_project_id,
+        row.harness_feature_slug,
+        row.harness_node_name,
+        row.harness_node_status,
+        row.harness_adapter_name,
+        row.harness_adapter_version
       ]
     )
     scheduleSave()
@@ -210,18 +244,34 @@ export function insertGenEvent(row: GenIndexRow): void {
 /**
  * Find all unmeasured gen events for a file within the retention window,
  * newest first. Returns an empty array when none exists.
+ *
+ * `maxCreatedAt` (optional) is an inclusive upper bound on the generation time.
+ * Commit-driven measurement passes the commit's creation time here so a
+ * generation that happened *after* the commit (e.g. the next turn editing the
+ * same file before it is committed again) is never attributed to that commit.
+ * Without it, an out-of-order re-measure of an old commit — notably the commit
+ * reconciler / hook sync running long after the commit — would vacuum unrelated
+ * later generations into the old commit, inflating its generated-line
+ * denominator and consuming gens the real commit should have claimed.
  */
-export function findPendingGensForFile(filePath: string, minCreatedAt: number): GenIndexRow[] {
+export function findPendingGensForFile(
+  filePath: string,
+  minCreatedAt: number,
+  maxCreatedAt?: number
+): GenIndexRow[] {
   if (!db) return []
+  const hasMax = typeof maxCreatedAt === "number" && Number.isFinite(maxCreatedAt)
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
             line_hashes, old_line_hashes, created_at, measured,
-            used_skills, thread_id, trace_id, model_id, model_name
+            used_skills, thread_id, trace_id, model_id, model_name,
+            harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+            tool
        FROM gen_events
-      WHERE file_path = ? AND measured = 0 AND created_at >= ?
+      WHERE file_path = ? AND measured = 0 AND created_at >= ?${hasMax ? " AND created_at <= ?" : ""}
       ORDER BY created_at DESC`
   )
-  stmt.bind([filePath, minCreatedAt])
+  stmt.bind(hasMax ? [filePath, minCreatedAt, maxCreatedAt as number] : [filePath, minCreatedAt])
   try {
     const rows: GenIndexRow[] = []
     while (stmt.step()) {
@@ -230,6 +280,73 @@ export function findPendingGensForFile(filePath: string, minCreatedAt: number): 
     return rows
   } finally {
     stmt.free()
+  }
+}
+
+/**
+ * Fetch a single gen row by its `event_id` (primary key). Used by the local
+ * line-level 溯源 reader to recover the stored per-line hashes + absolute file
+ * path for a specific generation. Returns null when the row is absent (e.g.
+ * already pruned by retention, oversize baselines that skip the index, or a gen
+ * produced on another machine / by another user).
+ */
+export function getGenRowByEventId(eventId: string): GenIndexRow | null {
+  if (!db || !eventId) return null
+  const stmt = db.prepare(
+    `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
+            line_hashes, old_line_hashes, created_at, measured,
+            used_skills, thread_id, trace_id, model_id, model_name,
+            harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+            tool
+       FROM gen_events
+      WHERE event_id = ?`
+  )
+  stmt.bind([eventId])
+  try {
+    if (!stmt.step()) return null
+    return stmt.getAsObject() as unknown as GenIndexRow
+  } finally {
+    stmt.free()
+  }
+}
+
+/**
+ * Lightweight listing of all *pending* (unmeasured) generations within the
+ * window: just `event_id` + `file_path`, no BLOBs. Used by the agent shell-op
+ * handler (rm/mv) to find pending gens at/under a deleted-or-moved path without
+ * loading every line-hash blob.
+ */
+export function listPendingGenPaths(
+  minCreatedAt: number
+): { event_id: string; file_path: string }[] {
+  if (!db) return []
+  const stmt = db.prepare(
+    `SELECT event_id, file_path FROM gen_events WHERE measured = 0 AND created_at >= ?`
+  )
+  stmt.bind([minCreatedAt])
+  try {
+    const rows: { event_id: string; file_path: string }[] = []
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject() as unknown as { event_id: string; file_path: string })
+    }
+    return rows
+  } finally {
+    stmt.free()
+  }
+}
+
+/**
+ * Rewrite a gen row's `file_path`. Used when an agent `mv` relocates a pending
+ * generation before it is committed, so commit-time attribution (keyed by path)
+ * finds it at its new home and still credits adoption.
+ */
+export function updateGenFilePath(eventId: string, newFilePath: string): void {
+  if (!db) return
+  try {
+    db.run(`UPDATE gen_events SET file_path = ? WHERE event_id = ?`, [newFilePath, eventId])
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] updateGenFilePath failed:", e)
   }
 }
 
@@ -262,7 +379,7 @@ export function deleteOlderThan(cutoff: number): number {
 /**
  * Remove already-measured rows older than `cutoff`. These rows have no further
  * use (findPendingGensForFile filters measured=0), so
- * we can evict them far more aggressively than the full 7-day window.
+ * we can evict them far more aggressively than the full 14-day window.
  */
 export function deleteMeasuredOlderThan(cutoff: number): void {
   if (!db) return

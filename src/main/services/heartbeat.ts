@@ -2,7 +2,12 @@ import { BrowserWindow } from "electron"
 import { HumanMessage } from "@langchain/core/messages"
 import { getHeartbeatConfig, getHeartbeatContent, saveHeartbeatConfig, getGlobalRoutingMode } from "../storage"
 import { resolveModel } from "../routing"
-import { createAgentRuntime, getCheckpointer, closeCheckpointer } from "../agent/runtime"
+import {
+  createAgentRuntime,
+  getCheckpointer,
+  closeCheckpointer,
+  pinCheckpointer
+} from "../agent/runtime"
 import {
   createThread as dbCreateThread,
   getThread as dbGetThread,
@@ -10,6 +15,8 @@ import {
 } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyIfBackground } from "./notify"
+import { emitAppAttention } from "../app-attention-events"
+import { trackEvent } from "./event-reporter"
 
 /** Fixed thread ID for heartbeat (aligns with Nanobot session_key="heartbeat"). Resets won't orphan it. */
 const HEARTBEAT_THREAD_ID = "heartbeat"
@@ -235,6 +242,9 @@ async function executeHeartbeat(): Promise<void> {
   abortController = new AbortController()
   notifyRenderer("heartbeat:changed")
 
+  // Telemetry: only real runs (past the empty/skip gates) are timed & counted.
+  const runStartedAt = Date.now()
+
   const threadId = HEARTBEAT_THREAD_ID
 
   // Ensure thread exists in DB and metadata stays current
@@ -256,6 +266,7 @@ async function executeHeartbeat(): Promise<void> {
   }
 
   const channel = `heartbeat:stream:${threadId}`
+  const releaseCheckpointerPin = pinCheckpointer(threadId)
 
   try {
     // Snapshot pre-heartbeat checkpoint so we can restore if HEARTBEAT_OK
@@ -317,10 +328,9 @@ async function executeHeartbeat(): Promise<void> {
       // Restore pre-heartbeat checkpoint: only prune this HEARTBEAT_OK round,
       // preserving any previous actionable history. Aligns with Moltbot's pruneHeartbeatTranscript.
       try {
-        const cp = await getCheckpointer(threadId)
-        await cp.deleteThread(threadId)
+        await checkpointer.deleteThread(threadId)
         if (preHeartbeatSnapshot?.metadata) {
-          await cp.put(
+          await checkpointer.put(
             preHeartbeatSnapshot.config,
             preHeartbeatSnapshot.checkpoint,
             preHeartbeatSnapshot.metadata
@@ -336,6 +346,15 @@ async function executeHeartbeat(): Promise<void> {
         lastRunError: null
       })
       console.log("[Heartbeat] Completed, HEARTBEAT_OK (silent, no action needed)")
+      try {
+        trackEvent("heartbeat.run.completed", "heartbeat", {
+          outcome: "silent",
+          durationMs: Date.now() - runStartedAt,
+          replyChars: fullReply.length
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit heartbeat.run.completed:", e)
+      }
     } else {
       saveHeartbeatConfig({
         lastRunAt: new Date().toISOString(),
@@ -343,7 +362,20 @@ async function executeHeartbeat(): Promise<void> {
         lastRunError: null
       })
       notifyIfBackground("💓 Heartbeat", stripped.text.trim() || "检查完成，有需要关注的内容")
+      emitAppAttention({
+        kind: "interaction",
+        threadId
+      })
       console.log("[Heartbeat] Completed with actionable output")
+      try {
+        trackEvent("heartbeat.run.completed", "heartbeat", {
+          outcome: "actionable",
+          durationMs: Date.now() - runStartedAt,
+          replyChars: fullReply.length
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit heartbeat.run.completed:", e)
+      }
     }
   } catch (error) {
     const isAbort = error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
@@ -354,12 +386,27 @@ async function executeHeartbeat(): Promise<void> {
       lastRunStatus: "error",
       lastRunError: message
     })
-    if (!isAbort) notifyIfBackground("❌ Heartbeat", message)
+    if (!isAbort) {
+      notifyIfBackground("❌ Heartbeat", message)
+      emitAppAttention({
+        kind: "task-error",
+        threadId
+      })
+    }
     console.error("[Heartbeat] Error:", message)
+    try {
+      trackEvent("heartbeat.run.completed", "heartbeat", {
+        outcome: isAbort ? "cancelled" : "error",
+        durationMs: Date.now() - runStartedAt
+      })
+    } catch (e) {
+      console.warn("[event] failed to emit heartbeat.run.completed:", e)
+    }
   } finally {
     running = false
     abortController = null
-    closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
+    releaseCheckpointerPin()
+    await closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
     notifyRenderer("heartbeat:changed")
     notifyRenderer("threads:changed")
   }

@@ -1,10 +1,13 @@
 import {
   getEnabledPluginHookMetadata,
   getEnabledSkillHookMetadata,
-  getEnabledHooks
+  getEnabledHooks,
+  getEnabledPluginSkillSourceMetadata
 } from "../storage"
 import { hookMatchesRunCriteria, type HookContext } from "./runner"
 import type { HookConfig, HookEvent } from "./types"
+export { normalizePathKey } from "./path-key"
+import { normalizePathKey } from "./path-key"
 
 export interface HookScopeSnapshot {
   activePluginIds: string[]
@@ -43,6 +46,11 @@ export interface HookScopeController {
   snapshot(): HookScopeSnapshot
 }
 
+export interface HookScopeOptions {
+  initialPersistentHookKeys?: readonly string[]
+  onPersistentHookKeysChanged?: (keys: readonly string[]) => void
+}
+
 // Normalizers are exported so other modules (e.g. ipc/agent prune-at-interrupt
 // logic) can produce keys in the exact same shape that hookScope stores
 // internally. Keep these functions strictly pure / deterministic.
@@ -56,11 +64,6 @@ export function normalizePluginId(pluginId: string | undefined | null): string {
   return pluginId?.trim().toLowerCase() ?? ""
 }
 
-export function normalizePathKey(path: string | undefined | null): string {
-  const normalized = path?.trim().replace(/\\/g, "/").replace(/\/+$/, "") ?? ""
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized
-}
-
 function addNormalizedPathAlias(target: Set<string>, normalizedPath: string): void {
   if (!normalizedPath) return
   target.add(normalizedPath)
@@ -72,6 +75,17 @@ function addPathAliases(target: Set<string>, path: string | undefined | null): v
   const normalized = normalizePathKey(path)
   if (!normalized) return
   addNormalizedPathAlias(target, normalized)
+}
+
+function addActiveSkillPath(target: Set<string>, normalizedPath: string): void {
+  if (!normalizedPath) return
+  target.add(normalizedPath)
+  // macOS temp paths commonly round-trip through /var/folders/.../T while some
+  // call sites compare pre-normalized lower-case keys. Keep this as an alias
+  // rather than making all POSIX skill paths case-insensitive.
+  if (process.platform === "darwin" && normalizedPath.startsWith("/var/folders/")) {
+    target.add(normalizedPath.toLowerCase())
+  }
 }
 
 function pathSetIntersects(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
@@ -105,11 +119,21 @@ export function extractPluginIdFromProviderKey(providerKey?: string): string | u
   return pluginId || undefined
 }
 
-export function createHookScope(): HookScopeController {
+export function createHookScope(options: HookScopeOptions = {}): HookScopeController {
   const activePluginIds = new Set<string>()
   const activeSkillNames = new Set<string>()
   const activeSkillPaths = new Set<string>()
-  const persistentHookKeys = new Set<string>()
+  const persistentHookKeys = new Set<string>(
+    options.initialPersistentHookKeys?.filter((key) => key.length > 0) ?? []
+  )
+  const notifyPersistentHookKeysChanged = (): void => {
+    if (!options.onPersistentHookKeysChanged) return
+    try {
+      options.onPersistentHookKeysChanged([...persistentHookKeys])
+    } catch (error) {
+      console.warn("[Hooks] failed to persist hook scope keys:", error)
+    }
+  }
 
   return {
     activePluginIds,
@@ -126,19 +150,30 @@ export function createHookScope(): HookScopeController {
       const normalizedPluginId = normalizePluginId(pluginId)
       if (normalizedPluginId) activePluginIds.add(normalizedPluginId)
       const normalizedPath = normalizePathKey(skillPath)
-      if (normalizedPath) activeSkillPaths.add(normalizedPath)
+      addActiveSkillPath(activeSkillPaths, normalizedPath)
     },
     activatePersistentHooks(hooks) {
+      let changed = false
       for (const hook of hooks) {
         if (hook.persistAfterInterrupt === true && hook.id) {
-          persistentHookKeys.add(getPersistentHookKey(hook))
+          const key = getPersistentHookKey(hook)
+          if (!persistentHookKeys.has(key)) {
+            persistentHookKeys.add(key)
+            changed = true
+          }
         }
       }
+      if (changed) notifyPersistentHookKeysChanged()
     },
     activatePersistentHookKeys(keys) {
+      let changed = false
       for (const key of keys) {
-        if (key) persistentHookKeys.add(key)
+        if (key && !persistentHookKeys.has(key)) {
+          persistentHookKeys.add(key)
+          changed = true
+        }
       }
+      if (changed) notifyPersistentHookKeysChanged()
     },
     pruneActivations(predicates) {
       for (const id of [...activePluginIds]) {
@@ -176,6 +211,48 @@ export function mergeHookScopeSnapshot(
     target.activateSkill(skillName)
   }
   target.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
+}
+
+/**
+ * Build a fresh child scope that inherits a point-in-time copy of `parent`'s
+ * plugin/skill activations. Used when spawning a runtime that should see the
+ * parent's hook scope (e.g. a coordinator worker inheriting the coordinator's
+ * activations), so the child sees what the parent had active the same way a
+ * task-tool subagent does — but isolated, since unlike a subagent (which shares
+ * the parent's mutable scope instance) workers can run in parallel.
+ *
+ * The child is a deep, independent copy: it is seeded from `parent.snapshot()`
+ * but backed by its own Sets, so later activations on either side never leak
+ * into the other. This makes it safe to hand to concurrently-running children
+ * without cross-contamination. The flip side is that activations the child
+ * makes during its run stay local — they are never reflected back to the
+ * parent or visible to sibling children.
+ */
+export function createInheritedHookScope(parent: HookScopeController): HookScopeController {
+  const child = createHookScope()
+  mergeHookScopeSnapshot(child, parent.snapshot())
+  return child
+}
+
+/**
+ * Resolve which enabled plugin owns a given skill path by matching it against
+ * each plugin's skill-source roots. Returns the owning pluginId, or undefined
+ * for a standalone / workspace skill.
+ *
+ * Used so a coordinator can activate a plugin's scope when the user
+ * slash-selects one of its skills — without that pluginId, only the skill scope
+ * would activate and the plugin's own (plugin-scoped) hooks would stay gated.
+ */
+export function resolvePluginIdForSkillPath(
+  skillPath: string | undefined | null
+): string | undefined {
+  const key = normalizePathKey(skillPath)
+  if (!key) return undefined
+  for (const source of getEnabledPluginSkillSourceMetadata()) {
+    const root = normalizePathKey(source.pluginRoot)
+    if (root && (key === root || key.startsWith(`${root}/`))) return source.pluginId
+  }
+  return undefined
 }
 
 export interface ScopedHookCandidates {

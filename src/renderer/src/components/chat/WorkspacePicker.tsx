@@ -7,9 +7,11 @@ import {
   GitBranch,
   Loader2,
   AlertCircle,
+  RefreshCw,
   Trash2
 } from "lucide-react"
-import { useState, useEffect } from "react"
+import { useState, useEffect, memo } from "react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useCurrentThread } from "@/lib/thread-context"
@@ -23,6 +25,7 @@ interface WorkspacePickerProps {
 
 type WorkspaceMode = "local" | "worktree"
 type WorktreeItem = { path: string; branch: string; isMain: boolean; createdAt?: Date }
+const WORKSPACE_SWITCH_LOCKED_MESSAGE = "当前线程已有对话消息，不能切换文件夹或创建 Worktree。"
 
 function getFolderName(path: string | null | undefined): string | undefined {
   return path?.split(/[\\/]/).filter(Boolean).pop()
@@ -83,7 +86,12 @@ function PathRow({ label, path, highlight = false }: { label: string; path: stri
   )
 }
 
-export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePickerProps): React.JSX.Element {
+export const WorkspacePicker = memo(WorkspacePickerImpl)
+
+function WorkspacePickerImpl({
+  threadId,
+  onGitStatusChange
+}: WorkspacePickerProps): React.JSX.Element {
   const { workspacePath, setWorkspacePath, setWorkspaceFiles, messages } = useCurrentThread(threadId)
   const canChangeWorkspace = messages.length === 0
   const [open, setOpen] = useState(false)
@@ -107,6 +115,24 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
   const [worktreeList, setWorktreeList] = useState<WorktreeItem[]>([])
   const [worktreeListLoading, setWorktreeListLoading] = useState(false)
   const [removingWorktreePath, setRemovingWorktreePath] = useState<string | null>(null)
+
+  // PR-11 — Setup(maintenance) re-run state. Independent of git/worktree flow.
+  const [reinitLoading, setReinitLoading] = useState(false)
+
+  async function handleReinitWorkspace(): Promise<void> {
+    if (!workspacePath || reinitLoading) return
+    setReinitLoading(true)
+    try {
+      await window.api.hooks.workspace.runSetupMaintenance(workspacePath)
+      toast.success("已触发工作区 Setup hooks（maintenance）")
+      setOpen(false)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      toast.error(`重新初始化失败：${msg}`)
+    } finally {
+      setReinitLoading(false)
+    }
+  }
 
   async function refreshWorktreeList(root: string): Promise<void> {
     setWorktreeListLoading(true)
@@ -142,10 +168,6 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
       if (cancelled) return
       setWorkspacePath(p)
       if (p) {
-        const result = await window.api.workspace.loadFromDisk(threadId)
-        if (cancelled) return
-        if (result.success && result.files) setWorkspaceFiles(result.files)
-
         const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false, threadId })
         if (cancelled) return
         setIsGit(gitInfo.isGit)
@@ -179,8 +201,23 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
     void refreshWorktreeList(gitRoot)
   }, [open, isGit, gitRoot])
 
+  useEffect(() => {
+    if (canChangeWorkspace || isWorktree) return
+    setMode("local")
+    setCreatingWorktree(false)
+    setBranchName("")
+    setWorktreeError(null)
+  }, [canChangeWorkspace, isWorktree])
+
   async function handleSelectFolder(): Promise<void> {
-    await selectWorkspaceFolder(threadId, setWorkspacePath, setWorkspaceFiles, setLoading, setOpen)
+    const selection = await selectWorkspaceFolder(
+      threadId,
+      setWorkspacePath,
+      setWorkspaceFiles,
+      setLoading,
+      setOpen
+    )
+    if (selection.status !== "success") return
     const newPath = await window.api.workspace.get(threadId)
     if (newPath) {
       const gitInfo = await window.api.workspace.isGit(newPath, { includeWorktrees: false, threadId })
@@ -199,6 +236,10 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
   }
 
   async function handleCreateWorktree(): Promise<void> {
+    if (!canChangeWorkspace) {
+      toast.error(WORKSPACE_SWITCH_LOCKED_MESSAGE)
+      return
+    }
     if (!gitRoot || !branchName.trim()) return
     setLoading(true)
     setWorktreeError(null)
@@ -235,6 +276,10 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
   }
 
   function handleModeSelect(selected: WorkspaceMode): void {
+    if (selected === "worktree" && !canChangeWorkspace) {
+      toast.error(WORKSPACE_SWITCH_LOCKED_MESSAGE)
+      return
+    }
     setMode(selected)
     setWorktreeError(null)
     if (selected === "worktree" && !isWorktree) {
@@ -277,7 +322,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
         setWorktreeError(null)
       } else {
         // Restore worktree creation form if mode was already set to worktree
-        if (mode === "worktree" && !isWorktree) setCreatingWorktree(true)
+        if (mode === "worktree" && !isWorktree && canChangeWorkspace) setCreatingWorktree(true)
       }
     }}>
       <PopoverTrigger asChild>
@@ -336,7 +381,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
               </div>
 
               {/* Git mode selector — 仅在未使用 worktree、且选中路径不是 worktree 时展示 */}
-              {isGit && !isWorktree && !isWorktreePath && (
+              {isGit && !isWorktree && !isWorktreePath && canChangeWorkspace && (
                 <div className="space-y-1.5">
                   <div className="text-xs text-muted-foreground">工作模式</div>
                   <div className="flex gap-1.5">
@@ -371,7 +416,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
               )}
 
               {/* Worktree creation form */}
-              {isGit && !isWorktree && creatingWorktree && (
+              {isGit && !isWorktree && creatingWorktree && canChangeWorkspace && (
                 <div className="space-y-2">
                   <div className="text-xs text-muted-foreground">新建分支名称</div>
                   <Input
@@ -418,7 +463,7 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
                 </div>
               )}
 
-              {isGit && gitRoot && (isWorktree || mode === "worktree") && (
+              {isGit && gitRoot && (isWorktree || (mode === "worktree" && canChangeWorkspace)) && (
                 <div className="space-y-1.5">
                   <div className="text-xs text-muted-foreground">Worktree 列表</div>
                   <div className="max-h-40 overflow-auto rounded-md border border-border bg-background-secondary">
@@ -469,9 +514,15 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
 
               {!isWorktree && (
                 <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  {isGit && mode === "worktree"
+                  {isGit && mode === "worktree" && canChangeWorkspace
                     ? "将基于当前仓库创建一个独立的 Worktree，代理在隔离的分支中工作。"
                     : "代理将在此文件夹中读写文件。"}
+                </p>
+              )}
+
+              {!canChangeWorkspace && !isWorktree && (
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  {WORKSPACE_SWITCH_LOCKED_MESSAGE}
                 </p>
               )}
 
@@ -487,6 +538,25 @@ export function WorkspacePicker({ threadId, onGitStatusChange }: WorkspacePicker
                   更换文件夹
                 </Button>
               )}
+              {/* PR-11 — Re-run workspace Setup hooks (`trigger: "maintenance"`).
+                  Available whenever a workspace is set; independent of whether
+                  the thread already has messages (Setup is workspace-level, not
+                  thread-level). No-op + silent toast if no Setup hook matches. */}
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full h-7 text-xs"
+                onClick={handleReinitWorkspace}
+                disabled={reinitLoading}
+                title="触发已配置的 Setup hook（trigger=maintenance）；用于重新执行工作区初始化脚本，不影响 setup-state 标记"
+              >
+                {reinitLoading ? (
+                  <Loader2 className="size-3 mr-1.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5 mr-1.5" />
+                )}
+                重新初始化工作区
+              </Button>
             </div>
           ) : (
             <div className="space-y-2">

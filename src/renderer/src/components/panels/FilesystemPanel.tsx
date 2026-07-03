@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
   Folder,
   File,
@@ -13,7 +13,9 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
+import { getWorkspaceSelectionErrorMessage } from "@/lib/workspace-utils"
 import type { FileInfo } from "@/types"
+import { toast } from "sonner"
 
 export function FilesystemPanel() {
   const { currentThreadId } = useAppStore()
@@ -91,6 +93,7 @@ export function FilesystemPanel() {
       }
     } catch (e) {
       console.error("[FilesystemPanel] Select folder error:", e)
+      toast.error(getWorkspaceSelectionErrorMessage(e))
     } finally {
       setLoading(false)
     }
@@ -192,7 +195,7 @@ export function FilesystemPanel() {
     return tree
   }
 
-  const tree = buildTree(workspaceFiles)
+  const tree = useMemo(() => buildTree(workspaceFiles), [workspaceFiles])
 
   const toggleDir = (path: string) => {
     setExpandedDirs((prev) => {

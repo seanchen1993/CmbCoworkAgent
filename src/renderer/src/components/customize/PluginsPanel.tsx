@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ExternalLink,
+  FileEdit,
   FolderOpen,
   Plug,
   Plus,
@@ -30,11 +31,17 @@ import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import type { PluginMetadata, PluginManifest } from "@/types"
 import { marketApi, type MarketItem } from "../../api/market"
-import { MarketPublishDialog, type MarketPublishTarget } from "./MarketPublishDialog"
-import { readUploadedItemNamesFromStorage } from "./marketPublishStorage"
+import {
+  MarketPublishDialog,
+  type MarketPublishFileBuildContext,
+  type MarketPublishTarget
+} from "./MarketPanel/MarketPublishDialog"
+import { PluginFileEditorDialog } from "./PluginFileEditorDialog"
+import { readUploadedItemNamesFromStorage } from "./MarketPanel/marketPublishStorage"
 import { toast } from "sonner"
 
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
+type PluginMcpServerDetail = Awaited<ReturnType<typeof window.api.plugins.getDetail>>["mcpServerDetails"][number]
 const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
   import.meta.env.VITE_PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL?.trim()
 const LOCAL_UPLOADED_PLUGIN_NAMES_KEY = "plugins_panel_uploaded_plugin_names"
@@ -42,6 +49,7 @@ const LOCAL_UPLOADED_PLUGIN_NAMES_KEY = "plugins_panel_uploaded_plugin_names"
 interface PluginDetail {
   skills: string[]
   mcpServers: string[]
+  mcpServerDetails: PluginMcpServerDetail[]
   hookCount: number
   hooks: PluginHookMetadata[]
   manifest: PluginManifest | null
@@ -58,7 +66,7 @@ interface PluginConsoleInfo {
 }
 
 function getEmptyPluginDetail(): PluginDetail {
-  return { skills: [], mcpServers: [], hookCount: 0, hooks: [], manifest: null }
+  return { skills: [], mcpServers: [], mcpServerDetails: [], hookCount: 0, hooks: [], manifest: null }
 }
 
 function normalizePluginNameKey(name: string): string {
@@ -290,6 +298,13 @@ function UploadPluginDialog(props: {
             </a>
           </div>
         )}
+        <div className="mt-4 rounded-md border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+          当前本地上传 Plugin 仅支持英文插件名。请确保 .zip 文件名、插件根目录名以及{" "}
+          <span className="font-mono">plugin.json</span> /{" "}
+          <span className="font-mono">.codex-plugin/plugin.json</span> 中的{" "}
+          <span className="font-mono">name</span>{" "}
+          使用英文、数字、短横线或下划线；中文名可能导致安装失败。
+        </div>
         <div
           className={cn(
             "mt-4 border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer",
@@ -350,10 +365,8 @@ export function PluginsPanel(): React.JSX.Element {
   const [publishMode, setPublishMode] = useState<"upload" | "update">("upload")
   const [marketPluginMap, setMarketPluginMap] = useState<Record<string, MarketItem>>({})
   // marketPluginsLoaded becomes true once the load attempt finishes, regardless
-  // of outcome — so the UI doesn't sit in the "loading" defensive-hide state
-  // forever when the market endpoint is unreachable. marketPluginsLoadFailed
-  // tells the legacy fallback to default to "not market" (show details) in
-  // that case, so offline users still see their local plugins' internals.
+  // of outcome. marketPluginsLoadFailed tells the legacy fallback to default to
+  // "not market" so offline users still see their local plugins' internals.
   const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
   const [marketPluginsLoadFailed, setMarketPluginsLoadFailed] = useState(false)
   const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
@@ -366,52 +379,19 @@ export function PluginsPanel(): React.JSX.Element {
   const [debouncedQuery, setDebouncedQuery] = useState("")
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loggedPluginSelectionRef = useRef<string | null>(null)
+  const originMigrationDoneRef = useRef(false)
+  const originMigrationInFlightRef = useRef(false)
   const [deleteTarget, setDeleteTarget] = useState<PluginMetadata | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [fileEditorOpen, setFileEditorOpen] = useState(false)
 
-  const shouldHidePluginDetails = useCallback(
-    (plugin: PluginMetadata | null): boolean => {
-      if (!plugin) return false
-      const key = normalizePluginNameKey(plugin.name)
-      if (!key) return false
-      // Self-published always wins, regardless of origin: even if the plugin
-      // also lives in the market, the author should see their own internals.
-      // This check is intentionally above the origin check.
-      if (uploadedPluginNames.has(key)) return false
-      // origin is the source of truth for plugins installed after this field
-      // was introduced. Pre-existing plugins have origin === undefined and
-      // fall through to the legacy name-match fallback below; a one-time
-      // migration backfills them once the market list is available.
-      if (plugin.origin === "market") return true
-      if (plugin.origin === "local") return false
-      // Legacy fallback (plugin.origin === undefined). Reached only on the
-      // first session after upgrade, before the migration runs. Once the
-      // migration writes a concrete origin to disk this branch is dead for
-      // that plugin.
-      //
-      // Note: localUploadedPluginNames is only consulted *here* — it has no
-      // effect once origin is set, because every new local-install path
-      // already writes origin: "local" directly. Treat it purely as a
-      // pre-origin breadcrumb for plugins that were dragged in before this
-      // mechanism existed.
-      if (localUploadedPluginNames.has(key)) return false
-      if (!marketPluginsLoaded) return true // still loading — defensive hide
-      // Loaded-but-failed: we have no reliable signal of market membership.
-      // Default to "not market" (show details) so offline users don't see all
-      // their legacy plugins' internals disappear. The one-time migration
-      // also skips this state, so plugins stay in the legacy path until a
-      // future session sees a successful market load.
-      if (marketPluginsLoadFailed) return false
-      return Boolean(marketPluginMap[key])
-    },
-    [
-      localUploadedPluginNames,
-      marketPluginMap,
-      marketPluginsLoadFailed,
-      marketPluginsLoaded,
-      uploadedPluginNames
-    ]
-  )
+  // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
+  // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
+  // 保留入参以兼容调用点签名（恒返回 false）。
+  const shouldHidePluginDetails = useCallback((plugin: PluginMetadata | null): boolean => {
+    void plugin
+    return false
+  }, [])
 
   // Clean up debounce timer on unmount
   useEffect(() => {
@@ -476,13 +456,7 @@ export function PluginsPanel(): React.JSX.Element {
                   .getDetail(updated.id)
                   .then(setDetail)
                   .catch(() => {
-                    setDetail({
-                      skills: [],
-                      mcpServers: [],
-                      hookCount: 0,
-                      hooks: [],
-                      manifest: null
-                    })
+                    setDetail(getEmptyPluginDetail())
                   })
               }
             }
@@ -496,6 +470,12 @@ export function PluginsPanel(): React.JSX.Element {
   const shouldHideSelectedPluginDetails = shouldHidePluginDetails(selectedPlugin)
 
   useEffect(() => {
+    if (fileEditorOpen && (!selectedPlugin || shouldHideSelectedPluginDetails)) {
+      setFileEditorOpen(false)
+    }
+  }, [fileEditorOpen, selectedPlugin, shouldHideSelectedPluginDetails])
+
+  useEffect(() => {
     refreshPlugins()
   }, [refreshPlugins])
 
@@ -506,57 +486,24 @@ export function PluginsPanel(): React.JSX.Element {
     return () => clearTimeout(timer)
   }, [loadMarketPlugins])
 
-  // One-time backfill for plugins installed before `origin` existed: any plugin
-  // whose name matches a current market entry is marked "market"; the rest are
-  // marked "local". Without this, the legacy fallback would keep relying on the
-  // flaky name-vs-market-list match every render.
-  //
-  // Two carve-outs that must NOT get flipped to "market":
-  //   - self-published (uploadedPluginNames): even if also in the market, the
-  //     author should see their own internals.
-  //   - locally uploaded (localUploadedPluginNames): the user explicitly
-  //     dragged the zip in. A name collision with a market entry is not
-  //     evidence the install came from the market.
-  // Both are written as explicit "local" so the legacy fallback path stops
-  // engaging on the next render.
-  //
-  // Writes are batched into a single IPC + a single plugins.json write — for
-  // users with many old plugins this avoids N round-trips through the mutex.
-  //
-  // Lifecycle:
-  //   - done ref is set only after a successful batch commit, so a failed
-  //     attempt (network blip, IPC error) can be retried on the next render.
-  //   - in-flight ref guards against the effect re-firing while the async
-  //     write is still pending (refreshPlugins → plugins state change →
-  //     effect re-runs).
-  //   - Migration is skipped while the market list is still loading or
-  //     failed to load: running against an empty map would mislabel every
-  //     market-sourced plugin as "local".
-  //   - Single-shot per session: once a batch succeeds, done ref latches and
-  //     the effect never re-runs. If the market list at migration time was
-  //     incomplete (server-side pagination, partial cache, transient
-  //     filtering) any legacy plugin missed by that snapshot stays pinned to
-  //     "local" until something else re-tags it (e.g. a re-install). Accepted
-  //     trade-off vs. unbounded retry pressure on the market endpoint.
-  const originMigrationDoneRef = useRef(false)
-  const originMigrationInFlightRef = useRef(false)
   useEffect(() => {
     if (originMigrationDoneRef.current || originMigrationInFlightRef.current) return
     if (!marketPluginsLoaded || marketPluginsLoadFailed) return
     if (plugins.length === 0) return
-    const candidates = plugins.filter((p) => p.origin !== "market" && p.origin !== "local")
+
+    const candidates = plugins.filter(
+      (plugin) => plugin.origin !== "market" && plugin.origin !== "local"
+    )
     if (candidates.length === 0) return
 
     const updates: Array<{ id: string; origin: "market" | "local" }> = []
     for (const plugin of candidates) {
       const key = normalizePluginNameKey(plugin.name)
       if (!key) continue
-      let nextOrigin: "market" | "local"
-      if (uploadedPluginNames.has(key) || localUploadedPluginNames.has(key)) {
-        nextOrigin = "local"
-      } else {
-        nextOrigin = marketPluginMap[key] ? "market" : "local"
-      }
+      const nextOrigin =
+        uploadedPluginNames.has(key) || localUploadedPluginNames.has(key) || !marketPluginMap[key]
+          ? "local"
+          : "market"
       updates.push({ id: plugin.id, origin: nextOrigin })
     }
     if (updates.length === 0) return
@@ -564,13 +511,13 @@ export function PluginsPanel(): React.JSX.Element {
     originMigrationInFlightRef.current = true
     void (async () => {
       try {
-        const res = await window.api.plugins.setOriginsBatch(updates)
-        if (res?.success) {
+        const result = await window.api.plugins.setOriginsBatch(updates)
+        if (result?.success) {
           originMigrationDoneRef.current = true
           refreshPlugins()
         }
-      } catch (e) {
-        console.warn("[PluginsPanel] Failed to backfill plugin origin:", e)
+      } catch (error) {
+        console.warn("[PluginsPanel] Failed to backfill plugin origin:", error)
       } finally {
         originMigrationInFlightRef.current = false
       }
@@ -596,8 +543,7 @@ export function PluginsPanel(): React.JSX.Element {
         const d = await window.api.plugins.getDetail(plugin.id)
         setDetail(d)
       } catch {
-        const emptyDetail = getEmptyPluginDetail()
-        setDetail(emptyDetail)
+        setDetail(getEmptyPluginDetail())
       }
     },
     [shouldHidePluginDetails]
@@ -616,9 +562,9 @@ export function PluginsPanel(): React.JSX.Element {
 
     let cancelled = false
     const plugin = selectedPlugin
-    const marketInfo = resolvePluginMarketInfo(selectedPlugin, marketPluginMap)
+    const marketInfo = resolvePluginMarketInfo(plugin, marketPluginMap)
 
-    const logPluginInfo = async () => {
+    const logPluginInfo = async (): Promise<void> => {
       let consoleDetail = detail
       if (shouldHideUiDetail) {
         try {
@@ -628,7 +574,6 @@ export function PluginsPanel(): React.JSX.Element {
           consoleDetail = getEmptyPluginDetail()
         }
       }
-
       if (cancelled || loggedPluginSelectionRef.current === plugin.id) return
       console.log(buildPluginConsoleInfo(plugin, consoleDetail, marketInfo))
       loggedPluginSelectionRef.current = plugin.id
@@ -729,10 +674,12 @@ export function PluginsPanel(): React.JSX.Element {
   )
 
   const buildPluginMarketFile = useCallback(
-    async (target: MarketPublishTarget) => {
+    async (target: MarketPublishTarget, context: MarketPublishFileBuildContext) => {
       const plugin = plugins.find((item) => item.name === target.name)
       if (!plugin) return { success: false, error: "Plugin 不存在" }
-      const exported = await window.api.plugins.exportForMarket(plugin.id)
+      const exported = await window.api.plugins.exportForMarket(plugin.id, {
+        version: context.version
+      })
       if (!exported.success || !exported.buffer) {
         return { success: false, error: exported.error || "导出 Plugin 失败" }
       }
@@ -912,10 +859,21 @@ export function PluginsPanel(): React.JSX.Element {
             ? "更新到市场"
             : "发布到市场"
         }
-        hideComponentDetails={shouldHideSelectedPluginDetails}
         isMarketPlugin={
           selectedPlugin ? Boolean(resolvePluginMarketInfo(selectedPlugin, marketPluginMap)) : false
         }
+        hideComponentDetails={shouldHideSelectedPluginDetails}
+        onEditFiles={
+          selectedPlugin && !shouldHideSelectedPluginDetails
+            ? () => setFileEditorOpen(true)
+            : undefined
+        }
+      />
+
+      <PluginFileEditorDialog
+        plugin={selectedPlugin}
+        open={fileEditorOpen}
+        onOpenChange={setFileEditorOpen}
       />
 
       <UploadPluginDialog
@@ -975,6 +933,7 @@ export function PluginDetailPanel(props: {
   hideActions?: boolean
   hideComponentDetails?: boolean
   isMarketPlugin?: boolean
+  onEditFiles?: (plugin: PluginMetadata) => void
 }): React.JSX.Element {
   const {
     plugin,
@@ -986,75 +945,117 @@ export function PluginDetailPanel(props: {
     publishLabel = "发布到市场",
     hideActions = false,
     hideComponentDetails = false,
-    isMarketPlugin = false
+    isMarketPlugin = false,
+    onEditFiles
   } = props
 
   if (!plugin) {
     return (
-      <div className="flex-1 flex items-center justify-center overflow-y-auto p-8">
-        <div className="max-w-md space-y-6">
-          <div className="text-center space-y-3">
-            <div className="size-14 rounded-2xl bg-muted/60 flex items-center justify-center mx-auto">
-              <Puzzle className="size-7 text-muted-foreground/60" />
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="mx-auto max-w-3xl space-y-5">
+          <div className="space-y-3">
+            <div className="size-12 rounded-lg bg-muted/60 flex items-center justify-center">
+              <Puzzle className="size-6 text-muted-foreground/70" />
             </div>
-            <h3 className="text-lg font-semibold text-foreground/80">Plugins 插件</h3>
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              插件是打包好的功能扩展包，一个插件可以同时包含 Skills、MCP 服务器和 Hooks。
-              相比单独添加技能或 MCP，插件提供了更便捷的「一键安装、整体管理」的体验。
-            </p>
+            <div>
+              <h3 className="text-lg font-semibold text-foreground/85">Plugins 插件</h3>
+              <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
+                插件是一个可分发的功能包，可以把技能、MCP 服务、Hooks 和静态资源放在一起安装、启用、禁用和卸载。
+                适合把一套完整工作流交给团队复用，而不是让每个人分别添加技能、连接器和 Hook 规则。
+              </p>
+            </div>
           </div>
 
-          <div className="space-y-3">
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">插件包含什么？</p>
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                一个插件可以包含以下组件的任意组合：
-                <span className="font-medium text-foreground/60">Skills</span>（位于{" "}
-                <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">skills/</span>{" "}
-                目录）、<span className="font-medium text-foreground/60">MCP 服务器</span>（通过{" "}
-                <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">.mcp.json</span>{" "}
-                配置），以及 <span className="font-medium text-foreground/60">Hooks</span>（默认读取{" "}
-                <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
-                  hooks/hooks.json
-                </span>
-                ）。 安装后，包含的技能、MCP 和 Hooks 都可以在插件详情页查看和管理。
+          <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
+            <p className="text-sm font-medium text-foreground/75">推荐目录结构</p>
+            <pre className="rounded-md border bg-background p-3 text-xs overflow-x-auto text-muted-foreground">
+{`my-plugin/
+  plugin.json                 // 插件元信息，也可放在 .codex-plugin/plugin.json
+  .mcp.json                   // 插件 MCP 配置，可选
+  skills/
+    my-skill/SKILL.md         // 插件技能，可选
+  hooks/hooks.json            // 插件 Hook 配置，可选
+  assets/                     // 图片、脚本、模板等资源，可选`}
+            </pre>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-2">
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground/75">
+                <Sparkles className="size-4 text-amber-500" />
+                Skills
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                放在 <span className="font-mono">skills/</span> 目录。启用插件后，技能会出现在可用技能列表中；读取或选择插件技能时，会激活该插件的运行作用域。
               </p>
             </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">如何安装？</p>
-              <ul className="text-[13px] text-muted-foreground space-y-2 leading-relaxed">
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">1.</span>点击{" "}
-                  <span className="font-medium text-foreground/60">+</span> 按钮，上传{" "}
-                  <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">.zip</span>{" "}
-                  压缩包，或选择本地文件夹直接安装
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">2.</span>也可以前往{" "}
-                  <span className="font-medium text-foreground/60">Market</span>{" "}
-                  浏览社区发布的插件，一键下载安装
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">3.</span>
-                  安装后可查看插件的版本、作者、许可证、包含的组件等详情
-                </li>
-                <li className="flex gap-2">
-                  <span className="text-foreground/40 shrink-0">4.</span>
-                  通过开关随时启用或禁用，也可以完全卸载不需要的插件
-                </li>
-              </ul>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
-              <p className="text-sm font-medium text-foreground/70">插件 vs 单独添加</p>
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                如果你只需要一个技能，直接在 Skills
-                页面上传即可。如果你只需要连接一个远程工具服务，在 MCPs
-                页面添加即可。但当你需要「一组关联的技能 + MCP 配置 + Hook
-                规则」打包分发时，插件是更好的选择——安装一次，全部就位。
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-2">
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground/75">
+                <Plug className="size-4 text-blue-500" />
+                MCP Servers
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                放在根目录 <span className="font-mono">.mcp.json</span>。remote MCP 默认携带当前用户身份 Header；插件 MCP 默认不会抢全局 MCP 的裸短别名。
               </p>
             </div>
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-2">
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground/75">
+                <Webhook className="size-4 text-violet-500" />
+                Hooks
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                默认读取 <span className="font-mono">hooks/hooks.json</span>。插件 Hook 只会在插件或插件技能进入作用域后参与执行，避免污染普通工具调用。
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
+            <p className="text-sm font-medium text-foreground/75">.mcp.json 字段说明</p>
+            <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+              <p><span className="font-mono text-foreground/70">url</span>：remote MCP 地址，支持 http/https。</p>
+              <p><span className="font-mono text-foreground/70">command / args / env</span>：stdio MCP 启动命令、参数和环境变量。</p>
+              <p><span className="font-mono text-foreground/70">transport</span>：remote 传输方式，支持 <span className="font-mono">sse</span> 或 <span className="font-mono">streamable-http</span>。</p>
+              <p><span className="font-mono text-foreground/70">headers</span>：插件自定义请求 Header。</p>
+              <p><span className="font-mono text-foreground/70">injectUserHeaders</span>：remote MCP 默认 <span className="font-mono">true</span>，会注入 <span className="font-mono">yst_id_token</span>、<span className="font-mono">sap_id</span>、<span className="font-mono">name</span>；设为 <span className="font-mono">false</span> 可关闭。</p>
+              <p><span className="font-mono text-foreground/70">priority</span>：插件 MCP 基础优先级，范围 <span className="font-mono">0..100</span>，默认 <span className="font-mono">50</span>；全局 MCP 默认 <span className="font-mono">100</span>。</p>
+              <p><span className="font-mono text-foreground/70">scope</span>：默认 <span className="font-mono">plugin-active</span>，未激活时按 lazy 工具处理；也可设 <span className="font-mono">plugin-installed</span> 常驻。</p>
+              <p><span className="font-mono text-foreground/70">fallback</span>：允许插件 MCP 连接失败时回退到全局同名 MCP。必须显式设置 <span className="font-mono">safeToRetry: true</span>，只适合查询类或幂等工具。</p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
+            <p className="text-sm font-medium text-foreground/75">.mcp.json 示例</p>
+            <pre className="max-h-[260px] overflow-auto rounded-md border bg-background p-3 text-xs text-muted-foreground">
+{`{
+  "search-service": {
+    "url": "https://example.com/mcp",
+    "transport": "streamable-http",
+    "headers": {
+      "X-App": "my-plugin"
+    },
+    "injectUserHeaders": true,
+    "priority": 50,
+    "scope": "plugin-active",
+    "fallback": {
+      "enabled": true,
+      "to": "global",
+      "match": "toolNameAndSchema",
+      "safeToRetry": true
+    }
+  },
+  "local-helper": {
+    "command": "node",
+    "args": ["./mcp-server.js"],
+    "env": {
+      "NODE_ENV": "production"
+    }
+  }
+}`}
+            </pre>
+          </div>
+
+          <div className="rounded-lg border border-amber-300/50 bg-amber-50 px-4 py-3 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300 leading-relaxed">
+            启用插件前请确认来源可信。remote MCP 默认会携带当前用户身份访问远程服务；fallback 会把同一组参数发送给全局同名 MCP，因此只应给可重试、幂等、无写入副作用的工具开启。
           </div>
         </div>
       </div>
@@ -1112,6 +1113,17 @@ export function PluginDetailPanel(props: {
         </div>
         {!hideActions && (
           <div className="flex items-center gap-1.5 shrink-0">
+            {onEditFiles && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={() => onEditFiles(plugin)}
+              >
+                <FileEdit className="size-3" />
+                编辑文件
+              </Button>
+            )}
             {onPublish && (
               <Button
                 variant="outline"
@@ -1303,15 +1315,66 @@ export function PluginDetailPanel(props: {
           {/* MCP Servers list */}
           {!hideComponentDetails && detail && detail.mcpServers.length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-sm font-medium">MCP Servers</h3>
-              <div className="space-y-1">
-                {detail.mcpServers.map((server) => (
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-medium">MCP Servers</h3>
+                <span className="text-[11px] text-muted-foreground">
+                  默认携带当前用户身份，激活后显示并参与调用
+                </span>
+              </div>
+              <div className="rounded-lg border border-blue-300/40 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 leading-relaxed">
+                插件 MCP 支持在 <span className="font-mono">.mcp.json</span> 中配置{" "}
+                <span className="font-mono">injectUserHeaders</span>、{" "}
+                <span className="font-mono">priority</span>、{" "}
+                <span className="font-mono">scope</span> 和{" "}
+                <span className="font-mono">fallback</span>。默认 remote MCP 会带上{" "}
+                <span className="font-mono">yst_id_token</span>、{" "}
+                <span className="font-mono">sap_id</span>、{" "}
+                <span className="font-mono">name</span>；若不需要，可设{" "}
+                <span className="font-mono">injectUserHeaders: false</span>。Fallback 只会在同时声明{" "}
+                <span className="font-mono">safeToRetry: true</span> 时启用。
+              </div>
+              <div className="space-y-2">
+                {(detail.mcpServerDetails.length > 0
+                  ? detail.mcpServerDetails
+                  : detail.mcpServers.map((name) => ({
+                      name,
+                      kind: "remote" as const,
+                      injectUserHeaders: true,
+                      priority: 50,
+                      scope: "plugin-active" as const,
+                      fallbackEnabled: false,
+                      fallbackSafeToRetry: false
+                    }))
+                ).map((server) => (
                   <div
-                    key={server}
-                    className="flex items-center gap-2 rounded-md bg-muted/30 px-3 py-2 text-xs"
+                    key={server.name}
+                    className="rounded-md bg-muted/30 px-3 py-2 text-xs space-y-2"
                   >
-                    <Plug className="size-3 text-blue-500 shrink-0" />
-                    <span className="truncate">{server}</span>
+                    <div className="flex items-center gap-2">
+                      <Plug className="size-3 text-blue-500 shrink-0" />
+                      <span className="truncate font-medium">{server.name}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+                        {server.kind}
+                      </span>
+                      {server.transport && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+                          {server.transport}
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                      <span>用户 Header：{server.injectUserHeaders ? "默认注入" : "不注入"}</span>
+                      <span>优先级：{server.priority}（插件最高 100）</span>
+                      <span>作用域：{server.scope === "plugin-active" ? "插件激活优先" : "安装后常驻"}</span>
+                      <span>
+                        Fallback：
+                        {server.fallbackEnabled
+                          ? `到 ${server.fallbackTo ?? "global"}`
+                          : server.fallbackSafeToRetry
+                            ? "关闭"
+                            : "关闭或未声明 safeToRetry"}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1319,9 +1382,7 @@ export function PluginDetailPanel(props: {
           )}
 
           {/* Loading state */}
-          {!hideComponentDetails && !detail && (
-            <p className="text-xs text-muted-foreground">加载中...</p>
-          )}
+          {!hideComponentDetails && !detail && <p className="text-xs text-muted-foreground">加载中...</p>}
 
           {/* Plugin path */}
           {!hideComponentDetails && (

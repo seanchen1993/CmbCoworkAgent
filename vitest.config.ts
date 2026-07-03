@@ -2,9 +2,14 @@ import { defineConfig } from "vitest/config"
 
 export default defineConfig({
   test: {
-    // Node-only suite. Renderer-side tests would need jsdom and a separate
-    // config; we don't have any yet, so keep scope narrow.
+    // Node-only suite (main process + framework-free shared utils, plus a few
+    // renderer tests that are pure TypeScript utilities). Renderer-side tests that
+    // need jsdom would require a separate config; keep this scope narrow.
     environment: "node",
-    include: ["src/main/**/*.test.ts"]
+    include: [
+      "src/main/**/*.test.ts",
+      "src/shared/**/*.test.ts",
+      "src/renderer/src/components/panels/git-panel-file-tree.test.ts"
+    ]
   }
 })

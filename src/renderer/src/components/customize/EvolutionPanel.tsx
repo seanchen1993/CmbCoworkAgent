@@ -27,21 +27,34 @@ import {
   XCircle,
   Ban,
   RotateCcw,
+  Rocket,
   ShieldCheck
 } from "lucide-react"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
-import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
+import { evolutionApi, evolutionSkillKey, type EvolutionCandidate } from "@/api/evolution"
+import { marketApi, type MarketItem } from "@/api/market"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { DEFAULT_SCENE_CATEGORY } from "@/lib/skill-data-service"
+import { TraceConversation } from "@/components/trace/TraceConversation"
+import { normalizeMarketSkillKey } from "@/components/dashboard/skill-market"
 import { hasUnreadCloudEvolutionUpdates, markCloudEvolutionUpdatesSeen } from "@/lib/evolution-notices"
-import { buildBundleUnifiedDiff, extractTextBundleFromZip } from "@/lib/skill-bundle-diff"
+import {
+  buildBundleUnifiedDiff,
+  createMergedTextBundleZip,
+  createTextBundleZip,
+  extractTextBundleFromZip,
+  type TextBundleFile
+} from "@/lib/skill-bundle-diff"
 import { trackCloudEvolutionCandidateAccepted } from "@/lib/cloud-evolution-events"
 import type { SkillMetadata } from "@/types"
 import { SkillEvolutionReviewPanel } from "./SkillEvolutionReviewPanel"
+import { useMyUploadedSkills } from "../../lib/use-my-uploaded-skills"
+import { SkillBundleMergeEditor } from "./SkillBundleMergeEditor"
 
 interface SkillCandidate {
   candidateId: string
@@ -148,6 +161,10 @@ interface TraceDetail extends TraceEntry {
   errorMessage?: string
   steps: TraceStep[]
   nodes?: TraceNode[]
+  modelCalls?: Array<{
+    outputMessage?: { content?: unknown }
+    toolCalls?: Array<{ name?: string }>
+  }>
 }
 
 type Tab = "candidates" | "traces" | "review"
@@ -156,6 +173,17 @@ interface UserInfoLite {
   ystId?: string | null
   sapId?: string | null
   userName?: string | null
+  orgName?: string | null
+  pathName?: string | null
+}
+
+function buildMarketUserId(userInfo: UserInfoLite | null | undefined): string | undefined {
+  if (!userInfo) return undefined
+  const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
+  const rawName = (userInfo.userName || "").trim()
+  const rawOrg = (userInfo.pathName || userInfo.orgName || "").trim()
+  const segments = [rawId, rawName, rawOrg].filter(Boolean)
+  return segments.length > 0 ? segments.join(" / ") : undefined
 }
 
 function getEvolutionReviewAdminYstIds(): Set<string> {
@@ -177,15 +205,31 @@ function isToggleKey(event: React.KeyboardEvent<HTMLDivElement>): boolean {
   return event.key === "Enter" || event.key === " "
 }
 
+function traceOutcomeStatus(outcome: string): TraceNode["status"] {
+  if (outcome === "error") return "error"
+  if (outcome === "cancelled") return "cancelled"
+  if (outcome === "unknown") return "unknown"
+  return "success"
+}
+
+function traceOutcomeLabel(outcome: string): string {
+  if (outcome === "success") return "成功"
+  if (outcome === "error") return "错误"
+  if (outcome === "cancelled") return "取消"
+  if (outcome === "unknown") return "未定"
+  return outcome
+}
+
 function buildFallbackNodes(detail: TraceDetail): TraceNode[] {
   const rootId = `trace:${detail.traceId}`
+  const terminalStatus = traceOutcomeStatus(detail.outcome)
   const nodes: TraceNode[] = [
     {
       id: rootId,
       type: "trace",
       parentId: null,
       name: "Agent Trace",
-      status: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancelled" : "success",
+      status: terminalStatus,
       startedAt: detail.startedAt,
       endedAt: detail.endedAt,
       input: { userMessage: detail.userMessage },
@@ -252,11 +296,16 @@ function buildFallbackNodes(detail: TraceDetail): TraceNode[] {
     id: `terminal:${detail.traceId}`,
     type: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancel" : "message",
     parentId: rootId,
-    name: detail.outcome === "error" ? "Run Error" : detail.outcome === "cancelled" ? "Run Cancelled" : "Run Completed",
-    status: detail.outcome === "error" ? "error" : detail.outcome === "cancelled" ? "cancelled" : "success",
+    name:
+      detail.outcome === "error" ? "Run Error" :
+      detail.outcome === "cancelled" ? "Run Cancelled" :
+      detail.outcome === "unknown" ? "Run Ended" :
+      "Run Completed",
+    status: terminalStatus,
     startedAt: detail.endedAt,
     endedAt: detail.endedAt,
-    output: detail.errorMessage ?? (detail.outcome === "success" ? "Completed" : detail.outcome)
+    output: detail.errorMessage
+      ?? (detail.outcome === "success" ? "Completed" : "Run ended without a final success signal")
   })
 
   return nodes
@@ -299,7 +348,8 @@ function outcomeColor(outcome: string): string {
   return {
     success: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30",
     error: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
-    cancelled: "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
+    cancelled: "bg-zinc-500/15 text-zinc-500 border-zinc-500/20",
+    unknown: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
   }[outcome] ?? "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
 }
 
@@ -318,6 +368,7 @@ function nodeStatusClass(status?: TraceNode["status"]): string {
   if (status === "error") return "text-red-500"
   if (status === "running") return "text-blue-500"
   if (status === "cancelled") return "text-zinc-500"
+  if (status === "unknown") return "text-amber-600"
   return "text-muted-foreground"
 }
 
@@ -427,7 +478,9 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
         </button>
         <span className="text-muted-foreground/40">/</span>
         <span className="text-xs font-mono text-muted-foreground">{detail.traceId.slice(0, 16)}</span>
-        <Badge className={cn("ml-auto border text-[10px]", outcomeColor(detail.outcome))}>{detail.outcome}</Badge>
+        <Badge className={cn("ml-auto border text-[10px]", outcomeColor(detail.outcome))}>
+          {traceOutcomeLabel(detail.outcome)}
+        </Badge>
       </div>
 
       <div className="shrink-0 border-b border-border grid grid-cols-4">
@@ -446,7 +499,16 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
       <div className="flex-1 overflow-hidden">
         <ScrollArea className="h-full px-4 py-3">
           {root ? (
-            <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
+            <div className="space-y-4">
+              <TraceConversation trace={detail} />
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="text-xs font-semibold text-foreground">执行树</p>
+                  <p className="text-[10px] text-muted-foreground">工具、模型调用与原始 trace 结构</p>
+                </div>
+                <TraceTreeNode node={root} childrenByParent={childrenByParent} depth={0} />
+              </div>
+            </div>
           ) : (
             <div className="py-10 text-center text-sm text-muted-foreground">该 trace 暂无树结构数据</div>
           )}
@@ -508,7 +570,7 @@ function TraceCard({
             className="size-3.5"
           />
           <Badge className={cn("border text-[10px] px-1.5 py-0 shrink-0", outcomeColor(trace.outcome))}>
-            {trace.outcome === "success" ? "成功" : trace.outcome === "error" ? "错误" : "取消"}
+            {traceOutcomeLabel(trace.outcome)}
           </Badge>
           <span className="text-[10px] font-mono text-muted-foreground/60">{trace.traceId.slice(0, 8)}</span>
           <button
@@ -717,17 +779,26 @@ function OptimizeStreamCard({
 
 function CandidateCard({
   candidate,
+  marketInfo,
   onApprove,
   onReject,
-  onDelete
+  onDelete,
+  onPublishMarket,
+  publishingMarket,
+  marketSynced
 }: {
   candidate: SkillCandidate
-  onApprove: (id: string) => Promise<void>
+  marketInfo?: MarketItem
+  onApprove: (id: string, proposedContent?: string) => Promise<void>
   onReject: (id: string) => Promise<void>
   onDelete: (id: string) => void
+  onPublishMarket: (candidate: SkillCandidate, marketInfo?: MarketItem) => Promise<void>
+  publishingMarket: boolean
+  marketSynced: boolean
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [editorOpen, setEditorOpen] = useState(false)
   const [oldContent, setOldContent] = useState<string | null>(null)
   const [oldContentStatus, setOldContentStatus] = useState<"idle" | "loading" | "ready" | "failed">("idle")
   // Use a ref to track load state inside the effect without adding it to the dependency array,
@@ -779,6 +850,42 @@ function CandidateCard({
     setLoading(true)
     await onApprove(candidate.candidateId)
     setLoading(false)
+  }
+
+  const openEditedEditor = async (): Promise<void> => {
+    if (candidate.action === "patch" && oldContentStatus !== "ready") {
+      setLoading(true)
+      setOldContentStatus("loading")
+      try {
+        const skills = await window.api.skills.list()
+        const matched = skills.find((s) => s.name === candidate.skillId)
+        if (!matched) throw new Error(`Skill not found: ${candidate.skillId}`)
+        const result = await window.api.skills.read(matched.path)
+        if (!result.success || typeof result.content !== "string") {
+          throw new Error(result.error ?? "Failed to read skill content")
+        }
+        setOldContent(result.content)
+        setOldContentStatus("ready")
+      } catch (error) {
+        setOldContentStatus("failed")
+        toast.error(error instanceof Error ? error.message : "读取旧版 Skill 失败")
+      } finally {
+        setLoading(false)
+      }
+    }
+    setEditorOpen(true)
+  }
+
+  const approveEdited = async (files: TextBundleFile[]): Promise<void> => {
+    const skillFile = files.find((file) => file.path === "SKILL.md")
+    if (!skillFile) throw new Error("编辑内容缺少 SKILL.md")
+    setLoading(true)
+    try {
+      await onApprove(candidate.candidateId, skillFile.content)
+      setEditorOpen(false)
+    } finally {
+      setLoading(false)
+    }
   }
 
   const reject = async (): Promise<void> => {
@@ -856,6 +963,18 @@ function CandidateCard({
               </Button>
               <Button
                 size="sm"
+                variant="outline"
+                disabled={loading}
+                className="h-7 px-2.5 text-xs"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void openEditedEditor()
+                }}
+              >
+                编辑后采纳
+              </Button>
+              <Button
+                size="sm"
                 variant="ghost"
                 disabled={loading}
                 className="h-7 px-2.5 text-xs text-muted-foreground hover:text-destructive"
@@ -867,6 +986,25 @@ function CandidateCard({
                 <XCircle className="size-3 mr-1" />拒绝
               </Button>
             </>
+          )}
+          {candidate.status === "approved" && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={loading || publishingMarket || marketSynced}
+              className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
+              onClick={(event) => {
+                event.stopPropagation()
+                void onPublishMarket(candidate, marketInfo)
+              }}
+            >
+              {publishingMarket ? (
+                <Loader2 className="size-3 mr-1 animate-spin" />
+              ) : (
+                <Rocket className="size-3 mr-1" />
+              )}
+              {marketSynced ? "已提交市场" : marketInfo ? "更新市场" : "发布市场"}
+            </Button>
           )}
           <Button
             size="sm"
@@ -932,31 +1070,53 @@ function CandidateCard({
           </div>
         </div>
       )}
+      <SkillBundleMergeEditor
+        open={editorOpen}
+        title={`编辑优化候选：${candidate.name}`}
+        description="编辑最终写入本地的 SKILL.md。"
+        baseFiles={oldContent ? [{ path: "SKILL.md", content: oldContent }] : []}
+        initialFiles={[{ path: "SKILL.md", content: candidate.proposedContent }]}
+        confirmLabel="采纳编辑版"
+        saving={loading}
+        onOpenChange={setEditorOpen}
+        onConfirm={approveEdited}
+      />
     </div>
   )
 }
 
 function CloudEvolutionUpdateCard({
   candidate,
+  marketInfo,
   onInstall,
+  onUpdateMarket,
   onRollback,
   onExportBackup,
   onIgnore,
   onDelete,
-  installing
+  installing,
+  updatingMarket
 }: {
   candidate: EvolutionCandidate
-  onInstall: (candidate: EvolutionCandidate) => Promise<void>
+  marketInfo?: MarketItem
+  onInstall: (candidate: EvolutionCandidate, editedFiles?: TextBundleFile[], originalZipBuffer?: ArrayBuffer) => Promise<void>
+  onUpdateMarket: (candidate: EvolutionCandidate, marketInfo: MarketItem) => Promise<void>
   onRollback: (candidate: EvolutionCandidate) => Promise<void>
   onExportBackup: (candidate: EvolutionCandidate) => Promise<void>
   onIgnore: (candidateId: string) => void
   onDelete: (candidateId: string) => void
   installing: boolean
+  updatingMarket: boolean
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const [diff, setDiff] = useState("")
   const [diffSource, setDiffSource] = useState<"local" | "backend" | "error" | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [editorLoading, setEditorLoading] = useState(false)
+  const [editorBaseFiles, setEditorBaseFiles] = useState<TextBundleFile[]>([])
+  const [editorInitialFiles, setEditorInitialFiles] = useState<TextBundleFile[]>([])
+  const [editorOriginalZipBuffer, setEditorOriginalZipBuffer] = useState<ArrayBuffer | null>(null)
 
   useEffect(() => {
     setDiff("")
@@ -1011,6 +1171,36 @@ function CloudEvolutionUpdateCard({
   }, [candidate.candidate_id, candidate.skill_name, diffSource, expanded])
   const toggleExpanded = (): void => setExpanded((v) => !v)
   const adopted = candidate.local_adoption_status === "adopted"
+  const canUpdateMarket = adopted && !!marketInfo && !candidate.plugin_name
+
+  const openEditor = async (): Promise<void> => {
+    setEditorLoading(true)
+    try {
+      const installedSkills = await window.api.skills.list()
+      const existing = installedSkills.find((skill: SkillMetadata) => skill.name === candidate.skill_name)
+      if (!existing) throw new Error(`本地未安装同名 Skill：${candidate.skill_name}`)
+      const localBundle = await window.api.skills.readTextBundle(existing.path)
+      if (!localBundle.success || !localBundle.files) {
+        throw new Error(localBundle.error || "读取本地 Skill 文件失败")
+      }
+      const remoteBundle = await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
+      const remoteBuffer = await remoteBundle.blob.arrayBuffer()
+      const remoteFiles = await extractTextBundleFromZip(remoteBuffer)
+      setEditorBaseFiles(localBundle.files)
+      setEditorInitialFiles(remoteFiles)
+      setEditorOriginalZipBuffer(remoteBuffer)
+      setEditorOpen(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载候选编辑器失败")
+    } finally {
+      setEditorLoading(false)
+    }
+  }
+
+  const installEdited = async (files: TextBundleFile[]): Promise<void> => {
+    await onInstall(candidate, files, editorOriginalZipBuffer ?? undefined)
+    setEditorOpen(false)
+  }
 
   return (
     <div className={cn(
@@ -1114,6 +1304,49 @@ function CloudEvolutionUpdateCard({
               已采纳
             </Button>
           )}
+          {canUpdateMarket && (
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={installing || updatingMarket}
+                    className="h-7 px-2.5 text-xs border-blue-500/40 text-blue-600 hover:bg-blue-500/10 hover:text-blue-600"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      if (marketInfo) void onUpdateMarket(candidate, marketInfo)
+                    }}
+                  >
+                    {updatingMarket ? (
+                      <Loader2 className="size-3 mr-1 animate-spin" />
+                    ) : (
+                      <Rocket className="size-3 mr-1" />
+                    )}
+                    更新市场
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" sideOffset={6} className="max-w-56">
+                  将本地已采纳的新版本打包，并更新到你上传的应用市场 Skill。
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          {!adopted && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={installing || editorLoading}
+              className="h-7 px-2.5 text-xs"
+              onClick={(event) => {
+                event.stopPropagation()
+                void openEditor()
+              }}
+            >
+              {editorLoading ? <Loader2 className="size-3 animate-spin" /> : null}
+              编辑安装
+            </Button>
+          )}
           {adopted && (
             <Button
               size="sm"
@@ -1203,6 +1436,17 @@ function CloudEvolutionUpdateCard({
           </div>
         </div>
       )}
+      <SkillBundleMergeEditor
+        open={editorOpen}
+        title={`编辑云端自进化版本：${candidate.skill_name}`}
+        description="编辑最终安装到本地的文件内容。"
+        baseFiles={editorBaseFiles}
+        initialFiles={editorInitialFiles}
+        confirmLabel="安装编辑版"
+        saving={installing}
+        onOpenChange={setEditorOpen}
+        onConfirm={installEdited}
+      />
     </div>
   )
 }
@@ -1239,9 +1483,16 @@ export function EvolutionPanel(): React.JSX.Element {
   const [autoPropose, setAutoPropose] = useState(false)
   const [threshold, setThreshold] = useState(10)
   const [thresholdInput, setThresholdInput] = useState("10")
+  const [turnThreshold, setTurnThreshold] = useState(2)
+  const [turnThresholdInput, setTurnThresholdInput] = useState("2")
   const [thresholdSaved, setThresholdSaved] = useState(false)
   const [cloudUpdateLoading, setCloudUpdateLoading] = useState(false)
   const [installingCloudCandidateId, setInstallingCloudCandidateId] = useState<string | null>(null)
+  const [updatingMarketCandidateId, setUpdatingMarketCandidateId] = useState<string | null>(null)
+  const [publishingMarketCandidateId, setPublishingMarketCandidateId] = useState<string | null>(null)
+  const [marketSyncedCandidateIds, setMarketSyncedCandidateIds] = useState<Set<string>>(
+    () => new Set()
+  )
   const [reviewUserInfo, setReviewUserInfo] = useState<UserInfoLite | null>(null)
   const {
     threads,
@@ -1271,34 +1522,53 @@ export function EvolutionPanel(): React.JSX.Element {
     setPendingEvolution
   } = useAppStore()
 
+  const { ownedSkillKeys, ownedSkillItemsByKey } = useMyUploadedSkills()
   const localPendingCandidateCount = candidates.filter((c) => c.status === "pending").length
   const cloudPendingUpdateCount = cloudEvolutionUpdates.filter((candidate) => candidate.local_adoption_status !== "adopted").length
   const cloudAdoptedUpdateCount = cloudEvolutionUpdates.length - cloudPendingUpdateCount
   const pendingCount = localPendingCandidateCount + cloudPendingUpdateCount
-  const showEvolutionReview = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
+  // 审批员身份决定 Admin 标签 + admin 模式（可见全部候选）。
+  // DEV 默认按 Admin 走，方便本地调试；生产环境严格按白名单。
+  // 非白名单用户进入 creator 模式，仅可见自己上传技能的候选。
+  const isReviewAdmin = import.meta.env.DEV || canReviewEvolution(reviewUserInfo)
+  // 审批 tab 对所有人常驻显示；没有自己技能的候选时展示空状态即可。
+  const showEvolutionReview = true
+  const reviewMode: "admin" | "creator" = isReviewAdmin ? "admin" : "creator"
 
   const loadTraces = useCallback(async () => {
     setTracesLoading(true)
     try {
       const list = await window.api.optimizer.getTraces({ limit: 80 })
       setTraces(list)
+      // Read the current selection at call time (not via closure) so this
+      // callback stays stable. Closing over `selectedTraceIds` would recreate
+      // loadTraces on every selection toggle, re-firing the load effect and
+      // flashing the spinner over the list. We only prune ids that no longer
+      // exist after a fresh load.
+      const current = useAppStore.getState().evolutionSelectedTraceIds
       const keep = new Set<string>()
       const valid = new Set(list.map((t) => t.traceId))
-      for (const id of selectedTraceIds) {
+      for (const id of current) {
         if (valid.has(id)) keep.add(id)
       }
-      if (!isSameIdSet(keep, selectedTraceIds)) {
+      if (!isSameIdSet(keep, current)) {
         setEvolutionSelectedTraceIds(keep)
       }
     } finally {
       setTracesLoading(false)
     }
-  }, [selectedTraceIds, setEvolutionSelectedTraceIds])
+  }, [setEvolutionSelectedTraceIds])
 
   const refreshCloudEvolutionUpdates = useCallback(async () => {
     setCloudUpdateLoading(true)
     try {
-      const installedSkills = await window.api.skills.list()
+      // Include plugin-owned skills so cloud candidates can target SKILLs that
+      // live inside plugins, not just standalone custom skills.
+      const [customSkills, pluginSkills] = await Promise.all([
+        window.api.skills.list(),
+        window.api.skills.listPlugins()
+      ])
+      const installedSkills = [...customSkills, ...pluginSkills]
       const updates = await evolutionApi.listAvailableUpdates(installedSkills)
       setCloudEvolutionUpdates(updates)
       if (tab === "candidates") {
@@ -1320,7 +1590,7 @@ export function EvolutionPanel(): React.JSX.Element {
       mode?: "auto" | "selected"
       traceIds?: string[]
     },
-    pendingMessage = "正在分析选中内容，请稍候..."
+    pendingMessage = "正在生成优化候选，请稍候..."
   ) => {
     setEvolutionLastRunOpts(opts ?? null)
     setEvolutionStreamedText("")
@@ -1360,6 +1630,10 @@ export function EvolutionPanel(): React.JSX.Element {
     window.api.optimizer.getThreshold().then((v) => {
       setThreshold(v)
       setThresholdInput(String(v))
+    }).catch(console.warn)
+    window.api.optimizer.getTurnThreshold().then((v) => {
+      setTurnThreshold(v)
+      setTurnThresholdInput(String(v))
     }).catch(console.warn)
     refreshCloudEvolutionUpdates().catch(console.warn)
   }, [refreshCloudEvolutionUpdates])
@@ -1448,12 +1722,21 @@ export function EvolutionPanel(): React.JSX.Element {
   const commitThreshold = useCallback(async () => {
     const parsed = parseInt(thresholdInput, 10)
     const clamped = Number.isNaN(parsed) ? 10 : Math.max(1, Math.min(99, parsed))
+    const parsedTurnThreshold = parseInt(turnThresholdInput, 10)
+    const clampedTurnThreshold = Number.isNaN(parsedTurnThreshold)
+      ? 2
+      : Math.max(1, Math.min(99, parsedTurnThreshold))
     setThreshold(clamped)
     setThresholdInput(String(clamped))
-    await window.api.optimizer.setThreshold(clamped).catch(console.warn)
+    setTurnThreshold(clampedTurnThreshold)
+    setTurnThresholdInput(String(clampedTurnThreshold))
+    await Promise.all([
+      window.api.optimizer.setThreshold(clamped),
+      window.api.optimizer.setTurnThreshold(clampedTurnThreshold)
+    ]).catch(console.warn)
     setThresholdSaved(true)
     setTimeout(() => setThresholdSaved(false), 1500)
-  }, [thresholdInput])
+  }, [thresholdInput, turnThresholdInput])
 
   const handleExpandTrace = useCallback(async (traceId: string) => {
     setDetailLoading(true)
@@ -1467,12 +1750,14 @@ export function EvolutionPanel(): React.JSX.Element {
     }
   }, [])
 
-  const handleApprove = useCallback(async (candidateId: string) => {
-    const result = await window.api.optimizer.approve(candidateId)
+  const handleApprove = useCallback(async (candidateId: string, proposedContent?: string) => {
+    const result = await window.api.optimizer.approve(candidateId, proposedContent)
     if (result.success) {
       setCandidates((prev) => prev.map((candidate) => (
         candidate.candidateId === candidateId ? { ...candidate, status: "approved" } : candidate
       )))
+    } else if (result.error) {
+      toast.error(result.error)
     }
   }, [])
 
@@ -1483,8 +1768,101 @@ export function EvolutionPanel(): React.JSX.Element {
     )))
   }, [])
 
+  const handlePublishLocalCandidateToMarket = useCallback(async (
+    candidate: SkillCandidate,
+    marketInfo?: MarketItem
+  ) => {
+    if (candidate.status !== "approved") {
+      toast.error("请先采纳候选，再发布到应用市场")
+      return
+    }
+
+    setPublishingMarketCandidateId(candidate.candidateId)
+    try {
+      const candidateKeys = new Set(
+        [candidate.skillId, candidate.name, marketInfo?.name, marketInfo?.filename]
+          .map((value) => normalizeMarketSkillKey(value))
+          .filter(Boolean)
+      )
+      const customSkills = await window.api.skills.list()
+      const existing = customSkills.find((skill: SkillMetadata) => {
+        const skillKeys = [skill.name, skill.relativePath, skill.id]
+          .map((value) => normalizeMarketSkillKey(value))
+          .filter(Boolean)
+        return skillKeys.some((key) => candidateKeys.has(key))
+      })
+      if (!existing) {
+        throw new Error(`本地未找到已采纳的 Skill：${candidate.name || candidate.skillId}`)
+      }
+
+      const exported = await window.api.skills.exportForMarket(existing.path, {
+        includeNestedSkills: true
+      })
+      if (!exported.success || !exported.buffer) {
+        throw new Error(exported.error || "导出市场 Skill 包失败")
+      }
+
+      const file = new File(
+        [exported.buffer],
+        exported.fileName || `${existing.name}.zip`,
+        { type: "application/zip" }
+      )
+      const userInfo = await window.api.models.getUserInfo().catch(() => null)
+      const userId = marketInfo?.user_id || buildMarketUserId(userInfo)
+      const name = marketInfo?.name || existing.name || candidate.name || candidate.skillId
+      const description = existing.description || candidate.description || marketInfo?.description || ""
+      const category = marketInfo?.category || existing.metadata?.category || DEFAULT_SCENE_CATEGORY
+      const version = existing.version || marketInfo?.version || "1.0.0"
+      const guidance = existing.metadata?.guidance || marketInfo?.guidance || undefined
+      const chineseName = marketInfo?.chinese_name || existing.metadata?.chinese_name || undefined
+
+      const result = marketInfo
+        ? await marketApi.updateItem(
+            file,
+            "skill",
+            name,
+            description,
+            category,
+            version,
+            guidance,
+            chineseName,
+            userId
+          )
+        : await marketApi.uploadFile(
+            file,
+            "skill",
+            name,
+            description,
+            category,
+            version,
+            guidance,
+            chineseName,
+            userId
+          )
+      if (!result.success) {
+        throw new Error(result.error || (marketInfo ? "更新应用市场失败" : "发布应用市场失败"))
+      }
+
+      setMarketSyncedCandidateIds((prev) => new Set(prev).add(candidate.candidateId))
+      toast.success(
+        marketInfo
+          ? `已将「${existing.name}」更新到应用市场`
+          : `已将「${existing.name}」发布到应用市场`
+      )
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "发布应用市场失败")
+    } finally {
+      setPublishingMarketCandidateId(null)
+    }
+  }, [])
+
   const handleDeleteCandidate = useCallback((candidateId: string) => {
     setCandidates((prev) => prev.filter((candidate) => candidate.candidateId !== candidateId))
+    setMarketSyncedCandidateIds((prev) => {
+      const next = new Set(prev)
+      next.delete(candidateId)
+      return next
+    })
   }, [])
 
   const removeCloudUpdate = useCallback((candidateId: string) => {
@@ -1505,40 +1883,80 @@ export function EvolutionPanel(): React.JSX.Element {
     removeCloudUpdate(candidateId)
   }, [removeCloudUpdate])
 
-  const handleInstallCloudUpdate = useCallback(async (candidate: EvolutionCandidate) => {
+  const handleInstallCloudUpdate = useCallback(async (
+    candidate: EvolutionCandidate,
+    editedFiles?: TextBundleFile[],
+    originalZipBuffer?: ArrayBuffer
+  ) => {
     setInstallingCloudCandidateId(candidate.candidate_id)
     trackCloudEvolutionCandidateAccepted(candidate, candidate.source_version ?? null)
     let backupId: string | undefined
     try {
-      const installedSkills = await window.api.skills.list()
-      const existing = installedSkills.find((skill: SkillMetadata) => skill.name === candidate.skill_name)
+      // Match across custom + plugin skills, keyed so a plugin "pdf" never
+      // resolves to a same-named custom skill.
+      const [customSkills, pluginSkills] = await Promise.all([
+        window.api.skills.list(),
+        window.api.skills.listPlugins()
+      ])
+      const candidateKey = evolutionSkillKey(candidate.skill_name, candidate.plugin_name)
+      const existing = [...customSkills, ...pluginSkills].find(
+        (skill: SkillMetadata) => evolutionSkillKey(skill.name, skill.pluginName) === candidateKey
+      )
       if (!existing) {
         throw new Error(`本地未安装同名 Skill：${candidate.skill_name}`)
       }
 
-      const bundle = await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
-      const buffer = await bundle.blob.arrayBuffer()
-      const backupResult = await window.api.skills.backupForCloudEvolution({
-        skillPath: existing.path,
-        candidateId: candidate.candidate_id,
-        skillName: candidate.skill_name,
-        sourceVersion: existing.version || candidate.source_version || null,
-        targetVersion: candidate.target_version || null
-      })
-      if (!backupResult.success || !backupResult.backupId) {
-        throw new Error(backupResult.error || `备份旧版 Skill 失败：${candidate.skill_name}`)
-      }
-      backupId = backupResult.backupId
+      const bundle = editedFiles
+        ? originalZipBuffer
+          ? await createMergedTextBundleZip(originalZipBuffer, editedFiles, `${candidate.skill_name}-${candidate.target_version || "edited"}.zip`)
+          : await createTextBundleZip(editedFiles, `${candidate.skill_name}-${candidate.target_version || "edited"}.zip`)
+        : await evolutionApi.downloadCandidateBundle(candidate.candidate_id)
+      const buffer = "blob" in bundle ? await bundle.blob.arrayBuffer() : bundle.buffer
+      const filename = bundle.filename
 
-      const deleteResult = await window.api.skills.delete(existing.path)
-      if (!deleteResult.success) {
-        throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
-      }
+      let backupPath: string | undefined
+      const isPluginSkill = !!(candidate.plugin_name || existing.pluginId || existing.pluginName)
+      if (isPluginSkill) {
+        // Plugin skills are evolved in place inside the plugin dir (the custom-
+        // dir delete+upload path is not valid for plugin-owned files). The IPC
+        // backs the dir up itself and returns the backupId for rollback.
+        const applyResult = await window.api.skills.applyPluginSkillEvolution({
+          skillPath: existing.path,
+          candidateId: candidate.candidate_id,
+          skillName: candidate.skill_name,
+          buffer,
+          fileName: filename,
+          sourceVersion: existing.version || candidate.source_version || null,
+          targetVersion: candidate.target_version || null
+        })
+        if (!applyResult.success || !applyResult.backupId) {
+          throw new Error(applyResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        }
+        backupId = applyResult.backupId
+      } else {
+        const backupResult = await window.api.skills.backupForCloudEvolution({
+          skillPath: existing.path,
+          candidateId: candidate.candidate_id,
+          skillName: candidate.skill_name,
+          sourceVersion: existing.version || candidate.source_version || null,
+          targetVersion: candidate.target_version || null
+        })
+        if (!backupResult.success || !backupResult.backupId) {
+          throw new Error(backupResult.error || `备份旧版 Skill 失败：${candidate.skill_name}`)
+        }
+        backupId = backupResult.backupId
+        backupPath = backupResult.backupPath
 
-      const uploadResult = await window.api.skills.upload(buffer, bundle.filename)
-      if (!uploadResult.success) {
-        await window.api.skills.restoreCloudEvolutionBackup(backupId).catch(console.warn)
-        throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        const deleteResult = await window.api.skills.delete(existing.path)
+        if (!deleteResult.success) {
+          throw new Error(deleteResult.error || `删除旧版 Skill 失败：${candidate.skill_name}`)
+        }
+
+        const uploadResult = await window.api.skills.upload(buffer, filename)
+        if (!uploadResult.success) {
+          await window.api.skills.restoreCloudEvolutionBackup(backupId).catch(console.warn)
+          throw new Error(uploadResult.error || `安装云端自进化 Skill 失败：${candidate.skill_name}`)
+        }
       }
 
       const adoption = {
@@ -1547,8 +1965,8 @@ export function EvolutionPanel(): React.JSX.Element {
         source_version: existing.version || candidate.source_version || null,
         target_version: candidate.target_version || null,
         adopted_at: new Date().toISOString(),
-        backup_id: backupResult.backupId,
-        backup_path: backupResult.backupPath,
+        backup_id: backupId,
+        backup_path: backupPath,
         candidate
       }
       evolutionApi.markCandidateAdopted(adoption)
@@ -1567,6 +1985,68 @@ export function EvolutionPanel(): React.JSX.Element {
     }
   }, [cloudEvolutionUpdates, setCloudEvolutionUpdates, setPendingEvolution])
 
+  const handleUpdateMarketFromCloudUpdate = useCallback(async (
+    candidate: EvolutionCandidate,
+    marketInfo: MarketItem
+  ) => {
+    if (candidate.plugin_name) {
+      toast.error("插件内 Skill 需要通过 Plugin 更新市场，不能按独立 Skill 发布")
+      return
+    }
+
+    setUpdatingMarketCandidateId(candidate.candidate_id)
+    try {
+      const candidateKeys = new Set(
+        [candidate.skill_name, marketInfo.name, marketInfo.filename]
+          .map((value) => normalizeMarketSkillKey(value))
+          .filter(Boolean)
+      )
+      const customSkills = await window.api.skills.list()
+      const existing = customSkills.find((skill: SkillMetadata) => {
+        const skillKeys = [skill.name, skill.relativePath]
+          .map((value) => normalizeMarketSkillKey(value))
+          .filter(Boolean)
+        return skillKeys.some((key) => candidateKeys.has(key))
+      })
+      if (!existing) {
+        throw new Error(`本地未找到已采纳的 Skill：${candidate.skill_name}`)
+      }
+
+      const exported = await window.api.skills.exportForMarket(existing.path, {
+        includeNestedSkills: true
+      })
+      if (!exported.success || !exported.buffer) {
+        throw new Error(exported.error || "导出市场 Skill 包失败")
+      }
+
+      const file = new File(
+        [exported.buffer],
+        exported.fileName || `${existing.name}.zip`,
+        { type: "application/zip" }
+      )
+      const result = await marketApi.updateItem(
+        file,
+        "skill",
+        marketInfo.name || existing.name || candidate.skill_name,
+        existing.description || marketInfo.description || "",
+        marketInfo.category || existing.metadata?.category || DEFAULT_SCENE_CATEGORY,
+        candidate.target_version || existing.version || marketInfo.version || "1.0.0",
+        existing.metadata?.guidance || marketInfo.guidance || undefined,
+        marketInfo.chinese_name || existing.metadata?.chinese_name || undefined,
+        marketInfo.user_id || undefined
+      )
+      if (!result.success) {
+        throw new Error(result.error || "更新应用市场失败")
+      }
+
+      toast.success(`已将「${candidate.skill_name}」更新到应用市场 ${candidate.target_version || ""}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "更新应用市场失败")
+    } finally {
+      setUpdatingMarketCandidateId(null)
+    }
+  }, [])
+
   const handleRollbackCloudUpdate = useCallback(async (candidate: EvolutionCandidate) => {
     if (!candidate.local_backup_id) {
       toast.error("未找到旧版备份，无法回滚")
@@ -1575,7 +2055,11 @@ export function EvolutionPanel(): React.JSX.Element {
     if (!confirm(`确定要将「${candidate.skill_name}」回滚到采纳前的旧版本吗？`)) return
     setInstallingCloudCandidateId(candidate.candidate_id)
     try {
-      const result = await window.api.skills.restoreCloudEvolutionBackup(candidate.local_backup_id)
+      // Plugin skills were evolved in place, so roll back into the plugin dir;
+      // standalone skills restore into the custom dir.
+      const result = candidate.plugin_name
+        ? await window.api.skills.rollbackPluginSkillEvolution(candidate.local_backup_id)
+        : await window.api.skills.restoreCloudEvolutionBackup(candidate.local_backup_id)
       if (!result.success) {
         throw new Error(result.error || `回滚旧版 Skill 失败：${candidate.skill_name}`)
       }
@@ -1732,16 +2216,16 @@ export function EvolutionPanel(): React.JSX.Element {
       return
     }
     const pendingMessage = selectedThreadCount > 0
-      ? `正在分析已选内容（${traceIds.length} 条 trace / ${selectedThreadCount} 个会话），请稍候...`
-      : `正在分析已选内容（${traceIds.length} 条 trace），请稍候...`
+      ? `正在生成优化候选（${traceIds.length} 条 trace / ${selectedThreadCount} 个会话），请稍候...`
+      : `正在生成优化候选（${traceIds.length} 条 trace），请稍候...`
     await runOptimizer({ mode: "selected", traceIds }, pendingMessage)
     setTab("candidates")
   }, [runOptimizer, selectedTraceIds, selectedThreadCount])
 
   const handleRetryOptimizer = useCallback(() => {
     const pendingMessage = lastRunOpts?.traceIds
-      ? `正在重试分析（${lastRunOpts.traceIds.length} 条 trace），请稍候...`
-      : "正在重试分析，请稍候..."
+      ? `正在重试生成候选（${lastRunOpts.traceIds.length} 条 trace），请稍候...`
+      : "正在重试生成候选，请稍候..."
     runOptimizer(lastRunOpts ?? undefined, pendingMessage).catch(console.warn)
   }, [lastRunOpts, runOptimizer])
 
@@ -1781,6 +2265,9 @@ export function EvolutionPanel(): React.JSX.Element {
   if (selectedTrace) {
     return <TraceDetailView detail={selectedTrace} onClose={() => setSelectedTrace(null)} />
   }
+
+  const thresholdsChanged =
+    thresholdInput !== String(threshold) || turnThresholdInput !== String(turnThreshold)
 
   return (
     <div className="flex flex-1 min-w-0 flex-col h-full overflow-hidden">
@@ -1858,8 +2345,8 @@ export function EvolutionPanel(): React.JSX.Element {
             <div className="group relative shrink-0">
               <Info className="size-3.5 text-muted-foreground/40 hover:text-muted-foreground/70 cursor-default transition-colors" />
               <div className="pointer-events-none absolute top-full left-0 mt-2 w-80 rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-5 text-muted-foreground shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-50">
-                <p><span className="font-medium text-foreground">直接触发：</span> 达到工具调用阈值后，直接进入技能沉淀流程。</p>
-                <p className="mt-1"><span className="font-medium text-foreground">模型判断：</span> 达到工具调用阈值后，先由大模型判断是否值得沉淀，再决定是否进入技能沉淀流程。</p>
+                <p><span className="font-medium text-foreground">直接触发：</span> 达到工具调用和对话轮次阈值后，直接进入技能沉淀流程。</p>
+                <p className="mt-1"><span className="font-medium text-foreground">模型判断：</span> 达到两个阈值后，先由大模型判断是否值得沉淀，再决定是否进入技能沉淀流程。</p>
               </div>
             </div>
 
@@ -1887,11 +2374,35 @@ export function EvolutionPanel(): React.JSX.Element {
                 !onlineSkillEvolutionEnabled && "cursor-not-allowed bg-muted/30"
               )}
             />
+            <span className="ml-2 text-xs text-muted-foreground">对话轮次阈值</span>
+            <input
+              type="number"
+              min={1}
+              max={99}
+              disabled={!onlineSkillEvolutionEnabled}
+              value={turnThresholdInput}
+              onChange={(e) => {
+                setTurnThresholdInput(e.target.value)
+                setThresholdSaved(false)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitThreshold()
+              }}
+              className={cn(
+                "w-12 h-6 rounded border bg-background text-center text-xs transition-colors",
+                "focus:outline-none focus:ring-1 focus:ring-violet-500/50",
+                "[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
+                turnThresholdInput !== String(turnThreshold)
+                  ? "border-violet-400 text-foreground"
+                  : "border-border text-muted-foreground",
+                !onlineSkillEvolutionEnabled && "cursor-not-allowed bg-muted/30"
+              )}
+            />
             {thresholdSaved ? (
               <span className="text-[11px] text-emerald-500 flex items-center gap-0.5">
                 <CheckCircle2 className="size-3" />已保存
               </span>
-            ) : thresholdInput !== String(threshold) ? (
+            ) : thresholdsChanged ? (
               <button
                 disabled={!onlineSkillEvolutionEnabled}
                 onClick={commitThreshold}
@@ -1969,7 +2480,7 @@ export function EvolutionPanel(): React.JSX.Element {
             ) : item === "traces" ? (
               <>
                 <Activity className="size-3.5" />
-                执行 Traces
+                历史会话执行记录
                 {traces.length > 0 && (
                   <span className="ml-1 text-[10px] text-muted-foreground">
                     ({traceGroups.length} 个会话 / {traces.length} 条)
@@ -1980,9 +2491,15 @@ export function EvolutionPanel(): React.JSX.Element {
               <>
                 <ShieldCheck className="size-3.5" />
                 进化审批
-                <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                  Admin
-                </span>
+                {isReviewAdmin ? (
+                  <span className="ml-1 rounded-full bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                    Admin
+                  </span>
+                ) : (
+                  <span className="ml-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                    我的
+                  </span>
+                )}
               </>
             )}
           </button>
@@ -2053,7 +2570,7 @@ export function EvolutionPanel(): React.JSX.Element {
                 分析中...
               </>
             ) : (
-              "分析选中内容"
+              "生成优化候选"
             )}
           </Button>
           <Button
@@ -2070,7 +2587,7 @@ export function EvolutionPanel(): React.JSX.Element {
 
       {tab === "review" ? (
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <SkillEvolutionReviewPanel />
+          <SkillEvolutionReviewPanel mode={reviewMode} ownedSkillKeys={ownedSkillKeys} />
         </div>
       ) : (
         <ScrollArea className="flex-1">
@@ -2082,35 +2599,52 @@ export function EvolutionPanel(): React.JSX.Element {
                   <EmptyState
                     icon={<Sparkles className="size-8 text-muted-foreground/40 mb-3" />}
                     title="暂无优化候选"
-                    desc="请先切换到「执行 Traces」分析本地记录，或等待云端自进化服务推送新版本"
+                    desc="请先切换到「历史会话执行记录」分析本地记录，或等待云端自进化服务推送新版本"
                   />
                 </>
               ) : (
                 <>
                   <CloudEvolutionIntro />
-                  {cloudEvolutionUpdates.map((candidate) => (
-                    <CloudEvolutionUpdateCard
-                      key={candidate.candidate_id}
-                      candidate={candidate}
-	                      installing={installingCloudCandidateId === candidate.candidate_id}
-	                      onInstall={handleInstallCloudUpdate}
-	                      onRollback={handleRollbackCloudUpdate}
-	                      onExportBackup={handleExportCloudBackup}
-	                      onIgnore={handleIgnoreCloudUpdate}
-	                      onDelete={handleDeleteCloudUpdate}
-                    />
-                  ))}
+                  {cloudEvolutionUpdates.map((candidate) => {
+                    const marketInfo = candidate.plugin_name
+                      ? undefined
+                      : ownedSkillItemsByKey.get(normalizeMarketSkillKey(candidate.skill_name))
+                    return (
+                      <CloudEvolutionUpdateCard
+                        key={candidate.candidate_id}
+                        candidate={candidate}
+                        marketInfo={marketInfo}
+                        installing={installingCloudCandidateId === candidate.candidate_id}
+                        updatingMarket={updatingMarketCandidateId === candidate.candidate_id}
+                        onInstall={handleInstallCloudUpdate}
+                        onUpdateMarket={handleUpdateMarketFromCloudUpdate}
+                        onRollback={handleRollbackCloudUpdate}
+                        onExportBackup={handleExportCloudBackup}
+                        onIgnore={handleIgnoreCloudUpdate}
+                        onDelete={handleDeleteCloudUpdate}
+                      />
+                    )
+                  })}
                   {[...candidates]
                     .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
-                    .map((candidate) => (
-                      <CandidateCard
-                        key={candidate.candidateId}
-                        candidate={candidate}
-                        onApprove={handleApprove}
-                        onReject={handleReject}
-                        onDelete={handleDeleteCandidate}
-                      />
-                    ))}
+                    .map((candidate) => {
+                      const marketInfo =
+                        ownedSkillItemsByKey.get(normalizeMarketSkillKey(candidate.skillId)) ??
+                        ownedSkillItemsByKey.get(normalizeMarketSkillKey(candidate.name))
+                      return (
+                        <CandidateCard
+                          key={candidate.candidateId}
+                          candidate={candidate}
+                          marketInfo={marketInfo}
+                          publishingMarket={publishingMarketCandidateId === candidate.candidateId}
+                          marketSynced={marketSyncedCandidateIds.has(candidate.candidateId)}
+                          onApprove={handleApprove}
+                          onReject={handleReject}
+                          onDelete={handleDeleteCandidate}
+                          onPublishMarket={handlePublishLocalCandidateToMarket}
+                        />
+                      )
+                    })}
                 </>
               )
             ) : tracesLoading ? (

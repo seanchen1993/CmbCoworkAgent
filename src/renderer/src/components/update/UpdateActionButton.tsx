@@ -103,9 +103,9 @@ export function UpdateActionButton({
 
   const hasUpdate = Boolean(version) && status !== "idle"
 
-  if (hideWhenCurrent && !hasUpdate) return null
+  if (variant !== "tag" && hideWhenCurrent && !hasUpdate) return null
 
-  const tagText =
+  const statusTagText =
     status === "downloaded"
       ? "重启更新"
       : status === "downloading"
@@ -114,25 +114,36 @@ export function UpdateActionButton({
           ? "更新失败"
           : hasUpdate
             ? "可更新"
-            : "检查"
+            : null
 
   if (variant === "tag") {
     return (
       <>
-        <button
-          type="button"
-          className={cn(
-            "cursor-pointer rounded-full px-1.5 py-0.5 text-[9px] font-medium transition-colors",
-            hasUpdate
-              ? "bg-status-warning/15 text-status-warning hover:bg-status-warning/25"
-              : "bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground",
-            className
+        <div className={cn("inline-flex shrink-0 items-center gap-1", className)}>
+          <button
+            type="button"
+            className="cursor-pointer rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground shrink-0"
+            title="检查是否有新版本"
+            onClick={() => setDialogOpen(true)}
+          >
+            检查
+          </button>
+          {statusTagText && (
+            <button
+              type="button"
+              className={cn(
+                "cursor-pointer rounded-full px-1.5 py-0.5 text-[9px] font-medium transition-colors shrink-0",
+                status === "error"
+                  ? "bg-red-100 text-red-700 hover:bg-red-200"
+                  : "bg-status-warning/15 text-status-warning hover:bg-status-warning/25"
+              )}
+              title={version ? `发现新版本 v${version}` : "查看更新状态"}
+              onClick={() => setDialogOpen(true)}
+            >
+              {statusTagText}
+            </button>
           )}
-          title={version ? `发现新版本 v${version}` : "检查是否有新版本"}
-          onClick={() => setDialogOpen(true)}
-        >
-          {tagText}
-        </button>
+        </div>
         {dialogOpen && <UpdateDialog open={dialogOpen} onOpenChange={setDialogOpen} />}
       </>
     )

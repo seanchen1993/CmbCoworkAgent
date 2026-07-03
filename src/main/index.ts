@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker } from "electron"
+import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -6,9 +6,24 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox")
 }
 
-import { existsSync } from "fs"
 import { join } from "path"
-import { writeMainLog, writeRendererLog } from "./logging"
+import { existsSync, rmSync } from "fs"
+import { writeMainLog, writeRendererLog, flushLogs, flushLogsSync } from "./logging"
+import { registerPathOpenersHandlers } from "./ipc/path-openers"
+import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
+import {
+  clearAppAttention,
+  disposeAppTray,
+  initializeAppTray,
+  isAppQuitting,
+  isAppTrayAvailable,
+  requestAppAttention,
+  setAppQuitting,
+  showPendingAppAttention,
+  shouldHideMainWindowOnClose
+} from "./app-tray"
+import { setAppAttentionHandler } from "./app-attention-events"
+import { APP_ATTENTION_CHANNEL, isRendererAppAttentionPayload } from "../shared/app-attention"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
@@ -58,7 +73,8 @@ function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): strin
           }
         }
         if (typeof nestedValue === "symbol") return nestedValue.toString()
-        if (typeof nestedValue === "function") return `[Function ${nestedValue.name || "anonymous"}]`
+        if (typeof nestedValue === "function")
+          return `[Function ${nestedValue.name || "anonymous"}]`
         if (nestedValue && typeof nestedValue === "object") {
           if (seen.has(nestedValue)) return "[Circular]"
           seen.add(nestedValue)
@@ -121,11 +137,25 @@ process.stderr.on("error", (err: NodeJS.ErrnoException) => {
 process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
   if (err.code === "EPIPE") return // silently ignore broken pipe
   console.error("[Main] Uncaught exception:", err)
+  // Persist the buffered tail (incl. this error) in case the process dies next.
+  flushLogsSync()
 })
 process.on("unhandledRejection", (reason) => {
   console.error("[Main] Unhandled rejection:", reason)
 })
+
+// Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
+// does not fire Node's `exit` event, so flush the log tail before quitting.
+// `once` lets a second signal fall through to default force-kill if quit hangs.
+const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
+  console.warn(`[Main] received ${signal}, flushing logs and quitting`)
+  flushLogsSync()
+  app.quit()
+}
+process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
+process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
+import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
@@ -133,8 +163,10 @@ import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
+import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
+import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
@@ -145,13 +177,19 @@ import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
 import { registerDesignHandlers } from "./ipc/design"
+import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
+import { registerFeatureGateHandlers } from "./ipc/feature-gates"
+import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerTaskCardHandlers } from "./ipc/task-cards"
+import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
+import { startHarnessStatusReporter } from "./services/harness-status-reporter"
 import { initializeAdoptionTracker, shutdownAdoptionTracker } from "./services/adoption-tracker"
 import {
   startRegisteredGitHookEventSync,
@@ -168,7 +206,8 @@ import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
+import { startFeatureGatePrefetch, stopFeatureGatePrefetch } from "./feature-gates"
+import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import {
@@ -181,6 +220,25 @@ import {
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
+
+function cleanupLegacySkillEvalRecords(): void {
+  const roots = new Set(
+    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter((value): value is string =>
+      Boolean(value)
+    )
+  )
+
+  for (const root of roots) {
+    const legacyDir = join(root, "skill-evals")
+    if (!existsSync(legacyDir)) continue
+    try {
+      rmSync(legacyDir, { recursive: true, force: true })
+      console.log("[Main] Removed legacy SkillEval records:", legacyDir)
+    } catch (error) {
+      console.warn("[Main] Failed to remove legacy SkillEval records:", error)
+    }
+  }
+}
 
 // ── Keep Awake ──
 let keepAwakeBlockerId: number | null = null
@@ -230,14 +288,16 @@ function applyMacDockIcon(): void {
 
   // 宠物透明窗口会额外创建 BrowserWindow；macOS 下重复应用 Dock 图标可避免开发态图标被重置。
   app.dock.show()
-  const iconPath = getFirstExistingPath([
-    ...(isDev ? [getDevMacDockIconPath()] : []),
-    join(__dirname, "../../resources/icon.png"),
-    join(app.getAppPath(), "resources/icon.png"),
-    join(__dirname, "../resources/icon.png"),
-    join(app.getAppPath(), "build/icon.png"),
-    join(process.cwd(), "build/icon.png")
-  ].filter((path): path is string => Boolean(path)))
+  const iconPath = getFirstExistingPath(
+    [
+      ...(isDev ? [getDevMacDockIconPath()] : []),
+      join(__dirname, "../../resources/icon.png"),
+      join(app.getAppPath(), "resources/icon.png"),
+      join(__dirname, "../resources/icon.png"),
+      join(app.getAppPath(), "build/icon.png"),
+      join(process.cwd(), "build/icon.png")
+    ].filter((path): path is string => Boolean(path))
+  )
 
   if (isDev) {
     console.log(`[icon] mac dock icon path: ${iconPath ?? "not found"}`)
@@ -279,13 +339,18 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99','.163'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
+    autoHideMenuBar: ![".166", ".147", ".216", ".215", ".225", "201.99", ".163"].some((ip) =>
+      getLocalIP().includes(ip)
+    ) // 自动隐藏菜单栏
   })
 
   mainWindow.on("ready-to-show", () => {
     mainWindow?.show()
     applyMacDockIcon()
   })
+
+  mainWindow.on("focus", clearAppAttention)
+  mainWindow.on("blur", showPendingAppAttention)
 
   mainWindow.on("unresponsive", () => {
     console.warn("[Main] BrowserWindow became unresponsive")
@@ -304,47 +369,58 @@ function createWindow(): void {
     writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
   })
 
-  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    console.error("[Main] Renderer failed to load:", {
-      errorCode,
-      errorDescription,
-      validatedURL
-    })
-  })
+  mainWindow.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL) => {
+      console.error("[Main] Renderer failed to load:", {
+        errorCode,
+        errorDescription,
+        validatedURL
+      })
+    }
+  )
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[Main] Renderer process gone:", details)
   })
 
-  mainWindow.webContents.on('did-finish-load', () => {
+  mainWindow.webContents.on("did-finish-load", () => {
     const version = app.getVersion()
-    console.log('version---------------', version)
-    console.log('getLocalIP', getLocalIP())
+    console.log("version---------------", version)
+    console.log("getLocalIP", getLocalIP())
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('version', version)
-      mainWindow.webContents.send('ip', getLocalIP())
+      mainWindow.webContents.send("version", version)
+      mainWindow.webContents.send("ip", getLocalIP())
     }
   })
 
   // HMR for renderer based on electron-vite cli
   if (isDev && process.env["ELECTRON_RENDERER_URL"]) {
-    console.log('local render')
+    console.log("local render")
     mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"])
   } else {
-    console.log('url render')
+    console.log("url render")
     // mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
     const renderUrl = import.meta.env.VITE_RENDER_URL
     if (!renderUrl) {
       mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
-    }else{
+    } else {
       mainWindow.loadURL(renderUrl)
     }
   }
 
-  mainWindow.on("close", () => {
+  mainWindow.on("close", (event) => {
     console.warn("[Main] Main window close requested", {
       pet: getPetWindowDebugInfo()
     })
+    if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
+      event.preventDefault()
+      mainWindow?.hide()
+      showPendingAppAttention()
+      if (process.platform === "darwin" && app.dock) {
+        app.dock.hide()
+      }
+    }
   })
 
   mainWindow.on("closed", () => {
@@ -365,6 +441,7 @@ function createWindow(): void {
  * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
  */
 function ensureMainWindowVisible(): BrowserWindow | null {
+  clearAppAttention()
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
     return mainWindow
@@ -387,7 +464,8 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
     if (!thread.metadata) continue
     try {
       const metadata = JSON.parse(thread.metadata)
-      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
+      const workspacePath =
+        typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
       if (!workspacePath) continue
       const key = workspacePath.toLowerCase()
       if (seen.has(key)) continue
@@ -443,7 +521,6 @@ if (!gotTheLock) {
       })
     }
 
-    // Register cloud trace reporter if trace base URL is configured
     const traceBaseUrl = import.meta.env.VITE_API_TRACE_BASE_URL as string | undefined
     if (traceBaseUrl) {
       setTraceReporter(new CloudTraceReporter(traceBaseUrl))
@@ -454,8 +531,15 @@ if (!gotTheLock) {
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
+    // Periodically upsert Harness Board project/feature status into the event
+    // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
+    // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
+    // configured.
+    startHarnessStatusReporter()
+
     // Initialize database
     await initializeDatabase()
+    cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)
     try {
@@ -467,6 +551,7 @@ if (!gotTheLock) {
 
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
+    registerWorkflowHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
     registerModelHandlers(ipcMain)
     registerSkillsHandlers(ipcMain)
@@ -474,8 +559,10 @@ if (!gotTheLock) {
     registerScheduledTaskHandlers(ipcMain)
     registerHeartbeatHandlers(ipcMain)
     registerMemoryHandlers(ipcMain)
+    registerTaskMmdHandlers(ipcMain)
     registerGitHandlers()
     registerPluginHandlers(ipcMain)
+    registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
     registerOptimizerHandlers(ipcMain)
     registerChatXHandlers(ipcMain)
@@ -487,12 +574,26 @@ if (!gotTheLock) {
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
     registerDesignHandlers()
+    registerAdoptionTraceHandlers(ipcMain)
+    registerFeatureGateHandlers(ipcMain)
+    registerHarnessBoardHandlers(ipcMain)
     registerUpdaterHandlers()
     registerLspHandlers(ipcMain)
+    registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
+    registerTaskCardHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
+
+    ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (event.sender.id !== mainWindow.webContents.id || !isRendererAppAttentionPayload(payload))
+        return
+      // Main-process sources own persistent state and keys. Strip renderer keys so
+      // a compromised renderer cannot overwrite or resolve an approval/input entry.
+      requestAppAttention({ kind: payload.kind, threadId: payload.threadId })
+    })
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)
@@ -523,36 +624,6 @@ if (!gotTheLock) {
       return app.getVersion()
     })
 
-    ipcMain.handle("open-folder", async (_, folderPath: string) => {
-      try {
-        await shell.openPath(folderPath)
-        return { success: true }
-      } catch (error) {
-        console.error("Failed to open folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
-    })
-
-    ipcMain.handle("show-item-in-folder", async (_, filePath: string) => {
-      try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
-      } catch (error) {
-        console.error("Failed to show item in folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
-    })
-
-    ipcMain.handle("shell-show-item-in-folder", async (_, filePath: string) => {
-      try {
-        shell.showItemInFolder(filePath)
-        return { success: true }
-      } catch (error) {
-        console.error("Failed to show item in folder:", error)
-        return { success: false, error: error instanceof Error ? error.message : "Unknown error" }
-      }
-    })
-
     ipcMain.handle("open-login-window", async () => {
       if (!loginWindow) {
         loginWindow = new BrowserWindow({
@@ -562,14 +633,19 @@ if (!gotTheLock) {
             contextIsolation: true,
             nodeIntegration: false,
             webviewTag: true,
-            preload: join(__dirname, "../preload/index.js"),
-          },
+            preload: join(__dirname, "../preload/index.js")
+          }
         })
       }
-      loginWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-        "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-        "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-        "&response_type=code")
+      loginWindow.loadURL(
+        `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+          "&redirect_uri=" +
+          encodeURIComponent(
+            `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+          ) +
+          "&response_type=code"
+      )
     })
 
     ipcMain.handle("close-login-window", async () => {
@@ -577,22 +653,27 @@ if (!gotTheLock) {
         loginWindow.close()
         loginWindow = null
       }
-      if(mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("notify-login-msg",'login')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("notify-login-msg", "login")
       }
     })
 
     ipcMain.handle("open-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
-        mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-          "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-          "&response_type=code")
+      if (mainWindow && !mainWindow.isDestroyed() && !isDev) {
+        mainWindow.loadURL(
+          `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+            "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+            "&redirect_uri=" +
+            encodeURIComponent(
+              `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+            ) +
+            "&response_type=code"
+        )
       }
     })
 
     ipcMain.handle("close-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
       }
     })
@@ -606,6 +687,14 @@ if (!gotTheLock) {
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
 
     createWindow()
+    setAppAttentionHandler(requestAppAttention)
+    await initializeAppTray({
+      getMainWindow: () => mainWindow,
+      showMainWindow: () => {
+        ensureMainWindowVisible()
+        applyMacDockIcon()
+      }
+    })
     createPetWindow()
 
     // Start scheduled task scheduler and heartbeat service
@@ -614,6 +703,7 @@ if (!gotTheLock) {
     startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
+    startFeatureGatePrefetch(3000)
     markFullBackupCleanupReady(selfCheckResult)
 
     // ── Keep Awake ──
@@ -626,9 +716,8 @@ if (!gotTheLock) {
     })
 
     app.on("activate", () => {
-      if (!mainWindow || mainWindow.isDestroyed()) {
-        createWindow()
-      }
+      ensureMainWindowVisible()
+      applyMacDockIcon()
       createPetWindow()
     })
   })
@@ -648,6 +737,7 @@ if (!gotTheLock) {
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
   app.on("before-quit", (event) => {
+    setAppQuitting(true)
     console.warn("[Main] before-quit", {
       sessionEndDone,
       hasActiveSessions: hasActiveSessions(),
@@ -659,7 +749,9 @@ if (!gotTheLock) {
       return
     }
     event.preventDefault()
-    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
+    fireSessionEndAll(5000, (threadId) =>
+      makeBroadcastHookResultCallback(`agent:stream:${threadId}`)
+    )
       .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
       .finally(() => disposeAllAgentThreadStates())
       .finally(() => {
@@ -681,15 +773,19 @@ if (!gotTheLock) {
     }
     quitting = true
     e.preventDefault()
+    setAppAttentionHandler(null)
+    disposeAppTray()
     applyKeepAwake(false)
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()
     stopHeartbeat()
     stopChatX()
+    stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
     stopUpdateChecker()
+    stopFeatureGatePrefetch()
     try {
       shutdownAdoptionTracker()
     } catch (err) {
@@ -702,24 +798,56 @@ if (!gotTheLock) {
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ])
 
-    // Single-fire exit guard so timeout + finally don't both call app.exit
-    let exited = false
-    const doExit = (): void => {
-      if (exited) return
-      exited = true
-      flush()
+    const CLEANUP_TIMEOUT_MS = 10_000
+    const FORCE_FLUSH_GRACE_MS = 2_000
+    const HARD_EXIT_TIMEOUT_MS = CLEANUP_TIMEOUT_MS + FORCE_FLUSH_GRACE_MS + 500
+
+    let exitStarted = false
+    let cancelHardExit: (() => void) | null = null
+
+    const exitImmediately = (): void => {
+      if (cancelHardExit) {
+        cancelHardExit()
+        cancelHardExit = null
+      }
       app.exit(0)
     }
 
-    // Give async cleanup up to 10s, then force quit
+    const doExit = async (force: boolean): Promise<void> => {
+      if (exitStarted) return
+      exitStarted = true
+
+      if (force) {
+        // Cleanup already exceeded its budget. Give persistence a short bounded
+        // grace period, but never let a stalled disk keep the process alive.
+        await Promise.all([
+          waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
+          waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
+        ])
+      } else {
+        await flush()
+        await flushLogs()
+      }
+      exitImmediately()
+    }
+
+    // Independent hard deadline: even if cleanup finishes just before its timer
+    // and the normal async flush then stalls, the process still exits.
+    cancelHardExit = scheduleHardDeadline(() => {
+      console.error("[Main] Hard exit deadline reached")
+      flushLogsSync()
+      exitImmediately()
+    }, HARD_EXIT_TIMEOUT_MS)
+
+    // Give async cleanup up to 10s, then switch to bounded best-effort flushes.
     const forceTimer = setTimeout(() => {
       console.warn("[Main] Cleanup timeout, force quitting")
-      doExit()
-    }, 10_000)
+      void doExit(true)
+    }, CLEANUP_TIMEOUT_MS)
 
     cleanup.finally(() => {
       clearTimeout(forceTimer)
-      doExit()
+      void doExit(false)
     })
   })
 }

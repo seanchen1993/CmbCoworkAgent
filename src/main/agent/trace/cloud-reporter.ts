@@ -46,9 +46,9 @@ function formatLocalDate(isoTimestamp: string): string | null {
   const date = new Date(isoTimestamp)
   if (Number.isNaN(date.getTime())) return null
 
-  const year  = String(date.getFullYear())
+  const year = String(date.getFullYear())
   const month = String(date.getMonth() + 1).padStart(2, "0")
-  const day   = String(date.getDate()).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
 
   return `${year}${month}${day}`
 }
@@ -73,7 +73,7 @@ export class CloudTraceReporter implements ITraceReporter {
     if (!datePart) {
       console.warn(
         `[CloudReporter] Skipping upload for trace ${trace.traceId}: ` +
-        `invalid startedAt value "${trace.startedAt}"`
+          `invalid startedAt value "${trace.startedAt}"`
       )
       return
     }
@@ -107,7 +107,7 @@ export class CloudTraceReporter implements ITraceReporter {
       const result = await Promise.race<Response | FetchTimeout>([
         fetch(`${this.baseUrl}/api/traces/upload`, {
           method: "POST",
-          body:   formData
+          body: formData
         }),
         timeoutPromise
       ])
@@ -116,7 +116,7 @@ export class CloudTraceReporter implements ITraceReporter {
       if (result === FETCH_TIMEOUT || !("ok" in result)) {
         console.warn(
           `[CloudReporter] Upload timed out for trace ${trace.traceId} ` +
-          `after ${REPORT_TIMEOUT_MS}ms`
+            `after ${REPORT_TIMEOUT_MS}ms`
         )
         return
       }
@@ -124,7 +124,7 @@ export class CloudTraceReporter implements ITraceReporter {
       if (!result.ok) {
         console.warn(
           `[CloudReporter] Upload failed for trace ${trace.traceId}: ` +
-          `${result.status} ${result.statusText}`
+            `${result.status} ${result.statusText}`
         )
         return
       }

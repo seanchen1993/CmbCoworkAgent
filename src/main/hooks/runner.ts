@@ -3,19 +3,46 @@ import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
-import type { HookConfig, HookEvent, HookResult } from "./types"
+import type { HookConfig, HookEvent, HookResult, HookUserContextField } from "./types"
+import { getHookModelRef, getTimeoutBounds } from "./types"
+import { executeHttpHook } from "./http-runner"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
-import { getCustomModelConfigs, getHookLoggingConfig } from "../storage"
+import { getCustomModelConfigs, getHookLoggingConfig, getUserInfo } from "../storage"
 import { persistHookResultRecord } from "./log-record"
+import { trackEvent } from "../services/event-reporter"
 
-const DEFAULT_TIMEOUT = 10_000
+/**
+ * Resolve the effective timeout (ms) for a hook by consulting the handler-type
+ * and async-aware bounds table. Falls back to the hook's own `timeout` when set
+ * and within bounds; otherwise uses the type-specific default. Centralised so
+ * commandHook / promptHook / future http/agent hook paths all agree.
+ */
+function getEffectiveTimeout(hook: HookConfig): number {
+  const bounds = getTimeoutBounds(hook.type, (hook as { async?: boolean }).async === true)
+  return hook.timeout ?? bounds.default
+}
 const MAX_OUTPUT_BYTES = 1_000_000 // 1 MB per hook
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
+const DEFAULT_USER_CONTEXT_FIELDS = [
+  "sap_id",
+  "yst_id",
+  "name",
+  "origin_org_id",
+  "org_name",
+  "path_name"
+] as const
+// Token-bearing fields are never written to env vars and are redacted in
+// diagnostic logs. Match by name with the same `/token/i` rule the log
+// redactor uses (log-record.ts) so adding a future *_token field can't
+// accidentally leak through the env path while being redacted in logs.
+function isTokenUserContextField(field: string): boolean {
+  return /token/i.test(field)
+}
 // `once` fired-state, partitioned by sessionId so we can drop a session's
 // entries when a thread ends (or when a hook is mutated). Aligns conceptually
 // with CC's session-scoped session-hooks Map, except we track fired state
@@ -32,6 +59,8 @@ export interface HookContext {
   workspacePath?: string
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
+  /** Optional system identifier exposed to hook commands as SYSTEM_ID. */
+  systemId?: string
   /** Renderer user message id that owns this hook event, used only for log grouping. */
   turnId?: string
   /** Plugin that owns the capability currently being used, when known. */
@@ -57,6 +86,77 @@ export interface HookContext {
     toolCalls?: string[]
     usedSkills?: string[]
   }
+  pluginOutputDir?: string
+  /** Harness plugin workspace exposed to hooks as PLUGIN_WORKSPACE. */
+  pluginWorkspace?: string
+  /** Harness feature identifier exposed to hooks as FEATURE_ID. */
+  featureId?: string
+  /**
+   * Harness project stable id (= `properties.harnessProjectId` on code-adoption
+   * events) for the project this conversation is bound to. Exposed to hooks as
+   * `HARNESS_PROJECT_ID` env and `harness_project_id` in stdin JSON. Lets an
+   * external code-adoption reporter (running as a DevClaw hook) tag its
+   * self-reported events with the same project id the dashboard aggregates on,
+   * so they surface in 项目运营概览. Empty for non-project-mode conversations.
+   */
+  harnessProjectId?: string
+  /**
+   * Bound adapter name / version (= `properties.harnessAdapterName` /
+   * `properties.harnessAdapterVersion` on code-adoption events). Exposed to hooks
+   * as `HARNESS_ADAPTER_NAME` / `HARNESS_ADAPTER_VERSION` env and
+   * `harness_adapter_name` / `harness_adapter_version` in stdin JSON. Lets an
+   * external reporter tag self-reported events so they show in the dashboard's
+   * per-adapter adoption breakdown. Empty for non-project-mode conversations.
+   */
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  /** Harness project code exposed to hooks as PROJECT_CODE. */
+  projectCode?: string
+  /** Harness project directory exposed to hooks as PROJECT_DIR. */
+  projectDir?: string
+  /**
+   * Absolute path to the on-disk conversation history for this session.
+   * Exposed to hooks as `transcript_path` in stdin JSON and `TRANSCRIPT_PATH` env.
+   * Mirrors Claude Code's hook input — lets hooks read prior turns for audit/analytics.
+   */
+  transcriptPath?: string
+  /**
+   * Active permission mode (e.g. "yolo", "approve"). Exposed as `permission_mode`
+   * in stdin JSON and `PERMISSION_MODE` env. Lets hooks adapt policy by mode.
+   */
+  permissionMode?: string
+  /**
+   * Subagent identifier — non-empty only when the hook fires from inside a
+   * subagent (e.g. PreToolUse from a task-tool worker). Mirrors CC's `agent_id`.
+   * Use this to distinguish parent-thread hooks from subagent-thread hooks.
+   */
+  agentId?: string
+  /**
+   * PR-11 — Setup event trigger source. Emitted as `trigger` in stdin JSON.
+   * `"init"` = workspace's first run on this machine (de-duped via
+   * `<workspacePath>/.cmbdevclaw/setup-state.json`);
+   * `"maintenance"` = user-initiated re-run via the workspace UI.
+   */
+  setupTrigger?: "init" | "maintenance"
+  /** PR-17 — classifyApiError output for StopFailure / PostToolUseFailure
+   *  matchers. Exposed as part of stdin JSON's `tool_input.error_type`. */
+  stopFailureError?: string
+  /** PR-16 follow-up — CC SessionStart `source` matchQuery. Today this
+   *  project only ever fires SessionStart on thread first-run, so the value
+   *  is always "startup" (no resume/clear/compact concept yet). The field
+   *  exists so OMC `matcher: "startup"` configs survive a round trip and
+   *  the matcher subsystem evaluates against a real value rather than
+   *  defaulting to toolName. */
+  sessionStartSource?: "startup" | "resume" | "clear" | "compact"
+  /** PR-16 follow-up — CC SessionEnd `reason` matchQuery. Today filled by the
+   *  two SessionEnd entry points: thread delete → "clear", before-quit drain
+   *  → "logout". CC also has "prompt_input_exit" / "other" which this project
+   *  doesn't have analogues for yet. */
+  sessionEndReason?: "clear" | "logout" | "prompt_input_exit" | "other"
+  /** PR-16 follow-up — CC Notification `notification_type` matchQuery. Today
+   *  the only Notification fire path is the approval queue, so the value is
+   *  always "permission_prompt". */
+  notificationType?: "permission_prompt"
 }
 
 /**
@@ -108,8 +208,68 @@ function matchesName(matcher: string | undefined, name: string | undefined): boo
   return matcher.toLowerCase() === name.toLowerCase()
 }
 
+/**
+ * PR-16 — Per-event matcher target. For events that today fire with no
+ * meaningful `toolName` (SessionStart, SessionEnd, Stop, Subagent*, Setup,
+ * PostToolUseFailure, StopFailure) the matcher now interrogates a
+ * per-event-specific context slot instead. Sites where users could
+ * historically have configured a meaningful matcher (PreToolUse, PostToolUse,
+ * Pre/PostSkillUse, Notification) keep the old behaviour — the Notification
+ * dual-matcher fallback below preserves `matcher: "execute"` style configs.
+ */
 function getMatcherTarget(event: HookEvent, context: HookContext): string | undefined {
-  return event === "PreSkillUse" || event === "PostSkillUse" ? context.skillName : context.toolName
+  switch (event) {
+    case "PreSkillUse":
+    case "PostSkillUse":
+      return context.skillName
+    case "SubagentStart":
+    case "SubagentStop":
+      return context.subagent?.name ?? context.subagent?.id
+    case "Setup":
+      return context.setupTrigger
+    case "SessionStart":
+      return context.sessionStartSource
+    case "SessionEnd":
+      return context.sessionEndReason
+    case "Notification":
+      return context.notificationType
+    case "StopFailure":
+      // PR-16 follow-up — CC matcher target for StopFailure is `error`,
+      // mirrored by `stopFailureError` (classifyApiError output). The old
+      // toolName return was a copy-paste from PostToolUseFailure; with no
+      // toolName ever set on the StopFailure context, `matcher: "rate_limit"`
+      // style configs (the OMC use case) silently never fired.
+      return context.stopFailureError
+    case "PostToolUseFailure":
+      return context.toolName
+    default:
+      return context.toolName
+  }
+}
+
+/**
+ * PR-16 — Match a hook's `matcher` field against the event-specific target,
+ * with a Notification-only fallback that preserves the legacy semantic
+ * (`matcher: "execute"` historically matched Notification's tool_name). When
+ * no notification_type field exists yet we keep toolName matching.
+ */
+function matchesEventMatcher(
+  matcher: string | undefined,
+  event: HookEvent,
+  context: HookContext
+): boolean {
+  if (!matcher || matcher === "*") return true
+  const primary = getMatcherTarget(event, context)
+  if (matchesName(matcher, primary)) return true
+  if (event === "Notification") {
+    // PR-16 dual-matcher fallback: with `notificationType` now filled,
+    // `primary` is "permission_prompt" — but historically users could
+    // configure `matcher: "execute"` to mean "Notification for execute-tool
+    // approvals". We preserve that legacy semantic by ALSO trying to match
+    // against the approval's toolName when the primary match misses.
+    return matchesName(matcher, context.toolName)
+  }
+  return false
 }
 
 /**
@@ -124,7 +284,67 @@ function setBestEffortJsonEnv(
   env[key] = value
 }
 
-function buildHookEnv(event: HookEvent, context: HookContext): Record<string, string> {
+function getHookUserContextFields(hook: HookConfig): HookUserContextField[] {
+  const config = hook.injectUserContext
+  if (!config) return []
+  if (config === true) return [...DEFAULT_USER_CONTEXT_FIELDS]
+  if (config.enabled === false) return []
+  return config.include && config.include.length > 0
+    ? config.include
+    : [...DEFAULT_USER_CONTEXT_FIELDS]
+}
+
+function buildHookUserContext(
+  hook: HookConfig,
+  options: { includeTokens?: boolean } = {}
+): Record<string, string> | undefined {
+  const fields = getHookUserContextFields(hook)
+  if (fields.length === 0) return undefined
+
+  let userInfo: ReturnType<typeof getUserInfo> = null
+  try {
+    userInfo = getUserInfo()
+  } catch {
+    userInfo = null
+  }
+  const values: Record<HookUserContextField, string | undefined> = {
+    sap_id: userInfo?.sapId,
+    yst_id: userInfo?.ystId,
+    name: userInfo?.userName,
+    origin_org_id: userInfo?.originOrgId,
+    org_name: userInfo?.orgName,
+    path_name: userInfo?.pathName,
+    origin_path_id: userInfo?.originPathId,
+    yst_id_token: userInfo?.ystIdToken
+  }
+  const userContext: Record<string, string> = {}
+  for (const field of fields) {
+    if (options.includeTokens === false && isTokenUserContextField(field)) continue
+    const value = values[field]
+    if (typeof value === "string" && value.length > 0) {
+      userContext[field] = value
+    }
+  }
+  return Object.keys(userContext).length > 0 ? userContext : undefined
+}
+
+function userContextEnvName(field: string): string {
+  return `HOOK_USER_${field.toUpperCase()}`
+}
+
+function addHookUserContextEnv(env: Record<string, string>, hook: HookConfig): void {
+  const userContext = buildHookUserContext(hook, { includeTokens: false })
+  if (!userContext) return
+  for (const [field, value] of Object.entries(userContext)) {
+    env[userContextEnvName(field)] = value
+  }
+}
+
+function buildHookEnv(
+  event: HookEvent,
+  context: HookContext,
+  hook: HookConfig
+): Record<string, string> {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     HOOK_EVENT: event
@@ -151,8 +371,23 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
     // Claude Code compatibility — the canonical env var hooks expect
     env.CLAUDE_PROJECT_DIR = context.workspacePath
   }
+  if (context.pluginOutputDir) env.PLUGIN_OUTPUT_DIR = context.pluginOutputDir
+  if (context.pluginWorkspace) env.PLUGIN_WORKSPACE = context.pluginWorkspace
+  if (context.featureId) env.FEATURE_ID = context.featureId
+  if (context.harnessProjectId) env.HARNESS_PROJECT_ID = context.harnessProjectId
+  if (context.harnessAdapterName) env.HARNESS_ADAPTER_NAME = context.harnessAdapterName
+  if (context.harnessAdapterVersion) env.HARNESS_ADAPTER_VERSION = context.harnessAdapterVersion
+  if (context.projectCode) env.PROJECT_CODE = context.projectCode
+  if (context.projectDir) env.PROJECT_DIR = context.projectDir
   if (context.sessionId) env.SESSION_ID = context.sessionId
+  if (context.systemId) env.SYSTEM_ID = context.systemId
   if (context.userPrompt) env.USER_PROMPT = context.userPrompt
+  addHookUserContextEnv(env, hook)
+  // PR-01: Claude Code-compatible env vars. Only set when context provides them
+  // — keeps zero-context invocations byte-identical with prior versions.
+  if (context.transcriptPath) env.TRANSCRIPT_PATH = context.transcriptPath
+  if (context.permissionMode) env.PERMISSION_MODE = context.permissionMode
+  if (context.agentId) env.AGENT_ID = context.agentId
   return env
 }
 
@@ -160,12 +395,14 @@ function buildHookEnv(event: HookEvent, context: HookContext): Record<string, st
  * Build the structured JSON payload written to the hook's stdin (Claude Code protocol).
  * Keys mirror Claude Code's documented hook input schema so existing community hooks work.
  */
-function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
+function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: HookConfig): string {
   const payload: Record<string, unknown> = {
     hook_event_name: event,
     session_id: context.sessionId ?? "",
     cwd: getCommandCwd(context)
   }
+  const userContext = buildHookUserContext(hook)
+  if (userContext) payload.user_context = userContext
   if (context.hookSourceType) payload.hook_source_type = context.hookSourceType
   if (context.hookSourceRoot) payload.hook_source_root = context.hookSourceRoot
   if (context.hookSourcePath) payload.hook_source_path = context.hookSourcePath
@@ -174,6 +411,13 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
   if (context.pluginId) payload.plugin_id = context.pluginId
   if (context.pluginName) payload.plugin_name = context.pluginName
   if (context.pluginRoot) payload.plugin_root = context.pluginRoot
+  if (context.pluginWorkspace) payload.plugin_workspace = context.pluginWorkspace
+  if (context.featureId) payload.feature_id = context.featureId
+  if (context.harnessProjectId) payload.harness_project_id = context.harnessProjectId
+  if (context.harnessAdapterName) payload.harness_adapter_name = context.harnessAdapterName
+  if (context.harnessAdapterVersion) payload.harness_adapter_version = context.harnessAdapterVersion
+  if (context.projectCode) payload.project_code = context.projectCode
+  if (context.projectDir) payload.project_dir = context.projectDir
   if (context.toolResult !== undefined) {
     // Upstream passes JSON.stringify(result); parse it back so hooks see a real object
     // (matches Claude Code spec where tool_response is the structured response).
@@ -185,13 +429,47 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext): string {
     }
   }
   if (context.userPrompt) payload.prompt = context.userPrompt
+  // PR-01: Claude Code-compatible payload fields. Only emitted when present so
+  // existing hook scripts that don't expect them see the exact same JSON shape.
+  if (context.transcriptPath) payload.transcript_path = context.transcriptPath
+  if (context.permissionMode) payload.permission_mode = context.permissionMode
+  if (context.agentId) payload.agent_id = context.agentId
+  // PR-11 — Setup event payload (`trigger` + `workspace_path`).
+  if (context.setupTrigger) {
+    payload.trigger = context.setupTrigger
+    if (context.workspacePath) payload.workspace_path = context.workspacePath
+  }
   if (context.skillName) payload.skill_name = context.skillName
   if (context.skillPath) payload.skill_path = context.skillPath
   if (context.skillRoot) payload.skill_root = context.skillRoot
   if (context.skillTriggerToolName) payload.skill_trigger_tool_name = context.skillTriggerToolName
   if (context.subagent) payload.subagent = context.subagent
   if (context.stopContext) payload.stop_context = context.stopContext
-  return JSON.stringify(payload)
+  return stringifyAsciiJson(payload)
+}
+
+/**
+ * Serialize the hook stdin payload as ASCII-only JSON (non-ASCII → \uXXXX).
+ *
+ * stdin bytes are written UTF-8 (Node's string default in `child.stdin.end`),
+ * but on Chinese Windows the interpreters that read them — Python's
+ * `sys.stdin.read()` (cp936/GBK via locale), PowerShell's `[Console]::In`
+ * (OEM codepage), cmd — default to the system ANSI/OEM codepage, not UTF-8.
+ * Any non-ASCII field (Chinese prompts, tool args, block reasons) therefore
+ * comes back as mojibake or throws UnicodeDecodeError. Escaping every code unit
+ * >= U+0080 to \uXXXX keeps the payload pure ASCII — a common subset of UTF-8
+ * and every legacy codepage — so the bytes are identical regardless of the
+ * encoding the script assumes, and every JSON parser restores the real code
+ * points. Surrogate pairs are emitted as two \uXXXX escapes, which is valid JSON.
+ */
+function stringifyAsciiJson(payload: unknown): string {
+  const json = JSON.stringify(payload)
+  let out = ""
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i)
+    out += code > 0x7f ? "\\u" + code.toString(16).padStart(4, "0") : json[i]
+  }
+  return out
 }
 
 function isBlockingResult(result: HookResult): boolean {
@@ -322,14 +600,39 @@ function executeCommandHook(
       return
     }
 
-    const timeout = hook.timeout ?? DEFAULT_TIMEOUT
+    const timeout = getEffectiveTimeout(hook)
     const isWindows = process.platform === "win32"
-    const cmd = isWindows ? command : "/bin/sh"
-    const args = isWindows ? [] : ["-c", command]
+
+    // PR-13b — honour explicit hook.shell when set, else fall back to the
+    // legacy platform-based pick. When `hook.shell` names a non-default
+    // interpreter the runner relies on it being resolvable from PATH (e.g.
+    // Git Bash / WSL / pwsh installed). spawn will surface a missing-binary
+    // error through the existing error path; the hook surfaces as failed
+    // (non-blocking, since exit-2 semantics only apply to clean runs).
+    let cmd: string
+    let args: string[]
+    let useShell: boolean
+    if (hook.shell === "bash") {
+      cmd = "bash"
+      args = ["-c", command]
+      useShell = false
+    } else if (hook.shell === "powershell") {
+      cmd = "pwsh"
+      args = ["-NoProfile", "-NonInteractive", "-Command", command]
+      useShell = false
+    } else if (hook.shell === "sh") {
+      cmd = "sh"
+      args = ["-c", command]
+      useShell = false
+    } else {
+      cmd = isWindows ? command : "/bin/sh"
+      args = isWindows ? [] : ["-c", command]
+      useShell = isWindows
+    }
 
     const child = spawn(cmd, args, {
       env,
-      shell: isWindows ? true : false,
+      shell: useShell,
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
       cwd
@@ -495,12 +798,15 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
 function buildPromptHookUserMessage(
   event: HookEvent,
   policy: string,
-  context: HookContext
+  context: HookContext,
+  hook: HookConfig
 ): string {
+  const userContext = buildHookUserContext(hook, { includeTokens: false })
   return JSON.stringify(
     {
       hook_event_name: event,
       policy,
+      ...(userContext ? { user_context: userContext } : {}),
       ...(context.userPrompt ? { prompt: context.userPrompt } : {}),
       tool_name: context.toolName ?? "(unknown)",
       tool_args: context.toolArgs ?? {},
@@ -513,6 +819,12 @@ function buildPromptHookUserMessage(
       ...(context.hookSourceRoot ? { hook_source_root: context.hookSourceRoot } : {}),
       ...(context.hookSourcePath ? { hook_source_path: context.hookSourcePath } : {}),
       cwd: getCommandCwd(context),
+      // PR-01: same CC-compatible fields used in command-hook payloads. The
+      // prompt-hook LLM also benefits from knowing transcript / mode / agent id
+      // when writing policy decisions.
+      ...(context.transcriptPath ? { transcript_path: context.transcriptPath } : {}),
+      ...(context.permissionMode ? { permission_mode: context.permissionMode } : {}),
+      ...(context.agentId ? { agent_id: context.agentId } : {}),
       ...(context.stopContext ? { stop_context: context.stopContext } : {}),
       workspace: context.workspacePath ?? ""
     },
@@ -556,13 +868,13 @@ async function executePromptHook(
     return fallbackResult("[PromptHook] No policy text configured")
   }
 
-  const timeout = hook.timeout ?? DEFAULT_TIMEOUT
-  const model = getPromptHookModel(hook.modelId, timeout)
+  const timeout = getEffectiveTimeout(hook)
+  const model = getPromptHookModel(getHookModelRef(hook), timeout)
   if (!model) {
     return fallbackResult("[PromptHook] No model configured — cannot evaluate prompt hook")
   }
 
-  const userMsg = buildPromptHookUserMessage(event, policy, context)
+  const userMsg = buildPromptHookUserMessage(event, policy, context, hook)
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
@@ -697,6 +1009,24 @@ function parseHookJsonOutput(result: HookResult): HookResult {
         ? nested.permissionDecisionReason
         : undefined)
 
+    // PR-02: Claude Code's SessionStart hook can return `initialUserMessage`
+    // to auto-inject a first prompt, and `watchPaths` to register paths with a
+    // file watcher. We parse both fields today even though the consumer side
+    // is wired in a later PR — emitting hooks can already use the CC shape
+    // and we won't need to touch the parser again.
+    const initialUserMessage =
+      typeof parsed.initialUserMessage === "string"
+        ? parsed.initialUserMessage
+        : nested && typeof nested.initialUserMessage === "string"
+          ? nested.initialUserMessage
+          : undefined
+
+    const watchPathsSource = parsed.watchPaths ?? nested?.watchPaths
+    const watchPaths =
+      Array.isArray(watchPathsSource) && watchPathsSource.every((p) => typeof p === "string")
+        ? (watchPathsSource as string[])
+        : undefined
+
     return {
       ...result,
       additionalContext,
@@ -708,7 +1038,9 @@ function parseHookJsonOutput(result: HookResult): HookResult {
       continue: typeof parsed.continue === "boolean" ? parsed.continue : undefined,
       stopReason: typeof parsed.stopReason === "string" ? parsed.stopReason : undefined,
       decision: effectiveDecision,
-      reason: effectiveReason
+      reason: effectiveReason,
+      initialUserMessage,
+      watchPaths
     }
   } catch {
     // stdout is not JSON — treat as plain text (backwards compatible)
@@ -750,6 +1082,54 @@ async function executeHook(
   hook: HookConfig,
   env: Record<string, string>,
   context: HookContext,
+  event: HookEvent,
+  onLateHookResult?: HookResultCallback
+): Promise<HookResult> {
+  // PR-15 — async config-layer fork: return a `pending` placeholder
+  // synchronously so the calling event chain doesn't wait, then run the
+  // real executor in the background and forward the final result through the
+  // same per-run `onHookResult` callback used by synchronous hooks. The placeholder
+  // never carries a blocking decision; the late result is informational.
+  // Setup owns workspace initialisation state, so its caller must observe the
+  // real exit code before writing setup-state or starting SessionStart. Even
+  // if a workspace/CC-imported config says async:true, run Setup synchronously.
+  if (hook.async === true && event !== "Setup") {
+    void executeSyncHook(hook, env, context, event)
+      .then((late) => {
+        const finalLate: HookResult = {
+          ...applyForcedOutcome(late, hook),
+          asyncStatus: "completed",
+          lateCompletedAt: new Date().toISOString()
+        }
+        recordHookResult(event, hook, finalLate, context, onLateHookResult)
+      })
+      .catch((err) => {
+        const errStr = err instanceof Error ? err.message : String(err)
+        const finalLate: HookResult = {
+          exitCode: null,
+          stdout: "",
+          stderr: errStr,
+          blocked: false,
+          asyncStatus: "timeout",
+          lateCompletedAt: new Date().toISOString()
+        }
+        recordHookResult(event, hook, finalLate, context, onLateHookResult)
+      })
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      blocked: false,
+      asyncStatus: "pending"
+    }
+  }
+  return executeSyncHook(hook, env, context, event)
+}
+
+async function executeSyncHook(
+  hook: HookConfig,
+  env: Record<string, string>,
+  context: HookContext,
   event: HookEvent
 ): Promise<HookResult> {
   const startedAt = Date.now()
@@ -760,11 +1140,15 @@ async function executeHook(
   if (hookType === "prompt") {
     if (diagnostic) {
       const policy = hook.prompt?.trim()
-      if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context)
+      if (policy) stdinPayload = buildPromptHookUserMessage(event, policy, context, hook)
     }
     result = await executePromptHook(hook, context, event)
+  } else if (hookType === "http") {
+    const builtPayload = buildHookStdinPayload(event, context, hook)
+    if (diagnostic) stdinPayload = builtPayload
+    result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
   } else {
-    const builtPayload = buildHookStdinPayload(event, context)
+    const builtPayload = buildHookStdinPayload(event, context, hook)
     if (diagnostic) stdinPayload = builtPayload
     result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
   }
@@ -774,7 +1158,6 @@ async function executeHook(
   if (diagnostic) finalized.cwd = getCommandCwd(context)
   return finalized
 }
-
 /**
  * Run all matching hooks for a given event.
  *
@@ -892,9 +1275,52 @@ export function hookMatchesRunCriteria(
   return (
     hook.enabled &&
     hook.event === event &&
-    matchesName(hook.matcher, getMatcherTarget(event, context)) &&
+    matchesEventMatcher(hook.matcher, event, context) &&
+    matchesIfCondition(hook.if, event, context) &&
     !shouldSkipOnceHook(hook, event, context)
   )
+}
+
+/**
+ * PR-16 — Lightweight evaluator for the CC `if` field. CC uses permission
+ * rule syntax (`"Bash(git *)"`) that requires the Bash tree-sitter parser; we
+ * implement a small subset that covers the most common cases without dragging
+ * the full parser in:
+ *
+ *   - `"ToolName(*)"` matches any args to that tool
+ *   - `"ToolName(pattern)"` matches when the tool's primary arg
+ *     (`command` for execute, `file_path` for read/write, `path` otherwise)
+ *     glob-matches the pattern (`*` is the only metachar)
+ *   - empty/undefined `if` always matches
+ *
+ * Future PRs can replace this with a fuller implementation; the contract
+ * (returns boolean) is stable.
+ */
+function matchesIfCondition(
+  ifClause: string | undefined,
+  _event: HookEvent,
+  context: HookContext
+): boolean {
+  if (!ifClause || !ifClause.trim()) return true
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)\(([^)]*)\)$/.exec(ifClause.trim())
+  if (!m) return true // unrecognised syntax → permissive (don't block hook)
+  const wantTool = m[1].toLowerCase()
+  const argPattern = m[2].trim()
+  if (!context.toolName) return false
+  if (context.toolName.toLowerCase() !== wantTool) return false
+  if (!argPattern || argPattern === "*") return true
+  const primaryArg =
+    (typeof context.toolArgs?.command === "string" && context.toolArgs.command) ||
+    (typeof context.toolArgs?.file_path === "string" && context.toolArgs.file_path) ||
+    (typeof context.toolArgs?.path === "string" && context.toolArgs.path) ||
+    ""
+  if (!primaryArg) return false
+  const regexSrc = "^" + argPattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$"
+  try {
+    return new RegExp(regexSrc).test(primaryArg)
+  } catch {
+    return false
+  }
 }
 
 function recordHookResult(
@@ -904,6 +1330,27 @@ function recordHookResult(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): void {
+  // Operational telemetry: emit unconditionally (independent of the hook-logging
+  // switch that gates persistHookResultRecord), so we always know hooks really
+  // ran and whether one blocked a risky operation. Payload kept minimal because
+  // this is the chokepoint for every hook on every event (incl. per-tool-call
+  // PostToolUse). Skip the async "pending" placeholder — its real result is
+  // recorded separately when the background run completes — so each execution
+  // emits exactly once.
+  if (result.asyncStatus !== "pending") {
+    try {
+      trackEvent("hook.executed", "hook", {
+        event,
+        hookType: hook.type ?? "command",
+        blocked: isBlockingResult(result),
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        source: hook.hookSourceType ?? "global"
+      })
+    } catch (e) {
+      console.warn("[event] failed to emit hook.executed:", e)
+    }
+  }
   persistHookResultRecord(event, hook, result, context.turnId)
   onHookResult?.(event, hook, result)
 }
@@ -926,7 +1373,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1002,7 +1449,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1044,7 +1491,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1110,7 +1557,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1177,7 +1624,7 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext), hookContext, event),
+        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
         hook
       )
       console.log(
@@ -1226,16 +1673,27 @@ export async function runHooks(
   // single slow hook can't block the "delete thread" UI or app shutdown.
   // Anything past the cap is allowed to keep running in the background; we
   // just stop blocking the caller.
-  if (event === "SessionEnd") {
-    const SESSION_END_TOTAL_TIMEOUT_MS = 5_000
-    const tasks = matched.map(async (hook) => {
+  // SessionEnd / Setup share "awaited drain": we want to return after every
+  // hook settled (so the caller can act on completion), but not let any one
+  // slow hook block the UI/app indefinitely.
+  //
+  // PR-11 follow-up — Setup MUST go through this awaited branch because
+  // session-lifecycle uses the resolution of runHooks to decide whether to
+  // write the workspace's setup-state marker. The original fire-and-forget
+  // path returned null synchronously, which caused the marker to be written
+  // before the hook actually completed (so a failed Setup script would
+  // never be retried).
+  if (event === "SessionEnd" || event === "Setup") {
+    const TOTAL_TIMEOUT_MS = event === "Setup" ? 30_000 : 5_000
+    const tasks = matched.map(async (hook): Promise<HookResult> => {
       const hookContext = enrichContextFromHook(hook, context)
       try {
         const rawResult = await executeHook(
           hook,
-          buildHookEnv(event, hookContext),
+          buildHookEnv(event, hookContext, hook),
           hookContext,
-          event
+          event,
+          onHookResult
         )
         const result = applyForcedOutcome(rawResult, hook)
         console.log(
@@ -1246,21 +1704,77 @@ export async function runHooks(
         if (result.stderr) {
           console.warn(`[Hooks] ${event} hook stderr:`, result.stderr)
         }
+        return result
       } catch (err) {
+        // PR-11 follow-up — surface unexpected executor throws as a synthetic
+        // exitCode: 1 result. The Setup branch downstream treats anyFailed via
+        // `exitCode !== 0`; previously returning undefined here would let a
+        // throw look like a fulfilled-without-result success → setup-state
+        // marker would be written for a hook that never actually ran.
+        const errStr = err instanceof Error ? err.message : String(err)
         console.warn(`[Hooks] ${event} hook error:`, err)
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: errStr,
+          blocked: false
+        }
       }
     })
-    await Promise.race([
-      Promise.allSettled(tasks),
-      new Promise<void>((resolve) => setTimeout(resolve, SESSION_END_TOTAL_TIMEOUT_MS))
-    ])
+    let timedOut = false
+    const settled = await Promise.race<Array<PromiseSettledResult<HookResult | undefined>> | "timeout">(
+      [
+        Promise.allSettled(tasks),
+        new Promise<"timeout">((resolve) => setTimeout(() => {
+          timedOut = true
+          resolve("timeout")
+        }, TOTAL_TIMEOUT_MS))
+      ]
+    )
+    // For Setup we surface a synthetic blocking result on timeout so the
+    // caller (session-lifecycle) does NOT mark the workspace initialised.
+    if (event === "Setup") {
+      if (timedOut) {
+        return {
+          exitCode: null,
+          stdout: "",
+          stderr: `Setup hooks timed out after ${TOTAL_TIMEOUT_MS}ms`,
+          blocked: true
+        }
+      }
+      // Any non-zero exit code from at least one Setup hook → treat the
+      // whole run as failed so we don't persist init state.
+      //   - rejected:                    promise blew up (shouldn't happen
+      //                                  since the task wraps in try/catch,
+      //                                  but defensive)
+      //   - fulfilled, undefined value:  task returned without a result
+      //                                  (also shouldn't happen but err safe)
+      //   - fulfilled, exitCode !== 0:   includes null (signals JSON
+      //                                  continue:false / decision:block /
+      //                                  unusual paths — none of which we
+      //                                  want to treat as a green init run)
+      const results = settled as Array<PromiseSettledResult<HookResult | undefined>>
+      const anyFailed = results.some(
+        (r) =>
+          r.status === "rejected" ||
+          (r.status === "fulfilled" && (r.value === undefined || r.value.exitCode !== 0))
+      )
+      if (anyFailed) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: "at least one Setup hook returned non-zero exit",
+          blocked: true
+        }
+      }
+    }
     return null
   }
 
   // Notification / SessionStart: fire-and-forget
   for (const hook of matched) {
     const hookContext = enrichContextFromHook(hook, context)
-    executeHook(hook, buildHookEnv(event, hookContext), hookContext, event)
+    executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)
         console.log(

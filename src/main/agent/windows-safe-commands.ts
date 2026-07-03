@@ -1,4 +1,10 @@
 import path from "node:path"
+import {
+  BUILD_TOOL_EXECUTABLES,
+  isReadOnlyBuildToolInvocation,
+  normalizeBuildToolExecutable,
+  hasUnsafeWriteFlag
+} from "./read-only-build-tool"
 
 export type WindowsShellKind = "powershell" | "cmd" | "bash" | "unknown"
 
@@ -42,6 +48,27 @@ const SIDE_EFFECTING_POWERSHELL_CMDLETS = new Set([
   "set-content", "add-content", "out-file", "new-item", "remove-item", "move-item",
   "copy-item", "rename-item", "start-process", "stop-process"
 ])
+// Cmdlets (and aliases) that read an item/content BY PATH. For these, an `Env:`-prefixed
+// argument resolves the environment-variable PSDrive and would print secrets to stdout
+// (`Get-Content Env:KEY`, `Get-ChildItem Env:`). A Windows filename can't contain `:`,
+// so an `env:`-prefixed arg to one of these is unambiguously the provider, not a file.
+// Used to SCOPE the env-provider check so a literal `env:` in a search pattern / output
+// string (Select-String, Write-Output) is not false-killed.
+const ENV_PATH_READING_CMDLETS = new Set([
+  "get-content", "gc", "cat", "type",
+  "get-item", "gi",
+  "get-childitem", "gci", "dir", "ls",
+  "get-itemproperty", "gp",
+  "get-itempropertyvalue", "gpv",
+  "test-path", "tp",
+  "resolve-path", "rvpa"
+])
+// Pure-output cmdlets: their arguments are literal text to PRINT, not a path to read.
+// So a (quoted) arg that merely LOOKS like `-Path:Env:` or `Env:` is output, not a
+// provider read — the env-provider PATH checks must be skipped for them to avoid a
+// false-kill. (`$env:` variable expansion in their args is still caught earlier, before
+// tokenization drops the quote context.)
+const OUTPUT_CMDLETS = new Set(["echo", "write-output", "write-host"])
 const UNSAFE_RIPGREP_FLAGS = new Set(["--search-zip", "-z"])
 const UNSAFE_RIPGREP_FLAGS_WITH_VALUES = ["--pre", "--hostname-bin"]
 const UNSAFE_GIT_FLAGS = new Set(["--output", "--ext-diff", "--textconv", "--exec", "--paginate"])
@@ -80,6 +107,147 @@ export function isKnownSafeWindowsCommand(command: string, shellKind: WindowsShe
   if (!commands) return false
 
   return commands.every((cmd) => isSafePowerShellCommand(cmd))
+}
+
+/**
+ * Read-only counterpart of isKnownSafeWindowsCommand. Same parsing, but each
+ * parsed command must be pure inspection: this is what re-validates a
+ * `powershell -Command "<x>"` wrapper for a READ-ONLY agent. The wrapper is
+ * already auto-"safe" (isKnownSafeWindowsCommand accepted it), but "safe" lets
+ * build tools through — here `npm install` / `cargo build` are rejected while
+ * `Get-Content x` / `npm ls` / `mvn dependency:tree` stay allowed.
+ */
+export function isReadOnlyWindowsCommand(command: string, shellKind: WindowsShellKind): boolean {
+  if (process.platform !== "win32") return false
+
+  const trimmed = command.trim()
+  if (!trimmed) return false
+
+  if (shellKind === "powershell") {
+    const commands = parsePowerShellScript(trimmed)
+    if (commands && commands.every((cmd) => isReadOnlyPowerShellCommand(cmd))) {
+      return true
+    }
+  }
+
+  const tokens = tokenizeCommand(trimmed)
+  if (!tokens || tokens.length === 0) return false
+
+  const commands = tryParsePowerShellCommandSequence(tokens)
+  if (!commands) return false
+
+  return commands.every((cmd) => isReadOnlyPowerShellCommand(cmd))
+}
+
+/**
+ * Read-only counterpart of isSafePowerShellCommand: read-only cmdlets/diagnostics
+ * stay allowed (the SAFE_POWERSHELL_COMMANDS set is already read-only), git/rg
+ * use their existing read-only checks, and EVERY build/package/codegen tool is
+ * restricted to its inspection subcommands via the shared
+ * isReadOnlyBuildToolInvocation (so make/cmake/java/javac — blanket-safe for a
+ * normal agent — are now version/help only).
+ */
+export function isReadOnlyPowerShellCommand(words: string[]): boolean {
+  if (words.length === 0) return false
+
+  // SECURITY (env-secret exfil), part 1 — `$env:` / `${env:…}` variable expansion
+  // leaks the value in ANY command (`Write-Output $env:KEY`, `Format-Table $env:KEY`,
+  // double-quoted `"$env:KEY"`), so reject it anywhere. A single-quoted literal
+  // `'$env:'` is over-blocked too (a rare, safe trade — tokenization can't tell quote
+  // kinds apart, same trade as POSIX echo/printf `$`). The bare `Env:` PROVIDER form
+  // is NOT handled here: it only leaks as a read cmdlet's PATH (vetted after `command`
+  // below), so a literal `env:` in a search pattern / output string
+  // (`Select-String "env:"`, `Write-Output "env: bar"`) is not false-killed.
+  if (words.some((word) => /\$\{?env:/i.test(word))) {
+    return false
+  }
+
+  // SCRIPT BLOCKS: cmdlets like ForEach-Object/% and Where-Object/? accept a
+  // `{ … }` block that can contain ARBITRARY code — e.g. `Get-Content x | % { npm
+  // install }`, `% { rm y }`, `% { ./tool.exe }`, `% { iex '…' }`. The outer
+  // cmdlet (%, where-object …) is itself in the read-only set, so a flat token
+  // scan would wrongly accept it. This conservative parser can't safely vet a
+  // block body, so DENY any command containing a script-block brace. (Simple
+  // non-block forms like `Where-Object Name -eq x` have no braces and stay
+  // allowed.)
+  if (words.some((word) => word.includes("{") || word.includes("}"))) {
+    return false
+  }
+
+  // A path-qualified inner executable (./x, C:\tools\x, /tmp/x) is not the known
+  // command — parity with the POSIX gate, which rejects path-qualified binaries
+  // because their content can't be assumed read-only.
+  if (/[\\/]/.test(words[0].replace(/^[('"]+/, ""))) {
+    return false
+  }
+
+  for (const word of words) {
+    const inner = word
+      .trim()
+      .replace(/^[()]+|[()]+$/g, "")
+      .replace(/^-+/, "")
+      .toLowerCase()
+    if (SIDE_EFFECTING_POWERSHELL_CMDLETS.has(inner)) {
+      return false
+    }
+  }
+
+  const command = words[0]
+    .trim()
+    .replace(/^[()]+|[()]+$/g, "")
+    .replace(/^-+/, "")
+    .toLowerCase()
+
+  // SECURITY (env-secret exfil), part 2 — the `Env:` PSDrive provider leaks secrets
+  // when a cmdlet resolves it as a PATH. Three shapes are rejected; a literal `env:`
+  // in a SEARCH PATTERN or OUTPUT string is NONE of them and stays allowed
+  // (`Select-String "env:" *.txt`, `Write-Output "env: bar"`):
+  //   1. colon-bound path parameter on ANY cmdlet — `-Path:Env:KEY`,
+  //      `-LiteralPath:Env:`, `-LP:Env:` (PowerShell's documented `-Param:Value`);
+  //   2. a bare `Env:` arg to a content/item-reading cmdlet — `Get-Content Env:KEY`,
+  //      `Get-ChildItem Env:` (a Windows filename can't contain `:`, so for these an
+  //      `env:` arg is unambiguously the provider, not a file);
+  //   3. the value of a SPACE-separated path parameter on ANY cmdlet — `-Path Env:KEY`
+  //      — so `Select-String -Path Env:KEY "."` can't read a var's value either.
+  // `\benv:` matches `Env:` and colon-bound forms but not `env-notes.txt`/`environment`.
+  // Pure-output cmdlets print their args verbatim and have no path-reading parameter,
+  // so a quoted literal like `Write-Output "-Path:Env:KEY"` is text, not a leak — skip
+  // the path checks for them (their `$env:` expansion was already caught above).
+  if (!OUTPUT_CMDLETS.has(command)) {
+    const isEnvReadCmdlet = ENV_PATH_READING_CMDLETS.has(command)
+    const PATH_PARAM_RE = /^-(?:path|literalpath|lp|pspath|filepath)$/i
+    for (let i = 1; i < words.length; i++) {
+      const arg = words[i]
+      if (!/\benv:/i.test(arg)) continue
+      if (/^-(?:path|literalpath|lp|pspath|filepath):/i.test(arg)) return false // (1)
+      if (isEnvReadCmdlet) return false // (2)
+      if (i > 1 && PATH_PARAM_RE.test(words[i - 1])) return false // (3)
+    }
+  }
+
+  // SAFE_POWERSHELL_COMMANDS are read-only cmdlets + read-only diagnostics, but a
+  // few diagnostics (arp/route/netsh/ipconfig) have mutate verbs (arp -d, route
+  // add, netsh … set, ipconfig /flushdns) the name-allowlist would wave through —
+  // reject those per command (shared with the POSIX gate); read forms stay safe.
+  if (SAFE_POWERSHELL_COMMANDS.has(command)) {
+    return !hasUnsafeWriteFlag(command, words)
+  }
+
+  // Build/package/codegen tools: inspection subcommands only (shared with the
+  // POSIX gate so both agree). normalizeBuildToolExecutable handles npm.cmd etc.
+  const buildExe = normalizeBuildToolExecutable(words[0])
+  if (BUILD_TOOL_EXECUTABLES.has(buildExe)) {
+    return isReadOnlyBuildToolInvocation(buildExe, words)
+  }
+
+  switch (command) {
+    case "git":
+      return isSafeGitCommand(words)
+    case "rg":
+      return isSafeRipgrep(words)
+    default:
+      return false
+  }
 }
 
 function tryParsePowerShellCommandSequence(command: string[]): string[][] | null {
@@ -138,8 +306,19 @@ function parsePowerShellScript(script: string): string[][] | null {
   return parsePowerShellScriptConservatively(script)
 }
 
-function isSafePowerShellCommand(words: string[]): boolean {
+export function isSafePowerShellCommand(words: string[]): boolean {
   if (words.length === 0) return false
+
+  // SCRIPT BLOCKS: ForEach-Object/%/Where-Object/? accept a `{ … }` block whose
+  // body can be ARBITRARY code (`Get-Content x | % { rm y }`). The outer cmdlet is
+  // itself "safe", so a flat token scan would auto-approve the block — running it
+  // with no user prompt. This conservative parser can't vet a block body, so deny
+  // any command containing a script-block brace (it falls through to needs_approval
+  // rather than auto-running). Simple non-block forms (`Where-Object Name -eq x`)
+  // have no braces and stay auto-safe.
+  if (words.some((word) => word.includes("{") || word.includes("}"))) {
+    return false
+  }
 
   for (const word of words) {
     const inner = word
@@ -159,7 +338,7 @@ function isSafePowerShellCommand(words: string[]): boolean {
     .toLowerCase()
 
   if (SAFE_POWERSHELL_COMMANDS.has(command)) {
-    return true
+    return !hasUnsafeWriteFlag(command, words)
   }
 
   switch (command) {

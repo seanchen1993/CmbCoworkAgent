@@ -4,7 +4,9 @@ export type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
+  AgentAutoCommitRepoResult,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitStatus
 } from "../shared/auto-commit-types"
 
@@ -20,14 +22,23 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
+  agentMode?: "normal" | "coordinator" | "workflow"
+  coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string
 }
 
 export interface AgentResumeParams {
   threadId: string
-  command: { resume?: { decision?: string; pendingCount?: number } }
+  command: {
+    resume?: {
+      decision?: string
+      pendingCount?: number
+      allowRuntimeRestoredCheckpointResume?: boolean
+    }
+  }
   modelId?: string
+  agentMode?: "normal" | "coordinator" | "workflow"
 }
 
 export interface AgentInterruptParams {
@@ -37,12 +48,18 @@ export interface AgentInterruptParams {
 
 export interface AgentCancelParams {
   threadId: string
+  cancelWorkers?: boolean
 }
 
 // Thread IPC
 export interface ThreadUpdateParams {
   threadId: string
   updates: Partial<Thread>
+}
+
+export interface ThreadValuesMergeParams {
+  threadId: string
+  patch: Record<string, unknown>
 }
 
 // Workspace IPC
@@ -109,11 +126,17 @@ export interface Subagent {
   id: string
   name: string
   description: string
-  status: "pending" | "running" | "completed" | "failed"
+  status: "pending" | "running" | "completed" | "failed" | "cancelled"
   startedAt?: Date
   completedAt?: Date
   toolCallId?: string
   subagentType?: string
+  /** Latest interior tool the subagent invoked — drives the collapsed status line. */
+  currentTool?: string
+  /** ISO timestamp of the subagent's most recent interior activity (heartbeat). */
+  lastActivityAt?: string
+  /** Registration order (0-based). Used to match LangGraph checkpoint_ns index (e.g. "tools:0"). */
+  spawnIndex?: number
 }
 
 // Stream events from agent
@@ -126,8 +149,9 @@ export type StreamEvent =
   | { type: "todos"; todos: Todo[] }
   | { type: "workspace"; files: FileInfo[]; path: string }
   | { type: "subagents"; subagents: Subagent[] }
+  | { type: "custom"; data: Record<string, unknown> }
   | { type: "done"; result: unknown }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; message?: string }
 
 export interface Message {
   id: string
@@ -165,6 +189,7 @@ export interface HITLRequest {
   allowed_decisions: HITLDecision["type"][]
   pendingCount?: number
   pendingToolCallIds?: string[]
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 export interface HITLDecision {
@@ -172,6 +197,7 @@ export interface HITLDecision {
   tool_call_id: string
   edited_args?: Record<string, unknown>
   feedback?: string
+  allowRuntimeRestoredCheckpointResume?: boolean
 }
 
 // Todo types (from deepagentsjs)
@@ -193,6 +219,33 @@ export interface GrepMatch {
   path: string
   line: number
   text: string
+}
+
+export type SupportedIde = "idea" | "vscode" | "webstorm"
+
+export type PreferredIde = SupportedIde | null
+
+export interface IdeSettings {
+  preferredIde: PreferredIde
+  executablePaths: Partial<Record<SupportedIde, string>>
+}
+
+export interface ConfigurePreferredIdeRequest {
+  preferredIde: SupportedIde
+  executablePath?: string
+}
+
+export interface ConfigurePreferredIdeResult {
+  status: "configured" | "needs_executable_path"
+  settings: IdeSettings
+  message?: string
+}
+
+export interface OpenIdeRequest {
+  ide: SupportedIde
+  workspacePath: string
+  filePath?: string
+  line?: number
 }
 
 // MCP Connector types
@@ -313,6 +366,7 @@ export interface PluginManifest {
   name: string
   version?: string
   description?: string
+  useScenario?: string
   author?: { name?: string; email?: string; url?: string } | string
   license?: string
   keywords?: string[]
@@ -327,6 +381,7 @@ export interface PluginMetadata {
   name: string
   version: string
   description: string
+  useScenario?: string
   author: string
   path: string
   enabled: boolean
@@ -386,6 +441,41 @@ export interface PluginMcpServerConfig {
   url?: string
   transport?: "sse" | "streamable-http"
   headers?: Record<string, string>
+  /** Remote plugin MCP defaults to injecting yst_id_token / sap_id / name. Set false to opt out. */
+  injectUserHeaders?: boolean
+  /** Base priority, clamped to 0..100. Defaults to 50; global MCP connectors default to 100. */
+  priority?: number
+  /** plugin-active keeps the plugin MCP lazy until its plugin or skill is used. */
+  scope?: "plugin-active" | "plugin-installed"
+  /** Optional fallback to a compatible global MCP. Requires safeToRetry=true to avoid duplicate writes. */
+  fallback?: {
+    enabled?: boolean
+    to?: "global"
+    match?: "toolNameAndSchema" | "toolName"
+    safeToRetry?: boolean
+  }
+}
+
+export interface PluginMcpServerDetail {
+  name: string
+  kind: "remote" | "stdio"
+  transport?: "sse" | "streamable-http"
+  injectUserHeaders: boolean
+  priority: number
+  scope: "plugin-active" | "plugin-installed"
+  fallbackEnabled: boolean
+  fallbackTo?: "global"
+  fallbackMatch?: "toolNameAndSchema" | "toolName"
+  fallbackSafeToRetry: boolean
+}
+
+export interface PluginDetail {
+  skills: string[]
+  mcpServers: string[]
+  mcpServerDetails: PluginMcpServerDetail[]
+  hookCount: number
+  hooks: PluginHookMetadata[]
+  manifest: PluginManifest | null
 }
 
 // LSP types
@@ -531,9 +621,20 @@ export interface ApprovalRequest extends HITLRequest {
     | "write_file"
     | "edit_file"
     | "code_exec"
-    | "prepare_save_code_exec_tool"
     | "save_code_exec_tool"
+    | "git_commit"
+    | "git_push"
   command?: string // shell command (for execute operations)
+  /** For git_commit: the message the agent passed via -m, used to pre-fill the dialog */
+  suggestedCommitMessage?: string
+  /** For git_commit: file paths the agent selected via pathspecs or existing staged files */
+  suggestedCommitFilePaths?: string[]
+  /** For git_commit: cwd that explicit pathspecs are relative to (after git -C) */
+  suggestedCommitFileBasePath?: string
+  /** For git_commit/git_push: Git working directory resolved from cd / git -C. */
+  suggestedGitWorktreePath?: string
+  /** For git_commit: where suggestedCommitFilePaths came from */
+  suggestedCommitFileSelectionSource?: "pathspec" | "staged"
   filePath?: string // target file path (for write_file/edit_file operations)
   code?: string // code_exec script preview
   params?: unknown // code_exec params preview
@@ -541,14 +642,18 @@ export interface ApprovalRequest extends HITLRequest {
   savedToolName?: string // proposed saved tool name before slug normalization
   savedToolId?: string // proposed saved tool ID
   savedToolDescription?: string // proposed saved tool description
-  savedToolMetadataError?: string // metadata generation failure message for manual fallback
   cwd: string
   reason?: string // why approval is needed
   retry_reason?: string // sandbox-failure retry context
   allowed_approval_types: ApprovalDecisionType[]
 }
 
-export type ApprovalDecisionType = "approve" | "approve_session" | "approve_permanent" | "reject"
+export type ApprovalDecisionType =
+  | "approve"
+  | "approve_session"
+  | "approve_permanent"
+  | "reject"
+  | "error"
 
 /** Fine-grained approval decision from the renderer */
 export interface ApprovalDecision {
@@ -556,6 +661,25 @@ export interface ApprovalDecision {
   tool_call_id: string
   savedToolName?: string
   savedToolDescription?: string
+  /**
+   * For git_commit approvals: the outcome of the commit the renderer performed
+   * (via workspace:commitWorktree) after the user picked a task card and confirmed.
+   * Present only when operation === "git_commit".
+   */
+  commitResult?: {
+    success: boolean
+    commitMessage?: string
+    error?: string
+  }
+  /**
+   * For git_push approvals: the outcome of the push the renderer performed (via
+   * workspace:pushWorktree, the same path as the Git Panel) after the user approved.
+   * Present only when operation === "git_push".
+   */
+  pushResult?: {
+    success: boolean
+    error?: string
+  }
 }
 
 // User input request tool

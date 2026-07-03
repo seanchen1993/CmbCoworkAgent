@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import {
+  AlertCircle,
   ChevronDown,
   ChevronRight,
   CloudUpload,
   FileText,
   Folder,
+  GitBranch,
+  Info,
   Plus,
   Power,
+  Radio,
   Search,
   Sparkles,
   Store,
@@ -21,6 +23,7 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Dialog,
   DialogContent,
@@ -35,10 +38,12 @@ import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/ski
 import { marketApi, type MarketItem } from "../../api/market"
 import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
-import { UniversalUploadDialog } from "./UniversalUploadDialog"
+import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
-import { marketInstalledVersionStorage } from "./MarketUpdateBadge"
-import { marketInstalledSourceStorage } from "./market-installed-source-storage"
+import { marketInstalledVersionStorage } from "./MarketPanel/MarketUpdateBadge"
+import { marketInstalledSourceStorage } from "./MarketPanel/market-installed-source-storage"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
 type FileTreeNode = {
@@ -57,7 +62,14 @@ type SkillTreeNode = {
 
 type SkillMarketInfo = Pick<
   MarketItem,
-  "name" | "chinese_name" | "category" | "description" | "featured" | "guidance" | "user_id"
+  | "name"
+  | "chinese_name"
+  | "category"
+  | "description"
+  | "featured"
+  | "guidance"
+  | "user_id"
+  | "version"
 >
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
@@ -116,6 +128,7 @@ const KNOWN_TEXT_EXTS = new Set([
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
 const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
 const EDITED_SKILL_PATHS_KEY = "skills_panel_edited_skill_paths"
+const DEFAULT_SKILL_VERSION = "v1.0.0"
 
 /**
  * 统一路径 Key，保证在 Windows/Linux 下本地标记可稳定命中：
@@ -547,6 +560,7 @@ function PublishSkillDialog(props: {
         name: skill.name,
         description: skill.description || marketInfo?.description || "",
         category: getSkillCategory(skill, marketInfo) || DEFAULT_SCENE_CATEGORY,
+        version: skill.version || marketInfo?.version || undefined,
         guidance: skill.metadata?.guidance || marketInfo?.guidance || "",
         chinese_name: getSkillChineseName(skill, marketInfo),
         user_id: marketInfo?.user_id
@@ -560,7 +574,7 @@ function PublishSkillDialog(props: {
       descriptionOverride="会自动打包当前技能目录为 zip 并提交到 Market。若包含嵌套子技能，发布前会询问是否一并上传。"
       submitLabel={mode === "update" ? "更新发布" : "一键发布"}
       submittingLabel={mode === "update" ? "更新中..." : "发布中..."}
-      onUpload={(file, name, description, category, guidance, chineseName, userId) => {
+      onUpload={(file, name, description, category, version, guidance, chineseName, userId) => {
         if (mode === "update") {
           return marketApi.updateItem(
             file,
@@ -568,6 +582,7 @@ function PublishSkillDialog(props: {
             name,
             description,
             category,
+            version,
             guidance || undefined,
             chineseName || undefined,
             userId || undefined
@@ -580,6 +595,7 @@ function PublishSkillDialog(props: {
           name,
           description,
           category,
+          version,
           guidance || undefined,
           chineseName || undefined,
           userId || undefined
@@ -989,17 +1005,26 @@ function SkillsGuide(): React.JSX.Element {
                   <code className="mx-1 font-mono text-foreground/85">description</code>
                   等元信息，也会加载
                   <code className="mx-1 font-mono text-foreground/85">hooks</code>
-                  字段里的配套 Skill Hook。frontmatter 后面的正文仍是技能说明，会按正常技能内容读取。
+                  字段里的配套 Skill Hook。frontmatter
+                  后面的正文仍是技能说明，会按正常技能内容读取。
                 </p>
                 <p>
-                  如果某个 Skill Hook 需要在技能触发后于本会话持续生效，可以在该 Hook 上加
-                  <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt: true</code>
-                  ；这个字段只对技能 / 插件 Hook 有意义，并且按 Hook 自己的身份持久化。
+                  如果某个 Skill Hook 需要在技能触发后于当前线程持续生效，可以在该 Hook 上加
+                  <code className="mx-1 font-mono text-foreground/85">
+                    persistAfterInterrupt: true
+                  </code>
+                  ；这个字段只对技能 / 插件 Hook 有意义，并且按 Hook 自己的身份持久化到线程。
                 </p>
                 <p>
                   一个技能目录下如果还有子目录包含
                   <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
                   ，会被识别为独立的子技能；系统按目录路径区分父子技能和同名技能。
+                </p>
+                <p>
+                  技能说明中提到的相对脚本、资源和模板路径，会按当前
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  所在目录解析；这只用于技能脚本定位，不会改变工作区 Hook 的
+                  <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>。
                 </p>
                 <p>
                   应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用、编辑和删除。
@@ -1031,7 +1056,7 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   父技能和子技能都支持
                   <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>
-                  ，是否在会话后续轮次继续命中由各自 Hook 自己决定。
+                  ，是否在当前线程后续轮次继续命中由各自 Hook 自己决定。
                 </p>
               </div>
             </SkillGuideSubSection>
@@ -1052,6 +1077,11 @@ function SkillsGuide(): React.JSX.Element {
                   作为主技能；如果包含子技能且子技能名称与已有技能重复，会先提示确认。
                 </p>
                 <p>上传后可以在左侧展开目录、右侧预览文件内容，也可以随时切换技能启用状态。</p>
+                <p>
+                  如果普通技能与插件自带技能同名，斜杠列表会同时展示两个入口并标明来源；选中后按对应
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  绝对路径执行，插件自带技能仍由插件管理。
+                </p>
                 <p>禁用技能后，该技能本体和它附带的 Skill Hook 会一起失效。</p>
               </div>
             </SkillGuideSubSection>
@@ -1157,8 +1187,8 @@ function SkillsGuide(): React.JSX.Element {
                   会继续生效；同一个技能同一轮只会做一次激活记录，避免重复读取时反复触发激活 Hook。
                 </p>
                 <p>
-                  父技能和子技能互相独立：只选子技能时只触发子技能目录下的 Hook，不会自动触发父技能 Hook；只选父技能时也不会自动触发子技能
-                  Hook。
+                  父技能和子技能互相独立：只选子技能时只触发子技能目录下的 Hook，不会自动触发父技能
+                  Hook；只选父技能时也不会自动触发子技能 Hook。
                 </p>
                 <p>禁用某个技能后，该技能本体和它目录下的 Skill Hook 会一起失效。</p>
               </div>
@@ -1176,20 +1206,19 @@ function SkillsGuide(): React.JSX.Element {
                   <code>{SKILL_HOOK_FRONTMATTER_EXAMPLE}</code>
                 </pre>
                 <p>
-                frontmatter 使用 YAML，字段无需加引号；内部
-                <code className="mx-1 font-mono text-foreground/85">hooks</code>
-                结构与 Claude Code hooks settings 一致，并支持
-                <code className="mx-1 font-mono text-foreground/85">once</code>、
-                <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
-                <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
-                <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>、
-                <code className="mx-1 font-mono text-foreground/85">forcedReason</code>、
-                <code className="mx-1 font-mono text-foreground/85">onBlock</code>和
-                <code className="mx-1 font-mono text-foreground/85">modelId</code>。
+                  frontmatter 使用 YAML，字段无需加引号；内部
+                  <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                  结构与 Claude Code hooks settings 一致，并支持
+                  <code className="mx-1 font-mono text-foreground/85">once</code>、
+                  <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
+                  <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
+                  <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>、
+                  <code className="mx-1 font-mono text-foreground/85">forcedReason</code>、
+                  <code className="mx-1 font-mono text-foreground/85">onBlock</code>和
+                  <code className="mx-1 font-mono text-foreground/85">modelId</code>。
                 </p>
                 <p>
-                  对
-                  <code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>/
+                  对<code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>/
                   <code className="mx-1 font-mono text-foreground/85">PostSkillUse</code>
                   ，如果 frontmatter 里的
                   <code className="mx-1 font-mono text-foreground/85">matcher</code>
@@ -1236,8 +1265,7 @@ function SkillsGuide(): React.JSX.Element {
                   Skill Hook 的命令默认在技能目录执行，
                   <code className="mx-1 font-mono text-foreground/85">cwd</code>
                   不是当前项目工作区。Skill Hook 里
-                  <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>
-                  与
+                  <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>与
                   <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                   通常相同；要访问用户当前工作区，请优先读取
                   <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
@@ -1295,7 +1323,8 @@ function SkillsGuide(): React.JSX.Element {
                 </div>
                 <div className="space-y-2">
                   <p>
-                    如果确实要把工作区路径作为命令参数传入，Windows 下可以这样写；跨平台脚本仍建议读取环境变量：
+                    如果确实要把工作区路径作为命令参数传入，Windows
+                    下可以这样写；跨平台脚本仍建议读取环境变量：
                   </p>
                   <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
                     <code>{SKILL_HOOK_WINDOWS_ARG_EXAMPLE}</code>
@@ -1318,9 +1347,10 @@ function SkillsGuide(): React.JSX.Element {
                     不同事件还会补充
                     <code className="mx-1 font-mono text-foreground/85">prompt</code>、
                     <code className="mx-1 font-mono text-foreground/85">tool_response</code>、
-                    <code className="mx-1 font-mono text-foreground/85">skill_trigger_tool_name</code>、
-                    <code className="mx-1 font-mono text-foreground/85">subagent</code>
-                    和
+                    <code className="mx-1 font-mono text-foreground/85">
+                      skill_trigger_tool_name
+                    </code>
+                    、<code className="mx-1 font-mono text-foreground/85">subagent</code>和
                     <code className="mx-1 font-mono text-foreground/85">stop_context</code>
                     等字段；完整字段以“自定义 &gt; 钩子”的事件协议说明为准。
                   </p>
@@ -1334,16 +1364,15 @@ function SkillsGuide(): React.JSX.Element {
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  命令 Hook 的调试日志建议写到 stderr；stdout 必须输出纯 JSON 才会被当成
-                  Hook 返回值解析，不要额外包单引号、markdown 或混入调试日志。
+                  命令 Hook 的调试日志建议写到 stderr；stdout 必须输出纯 JSON 才会被当成 Hook
+                  返回值解析，不要额外包单引号、markdown 或混入调试日志。
                 </p>
                 <p>
                   常用返回包括
                   <code className="mx-1 font-mono text-foreground/85">decision="block"</code>、
                   <code className="mx-1 font-mono text-foreground/85">reason</code>、
                   <code className="mx-1 font-mono text-foreground/85">systemMessage</code>、
-                  <code className="mx-1 font-mono text-foreground/85">additionalContext</code>
-                  和
+                  <code className="mx-1 font-mono text-foreground/85">additionalContext</code>和
                   <code className="mx-1 font-mono text-foreground/85">requiredSkill</code>
                   ；命令返回
                   <code className="mx-1 font-mono text-foreground/85">exit=2</code>
@@ -1351,12 +1380,12 @@ function SkillsGuide(): React.JSX.Element {
                 </p>
                 <p>
                   所有事件都支持
-                  <code className="mx-1 font-mono text-foreground/85">continue=false</code>
-                  +
+                  <code className="mx-1 font-mono text-foreground/85">continue=false</code>+
                   <code className="mx-1 font-mono text-foreground/85">stopReason</code>
                   ，优先级高于
                   <code className="mx-1 font-mono text-foreground/85">decision=block</code>
-                  ：Stop / PostSkillUse 上是真的终止整轮；Pre / Post 工具事件上等同强制阻断该次操作。
+                  ：Stop / PostSkillUse 上是真的终止整轮；Pre / Post
+                  工具事件上等同强制阻断该次操作。
                 </p>
                 <p>
                   如果不想让脚本动态决定，可以在 Hook 配置里直接锁定行为：
@@ -1386,6 +1415,7 @@ function SkillsGuide(): React.JSX.Element {
 export function SkillsPanel(): React.JSX.Element {
   const { setShowCustomizeView, setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery } =
     useAppStore()
+  const recordSkillUrl = import.meta.env.VITE_JUMP_RECORD_SKILL_URL?.trim() || ""
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
@@ -1633,7 +1663,12 @@ export function SkillsPanel(): React.JSX.Element {
   const handleDeleteSkill = useCallback(
     async (skill: SkillMetadata) => {
       if (!window.api?.skills?.delete) return
-      if (!confirm(`确定要删除技能「${skill.name}」吗？`)) return
+      if (
+        !confirm(
+          `确定要删除技能「${skill.name}」吗？\n\n特别注意：删除后的技能文件不会进入垃圾箱，会直接从磁盘移除。`
+        )
+      )
+        return
       const res = await window.api.skills.delete(skill.path)
       if (res.success) {
         removeLocalUploadedSkillPathFromStorage(skill.path)
@@ -1727,26 +1762,11 @@ export function SkillsPanel(): React.JSX.Element {
     () => !!selectedSkill && selectedSkillUploadedInPanel,
     [selectedSkill, selectedSkillUploadedInPanel]
   )
-  const selectedSkillCanPublish = useMemo(
-    () =>
-      !!selectedSkill &&
-      selectedSkill.source !== "project" &&
-      // 规则 2：我上传但尚未“我发布过”时，提供“一键发布”。
-      selectedSkillUploadedInPanel &&
-      !selectedSkillUploadedByMe,
-    [selectedSkill, selectedSkillUploadedByMe, selectedSkillUploadedInPanel]
+  const selectedSkillShowPublishButton = useMemo(
+    () => !!selectedSkill && selectedSkill.source !== "project" && selectedSkillUploadedInPanel,
+    [selectedSkill, selectedSkillUploadedInPanel]
   )
-  const selectedSkillCanUpdate = useMemo(
-    () =>
-      !!selectedSkill &&
-      selectedSkill.source !== "project" &&
-      // 规则 4：我上传且已经发布到市场，并且发生过编辑时，支持“更新发布”。
-      selectedSkillUploadedInPanel &&
-      selectedSkillUploadedByMe &&
-      selectedSkillIsEdited,
-    [selectedSkill, selectedSkillIsEdited, selectedSkillUploadedByMe, selectedSkillUploadedInPanel]
-  )
-  const selectedSkillPublishLabel = selectedSkillCanUpdate ? "更新到市场" : "发布到市场"
+  const selectedSkillPublishLabel = "同步到市场"
   const selectedSkillDeleteDisabledReason = selectedSkillHideContent
     ? "精品技能是内置技能，不允许删除。你可以点击按钮不启动这个技能。"
     : undefined
@@ -1883,6 +1903,18 @@ export function SkillsPanel(): React.JSX.Element {
     [setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery, setShowCustomizeView]
   )
 
+  const handleOpenRecordSkill = useCallback(() => {
+    if (!recordSkillUrl) {
+      toast.error("未配置录制技能跳转地址")
+      return
+    }
+
+    void window.electron.openExternal(recordSkillUrl).catch((error) => {
+      console.error("[SkillsPanel] Failed to open record skill url:", error)
+      toast.error("打开录制技能页面失败")
+    })
+  }, [recordSkillUrl])
+
   return (
     <div className="contents">
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
@@ -1909,27 +1941,45 @@ export function SkillsPanel(): React.JSX.Element {
               </button>
             )}
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-emerald-300/55 bg-emerald-500/[0.08] px-2 text-xs font-medium text-emerald-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-emerald-400/70 hover:bg-emerald-500/[0.16] hover:shadow-md dark:text-emerald-300"
+                onClick={() => setUploadDialogOpen(true)}
+                aria-label="上传技能"
+              >
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-emerald-400/10 to-emerald-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                />
+                <span className="relative flex size-4 items-center justify-center rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/25 transition-transform duration-200 group-hover:scale-105">
+                  <Plus className="size-2.5" />
+                </span>
+                <span className="relative">上传技能</span>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-amber-300/55 bg-amber-500/[0.08] px-2 text-xs font-medium text-amber-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-amber-400/70 hover:bg-amber-500/[0.16] hover:shadow-md dark:text-amber-300"
+                onClick={handleOpenRecordSkill}
+                aria-label="录制技能"
+              >
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-amber-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                />
+                <span className="relative flex size-4 items-center justify-center rounded-full bg-amber-500/15 ring-1 ring-amber-500/25 transition-transform duration-200 group-hover:scale-105">
+                  <Radio className="size-2.5" />
+                </span>
+                <span className="relative">录制技能</span>
+              </Button>
+            </div>
             <Button
               variant="outline"
               size="sm"
-              className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-emerald-300/55 bg-emerald-500/[0.08] px-2 text-xs font-medium text-emerald-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-emerald-400/70 hover:bg-emerald-500/[0.16] hover:shadow-md dark:text-emerald-300"
-              onClick={() => setUploadDialogOpen(true)}
-              aria-label="上传技能"
-            >
-              <span
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-emerald-400/10 to-emerald-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-              />
-              <span className="relative flex size-4 items-center justify-center rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/25 transition-transform duration-200 group-hover:scale-105">
-                <Plus className="size-2.5" />
-              </span>
-              <span className="relative">上传技能</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-primary/40 bg-primary/[0.08] px-2.5 text-xs font-medium text-primary shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-primary/60 hover:bg-primary/[0.18] hover:shadow-md"
+              className="mt-2 cursor-pointer group relative h-7 w-full overflow-hidden rounded-md border-primary/40 bg-primary/[0.08] px-2.5 text-xs font-medium text-primary shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-primary/60 hover:bg-primary/[0.18] hover:shadow-md"
               onClick={() => openMarketWithSkillSearch("")}
             >
               <span
@@ -1942,6 +1992,18 @@ export function SkillsPanel(): React.JSX.Element {
               <span className="relative">去应用市场</span>
               <ChevronRight className="relative size-3 text-primary/80 transition-transform duration-200 group-hover:translate-x-0.5" />
             </Button>
+            <div className="rounded-md border border-sky-200/70 bg-sky-50/80 px-2.5 py-2 text-[11px] leading-4 text-sky-900 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
+              <div className="flex items-start gap-1.5">
+                <Info className="mt-0.5 size-3 shrink-0" />
+                <p>
+                  这里管理普通技能。与插件技能同名时，斜杠列表会同时显示并用来源区分；技能说明中的相对脚本路径按
+                  <code className="mx-0.5 rounded bg-sky-100 px-1 dark:bg-sky-500/20">
+                    SKILL.md
+                  </code>
+                  所在目录解析。
+                </p>
+              </div>
+            </div>
           </div>
         </div>
         <ScrollArea className="flex-1">
@@ -2043,7 +2105,7 @@ export function SkillsPanel(): React.JSX.Element {
         }
         deleteDisabledReason={selectedSkillDeleteDisabledReason}
         onPublish={
-          selectedSkill && (selectedSkillCanPublish || selectedSkillCanUpdate)
+          selectedSkill && selectedSkillShowPublishButton
             ? () => openPublishDialog(selectedSkill)
             : undefined
         }
@@ -2449,14 +2511,14 @@ function SkillTreeList(props: {
   return (
     <div className="space-y-2">
       {nodes.map((node) => {
-          const childCount = node.children.reduce(
-            (sum, child) => sum + countSkillTreeSkills(child),
-            0
-          )
-          const childrenExpanded = expandedSkillTreeNodes.has(node.key)
+        const childCount = node.children.reduce(
+          (sum, child) => sum + countSkillTreeSkills(child),
+          0
+        )
+        const childrenExpanded = expandedSkillTreeNodes.has(node.key)
 
-          return (
-            <div key={node.key} className="space-y-1.5">
+        return (
+          <div key={node.key} className="space-y-1.5">
             {node.skill ? (
               (() => {
                 const skill = node.skill
@@ -2789,6 +2851,7 @@ export function SkillDetail(props: {
   hasMarketEntry?: boolean
   hideContentPreview?: boolean
   hideActions?: boolean
+  contentOnly?: boolean
 }): React.JSX.Element {
   const {
     skill,
@@ -2809,7 +2872,8 @@ export function SkillDetail(props: {
     isEdited = false,
     hasMarketEntry = false,
     hideContentPreview = false,
-    hideActions = false
+    hideActions = false,
+    contentOnly = false
   } = props
   const [isEditing, setIsEditing] = useState(false)
   const [draftContent, setDraftContent] = useState("")
@@ -2884,6 +2948,12 @@ export function SkillDetail(props: {
   const chineseName = getSkillChineseName(skill, marketInfo)
   const category = getSkillCategory(skill, marketInfo)
   const description = marketInfo?.description || skill.description || "暂无描述"
+  const skillFrontmatterVersion = skill.metadata?.version?.trim() || ""
+  const resolvedSkillVersion = skillFrontmatterVersion || skill.version || DEFAULT_SKILL_VERSION
+  const skillVersionMissingInFrontmatter = !skillFrontmatterVersion
+  const skillVersionTooltip = skillVersionMissingInFrontmatter
+    ? `当前没有在 SKILL.md frontmatter 里找到 version，所以这里显示的是默认值 ${DEFAULT_SKILL_VERSION}。`
+    : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段。"
   const isFeatured = isFeaturedSkill(marketInfo)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const previewContent =
@@ -2916,144 +2986,210 @@ export function SkillDetail(props: {
         }
       }}
     >
-      <div className="p-4 border-b border-border flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 min-w-0">
-            <h2 className="text-base font-semibold truncate min-w-0 flex-1">
-              {chineseName || skill.name}
-            </h2>
-            {!hideActions && onPublish && (
-              <Button
-                variant="default"
-                size="sm"
-                className={cn(publishButtonClassName, "group shrink-0")}
-                onClick={onPublish}
-              >
-                <span className="flex size-4 items-center justify-center rounded-full bg-white/20 ring-1 ring-white/30 transition-transform duration-200 group-hover:scale-105">
-                  <CloudUpload className="size-2.5" />
-                </span>
-                {publishLabel}
-              </Button>
-            )}
-          </div>
-          <div className="mt-1 flex items-center gap-1.5 flex-wrap">
-            {chineseName && <p className="text-xs text-muted-foreground truncate">{skill.name}</p>}
-            {isFeatured && (
-              <Badge
-                variant="outline"
-                className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
-              >
-                <Sparkles className="size-3 shrink-0" />
-                精品
-              </Badge>
-            )}
-            {hasMarketEntry && (
-              <Badge
-                variant="outline"
-                className="h-5 gap-1 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
-              >
-                <Store className="size-3 shrink-0" />
-                市场
-              </Badge>
-            )}
-            {isEdited && (
-              <Badge
-                variant="outline"
-                className="h-5 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
-              >
-                已编辑
-              </Badge>
-            )}
-            {category && (
-              <Badge variant="outline" className="h-5 px-2 text-[10px]">
-                {category}
-              </Badge>
-            )}
-          </div>
-        </div>
-        {!hideActions && (
-          <div className="flex items-center gap-1.5 shrink-0">
-            {canEditCurrentFile && !isEditing && (
-              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleStartEdit}>
-                编辑
-              </Button>
-            )}
-            {canEditCurrentFile && isEditing && (
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={handleCancelEdit}
-                  disabled={isSaving}
-                >
-                  取消
-                </Button>
-                <Button
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => void handleSaveEdit()}
-                  disabled={!isDirty || isSaving}
-                >
-                  {isSaving ? "保存中..." : "保存"}
-                </Button>
-              </>
-            )}
-            {onDelete && (
-              deleteDisabledReason ? (
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <span className="inline-flex cursor-not-allowed">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="pointer-events-none h-7 gap-1.5 text-xs text-muted-foreground opacity-55"
-                        disabled
-                        aria-disabled="true"
-                      >
-                        <Trash2 className="size-3" />
-                        删除
-                      </Button>
-                    </span>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    className="w-auto max-w-56 px-3 py-2 text-xs"
-                    side="bottom"
-                    align="end"
+      {!contentOnly && (
+        <>
+          <div className="p-4 border-b border-border flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 min-w-0">
+                <h2 className="text-base font-semibold truncate min-w-0 flex-1">
+                  {chineseName || skill.name}
+                </h2>
+                {!hideActions && onPublish && (
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className={cn(publishButtonClassName, "group shrink-0")}
+                    onClick={onPublish}
                   >
-                    {deleteDisabledReason}
-                  </PopoverContent>
-                </Popover>
-              ) : (
+                    <span className="flex size-4 items-center justify-center rounded-full bg-white/20 ring-1 ring-white/30 transition-transform duration-200 group-hover:scale-105">
+                      <CloudUpload className="size-2.5" />
+                    </span>
+                    {publishLabel}
+                  </Button>
+                )}
+              </div>
+              <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                {chineseName && (
+                  <p className="text-xs text-muted-foreground truncate">{skill.name}</p>
+                )}
+                {isFeatured && (
+                  <Badge
+                    variant="outline"
+                    className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+                  >
+                    <Sparkles className="size-3 shrink-0" />
+                    精品
+                  </Badge>
+                )}
+                {hasMarketEntry && (
+                  <Badge
+                    variant="outline"
+                    className="h-5 gap-1 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+                  >
+                    <Store className="size-3 shrink-0" />
+                    市场
+                  </Badge>
+                )}
+                {isEdited && (
+                  <Badge
+                    variant="outline"
+                    className="h-5 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+                  >
+                    已编辑
+                  </Badge>
+                )}
+                <TooltipProvider delayDuration={180}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "h-5 gap-1 px-2 text-[10px] cursor-help",
+                          skillVersionMissingInFrontmatter
+                            ? "border-amber-200 text-amber-800 bg-amber-50"
+                            : "border-sky-200 text-sky-700 bg-sky-50"
+                        )}
+                      >
+                        <GitBranch className="size-3 shrink-0" />
+                        {resolvedSkillVersion}
+                      </Badge>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                      {skillVersionTooltip}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                {category && (
+                  <Badge variant="outline" className="h-5 px-2 text-[10px]">
+                    {category}
+                  </Badge>
+                )}
+              </div>
+            </div>
+            {!hideActions && (
+              <div className="flex items-center gap-1.5 shrink-0">
+                {canEditCurrentFile && !isEditing && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={handleStartEdit}
+                  >
+                    编辑
+                  </Button>
+                )}
+                {canEditCurrentFile && isEditing && (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={handleCancelEdit}
+                      disabled={isSaving}
+                    >
+                      取消
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => void handleSaveEdit()}
+                      disabled={!isDirty || isSaving}
+                    >
+                      {isSaving ? "保存中..." : "保存"}
+                    </Button>
+                  </>
+                )}
+                {onDelete &&
+                  (deleteDisabledReason ? (
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <span className="inline-flex cursor-not-allowed">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="pointer-events-none h-7 gap-1.5 text-xs text-muted-foreground opacity-55"
+                            disabled
+                            aria-disabled="true"
+                          >
+                            <Trash2 className="size-3" />
+                            删除
+                          </Button>
+                        </span>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        className="w-auto max-w-56 px-3 py-2 text-xs"
+                        side="bottom"
+                        align="end"
+                      >
+                        {deleteDisabledReason}
+                      </PopoverContent>
+                    </Popover>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                      onClick={onDelete}
+                    >
+                      <Trash2 className="size-3" />
+                      删除
+                    </Button>
+                  ))}
                 <Button
-                  variant="ghost"
+                  variant={isDisabled ? "outline" : "default"}
                   size="sm"
-                  className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
-                  onClick={onDelete}
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={onToggleEnabled}
                 >
-                  <Trash2 className="size-3" />
-                  删除
+                  <Power className="size-3" />
+                  {isDisabled ? "已禁用" : "已启用"}
                 </Button>
-              )
+              </div>
             )}
-            <Button
-              variant={isDisabled ? "outline" : "default"}
-              size="sm"
-              className="h-7 gap-1.5 text-xs"
-              onClick={onToggleEnabled}
-            >
-              <Power className="size-3" />
-              {isDisabled ? "已禁用" : "已启用"}
-            </Button>
           </div>
-        )}
-      </div>
 
-      <div className="px-4 py-3 border-b border-border">
-        <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
-          {description}
-        </p>
-      </div>
+          <div className="px-4 py-3 border-b border-border">
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
+                {description}
+              </p>
+              <div className="flex items-start gap-2 rounded-lg border border-sky-200/70 bg-sky-50/80 px-3 py-2.5 text-xs leading-relaxed text-sky-900 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
+                <Info className="mt-0.5 size-3.5 shrink-0" />
+                <div className="space-y-1">
+                  <p className="font-medium">运行规则</p>
+                  <p>
+                    与插件技能同名时，斜杠列表会同时显示并用来源区分；选中后按对应
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">
+                      SKILL.md
+                    </code>
+                    绝对路径执行。相对脚本、资源和模板路径按
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">
+                      SKILL.md
+                    </code>
+                    所在目录解析，不会改写工作区 Hook 的
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">
+                      WORKSPACE_PATH
+                    </code>
+                    。
+                  </p>
+                </div>
+              </div>
+              {skillVersionMissingInFrontmatter && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                  <p>
+                    当前没有在{" "}
+                    <code className="rounded bg-amber-100 px-1">SKILL.md frontmatter</code> 里找到{" "}
+                    <code className="rounded bg-amber-100 px-1">version</code>，系统当前按{" "}
+                    <code className="rounded bg-amber-100 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
+                    处理。建议补上 version，方便发布、追踪和版本识别。
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
 
       {hideContentPreview ? (
         <div className="flex-1 min-h-0 p-4">

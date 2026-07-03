@@ -30,12 +30,14 @@ import {
 import { v4 as uuid } from "uuid"
 import type {
   AgentTrace,
+  TraceSkillEvalExtension,
   TraceStep,
   TraceToolCall,
   TraceModelCall,
   TraceNode,
   TraceNodeStatus,
   TraceOutcome,
+  TraceTriggerSource,
   ITraceReporter,
   RoutingTrace
 } from "./types"
@@ -44,17 +46,22 @@ import { app } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
+import { getHarnessProjectAdapterSnapshot } from "../../harness-board/service"
 import { nowIsoLocal } from "../../util/local-time"
+import { deriveUpperOrgLevelsFromPath } from "../../org-levels"
 import {
   DEFAULT_SKILL_VERSION,
   ensureVersionedSkillIdentifier,
   parseSkillIdentifier
 } from "../../utils/skill-identifiers"
-import {
-  setAdoptionContext,
-  clearAdoptionContext
-} from "../../services/adoption-tracker"
+import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
+import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
+import {
+  appendSkillEvalWindowTurn,
+  getSkillEvalWindowAssistantText,
+  getSkillEvalWindowContextByRawName
+} from "../skill-eval/window"
 
 // ─────────────────────────────────────────────────────────
 // Global reporter registry
@@ -143,39 +150,9 @@ function pruneOldTraces(threadId: string): void {
 function normalizeTrace(parsed: AgentTrace): AgentTrace {
   return {
     ...parsed,
-    usedSkills: Array.isArray(parsed.usedSkills) ? parsed.usedSkills : []
-  }
-}
-
-function deriveUpperOrgLevels(pathName?: string): Pick<AgentTrace, "upperOrgLv0" | "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
-  const emptyLevels = {
-    upperOrgLv0: "",
-    upperOrgLv1: "",
-    upperOrgLv2: "",
-    upperOrgLv3: ""
-  }
-  const parts = typeof pathName === "string"
-    ? pathName.split("/").map((part) => part.trim()).filter(Boolean)
-    : []
-  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
-  if (itDeptIndex < 0) return emptyLevels
-
-  const lowerParts = parts.slice(itDeptIndex + 1)
-  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  if (startsWithTeam) {
-    return {
-      upperOrgLv0: lowerParts[2] ?? "",
-      upperOrgLv1: lowerParts[1] ?? "",
-      upperOrgLv2: lowerParts[0] ?? "",
-      upperOrgLv3: "本部团队"
-    }
-  }
-
-  return {
-    upperOrgLv0: lowerParts[3] ?? "",
-    upperOrgLv1: lowerParts[2] ?? "",
-    upperOrgLv2: lowerParts[1] ?? "",
-    upperOrgLv3: lowerParts[0] ?? ""
+    usedSkills: Array.isArray(parsed.usedSkills) ? parsed.usedSkills : [],
+    evolvedSkills: Array.isArray(parsed.evolvedSkills) ? parsed.evolvedSkills : [],
+    triggerSource: parsed.triggerSource ?? "chat"
   }
 }
 
@@ -185,6 +162,40 @@ function getAppVersionForTrace(): string {
   } catch {
     return "unknown"
   }
+}
+
+function getSkillAuthor(skill: {
+  metadata?: Record<string, string>
+  pluginName?: string
+}): string | undefined {
+  const metadataAuthor = skill.metadata?.author || skill.metadata?.owner
+  if (metadataAuthor) return metadataAuthor
+  return skill.pluginName
+}
+
+function buildSkillAuthorByRawName(
+  rawSkillNames: string[],
+  skills: Array<{
+    name: string
+    version: string
+    metadata?: Record<string, string>
+    pluginName?: string
+  }>
+): Record<string, string | undefined> {
+  const byName = new Map(skills.map((skill) => [skill.name, skill]))
+  const byVersionedName = new Map(
+    skills.map((skill) => [ensureVersionedSkillIdentifier(skill.name, skill.version), skill])
+  )
+  const result: Record<string, string | undefined> = {}
+
+  for (const rawSkillName of rawSkillNames) {
+    const parsed = parseSkillIdentifier(rawSkillName)
+    const skill = byVersionedName.get(rawSkillName) ?? byName.get(parsed.name)
+    const author = skill ? getSkillAuthor(skill) : undefined
+    if (author) result[rawSkillName] = author
+  }
+
+  return result
 }
 
 // ─────────────────────────────────────────────────────────
@@ -199,9 +210,14 @@ export class TraceCollector {
   private modelId: string
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
+  private readonly triggerSource: TraceTriggerSource
+  private readonly harnessFeature:
+    | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
+    | undefined
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
+  private evolvedSkills: string[] = []
   private modelCalls: TraceModelCall[] = []
   private nodes: TraceNode[] = []
   private nodeIndexById = new Map<string, number>()
@@ -215,11 +231,21 @@ export class TraceCollector {
   private currentStepStartedAt: string = nowIsoLocal()
   private currentToolCalls: TraceToolCall[] = []
 
-  constructor(threadId: string, userMessage: string, modelId: string) {
+  constructor(
+    threadId: string,
+    userMessage: string,
+    modelId: string,
+    options: {
+      triggerSource?: TraceTriggerSource
+      harnessFeature?: { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
+    } = {}
+  ) {
     this.traceId = uuid()
     this.threadId = threadId
     this.userMessage = userMessage
     this.modelId = modelId
+    this.triggerSource = options.triggerSource ?? "chat"
+    this.harnessFeature = options.harnessFeature
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
@@ -233,14 +259,36 @@ export class TraceCollector {
       metadata: {
         traceId: this.traceId,
         threadId: this.threadId,
-        modelId: this.modelId
+        modelId: this.modelId,
+        triggerSource: this.triggerSource
       }
     })
-    // Publish context to adoption tracker (side-effect only)
+    // Publish context to adoption tracker (side-effect only). Project-mode
+    // conversations also carry their harness project / adapter so emitted
+    // code_gen/code_adopt events can be sliced by project / plugin directly.
     try {
+      let harnessAdapter: { name?: string; version?: string } = {}
+      if (this.harnessFeature) {
+        try {
+          const adapter = getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId)
+          if (adapter) harnessAdapter = { name: adapter.name, version: adapter.version }
+        } catch {
+          // best-effort: leave adapter fields absent on resolution failure
+        }
+      }
       setAdoptionContext(this.threadId, {
         traceId: this.traceId,
-        modelId: this.modelId
+        modelId: this.modelId,
+        ...(this.harnessFeature
+          ? {
+              harnessProjectId: this.harnessFeature.projectId,
+              harnessFeatureSlug: this.harnessFeature.slug,
+              harnessNodeName: this.harnessFeature.nodeName,
+              harnessNodeStatus: this.harnessFeature.nodeStatus,
+              harnessAdapterName: harnessAdapter.name,
+              harnessAdapterVersion: harnessAdapter.version
+            }
+          : {})
       })
     } catch {
       // never block trace setup
@@ -291,19 +339,31 @@ export class TraceCollector {
     }
   }
 
-  /** Set which skills were actually used for this run. */
+  /**
+   * Set which skills were actually used for this run (feeds the trace document's
+   * own `usedSkills`).
+   *
+   * NOTE: this intentionally does NOT write the adoption context's usedSkills.
+   * Code-gen skill attribution is sticky across the thread and is owned solely
+   * by the caller (ipc/agent.ts `syncUsedSkillsContext`), which writes the
+   * adoption context with the thread's active skill set right after this call.
+   * Writing current-run skills here would only be a value the caller overwrites,
+   * and risks bypassing the sticky attribution if ever called on its own.
+   */
   setUsedSkills(skills: string[]): void {
     this.usedSkills = [...skills]
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
     }
-    try {
-      setAdoptionContext(this.threadId, {
-        usedSkills: [...skills]
-      })
-    } catch {
-      // ignore
+  }
+
+  /** Set which used skills came from cloud trace evolution. */
+  setEvolvedSkills(skills: string[]): void {
+    this.evolvedSkills = [...skills]
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      root.metadata = { ...(root.metadata ?? {}), evolvedSkills: [...skills] }
     }
   }
 
@@ -408,9 +468,10 @@ export class TraceCollector {
     status?: TraceNodeStatus
     metadata?: Record<string, unknown>
   }): string {
-    const parentId = params.parentId
-      ?? (params.toolCallId ? this.toolNodeByCallId.get(params.toolCallId) : undefined)
-      ?? this.rootNodeId
+    const parentId =
+      params.parentId ??
+      (params.toolCallId ? this.toolNodeByCallId.get(params.toolCallId) : undefined) ??
+      this.rootNodeId
     const id = `tool_result:${uuid()}`
     const now = params.startedAt ?? nowIsoLocal()
 
@@ -440,8 +501,9 @@ export class TraceCollector {
     output?: unknown
     metadata?: Record<string, unknown>
   }): void {
-    const targetId = params.nodeId
-      ?? (params.messageId ? this.llmNodeByMessageId.get(params.messageId) : undefined)
+    const targetId =
+      params.nodeId ??
+      (params.messageId ? this.llmNodeByMessageId.get(params.messageId) : undefined)
     if (!targetId) return
     const node = this.getNode(targetId)
     if (!node) return
@@ -467,9 +529,16 @@ export class TraceCollector {
       id,
       type: params.type,
       parentId: this.rootNodeId,
-      name: params.name
-        ?? (params.type === "error" ? "Run Error" : params.type === "cancel" ? "Run Cancelled" : "Run Completed"),
-      status: params.status ?? (params.type === "error" ? "error" : params.type === "cancel" ? "cancelled" : "success"),
+      name:
+        params.name ??
+        (params.type === "error"
+          ? "Run Error"
+          : params.type === "cancel"
+            ? "Run Cancelled"
+            : "Run Completed"),
+      status:
+        params.status ??
+        (params.type === "error" ? "error" : params.type === "cancel" ? "cancelled" : "success"),
       startedAt: params.startedAt ?? nowIsoLocal(),
       endedAt: params.endedAt ?? nowIsoLocal(),
       output: params.output,
@@ -503,43 +572,71 @@ export class TraceCollector {
     const totalToolCalls = this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0)
 
     // Resolve skill versions and merge into "name-version" format
-    let usedSkillsWithVersions = this.usedSkills
-    if (this.usedSkills.length > 0) {
+    let skillAuthorByRawName: Record<string, string | undefined> = {}
+    const resolveSkillVersions = async (
+      skills: string[],
+      collectAuthors = false
+    ): Promise<string[]> => {
+      if (skills.length === 0) return []
       try {
         const allSkills = await listAllSkills()
         const skillVersionMap = new Map(allSkills.map((s) => [s.name, s.version]))
-        usedSkillsWithVersions = Array.from(
+        const resolved = Array.from(
           new Set(
-            this.usedSkills
+            skills
               .map((skill) => {
                 const parsed = parseSkillIdentifier(skill)
                 const listedVersion = skillVersionMap.get(parsed.name)
                 const resolvedVersion =
                   parsed.version && parsed.version !== DEFAULT_SKILL_VERSION
                     ? parsed.version
-                    : listedVersion ?? parsed.version
-                return ensureVersionedSkillIdentifier(
-                  parsed.name,
-                  resolvedVersion
-                )
+                    : (listedVersion ?? parsed.version)
+                return ensureVersionedSkillIdentifier(parsed.name, resolvedVersion)
               })
               .filter(Boolean)
           )
         )
+        if (collectAuthors) {
+          skillAuthorByRawName = buildSkillAuthorByRawName(resolved, allSkills)
+        }
+        return resolved
       } catch (e) {
         console.warn("[Tracer] Failed to resolve skill versions:", e)
-        usedSkillsWithVersions = Array.from(
-          new Set(
-            this.usedSkills
-              .map((skill) => ensureVersionedSkillIdentifier(skill))
-              .filter(Boolean)
-          )
+        return Array.from(
+          new Set(skills.map((skill) => ensureVersionedSkillIdentifier(skill)).filter(Boolean))
         )
       }
     }
 
+    const usedSkillsWithVersions = await resolveSkillVersions(this.usedSkills, true)
+    const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
+
     const userInfo = getUserInfo()
-    const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
+    const upperOrgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
+
+    // Project-mode traces also record the bound adapter plugin's version, so
+    // operations analytics can attribute a project conversation to a plugin
+    // version. Best-effort: any resolution failure leaves the fields absent.
+    let harnessAdapterFields: {
+      harnessAdapterId?: string
+      harnessAdapterName?: string
+      harnessAdapterVersion?: string
+    } = {}
+    if (this.harnessFeature) {
+      try {
+        const adapter = getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId)
+        if (adapter) {
+          harnessAdapterFields = {
+            harnessAdapterId: adapter.id,
+            harnessAdapterName: adapter.name,
+            harnessAdapterVersion: adapter.version
+          }
+        }
+      } catch (e) {
+        console.warn("[Tracer] Failed to resolve harness adapter for trace:", e)
+      }
+    }
+
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
@@ -564,20 +661,67 @@ export class TraceCollector {
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
-      nodes: this.finalizeNodes(outcome, endedAt, usedSkillsWithVersions, errorMessage),
+      nodes: this.finalizeNodes(
+        outcome,
+        endedAt,
+        usedSkillsWithVersions,
+        evolvedSkillsWithVersions,
+        errorMessage
+      ),
       totalToolCalls,
       outcome,
       ...(errorMessage ? { errorMessage } : {}),
       usedSkills: usedSkillsWithVersions,
+      evolvedSkills: evolvedSkillsWithVersions,
+      triggerSource: this.triggerSource,
+      ...(this.harnessFeature
+        ? {
+            harnessProjectId: this.harnessFeature.projectId,
+            harnessFeatureSlug: this.harnessFeature.slug,
+            ...(this.harnessFeature.nodeName
+              ? { harnessNodeName: this.harnessFeature.nodeName }
+              : {}),
+            ...(this.harnessFeature.nodeStatus
+              ? { harnessNodeStatus: this.harnessFeature.nodeStatus }
+              : {}),
+            ...harnessAdapterFields
+          }
+        : {}),
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
+    let skillEval: TraceSkillEvalExtension | undefined
+    try {
+      const windowTurn = appendSkillEvalWindowTurn({
+        traceId: trace.traceId,
+        threadId: trace.threadId,
+        startedAt: trace.startedAt,
+        endedAt: trace.endedAt,
+        usedSkills: usedSkillsWithVersions,
+        userMessage: trace.userMessage,
+        assistantText: getSkillEvalWindowAssistantText(trace),
+        outcome: trace.outcome
+      })
+      const evalRawSkillNames = windowTurn.evalSkillNames
+      const windowContextByRawName = getSkillEvalWindowContextByRawName(
+        trace.threadId,
+        evalRawSkillNames
+      )
+      skillEval = buildSkillEvalTraceExtension(trace, {
+        skillAuthorByRawName,
+        windowContextByRawName,
+        evalRawSkillNames
+      })
+    } catch (e) {
+      console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+    }
+    const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
 
-    writeTraceFile(trace)
+    writeTraceFile(traceWithEval)
 
     // Fire-and-forget: trace upload is a side-channel operation and must
     // never block the main agent flow. Errors are logged and swallowed.
     void Promise.resolve()
-      .then(() => _reporter.report(sanitizeTraceForCloudUpload(trace)))
+      .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
       .catch((e) => {
         console.warn("[Tracer] Reporter.report() threw:", e)
       })
@@ -590,14 +734,28 @@ export class TraceCollector {
       // ignore
     }
 
-    return trace
+    return traceWithEval
   }
 
-  private finalizeNodes(outcome: TraceOutcome, endedAt: string, resolvedUsedSkills: string[], errorMessage?: string): TraceNode[] {
+  private finalizeNodes(
+    outcome: TraceOutcome,
+    endedAt: string,
+    resolvedUsedSkills: string[],
+    resolvedEvolvedSkills: string[],
+    errorMessage?: string
+  ): TraceNode[] {
+    const finalStatus: TraceNodeStatus =
+      outcome === "error"
+        ? "error"
+        : outcome === "cancelled"
+          ? "cancelled"
+          : outcome === "unknown"
+            ? "unknown"
+            : "success"
     for (const node of this.nodes) {
       if (node.type === "llm" || node.type === "tool") {
         if (node.status === "running") {
-          node.status = outcome === "cancelled" ? "cancelled" : "success"
+          node.status = finalStatus
         }
         if (!node.endedAt) node.endedAt = endedAt
       }
@@ -619,6 +777,15 @@ export class TraceCollector {
           startedAt: endedAt,
           endedAt
         })
+      } else if (outcome === "unknown") {
+        this.addTerminalNode({
+          type: "message",
+          name: "Run Ended",
+          output: errorMessage ?? "Run ended without a final success signal",
+          status: "unknown",
+          startedAt: endedAt,
+          endedAt
+        })
       } else {
         this.addTerminalNode({
           type: "message",
@@ -632,7 +799,7 @@ export class TraceCollector {
 
     const root = this.getNode(this.rootNodeId)
     if (root) {
-      root.status = outcome === "error" ? "error" : outcome === "cancelled" ? "cancelled" : "success"
+      root.status = finalStatus
       root.endedAt = endedAt
       root.output = {
         outcome,
@@ -642,7 +809,9 @@ export class TraceCollector {
       }
       root.metadata = {
         ...(root.metadata ?? {}),
-        usedSkills: [...resolvedUsedSkills]
+        usedSkills: [...resolvedUsedSkills],
+        evolvedSkills: [...resolvedEvolvedSkills],
+        triggerSource: this.triggerSource
       }
     }
 
@@ -698,7 +867,9 @@ export function readThreadTraces(threadId: string): AgentTrace[] {
         if (!line.trim()) continue
         try {
           traces.push(normalizeTrace(JSON.parse(line) as AgentTrace))
-        } catch { /* skip malformed lines */ }
+        } catch {
+          /* skip malformed lines */
+        }
       }
     }
     return traces.sort((a, b) => a.startedAt.localeCompare(b.startedAt))
@@ -763,7 +934,11 @@ function findTraceLocation(traceId: string): { threadId: string; filePath: strin
   return null
 }
 
-export function deleteTraceById(traceId: string): { success: boolean; threadId?: string; error?: string } {
+export function deleteTraceById(traceId: string): {
+  success: boolean
+  threadId?: string
+  error?: string
+} {
   const location = findTraceLocation(traceId)
   if (!location) return { success: true }
   try {

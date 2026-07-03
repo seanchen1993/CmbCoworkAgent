@@ -57,9 +57,29 @@ function unescapeXml(s: string): string {
  * one blank line). They are free to put attachments in between too; the chip
  * parser anchors on `lastIndexOf` so anything preceding the tag is preserved.
  */
-export function formatSkillUseBlock(skill: { name: string; path: string }): string {
+function optionalXmlLine(tag: string, value: string | undefined): string {
+  const trimmed = value?.trim()
+  return trimmed ? `<${tag}>${escapeXml(trimmed)}</${tag}>\n` : ""
+}
+
+function skillWhenToUse(skill: {
+  metadata?: Record<string, string> | null
+}): string | undefined {
+  const metadata = skill.metadata ?? undefined
+  return metadata?.whenToUse ?? metadata?.["when-to-use"] ?? metadata?.when_to_use
+}
+
+export function formatSkillUseBlock(skill: {
+  name: string
+  path: string
+  description?: string | null
+  metadata?: Record<string, string> | null
+  allowedTools?: string[] | null
+}): string {
   const name = skill.name.trim()
   const path = skill.path.trim()
+  const allowedTools =
+    skill.allowedTools && skill.allowedTools.length > 0 ? skill.allowedTools.join(", ") : undefined
   return (
     `<${TAG_NAME}>\n` +
     `<instruction>\n` +
@@ -67,9 +87,13 @@ export function formatSkillUseBlock(skill: { name: string; path: string }): stri
     `- 不要跳过任何步骤，也不要把步骤改写成泛化或概括的回答；\n` +
     `- 不要重复询问技能文档中已经明确给出的内容；\n` +
     `- 不要凭猜测代替技能中明确的指令；\n` +
+    `- 技能文档中提到的相对脚本、资源、模板路径，都必须按 <path> 指定的 SKILL.md 所在目录解析；执行脚本时请使用绝对路径，或把 cwd 设置为该技能目录；\n` +
     `- 始终使用中文回答。\n` +
     `</instruction>\n` +
     `<name>${escapeXml(name)}</name>\n` +
+    optionalXmlLine("description", skill.description ?? undefined) +
+    optionalXmlLine("when_to_use", skillWhenToUse(skill)) +
+    optionalXmlLine("allowed_tools", allowedTools) +
     `<path>${escapeXml(path)}</path>\n` +
     `</${TAG_NAME}>`
   )
@@ -81,9 +105,12 @@ export function formatSkillUseBlock(skill: { name: string; path: string }): stri
  *
  * Tail-anchored on purpose: the block is always at the end of the model-facing
  * payload, and `lastIndexOf` survives even if the user's own prose happens to
- * contain the literal tag (they'd see their own text render, plus a chip for
- * the tail block — cosmetic-only, no execution impact because main-side does
- * nothing special with this string).
+ * contain the literal tag before the real transport block.
+ *
+ * This is protocol data, not just cosmetic UI metadata: main-side code also
+ * reads a valid tail block to activate the explicitly selected skill. User
+ * prose that ends with a complete, valid block is therefore still ambiguous
+ * until the composer sends skills out-of-band instead of as text.
  *
  * Returns null if no matching block exists, or if the block has no valid <name>.
  */

@@ -13,6 +13,8 @@ export interface DashboardCodeStats {
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
   pushedAdoptionRate: number | null
+  /** 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。端到端「真实入库」口径，领导主看。 */
+  inclusivePushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -77,6 +79,10 @@ export function makeDashboardCodeStats(args: {
   const measuredAdoptionRate = computeAdoptionRate(adoptedLines, effectiveGeneratedLines)
   const inclusiveAdoptionRate = computeAdoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines)
   const pushedAdoptionRate = computeAdoptionRate(pushedAdoptedLines, pushedEffectiveGeneratedLines)
+  const inclusivePushedAdoptionRate = computeAdoptionRate(
+    pushedAdoptedLines,
+    inclusiveEffectiveGeneratedLines
+  )
   return {
     generatedLines,
     deletedLines,
@@ -92,6 +98,7 @@ export function makeDashboardCodeStats(args: {
     measuredAdoptionRate,
     inclusiveAdoptionRate,
     pushedAdoptionRate,
+    inclusivePushedAdoptionRate,
     // Backward-compatible alias for older renderer code paths.
     adoptionRate: measuredAdoptionRate
   }
@@ -103,7 +110,10 @@ export function effectiveGeneratedLinesSumAgg(): Record<string, unknown> {
   }
 }
 
-function normalizeCodeStatsFromContainer(raw: unknown, prefix: string[] = []): DashboardCodeStats {
+export function normalizeCodeStatsFromContainer(
+  raw: unknown,
+  prefix: string[] = []
+): DashboardCodeStats {
   const generatedLines = getAggNumber(raw, [...prefix, "code_gen", "generated_lines", "value"])
   const deletedLines = getAggNumber(raw, [...prefix, "code_gen", "deleted_lines", "value"])
   const measuredGeneratedLines = getAggNumber(raw, [
@@ -148,8 +158,11 @@ export function normalizeCodeStatsFromAggs(raw: unknown): DashboardCodeStats {
   return normalizeCodeStatsFromContainer(raw, ["aggregations"])
 }
 
-export function normalizeSkillCodeAdoptionBuckets(raw: unknown): DashboardSkillCodeAdoptionStats[] {
-  return getAggArray(raw, ["aggregations", "by_skill_adoption", "buckets"])
+export function normalizeSkillCodeAdoptionBuckets(
+  raw: unknown,
+  aggKey = "by_skill_adoption"
+): DashboardSkillCodeAdoptionStats[] {
+  return getAggArray(raw, ["aggregations", aggKey, "buckets"])
     .map((bucket): DashboardSkillCodeAdoptionStats | null => {
       if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) return null
       const record = bucket as Record<string, unknown>

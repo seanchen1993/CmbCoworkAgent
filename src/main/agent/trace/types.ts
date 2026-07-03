@@ -123,7 +123,14 @@ export interface RoutingTrace {
   /** First 100 chars of the user message used for routing classification */
   messageSnippet: string
   /** Task source that triggered this routing call */
-  taskSource: "chat" | "heartbeat" | "scheduler_reminder" | "scheduler_action" | "memory_summarize" | "optimizer"
+  taskSource:
+    | "chat"
+    | "heartbeat"
+    | "scheduler_reminder"
+    | "scheduler_action"
+    | "memory_summarize"
+    | "task_mmd"
+    | "optimizer"
   /** Whether this was a resume or interrupt continuation (undefined for fresh invocations) */
   continuation?: "resume" | "interrupt"
   /** Global routing mode at invocation time */
@@ -142,12 +149,167 @@ export interface RoutingTrace {
   layers: RoutingLayerRecord[]
 }
 
+export type TraceTriggerSource = RoutingTrace["taskSource"]
+
 /** How the agent's run ended. */
 export type TraceOutcome =
-  | "success"   // Agent completed the task and said so
-  | "error"     // Runtime / uncaught exception
+  | "success" // Agent completed the task and said so
+  | "error" // Runtime / uncaught exception
   | "cancelled" // User cancelled mid-run
-  | "unknown"   // Stream ended without a clear signal
+  | "unknown" // Stream ended without a clear signal
+
+export type TraceSkillEvalWarningTag =
+  | "VALIDATION_SIGNAL_MISSING"
+  | "TOOL_BUDGET_EXCEEDED"
+  | "FINAL_RESPONSE_MISSING"
+  | "FINAL_RESPONSE_TOO_SHORT"
+  | "DANGEROUS_COMMAND_DETECTED"
+  | "OUTCOME_NOT_SUCCESS"
+  | "OUTCOME_QUALITY_LOW"
+  | "ERROR_NODES_DETECTED"
+  | "TOOL_RESULT_ERROR"
+  | "REPEATED_TOOL_CALLS"
+  | "PROMPT_TOKEN_BUDGET_EXCEEDED"
+  | "SUBAGENT_FAILED"
+  | "RUNTIME_ERROR"
+  | "STEP_BUDGET_EXCEEDED"
+  | "TERMINAL_MESSAGE_FAILED"
+  | "OUTPUT_SIGNAL_MISSING"
+
+export type TraceSkillEvalCheckCategory = "process" | "outcome" | "result"
+export type TraceSkillEvalResultStatus = "evaluated" | "skipped" | "failed"
+export type TraceSkillEvalSource = "explicit" | "inherited_context"
+export type TraceSkillEvalArtifactType =
+  | "response"
+  | "file"
+  | "command"
+  | "screenshot"
+  | "log"
+  | "other"
+
+export interface TraceSkillEvalCheck {
+  name: string
+  label: string
+  category: TraceSkillEvalCheckCategory
+  ok: boolean
+  weight: number
+  detail?: Record<string, unknown>
+}
+
+export interface TraceSkillEvalArtifact {
+  type: TraceSkillEvalArtifactType
+  label: string
+}
+
+export interface TraceSkillEvalEvidence {
+  finalResponseLength: number
+  changedFiles: number
+  validationCommands: number
+  artifactSignals: number
+  dangerousCommands: number
+  subagentRuns: number
+  subagentCompleted: number
+  subagentFailed: number
+  subagentResultLength: number
+  toolResultErrors: number
+}
+
+export interface TraceSkillEvalRecord {
+  id: string
+  traceId: string
+  threadId: string
+  rawSkillName: string
+  skillName: string
+  skillVersion?: string
+  skillTaskId: string
+  skillTaskTraceIndex: number
+  evalSource: TraceSkillEvalSource
+
+  contextTraceIds: string[]
+  skillEvalTraceIds: string[]
+  contextTraceCount: number
+  skillEvalTraceCount: number
+
+  startedAt: string
+  endedAt: string
+  startedDate: string
+  startedMonth: string
+
+  ystId: string
+  sapId: string
+  userName: string
+  orgName: string
+  originOrgId: string
+  upperOrgLv0: string
+  upperOrgLv1: string
+  upperOrgLv2: string
+  upperOrgLv3: string
+  appVersion: string
+  skillAuthor?: string
+
+  userMessage: string
+  modelId: string
+  modelName: string
+  outcome: TraceOutcome
+
+  score: number
+  processScore: number
+  outcomeScore: number
+  resultScore?: number
+  processWeight: number
+  outcomeWeight: number
+
+  pass: boolean
+  passNumeric: 0 | 1
+  outcomePass: boolean
+  outcomePassNumeric: 0 | 1
+  resultPass?: boolean
+  resultPassNumeric?: 0 | 1
+  resultStatus: TraceSkillEvalResultStatus
+
+  durationMs: number
+  totalToolCalls: number
+  modelCallCount: number
+  errorCount: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalTokens: number
+  promptInputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  peakInputTokens: number
+  totalTokensIncludesCache: "true" | "false" | "mixed"
+
+  failedProcessChecks: string[]
+  failedOutcomeChecks: string[]
+  failedResultChecks: string[]
+  failedProcessCheckCount: number
+  totalProcessCheckCount: number
+  failedOutcomeCheckCount: number
+  totalOutcomeCheckCount: number
+  failedResultCheckCount: number
+  totalResultCheckCount: number
+  warningTags: TraceSkillEvalWarningTag[]
+
+  checks: TraceSkillEvalCheck[]
+  outcomeChecks: TraceSkillEvalCheck[]
+  resultChecks: TraceSkillEvalCheck[]
+
+  warnings: string[]
+  outcomeWarnings: string[]
+  resultWarnings: string[]
+  resultIssues: string[]
+
+  artifacts: TraceSkillEvalArtifact[]
+  evidence: TraceSkillEvalEvidence
+}
+
+export interface TraceSkillEvalExtension {
+  schemaVersion: string
+  evalRulesVersion: string
+  evaluatedAt: string
+  records: TraceSkillEvalRecord[]
+}
 
 // ─────────────────────────────────────────────────────────
 // The top-level Trace record
@@ -213,6 +375,45 @@ export interface AgentTrace {
   appVersion?: string
   /** Which skills were actually used during this run, format: "name-version" e.g. "scheduler-assistant-v1.0.0" */
   usedSkills: string[]
+  /** Optional skill-eval payload computed before upload. Existing trace fields remain unchanged. */
+  skillEval?: TraceSkillEvalExtension
+  /** Used skills that were produced by the cloud trace evolver, same format as usedSkills. */
+  evolvedSkills: string[]
+  /** Source that triggered this trace. Missing values in older traces are treated as chat by dashboard queries. */
+  triggerSource: TraceTriggerSource
+  /**
+   * Harness Board project id this conversation belongs to, copied from the
+   * thread's `harnessFeature` binding. Absent for non-project (plain chat) threads.
+   * Lets the operations dashboard link a feature to its conversation traces.
+   */
+  harnessProjectId?: string
+  /** Harness Board feature slug this conversation belongs to (paired with harnessProjectId). */
+  harnessFeatureSlug?: string
+  /**
+   * Harness Board workflow stage name (group-label, e.g. "Dev-代码实现") that was
+   * current when this turn ran, resolved per-turn from the feature's run state.
+   * Within a plugin the group+label pair is unique, so this is a stable bucket
+   * key; no raw node id is reported. Absent on pre-feature traces and on turns
+   * where the stage could not be resolved. Forward-only: historical traces have
+   * no stage name.
+   */
+  harnessNodeName?: string
+  /**
+   * Status of the current workflow node *at the time this turn ran*, as a stable
+   * enum label (进行中/已完成/未开始/...). Lets the dashboard sub-divide a stage's
+   * conversations by status-at-turn-time. Absent when unresolved. Forward-only.
+   */
+  harnessNodeStatus?: string
+  /**
+   * Harness adapter (plugin) bound to this project. Only populated for
+   * project-mode traces (those with harnessProjectId). Lets the dashboard see
+   * which adapter plugin version drove a project conversation.
+   */
+  harnessAdapterId?: string
+  /** Harness adapter (plugin) display name — only for project-mode traces. */
+  harnessAdapterName?: string
+  /** Harness adapter (plugin) version, i.e. PluginMetadata.version — only for project-mode traces. */
+  harnessAdapterVersion?: string
   /**
    * Optional free-form metadata.
    * Known keys:

@@ -1,7 +1,7 @@
-import { lazy, Suspense } from "react"
+import { lazy, Suspense, useEffect, useRef } from "react"
 import { useCurrentThread } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
-import { ChatContainer } from "@/components/chat/ChatContainer"
+import { ChatContainer, type ChatSurface } from "@/components/chat/ChatContainer"
 import { ArrowLeft, Loader2 } from "lucide-react"
 
 const FileViewer = lazy(() => import("./FileViewer").then((m) => ({ default: m.FileViewer })))
@@ -10,18 +10,42 @@ interface TabbedPanelProps {
   threadId: string
   showTabBar?: boolean
   hasPendingGitDiffNotice?: boolean
+  chatSurface?: ChatSurface
+  hideWelcomeSkillTabs?: boolean
+  readOnlyReason?: string | null
   onRequestOpenGitPanel?: () => void
+  onDismissGitChangeNotice?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
+  onHarnessSessionCreated?: (threadId: string) => void
 }
 
 export function TabbedPanel({
   threadId,
   showTabBar = true,
   hasPendingGitDiffNotice = false,
+  chatSurface = "default",
+  hideWelcomeSkillTabs = false,
+  readOnlyReason = null,
   onRequestOpenGitPanel,
-  onThreadGitStatusChange
+  onDismissGitChangeNotice,
+  onThreadGitStatusChange,
+  onHarnessSessionCreated
 }: TabbedPanelProps): React.JSX.Element {
-  const { activeTab, openFiles, setActiveTab } = useCurrentThread(threadId)
+  const { activeTab, openFiles, pendingApproval, setActiveTab } = useCurrentThread(threadId)
+  const lastAutoFocusedApprovalIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!pendingApproval) {
+      lastAutoFocusedApprovalIdRef.current = null
+      return
+    }
+    if (lastAutoFocusedApprovalIdRef.current === pendingApproval.id) return
+
+    lastAutoFocusedApprovalIdRef.current = pendingApproval.id
+    if (activeTab !== "agent") {
+      setActiveTab("agent")
+    }
+  }, [activeTab, pendingApproval, setActiveTab])
 
   // Determine what to render based on active tab
   const isAgentTab = activeTab === "agent"
@@ -39,10 +63,16 @@ export function TabbedPanel({
       <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
         {isAgentTab ? (
           <ChatContainer
+            key={threadId}
             threadId={threadId}
             showGitChangeNotice={hasPendingGitDiffNotice}
+            surface={chatSurface}
+            hideWelcomeSkillTabs={hideWelcomeSkillTabs}
+            readOnlyReason={readOnlyReason}
             onOpenGitPanel={onRequestOpenGitPanel}
+            onDismissGitChangeNotice={onDismissGitChangeNotice}
             onThreadGitStatusChange={onThreadGitStatusChange}
+            onHarnessSessionCreated={onHarnessSessionCreated}
           />
         ) : activeFile ? (
           <div className="flex flex-1 min-h-0 flex-col overflow-hidden">

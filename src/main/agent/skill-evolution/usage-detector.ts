@@ -1,9 +1,8 @@
 import { readFileSync } from "fs"
 import { posix as pathPosix } from "path"
-import {
-  ensureVersionedSkillIdentifier,
-  parseYamlFrontmatter
-} from "../../utils/skill-identifiers"
+import { ensureVersionedSkillIdentifier, parseYamlFrontmatter } from "../../utils/skill-identifiers"
+
+const CLOUD_EVOLVER_NAME = "CMBDevClaw Trace Evolver"
 
 export interface SkillMetadataLite {
   name?: string
@@ -35,22 +34,35 @@ function readSkillFrontmatter(skillDocPath: string): Record<string, string> | nu
   }
 }
 
-function resolveSkillIdentifier(
+function isCloudEvolvedSkill(frontmatter: Record<string, string> | null): boolean {
+  return frontmatter?.["evolved-by"]?.trim() === CLOUD_EVOLVER_NAME
+}
+
+function resolveSkillInfo(
   fallbackName: string,
   version: string | undefined,
   skillDocPath: string,
   options: { fallbackWhenUnreadable: boolean } = { fallbackWhenUnreadable: true }
-): string {
+): { identifier: string; evolved: boolean } {
   const frontmatter = readSkillFrontmatter(skillDocPath)
 
   if (version?.trim()) {
     const name = (frontmatter?.name || fallbackName).trim()
-    return ensureVersionedSkillIdentifier(name, version)
+    return {
+      identifier: ensureVersionedSkillIdentifier(name, version),
+      evolved: isCloudEvolvedSkill(frontmatter)
+    }
   }
 
-  if (!frontmatter && !options.fallbackWhenUnreadable) return ""
+  if (!frontmatter && !options.fallbackWhenUnreadable) {
+    return { identifier: "", evolved: false }
+  }
+
   const skillName = (frontmatter?.name || fallbackName).trim()
-  return ensureVersionedSkillIdentifier(skillName, frontmatter?.version)
+  return {
+    identifier: ensureVersionedSkillIdentifier(skillName, frontmatter?.version),
+    evolved: isCloudEvolvedSkill(frontmatter)
+  }
 }
 
 function getLocalSkillRootDir(normalizedPath: string): string | null {
@@ -79,27 +91,34 @@ function getLocalSkillRootDir(normalizedPath: string): string | null {
 export class SkillUsageDetector {
   private readonly loadedSkillsByDocPath = new Map<string, string>()
   private readonly loadedSkillsByRootDir = new Map<string, string>()
+  private readonly evolvedSkillIdentifiers = new Set<string>()
   private readonly localSkillLookupCache = new Map<string, string | null>()
   private readonly usedSkillNames = new Set<string>()
+  private readonly usedEvolvedSkillNames = new Set<string>()
 
   onSkillsMetadata(skills: SkillMetadataLite[]): void {
     for (const skill of skills) {
       const skillName = typeof skill.name === "string" ? skill.name.trim() : ""
       const skillPath = typeof skill.path === "string" ? normalizePath(skill.path.trim()) : ""
-      const skillIdentifier = resolveSkillIdentifier(skillName, skill.version, skillPath)
+      const { identifier: skillIdentifier, evolved } = resolveSkillInfo(
+        skillName,
+        skill.version,
+        skillPath
+      )
       if (!skillName || !skillPath || !skillIdentifier) continue
 
       for (const candidatePath of getSkillPathAliases(skillPath)) {
-        this.registerSkillPath(candidatePath, skillIdentifier)
+        this.registerSkillPath(candidatePath, skillIdentifier, evolved)
       }
     }
   }
 
-  private registerSkillPath(skillPath: string, skillIdentifier: string): void {
+  private registerSkillPath(skillPath: string, skillIdentifier: string, evolved = false): void {
     const normalizedSkillPath = normalizePath(skillPath)
     if (!normalizedSkillPath || !skillIdentifier) return
 
     this.loadedSkillsByDocPath.set(normalizedSkillPath, skillIdentifier)
+    if (evolved) this.evolvedSkillIdentifiers.add(skillIdentifier)
     const rootDir = normalizePath(pathPosix.dirname(normalizedSkillPath))
     if (rootDir && rootDir !== ".") {
       this.loadedSkillsByRootDir.set(rootDir, skillIdentifier)
@@ -115,15 +134,20 @@ export class SkillUsageDetector {
 
     const skillDocPath = `${rootDir}/SKILL.md`
     const fallbackName = rootDir.split("/").filter(Boolean).at(-1) ?? ""
-    const skillIdentifier = resolveSkillIdentifier(fallbackName, undefined, skillDocPath, {
-      fallbackWhenUnreadable: false
-    })
+    const { identifier: skillIdentifier, evolved } = resolveSkillInfo(
+      fallbackName,
+      undefined,
+      skillDocPath,
+      {
+        fallbackWhenUnreadable: false
+      }
+    )
     if (!skillIdentifier) {
       this.localSkillLookupCache.set(rootDir, null)
       return null
     }
 
-    this.registerSkillPath(skillDocPath, skillIdentifier)
+    this.registerSkillPath(skillDocPath, skillIdentifier, evolved)
     this.localSkillLookupCache.set(rootDir, skillIdentifier)
     return skillIdentifier
   }
@@ -147,6 +171,13 @@ export class SkillUsageDetector {
     return ""
   }
 
+  private markSkillUsed(skillIdentifier: string): void {
+    this.usedSkillNames.add(skillIdentifier)
+    if (this.evolvedSkillIdentifiers.has(skillIdentifier)) {
+      this.usedEvolvedSkillNames.add(skillIdentifier)
+    }
+  }
+
   /**
    * Record a read_file path and check whether it matches any loaded skill.
    * Returns `true` when at least one new skill name was added to the set
@@ -159,12 +190,16 @@ export class SkillUsageDetector {
     const skillName = this.getSkillNameForReadFilePath(rawPath)
     if (!skillName) return false
 
-    this.usedSkillNames.add(skillName)
+    this.markSkillUsed(skillName)
     return this.usedSkillNames.size > priorSize
   }
 
   getUsedSkillNames(): string[] {
     return Array.from(this.usedSkillNames)
+  }
+
+  getUsedEvolvedSkillNames(): string[] {
+    return Array.from(this.usedEvolvedSkillNames)
   }
 
   hasUsedSkills(): boolean {

@@ -1,6 +1,6 @@
 {
   "name": "cmbdevclaw",
-  "version": "1.4.0",
+  "version": "1.4.5",
   "description": "CMBDevClaw description",
   "author": {
     "name": "CMBDevClaw",
@@ -40,10 +40,20 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:hooks && npm run test:plugins && npm run test:task-cards && npm run test:merge && npm run test:workflow",
+    "test:workflow": "npx tsx tests/read-only-shell-message.spec.ts && npx tsx tests/workflow-script.spec.ts && npx tsx tests/workflow-engine.spec.ts && npx tsx tests/agent-registry.spec.ts && npx tsx tests/coordinator-worker-access.spec.ts && npx tsx tests/coordinator-mode-plumbing.spec.ts && npx tsx tests/local-sandbox-readonly-hook.spec.ts && npx tsx tests/agent-tool-guard.spec.ts && npx tsx tests/thread-checkpoint-cleanup.spec.ts && npx tsx tests/sandbox-elevated.unit.spec.mjs",
+    "test:merge": "npx tsx tests/skill-bundle-merge.spec.ts && npx tsx tests/skill-bundle-version.spec.ts",
+    "test:hooks": "npx tsx tests/hook-cc-field-alignment.spec.ts && npx tsx tests/hook-timeout-bounds.spec.ts && npx tsx tests/hook-phase2-spec.spec.ts && npx tsx tests/hook-phase2-followup.spec.ts && npx tsx tests/git-hook-collection-path.spec.ts",
+    "test:plugins": "npx tsx tests/plugin-inspect-zip.spec.ts && npx tsx tests/plugin-market-version.spec.ts && npx tsx tests/plugin-skill-evolution-match.spec.ts && npx vitest run src/main/ipc/plugins-market-sim.test.ts",
+    "test:task-cards": "npx tsx tests/task-cards.spec.ts",
     "test:watch": "vitest",
+    "test:goal:unit": "npx tsx tests/goals.spec.ts && npx tsx tests/goals-db.spec.ts && npx tsx tests/goals-evaluator.spec.ts && npx tsx tests/goals-runtime-harness.spec.ts && npx tsx tests/goal-notice-ui.spec.ts && npx tsx tests/goal-transcript.spec.ts && npx tsx tests/goal-panel-view.spec.ts && npx tsx tests/goal-ui-events.spec.ts && npx tsx tests/checkpoint-message-times.spec.ts && npx tsx tests/sqljs-saver-async-flush.spec.ts && npx tsx tests/checkpointer-lru.spec.ts && npx tsx tests/thread-values-merge.spec.ts && npx tsx tests/submit-in-flight-lock.spec.ts && npx tsx tests/goal-control-submit.spec.ts && npx tsx tests/live-stream-messages.spec.ts && npx tsx tests/stream-message-ids.spec.ts",
+    "test:goal:integration": "npx tsx tests/goal-ipc-e2e.spec.ts",
+    "test:goal": "npm run test:goal:unit && npm run test:goal:integration",
+    "test:goal:e2e": "RUN_GOAL_E2E_REAL_MODEL=1 npx tsx tests/goal-ipc-e2e.spec.ts",
     "start": "electron-vite preview",
     "dev": "electron-vite dev",
+    "dev:mock-task-cards": "node -e \"const { spawnSync } = require('child_process'); process.env.CMB_TASK_CARDS_MOCK = '1'; const result = spawnSync('electron-vite', ['dev'], { stdio: 'inherit', shell: true, env: process.env }); process.exit(result.status ?? 1)\"",
     "build": "electron-vite build",
     "clean:win-code-exe": "node -e \"require('fs').rmSync('resources/bin/win32/codex.exe', { force: true })\"",
     "predist": "npm run clean:win-code-exe",
@@ -117,12 +127,21 @@
       {
         "from": "design-templates",
         "to": "design-templates"
+      },
+      {
+        "from": "build",
+        "to": "icons",
+        "filter": [
+          "icon.ico",
+          "icon.png"
+        ]
       }
     ],
     "electronVersion": "39.8.0"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.92",
+    "acorn": "^8.16.0",
     "@fontsource/inter": "^5.2.8",
     "@fontsource/rajdhani": "^5.2.7",
     "@langchain/anthropic": "^1.3.21",
@@ -162,7 +181,9 @@
     "langchain": "^1.2.28",
     "lucide-react": "^0.469.0",
     "mammoth": "1.12.0",
+    "mermaid": "^11.15.0",
     "micromatch": "^4.0.8",
+    "node-diff3": "^3.2.1",
     "node-pty": "^1.1.0",
     "playwright": "^1.58.2",
     "react-diff-viewer-continued": "^4.1.2",

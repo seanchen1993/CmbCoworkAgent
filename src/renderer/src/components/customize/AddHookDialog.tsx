@@ -25,6 +25,8 @@ import type {
   HookType,
   PromptHookFallback,
   HookUpsert,
+  HookInjectUserContext,
+  HookUserContextField,
   SkillMetadata
 } from "@/types"
 
@@ -46,6 +48,29 @@ export const COMMON_TOOLS: { value: string; label: string; description: string }
   { value: "custom", label: "自定义…", description: "手动输入工具名称或正则表达式" }
 ]
 const CUSTOM_SENTINEL = "custom"
+const HOOK_USER_CONTEXT_DEFAULT_FIELDS = [
+  "sap_id",
+  "yst_id",
+  "name",
+  "origin_org_id",
+  "org_name",
+  "path_name"
+] as const
+const YST_ID_TOKEN_FIELD: HookUserContextField = "yst_id_token"
+
+// The two checkboxes below can only express "default fields (+token)". A hook
+// authored in JSON may carry a narrower/custom `include` list; capture it here
+// so editing through this dialog preserves the original field selection instead
+// of silently widening it back to the defaults.
+function extractCustomUserContextInclude(
+  injectUserContext: HookInjectUserContext | undefined
+): HookUserContextField[] | null {
+  return injectUserContext &&
+    typeof injectUserContext === "object" &&
+    Array.isArray(injectUserContext.include)
+    ? injectUserContext.include
+    : null
+}
 
 const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = [
   {
@@ -97,6 +122,29 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     value: "SubagentStop",
     label: "子 Agent 停止（SubagentStop）",
     description: "子 Agent 任务结束时触发，可用于记录或同步子任务结果"
+  },
+  {
+    value: "Setup",
+    label: "工作区初始化（Setup）",
+    description:
+      '每个 workspace 首次启动触发一次（init），用户在工作区设置里点 "重新初始化" 触发 maintenance。payload 含 trigger 与 workspace_path'
+  },
+  {
+    value: "SubagentStart",
+    label: "子 Agent 启动（SubagentStart）",
+    description:
+      "父 Agent 决定派发任务、子 Agent 即将开始时触发。payload 含 agent_id / agent_type / task_description"
+  },
+  {
+    value: "PostToolUseFailure",
+    label: "工具调用失败（PostToolUseFailure）",
+    description:
+      "工具抛异常、显式 error、非零 exitCode、abort、超时时触发。payload 含 error / error_type / failure_kind。仅观测"
+  },
+  {
+    value: "StopFailure",
+    label: "本轮失败结束（StopFailure）",
+    description: "本轮因 API 错误结束（与 Stop 互斥）。payload 含 error / error_type。仅观测"
   }
 ]
 
@@ -670,6 +718,7 @@ exit 0
       "当前事件可在消息进入模型前拦截、重写用户输入，或注入隐藏整改上下文；命中红线时可以直接终止本轮。",
     outputNotes: [
       "`updatedInput.message` / `updatedInput.prompt` 可重写送入模型的内容。",
+      "注意：对 goals 的内部 runtime prompt（如自动续跑 / continuation），系统不会采纳 `updatedInput` 的完整 rewrite；仍会采纳 block、additionalContext 和 systemMessage，但不会允许覆盖目标脚手架。",
       "`decision=block` 或 `exit=2` 可直接阻止本轮提问继续执行。",
       "返回 `continue=false` + `stopReason` 可直接终止本轮（优先级高于 `decision=block`）。"
     ],
@@ -1406,11 +1455,50 @@ export function AddHookDialog(props: {
       : CUSTOM_SENTINEL
   }
   const [matcherMode, setMatcherMode] = useState<string>(initMatcherMode(editHook))
+  // PR-13/14/15/16 follow-up — fields that the dialog persists without yet
+  // owning a dedicated UI widget. Round-tripping them through dialog state
+  // means: (a) editing a hook that originally carried these fields preserves
+  // them across save, and (b) when a future PR exposes a widget it can bind
+  // to the existing state vars without touching submit/load.
+  // Fields covered:
+  //   matcherPreserve  — `matcher` when the event hides the matcher field
+  //                      (today everything except Pre/Post Tool/Skill);
+  //                      OMC SubagentStart with matcher:"code-reviewer"
+  //                      was the canonical example that motivated this.
+  //   passthroughIf    — PR-16 `if` permission-rule clause.
+  //   passthroughShell — PR-13b `shell` override (only meaningful for
+  //                      hookType === "command").
+  //   passthroughStatusMessage — PR-13b custom spinner text.
+  //   passthroughAsync — PR-15 config-layer async flag.
+  const [matcherPreserve, setMatcherPreserve] = useState<string | undefined>(editHook?.matcher)
+  const [passthroughIf, setPassthroughIf] = useState<string | undefined>(editHook?.if)
+  const [passthroughShell, setPassthroughShell] = useState(editHook?.shell)
+  const [passthroughStatusMessage, setPassthroughStatusMessage] = useState<string | undefined>(
+    editHook?.statusMessage
+  )
+  const [passthroughAsync, setPassthroughAsync] = useState<boolean | undefined>(editHook?.async)
   // command fields
   const [command, setCommand] = useState(editHook?.command ?? "")
+  // PR-14 — http hook fields. The headers / allowedEnvVars editors are simple
+  // textareas (one per line). We keep their wire form (object / array) round-
+  // tripped via local helpers below so the rest of the dialog stays unchanged.
+  const [httpUrl, setHttpUrl] = useState(editHook?.url ?? "")
+  const [httpHeaders, setHttpHeaders] = useState(
+    editHook?.headers
+      ? Object.entries(editHook.headers)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join("\n")
+      : ""
+  )
+  const [httpAllowedEnvVars, setHttpAllowedEnvVars] = useState(
+    editHook?.allowedEnvVars ? editHook.allowedEnvVars.join("\n") : ""
+  )
   // prompt fields
   const [prompt, setPrompt] = useState(editHook?.prompt ?? "")
-  const [modelId, setModelId] = useState(editHook?.modelId ?? "")
+  // PR-13b — CC-aligned `model` is the canonical field; legacy `modelId` is
+  // read for backward compat. UI state name stays `modelId` to avoid a noisy
+  // rename across the dialog.
+  const [modelId, setModelId] = useState(editHook?.model ?? editHook?.modelId ?? "")
   const [fallback, setFallback] = useState<PromptHookFallback>(editHook?.fallback ?? "allow")
   const [onBlockReason, setOnBlockReason] = useState(editHook?.onBlock?.reason ?? "")
   const [onBlockSystemMessage, setOnBlockSystemMessage] = useState(
@@ -1429,6 +1517,15 @@ export function AddHookDialog(props: {
   const [once, setOnce] = useState(editHook?.once === true)
   const [persistAfterInterrupt, setPersistAfterInterrupt] = useState(
     editHook?.persistAfterInterrupt === true
+  )
+  const [injectUserContext, setInjectUserContext] = useState(Boolean(editHook?.injectUserContext))
+  // Original custom `include` from a JSON-authored hook, preserved across edits.
+  const [injectUserContextInclude, setInjectUserContextInclude] = useState<
+    HookUserContextField[] | null
+  >(extractCustomUserContextInclude(editHook?.injectUserContext))
+  const [injectUserToken, setInjectUserToken] = useState(
+    typeof editHook?.injectUserContext === "object" &&
+      editHook.injectUserContext.include?.includes("yst_id_token") === true
   )
   const [commandExampleKind, setCommandExampleKind] = useState<CommandExampleKind>("python")
   // shared
@@ -1502,9 +1599,26 @@ export function AddHookDialog(props: {
       const mm = initMatcherMode(h)
       setMatcherMode(mm)
       setMatcher(mm === CUSTOM_SENTINEL ? (h.matcher ?? "") : "")
+      // Pass-through preservation (no widget yet — see comment at the state
+      // declarations above). matcherPreserve always holds the original value
+      // so a no-widget event still round-trips the matcher across save.
+      setMatcherPreserve(h.matcher)
+      setPassthroughIf(h.if)
+      setPassthroughShell(h.shell)
+      setPassthroughStatusMessage(h.statusMessage)
+      setPassthroughAsync(h.async)
       setCommand(h.command ?? "")
+      setHttpUrl(h.url ?? "")
+      setHttpHeaders(
+        h.headers
+          ? Object.entries(h.headers)
+              .map(([k, v]) => `${k}: ${v}`)
+              .join("\n")
+          : ""
+      )
+      setHttpAllowedEnvVars(h.allowedEnvVars ? h.allowedEnvVars.join("\n") : "")
       setPrompt(h.prompt ?? "")
-      setModelId(h.modelId ?? "")
+      setModelId(h.model ?? h.modelId ?? "")
       setFallback(h.fallback ?? "allow")
       setOnBlockReason(h.onBlock?.reason ?? "")
       setOnBlockSystemMessage(h.onBlock?.systemMessage ?? "")
@@ -1514,13 +1628,29 @@ export function AddHookDialog(props: {
       setForcedReason(h.forcedReason ?? "")
       setOnce(h.once === true)
       setPersistAfterInterrupt(h.persistAfterInterrupt === true)
+      setInjectUserContext(Boolean(h.injectUserContext))
+      setInjectUserContextInclude(extractCustomUserContextInclude(h.injectUserContext))
+      setInjectUserToken(
+        typeof h.injectUserContext === "object" &&
+          h.injectUserContext.include?.includes("yst_id_token") === true
+      )
       setTimeout_(String(h.timeout ?? 10000))
     } else {
       setHookType("command")
       setEvent("PreToolUse")
       setMatcherMode("*")
       setMatcher("")
+      // Pass-through preservation — reset to undefined on the create path so a
+      // fresh hook starts without any of these advanced fields set.
+      setMatcherPreserve(undefined)
+      setPassthroughIf(undefined)
+      setPassthroughShell(undefined)
+      setPassthroughStatusMessage(undefined)
+      setPassthroughAsync(undefined)
       setCommand("")
+      setHttpUrl("")
+      setHttpHeaders("")
+      setHttpAllowedEnvVars("")
       setPrompt("")
       setModelId("")
       setFallback("allow")
@@ -1532,6 +1662,9 @@ export function AddHookDialog(props: {
       setForcedReason("")
       setOnce(false)
       setPersistAfterInterrupt(false)
+      setInjectUserContext(false)
+      setInjectUserContextInclude(null)
+      setInjectUserToken(false)
       setTimeout_("10000")
     }
     setError(null)
@@ -1552,7 +1685,17 @@ export function AddHookDialog(props: {
   const handleSubmit = useCallback(async () => {
     setError(null)
 
-    if (hookType === "command") {
+    if (hookType === "http") {
+      const u = httpUrl.trim()
+      if (!u) {
+        setError("请输入 Webhook URL")
+        return
+      }
+      if (!/^https?:\/\//i.test(u)) {
+        setError("URL 必须以 http:// 或 https:// 开头")
+        return
+      }
+    } else if (hookType === "command") {
       if (!command.trim()) {
         setError("请输入命令")
         return
@@ -1566,22 +1709,80 @@ export function AddHookDialog(props: {
 
     setSubmitting(true)
     try {
+      // PR-13a / PR-14 — bounds now depend on handler type; the hard 60s cap
+      // would otherwise reject HTTP (max 5min) and async (max 5min) configs at
+      // IPC. Server-side validateHookConfig still enforces the real bounds.
+      const maxTimeout = hookType === "http" ? 300000 : 60000
       const config: HookUpsert = {
         event,
         type: hookType,
-        timeout: Math.min(60000, Math.max(1000, parseInt(timeout, 10) || 10000)),
+        timeout: Math.min(maxTimeout, Math.max(1000, parseInt(timeout, 10) || 10000)),
         enabled: editHook ? editHook.enabled : true
       }
+      // PR-16 follow-up — event-semantic passthroughs (`matcher` when its
+      // widget is hidden, and `if`) are valid ONLY when the user kept the
+      // same event. CC's matcher target and `if` permission-rule syntax both
+      // bind to event-specific fields (agent_type for SubagentStart, source
+      // for SessionStart, tool_name+tool_input for PreToolUse…), so carrying
+      // them across an event change silently misconfigures the hook. We gate
+      // on `event === editHook.event` and let the user re-enter values for
+      // the new event if they really meant that. On the create path
+      // `editHook` is undefined so the gate trivially permits a write — but
+      // the passthroughs themselves were reset to undefined in that branch,
+      // so nothing is forced.
+      const sameEventAsEdit = !editHook || event === editHook.event
+
       if (showMatcher) {
         const resolvedMatcher = matcherMode === CUSTOM_SENTINEL ? matcher.trim() : matcherMode
         if (resolvedMatcher && resolvedMatcher !== "*") config.matcher = resolvedMatcher
+      } else if (sameEventAsEdit && matcherPreserve && matcherPreserve !== "*") {
+        // Preserve the original matcher only when widget is hidden AND event
+        // is unchanged — see comment above.
+        config.matcher = matcherPreserve
       }
+
+      // PR-13/14/15/16 follow-up — pass-through fields without UI widgets.
+      // `if` is event-bound so it follows the same gate as matcher above.
+      // `shell` / `statusMessage` / `async` are event-agnostic and safe to
+      // round-trip across event changes.
+      if (sameEventAsEdit && passthroughIf && passthroughIf.trim()) {
+        config.if = passthroughIf.trim()
+      }
+      if (passthroughShell) config.shell = passthroughShell
+      if (passthroughStatusMessage && passthroughStatusMessage.trim()) {
+        config.statusMessage = passthroughStatusMessage.trim()
+      }
+      if (passthroughAsync === true) config.async = true
 
       if (hookType === "command") {
         config.command = command.trim()
+      } else if (hookType === "http") {
+        // PR-14 — http hook: parse the "K: V" textarea into a headers map and
+        // the env-var textarea into a string[]. Empty values are dropped so
+        // server-side validation only sees real overrides.
+        const url = httpUrl.trim()
+        if (url) config.url = url
+        const headers: Record<string, string> = {}
+        for (const line of httpHeaders.split(/\r?\n/)) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+          const colon = trimmed.indexOf(":")
+          if (colon < 0) continue
+          const k = trimmed.slice(0, colon).trim()
+          const v = trimmed.slice(colon + 1).trim()
+          if (k) headers[k] = v
+        }
+        if (Object.keys(headers).length > 0) config.headers = headers
+        const envVars = httpAllowedEnvVars
+          .split(/\r?\n/)
+          .map((v) => v.trim())
+          .filter(Boolean)
+        if (envVars.length > 0) config.allowedEnvVars = envVars
+        config.fallback = fallback
       } else {
         config.prompt = prompt.trim()
-        if (modelId.trim()) config.modelId = modelId.trim()
+        // PR-13b — write CC-aligned `model`; do not also write legacy `modelId`.
+        if (modelId.trim()) config.model = modelId.trim()
         config.fallback = fallback
       }
 
@@ -1607,6 +1808,27 @@ export function AddHookDialog(props: {
       }
       if (once) config.once = true
       if (persistAfterInterrupt) config.persistAfterInterrupt = true
+      if (injectUserContext) {
+        if (injectUserContextInclude) {
+          // Preserve the JSON-authored custom field list; only the token field
+          // is toggled here (and only for command hooks — prompt hooks never
+          // receive tokens at runtime, so their include is kept verbatim).
+          let include = injectUserContextInclude
+          if (hookType === "command") {
+            const base = include.filter((field) => field !== YST_ID_TOKEN_FIELD)
+            include = injectUserToken ? [...base, YST_ID_TOKEN_FIELD] : base
+          }
+          config.injectUserContext = include.length > 0 ? { enabled: true, include } : true
+        } else {
+          config.injectUserContext =
+            hookType === "command" && injectUserToken
+              ? {
+                  enabled: true,
+                  include: [...HOOK_USER_CONTEXT_DEFAULT_FIELDS, YST_ID_TOKEN_FIELD]
+                }
+              : true
+        }
+      }
 
       if (editHook) {
         await window.api.hooks.update({ ...config, id: editHook.id })
@@ -1625,7 +1847,23 @@ export function AddHookDialog(props: {
     event,
     matcherMode,
     matcher,
+    // PR-16 follow-up — preserve matcher across save when the widget is
+    // hidden for the chosen event type.
+    matcherPreserve,
+    // PR-13/14/15/16 follow-up — pass-through fields without widgets must be
+    // in the closure or edit-save would freeze on the initial editHook values
+    // and a Pass-2 edit (e.g. flipping enabled) wouldn't see updated state.
+    passthroughIf,
+    passthroughShell,
+    passthroughStatusMessage,
+    passthroughAsync,
     command,
+    // PR-14 follow-up — http hook fields must be in the dep list, otherwise
+    // useCallback closes over the initial empty values and the submit path
+    // sees stale URL/headers/allowedEnvVars even when the user just typed.
+    httpUrl,
+    httpHeaders,
+    httpAllowedEnvVars,
     prompt,
     modelId,
     fallback,
@@ -1638,6 +1876,9 @@ export function AddHookDialog(props: {
     forcedReason,
     once,
     persistAfterInterrupt,
+    injectUserContext,
+    injectUserContextInclude,
+    injectUserToken,
     editHook,
     onSuccess,
     handleOpenChange,
@@ -1684,11 +1925,25 @@ export function AddHookDialog(props: {
                 >
                   自然语言策略
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setHookType("http")}
+                  className={cn(
+                    "flex-1 py-2 px-3 rounded-md border text-sm font-medium transition-colors",
+                    hookType === "http"
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-background text-muted-foreground hover:border-primary/50"
+                  )}
+                >
+                  HTTP Webhook
+                </button>
               </div>
               <p className="text-xs text-muted-foreground">
                 {hookType === "command"
                   ? "执行 Shell 命令，exit=2 时阻断；exit=0 可返回 Claude Code JSON 输出"
-                  : "用自然语言描述合规规则，由行内 LLM 实时判决是否允许执行"}
+                  : hookType === "http"
+                    ? "POST 事件 JSON 到你配置的 URL；响应解析等同 command stdout。无 SSRF 防护，URL 自负风险"
+                    : "用自然语言描述合规规则，由行内 LLM 实时判决是否允许执行"}
               </p>
             </div>
 
@@ -2059,6 +2314,83 @@ export function AddHookDialog(props: {
               </div>
             )}
 
+            {/* HTTP-specific — PR-14 */}
+            {hookType === "http" && (
+              <>
+                <div className="space-y-2">
+                  <label htmlFor="hook-http-url" className="text-sm font-medium">
+                    Webhook URL
+                  </label>
+                  <Input
+                    id="hook-http-url"
+                    type="text"
+                    placeholder="https://gateway.example.com/hook"
+                    value={httpUrl}
+                    onChange={(e) => setHttpUrl(e.target.value)}
+                    className="h-9 font-mono text-xs"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    必填 http(s):// URL。POST 事件 JSON；2xx + JSON 响应等同 command stdout。 本地
+                    webhook 网关（127.0.0.1 / localhost / 私网）均允许。
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label htmlFor="hook-http-headers" className="text-sm font-medium">
+                    自定义 Header（每行一条 K: V）
+                  </label>
+                  <textarea
+                    id="hook-http-headers"
+                    placeholder={"Authorization: Bearer $MY_TOKEN\nX-Trace: $TRACE_ID"}
+                    value={httpHeaders}
+                    onChange={(e) => setHttpHeaders(e.target.value)}
+                    className="w-full min-h-[64px] rounded-md border border-input bg-background px-3 py-2 text-xs font-mono"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    值支持 $VAR / ${"${VAR}"} 插值；仅下面"允许的 env var"列表内的变量会被解析，
+                    其余替换为空串。
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label htmlFor="hook-http-envvars" className="text-sm font-medium">
+                    允许的 env var（每行一个名字）
+                  </label>
+                  <textarea
+                    id="hook-http-envvars"
+                    placeholder={"MY_TOKEN\nTRACE_ID"}
+                    value={httpAllowedEnvVars}
+                    onChange={(e) => setHttpAllowedEnvVars(e.target.value)}
+                    className="w-full min-h-[48px] rounded-md border border-input bg-background px-3 py-2 text-xs font-mono"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    白名单机制：headers 中 $XXX 仅当 XXX 出现在这里才注入 process.env[XXX]。
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label htmlFor="hook-http-fallback" className="text-sm font-medium">
+                    网络异常 / 超时回退策略
+                  </label>
+                  <select
+                    id="hook-http-fallback"
+                    value={fallback}
+                    onChange={(e) => setFallback(e.target.value as PromptHookFallback)}
+                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    {FALLBACK_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    {FALLBACK_OPTIONS.find((o) => o.value === fallback)?.description}
+                  </p>
+                </div>
+              </>
+            )}
+
             {/* Prompt-specific */}
             {hookType === "prompt" && (
               <>
@@ -2144,7 +2476,9 @@ export function AddHookDialog(props: {
               <p className="text-xs text-muted-foreground">
                 {hookType === "prompt"
                   ? "LLM 判决超时时间（含网络往返），范围 1000–60000ms，建议 ≥15000ms"
-                  : "命令执行超时时间，范围 1000–60000ms，默认 10000ms"}
+                  : hookType === "http"
+                    ? "HTTP 请求超时时间（覆盖 headers + body 整段），范围 1000–300000ms（5min），默认 30000ms"
+                    : "命令执行超时时间，范围 1000–60000ms，默认 10000ms"}
               </p>
             </div>
 
@@ -2164,13 +2498,14 @@ export function AddHookDialog(props: {
                   <p className="text-xs text-muted-foreground">
                     兼容 Claude Code 的
                     <code className="mx-1 font-mono text-foreground/85">once: true</code>
-                    。同一会话里，同一条 Hook 第一次成功执行（exit=0）后不再重复执行；不同事件、来源或
-                    Hook ID 分别计算。脚本失败或超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。
+                    。同一会话里，同一条 Hook
+                    第一次成功执行（exit=0）后不再重复执行；不同事件、来源或 Hook ID
+                    分别计算。脚本失败或超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。
                     会话结束、编辑、禁用再启用或删除该 Hook 都会立即清除"已执行"状态。
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    在 SubagentStop / Notification / SessionStart / SessionEnd 等
-                    fire-and-forget 事件下，并发触发可能仍执行多次（runner 不加同步锁）；如需严格只跑一次，请使用
+                    在 SubagentStop / Notification / SessionStart / SessionEnd 等 fire-and-forget
+                    事件下，并发触发可能仍执行多次（runner 不加同步锁）；如需严格只跑一次，请使用
                     PreToolUse / PostToolUse / Stop 等同步事件。
                   </p>
                 </div>
@@ -2188,12 +2523,70 @@ export function AddHookDialog(props: {
                 />
                 <div className="space-y-1">
                   <label htmlFor="hook-persist-after-interrupt" className="text-sm font-medium">
-                    触发后本会话持续生效
+                    触发后当前线程持续生效
                   </label>
                   <p className="text-xs text-muted-foreground">
-                    仅对插件和技能 Hook 生效。开启后，只要本会话里触发过该 Hook 所属的插件或技能，
-                    这条 Hook 后续轮次也会继续命中；同一技能下未开启的兄弟 Hook 不会被一起保留。
+                    仅对插件和技能 Hook 生效。开启后，只要当前线程里触发过该 Hook 所属的插件或技能，
+                    这条 Hook
+                    后续轮次、以及应用重启后继续此线程时也会继续命中；同一技能下未开启的兄弟 Hook
+                    不会被一起保留。
                   </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+              <div className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="hook-inject-user-context"
+                  checked={injectUserContext}
+                  onChange={(e) => {
+                    setInjectUserContext(e.target.checked)
+                    if (!e.target.checked) setInjectUserToken(false)
+                  }}
+                  className="mt-0.5 size-4"
+                />
+                <div className="space-y-2">
+                  <label htmlFor="hook-inject-user-context" className="text-sm font-medium">
+                    注入当前用户信息
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启后，Hook 可从 stdin 的
+                    <code className="mx-1 font-mono text-foreground/85">user_context</code>
+                    读取 sap_id、yst_id、name、机构等字段；command Hook 同时会收到
+                    <code className="mx-1 font-mono text-foreground/85">HOOK_USER_*</code>
+                    环境变量。
+                  </p>
+                  {injectUserContext && injectUserContextInclude && (
+                    <p className="text-xs text-muted-foreground">
+                      该 Hook 使用 JSON 里自定义的字段列表（
+                      <code className="mx-1 font-mono text-foreground/85">
+                        {injectUserContextInclude.join("、")}
+                      </code>
+                      ），在此编辑会保留该范围，仅可切换是否含 token。
+                    </p>
+                  )}
+                  {hookType === "command" && injectUserContext && (
+                    <label className="flex items-start gap-2 rounded-md border border-amber-300/50 bg-amber-50 px-2 py-2 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+                      <input
+                        type="checkbox"
+                        checked={injectUserToken}
+                        onChange={(e) => setInjectUserToken(e.target.checked)}
+                        className="mt-0.5 size-3.5"
+                      />
+                      <span>
+                        同时注入
+                        <code className="mx-1 font-mono">yst_id_token</code>
+                        。token 只进入 stdin，不会写入环境变量；诊断日志会脱敏。
+                      </span>
+                    </label>
+                  )}
+                  {hookType === "prompt" && injectUserContext && (
+                    <p className="text-xs text-muted-foreground">
+                      自然语言策略 Hook 不会注入 token 字段，避免把凭据发送给判决模型。
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

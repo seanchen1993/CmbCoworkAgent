@@ -33,7 +33,7 @@ import {
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace } from "../agent/trace/types"
 import {
-  getCustomModelConfigs,
+  getDefaultModelConfig,
   getCustomSkillsDir,
   clearDisabledSkillsForSkillDir,
   findExistingSkillById,
@@ -43,7 +43,9 @@ import {
   isSkillAutoProposeEnabled,
   setSkillAutoProposeEnabled,
   getSkillEvolutionThreshold,
-  setSkillEvolutionThreshold
+  setSkillEvolutionThreshold,
+  getSkillEvolutionTurnThreshold,
+  setSkillEvolutionTurnThreshold
 } from "../storage"
 import { trackEvent } from "../services/event-reporter"
 
@@ -81,8 +83,7 @@ function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
 }
 
 function getDefaultModel(): ChatOpenAI | null {
-  const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = getDefaultModelConfig()
   if (!config || !config.apiKey) return null
   return new ChatOpenAI({
     model: config.model,
@@ -139,7 +140,7 @@ function applyCandidate(
       }
     }
     mkdirSync(skillDir, { recursive: true })
-    writeFileSync(join(skillDir, "SKILL.md"), content, "utf-8")
+    writeFileSync(join(skillDir, "SKILL.md"), ensureEvolvedSkillMarker(content), "utf-8")
     if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
     invalidateEnabledSkillsCache()
     notifyRenderer("skills:changed")
@@ -147,6 +148,22 @@ function applyCandidate(
   } catch (e) {
     return { success: false, error: String(e) }
   }
+}
+
+function ensureEvolvedSkillMarker(content: string): string {
+  const marker = "evolved-by: CMBDevClaw Trace Evolver"
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?/)
+  if (!match) return `---\n${marker}\n---\n\n${content.replace(/^\n+/, "")}`.replace(/\s*$/, "\n")
+
+  const yaml = match[1].replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+  const lines = yaml.split("\n")
+  const index = lines.findIndex((line) => line.split(":", 1)[0]?.trim().toLowerCase() === "evolved-by")
+  if (index >= 0) {
+    lines[index] = marker
+  } else {
+    lines.push(marker)
+  }
+  return `---\n${lines.join("\n").trimEnd()}\n---\n\n${content.slice(match[0].length).replace(/^\n+/, "")}`.replace(/\s*$/, "\n")
 }
 
 export function registerOptimizerHandlers(ipcMain: IpcMain): void {
@@ -213,8 +230,18 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           })
           runResult = await optimizer.run()
         } catch (e) {
-          const errMsg = String(e)
+          const errMsg = e instanceof Error ? e.message : String(e)
           notifyRenderer("optimizer:streamEnd", { success: false, error: errMsg })
+          try {
+            trackEvent("skill.evolution.run", "skill", {
+              candidatesCount: 0,
+              tracesAnalyzed: 0,
+              mode: runMode,
+              outcome: "error"
+            })
+          } catch (err) {
+            console.warn("[event] failed to emit skill.evolution.run:", err)
+          }
           return {
             startedAt: new Date().toISOString(),
             endedAt: new Date().toISOString(),
@@ -226,6 +253,18 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
         notifyRenderer("optimizer:streamEnd", { success: true })
         const selectedMerged = mergePendingCandidates(runResult.candidates)
+        // Count every completed run (incl. no-candidate) so "运行但无候选" attempts
+        // aren't lost when only `created` is observed.
+        try {
+          trackEvent("skill.evolution.run", "skill", {
+            candidatesCount: runResult.candidates.length,
+            tracesAnalyzed: runResult.tracesAnalyzed,
+            mode: runMode,
+            outcome: runResult.candidates.length > 0 ? "candidates" : "empty"
+          })
+        } catch (e) {
+          console.warn("[event] failed to emit skill.evolution.run:", e)
+        }
         if (runResult.candidates.length > 0) {
           try {
             trackEvent("skill.evolution.created", "skill", {
@@ -256,8 +295,18 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         })
         result = await optimizer.run()
       } catch (e) {
-        const errMsg = String(e)
+        const errMsg = e instanceof Error ? e.message : String(e)
         notifyRenderer("optimizer:streamEnd", { success: false, error: errMsg })
+        try {
+          trackEvent("skill.evolution.run", "skill", {
+            candidatesCount: 0,
+            tracesAnalyzed: 0,
+            mode: runMode,
+            outcome: "error"
+          })
+        } catch (err) {
+          console.warn("[event] failed to emit skill.evolution.run:", err)
+        }
         return {
           startedAt: new Date().toISOString(),
           endedAt: new Date().toISOString(),
@@ -269,6 +318,18 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
       notifyRenderer("optimizer:streamEnd", { success: true })
       result.candidates = mergePendingCandidates(result.candidates)
+      // Count every completed run (incl. no-candidate) so "运行但无候选" attempts
+      // aren't lost when only `created` is observed.
+      try {
+        trackEvent("skill.evolution.run", "skill", {
+          candidatesCount: result.candidates.length,
+          tracesAnalyzed: result.tracesAnalyzed,
+          mode: runMode,
+          outcome: result.candidates.length > 0 ? "candidates" : "empty"
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit skill.evolution.run:", e)
+      }
       if (result.candidates.length > 0) {
         try {
           trackEvent("skill.evolution.created", "skill", {
@@ -293,14 +354,15 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
     "optimizer:approve",
     async (
       _event,
-      { candidateId }: { candidateId: string }
+      { candidateId, proposedContent }: { candidateId: string; proposedContent?: string }
     ): Promise<{ success: boolean; skillId?: string; error?: string }> => {
       const candidate = updateCandidateStatus(candidateId, "approved")
       if (!candidate) {
         return { success: false, error: `Candidate ${candidateId} not found` }
       }
 
-      const result = applyCandidate(candidate.action, candidate.skillId, candidate.proposedContent)
+      const content = typeof proposedContent === "string" ? proposedContent : candidate.proposedContent
+      const result = applyCandidate(candidate.action, candidate.skillId, content)
       if (!result.success) {
         updateCandidateStatus(candidateId, "rejected")
         return { success: false, skillId: candidate.skillId, error: result.error }
@@ -326,6 +388,18 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
     async (_event, { candidateId }: { candidateId: string }): Promise<{ success: boolean }> => {
       const candidate = updateCandidateStatus(candidateId, "rejected")
       console.log(`[Optimizer] Rejected candidate: ${candidateId}`)
+      if (candidate) {
+        try {
+          trackEvent("skill.evolution.rejected", "skill", {
+            candidateId,
+            skillId: candidate.skillId,
+            skillName: candidate.name,
+            action: candidate.action
+          })
+        } catch (e) {
+          console.warn("[event] failed to emit skill.evolution.rejected:", e)
+        }
+      }
       return { success: !!candidate }
     }
   )
@@ -352,6 +426,8 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         totalTokens: number
         outcome: string
         usedSkills: string[]
+        evolvedSkills: string[]
+        triggerSource: string
       }>
     > => {
       const traces = opts?.threadId
@@ -373,7 +449,9 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
           totalOutputTokens,
           totalTokens,
           outcome: trace.outcome,
-          usedSkills: trace.usedSkills
+          usedSkills: trace.usedSkills,
+          evolvedSkills: trace.evolvedSkills,
+          triggerSource: trace.triggerSource
         }
       })
     }
@@ -430,5 +508,13 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("optimizer:setThreshold", async (_event, value: number): Promise<void> => {
     setSkillEvolutionThreshold(value)
+  })
+
+  ipcMain.handle("optimizer:getTurnThreshold", async (): Promise<number> => {
+    return getSkillEvolutionTurnThreshold()
+  })
+
+  ipcMain.handle("optimizer:setTurnThreshold", async (_event, value: number): Promise<void> => {
+    setSkillEvolutionTurnThreshold(value)
   })
 }

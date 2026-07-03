@@ -15,7 +15,7 @@ import {
   setSandboxNuxCompleted
 } from "../storage"
 import { pendingApprovals } from "../agent/runtime"
-import type { ApprovalDecision } from "../types"
+import type { ApprovalDecision, ApprovalRequest } from "../types"
 
 const CODEX_HOME = join(homedir(), ".codex")
 const SETUP_MARKER_PATH = join(CODEX_HOME, ".sandbox", "setup_marker.json")
@@ -652,6 +652,13 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
     notifyChanged()
   })
 
+  ipcMain.handle("sandbox:getPendingApprovals", async (_event, threadId: string): Promise<ApprovalRequest[]> => {
+    if (typeof threadId !== "string" || !threadId.trim()) return []
+    return Array.from(pendingApprovals.values())
+      .filter((pending) => pending.threadId === threadId)
+      .map((pending) => pending.request)
+  })
+
   ipcMain.handle("sandbox:checkElevatedSetup", async (): Promise<{ setupComplete: boolean }> => {
     return { setupComplete: await isElevatedSetupComplete() }
   })
@@ -711,7 +718,13 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
   // When the renderer makes a decision on an approval request, it sends it here.
   // We look up the pending promise and resolve it.
 
-  const VALID_DECISION_TYPES = new Set(["approve", "approve_session", "approve_permanent", "reject"])
+  const VALID_DECISION_TYPES = new Set([
+    "approve",
+    "approve_session",
+    "approve_permanent",
+    "reject",
+    "error"
+  ])
 
   ipcMain.on("sandbox:approvalDecision", (event, decision: ApprovalDecision & { requestId: string }) => {
     // P2 fix: validate sender is a known BrowserWindow
@@ -751,7 +764,6 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
           return
         }
       }
-      pendingApprovals.delete(decision.requestId)
       pending.resolve(decision)
     } else {
       console.warn("[Sandbox] Received approval decision for unknown request:", decision.requestId)

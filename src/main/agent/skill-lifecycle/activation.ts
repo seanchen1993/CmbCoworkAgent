@@ -13,6 +13,15 @@ export interface SkillActivationOptions {
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
+  pluginOutputDir?: string
+  systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  projectCode?: string
+  projectDir?: string
   sessionId?: string
   turnId?: string
   hookScope?: HookScopeController
@@ -61,6 +70,15 @@ function buildSkillContext(options: SkillActivationOptions): HookContext {
     toolArgs: options.toolArgs,
     toolResult: options.toolResult,
     workspacePath: options.workspacePath,
+    pluginOutputDir: options.pluginOutputDir,
+    systemId: options.systemId,
+    pluginWorkspace: options.pluginWorkspace,
+    featureId: options.featureId,
+    harnessProjectId: options.harnessProjectId,
+    harnessAdapterName: options.harnessAdapterName,
+    harnessAdapterVersion: options.harnessAdapterVersion,
+    projectCode: options.projectCode,
+    projectDir: options.projectDir,
     sessionId: options.sessionId,
     turnId: options.turnId,
     skillName: options.skill.name,

@@ -3,6 +3,7 @@ import type {
   TraceChatMessage,
   TraceModelCall,
   TraceNode,
+  TraceSkillEvalExtension,
   TraceStep,
   TraceToolCall
 } from "./types"
@@ -10,6 +11,7 @@ import type {
 const SOFT_TRACE_BYTES = 64 * 1024
 const HARD_TRACE_BYTES = 96 * 1024
 const MAX_DEPTH = 8
+const MAX_SKILL_EVAL_CONTEXT_TRACE_IDS = 20
 
 const LIMITS = {
   userMessage: { max: 1024, head: 768, tail: 192 },
@@ -21,6 +23,10 @@ const LIMITS = {
   errorMessage: { max: 2048, head: 1024, tail: 768 },
   compressedMessage: { max: 512, head: 384, tail: 96 },
   compressedValue: { max: 768, head: 512, tail: 192 },
+  // Node input/output in the last-resort oversized-trace summary: kept small on
+  // purpose (a single >96KB trace can carry dozens of tool nodes), but still
+  // head+tail so the value shape stays recognizable.
+  oversizedNodeValue: { max: 256, head: 192, tail: 64 },
   binary: { max: 256, head: 256, tail: 0 }
 } as const
 
@@ -47,7 +53,12 @@ function maybeBinaryLike(value: string): boolean {
   return compact.length > 512 && compact.length % 4 === 0
 }
 
-function truncateString(value: string, limit: StringLimit, path: string, state: TruncationState): string {
+function truncateString(
+  value: string,
+  limit: StringLimit,
+  path: string,
+  state: TruncationState
+): string {
   const effective = maybeBinaryLike(value) ? LIMITS.binary : limit
   if (value.length <= effective.max) return value
 
@@ -62,7 +73,12 @@ function truncateString(value: string, limit: StringLimit, path: string, state: 
   return `${value.slice(0, effective.head)}\n...[trace truncated: omitted ${omitted} chars]...\n${value.slice(-effective.tail)}`
 }
 
-function truncateSerialized(value: unknown, limit: StringLimit, path: string, state: TruncationState): string {
+function truncateSerialized(
+  value: unknown,
+  limit: StringLimit,
+  path: string,
+  state: TruncationState
+): string {
   let text: string
   try {
     text = typeof value === "string" ? value : JSON.stringify(value)
@@ -88,16 +104,32 @@ function sanitizeUnknown(
   }
 
   if (Array.isArray(value)) {
-    const keepAll = path.includes("inputMessages") || path.endsWith(".steps") || path.endsWith(".toolCalls")
-    const source = keepAll || value.length <= 15
-      ? value.map((item, index) => sanitizeUnknown(item, limit, `${path}[${index}]`, state, depth + 1))
-      : [
-          ...value.slice(0, 10).map((item, index) => sanitizeUnknown(item, limit, `${path}[${index}]`, state, depth + 1)),
-          { _traceTruncatedItems: value.length - 13 },
-          ...value.slice(-3).map((item, index) =>
-            sanitizeUnknown(item, limit, `${path}[${value.length - 3 + index}]`, state, depth + 1)
+    const keepAll =
+      path.includes("inputMessages") || path.endsWith(".steps") || path.endsWith(".toolCalls")
+    const source =
+      keepAll || value.length <= 15
+        ? value.map((item, index) =>
+            sanitizeUnknown(item, limit, `${path}[${index}]`, state, depth + 1)
           )
-        ]
+        : [
+            ...value
+              .slice(0, 10)
+              .map((item, index) =>
+                sanitizeUnknown(item, limit, `${path}[${index}]`, state, depth + 1)
+              ),
+            { _traceTruncatedItems: value.length - 13 },
+            ...value
+              .slice(-3)
+              .map((item, index) =>
+                sanitizeUnknown(
+                  item,
+                  limit,
+                  `${path}[${value.length - 3 + index}]`,
+                  state,
+                  depth + 1
+                )
+              )
+          ]
     if (!keepAll && value.length > 15) {
       state.fields.add(path)
       state.originalBytesApprox += byteSize(value)
@@ -131,11 +163,21 @@ function sanitizeRecord(
   return { _traceTruncatedJson: String(sanitized ?? "") }
 }
 
-function sanitizeToolCall(call: TraceToolCall, path: string, state: TruncationState, compressed = false): TraceToolCall {
+function sanitizeToolCall(
+  call: TraceToolCall,
+  path: string,
+  state: TruncationState,
+  compressed = false
+): TraceToolCall {
   const valueLimit = compressed ? LIMITS.compressedValue : LIMITS.toolResult
   return {
     ...call,
-    args: sanitizeRecord(call.args ?? {}, compressed ? LIMITS.compressedValue : LIMITS.toolArgs, `${path}.args`, state),
+    args: sanitizeRecord(
+      call.args ?? {},
+      compressed ? LIMITS.compressedValue : LIMITS.toolArgs,
+      `${path}.args`,
+      state
+    ),
     ...(call.result !== undefined
       ? { result: truncateString(String(call.result), valueLimit, `${path}.result`, state) }
       : {})
@@ -150,7 +192,12 @@ function sanitizeMessage(
 ): TraceChatMessage {
   return {
     ...message,
-    content: truncateString(message.content ?? "", compressed ? LIMITS.compressedMessage : LIMITS.messageContent, `${path}.content`, state)
+    content: truncateString(
+      message.content ?? "",
+      compressed ? LIMITS.compressedMessage : LIMITS.messageContent,
+      `${path}.content`,
+      state
+    )
   }
 }
 
@@ -180,7 +227,12 @@ function sanitizeModelCall(
   }
 }
 
-function sanitizeStep(step: TraceStep, path: string, state: TruncationState, compressed = false): TraceStep {
+function sanitizeStep(
+  step: TraceStep,
+  path: string,
+  state: TruncationState,
+  compressed = false
+): TraceStep {
   return {
     ...step,
     assistantText: truncateString(
@@ -195,18 +247,128 @@ function sanitizeStep(step: TraceStep, path: string, state: TruncationState, com
   }
 }
 
-function sanitizeNode(node: TraceNode, path: string, state: TruncationState, compressed = false): TraceNode {
+function sanitizeNode(
+  node: TraceNode,
+  path: string,
+  state: TruncationState,
+  compressed = false
+): TraceNode {
   const limit = compressed ? LIMITS.compressedValue : LIMITS.nodeValue
   return {
     ...node,
-    ...(node.input !== undefined ? { input: sanitizeUnknown(node.input, limit, `${path}.input`, state) } : {}),
-    ...(node.output !== undefined ? { output: sanitizeUnknown(node.output, limit, `${path}.output`, state) } : {}),
+    ...(node.input !== undefined
+      ? { input: sanitizeUnknown(node.input, limit, `${path}.input`, state) }
+      : {}),
+    ...(node.output !== undefined
+      ? { output: sanitizeUnknown(node.output, limit, `${path}.output`, state) }
+      : {}),
     ...(node.metadata !== undefined
       ? { metadata: sanitizeRecord(node.metadata, limit, `${path}.metadata`, state) }
       : {})
   }
 }
 
+function sanitizeSkillEvalCheckDetails(
+  checks: TraceSkillEvalExtension["records"][number]["checks"],
+  path: string,
+  state: TruncationState,
+  valueLimit: StringLimit
+): TraceSkillEvalExtension["records"][number]["checks"] {
+  return checks.map((check, index) => ({
+    ...check,
+    ...(check.detail !== undefined
+      ? { detail: sanitizeRecord(check.detail, valueLimit, `${path}[${index}].detail`, state) }
+      : {})
+  }))
+}
+
+function sanitizeSkillEvalStrings(
+  values: string[],
+  path: string,
+  state: TruncationState,
+  valueLimit: StringLimit
+): string[] {
+  return values.map((value, index) => truncateString(value, valueLimit, `${path}[${index}]`, state))
+}
+
+function sanitizeSkillEval(
+  skillEval: TraceSkillEvalExtension | undefined,
+  path: string,
+  state: TruncationState,
+  compressed = false
+): TraceSkillEvalExtension | undefined {
+  if (!skillEval) return undefined
+  const textLimit = compressed ? LIMITS.compressedMessage : LIMITS.userMessage
+  const valueLimit = compressed ? LIMITS.compressedValue : LIMITS.nodeValue
+
+  return {
+    ...skillEval,
+    records: skillEval.records.map((record, index) => ({
+      ...record,
+      contextTraceIds: record.contextTraceIds.slice(0, MAX_SKILL_EVAL_CONTEXT_TRACE_IDS),
+      skillEvalTraceIds: record.skillEvalTraceIds.slice(0, MAX_SKILL_EVAL_CONTEXT_TRACE_IDS),
+      contextTraceCount: record.contextTraceIds.length,
+      skillEvalTraceCount: record.skillEvalTraceIds.length,
+      userMessage: truncateString(
+        record.userMessage ?? "",
+        textLimit,
+        `${path}.records[${index}].userMessage`,
+        state
+      ),
+      checks: sanitizeSkillEvalCheckDetails(
+        record.checks,
+        `${path}.records[${index}].checks`,
+        state,
+        valueLimit
+      ),
+      outcomeChecks: sanitizeSkillEvalCheckDetails(
+        record.outcomeChecks,
+        `${path}.records[${index}].outcomeChecks`,
+        state,
+        valueLimit
+      ),
+      resultChecks: sanitizeSkillEvalCheckDetails(
+        record.resultChecks,
+        `${path}.records[${index}].resultChecks`,
+        state,
+        valueLimit
+      ),
+      warnings: sanitizeSkillEvalStrings(
+        record.warnings,
+        `${path}.records[${index}].warnings`,
+        state,
+        valueLimit
+      ),
+      outcomeWarnings: sanitizeSkillEvalStrings(
+        record.outcomeWarnings,
+        `${path}.records[${index}].outcomeWarnings`,
+        state,
+        valueLimit
+      ),
+      resultWarnings: sanitizeSkillEvalStrings(
+        record.resultWarnings,
+        `${path}.records[${index}].resultWarnings`,
+        state,
+        valueLimit
+      ),
+      resultIssues: sanitizeSkillEvalStrings(
+        record.resultIssues,
+        `${path}.records[${index}].resultIssues`,
+        state,
+        valueLimit
+      ),
+      artifacts: record.artifacts.map((artifact, artifactIndex) => ({
+        ...artifact,
+        label: truncateString(
+          artifact.label,
+          valueLimit,
+          `${path}.records[${index}].artifacts[${artifactIndex}].label`,
+          state
+        )
+      }))
+    }))
+  }
+}
 function withTruncationMetadata(trace: AgentTrace, state: TruncationState): AgentTrace {
   const storedBytesApprox = byteSize(trace)
   const truncated = state.fields.size > 0 || storedBytesApprox > SOFT_TRACE_BYTES
@@ -226,12 +388,22 @@ function withTruncationMetadata(trace: AgentTrace, state: TruncationState): Agen
   }
 }
 
-function sanitizeTraceFields(trace: AgentTrace, compressed = false): { trace: AgentTrace; state: TruncationState } {
+function sanitizeTraceFields(
+  trace: AgentTrace,
+  compressed = false
+): { trace: AgentTrace; state: TruncationState } {
   const state: TruncationState = { fields: new Set(), originalBytesApprox: byteSize(trace) }
   const sanitized: AgentTrace = {
     ...trace,
-    userMessage: truncateString(trace.userMessage, compressed ? LIMITS.compressedMessage : LIMITS.userMessage, "userMessage", state),
-    steps: trace.steps.map((step, index) => sanitizeStep(step, `steps[${index}]`, state, compressed)),
+    userMessage: truncateString(
+      trace.userMessage,
+      compressed ? LIMITS.compressedMessage : LIMITS.userMessage,
+      "userMessage",
+      state
+    ),
+    steps: trace.steps.map((step, index) =>
+      sanitizeStep(step, `steps[${index}]`, state, compressed)
+    ),
     ...(trace.modelCalls
       ? {
           modelCalls: trace.modelCalls.map((call, index) =>
@@ -240,7 +412,11 @@ function sanitizeTraceFields(trace: AgentTrace, compressed = false): { trace: Ag
         }
       : {}),
     ...(trace.nodes
-      ? { nodes: trace.nodes.map((node, index) => sanitizeNode(node, `nodes[${index}]`, state, compressed)) }
+      ? {
+          nodes: trace.nodes.map((node, index) =>
+            sanitizeNode(node, `nodes[${index}]`, state, compressed)
+          )
+        }
       : {}),
     ...(trace.errorMessage
       ? {
@@ -253,7 +429,17 @@ function sanitizeTraceFields(trace: AgentTrace, compressed = false): { trace: Ag
         }
       : {}),
     ...(trace.metadata
-      ? { metadata: sanitizeRecord(trace.metadata, compressed ? LIMITS.compressedValue : LIMITS.nodeValue, "metadata", state) }
+      ? {
+          metadata: sanitizeRecord(
+            trace.metadata,
+            compressed ? LIMITS.compressedValue : LIMITS.nodeValue,
+            "metadata",
+            state
+          )
+        }
+      : {}),
+    ...(trace.skillEval
+      ? { skillEval: sanitizeSkillEval(trace.skillEval, "skillEval", state, compressed) }
       : {})
   }
   return { trace: sanitized, state }
@@ -263,13 +449,25 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
   const summarizedSteps = trace.steps.map((step) => ({
     index: step.index,
     startedAt: step.startedAt,
-    assistantText: truncateString(step.assistantText ?? "", LIMITS.compressedMessage, `steps[${step.index}].assistantText`, state),
+    assistantText: truncateString(
+      step.assistantText ?? "",
+      LIMITS.compressedMessage,
+      `steps[${step.index}].assistantText`,
+      state
+    ),
     toolCalls: step.toolCalls.map((toolCall) => ({
       name: toolCall.name,
       args: {},
       ...(toolCall.durationMs !== undefined ? { durationMs: toolCall.durationMs } : {}),
       ...(toolCall.result !== undefined
-        ? { result: truncateString(String(toolCall.result), LIMITS.compressedMessage, `steps[${step.index}].toolCalls.${toolCall.name}.result`, state) }
+        ? {
+            result: truncateString(
+              String(toolCall.result),
+              LIMITS.compressedMessage,
+              `steps[${step.index}].toolCalls.${toolCall.name}.result`,
+              state
+            )
+          }
         : {})
     }))
   }))
@@ -284,7 +482,12 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
       inputMessages: call.inputMessages.map((message, messageIndex) =>
         sanitizeMessage(message, `modelCalls[${index}].inputMessages[${messageIndex}]`, state, true)
       ),
-      outputMessage: sanitizeMessage(call.outputMessage, `modelCalls[${index}].outputMessage`, state, true),
+      outputMessage: sanitizeMessage(
+        call.outputMessage,
+        `modelCalls[${index}].outputMessage`,
+        state,
+        true
+      ),
       toolCalls: call.toolCalls.map((toolCall) => ({ name: toolCall.name, args: {} })),
       tokenUsage: call.tokenUsage
     })),
@@ -296,11 +499,23 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
       status: node.status,
       startedAt: node.startedAt,
       endedAt: node.endedAt,
+      // Keep a hard-capped, serialized form of input/output so the dashboard
+      // execution tree still shows tool args/results for oversized traces
+      // instead of empty panels. The compressedValue limit bounds each field.
+      ...(node.input !== undefined
+        ? { input: { _traceTruncatedJson: truncateSerialized(node.input, LIMITS.oversizedNodeValue, `nodes.${node.id}.input`, state) } }
+        : {}),
+      ...(node.output !== undefined
+        ? { output: { _traceTruncatedJson: truncateSerialized(node.output, LIMITS.oversizedNodeValue, `nodes.${node.id}.output`, state) } }
+        : {}),
       metadata: node.metadata?.tokenUsage ? { tokenUsage: node.metadata.tokenUsage } : undefined
     })),
     errorMessage: trace.errorMessage
       ? truncateString(trace.errorMessage, LIMITS.compressedValue, "errorMessage", state)
-      : undefined
+      : undefined,
+    ...(trace.skillEval
+      ? { skillEval: sanitizeSkillEval(trace.skillEval, "skillEval", state, true) }
+      : {})
   }
 }
 

@@ -19,6 +19,7 @@ export interface RoutingContext {
     | "scheduler_reminder"
     | "scheduler_action"
     | "memory_summarize"
+    | "task_mmd"
     | "optimizer"
   message?: string
   threadId?: string
@@ -1027,6 +1028,7 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
     switch (ctx.taskSource) {
       case "heartbeat":
       case "memory_summarize":
+      case "task_mmd":
       case "scheduler_reminder": {
         recordLayer({
           layer: "layer1",

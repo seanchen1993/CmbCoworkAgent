@@ -1,3 +1,15 @@
+import { buildBundleUnifiedDiff, createTextBundleZip, type TextBundleFile } from "@/lib/skill-bundle-diff"
+import {
+  candidateFromAdoptionRecord,
+  compareEvolutionVersions,
+  evolutionSkillKey,
+  selectAvailableUpdates,
+  withAdoptionRecord
+} from "./evolution-matching"
+
+// Re-exported so existing consumers keep importing them from "@/api/evolution".
+export { compareEvolutionVersions, evolutionSkillKey }
+
 function normalizeBaseUrl(value: string | undefined): string {
   const raw = value?.trim().replace(/\/+$/, "") || ""
   if (!raw) return ""
@@ -18,6 +30,14 @@ const ADOPTED_EVOLUTION_UPDATES_KEY = "trace-evolver-adopted-update-candidates"
 export interface InstalledSkillLike {
   name: string
   version?: string | null
+  /**
+   * Market plugin name when this skill is owned by an installed plugin (equals
+   * the plugin's local name, which for market-installed plugins matches the
+   * server-side candidate `plugin_name`). Undefined for standalone skills.
+   */
+  pluginName?: string | null
+  /** Absolute SKILL.md path — used to write an evolved plugin skill back in place. */
+  path?: string | null
 }
 
 export interface EvolutionCandidate {
@@ -32,6 +52,10 @@ export interface EvolutionCandidate {
   source_thread_ids: string[]
   skill_name: string
   evolution_status: string
+  /** Market plugin name — set only for candidates that evolve a skill inside a plugin. */
+  plugin_name?: string | null
+  /** POSIX path of the skill dir inside the plugin bundle, e.g. "skills/pdf". */
+  plugin_skill_path?: string | null
   source_version?: string | null
   target_version?: string | null
   source_bundle_hash?: string | null
@@ -70,6 +94,10 @@ export interface EvolutionRunRequest {
   output_root?: string | null
 }
 
+export type EvolutionDraftFile = TextBundleFile
+
+const DEV_DRAFTS = new Map<string, TextBundleFile[]>()
+
 function isNetworkError(error: unknown): boolean {
   return error instanceof TypeError
 }
@@ -92,6 +120,12 @@ function setLocalDebugEndpointEnabled(enabled: boolean): void {
 
 function traceEvolverBaseUrl(): string {
   return isLocalDebugEndpointEnabled() ? TRACE_EVOLVER_LOCAL_DEBUG_URL : TRACE_EVOLVER_CONFIGURED_BASE_URL
+}
+
+function traceEvolverNoCacheUrl(path: string): string {
+  const url = new URL(`${traceEvolverBaseUrl()}${path}`)
+  url.searchParams.set("_", Date.now().toString())
+  return url.toString()
 }
 
 function shouldUseDevMock(error: unknown): boolean {
@@ -173,6 +207,31 @@ function devListCandidates(status?: string): EvolutionCandidate[] {
 
 function devDiff(candidateId: string): string {
   const candidate = devCandidate(candidateId)
+  const draft = DEV_DRAFTS.get(candidateId)
+  if (draft) {
+    const referencePath = candidate.skill_name === "elementui-page"
+      ? "references/quality-gates.md"
+      : "references/review-checklist.md"
+    return buildBundleUnifiedDiff(
+      [
+        {
+          path: "SKILL.md",
+          content: `---
+name: ${candidate.skill_name}
+description: ${candidate.skill_name === "elementui-page" ? "Generate ElementUI pages with quality gates." : "Review Electron/TypeScript changes with risk-focused checks."}
+version: ${candidate.source_version || "v1.0.0"}
+---
+
+# ${candidate.skill_name}
+
+## Workflow
+`
+        },
+        { path: referencePath, content: "" }
+      ],
+      draft
+    )
+  }
   const referencePath = candidate.skill_name === "elementui-page"
     ? "references/quality-gates.md"
     : "references/review-checklist.md"
@@ -188,12 +247,12 @@ index dev111..dev222 100644
 +version: ${candidate.target_version || "v1.0.1"}
 +evolved-by: CMBDevClaw Trace Evolver
  ---
- 
+
  # ${candidate.skill_name}
 @@ -10,3 +11,7 @@
- 
+
  ## Workflow
- 
+
 +- Treat repeated user corrections from cloud traces as high-priority guardrails.
 +- Before final response, verify generated artifacts against the user's explicit feedback.
 +- If a reference checklist exists, read it before applying workflow-specific constraints.
@@ -232,6 +291,20 @@ evolved-by: CMBDevClaw Trace Evolver
 `
 }
 
+function devBaseSkillMarkdown(candidate: EvolutionCandidate): string {
+  return `---
+name: ${candidate.skill_name}
+description: ${candidate.skill_name === "elementui-page" ? "Generate ElementUI pages with quality gates." : "Review Electron/TypeScript changes with risk-focused checks."}
+version: ${candidate.source_version || "v1.0.0"}
+---
+
+# ${candidate.skill_name}
+
+## Workflow
+
+`
+}
+
 function devReferenceMarkdown(): string {
   return `# Cloud Trace Quality Gates
 
@@ -244,6 +317,11 @@ function devReferenceMarkdown(): string {
 
 async function devCandidateZip(candidateId: string): Promise<{ blob: Blob; filename: string }> {
   const candidate = devCandidate(candidateId)
+  const draft = DEV_DRAFTS.get(candidateId)
+  if (draft) {
+    const zip = await createTextBundleZip(draft, `${candidate.skill_name}-${candidate.target_version || "v1.0.1"}.zip`)
+    return { blob: new Blob([zip.buffer], { type: "application/zip" }), filename: zip.filename }
+  }
   const { default: JSZip } = await import("jszip")
   const zip = new JSZip()
   const referencePath = candidate.skill_name === "elementui-page"
@@ -257,58 +335,34 @@ async function devCandidateZip(candidateId: string): Promise<{ blob: Blob; filen
   }
 }
 
-function normalizeVersion(version?: string | null): string | null {
-  const raw = String(version ?? "").trim()
-  if (!raw) return null
-  return raw.startsWith("v") ? raw.slice(1) : raw
+async function devCandidateBaseZip(candidateId: string): Promise<{ blob: Blob; filename: string }> {
+  const candidate = devCandidate(candidateId)
+  const zip = await createTextBundleZip(
+    [{ path: "SKILL.md", content: devBaseSkillMarkdown(candidate) }],
+    `${candidate.skill_name}-${candidate.source_version || "base"}.zip`
+  )
+  return { blob: new Blob([zip.buffer], { type: "application/zip" }), filename: zip.filename }
 }
 
-export function compareEvolutionVersions(left?: string | null, right?: string | null): number {
-  const lv = normalizeVersion(left)
-  const rv = normalizeVersion(right)
-  // If either side is missing, no reliable comparison — suppress the update.
-  if (lv === null || rv === null) return 0
-  const l = lv.split(".").map((part) => Number(part) || 0)
-  const r = rv.split(".").map((part) => Number(part) || 0)
-  for (let i = 0; i < 3; i++) {
-    const diff = (l[i] || 0) - (r[i] || 0)
-    if (diff !== 0) return diff
+function devSaveDraft(candidateId: string, files: TextBundleFile[], notes?: string): EvolutionCandidate {
+  DEV_DRAFTS.set(candidateId, files)
+  return {
+    ...devCandidate(candidateId),
+    notes: notes ?? devCandidate(candidateId).notes
   }
-  return 0
 }
 
+/**
+ * Apply ignored/adopted bookkeeping (from localStorage) on top of the pure
+ * selection in {@link selectAvailableUpdates}.
+ */
 function filterAvailableUpdates(
   candidates: EvolutionCandidate[],
   installedSkills: InstalledSkillLike[]
 ): EvolutionCandidate[] {
-  const ignored = getIgnoredEvolutionCandidateIds()
-  const adopted = getAdoptedEvolutionCandidates()
-  const available = candidates
-    .filter((candidate) => !ignored.has(candidate.candidate_id))
-    .filter((candidate) => candidate.auto_optimized !== false)
-    .filter((candidate) => {
-      const installed = installedSkills.find((skill) => skill.name === candidate.skill_name)
-      if (!installed) return false
-      return compareEvolutionVersions(candidate.target_version, installed.version) > 0
-    })
-
-  const latestBySkill = new Map<string, EvolutionCandidate>()
-  for (const candidate of available) {
-    const current = latestBySkill.get(candidate.skill_name)
-    if (!current || compareEvolutionVersions(candidate.target_version, current.target_version) > 0) {
-      latestBySkill.set(candidate.skill_name, candidate)
-    }
-  }
-
-  for (const record of adopted.values()) {
-    if (ignored.has(record.candidate_id)) continue
-    latestBySkill.set(record.skill_name, candidateFromAdoptionRecord(record))
-  }
-
-  return [...latestBySkill.values()].sort((a, b) => {
-    const statusDelta = Number(Boolean(a.local_adoption_status)) - Number(Boolean(b.local_adoption_status))
-    if (statusDelta !== 0) return statusDelta
-    return a.skill_name.localeCompare(b.skill_name)
+  return selectAvailableUpdates(candidates, installedSkills, {
+    ignoredIds: getIgnoredEvolutionCandidateIds(),
+    adopted: getAdoptedEvolutionCandidates()
   })
 }
 
@@ -354,47 +408,13 @@ function clearAdoptedEvolutionCandidate(candidateId: string): void {
   localStorage.setItem(ADOPTED_EVOLUTION_UPDATES_KEY, JSON.stringify([...adopted.values()]))
 }
 
-function withAdoptionRecord(candidate: EvolutionCandidate, record: EvolutionAdoptionRecord): EvolutionCandidate {
-  return {
-    ...candidate,
-    local_adoption_status: "adopted",
-    local_adopted_at: record.adopted_at,
-    local_backup_id: record.backup_id,
-    local_backup_path: record.backup_path
-  }
-}
-
-function candidateFromAdoptionRecord(record: EvolutionAdoptionRecord): EvolutionCandidate {
-  const candidate = record.candidate
-  if (candidate) return withAdoptionRecord(candidate, record)
-  return withAdoptionRecord({
-    candidate_id: record.candidate_id,
-    run_id: "",
-    status: "published",
-    recommendation: null,
-    base_skill_id: record.skill_name,
-    full_bundle_path: "",
-    files_changed: [],
-    source_trace_ids: [],
-    source_thread_ids: [],
-    skill_name: record.skill_name,
-    evolution_status: "published",
-    source_version: record.source_version || null,
-    target_version: record.target_version || null,
-    source_bundle_hash: null,
-    auto_optimized: true,
-    evaluation_score: null,
-    published_at: null,
-    published_s3_path: null,
-    notes: "本地已采纳记录"
-  }, record)
-}
-
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${traceEvolverBaseUrl()}${path}`, {
     ...init,
+    cache: init?.cache ?? "no-store",
     headers: {
       "Content-Type": "application/json",
+      "Cache-Control": "no-cache",
       ...(init?.headers || {})
     }
   })
@@ -488,7 +508,10 @@ export const evolutionApi = {
 
   async getDiff(candidateId: string): Promise<string> {
     try {
-      const response = await fetch(`${traceEvolverBaseUrl()}/evolution/candidates/${encodeURIComponent(candidateId)}/diff`)
+      const response = await fetch(
+        traceEvolverNoCacheUrl(`/evolution/candidates/${encodeURIComponent(candidateId)}/diff`),
+        { cache: "no-store", headers: { "Cache-Control": "no-cache" } }
+      )
       if (!response.ok) {
         throw new Error(`Failed to load diff: ${response.status}`)
       }
@@ -501,7 +524,10 @@ export const evolutionApi = {
 
   async downloadCandidateBundle(candidateId: string): Promise<{ blob: Blob; filename: string }> {
     try {
-      const response = await fetch(`${traceEvolverBaseUrl()}/evolution/candidates/${encodeURIComponent(candidateId)}/bundle.zip`)
+      const response = await fetch(
+        traceEvolverNoCacheUrl(`/evolution/candidates/${encodeURIComponent(candidateId)}/bundle.zip`),
+        { cache: "no-store", headers: { "Cache-Control": "no-cache" } }
+      )
       if (!response.ok) {
         throw new Error(`Failed to download candidate bundle: ${response.status}`)
       }
@@ -512,6 +538,25 @@ export const evolutionApi = {
     } catch (error) {
       if (!shouldUseDevMock(error)) throw error
       return devCandidateZip(candidateId)
+    }
+  },
+
+  async downloadCandidateBaseBundle(candidateId: string): Promise<{ blob: Blob; filename: string }> {
+    try {
+      const response = await fetch(
+        traceEvolverNoCacheUrl(`/evolution/candidates/${encodeURIComponent(candidateId)}/base-bundle.zip`),
+        { cache: "no-store", headers: { "Cache-Control": "no-cache" } }
+      )
+      if (!response.ok) {
+        throw new Error(`Failed to download candidate base bundle: ${response.status}`)
+      }
+      const blob = await response.blob()
+      const contentDisposition = response.headers.get("Content-Disposition")
+      const filename = contentDisposition?.match(/filename="?([^"]+)"?/)?.[1] || `${candidateId}-base.zip`
+      return { blob, filename }
+    } catch (error) {
+      if (!shouldUseDevMock(error)) throw error
+      return devCandidateBaseZip(candidateId)
     }
   },
 
@@ -539,14 +584,27 @@ export const evolutionApi = {
     }
   },
 
-  async deleteCandidate(candidateId: string): Promise<{ detail: string }> {
+  async saveDraft(
+    candidateId: string,
+    files: EvolutionDraftFile[],
+    reviewer?: string,
+    notes?: string
+  ): Promise<EvolutionCandidate> {
     try {
-      return await requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}`, {
-        method: "DELETE"
+      return await requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}/draft`, {
+        method: "PUT",
+        body: JSON.stringify({ reviewer, notes, files })
       })
     } catch (error) {
-      throw error
+      if (!shouldUseDevMock(error)) throw error
+      return devSaveDraft(candidateId, files, notes)
     }
+  },
+
+  async deleteCandidate(candidateId: string): Promise<{ detail: string }> {
+    return requestJson(`/evolution/candidates/${encodeURIComponent(candidateId)}`, {
+      method: "DELETE"
+    })
   },
 
   async publish(candidateId: string, reviewer?: string): Promise<EvolutionCandidate> {

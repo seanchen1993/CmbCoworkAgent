@@ -1,4 +1,5 @@
 import { resolve } from "path"
+import { normalizePathKey } from "../../hooks/path-key"
 import type { SkillLifecycleMatch } from "./registry"
 
 export type SkillActivationTrigger = "explicit" | "read_file"
@@ -30,13 +31,8 @@ export interface SkillUseTracker {
   pruneRecords(shouldKeep: (record: SkillUseRecord) => boolean): void
 }
 
-function normalizePathKey(input: string): string {
-  const normalized = resolve(input).replace(/\\/g, "/").replace(/\/+$/, "")
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized
-}
-
 export function getSkillUseKey(skill: SkillLifecycleMatch): string {
-  return normalizePathKey(skill.rootDir)
+  return normalizePathKey(resolve(skill.rootDir))
 }
 
 export function createSkillUseTracker(): SkillUseTracker {

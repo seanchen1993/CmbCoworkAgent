@@ -138,6 +138,15 @@ export async function runPostSkillUseHooksForActivatedSkills({
   threadId,
   workspacePath,
   turnId,
+  pluginOutputDir,
+  systemId,
+  pluginWorkspace,
+  featureId,
+  harnessProjectId,
+  harnessAdapterName,
+  harnessAdapterVersion,
+  projectCode,
+  projectDir,
   getStopContext,
   hookScope,
   skillUseTracker,
@@ -149,6 +158,15 @@ export async function runPostSkillUseHooksForActivatedSkills({
   threadId: string
   workspacePath?: string
   turnId?: string
+  pluginOutputDir?: string
+  systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  projectCode?: string
+  projectDir?: string
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
@@ -170,6 +188,15 @@ export async function runPostSkillUseHooksForActivatedSkills({
         skillPath: skill.path
       },
       workspacePath,
+      pluginOutputDir,
+      systemId,
+      pluginWorkspace,
+      featureId,
+      harnessProjectId,
+      harnessAdapterName,
+      harnessAdapterVersion,
+      projectCode,
+      projectDir,
       sessionId: threadId,
       turnId,
       skillName: skill.name,
@@ -208,6 +235,15 @@ export async function runCompletionHooksWithRevision({
   threadId,
   workspacePath,
   turnId,
+  pluginOutputDir,
+  systemId,
+  pluginWorkspace,
+  featureId,
+  harnessProjectId,
+  harnessAdapterName,
+  harnessAdapterVersion,
+  projectCode,
+  projectDir,
   abortSignal,
   getStopContext,
   hookScope,
@@ -220,11 +256,21 @@ export async function runCompletionHooksWithRevision({
   maxRevisionAttempts,
   revisionPromptPrefix,
   runPostSkillUseHooks,
-  runStopHooks
+  runStopHooks,
+  onStopHooksFired
 }: {
   threadId: string
   workspacePath?: string
   turnId?: string
+  pluginOutputDir?: string
+  systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  projectCode?: string
+  projectDir?: string
   abortSignal: AbortSignal
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
@@ -238,6 +284,7 @@ export async function runCompletionHooksWithRevision({
   revisionPromptPrefix: string
   runPostSkillUseHooks?: () => Promise<HookResult | null>
   runStopHooks?: () => Promise<HookResult | null>
+  onStopHooksFired?: () => void
 }): Promise<CompletionHookOutcome> {
   let postSkillRevisionCount = 0
   let stopRevisionCount = 0
@@ -248,6 +295,15 @@ export async function runCompletionHooksWithRevision({
           threadId,
           workspacePath,
           turnId,
+          pluginOutputDir,
+          systemId,
+          pluginWorkspace,
+          featureId,
+          harnessProjectId,
+          harnessAdapterName,
+          harnessAdapterVersion,
+          projectCode,
+          projectDir,
           getStopContext,
           hookScope,
           skillUseTracker,
@@ -295,6 +351,7 @@ export async function runCompletionHooksWithRevision({
       continue
     }
 
+    onStopHooksFired?.()
     const stopResult = await (runStopHooks
       ? runStopHooks()
       : runHooksEnriched(
@@ -303,6 +360,15 @@ export async function runCompletionHooksWithRevision({
             "Stop",
             {
               workspacePath,
+              pluginOutputDir,
+              systemId,
+              pluginWorkspace,
+              featureId,
+              harnessProjectId,
+              harnessAdapterName,
+              harnessAdapterVersion,
+              projectCode,
+              projectDir,
               sessionId: threadId,
               turnId,
               stopContext: getStopContext()
@@ -313,6 +379,15 @@ export async function runCompletionHooksWithRevision({
           "Stop",
           {
             workspacePath,
+            pluginOutputDir,
+            systemId,
+            pluginWorkspace,
+            featureId,
+            harnessProjectId,
+            harnessAdapterName,
+            harnessAdapterVersion,
+            projectCode,
+            projectDir,
             sessionId: threadId,
             turnId,
             stopContext: getStopContext()

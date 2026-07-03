@@ -1,4 +1,4 @@
-import { MOCK_MARKET_DATA } from "../components/customize/MarketMockData"
+import { MOCK_MARKET_DATA } from "../components/customize/MarketPanel/MarketMockData"
 import { toast } from "sonner"
 import { getMockOrgSkillMarketResponse, orgSkillMarketApi } from "./org-skill-market"
 import { USE_MARKET_MOCK_ON_ERROR } from "./market-flags"
@@ -71,6 +71,8 @@ export interface MarketItem {
   published_at?: string
   installedVersion?: string
   updateAvailable?: boolean
+  installDisabledReason?: string
+  project_mode_supported?: boolean
   orgSkillId?: number
   orgSkillVersionId?: number
   sourceOriginName?: string
@@ -371,8 +373,9 @@ export const marketApi = {
     }
   },
 
-  async getPlugins(): Promise<MarketApiResponse> {
+  async getPlugins(options?: { allowMockOnError?: boolean; silent?: boolean }): Promise<MarketApiResponse> {
     const cacheKey = "plugins"
+    const allowMockOnError = options?.allowMockOnError ?? USE_MARKET_MOCK_ON_ERROR
 
     // Check cache first
     // const cachedData = getCachedData(cacheKey)
@@ -391,6 +394,9 @@ export const marketApi = {
       })
 
       if (!response.ok) {
+        if (options?.silent) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
         await throwMarketError(response)
       }
 
@@ -413,7 +419,7 @@ export const marketApi = {
       return result
     } catch (error) {
       console.error("Error fetching plugins:", error)
-      if (USE_MARKET_MOCK_ON_ERROR) {
+      if (allowMockOnError) {
         return getMockMarketResponse("plugin", error)
       }
       return {
@@ -508,7 +514,7 @@ export const marketApi = {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.plugins?.install === "function") {
-          const installResult = await window.api.plugins.install(arrayBuffer, filename, "market")
+          const installResult = await window.api.plugins.install(arrayBuffer, filename, "market", item?.version)
           return {
             success: installResult.success,
             error: installResult.error
@@ -632,11 +638,12 @@ export const marketApi = {
     name: string,
     description: string,
     category: string,
+    version: string,
     guidance?: string,
     chineseName?: string,
     userId?: string
   ): Promise<{ success: boolean; data?: MarketUploadResponse; error?: string }> {
-    console.log(`Uploading ${resourceType} file: ${file.name} category:${category}`)
+    console.log(`Uploading ${resourceType} file: ${file.name} category:${category} version:${version}`)
 
     const formData = new FormData()
     formData.append("resource_type", resourceType)
@@ -644,7 +651,7 @@ export const marketApi = {
     formData.append("description", description)
     formData.append("file", file)
     formData.append("category", category)
-    formData.append("version", "1.0.0") // Set default version to 1.0.0 for first upload
+    formData.append("version", version)
     if (guidance) {
       formData.append("guidance", guidance)
     }
@@ -692,23 +699,12 @@ export const marketApi = {
     name: string,
     description: string,
     category: string,
+    version: string,
     guidance?: string,
     chineseName?: string,
     userId?: string
   ): Promise<{ success: boolean; data?: MarketUpdateResponse; error?: string }> {
-    console.log(`Updating ${resourceType} item: ${name} category:${category}`)
-
-    // First, get the current item to retrieve its version
-    let currentVersion = "1.0.1" // Start from 1.0.1 for first update
-    try {
-      const currentItems = await this.getItemsByType(resourceType)
-      const currentItem = currentItems.data?.find((item) => item.name === name)
-      if (currentItem && currentItem.version) {
-        currentVersion = this.incrementVersion(currentItem.version)
-      }
-    } catch (error) {
-      console.warn("Could not retrieve current version, using default increment:", error)
-    }
+    console.log(`Updating ${resourceType} item: ${name} category:${category} version:${version}`)
 
     const formData = new FormData()
     formData.append("resource_type", resourceType)
@@ -718,7 +714,7 @@ export const marketApi = {
       formData.append("file", file)
     }
     formData.append("category", category)
-    formData.append("version", currentVersion) // Add auto-incremented version
+    formData.append("version", version)
     if (guidance) {
       formData.append("guidance", guidance)
     }
@@ -730,8 +726,6 @@ export const marketApi = {
     }
     const ip = localStorage.getItem("localIp")
     formData.append("ip", ip || "")
-
-    console.log(`Auto-incrementing version to: ${currentVersion}`)
 
     const response = await fetch(ENDPOINTS.update(resourceType, name), {
       method: "PUT",
@@ -759,40 +753,6 @@ export const marketApi = {
     return {
       success: true,
       data
-    }
-  },
-
-  // Helper method to increment version number
-  incrementVersion(version: string): string {
-    const versionParts = version.split(".")
-    if (versionParts.length !== 3) {
-      // Invalid version format, return default increment
-      return "1.0.1"
-    }
-
-    const [major, minor, patch] = versionParts.map((part) => parseInt(part, 10))
-
-    if (isNaN(major) || isNaN(minor) || isNaN(patch)) {
-      return "1.0.1"
-    }
-
-    // Increment patch version by 1
-    return `${major}.${minor}.${patch + 1}`
-  },
-
-  // Helper method to get items by type (reusing existing logic)
-  async getItemsByType(resourceType: string): Promise<MarketApiResponse> {
-    switch (resourceType) {
-      case "skill":
-        return this.getSkills()
-      case "mcp":
-        return this.getMcps()
-      case "plugin":
-        return this.getPlugins()
-      case "orgSkill":
-        return this.getOrgSkills()
-      default:
-        throw new Error(`Unknown resource type: ${resourceType}`)
     }
   }
 }
