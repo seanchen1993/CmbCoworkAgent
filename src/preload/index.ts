@@ -65,7 +65,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessServiceUnitMapping,
+  HarnessDeployUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -3101,15 +3101,15 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
-    getServiceUnitMappings: (): Promise<HarnessServiceUnitMapping[]> =>
-      ipcRenderer.invoke("harnessBoard:getServiceUnitMappings") as Promise<HarnessServiceUnitMapping[]>,
-    saveServiceUnitMappings: (
-      mappings: HarnessServiceUnitMapping[]
-    ): Promise<HarnessServiceUnitMapping[]> =>
+    getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
+      ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<HarnessDeployUnitMapping[]>,
+    saveDeployUnitMappings: (
+      mappings: HarnessDeployUnitMapping[]
+    ): Promise<HarnessDeployUnitMapping[]> =>
       ipcRenderer.invoke(
-        "harnessBoard:saveServiceUnitMappings",
+        "harnessBoard:saveDeployUnitMappings",
         mappings
-      ) as Promise<HarnessServiceUnitMapping[]>,
+      ) as Promise<HarnessDeployUnitMapping[]>,
     syncProjectConstraints: (adapterId: string): Promise<HarnessProjectConstraintSyncResult> =>
       ipcRenderer.invoke(
         "harnessBoard:syncProjectConstraints",
@@ -3146,16 +3146,16 @@ const api = {
         "harnessBoard:getDynamicWorkflowConfig",
         projectId
       ) as Promise<HarnessDynamicWorkflowConfig | null>,
-    getPublicAgentmdServiceUnits: (projectId: string): Promise<string[]> =>
+    getPublicAgentmdDeployUnits: (projectId: string): Promise<string[]> =>
       ipcRenderer.invoke(
-        "harnessBoard:getPublicAgentmdServiceUnits",
+        "harnessBoard:getPublicAgentmdDeployUnits",
         projectId
       ) as Promise<string[]>,
-    getLocalAgentmdServiceUnitMappings: (
-      mappings: HarnessServiceUnitMapping[]
+    getLocalAgentmdDeployUnitMappings: (
+      mappings: HarnessDeployUnitMapping[]
     ): Promise<string[]> =>
       ipcRenderer.invoke(
-        "harnessBoard:getLocalAgentmdServiceUnitMappings",
+        "harnessBoard:getLocalAgentmdDeployUnitMappings",
         mappings
       ) as Promise<string[]>,
     updateProject: (

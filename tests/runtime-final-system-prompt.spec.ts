@@ -68,7 +68,7 @@ function usage(): string {
     "Options:",
     "  --workspace <path>           Session workspace path used by the runtime",
     "  --project-id <id>            Harness project id from harness-board-projects.json",
-    "  --feature <slug>             Harness feature slug/name; selected service units are read from saved binding",
+    "  --feature <slug>             Harness feature slug/name; selected deploy units are read from saved binding",
     "  --extra-system-prompt <text>  Optional prompt appended after AGENTS prompt",
     "  --help                       Print this help"
   ].join("\n")

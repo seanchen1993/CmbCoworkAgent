@@ -95,7 +95,7 @@ import type {
   HarnessNodeStatus,
   HarnessRunDetailViewModel,
   HarnessRunNode,
-  HarnessServiceUnitMapping,
+  HarnessDeployUnitMapping,
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
   HarnessBoardCompatibility,
@@ -226,41 +226,41 @@ function createEmptyProjectForm(adapterId = ""): HarnessProjectCreateInput {
   return createEmptyProjectMetadataForm(adapterId)
 }
 
-function createEmptyServiceUnitMapping(): HarnessServiceUnitMapping {
+function createEmptyDeployUnitMapping(): HarnessDeployUnitMapping {
   return {
-    serviceUnitIdMapping: "",
-    serviceUnitId: "",
+    deployUnitIdMapping: "",
+    deployUnitId: "",
     localRepoPath: "",
     description: ""
   }
 }
 
-function buildServiceUnitMappingSavePayload(
-  mappings: HarnessServiceUnitMapping[]
-): { mappings: HarnessServiceUnitMapping[]; error: string | null } {
+function buildDeployUnitMappingSavePayload(
+  mappings: HarnessDeployUnitMapping[]
+): { mappings: HarnessDeployUnitMapping[]; error: string | null } {
   // Keep row-specific feedback in the renderer; the main process canonicalizes and assigns IDs.
   const seen = new Set<string>()
-  const payload: HarnessServiceUnitMapping[] = []
+  const payload: HarnessDeployUnitMapping[] = []
 
   for (let index = 0; index < mappings.length; index += 1) {
     const row = mappings[index]
-    const serviceUnitId = row.serviceUnitId.trim()
+    const deployUnitId = row.deployUnitId.trim()
     const localRepoPath = row.localRepoPath.trim()
     const description = row.description?.trim() || ""
-    if (!serviceUnitId && !localRepoPath && !description) continue
-    if (!serviceUnitId) {
+    if (!deployUnitId && !localRepoPath && !description) continue
+    if (!deployUnitId) {
       return { mappings: [], error: `第 ${index + 1} 行发布单元 ID 不能为空` }
     }
     if (!localRepoPath) {
       return { mappings: [], error: `第 ${index + 1} 行代码库路径不能为空` }
     }
-    if (seen.has(serviceUnitId)) {
-      return { mappings: [], error: `发布单元 ID 重复：${serviceUnitId}` }
+    if (seen.has(deployUnitId)) {
+      return { mappings: [], error: `发布单元 ID 重复：${deployUnitId}` }
     }
-    seen.add(serviceUnitId)
+    seen.add(deployUnitId)
     payload.push({
-      serviceUnitIdMapping: row.serviceUnitIdMapping,
-      serviceUnitId,
+      deployUnitIdMapping: row.deployUnitIdMapping,
+      deployUnitId,
       localRepoPath,
       ...(description ? { description } : {})
     })
@@ -481,7 +481,7 @@ function makeDeletedProjectSidebarItem(projectId: string, name: string): Project
       type: "plugin"
     },
     boardCompatibility: deletedProjectCompatibility,
-    supportsServiceUnits: false,
+    supportsDeployUnits: false,
     supportsSessionContextInjection: false,
     lifecycle: {
       status: "deleted"
@@ -623,7 +623,7 @@ function createUnboundRunDetail(
       hookLogRefs: [],
       watchRefs: [],
       skipNodeAvailable: false,
-      selectedServiceUnits: [],
+      selectedDeployUnits: [],
       currentNodeId: "",
       nodes: [],
       unmatchedHooks: []
@@ -2632,21 +2632,21 @@ function FeatureCreateDialog({
   workflowLoading,
   workflowTemplate,
   selectedWorkflowNodeIds,
-  agentsReadyServiceUnits,
-  localAgentmdServiceUnitMappings,
+  agentsReadyDeployUnits,
+  localAgentmdDeployUnitMappings,
   publicConstraintsSyncAvailable,
   syncingPublicConstraints,
-  serviceUnitMappings,
-  serviceUnitMappingsLoading,
-  selectedServiceUnitIds,
+  deployUnitMappings,
+  deployUnitMappingsLoading,
+  selectedDeployUnitIds,
   creating,
   error,
   onOpenChange,
   onChange,
   onWorkflowTemplateChange,
   onWorkflowNodeToggle,
-  onServiceUnitToggle,
-  onOpenServiceUnitSettings,
+  onDeployUnitToggle,
+  onOpenDeployUnitSettings,
   onSyncPublicConstraints,
   onSubmit
 }: {
@@ -2656,21 +2656,21 @@ function FeatureCreateDialog({
   workflowLoading: boolean
   workflowTemplate: string
   selectedWorkflowNodeIds: Set<string>
-  agentsReadyServiceUnits: string[]
-  localAgentmdServiceUnitMappings: string[]
+  agentsReadyDeployUnits: string[]
+  localAgentmdDeployUnitMappings: string[]
   publicConstraintsSyncAvailable: boolean
   syncingPublicConstraints: boolean
-  serviceUnitMappings: HarnessServiceUnitMapping[]
-  serviceUnitMappingsLoading: boolean
-  selectedServiceUnitIds: Set<string>
+  deployUnitMappings: HarnessDeployUnitMapping[]
+  deployUnitMappingsLoading: boolean
+  selectedDeployUnitIds: Set<string>
   creating: boolean
   error: string | null
   onOpenChange: (open: boolean) => void
   onChange: (featureName: string) => void
   onWorkflowTemplateChange: (templateId: string) => void
   onWorkflowNodeToggle: (nodeId: string, checked: boolean) => void
-  onServiceUnitToggle: (serviceUnitIdMapping: string, checked: boolean) => void
-  onOpenServiceUnitSettings: () => void
+  onDeployUnitToggle: (deployUnitIdMapping: string, checked: boolean) => void
+  onOpenDeployUnitSettings: () => void
   onSyncPublicConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
@@ -2679,14 +2679,14 @@ function FeatureCreateDialog({
   const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
   const customRequiredNodeIds = requiredWorkflowNodeIds(workflowConfig, workflowTemplate)
   const selectedTemplateNodeIds = new Set(selectedTemplate?.nodes ?? [])
-  const agentsReadyServiceUnitIds = new Set(agentsReadyServiceUnits)
-  const localAgentmdServiceUnitMappingIds = new Set(localAgentmdServiceUnitMappings)
+  const agentsReadyDeployUnitIds = new Set(agentsReadyDeployUnits)
+  const localAgentmdDeployUnitMappingIds = new Set(localAgentmdDeployUnitMappings)
   const supportsSessionContextInjection = project?.supportsSessionContextInjection === true
-  const selectableServiceUnitMappings = serviceUnitMappings.filter((mapping) =>
-    mapping.serviceUnitIdMapping.trim()
+  const selectableDeployUnitMappings = deployUnitMappings.filter((mapping) =>
+    mapping.deployUnitIdMapping.trim()
   )
-  const selectedServiceUnitCount = selectableServiceUnitMappings.filter((mapping) =>
-    selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
+  const selectedDeployUnitCount = selectableDeployUnitMappings.filter((mapping) =>
+    selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
   ).length
   const sessionContextProviderName =
     project?.harnessAdapter.name.trim() || project?.harnessAdapter.id.trim() || "插件"
@@ -2694,7 +2694,7 @@ function FeatureCreateDialog({
     ? `由 ${sessionContextProviderName} 加载会话工作区及所选发布单元的系统约束`
     : "由 CMBDevClaw 加载会话工作区及所选发布单元的系统约束"
   const workflowTabDisabled = !workflowLoading && !workflowConfig
-  const defaultTab = "service-units"
+  const defaultTab = "deploy-units"
   const workflowPanel = workflowLoading ? (
     <div className="flex min-h-32 items-center justify-center rounded-md border border-border bg-background text-sm text-muted-foreground">
       <Loader2 className="mr-2 size-4 animate-spin" />
@@ -2733,7 +2733,7 @@ function FeatureCreateDialog({
       插件暂不支持动态工作流。
     </div>
   )
-  const serviceUnitPanel = (
+  const deployUnitPanel = (
     <section className="grid gap-3 rounded-md border border-border bg-muted/30 p-3">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
@@ -2743,7 +2743,7 @@ function FeatureCreateDialog({
             size="sm"
             className="h-auto min-w-0 px-0 py-0 text-xs"
             disabled={creating}
-            onClick={onOpenServiceUnitSettings}
+            onClick={onOpenDeployUnitSettings}
           >
             需要配置发布单元？
           </Button>
@@ -2763,31 +2763,31 @@ function FeatureCreateDialog({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <div className="text-xs text-muted-foreground">
-            已选择 {selectedServiceUnitCount} 个
+            已选择 {selectedDeployUnitCount} 个
           </div>
         </div>
       </div>
-      {serviceUnitMappingsLoading ? (
+      {deployUnitMappingsLoading ? (
         <div className="flex min-h-20 items-center justify-center text-sm text-muted-foreground">
           <Loader2 className="mr-2 size-4 animate-spin" />
           加载发布单元
         </div>
-      ) : selectableServiceUnitMappings.length === 0 ? (
+      ) : selectableDeployUnitMappings.length === 0 ? (
         <div className="rounded-md border border-dashed border-border bg-background px-3 py-4 text-sm text-muted-foreground">
           没有已配置的发布单元
         </div>
       ) : (
         <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-background px-3 py-2">
-          {selectableServiceUnitMappings.map((mapping) => {
-            const checked = selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
-            const publicAgentmdSupported = agentsReadyServiceUnitIds.has(mapping.serviceUnitId.trim())
-            const localAgentmdSupported = localAgentmdServiceUnitMappingIds.has(mapping.serviceUnitIdMapping)
+          {selectableDeployUnitMappings.map((mapping) => {
+            const checked = selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
+            const publicAgentmdSupported = agentsReadyDeployUnitIds.has(mapping.deployUnitId.trim())
+            const localAgentmdSupported = localAgentmdDeployUnitMappingIds.has(mapping.deployUnitIdMapping)
             const showPublicAgentmdTag = supportsSessionContextInjection && publicAgentmdSupported
             const showLocalAgentmdTag =
               localAgentmdSupported && (!supportsSessionContextInjection || !publicAgentmdSupported)
             return (
               <label
-                key={mapping.serviceUnitIdMapping}
+                key={mapping.deployUnitIdMapping}
                 className="flex min-w-0 cursor-pointer items-start gap-2 rounded-sm border border-transparent px-2 py-1.5 text-sm transition-colors hover:bg-muted/60"
               >
                 <input
@@ -2795,12 +2795,12 @@ function FeatureCreateDialog({
                   checked={checked}
                   className="mt-0.5 size-4 shrink-0 accent-primary"
                   onChange={(event) =>
-                    onServiceUnitToggle(mapping.serviceUnitIdMapping, event.target.checked)
+                    onDeployUnitToggle(mapping.deployUnitIdMapping, event.target.checked)
                   }
                 />
                 <span className="min-w-0 flex-1">
                   <span className="flex min-w-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate text-foreground">{mapping.serviceUnitId}</span>
+                    <span className="min-w-0 flex-1 truncate text-foreground">{mapping.deployUnitId}</span>
                     {showPublicAgentmdTag && (
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -2885,7 +2885,7 @@ function FeatureCreateDialog({
             >
               <TabsList className="grid w-full grid-cols-2">
                 <FeatureCreateTabTrigger
-                  value="service-units"
+                  value="deploy-units"
                   disabled={false}
                   tooltip="插件暂不支持"
                 >
@@ -2914,8 +2914,8 @@ function FeatureCreateDialog({
                   选择要使用的工作流
                 </FeatureCreateTabTrigger>
               </TabsList>
-              <TabsContent value="service-units" className="mt-0">
-                {serviceUnitPanel}
+              <TabsContent value="deploy-units" className="mt-0">
+                {deployUnitPanel}
               </TabsContent>
               <TabsContent value="workflow" className="mt-0">
                 {workflowPanel}
@@ -2964,14 +2964,14 @@ function ProjectModeSettingsPanel({
   onPickPath,
   onSave
 }: {
-  mappings: HarnessServiceUnitMapping[]
+  mappings: HarnessDeployUnitMapping[]
   loading: boolean
   saving: boolean
   dirty: boolean
   error: string | null
   onAdd: () => void
   onRemove: (index: number) => void
-  onChange: (index: number, mapping: HarnessServiceUnitMapping) => void
+  onChange: (index: number, mapping: HarnessDeployUnitMapping) => void
   onPickPath: (index: number) => void
   onSave: () => void
 }): React.JSX.Element {
@@ -3036,9 +3036,9 @@ function ProjectModeSettingsPanel({
                 className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] items-center gap-2"
               >
                 <Input
-                  value={mapping.serviceUnitId}
+                  value={mapping.deployUnitId}
                   onChange={(event) =>
-                    onChange(index, { ...mapping, serviceUnitId: event.target.value })
+                    onChange(index, { ...mapping, deployUnitId: event.target.value })
                   }
                   placeholder="请输入发布单元 ID"
                   className={harnessProjectCreateInputClassName}
@@ -3781,10 +3781,10 @@ function FeatureConversationPanel({
   )
 }
 
-function FeatureServiceUnitsPanel({
-  serviceUnits
+function FeatureDeployUnitsPanel({
+  deployUnits
 }: {
-  serviceUnits: HarnessServiceUnitMapping[]
+  deployUnits: HarnessDeployUnitMapping[]
 }): React.JSX.Element {
   return (
     <section className="rounded-md border border-border bg-background">
@@ -3792,21 +3792,21 @@ function FeatureServiceUnitsPanel({
         <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
         <span className="truncate">当前特性绑定的发布单元</span>
       </div>
-      {serviceUnits.length === 0 ? (
+      {deployUnits.length === 0 ? (
         <div className="px-3 py-6 text-sm text-muted-foreground">当前特性没有绑定发布单元。</div>
       ) : (
         <div className="divide-y divide-border">
-          {serviceUnits.map((serviceUnit) => (
-            <div key={serviceUnit.serviceUnitIdMapping} className="px-3 py-3">
-              <div className="truncate text-sm font-medium" title={serviceUnit.serviceUnitId}>
-                {serviceUnit.serviceUnitId}
+          {deployUnits.map((deployUnit) => (
+            <div key={deployUnit.deployUnitIdMapping} className="px-3 py-3">
+              <div className="truncate text-sm font-medium" title={deployUnit.deployUnitId}>
+                {deployUnit.deployUnitId}
               </div>
               <div className="mt-1 flex min-w-0 items-center gap-2">
                 <div
                   className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
-                  title={serviceUnit.localRepoPath}
+                  title={deployUnit.localRepoPath}
                 >
-                  {serviceUnit.localRepoPath}
+                  {deployUnit.localRepoPath}
                 </div>
                 <Button
                   type="button"
@@ -3815,7 +3815,7 @@ function FeatureServiceUnitsPanel({
                   className="size-7 shrink-0"
                   title="打开代码库路径"
                   onClick={() =>
-                    void openPathInFileManager(serviceUnit.localRepoPath, "无法打开代码库路径")
+                    void openPathInFileManager(deployUnit.localRepoPath, "无法打开代码库路径")
                   }
                 >
                   <FolderOpen className="size-3.5" />
@@ -4983,7 +4983,7 @@ function FeatureDetailPage({
               </div>
 
               <aside className="min-w-0 space-y-4">
-                <FeatureServiceUnitsPanel serviceUnits={detail.run.selectedServiceUnits} />
+                <FeatureDeployUnitsPanel deployUnits={detail.run.selectedDeployUnits} />
                 <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
 
                 <section className="rounded-md border border-border bg-background">
@@ -5295,10 +5295,10 @@ export function HarnessBoardView({
   const [featureWorkflowLoading, setFeatureWorkflowLoading] = useState(false)
   const [featureWorkflowTemplate, setFeatureWorkflowTemplate] = useState("")
   const [selectedWorkflowNodeIds, setSelectedWorkflowNodeIds] = useState<Set<string>>(new Set())
-  const [featureAgentsReadyServiceUnits, setFeatureAgentsReadyServiceUnits] = useState<string[]>([])
-  const [featureLocalAgentmdServiceUnitMappings, setFeatureLocalAgentmdServiceUnitMappings] =
+  const [featureAgentsReadyDeployUnits, setFeatureAgentsReadyDeployUnits] = useState<string[]>([])
+  const [featureLocalAgentmdDeployUnitMappings, setFeatureLocalAgentmdDeployUnitMappings] =
     useState<string[]>([])
-  const [selectedServiceUnitIds, setSelectedServiceUnitIds] = useState<Set<string>>(new Set())
+  const [selectedDeployUnitIds, setSelectedDeployUnitIds] = useState<Set<string>>(new Set())
   const [projectModeTab, setProjectModeTab] = useState("projects")
   const [syncingProjectConstraintAdapterIds, setSyncingProjectConstraintAdapterIds] = useState<Set<string>>(new Set())
   const [syncedProjectConstraintPaths, setSyncedProjectConstraintPaths] = useState<Record<string, string>>({})
@@ -5311,11 +5311,11 @@ export function HarnessBoardView({
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
   const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [serviceUnitMappings, setServiceUnitMappings] = useState<HarnessServiceUnitMapping[]>([])
-  const [serviceUnitMappingsLoading, setServiceUnitMappingsLoading] = useState(true)
-  const [serviceUnitMappingsSaving, setServiceUnitMappingsSaving] = useState(false)
-  const [serviceUnitMappingsDirty, setServiceUnitMappingsDirty] = useState(false)
-  const [serviceUnitMappingsError, setServiceUnitMappingsError] = useState<string | null>(null)
+  const [deployUnitMappings, setDeployUnitMappings] = useState<HarnessDeployUnitMapping[]>([])
+  const [deployUnitMappingsLoading, setDeployUnitMappingsLoading] = useState(true)
+  const [deployUnitMappingsSaving, setDeployUnitMappingsSaving] = useState(false)
+  const [deployUnitMappingsDirty, setDeployUnitMappingsDirty] = useState(false)
+  const [deployUnitMappingsError, setDeployUnitMappingsError] = useState<string | null>(null)
   const {
     threads,
     currentThreadId,
@@ -5477,105 +5477,105 @@ export function HarnessBoardView({
     [scheduleEnterpriseProjectDetailQuery]
   )
 
-  const loadServiceUnitMappings = useCallback(async (): Promise<void> => {
-    setServiceUnitMappingsLoading(true)
-    setServiceUnitMappingsError(null)
+  const loadDeployUnitMappings = useCallback(async (): Promise<void> => {
+    setDeployUnitMappingsLoading(true)
+    setDeployUnitMappingsError(null)
     try {
-      const mappings = await window.api.harnessBoard.getServiceUnitMappings()
-      setServiceUnitMappings(mappings)
-      setServiceUnitMappingsDirty(false)
+      const mappings = await window.api.harnessBoard.getDeployUnitMappings()
+      setDeployUnitMappings(mappings)
+      setDeployUnitMappingsDirty(false)
     } catch (error) {
-      setServiceUnitMappingsError(cleanIpcError(error))
+      setDeployUnitMappingsError(cleanIpcError(error))
     } finally {
-      setServiceUnitMappingsLoading(false)
+      setDeployUnitMappingsLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void loadServiceUnitMappings()
-  }, [loadServiceUnitMappings])
+    void loadDeployUnitMappings()
+  }, [loadDeployUnitMappings])
 
-  const handleAddServiceUnitMapping = useCallback((): void => {
-    setServiceUnitMappings((current) => [...current, createEmptyServiceUnitMapping()])
-    setServiceUnitMappingsDirty(true)
-    setServiceUnitMappingsError(null)
+  const handleAddDeployUnitMapping = useCallback((): void => {
+    setDeployUnitMappings((current) => [...current, createEmptyDeployUnitMapping()])
+    setDeployUnitMappingsDirty(true)
+    setDeployUnitMappingsError(null)
   }, [])
 
-  const handleRemoveServiceUnitMapping = useCallback((index: number): void => {
-    setServiceUnitMappings((current) => current.filter((_, itemIndex) => itemIndex !== index))
-    setServiceUnitMappingsDirty(true)
-    setServiceUnitMappingsError(null)
+  const handleRemoveDeployUnitMapping = useCallback((index: number): void => {
+    setDeployUnitMappings((current) => current.filter((_, itemIndex) => itemIndex !== index))
+    setDeployUnitMappingsDirty(true)
+    setDeployUnitMappingsError(null)
   }, [])
 
-  const handleChangeServiceUnitMapping = useCallback(
-    (index: number, mapping: HarnessServiceUnitMapping): void => {
-      setServiceUnitMappings((current) =>
+  const handleChangeDeployUnitMapping = useCallback(
+    (index: number, mapping: HarnessDeployUnitMapping): void => {
+      setDeployUnitMappings((current) =>
         current.map((item, itemIndex) => itemIndex === index ? mapping : item)
       )
-      setServiceUnitMappingsDirty(true)
-      setServiceUnitMappingsError(null)
+      setDeployUnitMappingsDirty(true)
+      setDeployUnitMappingsError(null)
     },
     []
   )
 
-  const handlePickServiceUnitRepoPath = useCallback(
+  const handlePickDeployUnitRepoPath = useCallback(
     async (index: number): Promise<void> => {
       const localRepoPath = await window.api.workspace.select()
       if (!localRepoPath) return
-      setServiceUnitMappings((current) =>
+      setDeployUnitMappings((current) =>
         current.map((item, itemIndex) =>
           itemIndex === index ? { ...item, localRepoPath } : item
         )
       )
-      setServiceUnitMappingsDirty(true)
-      setServiceUnitMappingsError(null)
+      setDeployUnitMappingsDirty(true)
+      setDeployUnitMappingsError(null)
     },
     []
   )
 
-  const handleSaveServiceUnitMappings = useCallback(async (): Promise<void> => {
-    const payload = buildServiceUnitMappingSavePayload(serviceUnitMappings)
+  const handleSaveDeployUnitMappings = useCallback(async (): Promise<void> => {
+    const payload = buildDeployUnitMappingSavePayload(deployUnitMappings)
     if (payload.error) {
-      setServiceUnitMappingsError(payload.error)
+      setDeployUnitMappingsError(payload.error)
       return
     }
 
-    setServiceUnitMappingsSaving(true)
-    setServiceUnitMappingsError(null)
+    setDeployUnitMappingsSaving(true)
+    setDeployUnitMappingsError(null)
     try {
-      const saved = await window.api.harnessBoard.saveServiceUnitMappings(payload.mappings)
-      setServiceUnitMappings(saved)
-      setServiceUnitMappingsDirty(false)
+      const saved = await window.api.harnessBoard.saveDeployUnitMappings(payload.mappings)
+      setDeployUnitMappings(saved)
+      setDeployUnitMappingsDirty(false)
       toast.success("配置已保存")
     } catch (error) {
-      setServiceUnitMappingsError(cleanIpcError(error))
+      setDeployUnitMappingsError(cleanIpcError(error))
     } finally {
-      setServiceUnitMappingsSaving(false)
+      setDeployUnitMappingsSaving(false)
     }
-  }, [serviceUnitMappings])
+  }, [deployUnitMappings])
 
   const handleProjectModeTabChange = useCallback(
     (nextTab: string): void => {
       if (projectModeTab === "settings" && nextTab !== "settings") {
-        const payload = buildServiceUnitMappingSavePayload(serviceUnitMappings)
+        const payload = buildDeployUnitMappingSavePayload(deployUnitMappings)
         if (
-          serviceUnitMappingsDirty &&
-          !serviceUnitMappingsLoading &&
-          !serviceUnitMappingsSaving &&
+          deployUnitMappingsDirty &&
+          !deployUnitMappingsLoading &&
+          !deployUnitMappingsSaving &&
           !payload.error
         ) {
-          void handleSaveServiceUnitMappings()
+          void handleSaveDeployUnitMappings()
         }
       }
       setProjectModeTab(nextTab)
     },
     [
-      handleSaveServiceUnitMappings,
+      handleSaveDeployUnitMappings,
       projectModeTab,
-      serviceUnitMappings,
-      serviceUnitMappingsDirty,
-      serviceUnitMappingsLoading,
-      serviceUnitMappingsSaving
+      deployUnitMappings,
+      deployUnitMappingsDirty,
+      deployUnitMappingsLoading,
+      deployUnitMappingsSaving
     ]
   )
 
@@ -5679,12 +5679,12 @@ export function HarnessBoardView({
   const refreshFeaturePublicConstraints = useCallback(
     async (projectId: string, requestId: number): Promise<void> => {
       try {
-        const publicAgentmdServiceUnits = await window.api.harnessBoard.getPublicAgentmdServiceUnits(projectId)
+        const publicAgentmdDeployUnits = await window.api.harnessBoard.getPublicAgentmdDeployUnits(projectId)
         if (requestId !== featureWorkflowRequestIdRef.current) return
-        setFeatureAgentsReadyServiceUnits(publicAgentmdServiceUnits)
+        setFeatureAgentsReadyDeployUnits(publicAgentmdDeployUnits)
       } catch {
         if (requestId !== featureWorkflowRequestIdRef.current) return
-        setFeatureAgentsReadyServiceUnits([])
+        setFeatureAgentsReadyDeployUnits([])
       }
     },
     []
@@ -6287,9 +6287,9 @@ export function HarnessBoardView({
     setFeatureWorkflowConfig(null)
     setFeatureWorkflowTemplate("")
     setSelectedWorkflowNodeIds(new Set())
-    setFeatureAgentsReadyServiceUnits([])
-    setFeatureLocalAgentmdServiceUnitMappings([])
-    setSelectedServiceUnitIds(new Set())
+    setFeatureAgentsReadyDeployUnits([])
+    setFeatureLocalAgentmdDeployUnitMappings([])
+    setSelectedDeployUnitIds(new Set())
     setFeatureWorkflowLoading(true)
 
     void window.api.harnessBoard
@@ -6314,16 +6314,16 @@ export function HarnessBoardView({
       })
     void refreshFeaturePublicConstraints(project.projectId, requestId)
     void window.api.harnessBoard
-      .getLocalAgentmdServiceUnitMappings(serviceUnitMappings)
-      .then((serviceUnitMappingIds) => {
+      .getLocalAgentmdDeployUnitMappings(deployUnitMappings)
+      .then((deployUnitMappingIds) => {
         if (requestId !== featureWorkflowRequestIdRef.current) return
-        setFeatureLocalAgentmdServiceUnitMappings(serviceUnitMappingIds)
+        setFeatureLocalAgentmdDeployUnitMappings(deployUnitMappingIds)
       })
       .catch(() => {
         if (requestId !== featureWorkflowRequestIdRef.current) return
-        setFeatureLocalAgentmdServiceUnitMappings([])
+        setFeatureLocalAgentmdDeployUnitMappings([])
       })
-  }, [refreshFeaturePublicConstraints, serviceUnitMappings])
+  }, [refreshFeaturePublicConstraints, deployUnitMappings])
 
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
@@ -6336,15 +6336,15 @@ export function HarnessBoardView({
         setFeatureWorkflowLoading(false)
         setFeatureWorkflowTemplate("")
         setSelectedWorkflowNodeIds(new Set())
-        setFeatureAgentsReadyServiceUnits([])
-        setFeatureLocalAgentmdServiceUnitMappings([])
-        setSelectedServiceUnitIds(new Set())
+        setFeatureAgentsReadyDeployUnits([])
+        setFeatureLocalAgentmdDeployUnitMappings([])
+        setSelectedDeployUnitIds(new Set())
       }
     },
     [creatingFeatureProjectId]
   )
 
-  const handleOpenServiceUnitSettings = useCallback((): void => {
+  const handleOpenDeployUnitSettings = useCallback((): void => {
     if (creatingFeatureProjectId) return
     handleFeatureDialogOpenChange(false)
     setSelectedFeature(null)
@@ -6377,13 +6377,13 @@ export function HarnessBoardView({
     })
   }, [featureWorkflowConfig, featureWorkflowTemplate])
 
-  const handleServiceUnitToggle = useCallback((serviceUnitIdMapping: string, checked: boolean): void => {
-    setSelectedServiceUnitIds((current) => {
+  const handleDeployUnitToggle = useCallback((deployUnitIdMapping: string, checked: boolean): void => {
+    setSelectedDeployUnitIds((current) => {
       const next = new Set(current)
       if (checked) {
-        next.add(serviceUnitIdMapping)
+        next.add(deployUnitIdMapping)
       } else {
-        next.delete(serviceUnitIdMapping)
+        next.delete(deployUnitIdMapping)
       }
       return next
     })
@@ -6404,11 +6404,11 @@ export function HarnessBoardView({
     const supportsSessionContextInjection = featureDialogProject.supportsSessionContextInjection
     const sessionContextInjectionSource =
       supportsSessionContextInjection ? "plugin" : "cmbdevclaw"
-    const selectedServiceUnits = serviceUnitMappings.filter((mapping) =>
-      selectedServiceUnitIds.has(mapping.serviceUnitIdMapping)
+    const selectedDeployUnits = deployUnitMappings.filter((mapping) =>
+      selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
     )
-    const hasSelectedServiceUnits = selectedServiceUnits.length > 0
-    if (hasSelectedServiceUnits && serviceUnitMappingsDirty) {
+    const hasSelectedDeployUnits = selectedDeployUnits.length > 0
+    if (hasSelectedDeployUnits && deployUnitMappingsDirty) {
       setFeatureError("发布单元路径配置尚未保存，请先保存后再创建特性")
       return
     }
@@ -6442,13 +6442,13 @@ export function HarnessBoardView({
         projectId: featureDialogProject.projectId,
         feature,
         sessionContextInjectionSource,
-        ...(hasSelectedServiceUnits ? { selectedServiceUnits } : {}),
+        ...(hasSelectedDeployUnits ? { selectedDeployUnits } : {}),
         ...workflowInput
       })
 
       setFeatureDialogProject(null)
       setFeatureName("")
-      setSelectedServiceUnitIds(new Set())
+      setSelectedDeployUnitIds(new Set())
       await loadProjectDetail(result.projectId)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
@@ -6468,9 +6468,9 @@ export function HarnessBoardView({
     featureWorkflowConfig,
     featureWorkflowTemplate,
     selectedWorkflowNodeIds,
-    selectedServiceUnitIds,
-    serviceUnitMappings,
-    serviceUnitMappingsDirty,
+    selectedDeployUnitIds,
+    deployUnitMappings,
+    deployUnitMappingsDirty,
     loadProjectDetail
   ])
 
@@ -7087,21 +7087,21 @@ export function HarnessBoardView({
           workflowLoading={featureWorkflowLoading}
           workflowTemplate={featureWorkflowTemplate}
           selectedWorkflowNodeIds={selectedWorkflowNodeIds}
-          agentsReadyServiceUnits={featureAgentsReadyServiceUnits}
-          localAgentmdServiceUnitMappings={featureLocalAgentmdServiceUnitMappings}
+          agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
+          localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
           publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
           syncingPublicConstraints={featurePublicConstraintsSyncing}
-          serviceUnitMappings={serviceUnitMappings}
-          serviceUnitMappingsLoading={serviceUnitMappingsLoading}
-          selectedServiceUnitIds={selectedServiceUnitIds}
+          deployUnitMappings={deployUnitMappings}
+          deployUnitMappingsLoading={deployUnitMappingsLoading}
+          selectedDeployUnitIds={selectedDeployUnitIds}
           creating={creatingFeatureProjectId !== null}
           error={featureError}
           onOpenChange={handleFeatureDialogOpenChange}
           onChange={setFeatureName}
           onWorkflowTemplateChange={handleWorkflowTemplateChange}
           onWorkflowNodeToggle={handleWorkflowNodeToggle}
-          onServiceUnitToggle={handleServiceUnitToggle}
-          onOpenServiceUnitSettings={handleOpenServiceUnitSettings}
+          onDeployUnitToggle={handleDeployUnitToggle}
+          onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
           onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
           onSubmit={() => void handleSubmitFeature()}
         />
@@ -7304,16 +7304,16 @@ export function HarnessBoardView({
 
             <TabsContent value="settings" className="mt-0">
               <ProjectModeSettingsPanel
-                mappings={serviceUnitMappings}
-                loading={serviceUnitMappingsLoading}
-                saving={serviceUnitMappingsSaving}
-                dirty={serviceUnitMappingsDirty}
-                error={serviceUnitMappingsError}
-                onAdd={handleAddServiceUnitMapping}
-                onRemove={handleRemoveServiceUnitMapping}
-                onChange={handleChangeServiceUnitMapping}
-                onPickPath={(index) => void handlePickServiceUnitRepoPath(index)}
-                onSave={() => void handleSaveServiceUnitMappings()}
+                mappings={deployUnitMappings}
+                loading={deployUnitMappingsLoading}
+                saving={deployUnitMappingsSaving}
+                dirty={deployUnitMappingsDirty}
+                error={deployUnitMappingsError}
+                onAdd={handleAddDeployUnitMapping}
+                onRemove={handleRemoveDeployUnitMapping}
+                onChange={handleChangeDeployUnitMapping}
+                onPickPath={(index) => void handlePickDeployUnitRepoPath(index)}
+                onSave={() => void handleSaveDeployUnitMappings()}
               />
             </TabsContent>
 
@@ -7343,21 +7343,21 @@ export function HarnessBoardView({
         workflowLoading={featureWorkflowLoading}
         workflowTemplate={featureWorkflowTemplate}
         selectedWorkflowNodeIds={selectedWorkflowNodeIds}
-        agentsReadyServiceUnits={featureAgentsReadyServiceUnits}
-        localAgentmdServiceUnitMappings={featureLocalAgentmdServiceUnitMappings}
+        agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
+        localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
         publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
         syncingPublicConstraints={featurePublicConstraintsSyncing}
-        serviceUnitMappings={serviceUnitMappings}
-        serviceUnitMappingsLoading={serviceUnitMappingsLoading}
-        selectedServiceUnitIds={selectedServiceUnitIds}
+        deployUnitMappings={deployUnitMappings}
+        deployUnitMappingsLoading={deployUnitMappingsLoading}
+        selectedDeployUnitIds={selectedDeployUnitIds}
         creating={creatingFeatureProjectId !== null}
         error={featureError}
         onOpenChange={handleFeatureDialogOpenChange}
         onChange={setFeatureName}
         onWorkflowTemplateChange={handleWorkflowTemplateChange}
         onWorkflowNodeToggle={handleWorkflowNodeToggle}
-        onServiceUnitToggle={handleServiceUnitToggle}
-        onOpenServiceUnitSettings={handleOpenServiceUnitSettings}
+        onDeployUnitToggle={handleDeployUnitToggle}
+        onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
         onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
         onSubmit={() => void handleSubmitFeature()}
       />

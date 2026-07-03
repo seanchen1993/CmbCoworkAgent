@@ -65,7 +65,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessServiceUnitMapping,
+  HarnessDeployUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -2243,10 +2243,10 @@ interface CustomAPI {
   harnessBoard: {
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
-    getServiceUnitMappings: () => Promise<HarnessServiceUnitMapping[]>
-    saveServiceUnitMappings: (
-      mappings: HarnessServiceUnitMapping[]
-    ) => Promise<HarnessServiceUnitMapping[]>
+    getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
+    saveDeployUnitMappings: (
+      mappings: HarnessDeployUnitMapping[]
+    ) => Promise<HarnessDeployUnitMapping[]>
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
@@ -2258,9 +2258,9 @@ interface CustomAPI {
     ) => Promise<HarnessEnterpriseProjectDetailResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
-    getPublicAgentmdServiceUnits: (projectId: string) => Promise<string[]>
-    getLocalAgentmdServiceUnitMappings: (
-      mappings: HarnessServiceUnitMapping[]
+    getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
+    getLocalAgentmdDeployUnitMappings: (
+      mappings: HarnessDeployUnitMapping[]
     ) => Promise<string[]>
     updateProject: (
       projectId: string,

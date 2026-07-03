@@ -47,7 +47,7 @@ import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
 import type {
   HarnessAgentmdLoadStatusItem,
-  HarnessServiceUnitMapping
+  HarnessDeployUnitMapping
 } from "../../shared/harness-board-types"
 import {
   createAgent,
@@ -3086,25 +3086,25 @@ interface AgentsPromptLoadStatusPayload {
   promptPreview?: string
 }
 
-function applyServiceUnitMappingsToAgentmdLoadStatus(
+function applyDeployUnitMappingsToAgentmdLoadStatus(
   items: HarnessAgentmdLoadStatusItem[],
-  mappings: HarnessServiceUnitMapping[] | undefined
+  mappings: HarnessDeployUnitMapping[] | undefined
 ): HarnessAgentmdLoadStatusItem[] {
   if (!Array.isArray(mappings) || mappings.length === 0) return items
 
-  const serviceUnitByRepoPath = new Map<string, string>()
+  const deployUnitByRepoPath = new Map<string, string>()
   for (const mapping of mappings) {
     const localRepoPath = mapping.localRepoPath.trim()
-    const serviceUnitId = mapping.serviceUnitId.trim()
-    if (!localRepoPath || !serviceUnitId) continue
-    serviceUnitByRepoPath.set(resolve(localRepoPath), serviceUnitId)
+    const deployUnitId = mapping.deployUnitId.trim()
+    if (!localRepoPath || !deployUnitId) continue
+    deployUnitByRepoPath.set(resolve(localRepoPath), deployUnitId)
   }
-  if (serviceUnitByRepoPath.size === 0) return items
+  if (deployUnitByRepoPath.size === 0) return items
 
   return items.map((item) => {
     if (!path.isAbsolute(item.deployUnitId)) return item
-    const serviceUnitId = serviceUnitByRepoPath.get(resolve(item.deployUnitId))
-    return serviceUnitId ? { ...item, deployUnitId: serviceUnitId } : item
+    const deployUnitId = deployUnitByRepoPath.get(resolve(item.deployUnitId))
+    return deployUnitId ? { ...item, deployUnitId: deployUnitId } : item
   })
 }
 
@@ -3159,8 +3159,8 @@ export interface CreateAgentRuntimeOptions {
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   /** Additional project-mode workspace roots whose AGENTS.md files should be loaded by framework fallback. */
   additionalAgentsWorkspacePaths?: string[]
-  /** Project-mode service unit metadata for additional workspace AGENTS.md load status display. */
-  additionalAgentsWorkspaceMappings?: HarnessServiceUnitMapping[]
+  /** Project-mode deploy unit metadata for additional workspace AGENTS.md load status display. */
+  additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
   /** Project-mode callback for reporting final AGENTS.md load status and preview. */
   onAgentsPromptLoadStatus?: (payload: AgentsPromptLoadStatusPayload) => void
   /** Test/debug hook: captures the final system prompt passed to LangChain. */
@@ -3737,7 +3737,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
             totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
           })
     agentsPromptLoader = "cmbdevclaw"
-    agentsPromptLoadStatusItems = applyServiceUnitMappingsToAgentmdLoadStatus(
+    agentsPromptLoadStatusItems = applyDeployUnitMappingsToAgentmdLoadStatus(
       buildAgentsPromptLoadStatusItems(agentsPrompt),
       additionalAgentsWorkspaceMappings
     )

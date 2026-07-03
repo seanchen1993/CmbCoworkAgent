@@ -98,9 +98,9 @@ export interface HarnessKnowledgePreviewResult {
   error?: string
 }
 
-export interface HarnessServiceUnitMapping {
-  serviceUnitIdMapping: string
-  serviceUnitId: string
+export interface HarnessDeployUnitMapping {
+  deployUnitIdMapping: string
+  deployUnitId: string
   localRepoPath: string
   description?: string
 }
@@ -115,10 +115,10 @@ export interface HarnessAgentmdLoadStatusItem {
   message: string
 }
 
-export interface HarnessFeatureServiceUnitBinding {
+export interface HarnessFeatureDeployUnitBinding {
   projectId: string
   featureId: string
-  selectedServiceUnitMappings: HarnessServiceUnitMapping[]
+  selectedDeployUnitMappings: HarnessDeployUnitMapping[]
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
 }
 
@@ -231,7 +231,7 @@ export interface HarnessEnterpriseProjectDetailResult {
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
-  selectedServiceUnits?: HarnessServiceUnitMapping[]
+  selectedDeployUnits?: HarnessDeployUnitMapping[]
   sessionContextInjectionSource?: HarnessSessionContextInjectionSource
   workflowTemplate?: string
   workflowNodes?: string[]
@@ -289,7 +289,7 @@ export interface HarnessProjectListItem {
   }
   creator?: HarnessProjectCreatorMetadata
   boardCompatibility: HarnessBoardCompatibility
-  supportsServiceUnits: boolean
+  supportsDeployUnits: boolean
   supportsSessionContextInjection: boolean
   lifecycle: {
     status: "active" | "archived"
@@ -524,7 +524,7 @@ export interface HarnessRunDetailViewModel {
     featureStatusLabel?: string
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
-    selectedServiceUnits: HarnessServiceUnitMapping[]
+    selectedDeployUnits: HarnessDeployUnitMapping[]
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

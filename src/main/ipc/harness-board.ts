@@ -9,13 +9,13 @@ import {
   getHarnessProjectDetail,
   getHarnessProjectDetails,
   getHarnessKnowledgePreview,
-  getHarnessLocalAgentmdServiceUnitMappings,
-  getHarnessProjectPublicAgentmdServiceUnits,
+  getHarnessLocalAgentmdDeployUnitMappings,
+  getHarnessProjectPublicAgentmdDeployUnits,
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
-  listHarnessServiceUnitMappings,
-  saveHarnessServiceUnitMappings,
+  listHarnessDeployUnitMappings,
+  saveHarnessDeployUnitMappings,
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
   updateHarnessProjectMetadata
@@ -39,7 +39,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
-  HarnessServiceUnitMapping,
+  HarnessDeployUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -62,14 +62,14 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     return listHarnessProjects()
   })
 
-  ipcMain.handle("harnessBoard:getServiceUnitMappings", async (): Promise<HarnessServiceUnitMapping[]> => {
-    return listHarnessServiceUnitMappings()
+  ipcMain.handle("harnessBoard:getDeployUnitMappings", async (): Promise<HarnessDeployUnitMapping[]> => {
+    return listHarnessDeployUnitMappings()
   })
 
   ipcMain.handle(
-    "harnessBoard:saveServiceUnitMappings",
-    async (_event, mappings: HarnessServiceUnitMapping[]): Promise<HarnessServiceUnitMapping[]> => {
-      return saveHarnessServiceUnitMappings(mappings)
+    "harnessBoard:saveDeployUnitMappings",
+    async (_event, mappings: HarnessDeployUnitMapping[]): Promise<HarnessDeployUnitMapping[]> => {
+      return saveHarnessDeployUnitMappings(mappings)
     }
   )
 
@@ -136,16 +136,16 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
-    "harnessBoard:getPublicAgentmdServiceUnits",
+    "harnessBoard:getPublicAgentmdDeployUnits",
     async (_event, projectId: string): Promise<string[]> => {
-      return getHarnessProjectPublicAgentmdServiceUnits(projectId)
+      return getHarnessProjectPublicAgentmdDeployUnits(projectId)
     }
   )
 
   ipcMain.handle(
-    "harnessBoard:getLocalAgentmdServiceUnitMappings",
-    async (_event, mappings: HarnessServiceUnitMapping[]): Promise<string[]> => {
-      return getHarnessLocalAgentmdServiceUnitMappings(mappings)
+    "harnessBoard:getLocalAgentmdDeployUnitMappings",
+    async (_event, mappings: HarnessDeployUnitMapping[]): Promise<string[]> => {
+      return getHarnessLocalAgentmdDeployUnitMappings(mappings)
     }
   )
 

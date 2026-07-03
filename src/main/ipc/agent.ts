@@ -54,7 +54,7 @@ import {
 } from "../../shared/goal-events"
 import type {
   HarnessAgentmdLoadStatusItem,
-  HarnessServiceUnitMapping
+  HarnessDeployUnitMapping
 } from "../../shared/harness-board-types"
 import { TraceCollector } from "../agent/trace/collector"
 import {
@@ -406,7 +406,7 @@ interface HarnessAgentContext {
   enableAgentsPrompt?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
-  additionalAgentsWorkspaceMappings?: HarnessServiceUnitMapping[]
+  additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
   sessionContextInjectWarning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   pluginOutputDir?: string

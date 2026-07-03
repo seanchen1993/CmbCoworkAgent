@@ -23,7 +23,7 @@ import type {
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
-  HarnessFeatureServiceUnitBinding,
+  HarnessFeatureDeployUnitBinding,
   HarnessFeatureStatus,
   HarnessAgentmdLoadStatusItem,
   HarnessNodeStatus,
@@ -37,7 +37,7 @@ import type {
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionContextInjectionSource,
-  HarnessServiceUnitMapping,
+  HarnessDeployUnitMapping,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
@@ -54,19 +54,19 @@ interface HarnessProjectStoreFile {
   projects: HarnessProjectMetadata[]
 }
 
-interface HarnessServiceUnitMappingStoreFile {
+interface HarnessDeployUnitMappingStoreFile {
   version: 1
-  mappings: HarnessServiceUnitMapping[]
+  mappings: HarnessDeployUnitMapping[]
 }
 
-interface HarnessFeatureServiceUnitBindingRecord extends HarnessFeatureServiceUnitBinding {
+interface HarnessFeatureDeployUnitBindingRecord extends HarnessFeatureDeployUnitBinding {
   createdAt: string
   updatedAt?: string
 }
 
-interface HarnessFeatureServiceUnitBindingStoreFile {
+interface HarnessFeatureDeployUnitBindingStoreFile {
   version: 1
-  bindings: HarnessFeatureServiceUnitBindingRecord[]
+  bindings: HarnessFeatureDeployUnitBindingRecord[]
 }
 
 type HarnessHookLogRef = HarnessRunDetailViewModel["run"]["hookLogRefs"][number]
@@ -132,7 +132,7 @@ interface HarnessHookLogEntry {
 
 interface HarnessCommandParseOptions {
   feature?: string
-  selectedServiceUnitsJson?: string
+  selectedDeployUnitsJson?: string
   sessionWorkspacePath?: string
   projectDirs?: string[]
   workflowTemplate?: string
@@ -141,8 +141,8 @@ interface HarnessCommandParseOptions {
 }
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
-const HARNESS_SERVICE_UNIT_MAPPING_FILE = join(getOpenworkDir(), "harness-serviceUnitId-mapping.json")
-const HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE = join(getOpenworkDir(), "harness-board-features.json")
+const HARNESS_DEPLOY_UNIT_MAPPING_FILE = join(getOpenworkDir(), "harness-deployUnitId-mapping.json")
+const HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE = join(getOpenworkDir(), "harness-board-features.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
@@ -286,14 +286,14 @@ function emptyProjectStore(): HarnessProjectStoreFile {
   }
 }
 
-function emptyServiceUnitMappingStore(): HarnessServiceUnitMappingStoreFile {
+function emptyDeployUnitMappingStore(): HarnessDeployUnitMappingStoreFile {
   return {
     version: 1,
     mappings: []
   }
 }
 
-function emptyFeatureServiceUnitBindingStore(): HarnessFeatureServiceUnitBindingStoreFile {
+function emptyFeatureDeployUnitBindingStore(): HarnessFeatureDeployUnitBindingStoreFile {
   return {
     version: 1,
     bindings: []
@@ -772,7 +772,7 @@ function replaceHarnessConfigPlaceholders(
     projectDir,
     projectCode: project.projectCode,
     feature: options.feature ?? "",
-    selectedDeployUnits: options.selectedServiceUnitsJson ?? "",
+    selectedDeployUnits: options.selectedDeployUnitsJson ?? "",
     sessionWorkspacePath: options.sessionWorkspacePath ?? "",
     pluginPath: cwd,
     mode,
@@ -797,7 +797,7 @@ function parseInspectCommand(
   const optionalCommandArgs: Array<{
     key: keyof Pick<
       HarnessCommandParseOptions,
-      "workflowTemplate" | "workflowNodes" | "selectedServiceUnitsJson"
+      "workflowTemplate" | "workflowNodes" | "selectedDeployUnitsJson"
     >
     placeholder: string
     flag: string
@@ -805,7 +805,7 @@ function parseInspectCommand(
     { key: "workflowTemplate", placeholder: "${workflowTemplate}", flag: "--workflow-template" },
     { key: "workflowNodes", placeholder: "${workflowNodes}", flag: "--workflow-nodes" },
     {
-      key: "selectedServiceUnitsJson",
+      key: "selectedDeployUnitsJson",
       placeholder: "${selectedDeployUnits}",
       flag: "--selected-deployUnit"
     }
@@ -867,7 +867,7 @@ function readBoardConfigInspectCommand(
   return readBoardConfigPlatformText(cwd, HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode])
 }
 
-function boardConfigPublicAgentmdServiceUnits(cwd: string): string[] {
+function boardConfigPublicAgentmdDeployUnits(cwd: string): string[] {
   const parsed = readBoardConfig(cwd)
   return parsed ? uniqueStringsInOrder(parsed.supported_deploy_units) : []
 }
@@ -931,34 +931,34 @@ function projectDirectoryMissingMessage(project: HarnessProjectMetadata): string
   return `请确认项目「${project.projectCode}」的工作区「${project.workspacePath}」下存在项目文件夹「${projectDirectoryName(project)}」。`
 }
 
-function resolveServiceUnitMappingSnapshots(
-  snapshots: HarnessServiceUnitMapping[]
-): HarnessServiceUnitMapping[] {
+function resolveDeployUnitMappingSnapshots(
+  snapshots: HarnessDeployUnitMapping[]
+): HarnessDeployUnitMapping[] {
   const mappingsById = new Map(
-    readServiceUnitMappingStore().mappings.map((mapping) => [mapping.serviceUnitIdMapping, mapping])
+    readDeployUnitMappingStore().mappings.map((mapping) => [mapping.deployUnitIdMapping, mapping])
   )
-  return snapshots.map((snapshot) => mappingsById.get(snapshot.serviceUnitIdMapping) ?? snapshot)
+  return snapshots.map((snapshot) => mappingsById.get(snapshot.deployUnitIdMapping) ?? snapshot)
 }
 
-function resolveFeatureServiceUnitMappings(
+function resolveFeatureDeployUnitMappings(
   projectId: string,
   featureId: string
-): HarnessServiceUnitMapping[] {
-  const binding = findFeatureServiceUnitBinding(projectId, featureId)
-  return binding ? resolveServiceUnitMappingSnapshots(binding.selectedServiceUnitMappings) : []
+): HarnessDeployUnitMapping[] {
+  const binding = findFeatureDeployUnitBinding(projectId, featureId)
+  return binding ? resolveDeployUnitMappingSnapshots(binding.selectedDeployUnitMappings) : []
 }
 
-function getHarnessSelectedServiceUnitsCommandOptions(
+function getHarnessSelectedDeployUnitsCommandOptions(
   project: HarnessProjectMetadata,
   featureId: string,
-  selectedServiceUnits?: HarnessServiceUnitMapping[]
-): Pick<HarnessCommandParseOptions, "selectedServiceUnitsJson"> {
-  const resolvedServiceUnits =
-    selectedServiceUnits ??
-    resolveFeatureServiceUnitMappings(project.projectId, featureId)
-  if (resolvedServiceUnits.length === 0) return {}
+  selectedDeployUnits?: HarnessDeployUnitMapping[]
+): Pick<HarnessCommandParseOptions, "selectedDeployUnitsJson"> {
+  const resolvedDeployUnits =
+    selectedDeployUnits ??
+    resolveFeatureDeployUnitMappings(project.projectId, featureId)
+  if (resolvedDeployUnits.length === 0) return {}
   return {
-    selectedServiceUnitsJson: JSON.stringify(resolvedServiceUnits)
+    selectedDeployUnitsJson: JSON.stringify(resolvedDeployUnits)
   }
 }
 
@@ -974,10 +974,10 @@ function resolveHarnessAdditionalWorkspaceRootMappings(
   projectId: string,
   featureId: string,
   _workspacePath: string
-): HarnessServiceUnitMapping[] {
+): HarnessDeployUnitMapping[] {
   const seen = new Set<string>()
-  const mappings: HarnessServiceUnitMapping[] = []
-  for (const mapping of resolveFeatureServiceUnitMappings(projectId, featureId)) {
+  const mappings: HarnessDeployUnitMapping[] = []
+  for (const mapping of resolveFeatureDeployUnitMappings(projectId, featureId)) {
     const localRepoPath = normalizeText(mapping.localRepoPath).trim()
     if (!localRepoPath || !isAbsolute(localRepoPath)) continue
 
@@ -986,8 +986,8 @@ function resolveHarnessAdditionalWorkspaceRootMappings(
     seen.add(normalizedPath)
     const description = normalizeText(mapping.description).trim()
     mappings.push({
-      serviceUnitIdMapping: mapping.serviceUnitIdMapping,
-      serviceUnitId: normalizeText(mapping.serviceUnitId).trim(),
+      deployUnitIdMapping: mapping.deployUnitIdMapping,
+      deployUnitId: normalizeText(mapping.deployUnitId).trim(),
       localRepoPath,
       ...(description ? { description } : {})
     })
@@ -996,7 +996,7 @@ function resolveHarnessAdditionalWorkspaceRootMappings(
 }
 
 function buildHarnessAdditionalWorkspaceRootsPrompt(
-  mappings: HarnessServiceUnitMapping[]
+  mappings: HarnessDeployUnitMapping[]
 ): string | undefined {
   if (mappings.length === 0) return undefined
 
@@ -1009,11 +1009,11 @@ function buildHarnessAdditionalWorkspaceRootsPrompt(
     "| --- | --- | --- |",
     ...mappings.map((mapping) => {
       const description = formatMarkdownTableCell(normalizeText(mapping.description).trim())
-      const serviceUnitId = formatMarkdownTableCell(normalizeText(mapping.serviceUnitId).trim())
+      const deployUnitId = formatMarkdownTableCell(normalizeText(mapping.deployUnitId).trim())
       const localRepoPath = formatMarkdownTableCell(
         `\`${formatMarkdownInlineCode(normalizeText(mapping.localRepoPath).trim())}\``
       )
-      return `| ${description} | ${serviceUnitId} | ${localRepoPath} |`
+      return `| ${description} | ${deployUnitId} | ${localRepoPath} |`
     })
   ].join("\n")
 }
@@ -1803,7 +1803,7 @@ function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata 
   return Object.values(creator).some((item) => item.trim()) ? creator : null
 }
 
-function createUniqueServiceUnitMappingId(seenIds: Set<string>): string {
+function createUniqueDeployUnitMappingId(seenIds: Set<string>): string {
   let id = uuid()
   while (seenIds.has(id)) {
     id = uuid()
@@ -1811,32 +1811,32 @@ function createUniqueServiceUnitMappingId(seenIds: Set<string>): string {
   return id
 }
 
-function normalizeServiceUnitMappings(
+function normalizeDeployUnitMappings(
   value: unknown,
   options: { assignMissingOrDuplicateMappingId?: boolean } = {}
-): HarnessServiceUnitMapping[] {
+): HarnessDeployUnitMapping[] {
   if (!Array.isArray(value)) return []
   const seen = new Set<string>()
   const seenIds = new Set<string>()
-  const mappings: HarnessServiceUnitMapping[] = []
+  const mappings: HarnessDeployUnitMapping[] = []
   for (const item of value) {
     if (!isObject(item)) continue
-    const serviceUnitId = normalizeText(item.serviceUnitId).trim()
+    const deployUnitId = normalizeText(item.deployUnitId).trim()
     const localRepoPath = normalizeText(item.localRepoPath).trim()
     const description = normalizeText(item.description).trim()
-    if (!serviceUnitId || !localRepoPath || seen.has(serviceUnitId)) continue
+    if (!deployUnitId || !localRepoPath || seen.has(deployUnitId)) continue
 
-    let serviceUnitIdMapping = normalizeText(item.serviceUnitIdMapping).trim()
-    if (!serviceUnitIdMapping || seenIds.has(serviceUnitIdMapping)) {
+    let deployUnitIdMapping = normalizeText(item.deployUnitIdMapping).trim()
+    if (!deployUnitIdMapping || seenIds.has(deployUnitIdMapping)) {
       if (!options.assignMissingOrDuplicateMappingId) continue
-      serviceUnitIdMapping = createUniqueServiceUnitMappingId(seenIds)
+      deployUnitIdMapping = createUniqueDeployUnitMappingId(seenIds)
     }
 
-    seen.add(serviceUnitId)
-    seenIds.add(serviceUnitIdMapping)
+    seen.add(deployUnitId)
+    seenIds.add(deployUnitIdMapping)
     mappings.push({
-      serviceUnitIdMapping,
-      serviceUnitId,
+      deployUnitIdMapping,
+      deployUnitId,
       localRepoPath,
       ...(description ? { description } : {})
     })
@@ -1844,8 +1844,8 @@ function normalizeServiceUnitMappings(
   return mappings
 }
 
-function normalizeServiceUnitMappingsForSave(value: unknown): HarnessServiceUnitMapping[] {
-  return normalizeServiceUnitMappings(value, { assignMissingOrDuplicateMappingId: true })
+function normalizeDeployUnitMappingsForSave(value: unknown): HarnessDeployUnitMapping[] {
+  return normalizeDeployUnitMappings(value, { assignMissingOrDuplicateMappingId: true })
 }
 
 function normalizeSessionContextInjectionSource(
@@ -1859,18 +1859,18 @@ function normalizeSessionContextInjectionSource(
     : "cmbdevclaw"
 }
 
-function normalizeFeatureServiceUnitBinding(
+function normalizeFeatureDeployUnitBinding(
   value: unknown
-): HarnessFeatureServiceUnitBindingRecord | null {
+): HarnessFeatureDeployUnitBindingRecord | null {
   if (!isObject(value)) return null
   const projectId = normalizeText(value.projectId).trim()
   const featureId = normalizeText(value.featureId).trim()
-  const selectedServiceUnitMappings = normalizeServiceUnitMappings(value.selectedServiceUnitMappings)
+  const selectedDeployUnitMappings = normalizeDeployUnitMappings(value.selectedDeployUnitMappings)
   if (!projectId || !featureId) return null
   return {
     projectId,
     featureId,
-    selectedServiceUnitMappings,
+    selectedDeployUnitMappings,
     sessionContextInjectionSource: normalizeSessionContextInjectionSource(
       value.sessionContextInjectionSource
     ),
@@ -1879,16 +1879,16 @@ function normalizeFeatureServiceUnitBinding(
   }
 }
 
-function normalizeFeatureServiceUnitBindings(
+function normalizeFeatureDeployUnitBindings(
   value: unknown
-): HarnessFeatureServiceUnitBindingRecord[] {
+): HarnessFeatureDeployUnitBindingRecord[] {
   if (!Array.isArray(value)) return []
   const seen = new Set<string>()
-  const bindings: HarnessFeatureServiceUnitBindingRecord[] = []
+  const bindings: HarnessFeatureDeployUnitBindingRecord[] = []
   for (const item of value) {
-    const binding = normalizeFeatureServiceUnitBinding(item)
+    const binding = normalizeFeatureDeployUnitBinding(item)
     if (!binding) continue
-    const key = featureServiceUnitBindingKey(binding.projectId, binding.featureId)
+    const key = featureDeployUnitBindingKey(binding.projectId, binding.featureId)
     if (seen.has(key)) continue
     seen.add(key)
     bindings.push(binding)
@@ -1935,85 +1935,85 @@ function writeProjectStore(store: HarnessProjectStoreFile): void {
   writeFileSync(HARNESS_BOARD_FILE, `${JSON.stringify(store, null, 2)}\n`)
 }
 
-function readServiceUnitMappingStore(): HarnessServiceUnitMappingStoreFile {
+function readDeployUnitMappingStore(): HarnessDeployUnitMappingStoreFile {
   getOpenworkDir()
-  if (!existsSync(HARNESS_SERVICE_UNIT_MAPPING_FILE)) return emptyServiceUnitMappingStore()
+  if (!existsSync(HARNESS_DEPLOY_UNIT_MAPPING_FILE)) return emptyDeployUnitMappingStore()
   try {
-    const parsed = JSON.parse(readFileSync(HARNESS_SERVICE_UNIT_MAPPING_FILE, "utf-8")) as unknown
-    if (!isObject(parsed)) return emptyServiceUnitMappingStore()
+    const parsed = JSON.parse(readFileSync(HARNESS_DEPLOY_UNIT_MAPPING_FILE, "utf-8")) as unknown
+    if (!isObject(parsed)) return emptyDeployUnitMappingStore()
     return {
       version: 1,
-      mappings: normalizeServiceUnitMappings(parsed.mappings)
+      mappings: normalizeDeployUnitMappings(parsed.mappings)
     }
   } catch {
-    return emptyServiceUnitMappingStore()
+    return emptyDeployUnitMappingStore()
   }
 }
 
-function writeServiceUnitMappingStore(store: HarnessServiceUnitMappingStoreFile): void {
+function writeDeployUnitMappingStore(store: HarnessDeployUnitMappingStoreFile): void {
   getOpenworkDir()
-  writeFileSync(HARNESS_SERVICE_UNIT_MAPPING_FILE, `${JSON.stringify(store, null, 2)}\n`)
+  writeFileSync(HARNESS_DEPLOY_UNIT_MAPPING_FILE, `${JSON.stringify(store, null, 2)}\n`)
 }
 
-function featureServiceUnitBindingKey(projectId: string, featureId: string): string {
+function featureDeployUnitBindingKey(projectId: string, featureId: string): string {
   return `${projectId}\0${featureId}`
 }
 
-function readFeatureServiceUnitBindingStore(): HarnessFeatureServiceUnitBindingStoreFile {
+function readFeatureDeployUnitBindingStore(): HarnessFeatureDeployUnitBindingStoreFile {
   getOpenworkDir()
-  if (!existsSync(HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE)) {
-    return emptyFeatureServiceUnitBindingStore()
+  if (!existsSync(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE)) {
+    return emptyFeatureDeployUnitBindingStore()
   }
   try {
     const parsed = JSON.parse(
-      readFileSync(HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE, "utf-8")
+      readFileSync(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE, "utf-8")
     ) as unknown
-    if (!isObject(parsed)) return emptyFeatureServiceUnitBindingStore()
+    if (!isObject(parsed)) return emptyFeatureDeployUnitBindingStore()
     return {
       version: 1,
-      bindings: normalizeFeatureServiceUnitBindings(parsed.bindings)
+      bindings: normalizeFeatureDeployUnitBindings(parsed.bindings)
     }
   } catch {
-    return emptyFeatureServiceUnitBindingStore()
+    return emptyFeatureDeployUnitBindingStore()
   }
 }
 
-function writeFeatureServiceUnitBindingStore(
-  store: HarnessFeatureServiceUnitBindingStoreFile
+function writeFeatureDeployUnitBindingStore(
+  store: HarnessFeatureDeployUnitBindingStoreFile
 ): void {
   getOpenworkDir()
-  writeFileSync(HARNESS_FEATURE_SERVICE_UNIT_BINDING_FILE, `${JSON.stringify(store, null, 2)}\n`)
+  writeFileSync(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE, `${JSON.stringify(store, null, 2)}\n`)
 }
 
-function findFeatureServiceUnitBinding(
+function findFeatureDeployUnitBinding(
   projectId: string,
   featureId: string
-): HarnessFeatureServiceUnitBindingRecord | null {
-  const key = featureServiceUnitBindingKey(projectId, featureId)
+): HarnessFeatureDeployUnitBindingRecord | null {
+  const key = featureDeployUnitBindingKey(projectId, featureId)
   return (
-    readFeatureServiceUnitBindingStore().bindings.find(
-      (binding) => featureServiceUnitBindingKey(binding.projectId, binding.featureId) === key
+    readFeatureDeployUnitBindingStore().bindings.find(
+      (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
     ) ?? null
   )
 }
 
-function saveFeatureServiceUnitBinding(
+function saveFeatureDeployUnitBinding(
   projectId: string,
   featureId: string,
-  selectedServiceUnitMappings: HarnessServiceUnitMapping[],
+  selectedDeployUnitMappings: HarnessDeployUnitMapping[],
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
-): HarnessFeatureServiceUnitBindingRecord {
-  const store = readFeatureServiceUnitBindingStore()
-  const key = featureServiceUnitBindingKey(projectId, featureId)
+): HarnessFeatureDeployUnitBindingRecord {
+  const store = readFeatureDeployUnitBindingStore()
+  const key = featureDeployUnitBindingKey(projectId, featureId)
   const now = formatGmt8Timestamp()
   const existingIndex = store.bindings.findIndex(
-    (binding) => featureServiceUnitBindingKey(binding.projectId, binding.featureId) === key
+    (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
   )
   const existing = existingIndex >= 0 ? store.bindings[existingIndex] : null
-  const binding: HarnessFeatureServiceUnitBindingRecord = {
+  const binding: HarnessFeatureDeployUnitBindingRecord = {
     projectId,
     featureId,
-    selectedServiceUnitMappings,
+    selectedDeployUnitMappings,
     sessionContextInjectionSource,
     createdAt:
       existing?.createdAt && isGmt8Timestamp(existing.createdAt) ? existing.createdAt : now,
@@ -2024,19 +2024,19 @@ function saveFeatureServiceUnitBinding(
   } else {
     store.bindings.unshift(binding)
   }
-  writeFeatureServiceUnitBindingStore(store)
+  writeFeatureDeployUnitBindingStore(store)
   return binding
 }
 
-export function listHarnessServiceUnitMappings(): HarnessServiceUnitMapping[] {
-  return readServiceUnitMappingStore().mappings
+export function listHarnessDeployUnitMappings(): HarnessDeployUnitMapping[] {
+  return readDeployUnitMappingStore().mappings
 }
 
-export function saveHarnessServiceUnitMappings(
-  mappings: HarnessServiceUnitMapping[]
-): HarnessServiceUnitMapping[] {
-  const normalized = normalizeServiceUnitMappingsForSave(mappings)
-  writeServiceUnitMappingStore({
+export function saveHarnessDeployUnitMappings(
+  mappings: HarnessDeployUnitMapping[]
+): HarnessDeployUnitMapping[] {
+  const normalized = normalizeDeployUnitMappingsForSave(mappings)
+  writeDeployUnitMappingStore({
     version: 1,
     mappings: normalized
   })
@@ -2050,7 +2050,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     plugin,
     harnessAdapter.name || harnessAdapter.id
   )
-  const supportsServiceUnits = boardCompatibility.compatible
+  const supportsDeployUnits = boardCompatibility.compatible
   const supportsSessionContextInjection =
     boardCompatibility.compatible && plugin
       ? boardConfigSupportsSessionContextInjection(plugin.path)
@@ -2073,7 +2073,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     },
     creator: project.creator,
     boardCompatibility,
-    supportsServiceUnits,
+    supportsDeployUnits,
     supportsSessionContextInjection,
     lifecycle: {
       status: project.lifecycle.status,
@@ -2181,38 +2181,38 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
   validateHarnessName(input.feature, "特性名称")
 }
 
-function resolveFeatureSelectedServiceUnits(
+function resolveFeatureSelectedDeployUnits(
   input: HarnessFeatureCreateInput,
   _project: HarnessProjectMetadata
-): HarnessServiceUnitMapping[] {
-  if (!Array.isArray(input.selectedServiceUnits)) return []
+): HarnessDeployUnitMapping[] {
+  if (!Array.isArray(input.selectedDeployUnits)) return []
 
-  const selected = normalizeServiceUnitMappings(input.selectedServiceUnits)
+  const selected = normalizeDeployUnitMappings(input.selectedDeployUnits)
   if (selected.length === 0) {
-    throw new Error("请至少选择一个服务单元")
+    throw new Error("请至少选择一个发布单元")
   }
 
-  const configuredMappings = readServiceUnitMappingStore().mappings
+  const configuredMappings = readDeployUnitMappingStore().mappings
   const configuredById = new Map(
-    configuredMappings.map((mapping) => [mapping.serviceUnitIdMapping, mapping])
+    configuredMappings.map((mapping) => [mapping.deployUnitIdMapping, mapping])
   )
-  const resolved: HarnessServiceUnitMapping[] = []
+  const resolved: HarnessDeployUnitMapping[] = []
 
   for (const item of selected) {
-    const configured = configuredById.get(item.serviceUnitIdMapping)
+    const configured = configuredById.get(item.deployUnitIdMapping)
     const resolvedMapping = configured ?? item
-    const serviceUnitId = resolvedMapping.serviceUnitId.trim()
+    const deployUnitId = resolvedMapping.deployUnitId.trim()
     const localRepoPath = resolvedMapping.localRepoPath.trim()
     if (!isAbsolute(localRepoPath)) {
-      throw new Error(`服务单元 ${serviceUnitId} 的代码库路径必须是绝对路径`)
+      throw new Error(`发布单元 ${deployUnitId} 的代码库路径必须是绝对路径`)
     }
     if (!existsSync(localRepoPath)) {
-      throw new Error(`服务单元 ${serviceUnitId} 的代码库路径不存在：${localRepoPath}`)
+      throw new Error(`发布单元 ${deployUnitId} 的代码库路径不存在：${localRepoPath}`)
     }
     const description = resolvedMapping.description?.trim() || ""
     resolved.push({
-      serviceUnitIdMapping: resolvedMapping.serviceUnitIdMapping,
-      serviceUnitId,
+      deployUnitIdMapping: resolvedMapping.deployUnitIdMapping,
+      deployUnitId,
       localRepoPath,
       ...(description ? { description } : {})
     })
@@ -2387,7 +2387,7 @@ export interface HarnessFeatureAgentContext {
   enableAgentsPrompt?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
-  additionalAgentsWorkspaceMappings?: HarnessServiceUnitMapping[]
+  additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
   sessionContextInjectWarning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   pluginOutputDir?: string
@@ -2446,7 +2446,7 @@ function readHarnessFeatureSessionContextAgentPrompt(
   try {
     const configured = buildConfiguredHarnessInvocation(project, "sessionContext", {
       feature: featureId,
-      ...getHarnessSelectedServiceUnitsCommandOptions(project, featureId),
+      ...getHarnessSelectedDeployUnitsCommandOptions(project, featureId),
       sessionWorkspacePath: options.sessionWorkspacePath
     })
     const result = runHarnessJsonInvocation(configured, "sessionContext")
@@ -2509,7 +2509,7 @@ export function buildHarnessFeatureAgentContext(
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
   const systemId = normalizeText(project.systemId).trim()
-  const featureBinding = findFeatureServiceUnitBinding(project.projectId, feature.slug)
+  const featureBinding = findFeatureDeployUnitBinding(project.projectId, feature.slug)
   const sessionContextInjectionSource =
     featureBinding?.sessionContextInjectionSource ?? "cmbdevclaw"
   const usePluginAgentsPrompt = sessionContextInjectionSource === "plugin"
@@ -2646,7 +2646,7 @@ export function listHarnessProjects(): HarnessProjectListItem[] {
   return readProjectStore().projects.map(toListItem)
 }
 
-export function getHarnessProjectPublicAgentmdServiceUnits(projectId: string): string[] {
+export function getHarnessProjectPublicAgentmdDeployUnits(projectId: string): string[] {
   const project = requireProject(projectId)
   const plugin = findAdapterPlugin(project)
   if (!plugin) return []
@@ -2655,18 +2655,18 @@ export function getHarnessProjectPublicAgentmdServiceUnits(projectId: string): s
     project["harness-adapter"].name || project["harness-adapter"].id
   )
   if (!boardCompatibility.compatible) return []
-  return boardConfigPublicAgentmdServiceUnits(plugin.path)
+  return boardConfigPublicAgentmdDeployUnits(plugin.path)
 }
 
-export function getHarnessLocalAgentmdServiceUnitMappings(
-  mappings: HarnessServiceUnitMapping[]
+export function getHarnessLocalAgentmdDeployUnitMappings(
+  mappings: HarnessDeployUnitMapping[]
 ): string[] {
-  return normalizeServiceUnitMappings(mappings)
+  return normalizeDeployUnitMappings(mappings)
     .filter((mapping) => {
       const localRepoPath = mapping.localRepoPath.trim()
       return isAbsolute(localRepoPath) && existsSync(join(localRepoPath, "AGENTS.md"))
     })
-    .map((mapping) => mapping.serviceUnitIdMapping)
+    .map((mapping) => mapping.deployUnitIdMapping)
 }
 
 /**
@@ -2730,7 +2730,7 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
-  const selectedServiceUnits = resolveFeatureSelectedServiceUnits(input, project)
+  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input, project)
   const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
     input.sessionContextInjectionSource
   )
@@ -2738,17 +2738,17 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   if (!existsSync(workspacePath)) {
     throw new Error(projectDirectoryMissingMessage(project))
   }
-  const selectedServiceUnitsOptions = getHarnessSelectedServiceUnitsCommandOptions(
+  const selectedDeployUnitsOptions = getHarnessSelectedDeployUnitsCommandOptions(
     project,
     feature,
-    selectedServiceUnits
+    selectedDeployUnits
   )
 
   try {
     const configured = buildConfiguredHarnessInvocation(project, "createFeature", {
       feature,
       ...workflowOptions,
-      ...selectedServiceUnitsOptions
+      ...selectedDeployUnitsOptions
     })
     runHarnessInvocation(configured, harnessCommandLogOptions("createFeature"))
   } catch (error) {
@@ -2759,10 +2759,10 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
     throw new Error(`创建特性失败：${raw}`)
   }
 
-  saveFeatureServiceUnitBinding(
+  saveFeatureDeployUnitBinding(
     project.projectId,
     feature,
-    selectedServiceUnits,
+    selectedDeployUnits,
     sessionContextInjectionSource
   )
 
@@ -3349,7 +3349,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
   const { nodes: nodesWithHookLogs, unmatchedHooks } = applyHookLogEntries(nodes, hookLogEntries)
   const skipNodeAvailable = hasConfiguredHarnessInvocation(project, "skipNode")
-  const selectedServiceUnits = resolveFeatureServiceUnitMappings(project.projectId, slug)
+  const selectedDeployUnits = resolveFeatureDeployUnitMappings(project.projectId, slug)
   return {
     project: {
       projectId: project.projectId,
@@ -3378,7 +3378,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       ...(featureStatusLabel ? { featureStatusLabel } : {}),
       overallStatus,
       skipNodeAvailable,
-      selectedServiceUnits,
+      selectedDeployUnits,
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(featureSlug)),
       currentNodeId,
