@@ -1333,6 +1333,30 @@ export function createAgentToolGuardMiddleware(
   })
 }
 
+function describeRegistrySubagentAccess(
+  disallowedTools: readonly string[],
+  shellAccess: AgentShellAccess
+): string {
+  const parts: string[] = []
+  if (disallowedTools.length > 0) parts.push(`no ${disallowedTools.join("/")}`)
+  parts.push(
+    shellAccess === "none"
+      ? "no shell"
+      : shellAccess === "read_only"
+        ? "read-only shell"
+        : "full shell"
+  )
+  return parts.join(", ")
+}
+
+function appendRegistrySubagentAccessDescription(
+  description: string,
+  disallowedTools: readonly string[],
+  shellAccess: AgentShellAccess
+): string {
+  return `${description} [${describeRegistrySubagentAccess(disallowedTools, shellAccess)}]`
+}
+
 /**
  * Stable metadata key stamped onto every subagent-interior stream chunk so the
  * renderer can attribute it to the owning `task` tool call deterministically —
@@ -1978,7 +2002,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ]
       return {
         name: spec.name,
-        description: spec.description,
+        description: appendRegistrySubagentAccessDescription(spec.description, disallowed, shell),
         // write/verify (full) get AGENTS.md (project instructions); read_only AND
         // none omit it (mirrors CC omitClaudeMd dropping the claudeMd channel).
         // Same `## Project Instructions` format the general-purpose subagent uses.

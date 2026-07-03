@@ -122,7 +122,6 @@ import {
 import {
   isRetryableApiError,
   buildOrderedChain,
-  classifyApiError,
   extractErrorDetail,
   type FailoverAttempt,
   type ApiErrorDetail
@@ -2934,11 +2933,35 @@ function buildModelRetryHooks(window: BrowserWindow, channel: string): ModelRetr
  * `error` event so the card can render status / request-id / real reason).
  * Consumes & clears the captured fetch-layer body for the channel.
  */
+interface ErrorDetailModelInfo {
+  /** Runtime/config model id, e.g. custom:qwen3. */
+  modelId?: string
+  /** User-facing display name shown in the model switcher. */
+  modelDisplayName?: string
+  /** Actual Model field sent to the API, e.g. MiniMax-M2.7. */
+  modelName?: string
+  /** Backward-compatible display field consumed by older renderer code. */
+  model?: string
+}
+
+function resolveErrorDetailModelInfo(modelId: string | undefined): ErrorDetailModelInfo {
+  if (!modelId) return {}
+  const cfgId = modelId.startsWith("custom:") ? modelId.slice("custom:".length) : modelId
+  const configs = getCustomModelConfigs()
+  const cfg = configs.find((c) => c.id === cfgId) ?? configs.find((c) => c.model === cfgId)
+  return {
+    modelId,
+    modelDisplayName: cfg?.name,
+    modelName: cfg?.model,
+    model: cfg?.name ?? cfg?.model ?? modelId
+  }
+}
+
 function emitErrorDetail(
   window: BrowserWindow,
   channel: string,
   error: unknown,
-  extras?: { model?: string }
+  extras?: ErrorDetailModelInfo
 ): ApiErrorDetail {
   const fetchDetail = lastFetchErrorByChannel.get(channel)
   lastFetchErrorByChannel.delete(channel)
@@ -2946,16 +2969,21 @@ function emitErrorDetail(
   lastFailoverByChannel.delete(channel)
   const detail = extractErrorDetail(error, fetchDetail)
   const failover = attempts.map((a) => ({
+    ...resolveErrorDetailModelInfo(a.modelId),
     modelId: a.modelId,
     reason: extractErrorDetail(a.error).reason
   }))
+  const modelInfo = {
+    ...resolveErrorDetailModelInfo(extras?.modelId ?? extras?.model),
+    ...extras
+  }
   safeSendToWindow(window, channel, {
     type: "custom",
     data: {
       type: "error_detail",
       detail: {
         ...detail,
-        model: extras?.model,
+        ...modelInfo,
         failover: failover.length > 0 ? failover : undefined
       }
     }
@@ -6509,7 +6537,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           pauseActiveGoalForRuntimeStop(`Agent run failed: ${errMsg}`)
           console.error("[Agent] Error:", error)
           if (!stopHookFired) {
-            const stopFailureErrorCode = classifyApiError(error)
+            const stopFailureErrorCode = extractErrorDetail(
+              error,
+              lastFetchErrorByChannel.get(channel)
+            ).code
             const stopFailureContext: HookContext = {
               workspacePath: sessionWorkspacePath,
               sessionId: threadId,
@@ -6536,7 +6567,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // Sent BEFORE the error event: the error event terminates the stream
           // in the renderer (useStream), so any custom event sent after it is
           // dropped. error_detail must go first to populate the detail card.
-          emitErrorDetail(window, channel, error, { model: usedModelId })
+          emitErrorDetail(window, channel, error, { modelId: usedModelId })
           safeSendToWindow(window, channel, {
             type: "error",
             error: errMsg
@@ -6983,6 +7014,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       window.once("closed", onWindowClosed)
       sendActiveHookNotice(window, channel, workspacePath)
 
+      let resumeErrorModelId: string | undefined
       try {
         const requestedModelIdResume = modelId || (metadata.model as string | undefined)
         const resumeRoutingResult = await resolveModel({
@@ -6994,6 +7026,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }).catch(() => null)
         const effectiveResumeModelId =
           resumeRoutingResult?.resolvedModelId ?? requestedModelIdResume
+        resumeErrorModelId = effectiveResumeModelId
 
         const resumeStreamConfig = {
           configurable: { thread_id: threadId },
@@ -7062,6 +7095,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             resumeAgentRuntime = resumeAgent
             resumeUsedModelId = candidateId
+            resumeErrorModelId = candidateId
             break
           } catch (err) {
             if (!isRetryableApiError(err)) throw err
@@ -7222,6 +7256,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             resumeAgentRuntime = nextAgent
             resumeUsedModelId = nextCandidate
+            resumeErrorModelId = nextCandidate
             notifyResumeFailover()
           }
         }
@@ -7361,7 +7396,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             boundaryGoalActiveWindowId
           )
           // Before the error event — see note in agent:invoke handler.
-          emitErrorDetail(window, channel, error)
+          emitErrorDetail(window, channel, error, { modelId: resumeErrorModelId })
           safeSendToWindow(window, channel, {
             type: "error",
             error: error instanceof Error ? error.message : "Unknown error"
@@ -7733,6 +7768,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     window.once("closed", onWindowClosed)
     sendActiveHookNotice(window, channel, workspacePath)
 
+    let interruptErrorModelId: string | undefined
     try {
       const interruptRoutingResult = await resolveModel({
         taskSource: "chat",
@@ -7743,6 +7779,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }).catch(() => null)
       const effectiveInterruptModelId =
         interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
+      interruptErrorModelId = effectiveInterruptModelId
 
       const interruptStreamConfig = {
         configurable: { thread_id: threadId },
@@ -7802,6 +7839,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = intAgent
             intUsedModelId = candidateId
+            interruptErrorModelId = candidateId
             break
           } catch (err) {
             if (!isRetryableApiError(err)) throw err
@@ -7959,6 +7997,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = nextAgent
             intUsedModelId = nextCandidate
+            interruptErrorModelId = nextCandidate
             notifyIntFailover()
           }
         }
@@ -8112,7 +8151,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           boundaryGoalActiveWindowId
         )
         // Before the error event — see note in agent:invoke handler.
-        emitErrorDetail(window, channel, error)
+        emitErrorDetail(window, channel, error, { modelId: interruptErrorModelId })
         safeSendToWindow(window, channel, {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"

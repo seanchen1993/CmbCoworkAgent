@@ -12,7 +12,7 @@ import {
   getTimeoutBounds,
   SUPPORTED_HOOK_EVENTS
 } from "../src/main/hooks/types.ts"
-import { classifyApiError } from "../src/main/agent/failover.ts"
+import { classifyApiError, extractErrorDetail } from "../src/main/agent/failover.ts"
 import {
   detectToolFailure,
   toolFailureSignalFromThrow,
@@ -93,6 +93,14 @@ assertEqual(
   "P12f message 'rate limit' → rate_limit"
 )
 assertEqual(classifyApiError(new Error("something else")), "unknown", "P12g fallback → unknown")
+
+const fetchStatusDetail = extractErrorDetail(new Error("proxy returned a non-OpenAI body"), {
+  status: 502,
+  rawBody: "upstream proxy failed"
+})
+assertEqual(fetchStatusDetail.status, 502, "P12g-1 fetch-detail status is surfaced")
+assertEqual(fetchStatusDetail.code, "server_error", "P12g-2 fetch-detail status drives code")
+assertEqual(fetchStatusDetail.reason, "upstream proxy failed", "P12g-3 raw body drives reason")
 
 // ── PR-12 — detectToolFailure shapes ────────────────────────────────────────
 
