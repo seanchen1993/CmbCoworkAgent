@@ -304,6 +304,8 @@ export interface ModelRetryState {
 /** One failover attempt shown in the error detail card. */
 export interface ApiErrorFailoverAttempt {
   modelId: string
+  modelDisplayName?: string
+  modelName?: string
   reason: string
 }
 
@@ -321,6 +323,9 @@ export interface ApiErrorDetailState {
   reason?: string
   providerMessage?: string
   rawBody?: string
+  modelId?: string
+  modelDisplayName?: string
+  modelName?: string
   model?: string
   failover?: ApiErrorFailoverAttempt[]
 }

@@ -1458,12 +1458,16 @@ function ChatErrorCard({
     : "代理出错"
   const reason = (detail?.reason || error || "").trim()
   const hint = detail?.hint
+  const displayedModel = detail?.modelDisplayName || detail?.model || detail?.modelName
+  const apiModelName = detail?.modelName
   const hasDetails = Boolean(
     detail &&
     (detail.status != null ||
       detail.requestId ||
       detail.code ||
-      detail.model ||
+      displayedModel ||
+      apiModelName ||
+      detail.modelId ||
       (detail.failover && detail.failover.length > 0) ||
       detail.rawBody)
   )
@@ -1524,10 +1528,22 @@ function ChatErrorCard({
                     </button>
                   </div>
                 )}
-                {detail?.model && (
+                {displayedModel && (
                   <div className="flex gap-2">
                     <span className="shrink-0 w-16 text-muted-foreground/70">模型</span>
-                    <span className="font-mono break-all">{detail.model}</span>
+                    <span className="font-mono break-all">{displayedModel}</span>
+                  </div>
+                )}
+                {apiModelName && apiModelName !== displayedModel && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">Model</span>
+                    <span className="font-mono break-all">{apiModelName}</span>
+                  </div>
+                )}
+                {detail?.modelId && detail.modelId !== displayedModel && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">配置标识</span>
+                    <span className="font-mono break-all">{detail.modelId}</span>
                   </div>
                 )}
                 {detail?.failover && detail.failover.length > 0 && (
@@ -1536,7 +1552,14 @@ function ChatErrorCard({
                     <ul className="flex-1 min-w-0 space-y-0.5">
                       {detail.failover.map((f, i) => (
                         <li key={`${f.modelId}-${i}`} className="break-words">
-                          <span className="font-mono">{f.modelId}</span>：{f.reason}
+                          <span className="font-mono">
+                            {f.modelDisplayName
+                              ? `${f.modelDisplayName} (${f.modelId})`
+                              : f.modelName
+                                ? `${f.modelName} (${f.modelId})`
+                                : f.modelId}
+                          </span>
+                          ：{f.reason}
                         </li>
                       ))}
                     </ul>
