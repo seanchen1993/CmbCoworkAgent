@@ -42,6 +42,7 @@ export type EventCategory =
   | "memory"
   | "hook"
   | "chatx"
+  | "workspace"
 
 /**
  * Wire format expected by the server.

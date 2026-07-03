@@ -5433,6 +5433,7 @@ interface AdvFeatureMetrics {
   hookBlocked: number
   codeExec: number
   savedTool: number
+  claudeCodeLaunches: number
 }
 
 function advAggDocCount(agg: unknown): number {
@@ -5550,6 +5551,16 @@ function assembleAdvancedFeatureCards(
           { label: "code_exec", count: m.codeExec, tone: "neutral" },
           { label: "保存工具", count: m.savedTool, tone: "neutral" }
         ]
+      },
+      {
+        key: "claudeCode",
+        label: "Claude Code",
+        value: m.claudeCodeLaunches,
+        valueLabel: "启动次数",
+        hint: `选择目录启动会话 ${m.claudeCodeLaunches} 次`,
+        items: [
+          { label: "目录启动", count: m.claudeCodeLaunches, tone: "good" }
+        ]
       }
     ]
   }
@@ -5592,6 +5603,16 @@ async function fetchAdvancedFeatures(
       hooks: {
         filter: { term: { eventName: "hook.executed" } },
         aggs: { blocked: { filter: { term: { "properties.blocked": true } } } }
+      },
+      claude_code_launches: {
+        filter: {
+          bool: {
+            filter: [
+              { term: { eventName: "workspace.launch.started" } },
+              { term: { "properties.surface": "claude_code" } }
+            ]
+          }
+        }
       }
     }
   }
@@ -5661,7 +5682,8 @@ async function fetchAdvancedFeatures(
     hookTotal: advAggDocCount(eAggs.hooks),
     hookBlocked: advAggDocCount((eAggs.hooks as Record<string, unknown> | undefined)?.blocked),
     codeExec: advBucketCount(toolBuckets, "code_exec"),
-    savedTool: advBucketCount(toolBuckets, "save_code_exec_tool")
+    savedTool: advBucketCount(toolBuckets, "save_code_exec_tool"),
+    claudeCodeLaunches: advAggDocCount(eAggs.claude_code_launches)
   }
 
   return assembleAdvancedFeatureCards(metrics, "es")
@@ -5702,7 +5724,8 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),
-    savedTool: k(6)
+    savedTool: k(6),
+    claudeCodeLaunches: k(11)
   }
 
   return assembleAdvancedFeatureCards(metrics, "mock")
