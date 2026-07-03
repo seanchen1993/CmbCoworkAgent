@@ -1313,6 +1313,19 @@ function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknow
   }
 }
 
+function buildVersionedSkillUsagePrefixFilter(skillName: string): Record<string, unknown> {
+  const versionPrefix = buildVersionPrefix(skillName)
+  return {
+    bool: {
+      should: [
+        { prefix: { usedSkills: versionPrefix } },
+        { prefix: { "usedSkills.keyword": versionPrefix } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
 function buildVersionPrefix(skillName: string): string {
   return `${skillName}-v`
 }
@@ -4935,9 +4948,7 @@ async function fetchSkillUserStats(
   // 统计指标不做组织级数据权限过滤。
   const traceAccessFilter = null
   void granularity
-  const escapedSkillName = escapeWildcard(skillName)
-  const wildcardPattern = `${escapedSkillName}**`
-  const skillFilter = buildSkillUsageWildcardFilter(skillName)
+  const skillFilter = buildVersionedSkillUsagePrefixFilter(skillName)
   const body = {
     size: 0,
     // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
@@ -4947,13 +4958,9 @@ async function fetchSkillUserStats(
           timeRangeFilter("startedAt", range),
           ...(traceAccessFilter ? [traceAccessFilter] : []),
           { exists: { field: "ystId" } },
-          { bool: { must_not: { term: { ystId: "" } } } }
+          { bool: { must_not: { term: { ystId: "" } } } },
+          skillFilter
         ],
-        should: [
-          { wildcard: { usedSkills: wildcardPattern } },
-          { wildcard: { "usedSkills.keyword": wildcardPattern } }
-        ],
-        minimum_should_match: 1
       }
     },
     aggs: {
