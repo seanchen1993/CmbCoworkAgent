@@ -30,6 +30,7 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { Switch } from "@/components/ui/switch"
 import { useAppStore } from "@/lib/store"
 import {
   Dialog,
@@ -289,6 +290,31 @@ function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
 
 function getMarketUpdatedAt(item: Pick<MarketItem, "created_at" | "updated_at" | "extra_json">): string {
   return parseMarketExtraJson(item.extra_json).updated_at || item.updated_at || item.created_at
+}
+
+function splitEnvIds(value: string | undefined): Set<string> {
+  return new Set(
+    String(value || "")
+      .split(/[,\n;\s]+/)
+      .map((id) => id.trim())
+      .filter(Boolean)
+  )
+}
+
+function getMarketAdminYstIds(): Set<string> {
+  return splitEnvIds(import.meta.env.VITE_ADMIN_YST_IDS)
+}
+
+const MARKET_ADMIN_YST_IDS = getMarketAdminYstIds()
+
+function canCurrentUserEditOrDeleteMarketItem(
+  item: Pick<MarketItem, "canDelete" | "ip">,
+  localIp?: string | null,
+  isCurrentUserMarketAdmin = false
+): boolean {
+  return Boolean(
+    isCurrentUserMarketAdmin || item.canDelete || (item.ip && localIp && item.ip === localIp)
+  )
 }
 
 function doesMarketUserIdMatchCurrentUser(
@@ -705,7 +731,7 @@ function MarketItemCard({
                   卸载
                 </Button>
               )}
-              {(item.canDelete || (item.ip && ip && item.ip === ip)) && (
+              {canCurrentUserEditOrDeleteMarketItem(item, ip) && (
                 <>
                   <Button
                     variant="outline"
@@ -826,6 +852,7 @@ export function MarketPanel(): React.JSX.Element {
   const [mcpDetailConnector, setMcpDetailConnector] = useState<McpConnectorConfig | null>(null)
   const [pluginDetailPlugin, setPluginDetailPlugin] = useState<PluginMetadata | null>(null)
   const [pluginDetailData, setPluginDetailData] = useState<PluginDetailData | null>(null)
+  const pluginDetailFileBlobRef = useRef<Blob | null>(null)
   const [skillUsageSummary, setSkillUsageSummary] = useState<
     Record<string, SkillUsageSummaryMetric>
   >({})
@@ -840,6 +867,8 @@ export function MarketPanel(): React.JSX.Element {
   const [uploaderProfiles, setUploaderProfiles] = useState<Record<string, UploaderProfile>>({})
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
   const [currentUserSapId, setCurrentUserSapId] = useState<string | null>(null)
+  const [isCurrentUserMarketAdmin, setIsCurrentUserMarketAdmin] = useState(false)
+  const [adminModeEnabled, setAdminModeEnabled] = useState(false)
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
     readUploadedSkillNamesFromStorage()
   )
@@ -862,6 +891,8 @@ export function MarketPanel(): React.JSX.Element {
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
   )
+  const currentLocalIp = localStorage.getItem("localIp")
+  const isAdminModeActive = isCurrentUserMarketAdmin && adminModeEnabled
   const uploadedSkillDisabledReason = "这个技能已经存在于“我上传的技能”里，无需重复安装。"
   const uploadedSkillNameSetRef = useRef<Set<string>>(uploadedSkillNames)
 
@@ -949,6 +980,7 @@ export function MarketPanel(): React.JSX.Element {
     setMcpDetailConnector(null)
     setPluginDetailPlugin(null)
     setPluginDetailData(null)
+    pluginDetailFileBlobRef.current = null
     setSelectedSkillUsage(null)
     setSelectedSkillTraces([])
     setSkillTracesLoading(false)
@@ -1098,10 +1130,16 @@ export function MarketPanel(): React.JSX.Element {
       if (typeof window.api?.models?.getUserInfo !== "function") {
         setCurrentUserUploadCandidates([])
         setCurrentUserSapId(null)
+        setIsCurrentUserMarketAdmin(false)
+        setAdminModeEnabled(false)
         return
       }
       const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
       setCurrentUserSapId(userInfo?.sapId?.trim() || null)
+      const currentYstId = userInfo?.ystId?.trim() || ""
+      const isAdmin = Boolean(currentYstId && MARKET_ADMIN_YST_IDS.has(currentYstId))
+      setIsCurrentUserMarketAdmin(isAdmin)
+      if (!isAdmin) setAdminModeEnabled(false)
       const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
         .map((value) => String(value || "").trim())
         .filter(Boolean)
@@ -1113,6 +1151,8 @@ export function MarketPanel(): React.JSX.Element {
       console.warn("[MarketPanel] Failed to load current user upload candidates:", err)
       setCurrentUserUploadCandidates([])
       setCurrentUserSapId(null)
+      setIsCurrentUserMarketAdmin(false)
+      setAdminModeEnabled(false)
     }
   }, [])
 
@@ -1593,6 +1633,11 @@ export function MarketPanel(): React.JSX.Element {
     setCategoryFilter(null)
   }, [activeTab])
 
+  useEffect(() => {
+    if (detailMode === "detail") return
+    setAdminModeEnabled(false)
+  }, [detailMode])
+
   const getCurrentData = () => {
     switch (activeTab) {
       case "skill":
@@ -1772,6 +1817,7 @@ export function MarketPanel(): React.JSX.Element {
       } else if (activeTab === "plugin") {
         // The zip is already downloaded above; parse it (without installing) to
         // surface real Skill/MCP/Hook counts instead of hardcoded zeros.
+        pluginDetailFileBlobRef.current = installFile.blob
         const buffer = await installFile.blob.arrayBuffer()
         const detail = await window.api.plugins.inspectZip(buffer)
         setPluginDetailPlugin({
@@ -2262,7 +2308,8 @@ export function MarketPanel(): React.JSX.Element {
     guidance?: string,
     chineseName?: string,
     userId?: string,
-    extraJson?: string
+    extraJson?: string,
+    ip?: string
   ) => {
     try {
       // 更新时允许文件为空，这样可以只更新元数据
@@ -2283,7 +2330,8 @@ export function MarketPanel(): React.JSX.Element {
         guidance,
         chineseName,
         userId,
-        extraJson
+        extraJson,
+        ip
       )
 
       // Update is successful, no need to update localStorage since item already exists
@@ -2402,6 +2450,27 @@ export function MarketPanel(): React.JSX.Element {
     }
   }
 
+  const loadPluginSkillsForUpdateDialog = useCallback(async (): Promise<string[]> => {
+    const targetItem = updateDialog.item
+    if (activeTab !== "plugin" || detailMode !== "detail" || !targetItem) return []
+
+    if (selectedItem?.name !== targetItem.name) return []
+
+    if (pluginDetailFileBlobRef.current) {
+      const buffer = await pluginDetailFileBlobRef.current.arrayBuffer()
+      const detail = await window.api.plugins.inspectZip(buffer)
+      const skills = Array.from(new Set(detail.skills.map((skill) => skill.trim()).filter(Boolean)))
+      console.log("[MarketPanel] Refreshed plugin skills from detail file:", skills)
+      return skills
+    }
+
+    const fallbackSkills = Array.from(
+      new Set((pluginDetailData?.skills || []).map((skill) => skill.trim()).filter(Boolean))
+    )
+    console.log("[MarketPanel] Refreshed plugin skills from cached detail data:", fallbackSkills)
+    return fallbackSkills
+  }, [activeTab, detailMode, pluginDetailData, selectedItem?.name, updateDialog.item])
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-[#f5f4ed]">
       {/* Header */}
@@ -2419,8 +2488,21 @@ export function MarketPanel(): React.JSX.Element {
                       ? selectedItem.chinese_name || selectedItem.name
                       : "应用市场"}
                   </h2>
-                  <span>
-                    {detailMode === "detail" && selectedItem && (
+                  <span className="flex items-center gap-2">
+                    {detailMode === "detail" &&
+                    selectedItem &&
+                    activeTab !== ORG_SKILL_MARKET_TYPE &&
+                    isCurrentUserMarketAdmin ? (
+                      <label className="inline-flex items-center gap-2 rounded-lg border border-[#e8e6dc] bg-white px-2.5 py-1.5 text-[11px] text-[#5e5d59]">
+                        <span>管理员模式</span>
+                        <Switch
+                          checked={adminModeEnabled}
+                          onCheckedChange={setAdminModeEnabled}
+                          aria-label="切换管理员模式"
+                        />
+                      </label>
+                    ) : null}
+                    {detailMode === "detail" && selectedItem ? (
                       <Button
                         variant="outline"
                         size="sm"
@@ -2430,7 +2512,7 @@ export function MarketPanel(): React.JSX.Element {
                         <ArrowLeft className="size-3.5" />
                         返回列表
                       </Button>
-                    )}
+                    ) : null}
                   </span>
                 </div>
               </div>
@@ -2442,6 +2524,11 @@ export function MarketPanel(): React.JSX.Element {
         <MarketDetailView
           activeTab={activeTab}
           selectedItem={selectedItem}
+          canManageSelectedItem={canCurrentUserEditOrDeleteMarketItem(
+            selectedItem,
+            currentLocalIp,
+            isAdminModeActive
+          )}
           detailFilePanel={renderDetailFilePanel()}
           canViewSkillUserDetail={canViewSkillUserDetail}
           selectedSkillCallCount={selectedSkillCallCount}
@@ -2731,12 +2818,12 @@ export function MarketPanel(): React.JSX.Element {
                           </span>
                           {activeTab === "skill" ? (
                             <div className="flex items-center gap-2">
-                              <div className="inline-block w-10">排序</div>
+                              <div className="inline-block w-[30px]">排序</div>
                               <Select
                                 value={skillSortMode}
                                 onValueChange={(value) => setSkillSortMode(value as SkillSortMode)}
                               >
-                                <SelectTrigger className="h-7 min-w-[132px] rounded-lg border-[#e8e6dc] bg-white px-2 text-[11px] text-[#5e5d59]">
+                                <SelectTrigger className="h-7 w-[100px] rounded-lg border-[#e8e6dc] bg-white px-2 text-[11px] text-[#5e5d59]">
                                   <SelectValue placeholder="默认" />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -2897,8 +2984,18 @@ export function MarketPanel(): React.JSX.Element {
                     guidance: updateDialog.item.guidance,
                     chinese_name: updateDialog.item.chinese_name,
                     user_id: updateDialog.item.user_id,
-                    extra_json: updateDialog.item.extra_json
+                    extra_json: updateDialog.item.extra_json,
+                    ip: updateDialog.item.ip
                   }
+                : undefined
+            }
+            isAdminModeActive={isAdminModeActive}
+            loadPluginSkills={
+              activeTab === "plugin" &&
+              detailMode === "detail" &&
+              !!selectedItem &&
+              selectedItem.name === updateDialog.item?.name
+                ? loadPluginSkillsForUpdateDialog
                 : undefined
             }
           />

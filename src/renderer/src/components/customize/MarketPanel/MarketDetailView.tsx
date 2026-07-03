@@ -59,6 +59,7 @@ function formatMarketDateTime(value?: string): string {
 interface MarketDetailViewProps {
   activeTab: MarketItemType
   selectedItem: MarketItem
+  canManageSelectedItem: boolean
   detailFilePanel: React.ReactNode
   canViewSkillUserDetail: boolean
   selectedSkillCallCount: number | null
@@ -88,6 +89,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
   const {
     activeTab,
     selectedItem,
+    canManageSelectedItem,
     detailFilePanel,
     canViewSkillUserDetail,
     selectedSkillCallCount,
@@ -377,11 +379,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                       卸载
                     </Button>
                   )}
-                {activeTab !== "orgSkill" &&
-                  (selectedItem.canDelete ||
-                    (selectedItem.ip &&
-                      localStorage.getItem("localIp") &&
-                      selectedItem.ip === localStorage.getItem("localIp"))) && (
+                {activeTab !== "orgSkill" && canManageSelectedItem && (
                     <>
                       <Button
                         variant="outline"

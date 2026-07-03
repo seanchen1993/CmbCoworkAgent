@@ -708,7 +708,8 @@ export const marketApi = {
     guidance?: string,
     chineseName?: string,
     userId?: string,
-    extraJson?: string
+    extraJson?: string,
+    ipOverride?: string | null
   ): Promise<{ success: boolean; data?: MarketUpdateResponse; error?: string }> {
     console.log(`Updating ${resourceType} item: ${name} category:${category} version:${version}`)
 
@@ -733,7 +734,7 @@ export const marketApi = {
     if (extraJson) {
       formData.append("extra_json", extraJson)
     }
-    const ip = localStorage.getItem("localIp")
+    const ip = ipOverride ?? localStorage.getItem("localIp")
     formData.append("ip", ip || "")
 
     const response = await fetch(ENDPOINTS.update(resourceType, name), {
