@@ -760,6 +760,12 @@ async function scenario9() {
         ? "PASS"
         : "FAIL " + rB.验收标准总数 + "/" + rB.状态
     )
+    console.log(
+      "新合同不复用旧项目画像且轮次重置:",
+      logsB.some((l) => l.startsWith("AGENT: 探索：")) && rB.轮次 === 1
+        ? "PASS"
+        : "FAIL " + JSON.stringify(logsB.filter((l) => l.startsWith("AGENT"))) + "/round=" + rB.轮次
+    )
   }
   // 9b: 终审如实报告清单外失败命令 → 不得丢弃,必须降级
   {

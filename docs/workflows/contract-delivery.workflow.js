@@ -831,6 +831,10 @@ const canReuse =
   previousState.version === WORKFLOW_VERSION &&
   previousState.mode === "contract-delivery" &&
   previousState.requirement === requirement
+const hasExplicitContract =
+  options.contract &&
+  typeof options.contract === "object" &&
+  Array.isArray(options.contract.criteria)
 
 const context = {
   requirement,
@@ -843,18 +847,19 @@ const context = {
   criteria: [],
   // 轮次跨续跑连续计数:续跑的新轮次接着编号(round N+1...),既保留历史轮次
   // 产物目录不被覆盖,报告里的轮次也反映真实累计;每次调用仍有完整的 maxRounds 预算。
-  roundsUsed: canReuse && Number.isFinite(previousState.roundsUsed) ? previousState.roundsUsed : 0,
+  roundsUsed:
+    canReuse && !hasExplicitContract && Number.isFinite(previousState.roundsUsed)
+      ? previousState.roundsUsed
+      : 0,
   changedFiles:
-    canReuse && Array.isArray(previousState.changedFiles) ? previousState.changedFiles : []
+    canReuse && !hasExplicitContract && Array.isArray(previousState.changedFiles)
+      ? previousState.changedFiles
+      : []
 }
 
 // ---- 成契 ----
 phase("成契")
-if (
-  options.contract &&
-  typeof options.contract === "object" &&
-  Array.isArray(options.contract.criteria)
-) {
+if (hasExplicitContract) {
   // 支持在聊天里人机协商好合同后直接注入（成契前置到对话，是人工投入价值最高的一段）。
   // 显式注入优先于续跑复用:用户补充了新合同就必须按新合同验收,账本重建。
   if (canReuse) {
@@ -986,7 +991,7 @@ await writeState(context, "contract_done", "合同已成立。", [])
 // 注：不在脚本层注入技能——运行时会自动给每个子代理注入技能目录（含 read_only 角色），
 // 子代理自己会按需调用相关 SKILL.md，脚本重复注入只会浪费上下文。
 phase("项目探索")
-if (canReuse && previousState.exploration) {
+if (canReuse && !hasExplicitContract && previousState.exploration) {
   context.exploration = previousState.exploration
   log("续跑：复用已有项目画像。")
 } else {
