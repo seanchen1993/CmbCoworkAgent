@@ -2187,8 +2187,72 @@ const MAX_CACHED_CHECKPOINTERS = 12
 // In-flight eviction closes, so getCheckpointer can wait one out before
 // recreating an instance for the same thread (avoids reading a half-written DB).
 const closingCheckpointers = new Map<string, Promise<void>>()
+// Instance mirror of closingCheckpointers: a thread retirement must be able to
+// POISON (retire()) an instance whose detached evict-close is still settling —
+// the promise alone can't reach the object, and a held reference could
+// otherwise re-initialize it after the close settles.
+const closingInstances = new Map<string, SqlJsSaver>()
+// Retires (thread deletion) get their OWN wait channel, separate from reusable
+// closes: the pinned-skip in getCheckpointerInternal exists because a reusable
+// close WAITS for pins (pin holder waiting for it would deadlock) — but a
+// retire never waits for pins, so waiting on it is deadlock-free and MANDATORY
+// even for pinned callers. Heartbeat pins before it fetches its checkpointer;
+// with retires only in closingCheckpointers, its revive-then-get skipped the
+// wait and could grab/create a saver alongside the old one's in-flight teardown.
+const retiringCheckpointers = new Map<string, Promise<void>>()
 const checkpointerPins = new Map<string, number>()
 const checkpointerPinWaiters = new Map<string, Set<() => void>>()
+
+// Threads deleted this process (tombstones). A retired thread must never get a
+// NEW checkpointer: SqlJsSaver.setup() persists an empty snapshot, so even a
+// late read path would resurrect the just-deleted .sqlite as an orphan.
+// Prefix-aware — a dead parent buries its __worker__/__wf_ sub-threads too.
+// Entries stay for the process lifetime (tiny, bounded); late writers cannot
+// survive a restart, so in-memory-only is sufficient.
+//
+// CONTRACT for reused thread ids: user threads are uuids (never reused), but
+// fixed-id service threads exist (heartbeat). Any code that legitimately
+// RE-CREATES a thread record under a previously-deleted id MUST call
+// reviveRetiredThread(threadId) first — otherwise the new incarnation is
+// refused checkpointers until the app restarts.
+const retiredThreadIds = new Set<string>()
+
+// Retire epochs (mirrors run-store's disposal epochs): a saver that began
+// initialize() BEFORE a delete is in no registry, so retire can't poison it —
+// and if a revive (fixed-id recreation) lands before initialize() returns, the
+// tombstone re-check alone passes and the PRE-DELETION-born saver would be
+// cached as the new incarnation. The epoch captured before creation changes
+// exactly when a retire happened in between, revive-immune. Prefix-aware via
+// summation over dead ancestors.
+const retiredThreadEpochs = new Map<string, number>()
+
+function retireEpochOf(threadId: string): number {
+  let epoch = 0
+  for (const [dead, count] of retiredThreadEpochs) {
+    if (threadId === dead || threadId.startsWith(`${dead}__`)) epoch += count
+  }
+  return epoch
+}
+
+/**
+ * Lift the deletion tombstone for a thread id that is being legitimately
+ * re-created (fixed-id service threads like heartbeat, or a future
+ * id-preserving restore). The tombstone's job is to kill LATE writers of the
+ * DELETED incarnation; a caller deliberately making a new DB record for the
+ * same id supersedes it. Old poisoned saver instances stay poisoned (they
+ * belong to the dead incarnation) — the revived id simply gets fresh ones.
+ */
+export function reviveRetiredThread(threadId: string): void {
+  retiredThreadIds.delete(threadId)
+}
+
+function isRetiredThreadId(threadId: string): boolean {
+  if (retiredThreadIds.has(threadId)) return true
+  for (const dead of retiredThreadIds) {
+    if (threadId.startsWith(`${dead}__`)) return true
+  }
+  return false
+}
 
 let isCheckpointerThreadBusy: (threadId: string) => boolean = () => false
 /** Wire the "is this thread mid-run" predicate (from the IPC layer's activeRuns). */
@@ -2244,6 +2308,18 @@ async function waitForCheckpointerClose(threadId: string): Promise<void> {
   }
 }
 
+async function waitForCheckpointerRetire(threadId: string): Promise<void> {
+  for (;;) {
+    const pendingRetire = retiringCheckpointers.get(threadId)
+    if (!pendingRetire) return
+    try {
+      await pendingRetire
+    } catch {
+      // best-effort; a following iteration can observe any replacement retire
+    }
+  }
+}
+
 /** Close least-recently-used checkpointers beyond the cap, skipping busy threads. */
 function evictIdleCheckpointers(): void {
   if (checkpointers.size <= MAX_CACHED_CHECKPOINTERS) return
@@ -2253,10 +2329,16 @@ function evictIdleCheckpointers(): void {
     if (checkpointers.size <= MAX_CACHED_CHECKPOINTERS) break
     if (isCheckpointerThreadBusy(threadId)) continue
     if (isCheckpointerPinned(threadId)) continue
-    // Worker checkpointers are transient and lifecycle-managed by
-    // closeWorkerCheckpointersForThread; leave them to that explicit cleanup so a
-    // running worker (not necessarily in the busy guard) is never evicted.
-    if (threadId.includes("__worker__")) continue
+    // RULE, not a name list: NO sub-thread (coordinator `__worker__`, workflow
+    // `__wf_`, any future `<parent>__<role>` id) participates in LRU. Sub-agents
+    // hold their saver instance for the whole run WITHOUT registering in the IPC
+    // busy guard, so evicting one mid-run orphans a live writer: the held
+    // instance re-initializes on its next put() and keeps writing untracked by
+    // this map — its own cleanup then closes nothing, and a late debounced save
+    // resurrects the just-deleted file. Sub-threads are transient and closed by
+    // their explicit per-run cleanup instead. (The old `__worker__`-only special
+    // case missed `__wf_` and produced exactly that bug.)
+    if (threadId.includes("__")) continue
     checkpointers.delete(threadId)
     // NOTE: only free the checkpointer here. Unlike closeCheckpointer (thread
     // deletion), eviction is pure cache management — the thread still exists, so
@@ -2269,8 +2351,10 @@ function evictIdleCheckpointers(): void {
       .catch((e) => console.warn(`[Runtime] evict checkpointer close failed for ${threadId}:`, e))
       .finally(() => {
         if (closingCheckpointers.get(threadId) === closing) closingCheckpointers.delete(threadId)
+        if (closingInstances.get(threadId) === checkpointer) closingInstances.delete(threadId)
       })
     closingCheckpointers.set(threadId, closing)
+    closingInstances.set(threadId, checkpointer)
   }
 }
 
@@ -2329,6 +2413,17 @@ async function getCheckpointerInternal(
   threadId: string,
   waitForPendingClose: boolean
 ): Promise<SqlJsSaver> {
+  // Tombstone gate: never create (or hand out) a checkpointer for a deleted
+  // thread — SqlJsSaver.setup() persists an empty snapshot, so a late caller
+  // would materialize an orphan .sqlite for a thread that no longer exists.
+  if (isRetiredThreadId(threadId)) {
+    throw new Error(`[Runtime] Thread is deleted; checkpointer refused: ${threadId}`)
+  }
+  // An in-flight retire must be waited out UNCONDITIONALLY — pinned callers
+  // included (see retiringCheckpointers: retire never waits pins, so this
+  // cannot deadlock). Only reachable for a revived id (the tombstone check
+  // above throws otherwise), i.e. heartbeat's pin-then-get sequence.
+  await waitForCheckpointerRetire(threadId)
   if (waitForPendingClose && !isCheckpointerPinned(threadId)) {
     await waitForCheckpointerClose(threadId)
   }
@@ -2340,8 +2435,43 @@ async function getCheckpointerInternal(
     return cached
   }
   const dbPath = getThreadCheckpointPath(threadId)
+  const bornRetireEpoch = retireEpochOf(threadId)
   const checkpointer = new SqlJsSaver(dbPath)
   await checkpointer.initialize()
+  // Re-check AFTER the awaits above: a deletion landing while this instance
+  // was initializing scans the three registries, but this instance is in none
+  // of them yet — caching it would hand a live, writable saver for a deleted
+  // thread (setup() has already queued an async persist). The tombstone check
+  // alone is NOT enough: a revive (fixed-id recreation) landing before
+  // initialize() returned clears it, yet this saver was born of the PREVIOUS
+  // incarnation — the retire epoch catches that, revive-immune.
+  if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
+    await checkpointer.retire()
+    // initialize() may itself have WRITTEN to disk before this check:
+    // openRecoveredSqliteDatabase persists a recovered .bak/.tmp back to the
+    // live .sqlite, and the deletion's purge has already swept. retire() only
+    // gates FUTURE writes — re-sweep the recovery's write here, so the dead
+    // incarnation's transcript can't bleed into a revived id across a crash.
+    //
+    // BEST-EFFORT MITIGATION, not an ownership proof (accepted residual): a
+    // cached entry does mean a revived saver owns the file (skip), but the
+    // converse is heuristic — a revived saver can itself be mid-initialize and
+    // not cached yet, and this sweep could then eat its files. That residual
+    // is bounded: during its own init the new incarnation can hold NO user
+    // data on disk (post-purge there is nothing to recover, and new content
+    // only arrives via put() after init; its in-memory db is authoritative and
+    // any next write rewrites the whole file). Strictly closing the window
+    // needs an init-in-flight lease — declined per ROI for a five-condition
+    // race with bounded, self-healing fallout.
+    if (isRetiredThreadId(threadId) || !checkpointers.has(threadId)) {
+      try {
+        deleteThreadCheckpoint(threadId)
+      } catch (e) {
+        console.warn(`[Runtime] post-refusal checkpoint re-sweep failed for ${threadId}:`, e)
+      }
+    }
+    throw new Error(`[Runtime] Thread was deleted during checkpointer init; refused: ${threadId}`)
+  }
   checkpointers.set(threadId, checkpointer)
   evictIdleCheckpointers()
   return checkpointer
@@ -2370,6 +2500,16 @@ export async function withCheckpointer<T>(
 
 export async function closeCheckpointer(threadId: string): Promise<void> {
   const previousClose = closingCheckpointers.get(threadId)
+  // Mirror the instance SYNCHRONOUSLY (like the evict path): a thread
+  // retirement arriving while this close is still waiting (previous close,
+  // pins) must be able to poison the instance — the async body only removes it
+  // from `checkpointers` after those waits, and once the close settles the
+  // mirror entry is gone again, so registering any later would leave a window
+  // where retire can reach it through neither map. The map entry cannot be
+  // swapped under us meanwhile: getCheckpointer waits out the pending close we
+  // register below before creating a replacement.
+  const instanceAtCall = checkpointers.get(threadId)
+  if (instanceAtCall) closingInstances.set(threadId, instanceAtCall)
   const closing = (async () => {
     if (previousClose) await previousClose
     await waitForCheckpointerPins(threadId)
@@ -2381,29 +2521,128 @@ export async function closeCheckpointer(threadId: string): Promise<void> {
     approvalStores.delete(threadId)
   })().finally(() => {
     if (closingCheckpointers.get(threadId) === closing) closingCheckpointers.delete(threadId)
+    if (instanceAtCall && closingInstances.get(threadId) === instanceAtCall) {
+      closingInstances.delete(threadId)
+    }
   })
   closingCheckpointers.set(threadId, closing)
   await closing
 }
 
-export async function closeWorkerCheckpointersForThread(parentThreadId: string): Promise<void> {
-  if (parentThreadId.includes("__worker__")) {
-    console.warn(
-      `[Runtime] Skipping worker checkpoint cleanup for invalid coordinator parent thread id: ${parentThreadId}`
+/**
+ * THE deletion primitive for checkpointer lifecycle: permanently retire the
+ * thread's checkpointer AND every sub-thread's (`__worker__`, `__wf_`, any
+ * future `<parent>__<role>` id). Must run BEFORE the disk sweeps — a writer
+ * that outlived its cancellation (hung subagent past cancelAndWait's timeout)
+ * could otherwise flush a late snapshot and resurrect the just-deleted files.
+ *
+ * Unlike closeCheckpointer (reusable close for a still-existing thread), this:
+ *  - tombstones FIRST (synchronously), so no interleaved caller can create a
+ *    fresh instance while we await the teardown;
+ *  - poisons instances via retire() — a held reference (the compiled graph
+ *    keeps its saver for the whole run) can never re-initialize and write again;
+ *  - also poisons instances whose detached LRU-evict close is still settling
+ *    (closingInstances), then awaits those closes so no in-flight rename can
+ *    land after the sweep;
+ *  - deliberately does NOT wait for pins ITSELF: retire() makes a late
+ *    operation fail fast instead of resurrecting, and "error on a deleted
+ *    thread" is the correct semantics — waiting could hang deletion behind a
+ *    wedged writer. (Precise caveat: awaiting an in-flight reusable close CAN
+ *    transitively wait on that close's own pin wait — bounded by the pinned
+ *    operation's duration, and safe either way: the instance is mirrored in
+ *    closingInstances at close start, so it gets poisoned when we resume.)
+ */
+export async function retireThreadCheckpointers(threadId: string): Promise<void> {
+  retiredThreadIds.add(threadId)
+  retiredThreadEpochs.set(threadId, (retiredThreadEpochs.get(threadId) ?? 0) + 1)
+  const prefix = `${threadId}__`
+  const matches = (id: string): boolean => id === threadId || id.startsWith(prefix)
+  const ids = new Set<string>(
+    [...checkpointers.keys(), ...closingCheckpointers.keys(), ...closingInstances.keys()].filter(
+      matches
     )
-    return
-  }
-  const prefix = `${parentThreadId}__worker__`
-  const entries = Array.from(checkpointers.entries()).filter(([threadId]) =>
-    threadId.startsWith(prefix)
   )
-  await Promise.all(
-    entries.map(async ([threadId, checkpointer]) => {
-      checkpointers.delete(threadId)
-      approvalStores.delete(threadId)
-      await checkpointer.close()
+  // The exact parent id ALWAYS gets a retiring entry — even with nothing
+  // cached. A fixed-id reviver (heartbeat) synchronizes on this channel, and
+  // its post-revive getCheckpointer resumes the moment the per-id chain
+  // settles — BEFORE the caller's own continuation gets to sweep the disk. An
+  // empty registry would leave no entry at all, and a warm-wasm, sync-fs init
+  // could then load the dead incarnation's bytes from the not-yet-swept file.
+  // The chain therefore hot-sweeps the parent's durable files itself before
+  // settling (deep purge for quarantine archives still runs in threads:delete).
+  ids.add(threadId)
+  // allSettled, NOT all: one rejecting retire() must not make this resolve
+  // early while sibling teardowns are still in flight — the caller sweeps the
+  // disk right after, and an unsettled sibling's in-flight close could late-
+  // rename a file back AFTER the sweep. Every id must settle before we return.
+  const settled = await Promise.allSettled(
+    Array.from(ids).map((id) => {
+      // Grab the evict-closing instance BEFORE awaiting its close settles (the
+      // settle handler removes it from the map), so it can still be poisoned.
+      const previousClose = closingCheckpointers.get(id)
+      const closingInstance = closingInstances.get(id)
+      const retiring = (async () => {
+        // Poison FIRST — retire() sets the write-gate flag synchronously at
+        // call, so even while we wait out an in-flight close, no NEW write
+        // iteration can start on that instance. Handled at creation: a fast
+        // rejection must not become an unhandled rejection while we're still
+        // awaiting the previous close below.
+        const closingInstanceRetire = closingInstance
+          ? closingInstance
+              .retire()
+              .catch((e) => console.warn(`[Runtime] closing-instance retire failed for ${id}:`, e))
+          : null
+        // A rejected prior close must NOT skip the poisoning below — log and
+        // keep going; the sweep ordering only needs the close's in-flight
+        // WRITE to have settled, which awaiting the (settled-or-rejected)
+        // promise provides either way.
+        if (previousClose) {
+          await previousClose.catch((e) =>
+            console.warn(`[Runtime] prior close failed during retire of ${id}:`, e)
+          )
+        }
+        if (closingInstanceRetire) await closingInstanceRetire
+        const checkpointer = checkpointers.get(id)
+        if (checkpointer) {
+          checkpointers.delete(id)
+          await checkpointer.retire()
+        }
+        if (id === threadId) {
+          // Writers above are drained/poisoned — sweep the parent's durable
+          // files BEFORE this entry settles, so anyone waiting on the retiring
+          // channel resumes to a clean disk.
+          try {
+            deleteThreadCheckpoint(id)
+          } catch (e) {
+            console.warn(`[Runtime] in-retire checkpoint sweep failed for ${id}:`, e)
+          }
+        }
+      })().finally(() => {
+        if (closingCheckpointers.get(id) === retiring) closingCheckpointers.delete(id)
+        if (retiringCheckpointers.get(id) === retiring) retiringCheckpointers.delete(id)
+      })
+      // Register synchronously, before any await, in BOTH channels: the
+      // closing map keeps ordinary close/getCheckpointer chaining intact, and
+      // the retiring map is the pin-immune wait a revived fixed-id caller
+      // (heartbeat pins BEFORE fetching) is required to honor.
+      closingCheckpointers.set(id, retiring)
+      retiringCheckpointers.set(id, retiring)
+      return retiring
     })
   )
+  for (const result of settled) {
+    if (result.status === "rejected") {
+      console.warn(
+        `[Runtime] a checkpointer retire failed during thread retirement:`,
+        result.reason
+      )
+    }
+  }
+  // Independent of checkpointer presence: an approval store can exist for a
+  // thread whose checkpointer was already evicted/never cached.
+  for (const id of Array.from(approvalStores.keys()).filter(matches)) {
+    approvalStores.delete(id)
+  }
 }
 
 // Get the model instance from custom model configuration

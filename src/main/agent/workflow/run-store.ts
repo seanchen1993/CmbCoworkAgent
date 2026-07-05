@@ -9,7 +9,7 @@ import {
   writeFileSync
 } from "fs"
 import { mkdir, readFile, rename, stat, unlink, writeFile } from "fs/promises"
-import { join, resolve } from "path"
+import { basename, join, resolve } from "path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import type {
   PersistedWorkflowRun,
@@ -72,12 +72,22 @@ export function getWorkflowRunsDir(workspacePath: string, threadId: string): str
  * litter. Best-effort. Marks the directory disposed FIRST so that even if an
  * active run is still settling (its abort wait timed out), its late flush is a
  * no-op and cannot recreate the directory — no need to fully settle it first.
+ *
+ * Fixed-id caveat (documented tradeoff, no attempt token by design): this runs
+ * in the deletion's LATE half, after awaited cleanups — a fixed-id thread
+ * (heartbeat) revived in that window gets re-tombstoned/epoch-bumped by this
+ * late call. Safe today: heartbeat's per-beat revive converges it within one
+ * beat, and its runtime never registers the workflow tool (isWorkflowMode
+ * only), so no NEW incarnation's workflow artifacts can exist here to be
+ * swept. Revisit if fixed-id threads ever gain workflow access.
  */
 export function deleteWorkflowRunsForThread(workspacePath: string, threadId: string): void {
   const dir = getWorkflowRunsDir(workspacePath, threadId)
   // Mark disposed FIRST: a background run still settling (e.g. cancelAndWait
   // timed out) must not recreate this directory via a late flush/persist.
   disposedRunDirs.add(dir)
+  markWorkflowThreadDisposed(threadId)
+  commitWorkflowThreadDisposal(threadId)
   try {
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
   } catch (error) {
@@ -678,10 +688,45 @@ export async function markWorkflowRunInterrupted(
 export async function persistRecoveredRun(
   workspacePath: string,
   threadId: string,
-  run: PersistedWorkflowRun
+  run: PersistedWorkflowRun,
+  expectedDisposalEpoch?: number
 ): Promise<boolean> {
+  // Deletion tombstone: this writer mkdirs, so an in-flight retry that grabbed
+  // its snapshot BEFORE forgetThread() cleared the table could otherwise
+  // rebuild the removed `.cmbdevclaw/workflows/<threadId>` after the sweep.
+  // The set tombstones alone aren't enough: reviveWorkflowThread (fixed-id
+  // recreation) clears them, which must never re-arm an OLD incarnation's
+  // snapshot — callers stamp the disposal epoch at capture time, and an epoch
+  // mismatch means the snapshot predates a deletion. Report success either
+  // way so the caller drops the snapshot — for a dead incarnation, dropping
+  // IS the recovery.
+  // Two tombstone tiers with different verdicts: epoch/dir mismatch means the
+  // incarnation is DEAD — report success so the caller drops the snapshot.
+  // A bare set-hit means a deletion attempt is merely IN PROGRESS (it may yet
+  // roll back) — report failure so the caller KEEPS the snapshot for a later
+  // retry instead of losing the run's terminal state on a failed delete.
+  const isDeadIncarnation = (): boolean =>
+    disposedRunDirs.has(getWorkflowRunsDir(workspacePath, threadId)) ||
+    (expectedDisposalEpoch !== undefined &&
+      expectedDisposalEpoch !== (threadDisposalEpochs.get(threadId) ?? 0))
+  const isStale = (): boolean => isDeadIncarnation() || disposedThreadIds.has(threadId)
+  if (isStale()) {
+    return isDeadIncarnation()
+  }
   try {
     await mkdir(getWorkflowRunsDir(workspacePath, threadId), { recursive: true })
+    // Post-await recheck: a deletion landing DURING the mkdir already swept the
+    // dir; writing now would rebuild it as an orphan (mirrors doWrite). Remove
+    // the empty dir our mkdir may have rebuilt — tombstone-active only; an
+    // epoch-only mismatch means a revived incarnation may own the dir.
+    if (isStale()) {
+      const dir = getWorkflowRunsDir(workspacePath, threadId)
+      // Dir-tombstone-only rm (see sweepRacedRunDir): a bare id-set hit is a
+      // rollback-able deletion ATTEMPT — the dir may still belong to the
+      // surviving thread and must not be touched.
+      if (disposedRunDirs.has(dir)) sweepRacedRunDir(dir)
+      return isDeadIncarnation()
+    }
     const path = runFilePath(workspacePath, threadId, run.runId)
     const journalPath = journalFilePath(workspacePath, threadId, run.runId)
     let recoveredRun = run
@@ -899,12 +944,110 @@ const storeGenerations = new Map<string, number>()
  */
 const disposedRunDirs = new Set<string>()
 
+/** Best-effort removal of a run dir that a raced mkdir just rebuilt AFTER the
+ * deletion's rmSync already ran (the post-mkdir recheck caught the writer, but
+ * the empty dir would otherwise linger forever — nothing sweeps again). Callers
+ * must gate on disposedRunDirs — the DIR tombstone is set exactly where the
+ * real sweep ran, i.e. the deletion passed its point of no return. NEVER gate
+ * on the bare id set (a deletion ATTEMPT that may roll back — rm here would
+ * destroy a surviving thread's artifacts) nor on generation/epoch-only
+ * staleness (a newer resume store or revived incarnation may own the dir). */
+function sweepRacedRunDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * ThreadId-keyed twin of disposedRunDirs. The dir-keyed set can only be
+ * populated when thread deletion resolves a workspacePath; if the thread's
+ * metadata lost it, no dir tombstone registers and a late writer would
+ * recreate the run directory. Writers always know their own threadId, so this
+ * set closes that gap regardless of metadata health. Same lifetime rationale:
+ * threadIds are unique and never reused.
+ */
+const disposedThreadIds = new Set<string>()
+
+/**
+ * Incarnation fence for live store instances. reviveWorkflowThread() clears the
+ * SET tombstones so a legitimately re-created id (heartbeat) can persist again
+ * — but that must never un-poison a store BORN BEFORE the deletion: its
+ * doWrite mkdirs, so one late flush would rebuild the swept run directory.
+ * Only commitWorkflowThreadDisposal bumps the epoch — at the deletion's point
+ * of no return (mark alone is a rollback-able attempt and must not silence
+ * live stores). One deletion may bump more than once (threads:delete commits
+ * after the DB delete AND deleteWorkflowRunsForThread commits again);
+ * harmless, the fence only needs the old store's birth epoch to no longer
+ * match. A store captures the epoch at creation and goes permanently silent
+ * once they differ. Revive deliberately does NOT touch epochs.
+ */
+const threadDisposalEpochs = new Map<string, number>()
+
+export function workflowThreadDisposalEpoch(threadId: string): number {
+  return threadDisposalEpochs.get(threadId) ?? 0
+}
+
+/** Tombstone a deleted thread by id alone — callable even when its
+ * workspacePath is unknown. Gates NEW work (launches, recovered write-backs,
+ * toolstream enqueues) in every workspace. Deliberately does NOT bump the
+ * disposal epoch: live stores keep persisting until the deletion's point of
+ * no return (commitWorkflowThreadDisposal), so a deletion attempt that fails
+ * pre-DB-delete never silently ate an active run's terminal flush. */
+export function markWorkflowThreadDisposed(threadId: string): void {
+  disposedThreadIds.add(threadId)
+}
+
+/** The deletion's point of no return (DB row removed): bump the incarnation
+ * epoch so every store/snapshot born BEFORE it goes permanently silent —
+ * revive-immune (revive clears the sets, never epochs). */
+export function commitWorkflowThreadDisposal(threadId: string): void {
+  threadDisposalEpochs.set(threadId, (threadDisposalEpochs.get(threadId) ?? 0) + 1)
+}
+
+/** Whether the id-keyed tombstone is currently set (deletion in progress or
+ * completed this process). Lets a deletion attempt capture the prior state so
+ * its failure rollback restores membership instead of blindly clearing it —
+ * blind clearing would lift a tombstone an earlier COMPLETED deletion set. */
+export function isWorkflowThreadMarkedDisposed(threadId: string): boolean {
+  return disposedThreadIds.has(threadId)
+}
+
+/** Undo a markWorkflowThreadDisposed made by a deletion attempt that FAILED
+ * before its point of no return (the DB row still exists): the thread
+ * survives, so launches must work again. Restores the PRIOR membership rather
+ * than blindly clearing — the id may have been legitimately tombstoned by an
+ * earlier completed deletion. Epochs need no rollback: they only bump at the
+ * point of no return, which a failed attempt never reached. */
+export function rollbackWorkflowThreadDisposal(threadId: string, priorDisposed: boolean): void {
+  if (!priorDisposed) disposedThreadIds.delete(threadId)
+}
+
+/** Lift the disposal tombstones for a thread id that is being legitimately
+ * re-created (fixed-id service threads like heartbeat — see
+ * reviveRetiredThread in runtime.ts for the contract). Clears both the
+ * id-keyed entry and any dir-keyed entries (the run dir's basename IS the
+ * threadId), so the new incarnation can persist workflow runs again.
+ * Deliberately does NOT reset the disposal epoch: stores created before the
+ * deletion stay permanently silent — revive must never re-arm an old
+ * incarnation's late flush (its doWrite mkdirs the swept directory back). */
+export function reviveWorkflowThread(threadId: string): void {
+  disposedThreadIds.delete(threadId)
+  for (const dir of Array.from(disposedRunDirs)) {
+    if (basename(dir) === threadId) disposedRunDirs.delete(dir)
+  }
+}
+
 /** True once a thread's run directory has been disposed (thread deleted): a late,
  * fire-and-forget write (e.g. a subagent tool-stream sidecar still settling) must check
  * this and skip, so it can't recreate the removed `.cmbdevclaw/workflows/<threadId>/`
  * as an orphan after the thread is gone. */
 export function isWorkflowRunDirDisposed(workspacePath: string, threadId: string): boolean {
-  return disposedRunDirs.has(getWorkflowRunsDir(workspacePath, threadId))
+  return (
+    disposedThreadIds.has(threadId) ||
+    disposedRunDirs.has(getWorkflowRunsDir(workspacePath, threadId))
+  )
 }
 
 export function createWorkflowRunStore(options: {
@@ -924,6 +1067,10 @@ export function createWorkflowRunStore(options: {
   const state: PersistedWorkflowRun = JSON.parse(JSON.stringify(initial))
   const generation = (storeGenerations.get(path) ?? 0) + 1
   storeGenerations.set(path, generation)
+  // Disposal epoch at birth: if the thread gets deleted after this store was
+  // created, the epochs diverge and every later write goes silent — even if a
+  // revive (fixed-id recreation) has cleared the id/dir tombstones since.
+  const bornDisposalEpoch = threadDisposalEpochs.get(threadId) ?? 0
 
   // O(1) indexes that mirror the persisted arrays, so a large run (up to 1000
   // agents) does not pay O(n²) for the per-agent state upserts and journal
@@ -954,8 +1101,21 @@ export function createWorkflowRunStore(options: {
   // resumable / won't appear in history (e.g. disk full) instead of silently
   // reporting success — without BLOCKING the launch on a transient fault.
   let initialPersistOk = true
+  // One predicate for both check points: at write entry, and again AFTER the
+  // mkdir await below (same check-then-await shape that let a deletion slip
+  // past getCheckpointerInternal's entry-only tombstone check).
+  // NOTE: deliberately does NOT consult disposedThreadIds — that set flips on
+  // while a deletion ATTEMPT is merely in progress and may be rolled back; a
+  // live store silenced by it would eat the cancelled run's terminal flush.
+  // Permanent silencing rides on the epoch (bumped at the point of no return)
+  // and the dir tombstone (set where the sweep actually runs).
+  const isStaleWriter = (): boolean =>
+    storeGenerations.get(path) !== generation ||
+    disposedRunDirs.has(runDir) ||
+    (threadDisposalEpochs.get(threadId) ?? 0) !== bornDisposalEpoch
+
   const doWrite = async (withBak: boolean, isInitial = false): Promise<boolean> => {
-    if (storeGenerations.get(path) !== generation || disposedRunDirs.has(runDir)) {
+    if (isStaleWriter()) {
       // A newer store owns this run file now (stale writer), OR the thread was
       // deleted (disposed) — either way, go silent so we never recreate a
       // removed run directory. Not a failure: report success so a flush() caller
@@ -968,6 +1128,18 @@ export function createWorkflowRunStore(options: {
     state.updatedAt = new Date().toISOString()
     try {
       await mkdir(getWorkflowRunsDir(workspacePath, threadId), { recursive: true })
+      // Post-await recheck: a deletion landing DURING the mkdir has already
+      // swept the dir — this mkdir may have rebuilt it, and writing now would
+      // fill an orphan. Bail before any file lands; if our mkdir landed AFTER
+      // the sweep, remove the empty dir it rebuilt (tombstone-active only —
+      // see sweepRacedRunDir for why generation/epoch staleness must not rm).
+      if (isStaleWriter()) {
+        // Sweep ONLY behind the dir tombstone (deletion committed + swept):
+        // a bare id-set hit is a rollback-able attempt, and rm'ing here would
+        // destroy artifacts the surviving thread still owns.
+        if (disposedRunDirs.has(runDir)) sweepRacedRunDir(runDir)
+        return true
+      }
       // Journal lives in a SEPARATE sidecar so run.json stays small: get-run /
       // hydrate / history scan / mark-delivered parse run.json without paying for a
       // (potentially tens-of-MB) journal they never use. Only resume reads it back
@@ -1036,7 +1208,7 @@ export function createWorkflowRunStore(options: {
   // can't recreate the removed run directory. null = clear any stale sidecar.
   const resultSidecarPath = workflowResultFilePath(workspacePath, threadId, state.runId)
   const doPersistFullResult = async (resultJson: string | null): Promise<boolean> => {
-    if (storeGenerations.get(path) !== generation || disposedRunDirs.has(runDir)) {
+    if (isStaleWriter()) {
       // Stale writer or disposed dir: skip silently (mirrors doWrite). The run.json
       // won't persist either, so resultSidecarStatus on a stale record is moot.
       return true
@@ -1051,6 +1223,11 @@ export function createWorkflowRunStore(options: {
         return true
       }
       await mkdir(runDir, { recursive: true })
+      // Post-await recheck — same rationale (and same dir-tombstone-only rm) as doWrite's.
+      if (isStaleWriter()) {
+        if (disposedRunDirs.has(runDir)) sweepRacedRunDir(runDir)
+        return true
+      }
       await writeFile(`${resultSidecarPath}.tmp`, resultJson)
       await rename(`${resultSidecarPath}.tmp`, resultSidecarPath)
       return true

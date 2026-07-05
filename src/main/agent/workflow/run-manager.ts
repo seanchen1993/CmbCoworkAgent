@@ -9,10 +9,12 @@ import {
   createWorkflowRunStore,
   findUndeliveredTerminalRun,
   getWorkflowRunsDir,
+  isWorkflowRunDirDisposed,
   markWorkflowRunNotified,
   persistAgentToolStream,
   persistRecoveredRun,
-  pruneWorkflowRuns
+  pruneWorkflowRuns,
+  workflowThreadDisposalEpoch
 } from "./run-store"
 import { runWorkflowSubagent, type WorkflowSubagentDeps } from "./subagent"
 import {
@@ -30,8 +32,9 @@ import { emitAppAttention } from "../../app-attention-events"
  * `<task-notification>` is folded back into the conversation so the model can
  * report the outcome (mirrors how coordinator async workers notify).
  *
- * One active run per thread (the workflow tool is exclusive per thread, and a
- * second concurrent run over the same workspace would fight the first).
+ * One active run per thread (the workflow tool is exclusive per thread).
+ * Same-WORKSPACE concurrency across different threads is intentionally
+ * ALLOWED — see launch() and activeRunForWorkspace() for the tradeoff notes.
  */
 
 export const WORKFLOW_EVENTS_CHANNEL_PREFIX = "agent:workflow-events:"
@@ -335,6 +338,16 @@ class WorkflowRunManager {
    * point the disk is still stale (disk full) and there's nothing better to report.
    */
   private readonly flushFailedRuns = new Map<string, PersistedWorkflowRun>()
+  /** Disposal epoch at snapshot capture, in lockstep with flushFailedRuns.
+   * persistRecoveredRun mkdirs, so a snapshot from an incarnation deleted
+   * since must be DROPPED, not written — even after reviveWorkflowThread
+   * cleared the set tombstones for a fixed-id recreation. */
+  private readonly flushFailedEpochs = new Map<string, number>()
+
+  private dropFlushFailedRun(runId: string): void {
+    this.flushFailedRuns.delete(runId)
+    this.flushFailedEpochs.delete(runId)
+  }
 
   isActive(threadId: string): boolean {
     return this.active.has(threadId)
@@ -345,12 +358,14 @@ class WorkflowRunManager {
   }
 
   /**
-   * A run active over the same workspace on ANY thread. Two workflows over one
-   * workspace would race on file writes (the script's host writeFile + every
-   * subagent's edit_file land in the same tree, serialized only WITHIN a run), so
-   * the second launch must be refused. Compared by CANONICAL path (workspaceKey),
-   * NOT raw string: two threads can name one directory via a symlink, a macOS
-   * case-variant, or a trailing slash, all of which a string compare would miss.
+   * A run active over the same workspace on ANY thread. NOT a launch mutex —
+   * concurrent same-workspace workflows on different threads are intentionally
+   * ALLOWED (see launch(): matches Claude Code desktop; same-thread exclusivity
+   * still holds). This lookup serves the callers that must know a workspace is
+   * busy, e.g. auto-commit skips while any run is active on it. Compared by
+   * CANONICAL path (workspaceKey), NOT raw string: two threads can name one
+   * directory via a symlink, a macOS case-variant, or a trailing slash, all of
+   * which a string compare would miss.
    */
   activeRunForWorkspace(workspacePath: string): { threadId: string; runId: string } | undefined {
     const key = workspaceKey(workspacePath)
@@ -390,6 +405,15 @@ class WorkflowRunManager {
         `A dynamic workflow (${this.active.get(request.threadId)!.runId}) is already running in this thread. Wait for its task-notification or cancel it from the workflow panel.`
       )
     }
+    // Deletion tombstone: a foreground turn that outlived its thread's deletion
+    // could still reach the workflow tool. Refusing here (rather than silently
+    // skipping artifacts) keeps `.cmbdevclaw/workflows/<threadId>` deleted —
+    // persistScriptFile below would otherwise mkdir it back — and fails the
+    // tool call cleanly instead of starting a run whose every persist and
+    // subagent checkpointer is already tombstoned.
+    if (isWorkflowRunDirDisposed(request.workspacePath, request.threadId)) {
+      throw new Error("This thread has been deleted; a workflow can no longer be launched on it.")
+    }
     // No workspace-level mutual exclusion: concurrent workflows over the SAME
     // workspace on different threads are intentionally allowed (matches Claude
     // Code desktop). Trade-off: cmbcowork has no per-run git-worktree isolation
@@ -405,7 +429,7 @@ class WorkflowRunManager {
     // old in-memory terminal state is superseded. Without this, get-run/hydrate (which prefer
     // getFlushFailedRun) would keep showing the OLD terminal run instead of the NEW active one — the
     // disk re-persist may still be failing, so it isn't cleared on the success/ack paths.
-    this.flushFailedRuns.delete(request.runId)
+    this.dropFlushFailedRun(request.runId)
 
     const now = new Date().toISOString()
     const initial: PersistedWorkflowRun = {
@@ -579,6 +603,7 @@ class WorkflowRunManager {
             // reported, so a snapshot would just get re-surfaced by
             // findPendingNotification and wrongly reported.
             this.flushFailedRuns.set(request.runId, JSON.parse(JSON.stringify(runStore.state)))
+            this.flushFailedEpochs.set(request.runId, workflowThreadDisposalEpoch(request.threadId))
             // Bound memory: under a persistent disk fault these (each holding a full
             // journal) could pile up. Evict the oldest ALREADY-DELIVERED snapshot —
             // its result was already reported, so only its stale history copy is lost.
@@ -590,7 +615,7 @@ class WorkflowRunManager {
               let evicted = false
               for (const [id, snap] of this.flushFailedRuns) {
                 if (snap.notificationDelivered && !this.inFlightNotifications.has(id)) {
-                  this.flushFailedRuns.delete(id)
+                  this.dropFlushFailedRun(id)
                   evicted = true
                   break
                 }
@@ -713,7 +738,7 @@ class WorkflowRunManager {
    * (e.g. after a restart) would have to come from disk anyway.
    */
   clearFlushFailedRun(runId: string): void {
-    this.flushFailedRuns.delete(runId)
+    this.dropFlushFailedRun(runId)
   }
 
   /**
@@ -748,7 +773,7 @@ class WorkflowRunManager {
   forgetThread(threadId: string): void {
     for (const [runId, snap] of this.flushFailedRuns) {
       if (snap.threadId === threadId) {
-        this.flushFailedRuns.delete(runId)
+        this.dropFlushFailedRun(runId)
         this.inFlightNotifications.delete(runId)
         this.renotifyAttempts.delete(runId)
       }
@@ -770,8 +795,15 @@ class WorkflowRunManager {
     const snapshot = this.flushFailedRuns.get(runId)
     if (!snapshot) return false
     snapshot.notificationDelivered = true
-    if (await persistRecoveredRun(workspacePath, threadId, snapshot)) {
-      this.flushFailedRuns.delete(runId)
+    if (
+      await persistRecoveredRun(
+        workspacePath,
+        threadId,
+        snapshot,
+        this.flushFailedEpochs.get(runId)
+      )
+    ) {
+      this.dropFlushFailedRun(runId)
       return true
     }
     return false
@@ -791,8 +823,15 @@ class WorkflowRunManager {
   ): Promise<void> {
     const snapshot = this.flushFailedRuns.get(runId)
     if (!snapshot) return
-    if (await persistRecoveredRun(workspacePath, threadId, snapshot)) {
-      this.flushFailedRuns.delete(runId)
+    if (
+      await persistRecoveredRun(
+        workspacePath,
+        threadId,
+        snapshot,
+        this.flushFailedEpochs.get(runId)
+      )
+    ) {
+      this.dropFlushFailedRun(runId)
     }
   }
 

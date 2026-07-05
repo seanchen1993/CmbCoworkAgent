@@ -977,7 +977,7 @@ async function scenario12() {
     env1.parallel,
     env1.phase,
     env1.log,
-    { requirement: "执行预算测试需求", maxTasks: 2 },
+    { requirement: "执行预算测试需求", maxTasks: 2.9 } /* 小数预算必须取整为 2 */,
     env1.glob,
     env1.readFile,
     env1.writeFile
@@ -1008,7 +1008,7 @@ async function scenario12() {
     env2.parallel,
     env2.phase,
     env2.log,
-    { requirement: "执行预算测试需求", maxTasks: 2 },
+    { requirement: "执行预算测试需求", maxTasks: 2.9 } /* 小数预算必须取整为 2 */,
     env2.glob,
     env2.readFile,
     env2.writeFile
@@ -1233,6 +1233,95 @@ async function scenario15() {
   console.log("整体为需要修复:", r.状态 === "需要修复" ? "PASS" : "FAIL " + r.状态)
 }
 
+// ===== 场景16:强制重跑 + 预算截断——被强制未执行的下游不得保留旧 ready 放行 =====
+async function scenario16() {
+  const files = {}
+  const behavior = (label) => {
+    if (label === "需求整理") return NORMALIZED
+    if (label.startsWith("探索：")) return EXPLORE
+    if (label === "任务规划")
+      return {
+        strategy: "s",
+        tasks: [
+          {
+            id: "Task B",
+            title: "任务B",
+            objective: "b",
+            why: "w",
+            targetFiles: [],
+            acceptanceCriteria: ["b ok"],
+            validationCommands: [],
+            dependencies: ["Task A"],
+            riskLevel: "low"
+          },
+          {
+            id: "Task A",
+            title: "任务A",
+            objective: "a",
+            why: "w",
+            targetFiles: [],
+            acceptanceCriteria: ["a ok"],
+            validationCommands: [],
+            dependencies: [],
+            riskLevel: "low"
+          }
+        ],
+        globalValidationCommands: [],
+        blockers: [],
+        canImplement: true
+      }
+    if (label.startsWith("实现：")) return IMPL_OK
+    if (label.startsWith("验证：")) return VERIFY_PASS
+    if (label === "总体验收")
+      return {
+        verdict: "ready",
+        summary: "ok",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
+        commandChecks: [],
+        releaseNotes: [],
+        remainingIssues: [],
+        nextActions: []
+      }
+    throw new Error("未知 agent label: " + label)
+  }
+  const logsRun = async (a) => {
+    const logs = []
+    const env = makeEnv({ files, agentBehavior: behavior, logs })
+    const r = await runScript(
+      env.agent,
+      env.parallel,
+      env.phase,
+      env.log,
+      a,
+      env.glob,
+      env.readFile,
+      env.writeFile
+    )
+    return { r, logs }
+  }
+  await logsRun("强制预算测试需求") // 首跑:A、B 全部 ready、可交付
+  const { r: r2, logs: logs2 } = await logsRun({
+    requirement: "强制预算测试需求",
+    forceTaskIds: ["Task A"],
+    maxTasks: 1
+  })
+  console.log("\n== 场景16 强制+预算不误报 ==")
+  console.log(
+    "强制集合旧 ready 被失效:",
+    logs2.some((l) => l.includes("连带重跑") && l.includes("task-b")) ? "PASS" : "FAIL"
+  )
+  console.log(
+    "预算截断后如实 needs_fix:",
+    r2.状态 === "需要修复" && (r2.剩余问题 || []).some((x) => x.includes("task-b"))
+      ? "PASS"
+      : "FAIL " + r2.状态
+  )
+  const { r: r3 } = await logsRun("强制预算测试需求") // 续跑补 B
+  console.log("续跑补完后可交付:", r3.状态 === "可交付" ? "PASS" : "FAIL " + r3.状态)
+}
+
 ;(async () => {
   await scenario1and2()
   await scenario3()
@@ -1248,6 +1337,7 @@ async function scenario15() {
   await scenario13()
   await scenario14()
   await scenario15()
+  await scenario16()
 })()
   .catch((e) => {
     console.error("DRYRUN ERROR:", e)

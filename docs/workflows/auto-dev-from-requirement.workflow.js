@@ -227,7 +227,9 @@ function asRequirement(value) {
 }
 
 function uniq(items) {
-  const seen = {}
+  // 原型无关字典:命令文本作 key,普通 {} 会让 "__proto__"/"toString" 这类
+  // key 读到继承属性——uniq 里表现为静默丢弃合法条目(门禁变松方向)。
+  const seen = Object.create(null)
   const out = []
   for (const item of items) {
     if (typeof item !== "string" || item.length === 0) continue
@@ -236,6 +238,16 @@ function uniq(items) {
     out.push(item)
   }
   return out
+}
+
+// 命令文本归一化:吸收空白漂移(trim + 连续空白折叠为单空格)。已知取舍:
+// 折叠不感知 shell 引号,`grep "a  b"` 与 `grep "a b"` 会被判等——声明命令
+// 里引号内多空格有语义的场景极罕见,换 shell-aware 解析不值当。验证代理仍须
+// 原样回填声明命令(prompt 有此要求),归一化只兜底空格/换行差异的误判。
+function normalizeCommandText(cmd) {
+  return String(cmd || "")
+    .trim()
+    .replace(/\s+/g, " ")
 }
 
 function take(items, limit) {
@@ -264,7 +276,7 @@ function mergeExplorations(parts) {
     if (rank[part.confidence] > rank[confidence]) confidence = part.confidence
   }
 
-  const seenFiles = {}
+  const seenFiles = Object.create(null)
   const uniqueFiles = []
   for (const file of relevantFiles) {
     if (!file || typeof file.path !== "string" || seenFiles[file.path]) continue
@@ -1056,7 +1068,7 @@ ${stringify(plan)}
 ${stringify(implementation)}
 
 如果可以，请使用 shell 运行聚焦的验证命令。
-优先使用计划中的命令，但可以根据仓库实际情况调整。
+计划中的命令必须按声明的原样逐条执行(不得加参数/前缀/环境变量改变其语义——门禁按上报的 command 字段裁决,窄化执行等同虚报),并按原字符串填入 commands.command 报告结果;确需补充的命令另行执行、作为额外条目如实报告。
 不要修改文件。
 请返回通过/失败/阻塞结论，并给出证据。`,
         {
@@ -1125,7 +1137,7 @@ ${stringify(fix)}
 上一次验证：
 ${stringify(verification)}
 
-只运行有价值的聚焦检查。不要修改文件。`,
+计划中的命令必须按声明的原样逐条执行(不得加参数/前缀窄化范围),按原字符串填入 commands.command 报告结果;此外聚焦复查之前失败的问题。不要修改文件。`,
           {
             label: "修复后验证",
             phase: "验证",
@@ -1179,10 +1191,15 @@ if (finalReview.verdict === "ready") {
     (item) => item.result === "fail"
   )
   // 计划声明的测试命令必须逐条被报告且通过:缺失/not_run/fail 都不放行。
-  const reportedCmd = {}
-  for (const item of verificationAfterFix.commands || []) reportedCmd[item.command] = item
+  // 重复上报聚合取"最坏":先 fail 后 pass 不得被覆盖。
+  const reportedCmd = Object.create(null)
+  for (const item of verificationAfterFix.commands || []) {
+    const key = normalizeCommandText(item.command)
+    const existing = reportedCmd[key]
+    if (!existing || existing.result === "pass") reportedCmd[key] = item
+  }
   const unexecutedDeclared = uniq(plan.testCommands || []).filter((cmd) => {
-    const entry = reportedCmd[cmd]
+    const entry = reportedCmd[normalizeCommandText(cmd)]
     return !entry || entry.result !== "pass"
   })
   const verificationOk =

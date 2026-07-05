@@ -3,8 +3,19 @@ import { BrowserWindow } from "electron"
 import WebSocket from "ws"
 import { HumanMessage } from "@langchain/core/messages"
 import { getChatXConfig } from "../storage"
-import { createAgentRuntime, closeCheckpointer, pinCheckpointer } from "../agent/runtime"
-import { createThread as dbCreateThread, deleteThread as dbDeleteThread, getAllThreads, getThread } from "../db/index"
+import {
+  createAgentRuntime,
+  closeCheckpointer,
+  pinCheckpointer,
+  retireThreadCheckpointers
+} from "../agent/runtime"
+import { purgeThreadCheckpointArtifacts } from "../storage"
+import {
+  createThread as dbCreateThread,
+  deleteThread as dbDeleteThread,
+  getAllThreads,
+  getThread
+} from "../db/index"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { trackEvent } from "./event-reporter"
@@ -19,8 +30,8 @@ const RECONNECT_MAX_MS = 60_000
 const PING_INTERVAL_MS = 30_000
 const DEDUP_MAX_SIZE = 1000
 const MAX_QUEUE_SIZE = 10
-const MAX_MESSAGE_SIZE = 10 * 1024     // 10KB
-const MAX_CONTENT_LENGTH = 1000       // 1000 chars
+const MAX_MESSAGE_SIZE = 10 * 1024 // 10KB
+const MAX_CONTENT_LENGTH = 1000 // 1000 chars
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -86,7 +97,9 @@ function findChatXThread(chatId: string, sender: string): string | null {
       if (meta.chatxChatId === chatId && meta.chatxSender === sender) {
         return t.thread_id
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
   return null
 }
@@ -187,7 +200,9 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     }
     queue.push(msg)
     messageQueues.set(chatKey, queue)
-    console.log(`[ChatX] Chat ${chatKey} is busy, queued message: ${msg.msgId} (queue size: ${queue.length})`)
+    console.log(
+      `[ChatX] Chat ${chatKey} is busy, queued message: ${msg.msgId} (queue size: ${queue.length})`
+    )
     return
   }
 
@@ -195,33 +210,44 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
   const abortController = new AbortController()
   activeAbortControllers.set(chatKey, abortController)
 
-  // Find or create thread
-  let threadId = findChatXThread(msg.chatId, msg.fromId)
+  // Find or create thread. The whole pre-run setup is guarded: a throw here
+  // (db lookup/create, renderer notify) lands BEFORE the main try/finally
+  // takes ownership of cleanup — and stopChatX deliberately no longer clears
+  // owner state (the dual-writer fix), so an unguarded throw would leave this
+  // chatKey stuck in runningChats until process restart, silently queueing or
+  // dropping every later message of the chat.
+  let threadId = ""
   let threadCreated = false
-
-  if (!threadId) {
-    threadId = uuid()
-    const workspacePath = robot.workDir
-    if (!workspacePath) {
-      console.error("[ChatX] No workspace directory configured for robot:", msg.chatId)
-      runningChats.delete(chatKey)
-      activeAbortControllers.delete(chatKey)
-      return
+  try {
+    threadId = findChatXThread(msg.chatId, msg.fromId) || ""
+    if (!threadId) {
+      const workspacePath = robot.workDir
+      if (!workspacePath) {
+        console.error("[ChatX] No workspace directory configured for robot:", msg.chatId)
+        runningChats.delete(chatKey)
+        activeAbortControllers.delete(chatKey)
+        return
+      }
+      threadId = uuid()
+      const now = new Date()
+      const timeTag = `${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`
+      dbCreateThread(threadId, {
+        workspacePath,
+        title: `[远端机器人] ${robot.chatId} · ${timeTag}`,
+        chatxChatId: msg.chatId,
+        chatxSender: msg.fromId,
+        chatxRobotChatId: msg.chatId
+      })
+      threadCreated = true
+      notifyRenderer("threads:changed")
     }
-    const now = new Date()
-    const timeTag = `${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`
-    dbCreateThread(threadId, {
-      workspacePath,
-      title: `[远端机器人] ${robot.chatId} · ${timeTag}`,
-      chatxChatId: msg.chatId,
-      chatxSender: msg.fromId,
-      chatxRobotChatId: msg.chatId
-    })
-    threadCreated = true
-    notifyRenderer("threads:changed")
+    threadIdToChatKey.set(threadId, chatKey)
+  } catch (e) {
+    runningChats.delete(chatKey)
+    activeAbortControllers.delete(chatKey)
+    if (threadId) threadIdToChatKey.delete(threadId)
+    throw e
   }
-
-  threadIdToChatKey.set(threadId, chatKey)
   const channel = `scheduler:stream:${threadId}`
   let hasStreamedContent = false
   const releaseCheckpointerPin = pinCheckpointer(threadId)
@@ -270,7 +296,9 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
         if (evt.type === "full-messages") {
           // 只取最后一条没有 tool_calls 的 assistant 消息（即最终回复，不含中间工具推理）
           const finalMsgs = evt.messages.filter(
-            (m) => m.role === "assistant" && (!m.tool_calls || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
+            (m) =>
+              m.role === "assistant" &&
+              (!m.tool_calls || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
           )
           const last = finalMsgs[finalMsgs.length - 1]
           if (last?.content?.trim()) lastAssistantText = last.content.trim()
@@ -302,9 +330,12 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     }
   } catch (error) {
     const isAbortError =
-      error instanceof Error &&
-      (error.name === "AbortError" || error.message.includes("aborted"))
-    const errMsg = isAbortError ? "Cancelled" : (error instanceof Error ? error.message : String(error))
+      error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
+    const errMsg = isAbortError
+      ? "Cancelled"
+      : error instanceof Error
+        ? error.message
+        : String(error)
 
     if (isAbortError) {
       broadcastToChannel(channel, { type: "done" })
@@ -322,7 +353,33 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     }
 
     if (threadCreated && !hasStreamedContent) {
-      try { dbDeleteThread(threadId) } catch { /* ignore */ }
+      // Deleting a thread means deleting its transcript (same semantics as
+      // threads:delete): the runtime may already have created and flushed a
+      // checkpointer for this discarded one-shot thread, and the finally's
+      // reusable close below would flush it AGAIN — retire first (poisons +
+      // makes that close a no-op), then purge the on-disk artifacts. Retire
+      // and purge are INDEPENDENT best-effort (a retire fault must not leave
+      // the orphan file behind), but both stay gated on the row delete
+      // actually succeeding — retiring a SURVIVING thread would poison it.
+      let rowDeleted = false
+      try {
+        dbDeleteThread(threadId)
+        rowDeleted = true
+      } catch {
+        /* ignore */
+      }
+      if (rowDeleted) {
+        try {
+          await retireThreadCheckpointers(threadId)
+        } catch {
+          /* ignore */
+        }
+        try {
+          purgeThreadCheckpointArtifacts(threadId)
+        } catch {
+          /* ignore */
+        }
+      }
     }
   } finally {
     try {
@@ -334,11 +391,18 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     } catch (e) {
       console.warn("[event] failed to emit chatx.message.processed:", e)
     }
-    runningChats.delete(chatKey)
     activeAbortControllers.delete(chatKey)
     threadIdToChatKey.delete(threadId)
     releaseCheckpointerPin()
+    // Close BEFORE dropping the runningChats gate (mirrors heartbeat's finally):
+    // ChatX reuses one threadId per (chatId, sender), and an inbound landing in
+    // this close window would pass the gate, pin first, and — pinned callers
+    // skip the pending-close wait — create a second saver over the same sqlite
+    // the old close is still flushing (dual writer). Keeping the gate up makes
+    // the newcomer queue instead; the queue drain below runs after the gate
+    // clears, so queued messages are not starved.
     await closeCheckpointer(threadId).catch(() => {})
+    runningChats.delete(chatKey)
     notifyRenderer("threads:changed")
 
     // Process next queued message for this chat
@@ -402,7 +466,10 @@ function connect(): void {
       }
       const msg = JSON.parse(rawStr) as ChatXInboundMessage
       if (!msg.msgId || !msg.chatId || !msg.fromId) {
-        console.warn("[ChatX] Invalid message format (missing msgId/chatId/fromId):", rawStr.slice(0, 200))
+        console.warn(
+          "[ChatX] Invalid message format (missing msgId/chatId/fromId):",
+          rawStr.slice(0, 200)
+        )
         return
       }
       if (!msg.content || !msg.content.trim()) {
@@ -410,7 +477,9 @@ function connect(): void {
         return
       }
       if (msg.content.length > MAX_CONTENT_LENGTH) {
-        console.warn(`[ChatX] Content too long (${msg.content.length} chars), truncating to ${MAX_CONTENT_LENGTH}`)
+        console.warn(
+          `[ChatX] Content too long (${msg.content.length} chars), truncating to ${MAX_CONTENT_LENGTH}`
+        )
         msg.content = msg.content.slice(0, MAX_CONTENT_LENGTH)
       }
       handleInbound(msg).catch((err) => {
@@ -467,7 +536,11 @@ function cleanup(): void {
   stopPing()
   if (ws) {
     ws.removeAllListeners()
-    try { ws.terminate() } catch { /* ignore */ }
+    try {
+      ws.terminate()
+    } catch {
+      /* ignore */
+    }
     ws = null
   }
 }
@@ -504,9 +577,14 @@ export function stopChatX(): void {
     console.log(`[ChatX] Aborting running chat: ${key}`)
     controller.abort()
   }
-  activeAbortControllers.clear()
-  threadIdToChatKey.clear()
-  runningChats.clear()
+  // Owner-managed run state (runningChats / activeAbortControllers /
+  // threadIdToChatKey) is NOT cleared here — each handler's finally removes
+  // its own entries AFTER its checkpointer close settles. Clearing them at
+  // stop reopens the exact window the finally ordering closed: stop → restart
+  // → a message for the same chatKey passes the gate while the old handler is
+  // still flushing, dual-writing the reused thread's sqlite (same family as
+  // stopHeartbeat's abort-only fix). Queued messages carry no running state —
+  // dropping them on stop is fine.
   messageQueues.clear()
   cleanup()
 }

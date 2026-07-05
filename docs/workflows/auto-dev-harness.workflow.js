@@ -264,12 +264,13 @@ function normalizeTaskId(value, index) {
 function numberInRange(value, fallback, min, max) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return fallback
-  return Math.max(min, Math.min(parsed, max))
+  // 预算类参数必须取整:1.5 轮/1.5 个任务会让 < 比较多跑一轮/一个。
+  return Math.floor(Math.max(min, Math.min(parsed, max)))
 }
 
 function assignStableTaskIds(tasks) {
-  const seen = {}
-  const idMap = {}
+  const seen = Object.create(null)
+  const idMap = Object.create(null)
   const droppedDeps = []
   const withIds = tasks.map((task, index) => {
     const raw = normalizeTaskId(task.id || task.title, index)
@@ -307,10 +308,10 @@ function assignStableTaskIds(tasks) {
 }
 
 function topoSortTasks(tasks) {
-  const byId = {}
+  const byId = Object.create(null)
   for (const task of tasks) byId[task.id] = task
-  const visited = {}
-  const visiting = {}
+  const visited = Object.create(null)
+  const visiting = Object.create(null)
   const ordered = []
   let cyclic = false
   function visit(task) {
@@ -337,7 +338,9 @@ function lines(items) {
 }
 
 function uniq(items) {
-  const seen = {}
+  // 原型无关字典:命令文本作 key,普通 {} 会让 "__proto__"/"toString" 这类
+  // key 读到继承属性——uniq 里表现为静默丢弃合法条目(门禁变松方向)。
+  const seen = Object.create(null)
   const out = []
   for (const item of items || []) {
     if (typeof item !== "string" || item.length === 0) continue
@@ -346,6 +349,16 @@ function uniq(items) {
     out.push(item)
   }
   return out
+}
+
+// 命令文本归一化:吸收空白漂移(trim + 连续空白折叠为单空格)。已知取舍:
+// 折叠不感知 shell 引号,`grep "a  b"` 与 `grep "a b"` 会被判等——声明命令
+// 里引号内多空格有语义的场景极罕见,换 shell-aware 解析不值当。验证代理仍须
+// 原样回填声明命令(prompt 有此要求),归一化只兜底空格/换行差异的误判。
+function normalizeCommandText(cmd) {
+  return String(cmd || "")
+    .trim()
+    .replace(/\s+/g, " ")
 }
 
 function take(items, limit) {
@@ -781,7 +794,7 @@ function mergeExploration(parts) {
   const testCommands = []
   const buildCommands = []
   const risks = []
-  const seenFiles = {}
+  const seenFiles = Object.create(null)
 
   for (const part of parts || []) {
     if (!part) continue
@@ -859,10 +872,15 @@ function enforceVerificationConsistency(verification, task) {
     if (item.result === "fail") problems.push(`命令失败:${item.command}`)
   }
   // 任务声明的验证命令必须被执行且通过:缺失/not_run 与总体 pass 矛盾。
-  const reportedCmd = {}
-  for (const item of verification.commandChecks || []) reportedCmd[item.command] = item
+  // 重复上报聚合取"最坏":先 fail 后 pass 不得被覆盖。
+  const reportedCmd = Object.create(null)
+  for (const item of verification.commandChecks || []) {
+    const key = normalizeCommandText(item.command)
+    const existing = reportedCmd[key]
+    if (!existing || existing.result === "pass") reportedCmd[key] = item
+  }
   for (const cmd of uniq((task && task.validationCommands) || [])) {
-    const entry = reportedCmd[cmd]
+    const entry = reportedCmd[normalizeCommandText(cmd)]
     if (!entry || entry.result !== "pass") {
       problems.push(`声明的验证命令未执行或未通过:${cmd}`)
     }
@@ -892,12 +910,15 @@ function taskStateById(states, id) {
 // 任务契约指纹:目标/验收标准/验证命令/目标文件/依赖任一变化即视为新契约,
 // replan 后同 ID 任务的旧完成状态据此失效。
 function taskContractFingerprint(task) {
+  // 验收标准保持位置序(AC id 依赖位置);命令/文件/依赖语义无序,排序后入指纹,
+  // 避免 replan 仅调整顺序就误判契约变化、白白重跑任务。
+  const sorted = (arr) => [...(arr || [])].sort()
   return stringify([
     task.objective || "",
     task.acceptanceCriteria || [],
-    task.validationCommands || [],
-    task.targetFiles || [],
-    task.dependencies || []
+    sorted(task.validationCommands),
+    sorted(task.targetFiles),
+    sorted(task.dependencies)
   ])
 }
 
@@ -1170,7 +1191,7 @@ ${stringify(exploration)}
 ${previousState ? stringify(previousState.tasks || []) : "无"}
 
 要求：
-- 优先拆成 2 到 ${maxTasks} 个任务；简单需求可以只有 1 个任务。
+- 按需求完整拆分任务,数量以需求本身为准,不要为凑数或省略而增删;本次运行最多执行 ${maxTasks} 个未完成任务,超出的会自动留待续跑分批执行。
 - 每个任务都要有明确验收标准和验证命令。
 - 任务之间如果有依赖，请写 dependencies。
 - 任务 id 必须稳定、简短、kebab-case；续跑时尽量保留已有 id。
@@ -1221,7 +1242,7 @@ ${lines(blockers)}
 
   // 新计划生效(含 replan:true):清掉不在新计划里的旧任务状态。
   // 保留 id 相同的已完成任务(仍可跳过),丢弃孤儿,避免污染报告统计与总体验证。
-  const planTaskIds = {}
+  const planTaskIds = Object.create(null)
   for (const task of plan.tasks) planTaskIds[task.id] = true
   const staleTasks = context.taskStates.filter((t) => !planTaskIds[t.id])
   if (staleTasks.length > 0) {
@@ -1301,6 +1322,22 @@ if (effectiveForcedIds.size > 0) {
   const cascaded = [...effectiveForcedIds].filter((id) => !directlyForcedIds.has(id))
   if (cascaded.length > 0) {
     log(`强制重跑沿依赖传递,以下下游任务将连带重跑:${cascaded.join("、")}`)
+  }
+  // 立即把强制集合的旧状态失效为 planned:否则预算截断在下游执行前 break 时,
+  // 下游仍挂着旧 ready,最终门禁会把"被强制但本轮未执行"的任务误当完成放行。
+  for (const forcedId of effectiveForcedIds) {
+    const state = taskStateById(context.taskStates, forcedId)
+    if (state && state.status === "ready") {
+      const forcedTask = plan.tasks.find((t) => t.id === forcedId)
+      if (forcedTask) {
+        updateTaskState(context, forcedTask, {
+          status: "planned",
+          summary: "强制重跑,待执行。",
+          changedFiles: [],
+          issues: []
+        })
+      }
+    }
   }
 }
 
@@ -1403,7 +1440,8 @@ ${lines(task.validationCommands)}
 验收标准清单（acceptanceChecks 必须按下面的 id 逐条返回,不得遗漏、不得使用清单外的 id,不允许合并）：
 ${(task.acceptanceCriteria || []).map((text, i) => `- AC-${i + 1}: ${text}`).join("\n")}
 
-请实际运行可用的命令，并尝试至少一个边界/反例。每条检查给出结论与证据。`,
+请实际运行可用的命令，并尝试至少一个边界/反例。每条检查给出结论与证据。
+声明命令必须按原样执行(不得加参数/前缀窄化其范围——门禁按 commandChecks.command 裁决,窄化执行等同虚报),commandChecks.command 原样填写声明的命令字符串并逐条报告;确需额外命令另行执行、作为额外条目如实报告。`,
             {
               label: `验证：${task.title}`,
               phase: "任务执行",
@@ -1477,7 +1515,7 @@ ${stringify(verification)}
 验收标准清单（acceptanceChecks 必须按下面的 id 逐条返回,不得遗漏、不得使用清单外的 id,不允许合并）：
 ${(task.acceptanceCriteria || []).map((text, i) => `- AC-${i + 1}: ${text}`).join("\n")}
 
-请聚焦运行有价值的命令。`,
+任务声明的验证命令必须逐条执行并逐条报告,commandChecks.command 原样填写声明的命令字符串;acceptanceChecks 仍须按 id 逐条覆盖全部验收标准。`,
         {
           label: `复验：${task.title} #${fixRound}`,
           phase: "任务执行",
@@ -1551,7 +1589,7 @@ ${lines(allChangedFiles)}
 ${(normalized.acceptanceCriteria || []).map((text, i) => `- AC-${i + 1}: ${text}`).join("\n")}
 
 请实际运行全局验证命令，确认所有任务合并后是否满足需求。
-commandChecks 必须逐条覆盖上面列出的每一条全局验证命令,如实报告结果(以退出码为准),不得遗漏。`,
+commandChecks 必须逐条覆盖上面列出的每一条全局验证命令,command 字段原样填写清单中的命令字符串,如实报告结果(以退出码为准),不得遗漏。`,
   {
     label: "总体验收",
     phase: "总体验证",
@@ -1574,17 +1612,25 @@ phase("交付报告")
 // 都按不通过计,与 contract-delivery 终审的交叉核对同构)。任一不满足即降级。
 const unfinishedTasks = context.taskStates.filter((task) => task.status !== "ready")
 const expectedGlobalCommands = uniq(plan.globalValidationCommands || [])
-const reportedGlobalCommands = {}
+const reportedGlobalCommands = Object.create(null)
 for (const item of finalReview.commandChecks || []) {
-  reportedGlobalCommands[item.command] = item
+  const key = normalizeCommandText(item.command)
+  const existing = reportedGlobalCommands[key]
+  // 重复上报聚合取"最坏":失败/未跑不被后续 pass 覆盖。
+  if (!existing || existing.result === "pass") reportedGlobalCommands[key] = item
 }
 const failedGlobalCommands = expectedGlobalCommands.filter((cmd) => {
-  const entry = reportedGlobalCommands[cmd]
+  const entry = reportedGlobalCommands[normalizeCommandText(cmd)]
   return !entry || entry.result !== "pass"
 })
 // 终审代理如实报告的"清单外失败命令"同样不可忽略——它发现了问题就不能放行。
+const expectedGlobalNormalized = expectedGlobalCommands.map(normalizeCommandText)
 const extraFailedCommands = (finalReview.commandChecks || [])
-  .filter((item) => item.result === "fail" && !expectedGlobalCommands.includes(item.command))
+  .filter(
+    (item) =>
+      item.result === "fail" &&
+      !expectedGlobalNormalized.includes(normalizeCommandText(item.command))
+  )
   .map((item) => item.command)
 // 需求级验收覆盖按稳定 ID 对齐(与轻量版/契约版同构):规划遗漏或验收未覆盖的
 // 需求标准不能靠"任务都 ready"混过最终门禁。
