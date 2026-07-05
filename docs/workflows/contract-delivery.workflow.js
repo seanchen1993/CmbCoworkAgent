@@ -326,13 +326,27 @@ function tokensSpent() {
     : null
 }
 
+let fatalGlobError = null
+
 async function safeGlob(pattern) {
   try {
     return await glob(pattern)
   } catch (error) {
-    log(`文件匹配失败，已跳过：${pattern}：${error.message}`)
+    const message = String((error && error.message) || error)
+    if (/matched more than/.test(message)) {
+      // 引擎的 glob 结果上限是保护性错误:吞掉它会让脚本在几乎没有文件清单的
+      // 情况下继续规划实现。parallel 会把 thunk 异常吞成 null,直接 throw 传
+      // 不到主流程——记录标志,收集结束后统一 throwIfGlobOverflow 快速失败。
+      fatalGlobError = `glob("${pattern}") 超出引擎结果上限,请缩小匹配范围后重试:${message}`
+      return []
+    }
+    log(`文件匹配失败，已跳过：${pattern}：${message}`)
     return []
   }
+}
+
+function throwIfGlobOverflow() {
+  if (fatalGlobError) throw new Error(fatalGlobError)
 }
 
 async function safeRead(path) {
@@ -521,10 +535,20 @@ function enforcePerAcCompleteness(verification, pkg) {
   }
 
   const failedCommands = (verification.commandChecks || []).filter((item) => item.result === "fail")
+  const reportedCmd = {}
+  for (const item of verification.commandChecks || []) reportedCmd[item.command] = item
+  const unexecutedDeclared = uniq(pkg.validationCommands || []).filter((cmd) => {
+    const entry = reportedCmd[cmd]
+    return !entry || entry.result !== "pass"
+  })
   const allRowsPass = effective.length > 0 && effective.every((item) => item.result === "pass")
   const contradictions = []
   if (failedCommands.length > 0) {
     contradictions.push("存在失败命令:" + failedCommands.map((item) => item.command).join("、"))
+  }
+  if (unexecutedDeclared.length > 0) {
+    // 工作包声明的验证命令缺失/not_run/失败都视为证据基础不完整,通过结论不予采信。
+    contradictions.push("声明的验证命令未执行或未通过:" + unexecutedDeclared.join("、"))
   }
   if (allRowsPass && verification.status !== "pass") {
     contradictions.push(`总体状态为 ${statusText(verification.status)} 与明细全通过矛盾`)
@@ -835,6 +859,11 @@ const hasExplicitContract =
   options.contract &&
   typeof options.contract === "object" &&
   Array.isArray(options.contract.criteria)
+if (options.contract && !hasExplicitContract) {
+  // contract 是公开参数:传了但形状不合法(criteria 缺失/拼错/非数组)时,
+  // 静默当没传会让续跑复用旧合同——必须显式报错。
+  throw new Error("options.contract 形状不合法:必须是携带 criteria 数组的对象(请检查字段拼写)。")
+}
 
 const context = {
   requirement,
@@ -1038,6 +1067,7 @@ if (canReuse && !hasExplicitContract && previousState.exploration) {
   ]
   const manifests = uniq((await parallel(manifestPatterns.map((p) => () => safeGlob(p)))).flat())
   const sourceFiles = uniq((await parallel(sourcePatterns.map((p) => () => safeGlob(p)))).flat())
+  throwIfGlobOverflow()
   const manifestSnippets = []
   for (const file of take(manifests, MAX_MANIFESTS)) {
     const content = await safeRead(file)

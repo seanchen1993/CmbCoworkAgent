@@ -317,13 +317,27 @@ function fallbackReview(summary, criteria) {
   }
 }
 
+let fatalGlobError = null
+
 async function safeGlob(pattern) {
   try {
     return await glob(pattern)
   } catch (error) {
-    log(`已跳过文件匹配：${pattern}：${error.message}`)
+    const message = String((error && error.message) || error)
+    if (/matched more than/.test(message)) {
+      // 引擎的 glob 结果上限是保护性错误:吞掉它会让脚本在几乎没有文件清单的
+      // 情况下继续规划实现。parallel 会把 thunk 异常吞成 null,直接 throw 传
+      // 不到主流程——记录标志,收集结束后统一 throwIfGlobOverflow 快速失败。
+      fatalGlobError = `glob("${pattern}") 超出引擎结果上限,请缩小匹配范围后重试:${message}`
+      return []
+    }
+    log(`文件匹配失败，已跳过：${pattern}：${message}`)
     return []
   }
+}
+
+function throwIfGlobOverflow() {
+  if (fatalGlobError) throw new Error(fatalGlobError)
 }
 
 async function safeRead(path) {
@@ -853,6 +867,7 @@ const manifests = uniq(
 const sourceFiles = uniq(
   (await parallel(sourcePatterns.map((pattern) => () => safeGlob(pattern)))).flat()
 )
+throwIfGlobOverflow()
 const manifestSnippets = []
 for (const file of take(manifests, MAX_MANIFESTS)) {
   const content = await safeRead(file)
@@ -1163,7 +1178,17 @@ if (finalReview.verdict === "ready") {
   const failedCommands = (verificationAfterFix.commands || []).filter(
     (item) => item.result === "fail"
   )
-  const verificationOk = verificationAfterFix.status === "pass" && failedCommands.length === 0
+  // 计划声明的测试命令必须逐条被报告且通过:缺失/not_run/fail 都不放行。
+  const reportedCmd = {}
+  for (const item of verificationAfterFix.commands || []) reportedCmd[item.command] = item
+  const unexecutedDeclared = uniq(plan.testCommands || []).filter((cmd) => {
+    const entry = reportedCmd[cmd]
+    return !entry || entry.result !== "pass"
+  })
+  const verificationOk =
+    verificationAfterFix.status === "pass" &&
+    failedCommands.length === 0 &&
+    unexecutedDeclared.length === 0
   const coverage = finalReview.acceptanceCoverage || []
   const expectedCriteria = normalized.acceptanceCriteria || []
   const expectedIds = expectedCriteria.map((_, index) => "AC-" + (index + 1))
@@ -1184,6 +1209,10 @@ if (finalReview.verdict === "ready") {
         ? `验证未真正通过(状态“${statusText(verificationAfterFix.status)}”${
             failedCommands.length > 0
               ? `,失败命令:${failedCommands.map((item) => item.command).join("、")}`
+              : ""
+          }${
+            unexecutedDeclared.length > 0
+              ? `,计划命令未执行或未通过:${unexecutedDeclared.join("、")}`
               : ""
           })`
         : "",

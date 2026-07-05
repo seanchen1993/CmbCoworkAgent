@@ -89,7 +89,7 @@ const PLAN = {
       why: "w",
       targetFiles: [],
       acceptanceCriteria: ["b ok"],
-      validationCommands: ["npm test"],
+      validationCommands: [],
       dependencies: ["Task A", "ghost-task"],
       riskLevel: "low"
     },
@@ -100,7 +100,7 @@ const PLAN = {
       why: "w",
       targetFiles: [],
       acceptanceCriteria: ["a ok"],
-      validationCommands: ["npm test"],
+      validationCommands: [],
       dependencies: [],
       riskLevel: "low"
     }
@@ -138,6 +138,7 @@ const VERIFY_FAIL = {
 const FINAL_READY = {
   verdict: "ready",
   summary: "整体通过",
+  acceptanceCoverage: [{ id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }],
   commandChecks: [{ command: "npm test", result: "pass", evidence: "suite ok" }],
   releaseNotes: ["发布1"],
   remainingIssues: [],
@@ -186,6 +187,7 @@ async function scenario1and2() {
 
   console.log("== 场景1 全新运行 ==")
   console.log("返回状态:", r1.状态, "| 任务数:", r1.任务数, "| 已完成:", r1.已完成任务数)
+  console.log("首跑最终可交付:", r1.状态 === "可交付" ? "PASS" : "FAIL " + r1.状态)
   const agentCalls1 = logs1.filter((l) => l.startsWith("AGENT")).length
   console.log("agent 调用次数:", agentCalls1)
   // 拓扑排序断言：实现A 必须在 实现B 之前
@@ -223,6 +225,7 @@ async function scenario1and2() {
   )
   console.log("\n== 场景2 续跑 ==")
   console.log("返回状态:", r2.状态, "| 已完成:", r2.已完成任务数)
+  console.log("续跑最终可交付:", r2.状态 === "可交付" ? "PASS" : "FAIL " + r2.状态)
   console.log("复用需求契约:", logs2.some((l) => l.includes("复用已有需求契约")) ? "PASS" : "FAIL")
   console.log("复用项目画像:", logs2.some((l) => l.includes("复用已有项目画像")) ? "PASS" : "FAIL")
   console.log("复用任务规划:", logs2.some((l) => l.includes("复用已有任务规划")) ? "PASS" : "FAIL")
@@ -358,6 +361,9 @@ async function scenario5() {
       return {
         verdict: "ready",
         summary: "ok",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         releaseNotes: [],
         remainingIssues: [],
         nextActions: []
@@ -415,6 +421,9 @@ async function scenario6() {
       return {
         verdict: "ready",
         summary: "误报",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         releaseNotes: [],
         remainingIssues: [],
         nextActions: []
@@ -485,6 +494,9 @@ async function scenario7() {
       return {
         verdict: "ready",
         summary: "ok",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         releaseNotes: [],
         remainingIssues: [],
         nextActions: []
@@ -579,6 +591,9 @@ async function scenario8() {
       return {
         verdict: "ready",
         summary: "误报",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         releaseNotes: [],
         remainingIssues: [],
         nextActions: []
@@ -652,6 +667,9 @@ async function scenario9() {
       return {
         verdict: "ready",
         summary: "误报",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         releaseNotes: [],
         remainingIssues: [],
         nextActions: []
@@ -724,6 +742,9 @@ async function scenario10() {
       return {
         verdict: "ready",
         summary: "误报",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         releaseNotes: [],
         remainingIssues: [],
         nextActions: []
@@ -788,6 +809,9 @@ async function scenario11() {
       return {
         verdict: "ready",
         summary: "误报",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         commandChecks: [{ command: "npm test", result: "pass", evidence: "ok" }],
         releaseNotes: [],
         remainingIssues: [],
@@ -849,6 +873,9 @@ async function scenario11() {
         return {
           verdict: "ready",
           summary: "误报",
+          acceptanceCoverage: [
+            { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+          ],
           commandChecks: [{ command: "额外检查", result: "fail", evidence: "退出码1" }],
           releaseNotes: [],
           remainingIssues: [],
@@ -878,7 +905,7 @@ async function scenario11() {
   }
 }
 
-// ===== 场景12:截断保留依赖闭包(先拓扑后截断,只丢下游) =====
+// ===== 场景12:maxTasks 是执行预算——超出任务留待续跑,绝不静默丢弃报可交付 =====
 async function scenario12() {
   const files = {}
   const behavior = (label) => {
@@ -888,6 +915,7 @@ async function scenario12() {
       return {
         strategy: "s",
         tasks: [
+          // B 用"标题"引用依赖 A(真实规划代理的常见写法),验证标题映射
           {
             id: "Task B",
             title: "任务B",
@@ -896,7 +924,7 @@ async function scenario12() {
             targetFiles: [],
             acceptanceCriteria: ["b ok"],
             validationCommands: [],
-            dependencies: ["Task A"],
+            dependencies: ["任务A"],
             riskLevel: "low"
           },
           {
@@ -932,6 +960,9 @@ async function scenario12() {
       return {
         verdict: "ready",
         summary: "ok",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         commandChecks: [],
         releaseNotes: [],
         remainingIssues: [],
@@ -939,30 +970,54 @@ async function scenario12() {
       }
     throw new Error("未知 agent label: " + label)
   }
-  const logs = []
-  const env = makeEnv({ files, agentBehavior: behavior, logs })
-  const r = await runScript(
-    env.agent,
-    env.parallel,
-    env.phase,
-    env.log,
-    { requirement: "截断闭包测试需求", maxTasks: 2 },
-    env.glob,
-    env.readFile,
-    env.writeFile
+  const logs1 = []
+  const env1 = makeEnv({ files, agentBehavior: behavior, logs: logs1 })
+  const r1 = await runScript(
+    env1.agent,
+    env1.parallel,
+    env1.phase,
+    env1.log,
+    { requirement: "执行预算测试需求", maxTasks: 2 },
+    env1.glob,
+    env1.readFile,
+    env1.writeFile
   )
-  console.log("\n== 场景12 截断保留依赖闭包 ==")
+  console.log("\n== 场景12 执行预算分批 ==")
   console.log(
-    "丢弃的是下游任务C:",
-    logs.some((l) => l.includes("已丢弃下游任务") && l.includes("task-c")) ? "PASS" : "FAIL"
+    "标题依赖被正确映射(无断链告警):",
+    logs1.every((l) => !l.includes("无法解析的任务依赖")) ? "PASS" : "FAIL"
+  )
+  const idxA = logs1.findIndex((l) => l === "AGENT: 实现：任务A")
+  const idxB = logs1.findIndex((l) => l === "AGENT: 实现：任务B")
+  console.log("拓扑序 A 先于 B:", idxA >= 0 && idxB > idxA ? "PASS" : "FAIL")
+  console.log(
+    "预算用尽有日志且点名剩余任务:",
+    logs1.some((l) => l.includes("任务预算已用尽") && l.includes("task-c")) ? "PASS" : "FAIL"
   )
   console.log(
-    "无依赖未就绪误判:",
-    logs.every((l) => !l.includes("依赖任务未就绪")) ? "PASS" : "FAIL"
+    "首跑如实 needs_fix(不虚报可交付):",
+    r1.状态 === "需要修复" && (r1.剩余问题 || []).some((x) => x.includes("task-c"))
+      ? "PASS"
+      : "FAIL " + r1.状态
+  )
+  // 续跑第二批:完成 task-c 后才可交付
+  const logs2 = []
+  const env2 = makeEnv({ files, agentBehavior: behavior, logs: logs2 })
+  const r2 = await runScript(
+    env2.agent,
+    env2.parallel,
+    env2.phase,
+    env2.log,
+    { requirement: "执行预算测试需求", maxTasks: 2 },
+    env2.glob,
+    env2.readFile,
+    env2.writeFile
   )
   console.log(
-    "保留的 A/B 正常交付:",
-    r.状态 === "可交付" && r.任务数 === 2 ? "PASS" : "FAIL " + r.状态 + "/" + r.任务数
+    "续跑完成剩余批次后可交付:",
+    r2.状态 === "可交付" && logs2.filter((l) => l.includes("跳过已完成任务")).length === 2
+      ? "PASS"
+      : "FAIL " + r2.状态
   )
 }
 
@@ -1002,6 +1057,9 @@ async function scenario13() {
       return {
         verdict: "ready",
         summary: "ok",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
         commandChecks: [],
         releaseNotes: [],
         remainingIssues: [],
@@ -1047,6 +1105,134 @@ async function scenario13() {
   console.log("重跑后仍可交付:", r2.状态 === "可交付" ? "PASS" : "FAIL " + r2.状态)
 }
 
+// ===== 场景14:需求验收标准未被覆盖(规划遗漏)→ 最终门禁降级 =====
+async function scenario14() {
+  const files = {}
+  const behavior = (label) => {
+    if (label === "需求整理") return NORMALIZED
+    if (label.startsWith("探索：")) return EXPLORE
+    if (label === "任务规划")
+      return {
+        strategy: "s",
+        tasks: [
+          {
+            id: "task-m",
+            title: "任务M",
+            objective: "m",
+            why: "w",
+            targetFiles: [],
+            acceptanceCriteria: ["m ok"],
+            validationCommands: [],
+            dependencies: [],
+            riskLevel: "low"
+          }
+        ],
+        globalValidationCommands: [],
+        blockers: [],
+        canImplement: true
+      }
+    if (label.startsWith("实现：")) return IMPL_OK
+    if (label.startsWith("验证：")) return VERIFY_PASS
+    if (label === "总体验收")
+      // 误报 ready 且验收覆盖为空——需求 AC-1 没有任何 covered 证据
+      return {
+        verdict: "ready",
+        summary: "误报",
+        acceptanceCoverage: [],
+        commandChecks: [],
+        releaseNotes: [],
+        remainingIssues: [],
+        nextActions: []
+      }
+    throw new Error("未知 agent label: " + label)
+  }
+  const logs = []
+  const env = makeEnv({ files, agentBehavior: behavior, logs })
+  const r = await runScript(
+    env.agent,
+    env.parallel,
+    env.phase,
+    env.log,
+    "覆盖缺失测试需求",
+    env.glob,
+    env.readFile,
+    env.writeFile
+  )
+  console.log("\n== 场景14 需求覆盖缺失降级 ==")
+  console.log("整体为需要修复:", r.状态 === "需要修复" ? "PASS" : "FAIL " + r.状态)
+  console.log(
+    "缺失的需求 AC 被点名:",
+    logs.some((l) => l.includes("需求验收标准未覆盖") && l.includes("AC-1")) ? "PASS" : "FAIL"
+  )
+}
+
+// ===== 场景15:任务声明的验证命令未被报告 → 一致性门禁降级 =====
+async function scenario15() {
+  const files = {}
+  const behavior = (label) => {
+    if (label === "需求整理") return NORMALIZED
+    if (label.startsWith("探索：")) return EXPLORE
+    if (label === "任务规划")
+      return {
+        strategy: "s",
+        tasks: [
+          {
+            id: "task-n",
+            title: "任务N",
+            objective: "n",
+            why: "w",
+            targetFiles: [],
+            acceptanceCriteria: ["n ok"],
+            validationCommands: ["npm test"],
+            dependencies: [],
+            riskLevel: "low"
+          }
+        ],
+        globalValidationCommands: [],
+        blockers: [],
+        canImplement: true
+      }
+    if (label.startsWith("实现：") || label.startsWith("修复：")) return IMPL_OK
+    if (label.startsWith("验证：") || label.startsWith("复验：")) return VERIFY_PASS // 未报告声明命令
+    if (label === "总体验收")
+      return {
+        verdict: "ready",
+        summary: "误报",
+        acceptanceCoverage: [
+          { id: "AC-1", criterion: "验收1", status: "covered", evidence: "覆盖" }
+        ],
+        commandChecks: [],
+        releaseNotes: [],
+        remainingIssues: [],
+        nextActions: []
+      }
+    throw new Error("未知 agent label: " + label)
+  }
+  const logs = []
+  const env = makeEnv({ files, agentBehavior: behavior, logs })
+  const r = await runScript(
+    env.agent,
+    env.parallel,
+    env.phase,
+    env.log,
+    "声明命令未报告测试需求",
+    env.glob,
+    env.readFile,
+    env.writeFile
+  )
+  const state = JSON.parse(
+    files[".cmbdevclaw/长程自动开发工作流/声明命令未报告测试需求/状态.json"] || "null"
+  )
+  const taskIssues = JSON.stringify((state && state.tasks) || [])
+  console.log("\n== 场景15 声明命令未报告降级 ==")
+  console.log("任务未被标 ready:", r.已完成任务数 === 0 ? "PASS" : "FAIL")
+  console.log(
+    "声明命令缺失理由入账:",
+    taskIssues.includes("声明的验证命令未执行或未通过") ? "PASS" : "FAIL"
+  )
+  console.log("整体为需要修复:", r.状态 === "需要修复" ? "PASS" : "FAIL " + r.状态)
+}
+
 ;(async () => {
   await scenario1and2()
   await scenario3()
@@ -1060,6 +1246,8 @@ async function scenario13() {
   await scenario11()
   await scenario12()
   await scenario13()
+  await scenario14()
+  await scenario15()
 })()
   .catch((e) => {
     console.error("DRYRUN ERROR:", e)

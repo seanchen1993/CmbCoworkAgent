@@ -2,7 +2,7 @@ export const meta = {
   name: "长程需求自动开发流程",
   description: "将明确需求拆成任务清单，按任务实现、验证、修复，并用状态文件支持续跑。",
   whenToUse:
-    "当需求较复杂、可能跨多个模块或需要多轮实现验证时使用。小改动可继续使用轻量版需求自动开发流程。同一需求重跑即续跑；可选 args：artifactDir、outputPath、resume:false、replan:true、forceTaskIds、maxTasks、maxFixRounds。",
+    "当需求较复杂、可能跨多个模块或需要多轮实现验证时使用。小改动可继续使用轻量版需求自动开发流程。同一需求重跑即续跑；可选 args：artifactDir、outputPath、resume:false、replan:true、forceTaskIds、maxTasks（单次运行执行预算,超出任务自动留待续跑分批）、maxFixRounds。",
   phases: [
     { title: "需求整理" },
     { title: "项目探索" },
@@ -182,6 +182,20 @@ const FINAL_REVIEW_SCHEMA = {
   properties: {
     verdict: { type: "string", enum: ["ready", "needs_fix", "blocked"] },
     summary: { type: "string" },
+    acceptanceCoverage: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string", minLength: 1 },
+          criterion: { type: "string" },
+          status: { type: "string", enum: ["covered", "not_covered", "unclear"] },
+          evidence: { type: "string" }
+        },
+        required: ["id", "criterion", "status", "evidence"],
+        additionalProperties: false
+      }
+    },
     commandChecks: {
       type: "array",
       items: {
@@ -202,6 +216,7 @@ const FINAL_REVIEW_SCHEMA = {
   required: [
     "verdict",
     "summary",
+    "acceptanceCoverage",
     "commandChecks",
     "releaseNotes",
     "remainingIssues",
@@ -266,6 +281,13 @@ function assignStableTaskIds(tasks) {
     }
     seen[id] = true
     if (typeof task.id === "string" && task.id) idMap[task.id] = id
+    // 规划代理常用任务标题引用依赖(dependencies: ["数据库迁移"]),标题与
+    // 标题 slug 都映射到规范 id,避免依赖静默断链、拓扑失去约束。
+    if (typeof task.title === "string" && task.title) {
+      if (!idMap[task.title]) idMap[task.title] = id
+      const titleSlug = normalizeTaskId(task.title, index)
+      if (!idMap[titleSlug]) idMap[titleSlug] = id
+    }
     idMap[id] = id
     return { ...task, id }
   })
@@ -348,13 +370,27 @@ function statusText(value) {
   return labels[value] || value || "未知"
 }
 
+let fatalGlobError = null
+
 async function safeGlob(pattern) {
   try {
     return await glob(pattern)
   } catch (error) {
-    log(`文件匹配失败，已跳过：${pattern}：${error.message}`)
+    const message = String((error && error.message) || error)
+    if (/matched more than/.test(message)) {
+      // 引擎的 glob 结果上限是保护性错误:吞掉它会让脚本在几乎没有文件清单的
+      // 情况下继续规划实现。parallel 会把 thunk 异常吞成 null,直接 throw 传
+      // 不到主流程——记录标志,收集结束后统一 throwIfGlobOverflow 快速失败。
+      fatalGlobError = `glob("${pattern}") 超出引擎结果上限,请缩小匹配范围后重试:${message}`
+      return []
+    }
+    log(`文件匹配失败，已跳过：${pattern}：${message}`)
     return []
   }
+}
+
+function throwIfGlobOverflow() {
+  if (fatalGlobError) throw new Error(fatalGlobError)
 }
 
 async function safeRead(path) {
@@ -822,6 +858,15 @@ function enforceVerificationConsistency(verification, task) {
   for (const item of verification.commandChecks || []) {
     if (item.result === "fail") problems.push(`命令失败:${item.command}`)
   }
+  // 任务声明的验证命令必须被执行且通过:缺失/not_run 与总体 pass 矛盾。
+  const reportedCmd = {}
+  for (const item of verification.commandChecks || []) reportedCmd[item.command] = item
+  for (const cmd of uniq((task && task.validationCommands) || [])) {
+    const entry = reportedCmd[cmd]
+    if (!entry || entry.result !== "pass") {
+      problems.push(`声明的验证命令未执行或未通过:${cmd}`)
+    }
+  }
   if (problems.length === 0) return verification
   return {
     ...verification,
@@ -1044,6 +1089,7 @@ if (canReuse && previousState.exploration) {
   ]
   const manifests = uniq((await parallel(manifestPatterns.map((p) => () => safeGlob(p)))).flat())
   const sourceFiles = uniq((await parallel(sourcePatterns.map((p) => () => safeGlob(p)))).flat())
+  throwIfGlobOverflow()
   const manifestSnippets = []
   for (const file of take(manifests, MAX_MANIFESTS)) {
     const content = await safeRead(file)
@@ -1164,17 +1210,14 @@ ${lines(blockers)}
   if (assigned.droppedDeps.length > 0) {
     log("已忽略无法解析的任务依赖：" + assigned.droppedDeps.join("；"))
   }
-  // 先对完整任务图拓扑排序,再截断:拓扑序的前缀天然是依赖闭包,截断只会
-  // 丢下游任务,不会出现"保留的任务依赖被丢弃的上游"导致的永久阻塞误判。
+  // 拓扑排序完整任务图。注意:不截断计划——maxTasks 是"单次运行的执行预算",
+  // 超出预算的任务保持 planned 留给续跑分批执行。截断会让被丢任务从状态中
+  // 消失,最终门禁看不见它们,可能"部分完成却报可交付"。
   const sorted = topoSortTasks(assigned.tasks)
   if (sorted.cyclic) {
     log("任务依赖存在环，无法完全拓扑排序，按可行顺序执行。")
   }
-  if (sorted.tasks.length > maxTasks) {
-    const dropped = sorted.tasks.slice(maxTasks).map((task) => task.id)
-    log(`任务数超过上限 ${maxTasks}，已丢弃下游任务，请缩小需求或分批执行：${dropped.join("、")}`)
-  }
-  plan.tasks = take(sorted.tasks, maxTasks)
+  plan.tasks = sorted.tasks
 
   // 新计划生效(含 replan:true):清掉不在新计划里的旧任务状态。
   // 保留 id 相同的已完成任务(仍可跳过),丢弃孤儿,避免污染报告统计与总体验证。
@@ -1262,6 +1305,7 @@ if (effectiveForcedIds.size > 0) {
 }
 
 phase("任务执行")
+let executedThisRun = 0
 for (let index = 0; index < plan.tasks.length; index++) {
   const task = plan.tasks[index]
   const existing = taskStateById(context.taskStates, task.id)
@@ -1269,6 +1313,16 @@ for (let index = 0; index < plan.tasks.length; index++) {
   if (resumeEnabled && !forced && taskWasCompleted(existing)) {
     log(`跳过已完成任务：${task.title}`)
     continue
+  }
+  if (executedThisRun >= maxTasks) {
+    const remaining = plan.tasks
+      .slice(index)
+      .filter((t) => !taskWasCompleted(taskStateById(context.taskStates, t.id)))
+      .map((t) => t.id)
+    log(
+      `本次运行任务预算已用尽(maxTasks=${maxTasks}),剩余任务保持待办留给续跑:${remaining.join("、")}`
+    )
+    break
   }
 
   const unmetDeps = (task.dependencies || []).filter((dep) => {
@@ -1289,6 +1343,7 @@ for (let index = 0; index < plan.tasks.length; index++) {
 
   const taskFiles = taskArtifacts(artifactDir, task)
   await writeFile(taskFiles.contract, renderTaskContract(task, normalized))
+  executedThisRun += 1
   await writeTaskState(context, task, {
     status: "in_progress",
     summary: "任务开始执行。",
@@ -1492,6 +1547,9 @@ ${lines(plan.globalValidationCommands)}
 变更文件：
 ${lines(allChangedFiles)}
 
+需求验收标准清单（acceptanceCoverage 必须按下面的 id 逐条返回,不得遗漏、不得使用清单外的 id）：
+${(normalized.acceptanceCriteria || []).map((text, i) => `- AC-${i + 1}: ${text}`).join("\n")}
+
 请实际运行全局验证命令，确认所有任务合并后是否满足需求。
 commandChecks 必须逐条覆盖上面列出的每一条全局验证命令,如实报告结果(以退出码为准),不得遗漏。`,
   {
@@ -1503,6 +1561,7 @@ commandChecks 必须逐条覆盖上面列出的每一条全局验证命令,如�
 )) || {
   verdict: "blocked",
   summary: "总体验证代理没有返回结构化结果。",
+  acceptanceCoverage: [],
   commandChecks: [],
   releaseNotes: [],
   remainingIssues: ["总体验证失败。"],
@@ -1527,12 +1586,26 @@ const failedGlobalCommands = expectedGlobalCommands.filter((cmd) => {
 const extraFailedCommands = (finalReview.commandChecks || [])
   .filter((item) => item.result === "fail" && !expectedGlobalCommands.includes(item.command))
   .map((item) => item.command)
+// 需求级验收覆盖按稳定 ID 对齐(与轻量版/契约版同构):规划遗漏或验收未覆盖的
+// 需求标准不能靠"任务都 ready"混过最终门禁。
+const expectedReqIds = (normalized.acceptanceCriteria || []).map((_, index) => "AC-" + (index + 1))
+const coveredReqIds = new Set(
+  (finalReview.acceptanceCoverage || [])
+    .filter((item) => item.status === "covered" && String(item.evidence || "").trim().length > 0)
+    .map((item) =>
+      String(item.id || "")
+        .trim()
+        .toUpperCase()
+    )
+)
+const missingReqIds = expectedReqIds.filter((id) => !coveredReqIds.has(id))
 if (
   finalReview.verdict === "ready" &&
   (unfinishedTasks.length > 0 ||
     context.taskStates.length === 0 ||
     failedGlobalCommands.length > 0 ||
-    extraFailedCommands.length > 0)
+    extraFailedCommands.length > 0 ||
+    missingReqIds.length > 0)
 ) {
   const reasons = []
   if (context.taskStates.length === 0) {
@@ -1548,6 +1621,9 @@ if (
   }
   if (extraFailedCommands.length > 0) {
     reasons.push(`终审额外报告了失败命令：${extraFailedCommands.join("、")}`)
+  }
+  if (missingReqIds.length > 0) {
+    reasons.push(`需求验收标准未覆盖或证据缺失：${missingReqIds.join("、")}`)
   }
   const reason = reasons.join("；")
   log(`总体验收结论 ready 被硬门禁降级为 needs_fix：${reason}`)

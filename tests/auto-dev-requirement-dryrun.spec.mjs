@@ -279,11 +279,44 @@ async function scenario4() {
   )
 }
 
+// ===== 场景5(检视方复现):计划声明了测试命令,验证却零报告 → 必须降级 =====
+async function scenario5() {
+  const files = {}
+  const logs = []
+  const behavior = (label) => {
+    if (label === "需求整理") return NORMALIZED
+    if (label.startsWith("探索：")) return EXPLORE
+    if (label === "实现计划") return PLAN // testCommands: ["npm test"]
+    if (label === "代码实现") return IMPL_OK
+    if (label === "验证实现") return { ...VERIFY_PASS, commands: [] } // 声明命令零报告
+    if (label === "最终验收复核") return REVIEW_READY()
+    throw new Error("未知 agent label: " + label)
+  }
+  const env = makeEnv({ files, agentBehavior: behavior, logs })
+  const r = await runScript(
+    env.agent,
+    env.parallel,
+    env.phase,
+    env.log,
+    "命令零报告测试需求",
+    env.glob,
+    env.readFile,
+    env.writeFile
+  )
+  console.log("\n== 场景5 计划命令零报告降级 ==")
+  console.log("最终状态为需要修复:", r.状态 === "需要修复" ? "PASS" : "FAIL " + r.状态)
+  console.log(
+    "降级理由点名计划命令:",
+    logs.some((l) => l.includes("硬门禁降级") && l.includes("npm test")) ? "PASS" : "FAIL"
+  )
+}
+
 ;(async () => {
   await scenario1()
   await scenario2()
   await scenario3()
   await scenario4()
+  await scenario5()
 })()
   .catch((e) => {
     console.error("DRYRUN ERROR:", e)

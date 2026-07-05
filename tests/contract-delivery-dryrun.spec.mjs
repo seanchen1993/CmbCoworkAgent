@@ -120,7 +120,7 @@ function planFor(pending) {
       objective: "o",
       acIds,
       targetFiles: [],
-      validationCommands: ["mvn test"],
+      validationCommands: [],
       dependencies: i >= 2 ? [`pkg-${i / 2}`] : [],
       riskLevel: "low"
     })
@@ -317,7 +317,10 @@ async function scenario4() {
         status: "pass",
         summary: "ok",
         perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
-        commandChecks: [],
+        commandChecks: [
+          { command: "mvn test", result: "pass", evidence: "ok" },
+          { command: "npm run lint", result: "pass", evidence: "ok" }
+        ],
         issues: [],
         recommendedFixes: []
       }
@@ -420,7 +423,7 @@ async function scenario6() {
         status: "pass",
         summary: "ok",
         perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
-        commandChecks: [],
+        commandChecks: [{ command: "mvn test", result: "pass", evidence: "ok" }],
         issues: [],
         recommendedFixes: []
       }
@@ -545,7 +548,7 @@ async function scenario7() {
           status: "pass",
           summary: "ok",
           perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
-          commandChecks: [],
+          commandChecks: [{ command: "mvn test", result: "pass", evidence: "ok" }],
           issues: [],
           recommendedFixes: []
         }
@@ -819,6 +822,94 @@ async function scenario9() {
   }
 }
 
+// ===== 场景10:非法 contract 形状硬拒 + 包声明命令未报告不予采信 =====
+async function scenario10() {
+  console.log("\n== 场景10 非法合同形状 + 声明命令未报告 ==")
+  // 10a: contract 传了但 criteria 不是数组 → 必须抛错,不得静默复用旧合同
+  {
+    const env = makeEnv({
+      files: {},
+      agentBehavior: () => {
+        throw new Error("不应调用 agent")
+      },
+      logs: []
+    })
+    let rejected = false
+    try {
+      await runScript(
+        env.agent,
+        env.parallel,
+        env.phase,
+        env.log,
+        { requirement: "非法合同测试", contract: { title: "t", criteria: "oops" } },
+        env.glob,
+        env.readFile,
+        env.writeFile
+      )
+    } catch (e) {
+      rejected = String(e.message || e).includes("形状不合法")
+    }
+    console.log("非法形状被硬拒:", rejected ? "PASS" : "FAIL")
+  }
+  // 10b: 工作包声明了验证命令但验证未报告 → 通过明细不予采信
+  {
+    const logs = []
+    const behavior = (label, prompt) => {
+      if (label.startsWith("探索：")) return EXPLORE
+      if (/^第\d+轮规划$/.test(label))
+        return {
+          strategy: "s",
+          conventionsBrief: "公约",
+          canImplement: true,
+          blockers: [],
+          packages: [
+            {
+              id: "pkg-1",
+              title: "包1",
+              objective: "o",
+              acIds: ["AC-1"],
+              targetFiles: [],
+              validationCommands: ["mvn test"],
+              dependencies: [],
+              riskLevel: "low"
+            }
+          ]
+        }
+      if (label.startsWith("实现R") || label.startsWith("修复R")) return IMPL_OK
+      if (label.startsWith("验证R") || label.startsWith("复验R")) {
+        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+        const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
+        return {
+          status: "pass",
+          summary: "ok",
+          perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
+          commandChecks: [],
+          issues: [],
+          recommendedFixes: []
+        }
+      }
+      if (label.startsWith("对抗复核")) return { summary: "ok", refutations: [] }
+      throw new Error("未知 label: " + label)
+    }
+    const env = makeEnv({ files: {}, agentBehavior: behavior, logs })
+    const r = await runScript(
+      env.agent,
+      env.parallel,
+      env.phase,
+      env.log,
+      { requirement: "声明命令未报告契约测试", contract: contractOf(1, [], "standard") },
+      env.glob,
+      env.readFile,
+      env.writeFile
+    )
+    console.log("声明命令未报告不得证实:", r.已证实 === 0 ? "PASS" : "FAIL " + r.已证实)
+    console.log(
+      "不予采信理由含声明命令:",
+      (r.未证实 || []).some((x) => x.includes("声明的验证命令未执行或未通过")) ? "PASS" : "FAIL"
+    )
+  }
+}
+
 ;(async () => {
   const prev = await scenario1()
   await scenario2(prev)
@@ -829,6 +920,7 @@ async function scenario9() {
   await scenario7()
   await scenario8()
   await scenario9()
+  await scenario10()
 })()
   .catch((e) => {
     console.error("DRYRUN ERROR:", e)
