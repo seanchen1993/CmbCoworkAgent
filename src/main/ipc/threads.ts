@@ -21,10 +21,10 @@ import {
 } from "../agent/runtime"
 import { forgetCoordinatorThreadState } from "./agent"
 import {
-  deleteThreadCheckpoint,
   deleteThreadWorkerCheckpoints,
   deleteThreadWorkflowCheckpoints,
-  getOpenworkDir
+  getOpenworkDir,
+  purgeThreadCheckpointArtifacts
 } from "../storage"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import { deleteWorkflowRunsForThread } from "../agent/workflow/run-store"
@@ -744,20 +744,31 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       deleteWorkflowRunsForThread(workspacePath, threadId)
     }
 
-    // Delete the thread's checkpoint file
+    // Delete the thread's checkpoint file (deep clean: durable sidecars AND
+    // quarantine archives — "delete thread" means the transcript is gone).
+    // Each cleanup is independently best-effort: one stubborn file (e.g. EPERM
+    // on a quarantine archive) must not block the other sweeps from removing
+    // sub-thread transcripts.
     try {
-      deleteThreadCheckpoint(threadId)
-      const deletedWorkerCheckpoints = deleteThreadWorkerCheckpoints(threadId)
-      // Workflow subagents self-clean their checkpoints in their finally; this
-      // sweeps the rare crash / failed-cleanup leftovers, mirroring the worker
-      // sweep (which only covers __worker__, not __wf_). (#3)
-      const deletedWorkflowCheckpoints = deleteThreadWorkflowCheckpoints(threadId)
-      console.log("[Threads] Deleted checkpoint file", {
-        deletedWorkerCheckpoints,
-        deletedWorkflowCheckpoints
-      })
+      purgeThreadCheckpointArtifacts(threadId)
+      console.log("[Threads] Purged thread checkpoint artifacts")
     } catch (e) {
-      console.warn("[Threads] Failed to delete checkpoint file:", e)
+      console.warn("[Threads] Failed to purge thread checkpoint artifacts:", e)
+    }
+    try {
+      const deletedWorkerCheckpoints = deleteThreadWorkerCheckpoints(threadId)
+      console.log("[Threads] Deleted worker checkpoints", { deletedWorkerCheckpoints })
+    } catch (e) {
+      console.warn("[Threads] Failed to delete worker checkpoints:", e)
+    }
+    // Workflow subagents self-clean their checkpoints in their finally; this
+    // sweeps the rare crash / failed-cleanup leftovers, mirroring the worker
+    // sweep (which only covers __worker__, not __wf_). (#3)
+    try {
+      const deletedWorkflowCheckpoints = deleteThreadWorkflowCheckpoints(threadId)
+      console.log("[Threads] Deleted workflow checkpoints", { deletedWorkflowCheckpoints })
+    } catch (e) {
+      console.warn("[Threads] Failed to delete workflow checkpoints:", e)
     }
 
     try {
