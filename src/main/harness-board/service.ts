@@ -1,4 +1,4 @@
-import { execFileSync } from "child_process"
+import { execFileSync, spawn, type ChildProcess } from "child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs"
 import type { Dirent } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
@@ -145,6 +145,7 @@ const HARNESS_DEPLOY_UNIT_MAPPING_FILE = join(getOpenworkDir(), "harness-deployU
 const HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE = join(getOpenworkDir(), "harness-board-features.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
+const HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS = 45_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
 const HARNESS_SESSION_CONTEXT_MAX_CHARS = 60_000
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
@@ -1082,6 +1083,152 @@ function runHarnessInvocation(
       },
       maxBuffer: HARNESS_ADAPTER_MAX_BUFFER,
       timeout: HARNESS_ADAPTER_TIMEOUT_MS
+    })
+    if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
+    return stdoutBuffer
+  } catch (error) {
+    if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
+    throw new Error(formatAdapterError(error))
+  }
+}
+
+function createHarnessInvocationError(
+  message: string,
+  details: {
+    status?: number
+    signal?: string
+    stdout?: Buffer
+    stderr?: Buffer
+  } = {}
+): Error {
+  const error = new Error(message) as Error & {
+    status?: number
+    signal?: string
+    stdout?: Buffer
+    stderr?: Buffer
+  }
+  if (typeof details.status === "number") error.status = details.status
+  if (details.signal) error.signal = details.signal
+  if (details.stdout) error.stdout = details.stdout
+  if (details.stderr) error.stderr = details.stderr
+  return error
+}
+
+function killHarnessInvocationProcess(child: ChildProcess): void {
+  if (process.platform === "win32" && child.pid) {
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true
+    })
+    killer.once("error", () => {
+      child.kill()
+    })
+    return
+  }
+  child.kill("SIGTERM")
+}
+
+async function runHarnessInvocationAsync(
+  configured: ConfiguredHarnessInvocation,
+  logOptions: HarnessInvocationLogOptions | undefined,
+  timeoutMs: number
+): Promise<Buffer> {
+  const { cwd, invocation } = configured
+  if (logOptions) logHarnessInvocationStart(configured, logOptions)
+
+  try {
+    const stdoutBuffer = await new Promise<Buffer>((resolvePromise, rejectPromise) => {
+      const child = spawn(invocation.executable, invocation.args, {
+        cwd,
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUTF8: "1"
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
+      })
+
+      const stdoutChunks: Buffer[] = []
+      const stderrChunks: Buffer[] = []
+      let stdoutLength = 0
+      let stderrLength = 0
+      let settled = false
+      let timedOut = false
+      let exceededMaxBuffer = false
+
+      const timer = setTimeout(() => {
+        timedOut = true
+        killHarnessInvocationProcess(child)
+      }, timeoutMs)
+
+      const settle = (callback: () => void): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        callback()
+      }
+
+      const appendChunk = (chunks: Buffer[], chunk: Buffer, currentLength: number): number => {
+        const nextLength = currentLength + chunk.length
+        chunks.push(chunk)
+        if (nextLength > HARNESS_ADAPTER_MAX_BUFFER && !exceededMaxBuffer) {
+          exceededMaxBuffer = true
+          killHarnessInvocationProcess(child)
+        }
+        return nextLength
+      }
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdoutLength = appendChunk(stdoutChunks, chunk, stdoutLength)
+      })
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrLength = appendChunk(stderrChunks, chunk, stderrLength)
+      })
+      child.once("error", (error) => {
+        const stdout = Buffer.concat(stdoutChunks, stdoutLength)
+        const stderr = Buffer.concat(stderrChunks, stderrLength)
+        settle(() => {
+          rejectPromise(createHarnessInvocationError(error.message, { stdout, stderr }))
+        })
+      })
+      child.once("close", (code, signal) => {
+        const stdout = Buffer.concat(stdoutChunks, stdoutLength)
+        const stderr = Buffer.concat(stderrChunks, stderrLength)
+        settle(() => {
+          if (timedOut) {
+            rejectPromise(
+              createHarnessInvocationError(
+                `Harness adapter timed out after ${Math.round(timeoutMs / 1000)}s`,
+                { signal: "timeout", stdout, stderr }
+              )
+            )
+            return
+          }
+          if (exceededMaxBuffer) {
+            rejectPromise(
+              createHarnessInvocationError("Harness adapter stdout/stderr exceeded maxBuffer", {
+                signal: "maxBuffer",
+                stdout,
+                stderr
+              })
+            )
+            return
+          }
+          if (code === 0) {
+            resolvePromise(stdout)
+            return
+          }
+          rejectPromise(
+            createHarnessInvocationError(`Harness adapter exited with code ${code ?? "unknown"}`, {
+              ...(typeof code === "number" ? { status: code } : {}),
+              ...(signal ? { signal } : {}),
+              stdout,
+              stderr
+            })
+          )
+        })
+      })
     })
     if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
     return stdoutBuffer
@@ -3095,7 +3242,9 @@ export function getHarnessKnowledgePreview(adapterId: string): HarnessKnowledgeP
   }
 }
 
-export function syncHarnessProjectConstraints(adapterId: string): HarnessProjectConstraintSyncResult {
+export async function syncHarnessProjectConstraints(
+  adapterId: string
+): Promise<HarnessProjectConstraintSyncResult> {
   const { plugin, adapter } = findCompatibleKnowledgePlugin(adapterId)
   const configuredCommand = readBoardConfigInspectCommand(plugin.path, "pullKnowledge")
   if (!configuredCommand) {
@@ -3108,7 +3257,11 @@ export function syncHarnessProjectConstraints(adapterId: string): HarnessProject
     invocation: parseInspectCommand(configuredCommand, commandProject, "pullKnowledge", plugin.path)
   }
 
-  const stdoutBuffer = runHarnessInvocation(configured, harnessCommandLogOptions("pullKnowledge", adapter.name))
+  const stdoutBuffer = await runHarnessInvocationAsync(
+    configured,
+    harnessCommandLogOptions("pullKnowledge", adapter.name),
+    HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS
+  )
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
   let message = ""
   let parsed: unknown
