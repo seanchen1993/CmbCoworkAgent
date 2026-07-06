@@ -325,6 +325,8 @@ export function UniversalUploadDialog({
   const isSkillResource = resourceType === "skill"
   const isPluginResource = resourceType === "plugin"
   const isVersionReadonly = isSkillResource
+  const shouldPreserveExistingPublisherMetadata =
+    Boolean(isUpdate) && isAdminModeActive && Boolean(existingItem)
 
   const resetVersionState = React.useCallback(() => {
     setVersion(DEFAULT_MARKET_VERSION)
@@ -354,6 +356,10 @@ export function UniversalUploadDialog({
         includeSkills: isPluginResource
       })
 
+      const uploadUserId = shouldPreserveExistingPublisherMetadata
+        ? existingItem?.user_id?.trim() || undefined
+        : userId?.trim() || undefined
+
       return {
         name: name.trim(),
         description: description.trim(),
@@ -361,7 +367,7 @@ export function UniversalUploadDialog({
         version: version.trim() || DEFAULT_MARKET_VERSION,
         guidance: guidance.trim(),
         chineseName: chineseName.trim(),
-        userId: userId?.trim() || undefined,
+        userId: uploadUserId,
         extraJson
       }
     },
@@ -370,11 +376,15 @@ export function UniversalUploadDialog({
       chineseName,
       description,
       existingItem?.extra_json,
+      existingItem?.user_id,
       grayUserIds,
       guidance,
+      isAdminModeActive,
+      isUpdate,
       isPluginResource,
       name,
       pluginSkills,
+      shouldPreserveExistingPublisherMetadata,
       userId,
       version
     ]
@@ -642,13 +652,9 @@ export function UniversalUploadDialog({
         }
         uploadFile = generated.file
       }
-      const currentIp = localStorage.getItem("localIp") || ""
-      const shouldPreserveExistingIp =
-        Boolean(isUpdate) &&
-        isAdminModeActive &&
-        typeof existingItem?.ip === "string" &&
-        existingItem.ip !== currentIp
-      const uploadIp = shouldPreserveExistingIp ? existingItem?.ip : currentIp
+      const uploadIp = shouldPreserveExistingPublisherMetadata
+        ? (existingItem?.ip ?? "")
+        : (localStorage.getItem("localIp") || "")
 
       const result = await onUpload(
         uploadFile,
@@ -1284,7 +1290,8 @@ export function UniversalUploadDialog({
                         <div className="space-y-1">
                           <h4 className="text-sm font-medium text-foreground">Skills</h4>
                           <p className="text-xs leading-5 text-muted-foreground">
-                            上传 Plugin 时会自动从 zip 中解析 skill 名称；重复项会自动去重。
+                            优先回填列表里 extra_json 的 skills；上传新 zip 或点击刷新时，会按当前
+                            Plugin 文件重新解析，重复项会自动去重。
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
