@@ -2903,6 +2903,22 @@ export function ChatContainer({
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
+    const liveReasoningById = new Map<string, string>()
+    for (const liveMessage of streamData.liveMessages || []) {
+      if (
+        liveMessage.id &&
+        liveStreamMessageRole(liveMessage.type) === "assistant" &&
+        typeof liveMessage.reasoning === "string" &&
+        liveMessage.reasoning.trim()
+      ) {
+        liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
+      }
+    }
+    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
+      if (message.role !== "assistant" || message.reasoning) return message
+      const liveReasoning = liveReasoningById.get(message.id)
+      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
+    })
     const streamingMsgs: Message[] = (streamData.liveMessages || [])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
@@ -2913,6 +2929,7 @@ export function ChatContainer({
           id: streamMsg.id,
           role,
           content: normalizeLiveStreamMessageContent(streamMsg.content),
+          ...(role === "assistant" && streamMsg.reasoning ? { reasoning: streamMsg.reasoning } : {}),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
@@ -2926,7 +2943,7 @@ export function ChatContainer({
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs].filter(
+    const allMessages = [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
       isVisibleCheckpointTranscriptMessage
     )
     const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {

@@ -24,6 +24,7 @@ import {
   DEFAULT_TEMPERATURE,
   DEFAULT_TOP_P,
   DEFAULT_TOP_K,
+  DEFAULT_THINKING_EFFORT,
   getEnabledPluginSkillSourceMetadata,
   getEnabledPluginSkillMiddlewareSources,
   getPlugins,
@@ -139,7 +140,10 @@ import {
   getGlobalMcpCapabilityService
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
-import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
+import {
+  InterleavedThinkingChatOpenAICompletions,
+  ReasoningDisplayChatOpenAICompletions
+} from "./interleaved-thinking-completions"
 import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
@@ -2746,6 +2750,8 @@ function getModelInstance(
     topP?: number
     topK?: number
     interleavedThinking?: boolean
+    enableThinking?: boolean
+    thinkingEffort?: "high" | "max"
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number
@@ -2764,6 +2770,7 @@ function getModelInstance(
   const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
   const topP = customConfig.topP ?? DEFAULT_TOP_P
   const topK = customConfig.topK ?? DEFAULT_TOP_K
+  const thinkingEffort = customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT
 
   const baseFields = {
     model: resolvedModel,
@@ -2778,7 +2785,14 @@ function getModelInstance(
     maxRetries: 0,
     modelKwargs: {
       parallel_tool_calls: true,
-      ...(topK > 0 ? { top_k: topK } : {})
+      ...(topK > 0 ? { top_k: topK } : {}),
+      chat_template_kwargs: {
+        enable_thinking: customConfig.enableThinking === true,
+        reasoning_effort: thinkingEffort
+      },
+      ...(customConfig.enableThinking
+        ? { thinking: { type: "enabled" } }
+        : {})
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -2789,14 +2803,23 @@ function getModelInstance(
     }
   }
 
-  if (!customConfig.interleavedThinking) {
-    return new ChatOpenAI(baseFields)
+  if (customConfig.interleavedThinking) {
+    return new ChatOpenAI({
+      ...baseFields,
+      completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {
+        exposeReasoning: customConfig.enableThinking === true
+      })
+    } as never)
   }
 
-  return new ChatOpenAI({
-    ...baseFields,
-    completions: new InterleavedThinkingChatOpenAICompletions(baseFields)
-  } as never)
+  if (customConfig.enableThinking) {
+    return new ChatOpenAI({
+      ...baseFields,
+      completions: new ReasoningDisplayChatOpenAICompletions(baseFields)
+    } as never)
+  }
+
+  return new ChatOpenAI(baseFields)
 }
 
 export interface CreateAgentRuntimeOptions {

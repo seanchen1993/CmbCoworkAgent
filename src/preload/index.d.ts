@@ -930,6 +930,8 @@ interface CustomAPI {
         topP: number
         topK: number
         interleavedThinking?: boolean
+        enableThinking?: boolean
+        thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       }>
     >
@@ -945,6 +947,8 @@ interface CustomAPI {
       topP: number
       topK: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null>
     setCustomConfig: (config: {
@@ -959,6 +963,8 @@ interface CustomAPI {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<void>
     // Backward-compatible alias, prefer upsertCustomConfig in new code.
@@ -974,6 +980,8 @@ interface CustomAPI {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
@@ -988,6 +996,8 @@ interface CustomAPI {
       temperature?: number
       topP?: number
       topK?: number
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   ide: {

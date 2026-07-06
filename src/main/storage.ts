@@ -972,6 +972,8 @@ export interface CustomModelConfig {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1005,6 +1007,8 @@ export const MAX_TOP_P = 1
 export const DEFAULT_TOP_K = 40
 export const MIN_TOP_K = 0
 export const MAX_TOP_K = 1_000
+export type ThinkingEffort = "high" | "max"
+export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 
 export interface CustomModelPublicConfig {
   id: string
@@ -1018,6 +1022,8 @@ export interface CustomModelPublicConfig {
   topP: number
   topK: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1032,6 +1038,8 @@ interface StoredCustomModelRecord {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1112,6 +1120,10 @@ function normalizeTopK(value: unknown): number {
   }
 
   return Math.min(MAX_TOP_K, Math.max(MIN_TOP_K, Math.floor(value)))
+}
+
+function normalizeThinkingEffort(value: unknown): ThinkingEffort {
+  return value === "max" ? "max" : DEFAULT_THINKING_EFFORT
 }
 
 function defaultInterleavedThinkingForModel(model: string): boolean {
@@ -1406,6 +1418,8 @@ function toPublicConfig(
       config.model,
       config.interleavedThinking
     ),
+    enableThinking: config.enableThinking === true,
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 }
@@ -1425,6 +1439,8 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
     topP: normalizeTopP(item.topP),
     topK: normalizeTopK(item.topK),
     interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
+    enableThinking: item.enableThinking === true,
+    thinkingEffort: normalizeThinkingEffort(item.thinkingEffort),
     ...(item.tier !== undefined && { tier: item.tier })
   }))
 }
@@ -1448,6 +1464,8 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
       record.model,
       record.interleavedThinking
     ),
+    enableThinking: record.enableThinking === true,
+    thinkingEffort: normalizeThinkingEffort(record.thinkingEffort),
     ...(record.tier !== undefined && { tier: record.tier })
   }
 }
@@ -1513,6 +1531,8 @@ export function upsertCustomModelConfig(
       normalizedModel,
       config.interleavedThinking
     ),
+    enableThinking: config.enableThinking === true,
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 

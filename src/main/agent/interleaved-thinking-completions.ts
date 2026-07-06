@@ -6,6 +6,12 @@ import { ChatOpenAICompletions } from "@langchain/openai"
 const THINK_OPEN_TAG = "<think>"
 const THINK_CLOSE_TAG = "</think>"
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
 function extractReasoningText(reasoning: unknown): string {
   if (typeof reasoning === "string") return reasoning
   if (Array.isArray(reasoning)) {
@@ -15,9 +21,67 @@ function extractReasoningText(reasoning: unknown): string {
     const record = reasoning as Record<string, unknown>
     if (typeof record.text === "string") return record.text
     if (typeof record.reasoning === "string") return record.reasoning
+    if (typeof record.reasoning_content === "string") return record.reasoning_content
+    if (typeof record.reasoning_text === "string") return record.reasoning_text
+    if (typeof record.content === "string") return record.content
+    if (typeof record.summary === "string") return record.summary
+    if (typeof record.delta === "string") return record.delta
     if (Array.isArray(record.parts)) return record.parts.map(extractReasoningText).filter(Boolean).join("")
+    if (Array.isArray(record.reasoning_details)) {
+      return record.reasoning_details.map(extractReasoningText).filter(Boolean).join("")
+    }
+    if (Array.isArray(record.summary)) return record.summary.map(extractReasoningText).filter(Boolean).join("")
+    if (Array.isArray(record.details)) return record.details.map(extractReasoningText).filter(Boolean).join("")
   }
   return ""
+}
+
+function extractReasoningFromRecord(record: Record<string, unknown>): string {
+  const additionalKwargs = asRecord(record.additional_kwargs)
+  return extractReasoningText(
+    record.reasoning ??
+      record.reasoning_content ??
+      record.reasoning_text ??
+      record.reasoning_details ??
+      record.summary ??
+      record.details ??
+      record.delta ??
+      additionalKwargs?.reasoning ??
+      additionalKwargs?.reasoning_content ??
+      additionalKwargs?.reasoning_text ??
+      additionalKwargs?.reasoning_details ??
+      additionalKwargs?.summary ??
+      additionalKwargs?.details ??
+      additionalKwargs?.delta
+  )
+}
+
+function attachReasoningToAdditionalKwargs<T>(message: T, reasoning: string): T {
+  if (!reasoning) return message
+  const reasoningText = reasoning
+
+  const writableMessage = message as {
+    additional_kwargs?: Record<string, unknown>
+    lc_kwargs?: { additional_kwargs?: Record<string, unknown> }
+  }
+  const additionalKwargs = asRecord(writableMessage.additional_kwargs) ?? {}
+  writableMessage.additional_kwargs = {
+    ...additionalKwargs,
+    reasoning: reasoningText
+  }
+
+  if (writableMessage.lc_kwargs) {
+    const lcAdditionalKwargs = asRecord(writableMessage.lc_kwargs.additional_kwargs) ?? {}
+    writableMessage.lc_kwargs = {
+      ...writableMessage.lc_kwargs,
+      additional_kwargs: {
+        ...lcAdditionalKwargs,
+        reasoning: reasoningText
+      }
+    }
+  }
+
+  return message
 }
 
 function hasThinkOpenTag(text: string): boolean {
@@ -68,6 +132,12 @@ function mergeReasoningIntoContent(content: unknown, reasoning: unknown): string
 
 export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompletions {
   private thinkingOpen = false
+  private readonly exposeReasoning: boolean
+
+  constructor(fields?: unknown, options?: { exposeReasoning?: boolean }) {
+    super(fields as never)
+    this.exposeReasoning = options?.exposeReasoning === true
+  }
 
   override async *_streamResponseChunks(
     messages: BaseMessage[],
@@ -89,18 +159,22 @@ export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompleti
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]> {
     const [message, rawResponse] = args
+    const reasoning = extractReasoningFromRecord(message as unknown as Record<string, unknown>)
     const normalizedMessage = {
       ...message,
-      content: mergeReasoningIntoContent(message.content, (message as { reasoning?: unknown }).reasoning)
+      content: mergeReasoningIntoContent(message.content, reasoning)
     }
-    return super._convertCompletionsMessageToBaseMessage(normalizedMessage, rawResponse)
+    const baseMessage = super._convertCompletionsMessageToBaseMessage(normalizedMessage, rawResponse)
+    return this.exposeReasoning
+      ? attachReasoningToAdditionalKwargs(baseMessage, reasoning)
+      : baseMessage
   }
 
   override _convertCompletionsDeltaToBaseMessageChunk(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]> {
     const [delta, rawResponse, defaultRole] = args
-    const reasoningText = extractReasoningText((delta as { reasoning?: unknown }).reasoning)
+    const reasoningText = extractReasoningFromRecord(delta as unknown as Record<string, unknown>)
     const contentText = typeof delta.content === "string" ? delta.content : ""
     const hasToolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0
     const shouldCloseThink =
@@ -135,13 +209,45 @@ export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompleti
       this.thinkingOpen = false
     }
 
-    return super._convertCompletionsDeltaToBaseMessageChunk(
+    const chunk = super._convertCompletionsDeltaToBaseMessageChunk(
       {
         ...delta,
         content: nextContent
       },
       rawResponse,
-      defaultRole
+      defaultRole ?? (reasoningText ? "assistant" : undefined)
+    )
+    return this.exposeReasoning
+      ? attachReasoningToAdditionalKwargs(chunk, reasoningText)
+      : chunk
+  }
+}
+
+export class ReasoningDisplayChatOpenAICompletions extends ChatOpenAICompletions {
+  override _convertCompletionsMessageToBaseMessage(
+    ...args: Parameters<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]>
+  ): ReturnType<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]> {
+    const [message, rawResponse] = args
+    const baseMessage = super._convertCompletionsMessageToBaseMessage(message, rawResponse)
+    return attachReasoningToAdditionalKwargs(
+      baseMessage,
+      extractReasoningFromRecord(message as unknown as Record<string, unknown>)
+    )
+  }
+
+  override _convertCompletionsDeltaToBaseMessageChunk(
+    ...args: Parameters<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]>
+  ): ReturnType<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]> {
+    const [delta, rawResponse, defaultRole] = args
+    const reasoning = extractReasoningFromRecord(delta as unknown as Record<string, unknown>)
+    const chunk = super._convertCompletionsDeltaToBaseMessageChunk(
+      delta,
+      rawResponse,
+      defaultRole ?? (reasoning ? "assistant" : undefined)
+    )
+    return attachReasoningToAdditionalKwargs(
+      chunk,
+      reasoning
     )
   }
 }
