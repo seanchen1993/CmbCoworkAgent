@@ -1256,7 +1256,7 @@ const getMessageBubbleText = (content: Message["content"]): string => {
 
 // MessageBubble renders `null` for messages with no visible content: tool-result
 // messages, empty system notices, and assistant/user messages whose text is empty
-// and that carry no tool calls. Such empty wrappers must NOT get content-visibility
+// and that carry no tool calls or reasoning. Such empty wrappers must NOT get content-visibility
 // containment — when scrolled off-screen the intrinsic-size fallback would reserve
 // phantom height (stacking across many empty tool results into a large blank gap
 // between tools and text). Detection is intentionally generous: a false positive
@@ -1272,6 +1272,12 @@ const messageRendersNothing = (message: Message): boolean => {
   if (message.role === "tool") return true
   const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
   if (hasToolCalls) return false
+  if (message.role === "assistant" && typeof message.reasoning === "string") {
+    return (
+      message.reasoning.trim().length === 0 &&
+      getMessageBubbleText(message.content).trim().length === 0
+    )
+  }
   const visibleText =
     message.role === "system"
       ? getMessageText(message.content)
