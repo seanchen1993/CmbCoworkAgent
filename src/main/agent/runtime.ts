@@ -1196,6 +1196,7 @@ When NOT to use the task tool:
 - If the task is trivial (a few tool calls or simple lookup)
 - If delegating does not reduce token usage, complexity, or context switching
 - If splitting would add latency without benefit
+- If the user or Skills explicitly instruct not to use the task tool or subagents.
 
 ## Important Task Tool Usage Notes to Remember
 - You can call up to 3 \`task\` tools in a single response. When delegated tasks have no dependencies, launch independent subagents in parallel instead of serializing work that can run simultaneously.
