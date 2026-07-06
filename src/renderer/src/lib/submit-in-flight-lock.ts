@@ -2,6 +2,10 @@ export type SubmitInFlightLockRef = {
   current: Set<string>
 }
 
+export const sharedSubmitInFlightLockRef: SubmitInFlightLockRef = {
+  current: new Set<string>()
+}
+
 export function shouldUseSubmitInFlightLock(params: {
   isSideChannelGoalControl: boolean
 }): boolean {

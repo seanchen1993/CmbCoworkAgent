@@ -106,6 +106,7 @@ export default defineConfig({
     },
     plugins: [optionalMmjModule(), react(), tailwindcss()],
     server: {
+      host: "127.0.0.1",
       watch: {
         ignored: [
           "**/dist/**",

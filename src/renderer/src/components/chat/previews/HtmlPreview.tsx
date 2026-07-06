@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { PenLine } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
+import { VisualEditLayer } from "@/components/visual-edit/VisualEditLayer"
+import type {
+  ClawVisualAnnotation,
+  ClawVisualFeedbackContext,
+  ClawVisualTargetKind
+} from "@/components/visual-edit/visual-edit-types"
 
 import "highlight.js/styles/github.css"
 
@@ -13,6 +20,19 @@ interface HtmlPreviewProps {
   showModeToggle?: boolean
   viewMode?: "preview" | "source"
   readDependencyFile?: (resolvedPath: string) => Promise<string | null>
+  visualEdit?: {
+    threadId: string
+    targetKind?: ClawVisualTargetKind
+    targetPath?: string
+    targetUrl?: string
+    submitDisabled?: boolean
+    submitDisabledReason?: string | null
+    annotations: ClawVisualAnnotation[]
+    onAnnotationsChange: (
+      next: ClawVisualAnnotation[] | ((prev: ClawVisualAnnotation[]) => ClawVisualAnnotation[])
+    ) => void
+    onSubmit: (context: ClawVisualFeedbackContext) => Promise<boolean | void> | boolean | void
+  }
 }
 
 function getFileName(path: string): string {
@@ -35,14 +55,17 @@ export function HtmlPreview({
   showHeader = true,
   showModeToggle = true,
   viewMode,
-  readDependencyFile
+  readDependencyFile,
+  visualEdit
 }: HtmlPreviewProps): React.JSX.Element {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [iframeHeight, setIframeHeight] = useState<number>(480)
   const [internalViewMode, setInternalViewMode] = useState<"preview" | "source">("preview")
   const [srcDocContent, setSrcDocContent] = useState(content)
+  const [visualEditActive, setVisualEditActive] = useState(false)
   const currentViewMode = viewMode ?? internalViewMode
   const highlightedSourceMarkdown = useMemo(() => getFencedCodeBlock(content, "html"), [content])
+  const canUseVisualEdit = Boolean(visualEdit && currentViewMode === "preview")
 
   useEffect(() => {
     let isCancelled = false
@@ -144,11 +167,8 @@ export function HtmlPreview({
         style={fillHeight ? undefined : { maxHeight: "80vh" }}
       >
         {currentViewMode === "preview" ? (
-          <iframe
-            ref={iframeRef}
-            title={path || "html-preview"}
-            srcDoc={srcDocContent}
-            className={`border-0 ${fillHeight ? "h-full" : ""}`}
+          <div
+            className="relative"
             style={
               fillHeight
                 ? { height: "100%", minWidth: "1000px", width: "max(100%, 1000px)" }
@@ -158,11 +178,49 @@ export function HtmlPreview({
                     width: "max(100%, 1000px)"
                   }
             }
-            // 预览场景需要脚本和同源能力（例如 localStorage）；同时保留 sandbox 隔离主页面上下文。
-            sandbox="allow-scripts allow-same-origin"
-            scrolling={fillHeight ? "auto" : "no"}
-            onLoad={syncHeight}
-          />
+          >
+            <iframe
+              ref={iframeRef}
+              title={path || "html-preview"}
+              srcDoc={srcDocContent}
+              className="h-full w-full border-0"
+              // 预览场景需要脚本和同源能力（例如 localStorage）；同时保留 sandbox 隔离主页面上下文。
+              sandbox="allow-scripts allow-same-origin"
+              scrolling={fillHeight ? "auto" : "no"}
+              onLoad={syncHeight}
+            />
+            {canUseVisualEdit && !visualEditActive && (
+              <button
+                type="button"
+                disabled={visualEdit?.submitDisabled}
+                title={
+                  visualEdit?.submitDisabled
+                    ? visualEdit.submitDisabledReason || undefined
+                    : undefined
+                }
+                className="absolute right-3 top-3 z-20 inline-flex items-center gap-1.5 rounded-md border border-border bg-background/95 px-2.5 py-1.5 text-xs font-medium text-foreground shadow-lg backdrop-blur transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-background/95"
+                onClick={() => setVisualEditActive(true)}
+              >
+                <PenLine className="size-3.5" />
+                标注修改
+              </button>
+            )}
+            {visualEdit && visualEditActive && (
+              <VisualEditLayer
+                threadId={visualEdit.threadId}
+                targetKind={visualEdit.targetKind ?? "html-preview"}
+                targetPath={visualEdit.targetPath ?? path}
+                targetUrl={visualEdit.targetUrl}
+                iframeRef={iframeRef}
+                active={visualEditActive}
+                annotations={visualEdit.annotations}
+                submitDisabled={visualEdit.submitDisabled}
+                onClose={() => setVisualEditActive(false)}
+                onAnnotationsChange={visualEdit.onAnnotationsChange}
+                onSubmit={visualEdit.onSubmit}
+              />
+            )}
+          </div>
         ) : (
           <div className={fillHeight ? "min-h-full" : ""}>
             <div className="prose prose-sm max-w-none dark:prose-invert p-3">

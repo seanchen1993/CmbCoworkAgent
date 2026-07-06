@@ -149,6 +149,7 @@ import {
 } from "@/lib/goal-control-submit"
 import {
   releaseSubmitInFlightLock,
+  sharedSubmitInFlightLockRef,
   shouldUseSubmitInFlightLock,
   tryAcquireSubmitInFlightLock
 } from "@/lib/submit-in-flight-lock"
@@ -1735,7 +1736,7 @@ export function ChatContainer({
   const [searchOpen, setSearchOpen] = useState(false)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
-  const submitInFlightRef = useRef<Set<string>>(new Set())
+  const submitInFlightRef = sharedSubmitInFlightLockRef
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)

@@ -9,6 +9,11 @@ import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
+import { useVisualEditSubmit } from "@/components/visual-edit/useVisualEditSubmit"
+import {
+  getVisualEditStoreKey,
+  useVisualEditAnnotations
+} from "@/components/visual-edit/visual-edit-store"
 
 interface FileViewerProps {
   filePath: string
@@ -67,10 +72,23 @@ export function FileViewer({
   const [fileSize, setFileSize] = useState<number | undefined>()
   const cacheKey = externalFullPath || filePath
   const displayPath = externalFullPath || filePath
+  const { submitVisualFeedback, canSubmitVisualFeedback, submitDisabledReason } =
+    useVisualEditSubmit(threadId)
+  const visualEditStoreKey = useMemo(
+    () =>
+      getVisualEditStoreKey({
+        threadId,
+        targetKind: "html-preview",
+        targetPath: displayPath
+      }),
+    [displayPath, threadId]
+  )
+  const { annotations: visualEditAnnotations, setAnnotations: setVisualEditAnnotations } =
+    useVisualEditAnnotations(visualEditStoreKey)
 
   // Get file type info
   const fileName = displayPath.split("/").pop() || displayPath
-  const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() ?? "" : ""
+  const ext = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : ""
   const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
   const htmlLike = ext === "html" || ext === "htm"
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
@@ -183,9 +201,13 @@ export function FileViewer({
             </div>
             <div className="min-w-0 flex-1 space-y-2">
               <div className="text-sm font-semibold text-foreground">{friendlyError.title}</div>
-              <div className="text-sm text-muted-foreground leading-6">{friendlyError.description}</div>
+              <div className="text-sm text-muted-foreground leading-6">
+                {friendlyError.description}
+              </div>
               {friendlyError.detail ? (
-                <div className="text-xs text-muted-foreground/90 leading-5">{friendlyError.detail}</div>
+                <div className="text-xs text-muted-foreground/90 leading-5">
+                  {friendlyError.detail}
+                </div>
               ) : null}
               {friendlyError.missingPath ? (
                 <div className="rounded-md border border-border/60 bg-background/80 px-3 py-2 text-xs text-muted-foreground break-all text-left">
@@ -275,6 +297,16 @@ export function FileViewer({
         showModeToggle={false}
         viewMode={previewMode}
         readDependencyFile={readHtmlDependencyFile}
+        visualEdit={{
+          threadId,
+          targetKind: "html-preview",
+          targetPath: displayPath,
+          submitDisabled: !canSubmitVisualFeedback,
+          submitDisabledReason,
+          annotations: visualEditAnnotations,
+          onAnnotationsChange: setVisualEditAnnotations,
+          onSubmit: submitVisualFeedback
+        }}
       />
     )
   }

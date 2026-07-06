@@ -1,5 +1,6 @@
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
+import { clearVisualEditAnnotationsForThread } from "@/components/visual-edit/visual-edit-store"
 import type { Thread, ModelConfig, Provider, Message } from "@/types"
 import { findFirstChatThread, isHarnessFeatureThread } from "./thread-classification"
 
@@ -541,6 +542,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await window.api.threads.delete(threadId)
       console.log("[Store] Thread deleted from backend")
+      clearVisualEditAnnotationsForThread(threadId)
 
       set((state) => {
         const threads = state.threads.filter((t) => t.thread_id !== threadId)
