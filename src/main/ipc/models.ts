@@ -3595,7 +3595,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const msg =
           e instanceof Error
             ? e.name === "AbortError"
-              ? "连接超时（15 秒）"
+              ? "连接超时（30 秒）"
               : e.message
             : "未知错误"
         return { success: false, error: msg, latencyMs }

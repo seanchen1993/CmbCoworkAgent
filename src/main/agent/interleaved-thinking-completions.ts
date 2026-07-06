@@ -26,12 +26,15 @@ function extractReasoningText(reasoning: unknown): string {
     if (typeof record.content === "string") return record.content
     if (typeof record.summary === "string") return record.summary
     if (typeof record.delta === "string") return record.delta
-    if (Array.isArray(record.parts)) return record.parts.map(extractReasoningText).filter(Boolean).join("")
+    if (Array.isArray(record.parts))
+      return record.parts.map(extractReasoningText).filter(Boolean).join("")
     if (Array.isArray(record.reasoning_details)) {
       return record.reasoning_details.map(extractReasoningText).filter(Boolean).join("")
     }
-    if (Array.isArray(record.summary)) return record.summary.map(extractReasoningText).filter(Boolean).join("")
-    if (Array.isArray(record.details)) return record.details.map(extractReasoningText).filter(Boolean).join("")
+    if (Array.isArray(record.summary))
+      return record.summary.map(extractReasoningText).filter(Boolean).join("")
+    if (Array.isArray(record.details))
+      return record.details.map(extractReasoningText).filter(Boolean).join("")
   }
   return ""
 }
@@ -146,7 +149,7 @@ export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompleti
   ): AsyncGenerator<ChatGenerationChunk> {
     this.thinkingOpen = false
     try {
-      yield * super._streamResponseChunks(messages, options, runManager)
+      yield* super._streamResponseChunks(messages, options, runManager)
     } finally {
       this.thinkingOpen = false
     }
@@ -158,68 +161,96 @@ export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompleti
   override _convertCompletionsMessageToBaseMessage(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]> {
-    const [message, rawResponse] = args
-    const reasoning = extractReasoningFromRecord(message as unknown as Record<string, unknown>)
-    const normalizedMessage = {
-      ...message,
-      content: mergeReasoningIntoContent(message.content, reasoning)
+    try {
+      const [message, rawResponse] = args
+      const reasoning = extractReasoningFromRecord(message as unknown as Record<string, unknown>)
+      const normalizedMessage = {
+        ...message,
+        content: mergeReasoningIntoContent(message.content, reasoning)
+      }
+      const baseMessage = super._convertCompletionsMessageToBaseMessage(
+        normalizedMessage,
+        rawResponse
+      )
+      return this.exposeReasoning
+        ? attachReasoningToAdditionalKwargs(baseMessage, reasoning)
+        : baseMessage
+    } catch (e) {
+      console.warn(
+        "[InterleavedThinking] _convertCompletionsMessageToBaseMessage failed, falling back to base:",
+        e
+      )
+      return super._convertCompletionsMessageToBaseMessage(...args)
     }
-    const baseMessage = super._convertCompletionsMessageToBaseMessage(normalizedMessage, rawResponse)
-    return this.exposeReasoning
-      ? attachReasoningToAdditionalKwargs(baseMessage, reasoning)
-      : baseMessage
   }
 
   override _convertCompletionsDeltaToBaseMessageChunk(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]> {
-    const [delta, rawResponse, defaultRole] = args
-    const reasoningText = extractReasoningFromRecord(delta as unknown as Record<string, unknown>)
-    const contentText = typeof delta.content === "string" ? delta.content : ""
-    const hasToolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0
-    const shouldCloseThink =
-      this.thinkingOpen &&
-      (!reasoningText || reasoningText.length === 0) &&
-      (contentText.length > 0 || hasToolCalls || rawResponse.choices?.[0]?.finish_reason != null)
+    try {
+      const [delta, rawResponse, defaultRole] = args
+      const reasoningText = extractReasoningFromRecord(delta as unknown as Record<string, unknown>)
+      const contentText = typeof delta.content === "string" ? delta.content : ""
+      const hasToolCalls = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0
+      const shouldCloseThink =
+        this.thinkingOpen &&
+        (!reasoningText || reasoningText.length === 0) &&
+        (contentText.length > 0 || hasToolCalls || rawResponse.choices?.[0]?.finish_reason != null)
 
-    let nextContent = contentText
-    if (reasoningText) {
-      let reasoningChunk = reasoningText
-      if (this.thinkingOpen && startsWithThinkTag(reasoningChunk)) {
-        reasoningChunk = reasoningChunk.replace(/^\s*<think>/, "")
-      }
-      if (!this.thinkingOpen && !hasThinkOpenTag(reasoningChunk) && !hasThinkCloseTag(reasoningChunk)) {
-        reasoningChunk = `${THINK_OPEN_TAG}${reasoningChunk}`
-      }
-
-      const thinkingOpenAfterReasoning = resolveThinkOpenState(this.thinkingOpen, reasoningChunk)
-      nextContent = reasoningChunk
-
-      if (thinkingOpenAfterReasoning && (contentText.length > 0 || hasToolCalls || rawResponse.choices?.[0]?.finish_reason != null)) {
-        nextContent += `${THINK_CLOSE_TAG}${contentText.length > 0 ? `\n\n${contentText}` : ""}`
-        this.thinkingOpen = false
-      } else {
-        if (contentText.length > 0) {
-          nextContent += reasoningChunk.length > 0 ? `\n${contentText}` : contentText
+      let nextContent = contentText
+      if (reasoningText) {
+        let reasoningChunk = reasoningText
+        if (this.thinkingOpen && startsWithThinkTag(reasoningChunk)) {
+          reasoningChunk = reasoningChunk.replace(/^\s*<think>/, "")
         }
-        this.thinkingOpen = thinkingOpenAfterReasoning
-      }
-    } else if (shouldCloseThink) {
-      nextContent = nextContent.length > 0 ? `${THINK_CLOSE_TAG}\n\n${nextContent}` : THINK_CLOSE_TAG
-      this.thinkingOpen = false
-    }
+        if (
+          !this.thinkingOpen &&
+          !hasThinkOpenTag(reasoningChunk) &&
+          !hasThinkCloseTag(reasoningChunk)
+        ) {
+          reasoningChunk = `${THINK_OPEN_TAG}${reasoningChunk}`
+        }
 
-    const chunk = super._convertCompletionsDeltaToBaseMessageChunk(
-      {
-        ...delta,
-        content: nextContent
-      },
-      rawResponse,
-      defaultRole ?? (reasoningText ? "assistant" : undefined)
-    )
-    return this.exposeReasoning
-      ? attachReasoningToAdditionalKwargs(chunk, reasoningText)
-      : chunk
+        const thinkingOpenAfterReasoning = resolveThinkOpenState(this.thinkingOpen, reasoningChunk)
+        nextContent = reasoningChunk
+
+        if (
+          thinkingOpenAfterReasoning &&
+          (contentText.length > 0 ||
+            hasToolCalls ||
+            rawResponse.choices?.[0]?.finish_reason != null)
+        ) {
+          nextContent += `${THINK_CLOSE_TAG}${contentText.length > 0 ? `\n\n${contentText}` : ""}`
+          this.thinkingOpen = false
+        } else {
+          if (contentText.length > 0) {
+            nextContent += reasoningChunk.length > 0 ? `\n${contentText}` : contentText
+          }
+          this.thinkingOpen = thinkingOpenAfterReasoning
+        }
+      } else if (shouldCloseThink) {
+        nextContent =
+          nextContent.length > 0 ? `${THINK_CLOSE_TAG}\n\n${nextContent}` : THINK_CLOSE_TAG
+        this.thinkingOpen = false
+      }
+
+      const chunk = super._convertCompletionsDeltaToBaseMessageChunk(
+        {
+          ...delta,
+          content: nextContent
+        },
+        rawResponse,
+        defaultRole ?? (reasoningText ? "assistant" : undefined)
+      )
+      return this.exposeReasoning ? attachReasoningToAdditionalKwargs(chunk, reasoningText) : chunk
+    } catch (e) {
+      console.warn(
+        "[InterleavedThinking] _convertCompletionsDeltaToBaseMessageChunk failed, falling back to base:",
+        e
+      )
+      this.thinkingOpen = false
+      return super._convertCompletionsDeltaToBaseMessageChunk(...args)
+    }
   }
 }
 
@@ -227,27 +258,40 @@ export class ReasoningDisplayChatOpenAICompletions extends ChatOpenAICompletions
   override _convertCompletionsMessageToBaseMessage(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsMessageToBaseMessage"]> {
-    const [message, rawResponse] = args
-    const baseMessage = super._convertCompletionsMessageToBaseMessage(message, rawResponse)
-    return attachReasoningToAdditionalKwargs(
-      baseMessage,
-      extractReasoningFromRecord(message as unknown as Record<string, unknown>)
-    )
+    try {
+      const [message, rawResponse] = args
+      const baseMessage = super._convertCompletionsMessageToBaseMessage(message, rawResponse)
+      return attachReasoningToAdditionalKwargs(
+        baseMessage,
+        extractReasoningFromRecord(message as unknown as Record<string, unknown>)
+      )
+    } catch (e) {
+      console.warn(
+        "[ReasoningDisplay] _convertCompletionsMessageToBaseMessage failed, falling back to base:",
+        e
+      )
+      return super._convertCompletionsMessageToBaseMessage(...args)
+    }
   }
 
   override _convertCompletionsDeltaToBaseMessageChunk(
     ...args: Parameters<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]>
   ): ReturnType<ChatOpenAICompletions["_convertCompletionsDeltaToBaseMessageChunk"]> {
-    const [delta, rawResponse, defaultRole] = args
-    const reasoning = extractReasoningFromRecord(delta as unknown as Record<string, unknown>)
-    const chunk = super._convertCompletionsDeltaToBaseMessageChunk(
-      delta,
-      rawResponse,
-      defaultRole ?? (reasoning ? "assistant" : undefined)
-    )
-    return attachReasoningToAdditionalKwargs(
-      chunk,
-      reasoning
-    )
+    try {
+      const [delta, rawResponse, defaultRole] = args
+      const reasoning = extractReasoningFromRecord(delta as unknown as Record<string, unknown>)
+      const chunk = super._convertCompletionsDeltaToBaseMessageChunk(
+        delta,
+        rawResponse,
+        defaultRole ?? (reasoning ? "assistant" : undefined)
+      )
+      return attachReasoningToAdditionalKwargs(chunk, reasoning)
+    } catch (e) {
+      console.warn(
+        "[ReasoningDisplay] _convertCompletionsDeltaToBaseMessageChunk failed, falling back to base:",
+        e
+      )
+      return super._convertCompletionsDeltaToBaseMessageChunk(...args)
+    }
   }
 }
