@@ -45,8 +45,22 @@ export interface OverviewData {
   totalSkillCalls: number
   totalToolCalls: number
   trend: Array<{ time: string; count: number; users: number }>
-  bySkill: Array<{ skill: string; count: number; isPlugin?: boolean; pluginName?: string }>
-  bySkillAll: Array<{ skill: string; count: number; isPlugin?: boolean; pluginName?: string }>
+  bySkill: Array<{
+    id?: string
+    skill: string
+    count: number
+    sourceRef?: string
+    isPlugin?: boolean
+    pluginName?: string
+  }>
+  bySkillAll: Array<{
+    id?: string
+    skill: string
+    count: number
+    sourceRef?: string
+    isPlugin?: boolean
+    pluginName?: string
+  }>
   bySkillAdoption: SkillAdoptionRankingItem[]
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
@@ -450,7 +464,9 @@ export interface DashboardPluginAggregate {
 }
 
 export interface DashboardProjectModeSkillCount {
+  id?: string
   skill: string
+  sourceRef?: string
   count: number
   isPlugin?: boolean
   pluginName?: string
@@ -1108,9 +1124,11 @@ export function navigateRange(
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+type OverviewSkillUsageItem = OverviewData["bySkillAll"][number]
+
 function parsePluginSkillFromSourceRef(
   ref: unknown
-): { skill: string; pluginName: string } | null {
+): { id: string; sourceRef: string; skill: string; pluginName: string } | null {
   if (typeof ref !== "string" || !ref.startsWith("plugin:")) return null
   const rest = ref.slice("plugin:".length)
   const separatorIndex = rest.indexOf("/")
@@ -1122,8 +1140,11 @@ function parsePluginSkillFromSourceRef(
     const rawSkill = queryIndex >= 0 ? rawSkillAndQuery.slice(0, queryIndex) : rawSkillAndQuery
     const rawQuery = queryIndex >= 0 ? rawSkillAndQuery.slice(queryIndex + 1) : ""
     const query = new URLSearchParams(rawQuery)
+    const skill = decodeURIComponent(rawSkill)
     return {
-      skill: decodeURIComponent(rawSkill),
+      id: `plugin:${encodeURIComponent(pluginId)}/${encodeURIComponent(skill)}`,
+      sourceRef: ref,
+      skill,
       pluginName: query.get("name")?.trim() || pluginId
     }
   } catch {
@@ -1131,14 +1152,47 @@ function parsePluginSkillFromSourceRef(
   }
 }
 
-function parsePluginSkillInfo(rawBuckets: any): Map<string, string> {
-  const result = new Map<string, string>()
+function parsePluginSkillSourceBuckets(rawBuckets: any): OverviewSkillUsageItem[] {
+  const result = new Map<string, OverviewSkillUsageItem>()
   const buckets = Array.isArray(rawBuckets) ? rawBuckets : []
   for (const bucket of buckets) {
     const parsed = parsePluginSkillFromSourceRef(bucket?.key)
-    if (parsed && !result.has(parsed.skill)) result.set(parsed.skill, parsed.pluginName)
+    if (!parsed) continue
+    const count = Number(bucket?.doc_count ?? 0) || 0
+    const existing = result.get(parsed.id)
+    if (existing) {
+      existing.count += count
+    } else {
+      result.set(parsed.id, {
+        id: parsed.id,
+        sourceRef: parsed.sourceRef,
+        skill: parsed.skill,
+        count,
+        isPlugin: true,
+        pluginName: parsed.pluginName
+      })
+    }
   }
-  return result
+  return Array.from(result.values())
+}
+
+function combineSkillUsageBuckets(rawSkillBuckets: any, rawSourceBuckets: any): OverviewSkillUsageItem[] {
+  const pluginItems = parsePluginSkillSourceBuckets(rawSourceBuckets)
+  const pluginCountsBySkill = new Map<string, number>()
+  for (const item of pluginItems) {
+    pluginCountsBySkill.set(item.skill, (pluginCountsBySkill.get(item.skill) ?? 0) + item.count)
+  }
+
+  const result: OverviewSkillUsageItem[] = [...pluginItems]
+  const buckets = Array.isArray(rawSkillBuckets) ? rawSkillBuckets : []
+  for (const bucket of buckets) {
+    const skill = String(bucket?.key || "")
+    if (!skill) continue
+    const count = Math.max(0, (Number(bucket?.doc_count ?? 0) || 0) - (pluginCountsBySkill.get(skill) ?? 0))
+    if (count > 0) result.push({ id: skill, skill, count })
+  }
+
+  return result.sort((a, b) => b.count - a.count || a.skill.localeCompare(b.skill, "zh-CN"))
 }
 
 /** 根据粒度将 ES 返回的 ISO 时间串格式化为可读刻度 */
@@ -1234,8 +1288,10 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
   const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
   const totalToolCalls = aggs.total_tool_calls?.value ?? 0
-  const pluginSkillInfo = parsePluginSkillInfo(aggs.skill_source?.buckets)
-  const codePluginSkillInfo = parsePluginSkillInfo(aggs.code_skill_source?.buckets)
+  const combinedSkillItems = combineSkillUsageBuckets(
+    aggs.by_skill_all?.buckets ?? aggs.by_skill?.buckets ?? [],
+    aggs.skill_source?.buckets
+  )
 
   const trend: OverviewData["trend"] = (aggs.trend?.buckets ?? []).map((b: any) => ({
     time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
@@ -1243,25 +1299,9 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     users: b.users?.value ?? 0
   }))
 
-  const bySkill: OverviewData["bySkill"] = (aggs.by_skill?.buckets ?? []).map((b: any) => ({
-    skill: b.key || "unknown",
-    count: b.doc_count,
-    ...(pluginSkillInfo.has(b.key)
-      ? { isPlugin: true, pluginName: pluginSkillInfo.get(b.key) }
-      : {})
-  }))
+  const bySkill: OverviewData["bySkill"] = combinedSkillItems.slice(0, 20)
 
-  const bySkillAll: OverviewData["bySkillAll"] = (
-    aggs.by_skill_all?.buckets ??
-    aggs.by_skill?.buckets ??
-    []
-  ).map((b: any) => ({
-    skill: b.key || "unknown",
-    count: b.doc_count,
-    ...(pluginSkillInfo.has(b.key)
-      ? { isPlugin: true, pluginName: pluginSkillInfo.get(b.key) }
-      : {})
-  }))
+  const bySkillAll: OverviewData["bySkillAll"] = combinedSkillItems
 
   const bySkillAdoption: OverviewData["bySkillAdoption"] = (
     aggs.code_by_skill_adoption?.buckets ?? []
@@ -1272,8 +1312,10 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     const inclusivePushedAdoptionRate = b.inclusive_pushed_adoption_rate?.value
     return {
       skill: b.key || "unknown",
-      ...(b.is_plugin?.value === true || codePluginSkillInfo.has(b.key)
-        ? { isPlugin: true, pluginName: b.plugin_name?.value ?? codePluginSkillInfo.get(b.key) }
+      ...(b.id?.value ? { id: b.id.value } : {}),
+      ...(b.source_ref?.value ? { sourceRef: b.source_ref.value } : {}),
+      ...(b.is_plugin?.value === true
+        ? { isPlugin: true, pluginName: b.plugin_name?.value }
         : {}),
       generatedLines: b.generated_lines?.value ?? 0,
       measuredGeneratedLines: b.measured_generated_lines?.value ?? 0,

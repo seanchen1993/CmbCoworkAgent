@@ -1242,8 +1242,9 @@ function SkillChips({ skills }: { skills: DashboardProjectModeSkillCount[] }): R
   return (
     <>
       {skills.map((item) => (
-        <Badge key={item.skill} variant="outline" className="normal-case tracking-normal">
-          {item.skill} · {formatNumber(item.count)}
+        <Badge key={item.id ?? item.skill} variant="outline" className="normal-case tracking-normal">
+          {item.skill}
+          {item.isPlugin && item.pluginName ? ` · ${item.pluginName}` : ""} · {formatNumber(item.count)}
         </Badge>
       ))}
     </>

@@ -1576,27 +1576,220 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string")
 }
 
-function parsePluginSkillInfoFromSourceBuckets(raw: unknown): Map<string, string> {
-  const result = new Map<string, string>()
-  if (!Array.isArray(raw)) return result
+interface PluginSkillSourceBucket {
+  id: string
+  sourceRef: string
+  skill: string
+  pluginName: string
+  count: number
+}
+
+function pluginSkillSourceId(pluginId: string, skill: string): string {
+  return `plugin:${encodeURIComponent(pluginId)}/${encodeURIComponent(skill)}`
+}
+
+function parsePluginSkillSourceBuckets(raw: unknown): PluginSkillSourceBucket[] {
+  const result = new Map<string, PluginSkillSourceBucket>()
+  if (!Array.isArray(raw)) return []
   for (const bucket of raw) {
-    const parsed = parsePluginSkillSourceRef(asString(asRecord(bucket).key))
-    if (parsed?.skill && !result.has(parsed.skill)) {
-      result.set(parsed.skill, parsed.pluginName || parsed.pluginId)
+    const record = asRecord(bucket)
+    const sourceRef = asString(record.key)
+    const parsed = parsePluginSkillSourceRef(sourceRef)
+    if (!parsed?.skill || !parsed.pluginId) continue
+    const id = pluginSkillSourceId(parsed.pluginId, parsed.skill)
+    const count = asNumber(record.doc_count)
+    const existing = result.get(id)
+    if (existing) {
+      existing.count += count
+    } else {
+      result.set(id, {
+        id,
+        sourceRef,
+        skill: parsed.skill,
+        pluginName: parsed.pluginName || parsed.pluginId,
+        count
+      })
     }
+  }
+  return Array.from(result.values())
+}
+
+function subtractPluginSkillCountsBySkill(sourceBuckets: PluginSkillSourceBucket[]): Map<string, number> {
+  const result = new Map<string, number>()
+  for (const bucket of sourceBuckets) {
+    result.set(bucket.skill, (result.get(bucket.skill) ?? 0) + bucket.count)
   }
   return result
 }
 
-function markPluginSkillAdoptionStats<T extends DashboardSkillCodeAdoptionStats>(
-  items: T[],
-  pluginSkillInfo: Map<string, string>
-): T[] {
-  if (pluginSkillInfo.size === 0) return items
-  return items.map((item) => {
-    const pluginName = pluginSkillInfo.get(item.skill)
-    return pluginName ? { ...item, isPlugin: true, pluginName } : item
-  })
+function combineSkillCountBuckets(
+  usedSkillBuckets: unknown,
+  sourceBucketsRaw: unknown,
+  limit = Number.POSITIVE_INFINITY
+): ProjectModeSkillCount[] {
+  const pluginBuckets = parsePluginSkillSourceBuckets(sourceBucketsRaw)
+  const pluginCountsBySkill = subtractPluginSkillCountsBySkill(pluginBuckets)
+  const result: ProjectModeSkillCount[] = pluginBuckets.map((bucket) => ({
+    id: bucket.id,
+    sourceRef: bucket.sourceRef,
+    skill: bucket.skill,
+    count: bucket.count,
+    isPlugin: true,
+    pluginName: bucket.pluginName
+  }))
+
+  if (Array.isArray(usedSkillBuckets)) {
+    for (const bucket of usedSkillBuckets) {
+      const b = asRecord(bucket)
+      const skill = asString(b.key)
+      if (!skill) continue
+      const count = Math.max(0, asNumber(b.doc_count) - (pluginCountsBySkill.get(skill) ?? 0))
+      if (count > 0) result.push({ id: skill, skill, count })
+    }
+  }
+
+  result.sort((a, b) => b.count - a.count || a.skill.localeCompare(b.skill, "zh-CN"))
+  return result.slice(0, Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : result.length)
+}
+
+function makeSkillAdoptionStatsBucket(item: DashboardSkillCodeAdoptionStats): Record<string, unknown> {
+  return {
+    key: item.skill,
+    ...(item.id ? { id: { value: item.id } } : {}),
+    ...(item.sourceRef ? { source_ref: { value: item.sourceRef } } : {}),
+    is_plugin: { value: item.isPlugin === true },
+    plugin_name: { value: item.pluginName ?? null },
+    generated_lines: { value: item.generatedLines },
+    measured_generated_lines: { value: item.measuredGeneratedLines },
+    effective_generated_lines: { value: item.effectiveGeneratedLines },
+    unmeasured_generated_lines: { value: item.unmeasuredGeneratedLines },
+    inclusive_effective_generated_lines: { value: item.inclusiveEffectiveGeneratedLines },
+    adopted_lines: { value: item.adoptedLines },
+    measured_adoption_rate: { value: item.measuredAdoptionRate },
+    inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
+    commit_count: { value: item.commitCount },
+    pushed_measured_generated_lines: { value: item.pushedMeasuredGeneratedLines },
+    pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
+    pushed_adopted_lines: { value: item.pushedAdoptedLines },
+    pushed_adoption_rate: { value: item.pushedAdoptionRate },
+    inclusive_pushed_adoption_rate: { value: item.inclusivePushedAdoptionRate },
+    pushed_commit_count: { value: item.pushedCommitCount }
+  }
+}
+
+function subtractSkillCodeStats(
+  item: DashboardSkillCodeAdoptionStats,
+  subtract: DashboardSkillCodeAdoptionStats
+): DashboardSkillCodeAdoptionStats {
+  return {
+    ...makeDashboardCodeStats({
+      generatedLines: item.generatedLines - subtract.generatedLines,
+      deletedLines: item.deletedLines - subtract.deletedLines,
+      measuredGeneratedLines: item.measuredGeneratedLines - subtract.measuredGeneratedLines,
+      effectiveGeneratedLines: item.effectiveGeneratedLines - subtract.effectiveGeneratedLines,
+      adoptedLines: item.adoptedLines - subtract.adoptedLines,
+      pushedMeasuredGeneratedLines:
+        item.pushedMeasuredGeneratedLines - subtract.pushedMeasuredGeneratedLines,
+      pushedEffectiveGeneratedLines:
+        item.pushedEffectiveGeneratedLines - subtract.pushedEffectiveGeneratedLines,
+      pushedAdoptedLines: item.pushedAdoptedLines - subtract.pushedAdoptedLines,
+      pushedCommitCount: item.pushedCommitCount - subtract.pushedCommitCount
+    }),
+    id: item.id ?? item.skill,
+    skill: item.skill,
+    commitCount: Math.max(0, item.commitCount - subtract.commitCount)
+  }
+}
+
+function addSkillCodeStats(
+  item: DashboardSkillCodeAdoptionStats,
+  add: DashboardSkillCodeAdoptionStats
+): DashboardSkillCodeAdoptionStats {
+  return {
+    ...makeDashboardCodeStats({
+      generatedLines: item.generatedLines + add.generatedLines,
+      deletedLines: item.deletedLines + add.deletedLines,
+      measuredGeneratedLines: item.measuredGeneratedLines + add.measuredGeneratedLines,
+      effectiveGeneratedLines: item.effectiveGeneratedLines + add.effectiveGeneratedLines,
+      adoptedLines: item.adoptedLines + add.adoptedLines,
+      pushedMeasuredGeneratedLines: item.pushedMeasuredGeneratedLines + add.pushedMeasuredGeneratedLines,
+      pushedEffectiveGeneratedLines:
+        item.pushedEffectiveGeneratedLines + add.pushedEffectiveGeneratedLines,
+      pushedAdoptedLines: item.pushedAdoptedLines + add.pushedAdoptedLines,
+      pushedCommitCount: item.pushedCommitCount + add.pushedCommitCount
+    }),
+    id: item.id ?? item.skill,
+    skill: item.skill,
+    commitCount: item.commitCount + add.commitCount
+  }
+}
+
+function hasPositiveCodeStats(item: DashboardSkillCodeAdoptionStats): boolean {
+  return (
+    item.generatedLines > 0 ||
+    item.effectiveGeneratedLines > 0 ||
+    item.adoptedLines > 0 ||
+    item.pushedAdoptedLines > 0 ||
+    item.commitCount > 0 ||
+    item.pushedCommitCount > 0
+  )
+}
+
+function combineSkillCodeAdoptionStats(
+  usedSkillItems: DashboardSkillCodeAdoptionStats[],
+  sourceItems: DashboardSkillCodeAdoptionStats[]
+): DashboardSkillCodeAdoptionStats[] {
+  const pluginItems = new Map<string, DashboardSkillCodeAdoptionStats>()
+  const pluginStatsBySkill = new Map<string, DashboardSkillCodeAdoptionStats>()
+
+  for (const sourceItem of sourceItems) {
+    const parsed = parsePluginSkillSourceRef(sourceItem.skill)
+    if (!parsed?.skill || !parsed.pluginId) continue
+    const id = pluginSkillSourceId(parsed.pluginId, parsed.skill)
+    const pluginItem: DashboardSkillCodeAdoptionStats = {
+      ...sourceItem,
+      id,
+      sourceRef: sourceItem.skill,
+      skill: parsed.skill,
+      isPlugin: true,
+      pluginName: parsed.pluginName || parsed.pluginId
+    }
+    const existingPlugin = pluginItems.get(id)
+    if (existingPlugin) {
+      const merged = addSkillCodeStats(existingPlugin, pluginItem)
+      pluginItems.set(id, {
+        ...merged,
+        id,
+        sourceRef: existingPlugin.sourceRef ?? pluginItem.sourceRef,
+        skill: parsed.skill,
+        isPlugin: true,
+        pluginName: existingPlugin.pluginName ?? pluginItem.pluginName
+      })
+    } else {
+      pluginItems.set(id, pluginItem)
+    }
+    const existingSkillStats = pluginStatsBySkill.get(parsed.skill)
+    pluginStatsBySkill.set(
+      parsed.skill,
+      existingSkillStats ? addSkillCodeStats(existingSkillStats, pluginItem) : pluginItem
+    )
+  }
+
+  const result = Array.from(pluginItems.values())
+  for (const item of usedSkillItems) {
+    const remaining = pluginStatsBySkill.has(item.skill)
+      ? subtractSkillCodeStats(item, pluginStatsBySkill.get(item.skill)!)
+      : { ...item, id: item.id ?? item.skill }
+    if (hasPositiveCodeStats(remaining)) result.push(remaining)
+  }
+
+  result.sort(
+    (a, b) =>
+      b.adoptedLines - a.adoptedLines ||
+      b.generatedLines - a.generatedLines ||
+      a.skill.localeCompare(b.skill, "zh-CN")
+  )
+  return result
 }
 
 function skillVersionKey(skillName: string, skillVersion?: string): string {
@@ -1676,6 +1869,35 @@ function codeAdoptPushedAggs(): Record<string, unknown> {
     pushed_effective_generated_lines: effectiveGeneratedLinesSumAgg(),
     pushed_adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
     pushed_commit_count: { cardinality: { field: "properties.commitSha" } }
+  }
+}
+
+function codeSkillAdoptionBucketAggs(
+  codeGenFilters: Record<string, unknown>[],
+  codeAdoptFilters: Record<string, unknown>[],
+  codeAdoptPushedFilters: Record<string, unknown>[]
+): Record<string, unknown> {
+  return {
+    code_gen: {
+      filter: { bool: { filter: codeGenFilters } },
+      aggs: {
+        generated_lines: { sum: { field: "properties.lineCount" } },
+        deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+      }
+    },
+    code_adopt_measured: {
+      filter: { bool: { filter: codeAdoptFilters } },
+      aggs: {
+        measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+        effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+        adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+        commit_count: { cardinality: { field: "properties.commitSha" } }
+      }
+    },
+    code_adopt_pushed: {
+      filter: { bool: { filter: codeAdoptPushedFilters } },
+      aggs: codeAdoptPushedAggs()
+    }
   }
 }
 
@@ -2329,28 +2551,11 @@ async function fetchOverview(
       },
       by_skill_adoption: {
         terms: { field: "properties.usedSkills", size: rankingSearchSize },
-        aggs: {
-          code_gen: {
-            filter: { bool: { filter: codeGenFilters } },
-            aggs: {
-              generated_lines: { sum: { field: "properties.lineCount" } },
-              deleted_lines: { sum: { field: "properties.deletedLineCount" } }
-            }
-          },
-          code_adopt_measured: {
-            filter: { bool: { filter: codeAdoptFilters } },
-            aggs: {
-              measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
-              effective_generated_lines: effectiveGeneratedLinesSumAgg(),
-              adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
-              commit_count: { cardinality: { field: "properties.commitSha" } }
-            }
-          },
-          code_adopt_pushed: {
-            filter: { bool: { filter: codeAdoptPushedFilters } },
-            aggs: codeAdoptPushedAggs()
-          }
-        }
+        aggs: codeSkillAdoptionBucketAggs(codeGenFilters, codeAdoptFilters, codeAdoptPushedFilters)
+      },
+      by_skill_source_adoption: {
+        terms: { field: "properties.skillSource", size: rankingSearchSize },
+        aggs: codeSkillAdoptionBucketAggs(codeGenFilters, codeAdoptFilters, codeAdoptPushedFilters)
       },
       skill_source: { terms: { field: "properties.skillSource", size: rankingSearchSize } }
     }
@@ -2361,9 +2566,9 @@ async function fetchOverview(
     esQuery(getEsIndex("event"), codeBody)
   ])
   const codeStats = normalizeCodeStatsFromAggs(codeRaw)
-  const skillCodeAdoption = normalizeSkillCodeAdoptionBuckets(codeRaw)
-  const codePluginSkillInfo = parsePluginSkillInfoFromSourceBuckets(
-    asRecord(asRecord(asRecord(codeRaw).aggregations).skill_source).buckets
+  const skillCodeAdoption = combineSkillCodeAdoptionStats(
+    normalizeSkillCodeAdoptionBuckets(codeRaw),
+    normalizeSkillCodeAdoptionBuckets(codeRaw, "by_skill_source_adoption")
   )
   const traceRecord = asRecord(traceRaw)
   return {
@@ -2385,26 +2590,7 @@ async function fetchOverview(
       code_pushed_commit_count: { value: codeStats.pushedCommitCount },
       code_skill_source: asRecord(asRecord(codeRaw).aggregations).skill_source,
       code_by_skill_adoption: {
-        buckets: skillCodeAdoption.map((item) => ({
-          key: item.skill,
-          is_plugin: { value: codePluginSkillInfo.has(item.skill) },
-          plugin_name: { value: codePluginSkillInfo.get(item.skill) ?? null },
-          generated_lines: { value: item.generatedLines },
-          measured_generated_lines: { value: item.measuredGeneratedLines },
-          effective_generated_lines: { value: item.effectiveGeneratedLines },
-          unmeasured_generated_lines: { value: item.unmeasuredGeneratedLines },
-          inclusive_effective_generated_lines: { value: item.inclusiveEffectiveGeneratedLines },
-          adopted_lines: { value: item.adoptedLines },
-          measured_adoption_rate: { value: item.measuredAdoptionRate },
-          inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
-          commit_count: { value: item.commitCount },
-          pushed_measured_generated_lines: { value: item.pushedMeasuredGeneratedLines },
-          pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
-          pushed_adopted_lines: { value: item.pushedAdoptedLines },
-          pushed_adoption_rate: { value: item.pushedAdoptionRate },
-          inclusive_pushed_adoption_rate: { value: item.inclusivePushedAdoptionRate },
-          pushed_commit_count: { value: item.pushedCommitCount }
-        }))
+        buckets: skillCodeAdoption.map((item) => makeSkillAdoptionStatsBucket(item))
       }
     }
   }
@@ -6926,6 +7112,12 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             },
             {
               key: "plugin-release-note-v1.0.0",
+              id: { value: "plugin:demo-plugin/plugin-release-note-v1.0.0" },
+              source_ref: {
+                value: "plugin:demo-plugin/plugin-release-note-v1.0.0?name=Demo%20Plugin"
+              },
+              is_plugin: { value: true },
+              plugin_name: { value: "Demo Plugin" },
               generated_lines: { value: 410 },
               measured_generated_lines: { value: 360 },
               effective_generated_lines: { value: 340 },
@@ -9477,7 +9669,9 @@ interface ProjectModeFeatureView {
 }
 
 interface ProjectModeSkillCount {
+  id?: string
   skill: string
+  sourceRef?: string
   count: number
   isPlugin?: boolean
   pluginName?: string
@@ -10382,7 +10576,6 @@ async function fetchProjectModeSnapshotAggs(
       }
     }
   }
-
   return {
     projectCount,
     featureCount,
@@ -10798,28 +10991,6 @@ function projectFeatureKey(projectId: string, featureSlug: string): string {
   return JSON.stringify([projectId, featureSlug])
 }
 
-/** Convert a `terms usedSkills` bucket list into a {skill,count}[] ranking. */
-function parseSkillCountBuckets(
-  raw: unknown,
-  pluginSkillInfo: Map<string, string> = new Map()
-): ProjectModeSkillCount[] {
-  if (!Array.isArray(raw)) return []
-  const result: ProjectModeSkillCount[] = []
-  for (const bucket of raw) {
-    const b = asRecord(bucket)
-    const skill = asString(b.key)
-    if (skill) {
-      const pluginName = pluginSkillInfo.get(skill)
-      result.push({
-        skill,
-        count: asNumber(b.doc_count),
-        ...(pluginName ? { isPlugin: true, pluginName } : {})
-      })
-    }
-  }
-  return result
-}
-
 /** Convert a `terms toolNames` bucket list into a {tool,count}[] ranking. */
 function parseToolCountBuckets(raw: unknown): ProjectModeToolCount[] {
   if (!Array.isArray(raw)) return []
@@ -10902,7 +11073,7 @@ async function fetchProjectModeUsage(
       total_tokens: { sum: { field: "totalTokens" } },
       total_skill_calls: { value_count: { field: "usedSkills" } },
       distinct_skills: { cardinality: { field: "usedSkills" } },
-      top_skills: { terms: { field: "usedSkills", size: 20 } },
+      top_skills: { terms: { field: "usedSkills", size: 1000 } },
       skill_source: { terms: { field: "skillSource", size: 1000 } },
       top_users: {
         terms: { field: "sapId", size: 10 },
@@ -10984,6 +11155,11 @@ async function fetchProjectModeUsage(
       }
     }
   }
+  const topSkills = combineSkillCountBuckets(
+    asRecord(aggs.top_skills).buckets,
+    asRecord(aggs.skill_source).buckets,
+    1000
+  )
 
   return {
     conversationCount: asNumber(asRecord(aggs.conversation_count).value),
@@ -10993,11 +11169,8 @@ async function fetchProjectModeUsage(
     totalOutputTokens,
     totalTokens,
     skillCallCount: asNumber(asRecord(aggs.total_skill_calls).value),
-    distinctSkillCount: asNumber(asRecord(aggs.distinct_skills).value),
-    topSkills: parseSkillCountBuckets(
-      asRecord(aggs.top_skills).buckets,
-      parsePluginSkillInfoFromSourceBuckets(asRecord(aggs.skill_source).buckets)
-    ),
+    distinctSkillCount: topSkills.length || asNumber(asRecord(aggs.distinct_skills).value),
+    topSkills,
     topUsers: parseProjectModeTopUserBuckets(asRecord(aggs.top_users).buckets),
     tools: {
       byTool: parseToolCountBuckets(asRecord(aggs.by_tool).buckets),
@@ -11041,7 +11214,7 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
-          skills: { terms: { field: "usedSkills", size: 10 } },
+          skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } },
           ...stageBucketTraceAggs()
         }
@@ -11059,9 +11232,10 @@ async function fetchProjectModePageUsage(
     perProject.set(key, asNumber(b.doc_count))
     perProjectSkills.set(
       key,
-      parseSkillCountBuckets(
+      combineSkillCountBuckets(
         asRecord(b.skills).buckets,
-        parsePluginSkillInfoFromSourceBuckets(asRecord(b.skill_source).buckets)
+        asRecord(b.skill_source).buckets,
+        10
       )
     )
     perProjectStageConversations.set(key, parseStageBucketConversations(b))
@@ -11341,6 +11515,10 @@ async function fetchProjectModeAggregateCodeStats(
           terms: { field: "properties.usedSkills", size: 1000 },
           aggs: perBucketAggs
         },
+        by_skill_source: {
+          terms: { field: "properties.skillSource", size: 1000 },
+          aggs: perBucketAggs
+        },
         skill_source: { terms: { field: "properties.skillSource", size: 1000 } }
       }),
       statExtraFilters
@@ -11355,9 +11533,9 @@ async function fetchProjectModeAggregateCodeStats(
     byProject: new Map<string, DashboardCodeStats>(),
     byAdapter: parseAdapterCodeStatsBuckets(asRecord(adapterAggs.by_adapter).buckets),
     byAdapterStage: parseAdapterStageBucketsBuckets(asRecord(adapterAggs.by_adapter).buckets),
-    bySkill: markPluginSkillAdoptionStats(
+    bySkill: combineSkillCodeAdoptionStats(
       normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill"),
-      parsePluginSkillInfoFromSourceBuckets(asRecord(skillAggs.skill_source).buckets)
+      normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill_source")
     ),
     availableSources: enumerateSources ? parseAvailableCodeSources(overallRaw) : []
   }
