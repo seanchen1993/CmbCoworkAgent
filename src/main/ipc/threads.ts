@@ -17,15 +17,18 @@ import {
   withCheckpointer,
   closeCheckpointer,
   closeWorkerCheckpointersForThread,
-  clearToolConcurrencyLocksForThread
+  clearToolConcurrencyLocksForThread,
+  pendingApprovals
 } from "../agent/runtime"
-import { forgetCoordinatorThreadState } from "./agent"
+import { forgetCoordinatorThreadState, hasActiveAgentRun } from "./agent"
 import {
   deleteThreadCheckpoint,
   deleteThreadWorkerCheckpoints,
   deleteThreadWorkflowCheckpoints,
+  getThreadCheckpointPath,
   getOpenworkDir
 } from "../storage"
+import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import { deleteWorkflowRunsForThread } from "../agent/workflow/run-store"
 import {
@@ -64,10 +67,37 @@ import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { disposeAgentThreadState } from "./agent"
 import { getDefaultModel } from "./models"
-import type { Thread, ThreadUpdateParams, ThreadValuesMergeParams } from "../types"
+import type {
+  ForkableCheckpoint,
+  Thread,
+  ThreadForkCheckpointForMessageParams,
+  ThreadForkParams,
+  ThreadForkResponse,
+  ThreadUpdateParams,
+  ThreadValuesMergeParams
+} from "../types"
 import { SqlGoalStore } from "../agent/goals/goal-store"
 import type { ThreadGoal } from "../agent/goals/types"
 import { GOAL_UI_EVENT_LIMIT } from "../../shared/goal-events"
+import {
+  buildFilteredThreadValues,
+  deriveCheckpointTranscriptIndex,
+  truncateCheckpointMessagesAfter
+} from "../../shared/checkpoint-transcript"
+import {
+  buildForkableCheckpointSummary,
+  buildVisibleForkableCheckpointList,
+  describeCheckpointForkability,
+  getCheckpointId,
+  getCheckpointThreadId,
+  toForkabilityError
+} from "../../shared/checkpoint-forkability"
+import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
+import {
+  copyCheckpoint,
+  type CheckpointMetadata,
+  type CheckpointTuple
+} from "@langchain/langgraph-checkpoint"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 
@@ -264,6 +294,292 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
   } catch {
     return undefined
   }
+}
+
+function parseThreadValues(raw: string | null | undefined): Record<string, unknown> {
+  return parseJsonObject(raw) ?? {}
+}
+
+function serializeThreadRow(row: NonNullable<ReturnType<typeof getThread>>): Thread {
+  return {
+    thread_id: row.thread_id,
+    created_at: new Date(row.created_at),
+    updated_at: new Date(row.updated_at),
+    metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    status: row.status as Thread["status"],
+    thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+    title: row.title ?? undefined
+  }
+}
+
+function isAgentMode(value: unknown): value is "normal" | "coordinator" | "workflow" {
+  return value === "normal" || value === "coordinator" || value === "workflow"
+}
+
+function hasPendingApprovalForThread(threadId: string): boolean {
+  for (const approval of pendingApprovals.values()) {
+    if (approval.threadId === threadId || approval.runtimeThreadId === threadId) return true
+  }
+  return false
+}
+
+interface ThreadForkBusyInput {
+  threadId: string
+  workspacePath?: string | null
+  agentMode?: "normal" | "coordinator" | "workflow"
+}
+
+async function isThreadForkBusy(input: ThreadForkBusyInput): Promise<boolean> {
+  const { threadId, workspacePath, agentMode } = input
+  if (hasActiveAgentRun(threadId)) return true
+  if (hasPendingApprovalForThread(threadId)) return true
+
+  if (workflowRunManager.isActive(threadId)) return true
+  if (workspacePath) {
+    if (workflowRunManager.isBusyForThread(threadId, workspacePath)) return true
+  } else if (agentMode === "workflow") {
+    return true
+  }
+
+  if (workspacePath) {
+    try {
+      await coordinatorWorkerManager.restoreWorkersForThread({
+        parentThreadId: threadId,
+        workspacePath,
+        mode: "active"
+      })
+    } catch (error) {
+      if (agentMode === "coordinator") {
+        console.warn("[Threads] Failed to hydrate coordinator workers before fork:", error)
+        return true
+      }
+    }
+  } else if (agentMode === "coordinator") {
+    return true
+  }
+
+  const workers = coordinatorWorkerManager.readWorkers(threadId)
+  if (coordinatorWorkerManager.hasNotifications(threadId)) return true
+  return workers.some(
+    (worker) => worker.status === "running" || worker.notification_acknowledged === false
+  )
+}
+
+function assertForkableTuple(
+  tuple: CheckpointTuple,
+  options: { allowLegacyLatestFallback: boolean }
+): void {
+  const threadId = getCheckpointThreadId(tuple)
+  const forkability = describeCheckpointForkability(tuple, {
+    allowLegacyLatestFallback: options.allowLegacyLatestFallback,
+    pendingApproval: hasPendingApprovalForThread(threadId)
+  })
+  if (!forkability.isStableTurnBoundary) throw new Error(toForkabilityError(forkability.unstableReason))
+}
+
+function buildForkMetadata(input: {
+  sourceThreadId: string
+  sourceTitle: string
+  sourceMetadata: Record<string, unknown>
+  checkpointId: string
+  messageId?: string
+  title?: string
+  overrides?: ThreadForkParams["overrides"]
+}): Record<string, unknown> {
+  const { sourceThreadId, sourceTitle, sourceMetadata, checkpointId, messageId, title, overrides } =
+    input
+  const next: Record<string, unknown> = {}
+
+  const workspacePath = overrides?.workspacePath ?? sourceMetadata.workspacePath
+  if (typeof workspacePath === "string" || workspacePath === null)
+    next.workspacePath = workspacePath
+
+  const model = overrides?.model ?? sourceMetadata.model
+  if (typeof model === "string" && model.trim()) next.model = model
+
+  const agentMode = overrides?.agentMode ?? sourceMetadata.agentMode
+  if (isAgentMode(agentMode)) next.agentMode = agentMode
+
+  const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
+  if (typeof memoryEnabled === "boolean") next.memoryEnabled = memoryEnabled
+
+  const nextTitle = overrides?.title?.trim() || title?.trim() || sourceTitle || sourceThreadId
+  next.title = nextTitle
+  next.forkedFromThreadId = sourceThreadId
+  next.forkedFromCheckpointId = checkpointId
+  next.forkedFromCheckpointNs = ""
+  if (messageId) next.forkedFromMessageId = messageId
+  next.forkedAt = new Date().toISOString()
+
+  return next
+}
+
+async function cleanupFailedFork(
+  targetThreadId: string,
+  options: { rowCreated: boolean }
+): Promise<void> {
+  try {
+    deleteThreadCheckpoint(targetThreadId)
+  } catch (error) {
+    console.warn("[Threads] Failed to cleanup fork checkpoint:", error)
+  }
+  if (options.rowCreated) {
+    try {
+      dbDeleteThread(targetThreadId)
+    } catch (error) {
+      console.warn("[Threads] Failed to cleanup fork thread row:", error)
+    }
+  }
+}
+
+async function forkThread(params: ThreadForkParams): Promise<ThreadForkResponse> {
+  const sourceThreadId = assertValidCheckpointThreadId(params.sourceThreadId)
+  const explicitCheckpointId = params.checkpointId?.trim()
+  if (explicitCheckpointId) assertValidCheckpointThreadId(explicitCheckpointId)
+  const explicitMessageId = params.messageId?.trim()
+
+  return withThreadRunMutationLock(sourceThreadId, async () => {
+    const sourceRow = getThread(sourceThreadId)
+    if (!sourceRow) throw new Error("源会话不存在。")
+
+    const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
+    const workspacePath =
+      typeof sourceMetadata.workspacePath === "string" ? sourceMetadata.workspacePath : null
+    const agentMode = isAgentMode(sourceMetadata.agentMode) ? sourceMetadata.agentMode : undefined
+    if (await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })) {
+      throw new Error("当前会话仍在运行，请停止或等待完成后再 fork。")
+    }
+
+    const tuple = await withCheckpointer(sourceThreadId, async (sourceSaver) =>
+      sourceSaver.getTuple({
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          ...(explicitCheckpointId ? { checkpoint_id: explicitCheckpointId } : {})
+        }
+      })
+    )
+    if (!tuple) throw new Error("当前会话还没有可 fork 的 checkpoint。")
+    assertForkableTuple(tuple, { allowLegacyLatestFallback: !explicitCheckpointId })
+
+    const checkpointId = getCheckpointId(tuple)
+    const forkCheckpoint = explicitMessageId ? copyCheckpoint(tuple.checkpoint) : tuple.checkpoint
+    if (explicitMessageId && !truncateCheckpointMessagesAfter(forkCheckpoint, explicitMessageId)) {
+      throw new Error("该消息不在目标 checkpoint 中，无法从这里 fork。")
+    }
+    const sourceTitle =
+      sourceRow.title || (typeof sourceMetadata.title === "string" ? sourceMetadata.title : "")
+    const targetThreadId = uuid()
+    const targetMetadata = buildForkMetadata({
+      sourceThreadId,
+      sourceTitle,
+      sourceMetadata,
+      checkpointId,
+      messageId: explicitMessageId,
+      title: params.title,
+      overrides: params.overrides
+    })
+    const transcriptIndex = deriveCheckpointTranscriptIndex(forkCheckpoint)
+    const filteredThreadValues = buildFilteredThreadValues(
+      parseThreadValues(sourceRow.thread_values),
+      transcriptIndex
+    )
+
+    let targetSaver: SqlJsSaver | null = null
+    let rowCreated = false
+    try {
+      const checkpointMetadata =
+        tuple.metadata ??
+        ({
+          source: "fork",
+          step: -1,
+          writes: {},
+          parents: {}
+        } as CheckpointMetadata)
+      targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId))
+      await targetSaver.put(
+        { configurable: { thread_id: targetThreadId, checkpoint_ns: "" } },
+        forkCheckpoint,
+        checkpointMetadata
+      )
+      await targetSaver.close()
+      targetSaver = null
+
+      dbCreateThread(targetThreadId, targetMetadata)
+      rowCreated = true
+      const row = dbUpdateThread(targetThreadId, {
+        thread_values: JSON.stringify(filteredThreadValues)
+      })
+      if (!row) throw new Error("Forked thread row was not created.")
+      return {
+        thread: serializeThreadRow(row),
+        sourceThreadId,
+        sourceCheckpointId: checkpointId,
+        sourceCheckpointNs: ""
+      }
+    } catch (error) {
+      if (targetSaver) {
+        try {
+          await targetSaver.close()
+        } catch (closeError) {
+          console.warn("[Threads] Failed to close fork target saver:", closeError)
+        }
+      }
+      await cleanupFailedFork(targetThreadId, { rowCreated })
+      throw error
+    }
+  })
+}
+
+async function listForkableCheckpoints(threadId: string): Promise<ForkableCheckpoint[]> {
+  const sourceThreadId = assertValidCheckpointThreadId(threadId)
+  return withThreadRunMutationLock(sourceThreadId, async () => {
+    const sourceRow = getThread(sourceThreadId)
+    if (!sourceRow) throw new Error("源会话不存在。")
+
+    const activeRun = hasActiveAgentRun(sourceThreadId)
+    const pendingApproval = hasPendingApprovalForThread(sourceThreadId)
+    return withCheckpointer(sourceThreadId, async (sourceSaver) => {
+      const tuples: CheckpointTuple[] = []
+      for await (const tuple of sourceSaver.list({
+        configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+      })) {
+        tuples.push(tuple)
+      }
+      return buildVisibleForkableCheckpointList(tuples, { activeRun, pendingApproval })
+    })
+  })
+}
+
+async function resolveForkCheckpointForMessage(
+  params: ThreadForkCheckpointForMessageParams
+): Promise<ForkableCheckpoint | null> {
+  const sourceThreadId = assertValidCheckpointThreadId(params.threadId)
+  const messageId = params.messageId.trim()
+  if (!messageId) return null
+
+  return withThreadRunMutationLock(sourceThreadId, async () => {
+    const sourceRow = getThread(sourceThreadId)
+    if (!sourceRow) throw new Error("源会话不存在。")
+
+    const activeRun = hasActiveAgentRun(sourceThreadId)
+    const pendingApproval = hasPendingApprovalForThread(sourceThreadId)
+    return withCheckpointer(sourceThreadId, async (sourceSaver) => {
+      let candidate: ForkableCheckpoint | null = null
+      for await (const tuple of sourceSaver.list({
+        configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+      })) {
+        const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
+        if (!transcript.visibleMessageIds.includes(messageId)) continue
+
+        const summary = buildForkableCheckpointSummary(tuple, { activeRun, pendingApproval })
+        if (summary.isStableTurnBoundary) {
+          candidate = summary
+        }
+      }
+      return candidate
+    })
+  })
 }
 
 function toIsoString(value: number | Date): string {
@@ -602,40 +918,49 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     } as Thread
   })
 
+  ipcMain.handle("threads:fork", async (_event, params: ThreadForkParams) => {
+    return forkThread(params)
+  })
+
+  ipcMain.handle("threads:list-forkable-checkpoints", async (_event, threadId: string) => {
+    return listForkableCheckpoints(threadId)
+  })
+
+  ipcMain.handle(
+    "threads:resolve-fork-checkpoint-for-message",
+    async (_event, params: ThreadForkCheckpointForMessageParams) => {
+      return resolveForkCheckpointForMessage(params)
+    }
+  )
+
   // Update a thread
   ipcMain.handle("threads:update", async (_event, { threadId, updates }: ThreadUpdateParams) => {
-    const updateData: Parameters<typeof dbUpdateThread>[1] = {}
+    return withThreadRunMutationLock(threadId, async () => {
+      const updateData: Parameters<typeof dbUpdateThread>[1] = {}
 
-    if (updates.metadata !== undefined) {
-      const currentThread = getThread(threadId)
-      const currentMetadata = currentThread?.metadata
-        ? (JSON.parse(currentThread.metadata) as Record<string, unknown>)
-        : {}
-      await assertCanPersistExplicitNormalMode(
-        threadId,
-        currentMetadata,
-        updates.metadata as Record<string, unknown>
-      )
-    }
+      if (updates.metadata !== undefined) {
+        const currentThread = getThread(threadId)
+        const currentMetadata = currentThread?.metadata
+          ? (JSON.parse(currentThread.metadata) as Record<string, unknown>)
+          : {}
+        await assertCanPersistExplicitNormalMode(
+          threadId,
+          currentMetadata,
+          updates.metadata as Record<string, unknown>
+        )
+      }
 
-    if (updates.title !== undefined) updateData.title = updates.title
-    if (updates.status !== undefined) updateData.status = updates.status
-    if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
-    if (updates.thread_values !== undefined)
-      updateData.thread_values = JSON.stringify(updates.thread_values)
+      if (updates.title !== undefined) updateData.title = updates.title
+      if (updates.status !== undefined) updateData.status = updates.status
+      if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
+      if (updates.thread_values !== undefined)
+        updateData.thread_values = JSON.stringify(updates.thread_values)
 
-    const row = dbUpdateThread(threadId, updateData)
-    if (!row) throw new Error("Thread not found")
+      const row = dbUpdateThread(threadId, updateData)
+      if (!row) throw new Error("Thread not found")
 
-    return {
-      thread_id: row.thread_id,
-      created_at: new Date(row.created_at),
-      updated_at: new Date(row.updated_at),
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-      status: row.status as Thread["status"],
-      thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
-      title: row.title
-    }
+      return serializeThreadRow(row)
+    })
   })
 
   ipcMain.handle(
@@ -658,114 +983,116 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   // Delete a thread
   ipcMain.handle("threads:delete", async (event, threadId: string) => {
-    console.log("[Threads] Deleting thread:", threadId)
+    return withThreadRunMutationLock(threadId, async () => {
+      console.log("[Threads] Deleting thread:", threadId)
 
-    // A background dynamic workflow must not outlive its thread. Cancel and wait
-    // (bounded) for it to settle — best-effort, so a slow subagent can't hang
-    // this IPC. The orphan-directory race is closed regardless of the timeout:
-    // deleteWorkflowRunsForThread (below) marks the dir disposed, so any late
-    // flush from a still-settling run becomes a no-op and can't recreate it.
-    try {
-      await workflowRunManager.cancelAndWait(threadId)
-    } catch (error) {
-      console.warn("[Threads] Workflow cancel on delete failed:", error)
-    }
-    // Drop the thread's tool-concurrency locks so the module-level map doesn't
-    // keep one idle lock per deleted thread for the process lifetime.
-    clearToolConcurrencyLocksForThread(threadId)
-    // Drop any in-memory flush-failed workflow snapshots for this thread (each holds
-    // a full journal). A run whose persist failed lives only in memory; cancelAndWait
-    // above aborts the active run but never clears this table, so without this the
-    // journal leaks in the main process until restart even after the thread is gone. (#3)
-    workflowRunManager.forgetThread(threadId)
-
-    // Fire SessionEnd before teardown so hooks can observe a valid thread record.
-    // No-op if SessionStart never fired for this thread.
-    const existingThread = getThread(threadId)
-    let workspacePath: string | undefined
-    if (existingThread?.metadata) {
+      // A background dynamic workflow must not outlive its thread. Cancel and wait
+      // (bounded) for it to settle — best-effort, so a slow subagent can't hang
+      // this IPC. The orphan-directory race is closed regardless of the timeout:
+      // deleteWorkflowRunsForThread (below) marks the dir disposed, so any late
+      // flush from a still-settling run becomes a no-op and can't recreate it.
       try {
-        const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
-        workspacePath =
-          typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
-      } catch {
-        workspacePath = undefined
-      }
-    }
-    const window = BrowserWindow.fromWebContents(event.sender)
-    const hookChannel = `agent:stream:${threadId}`
-    await fireSessionEnd(
-      threadId,
-      workspacePath,
-      window ? makeHookResultCallback(window, hookChannel) : undefined
-    )
-    disposeAgentThreadState(threadId)
-
-    const cancelledWorkers = coordinatorWorkerManager.cancelWorkersForThread(
-      threadId,
-      "Thread was deleted."
-    )
-    const waitForCleanupBestEffort = async (workerIds?: string[]) => {
-      try {
-        await coordinatorWorkerManager.waitForWorkerCleanup(threadId, workerIds)
+        await workflowRunManager.cancelAndWait(threadId)
       } catch (error) {
-        console.warn("[Threads] Timed out waiting for coordinator worker cleanup:", error)
+        console.warn("[Threads] Workflow cancel on delete failed:", error)
       }
-    }
-    if (cancelledWorkers.length > 0) {
-      await waitForCleanupBestEffort(cancelledWorkers.map((worker) => worker.worker_id))
-    }
-    await waitForCleanupBestEffort()
+      // Drop the thread's tool-concurrency locks so the module-level map doesn't
+      // keep one idle lock per deleted thread for the process lifetime.
+      clearToolConcurrencyLocksForThread(threadId)
+      // Drop any in-memory flush-failed workflow snapshots for this thread (each holds
+      // a full journal). A run whose persist failed lives only in memory; cancelAndWait
+      // above aborts the active run but never clears this table, so without this the
+      // journal leaks in the main process until restart even after the thread is gone. (#3)
+      workflowRunManager.forgetThread(threadId)
 
-    // Delete from our metadata store
-    dbDeleteThread(threadId)
-    console.log("[Threads] Deleted from metadata store")
+      // Fire SessionEnd before teardown so hooks can observe a valid thread record.
+      // No-op if SessionStart never fired for this thread.
+      const existingThread = getThread(threadId)
+      let workspacePath: string | undefined
+      if (existingThread?.metadata) {
+        try {
+          const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
+          workspacePath =
+            typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+        } catch {
+          workspacePath = undefined
+        }
+      }
+      const window = BrowserWindow.fromWebContents(event.sender)
+      const hookChannel = `agent:stream:${threadId}`
+      await fireSessionEnd(
+        threadId,
+        workspacePath,
+        window ? makeHookResultCallback(window, hookChannel) : undefined
+      )
+      disposeAgentThreadState(threadId)
 
-    // Close any open checkpointer for this thread
-    try {
-      await closeCheckpointer(threadId)
-      await closeWorkerCheckpointersForThread(threadId)
-      console.log("[Threads] Closed checkpointer")
-    } catch (e) {
-      console.warn("[Threads] Failed to close checkpointer:", e)
-    }
+      const cancelledWorkers = coordinatorWorkerManager.cancelWorkersForThread(
+        threadId,
+        "Thread was deleted."
+      )
+      const waitForCleanupBestEffort = async (workerIds?: string[]) => {
+        try {
+          await coordinatorWorkerManager.waitForWorkerCleanup(threadId, workerIds)
+        } catch (error) {
+          console.warn("[Threads] Timed out waiting for coordinator worker cleanup:", error)
+        }
+      }
+      if (cancelledWorkers.length > 0) {
+        await waitForCleanupBestEffort(cancelledWorkers.map((worker) => worker.worker_id))
+      }
+      await waitForCleanupBestEffort()
 
-    coordinatorWorkerManager.forgetThread(threadId)
-    forgetCoordinatorThreadState(threadId)
-    if (workspacePath) {
+      // Delete from our metadata store
+      dbDeleteThread(threadId)
+      console.log("[Threads] Deleted from metadata store")
+
+      // Close any open checkpointer for this thread
       try {
-        await deleteCoordinatorWorkerArtifacts(threadId, workspacePath)
-        console.log("[Threads] Deleted coordinator worker artifacts")
+        await closeCheckpointer(threadId)
+        await closeWorkerCheckpointersForThread(threadId)
+        console.log("[Threads] Closed checkpointer")
       } catch (e) {
-        console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
+        console.warn("[Threads] Failed to close checkpointer:", e)
       }
-      // Remove the thread's workflow run artifacts (the active run, if any, was
-      // already settled above) so they don't linger as disk litter.
-      deleteWorkflowRunsForThread(workspacePath, threadId)
-    }
 
-    // Delete the thread's checkpoint file
-    try {
-      deleteThreadCheckpoint(threadId)
-      const deletedWorkerCheckpoints = deleteThreadWorkerCheckpoints(threadId)
-      // Workflow subagents self-clean their checkpoints in their finally; this
-      // sweeps the rare crash / failed-cleanup leftovers, mirroring the worker
-      // sweep (which only covers __worker__, not __wf_). (#3)
-      const deletedWorkflowCheckpoints = deleteThreadWorkflowCheckpoints(threadId)
-      console.log("[Threads] Deleted checkpoint file", {
-        deletedWorkerCheckpoints,
-        deletedWorkflowCheckpoints
-      })
-    } catch (e) {
-      console.warn("[Threads] Failed to delete checkpoint file:", e)
-    }
+      coordinatorWorkerManager.forgetThread(threadId)
+      forgetCoordinatorThreadState(threadId)
+      if (workspacePath) {
+        try {
+          await deleteCoordinatorWorkerArtifacts(threadId, workspacePath)
+          console.log("[Threads] Deleted coordinator worker artifacts")
+        } catch (e) {
+          console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
+        }
+        // Remove the thread's workflow run artifacts (the active run, if any, was
+        // already settled above) so they don't linger as disk litter.
+        deleteWorkflowRunsForThread(workspacePath, threadId)
+      }
 
-    try {
-      deleteTaskMmdThread(threadId)
-      console.log("[Threads] Deleted task-mmd files")
-    } catch (e) {
-      console.warn("[Threads] Failed to delete task-mmd files:", e)
-    }
+      // Delete the thread's checkpoint file
+      try {
+        deleteThreadCheckpoint(threadId)
+        const deletedWorkerCheckpoints = deleteThreadWorkerCheckpoints(threadId)
+        // Workflow subagents self-clean their checkpoints in their finally; this
+        // sweeps the rare crash / failed-cleanup leftovers, mirroring the worker
+        // sweep (which only covers __worker__, not __wf_). (#3)
+        const deletedWorkflowCheckpoints = deleteThreadWorkflowCheckpoints(threadId)
+        console.log("[Threads] Deleted checkpoint file", {
+          deletedWorkerCheckpoints,
+          deletedWorkflowCheckpoints
+        })
+      } catch (e) {
+        console.warn("[Threads] Failed to delete checkpoint file:", e)
+      }
+
+      try {
+        deleteTaskMmdThread(threadId)
+        console.log("[Threads] Deleted task-mmd files")
+      } catch (e) {
+        console.warn("[Threads] Failed to delete task-mmd files:", e)
+      }
+    })
   })
 
   // Get thread history (checkpoints)

@@ -62,6 +62,59 @@ export interface ThreadValuesMergeParams {
   patch: Record<string, unknown>
 }
 
+export interface ThreadForkOverrides {
+  title?: string
+  model?: string
+  workspacePath?: string | null
+  memoryEnabled?: boolean
+  agentMode?: "normal" | "coordinator" | "workflow"
+}
+
+export interface ThreadForkParams {
+  sourceThreadId: string
+  checkpointId?: string
+  messageId?: string
+  title?: string
+  overrides?: ThreadForkOverrides
+}
+
+export interface ThreadForkResponse {
+  thread: Thread
+  sourceThreadId: string
+  sourceCheckpointId: string
+  sourceCheckpointNs: ""
+}
+
+export interface ThreadForkCheckpointForMessageParams {
+  threadId: string
+  messageId: string
+}
+
+export type ForkBoundarySource = "metadata_marker" | "legacy_latest_idle_fallback"
+
+export type ForkUnstableReason =
+  | "missing_boundary_marker"
+  | "in_progress_turn"
+  | "interrupt"
+  | "pending_approval"
+  | "pending_writes"
+  | "unknown"
+
+export interface ForkableCheckpoint {
+  checkpointId: string
+  checkpointNs: ""
+  createdAt?: string
+  messageCount: number
+  lastMessagePreview: string
+  lastUserMessagePreview?: string
+  isStableTurnBoundary: boolean
+  stableTurnId?: string
+  boundarySource?: ForkBoundarySource
+  unstableReason?: ForkUnstableReason
+  hasInterrupt: boolean
+  hasPendingWrites: boolean
+}
+
 // Workspace IPC
 export interface WorkspaceSetParams {
   threadId?: string

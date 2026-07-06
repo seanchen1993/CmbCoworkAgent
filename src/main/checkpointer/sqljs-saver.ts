@@ -30,6 +30,7 @@ interface CheckpointRow {
   type: string | null
   checkpoint: string
   metadata: string
+  checkpoint_ts?: string | null
 }
 
 interface WriteRow {
@@ -37,6 +38,10 @@ interface WriteRow {
   channel: string
   type: string | null
   value: string
+}
+
+export interface SqlJsSaverOptions {
+  maxCheckpointsPerNamespace?: number
 }
 
 /**
@@ -62,9 +67,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * increases memory usage without benefit since we don't use LangGraph's time-travel feature. */
   private maxCheckpointsPerNamespace = 1
 
-  constructor(dbPath: string, serde?: SerializerProtocol) {
+  constructor(dbPath: string, serde?: SerializerProtocol, options: SqlJsSaverOptions = {}) {
     super(serde)
     this.dbPath = dbPath
+    const maxCheckpoints = options.maxCheckpointsPerNamespace ?? 1
+    this.maxCheckpointsPerNamespace = Math.max(1, Math.floor(maxCheckpoints))
   }
 
   /**
@@ -124,9 +131,17 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         type TEXT,
         checkpoint TEXT,
         metadata TEXT,
+        checkpoint_ts TEXT,
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
       )
     `)
+
+    try {
+      this.db.run(`ALTER TABLE checkpoints ADD COLUMN checkpoint_ts TEXT`)
+    } catch {
+      // Column already exists.
+    }
+    this.db.run(`UPDATE checkpoints SET checkpoint_ts = checkpoint_id WHERE checkpoint_ts IS NULL`)
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS writes (
@@ -168,7 +183,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         `DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN (
           SELECT checkpoint_id FROM checkpoints
           WHERE thread_id = ? AND checkpoint_ns = ?
-          ORDER BY checkpoint_id DESC
+          ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC
           LIMIT -1 OFFSET ?
         )`,
         [threadId, checkpointNs, threadId, checkpointNs, limit]
@@ -178,7 +193,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         `DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id NOT IN (
           SELECT checkpoint_id FROM checkpoints
           WHERE thread_id = ? AND checkpoint_ns = ?
-          ORDER BY checkpoint_id DESC
+          ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC
           LIMIT ?
         )`,
         [threadId, checkpointNs, threadId, checkpointNs, limit]
@@ -313,7 +328,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
         FROM checkpoints
         WHERE thread_id = ? AND checkpoint_ns = ?
-        ORDER BY checkpoint_id DESC
+        ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC
         LIMIT 1
       `
       params = [thread_id, checkpoint_ns]
@@ -404,7 +419,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       params.push(before.configurable.checkpoint_id)
     }
 
-    sql += ` ORDER BY checkpoint_id DESC`
+    sql += ` ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC`
 
     if (limit) {
       sql += ` LIMIT ${parseInt(String(limit), 10)}`
@@ -497,10 +512,13 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       throw new Error("Failed to serialize checkpoint and metadata to the same type.")
     }
 
+    const checkpointTs =
+      typeof preparedCheckpoint.ts === "string" ? preparedCheckpoint.ts : preparedCheckpoint.id
+
     this.db.run(
       `INSERT OR REPLACE INTO checkpoints 
-       (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, checkpoint_ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         thread_id,
         checkpoint_ns,
@@ -508,7 +526,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         parent_checkpoint_id ?? null,
         type1,
         serializedCheckpoint,
-        serializedMetadata
+        serializedMetadata,
+        checkpointTs
       ]
     )
 
@@ -522,6 +541,75 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         checkpoint_id: checkpoint.id
       }
     }
+  }
+
+  async updateCheckpointMetadata(
+    config: RunnableConfig,
+    updater: (metadata: CheckpointMetadata) => CheckpointMetadata
+  ): Promise<CheckpointMetadata | undefined> {
+    await this.initialize()
+    if (!this.db) throw new Error("Database not initialized")
+
+    if (!config.configurable) {
+      throw new Error("Empty configuration supplied.")
+    }
+
+    const thread_id = config.configurable.thread_id
+    const checkpoint_ns = config.configurable.checkpoint_ns ?? ""
+    const checkpoint_id = config.configurable.checkpoint_id
+
+    if (!thread_id) {
+      throw new Error('Missing "thread_id" field in passed "config.configurable".')
+    }
+
+    let sql: string
+    let params: unknown[]
+
+    if (checkpoint_id) {
+      sql = `
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+        FROM checkpoints
+        WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+      `
+      params = [thread_id, checkpoint_ns, checkpoint_id]
+    } else {
+      sql = `
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+        FROM checkpoints
+        WHERE thread_id = ? AND checkpoint_ns = ?
+        ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC
+        LIMIT 1
+      `
+      params = [thread_id, checkpoint_ns]
+    }
+
+    const stmt = this.db.prepare(sql)
+    stmt.bind(params)
+    if (!stmt.step()) {
+      stmt.free()
+      return undefined
+    }
+    const row = stmt.getAsObject() as unknown as CheckpointRow
+    stmt.free()
+
+    const currentMetadata = (await this.serde.loadsTyped(
+      row.type ?? "json",
+      row.metadata
+    )) as CheckpointMetadata
+    const nextMetadata = updater(currentMetadata)
+    const [metadataType, serializedMetadata] = await this.serde.dumpsTyped(nextMetadata)
+    if (metadataType !== (row.type ?? "json")) {
+      throw new Error("Failed to serialize updated checkpoint metadata to the existing type.")
+    }
+
+    this.db.run(
+      `UPDATE checkpoints
+       SET metadata = ?
+       WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
+      [serializedMetadata, row.thread_id, row.checkpoint_ns, row.checkpoint_id]
+    )
+    this.saveToDisk()
+    return nextMetadata
   }
 
   async putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string): Promise<void> {

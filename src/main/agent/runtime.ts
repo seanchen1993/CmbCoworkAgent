@@ -2316,7 +2316,10 @@ async function getCheckpointerInternal(
     return cached
   }
   const dbPath = getThreadCheckpointPath(threadId)
-  const checkpointer = new SqlJsSaver(dbPath)
+  const isWorkerCheckpoint = threadId.includes("__worker__") || threadId.includes("__wf_")
+  const checkpointer = new SqlJsSaver(dbPath, undefined, {
+    maxCheckpointsPerNamespace: isWorkerCheckpoint ? 1 : 30
+  })
   await checkpointer.initialize()
   checkpointers.set(threadId, checkpointer)
   evictIdleCheckpointers()

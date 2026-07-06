@@ -1,16 +1,20 @@
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import { nowIsoLocal } from "../util/local-time"
 import { AsyncKeyedLock } from "./async-keyed-lock"
+import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
 import {
   createAgentRuntime,
   getSkillEvolutionThreshold,
+  withCheckpointer,
+  pendingApprovals,
   setCheckpointerBusyGuard,
   getSkillEvolutionTurnThreshold,
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
+import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import { addThreadGoalEvent, getThread, updateThread } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
 import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
@@ -50,6 +54,10 @@ import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
+import {
+  checkpointHasInterrupt,
+  deriveCheckpointTranscriptIndex
+} from "../../shared/checkpoint-transcript"
 import { TraceCollector } from "../agent/trace/collector"
 import {
   requestSkillIntent,
@@ -232,6 +240,64 @@ const activeRuns = new Map<string, AbortController>()
 const goalStore = new SqlGoalStore()
 const goalManager = new GoalManager(goalStore)
 let restoredRuntimeGoalsReconciled = false
+
+function hasPendingApprovalForThread(threadId: string): boolean {
+  for (const approval of pendingApprovals.values()) {
+    if (approval.threadId === threadId || approval.runtimeThreadId === threadId) return true
+  }
+  return false
+}
+
+async function markLatestForkBoundary(input: {
+  threadId: string
+  turnId?: string
+  source: "agent_run_complete"
+}): Promise<void> {
+  const { threadId, turnId, source } = input
+  try {
+    if (hasPendingApprovalForThread(threadId)) return
+    await withCheckpointer(threadId, async (checkpointer) => {
+      const tuple = await checkpointer.getTuple({
+        configurable: { thread_id: threadId, checkpoint_ns: "" }
+      })
+      if (!tuple) return
+      if (checkpointHasInterrupt(tuple.checkpoint)) return
+      if ((tuple.pendingWrites?.length ?? 0) > 0) return
+
+      const checkpointId =
+        typeof tuple.config.configurable?.checkpoint_id === "string"
+          ? tuple.config.configurable.checkpoint_id
+          : tuple.checkpoint.id
+      if (!checkpointId) return
+
+      const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
+      const lastVisibleMessageId = transcript.visibleMessageIds.at(-1)
+      await checkpointer.updateCheckpointMetadata(tuple.config, (metadata) => {
+        const base =
+          metadata && typeof metadata === "object" && !Array.isArray(metadata)
+            ? (metadata as Record<string, unknown>)
+            : {}
+        return {
+          ...base,
+          cmb_fork_boundary: {
+            version: 1,
+            kind: "turn_complete",
+            boundaryId: `turn_complete:${threadId}:${checkpointId}`,
+            turnId,
+            checkpointId,
+            checkpointNs: "",
+            completedAt: new Date().toISOString(),
+            source,
+            lastVisibleMessageId
+          }
+        } as unknown as CheckpointMetadata
+      })
+      await checkpointer.flush()
+    })
+  } catch (error) {
+    console.warn("[Agent] Failed to mark checkpoint fork boundary:", error)
+  }
+}
 
 type GoalMutationSignature = {
   goalId: string
@@ -3888,30 +3954,32 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Abort any existing stream for this thread before starting a new one
       // This prevents concurrent streams which can cause checkpoint corruption
-      const replacement = await withActiveRunReplacementLock(threadId, async () => {
-        const existingController = activeRuns.get(threadId)
-        if (existingController) {
-          if (isTrustedCoordinatorNotificationInvoke) {
-            return { ignoredInternalNotification: true as const }
+      const replacement = await withThreadRunMutationLock(threadId, () =>
+        withActiveRunReplacementLock(threadId, async () => {
+          const existingController = activeRuns.get(threadId)
+          if (existingController) {
+            if (isTrustedCoordinatorNotificationInvoke) {
+              return { ignoredInternalNotification: true as const }
+            }
+            console.log("[Agent] Aborting existing stream for thread:", threadId)
+            existingController.abort()
+            await waitForReplacedRunToSettle(threadId)
           }
-          console.log("[Agent] Aborting existing stream for thread:", threadId)
-          existingController.abort()
-          await waitForReplacedRunToSettle(threadId)
-        }
 
-        const nextAbortController = new AbortController()
-        activeRuns.set(threadId, nextAbortController)
-        let nextResolveActiveRunSettled: () => void = () => {}
-        const nextActiveRunSettledPromise = new Promise<void>((resolve) => {
-          nextResolveActiveRunSettled = resolve
+          const nextAbortController = new AbortController()
+          activeRuns.set(threadId, nextAbortController)
+          let nextResolveActiveRunSettled: () => void = () => {}
+          const nextActiveRunSettledPromise = new Promise<void>((resolve) => {
+            nextResolveActiveRunSettled = resolve
+          })
+          activeRunSettled.set(threadId, nextActiveRunSettledPromise)
+          return {
+            abortController: nextAbortController,
+            activeRunSettledPromise: nextActiveRunSettledPromise,
+            resolveActiveRunSettled: nextResolveActiveRunSettled
+          }
         })
-        activeRunSettled.set(threadId, nextActiveRunSettledPromise)
-        return {
-          abortController: nextAbortController,
-          activeRunSettledPromise: nextActiveRunSettledPromise,
-          resolveActiveRunSettled: nextResolveActiveRunSettled
-        }
-      })
+      )
       if ("ignoredInternalNotification" in replacement) {
         console.log(
           "[CoordinatorMode] ignoring internal worker notification turn while foreground run is active",
@@ -6080,6 +6148,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               window,
               channel
             })
+            await markLatestForkBoundary({
+              threadId,
+              turnId: turnState.turnId,
+              source: "agent_run_complete"
+            })
           }
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
@@ -6604,25 +6677,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       // Abort any existing stream before resuming
-      const resumeReplacement = await withActiveRunReplacementLock(threadId, async () => {
-        const existingController = activeRuns.get(threadId)
-        if (existingController) {
-          existingController.abort()
-          await waitForReplacedRunToSettle(threadId)
-        }
-        const nextAbortController = new AbortController()
-        activeRuns.set(threadId, nextAbortController)
-        let nextResolveResumeRunSettled: () => void = () => {}
-        const nextResumeRunSettledPromise = new Promise<void>((resolve) => {
-          nextResolveResumeRunSettled = resolve
+      const resumeReplacement = await withThreadRunMutationLock(threadId, () =>
+        withActiveRunReplacementLock(threadId, async () => {
+          const existingController = activeRuns.get(threadId)
+          if (existingController) {
+            existingController.abort()
+            await waitForReplacedRunToSettle(threadId)
+          }
+          const nextAbortController = new AbortController()
+          activeRuns.set(threadId, nextAbortController)
+          let nextResolveResumeRunSettled: () => void = () => {}
+          const nextResumeRunSettledPromise = new Promise<void>((resolve) => {
+            nextResolveResumeRunSettled = resolve
+          })
+          activeRunSettled.set(threadId, nextResumeRunSettledPromise)
+          return {
+            abortController: nextAbortController,
+            resumeRunSettledPromise: nextResumeRunSettledPromise,
+            resolveResumeRunSettled: nextResolveResumeRunSettled
+          }
         })
-        activeRunSettled.set(threadId, nextResumeRunSettledPromise)
-        return {
-          abortController: nextAbortController,
-          resumeRunSettledPromise: nextResumeRunSettledPromise,
-          resolveResumeRunSettled: nextResolveResumeRunSettled
-        }
-      })
+      )
       const { abortController, resumeRunSettledPromise, resolveResumeRunSettled } =
         resumeReplacement
       const resumeCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
@@ -7186,6 +7261,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_complete"
+          })
           pauseActiveGoalAfterBoundary(
             threadId,
             window,
@@ -7357,25 +7437,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     // Abort any existing stream before continuing
-    const interruptReplacement = await withActiveRunReplacementLock(threadId, async () => {
-      const existingController = activeRuns.get(threadId)
-      if (existingController) {
-        existingController.abort()
-        await waitForReplacedRunToSettle(threadId)
-      }
-      const nextAbortController = new AbortController()
-      activeRuns.set(threadId, nextAbortController)
-      let nextResolveInterruptRunSettled: () => void = () => {}
-      const nextInterruptRunSettledPromise = new Promise<void>((resolve) => {
-        nextResolveInterruptRunSettled = resolve
+    const interruptReplacement = await withThreadRunMutationLock(threadId, () =>
+      withActiveRunReplacementLock(threadId, async () => {
+        const existingController = activeRuns.get(threadId)
+        if (existingController) {
+          existingController.abort()
+          await waitForReplacedRunToSettle(threadId)
+        }
+        const nextAbortController = new AbortController()
+        activeRuns.set(threadId, nextAbortController)
+        let nextResolveInterruptRunSettled: () => void = () => {}
+        const nextInterruptRunSettledPromise = new Promise<void>((resolve) => {
+          nextResolveInterruptRunSettled = resolve
+        })
+        activeRunSettled.set(threadId, nextInterruptRunSettledPromise)
+        return {
+          abortController: nextAbortController,
+          interruptRunSettledPromise: nextInterruptRunSettledPromise,
+          resolveInterruptRunSettled: nextResolveInterruptRunSettled
+        }
       })
-      activeRunSettled.set(threadId, nextInterruptRunSettledPromise)
-      return {
-        abortController: nextAbortController,
-        interruptRunSettledPromise: nextInterruptRunSettledPromise,
-        resolveInterruptRunSettled: nextResolveInterruptRunSettled
-      }
-    })
+    )
     const { abortController, interruptRunSettledPromise, resolveInterruptRunSettled } =
       interruptReplacement
     const interruptCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
@@ -7919,6 +8001,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_complete"
+          })
           pauseActiveGoalAfterBoundary(
             threadId,
             window,
@@ -8061,70 +8148,72 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "agent:cancel",
     async (event, { threadId, cancelWorkers = false }: AgentCancelParams) => {
-      const controller = activeRuns.get(threadId)
-      console.log(
-        `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, cancelWorkers=${cancelWorkers}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
-      )
-      const workers = cancelWorkers
-        ? coordinatorWorkerManager.cancelWorkersForThread(
-            threadId,
-            "User cancelled coordinator workers.",
-            {
-              suppressNotificationAutoRun: true,
-              dismissNotificationOnTerminalPersist: true
-            }
-          )
-        : []
-      const window = BrowserWindow.fromWebContents(event.sender)
-      if (window && workers.length > 0) {
-        sendCoordinatorWorkers(
-          window,
-          `agent:stream:${threadId}`,
-          coordinatorWorkerManager.readWorkers(threadId)
+      return withThreadRunMutationLock(threadId, async () => {
+        const controller = activeRuns.get(threadId)
+        console.log(
+          `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, cancelWorkers=${cancelWorkers}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
         )
-      }
-      if (workers.length > 0) {
-        void coordinatorWorkerManager
-          .waitForWorkerCleanup(
-            threadId,
-            workers.map((worker) => worker.worker_id)
+        const workers = cancelWorkers
+          ? coordinatorWorkerManager.cancelWorkersForThread(
+              threadId,
+              "User cancelled coordinator workers.",
+              {
+                suppressNotificationAutoRun: true,
+                dismissNotificationOnTerminalPersist: true
+              }
+            )
+          : []
+        const window = BrowserWindow.fromWebContents(event.sender)
+        if (window && workers.length > 0) {
+          sendCoordinatorWorkers(
+            window,
+            `agent:stream:${threadId}`,
+            coordinatorWorkerManager.readWorkers(threadId)
           )
-          .then(async () => {
-            await coordinatorWorkerManager.acknowledgeNotifications(
+        }
+        if (workers.length > 0) {
+          void coordinatorWorkerManager
+            .waitForWorkerCleanup(
               threadId,
               workers.map((worker) => worker.worker_id)
             )
-            if (!window || window.isDestroyed()) return
-            sendCoordinatorWorkers(
-              window,
-              `agent:stream:${threadId}`,
-              coordinatorWorkerManager.readWorkers(threadId)
-            )
-          })
-          .catch((error) => {
-            console.warn("[Agent] Failed to wait for coordinator worker cancellation:", error)
-            if (!window || window.isDestroyed()) return
-            sendCoordinatorWorkers(
-              window,
-              `agent:stream:${threadId}`,
-              coordinatorWorkerManager.readWorkers(threadId)
-            )
-          })
-      }
-      if (controller && !cancelWorkers) {
-        // Foreground cancellation should stop the active run and any thread-scoped
-        // background tasks it launched. "Stop background workers" uses the same IPC
-        // entrypoint with cancelWorkers=true and must not abort the foreground turn.
-        LocalSandbox.cancelBackgroundTasks(threadId)
-        controller.abort()
-        // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
-        // A user can cancel and immediately send another message; the next invoke must wait
-        // for checkpoint/sandbox cleanup before opening a replacement stream.
-        console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
-      } else if (!controller && !cancelWorkers) {
-        console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
-      }
-      return Boolean(controller && !cancelWorkers)
+            .then(async () => {
+              await coordinatorWorkerManager.acknowledgeNotifications(
+                threadId,
+                workers.map((worker) => worker.worker_id)
+              )
+              if (!window || window.isDestroyed()) return
+              sendCoordinatorWorkers(
+                window,
+                `agent:stream:${threadId}`,
+                coordinatorWorkerManager.readWorkers(threadId)
+              )
+            })
+            .catch((error) => {
+              console.warn("[Agent] Failed to wait for coordinator worker cancellation:", error)
+              if (!window || window.isDestroyed()) return
+              sendCoordinatorWorkers(
+                window,
+                `agent:stream:${threadId}`,
+                coordinatorWorkerManager.readWorkers(threadId)
+              )
+            })
+        }
+        if (controller && !cancelWorkers) {
+          // Foreground cancellation should stop the active run and any thread-scoped
+          // background tasks it launched. "Stop background workers" uses the same IPC
+          // entrypoint with cancelWorkers=true and must not abort the foreground turn.
+          LocalSandbox.cancelBackgroundTasks(threadId)
+          controller.abort()
+          // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
+          // A user can cancel and immediately send another message; the next invoke must wait
+          // for checkpoint/sandbox cleanup before opening a replacement stream.
+          console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
+        } else if (!controller && !cancelWorkers) {
+          console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
+        }
+        return Boolean(controller && !cancelWorkers)
+      })
     }
   )
 }

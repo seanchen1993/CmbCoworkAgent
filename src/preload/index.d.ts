@@ -37,7 +37,11 @@ import type {
   ConfigurePreferredIdeResult,
   IdeSettings,
   OpenIdeRequest,
-  PreferredIde
+  PreferredIde,
+  ForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams,
+  ThreadForkParams,
+  ThreadForkResponse
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -831,6 +835,11 @@ interface CustomAPI {
     list: () => Promise<Thread[]>
     get: (threadId: string) => Promise<Thread | null>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
+    fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
+    listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
+    resolveForkCheckpointForMessage: (
+      params: ThreadForkCheckpointForMessageParams
+    ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>

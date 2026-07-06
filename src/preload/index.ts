@@ -38,7 +38,11 @@ import type {
   ConfigurePreferredIdeResult,
   IdeSettings,
   OpenIdeRequest,
-  PreferredIde
+  PreferredIde,
+  ForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams,
+  ThreadForkParams,
+  ThreadForkResponse
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -497,6 +501,17 @@ const api = {
     },
     create: (metadata?: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:create", metadata)
+    },
+    fork: (params: ThreadForkParams): Promise<ThreadForkResponse> => {
+      return ipcRenderer.invoke("threads:fork", params)
+    },
+    listForkableCheckpoints: (threadId: string): Promise<ForkableCheckpoint[]> => {
+      return ipcRenderer.invoke("threads:list-forkable-checkpoints", threadId)
+    },
+    resolveForkCheckpointForMessage: (
+      params: ThreadForkCheckpointForMessageParams
+    ): Promise<ForkableCheckpoint | null> => {
+      return ipcRenderer.invoke("threads:resolve-fork-checkpoint-for-message", params)
     },
     update: (threadId: string, updates: Partial<Thread>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:update", { threadId, updates })
