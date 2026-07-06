@@ -2,6 +2,7 @@
  * 是“输入时”的逻辑。它负责在用户输入框里识别 @ 文件语法，计算当前光标是不是在 mention 里，给 popover 提供候选文件列表，并处理选择状态、关闭状态这些交互。
  */
 import { useCallback, useMemo, useState } from "react"
+import { isBinaryFile } from "@/lib/file-types"
 import type { FileInfo } from "@/types"
 
 export type AtFileSuggestion = {
@@ -27,56 +28,9 @@ const MAX_SUGGESTIONS = 15
 const QUOTED_AT_RE = /(?:^|\s)@"([^"]*)"?$/u
 const PLAIN_AT_RE = /(?:^|\s)@([^\s"]*)$/u
 
-export const SUPPORTED_WORKSPACE_MENTION_EXTS = new Set([
-  ".ts",
-  ".tsx",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-  ".json",
-  ".md",
-  ".txt",
-  ".css",
-  ".scss",
-  ".sass",
-  ".less",
-  ".html",
-  ".xml",
-  ".yml",
-  ".yaml",
-  ".toml",
-  ".ini",
-  ".sh",
-  ".zsh",
-  ".bash",
-  ".py",
-  ".java",
-  ".kt",
-  ".go",
-  ".rs",
-  ".swift",
-  ".c",
-  ".cc",
-  ".cpp",
-  ".h",
-  ".hpp",
-  ".sql",
-  ".csv"
-])
-
-function getFileExtension(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, "/")
-  const lastSlash = normalized.lastIndexOf("/")
-  const lastDot = normalized.lastIndexOf(".")
-  if (lastDot <= lastSlash) return ""
-  return normalized.slice(lastDot).toLowerCase()
-}
-
-// @文件只接收当前可按文本读取的工作区文件类型；没有扩展名的文件保持兼容，交给发送阶段继续判断。
+// @文件统一复用共享的文本/二进制文件识别，避免和预览侧扩展名列表漂移。
 export function isSupportedWorkspaceMentionFilePath(filePath: string): boolean {
-  const ext = getFileExtension(filePath)
-  return !ext || SUPPORTED_WORKSPACE_MENTION_EXTS.has(ext)
+  return !isBinaryFile(basename(filePath.replace(/\\/g, "/")))
 }
 
 // 把磁盘路径统一成 UI 可展示/可比对的格式，避免 Windows 反斜杠和多余前缀干扰匹配。
