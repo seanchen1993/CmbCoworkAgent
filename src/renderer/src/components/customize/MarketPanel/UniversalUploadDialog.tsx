@@ -99,6 +99,8 @@ interface UniversalUploadDialogProps {
   submittingLabel?: string
 }
 
+type ExistingUploadItem = NonNullable<UniversalUploadDialogProps["existingItem"]>
+
 const buildUserIdFromUserInfo = (userInfo: UserInfoLite | null): string | undefined => {
   if (!userInfo) return undefined
   const rawId = (userInfo.sapId || userInfo.ystId || "").trim()
@@ -234,6 +236,28 @@ function getResourceTypeLabel(resourceType: UniversalUploadDialogProps["resource
   }
 }
 
+function buildFormInitializationKey(
+  resourceType: UniversalUploadDialogProps["resourceType"],
+  isUpdate: boolean | undefined,
+  existingItem?: ExistingUploadItem
+): string {
+  if (!isUpdate || !existingItem) {
+    return `create:${resourceType}`
+  }
+
+  return JSON.stringify({
+    resourceType,
+    name: existingItem.name || "",
+    description: existingItem.description || "",
+    category: existingItem.category || DEFAULT_SCENE_CATEGORY,
+    version: existingItem.version || DEFAULT_MARKET_VERSION,
+    guidance: existingItem.guidance || "",
+    chinese_name: existingItem.chinese_name || "",
+    user_id: existingItem.user_id || "",
+    extra_json: existingItem.extra_json || ""
+  })
+}
+
 function FormSection({
   title,
   description,
@@ -321,12 +345,21 @@ export function UniversalUploadDialog({
   const [versionFoundInSkillFrontmatter, setVersionFoundInSkillFrontmatter] = useState(false)
   const [submitReasonOpen, setSubmitReasonOpen] = useState(false)
   const [parsingPluginSkills, setParsingPluginSkills] = useState(false)
+  const lastInitializedFormKeyRef = React.useRef<string | null>(null)
 
   const isSkillResource = resourceType === "skill"
   const isPluginResource = resourceType === "plugin"
   const isVersionReadonly = isSkillResource
   const shouldPreserveExistingPublisherMetadata =
     Boolean(isUpdate) && isAdminModeActive && Boolean(existingItem)
+  const hasExistingItem = Boolean(existingItem)
+  const existingItemName = existingItem?.name || ""
+  const existingItemDescription = existingItem?.description || ""
+  const existingItemCategory = existingItem?.category || DEFAULT_SCENE_CATEGORY
+  const existingItemVersion = existingItem?.version || DEFAULT_MARKET_VERSION
+  const existingItemGuidance = existingItem?.guidance || ""
+  const existingItemChineseName = existingItem?.chinese_name || ""
+  const existingItemExtraJson = existingItem?.extra_json
 
   const resetVersionState = React.useCallback(() => {
     setVersion(DEFAULT_MARKET_VERSION)
@@ -416,38 +449,84 @@ export function UniversalUploadDialog({
     }
   }, [loadPluginSkills])
 
-  // Initialize form with existing data for update mode
+  const formInitializationKey = buildFormInitializationKey(
+    resourceType,
+    isUpdate,
+    hasExistingItem
+      ? {
+          name: existingItemName,
+          description: existingItemDescription,
+          category: existingItemCategory,
+          version: existingItemVersion,
+          guidance: existingItemGuidance,
+          chinese_name: existingItemChineseName,
+          user_id: existingItem?.user_id,
+          extra_json: existingItemExtraJson,
+          ip: existingItem?.ip
+        }
+      : undefined
+  )
+
+  // Only hydrate the form when the dialog first opens or when the target item actually changes.
   React.useEffect(() => {
-    if (open && existingItem) {
-      setName(existingItem.name || "")
-      setDescription(existingItem.description || "")
-      setCategory(existingItem.category || DEFAULT_SCENE_CATEGORY)
-      setVersion(existingItem.version || DEFAULT_MARKET_VERSION)
-      setGuidance(existingItem.guidance || "")
-      setChineseName(existingItem.chinese_name || "")
+    if (!open) {
+      lastInitializedFormKeyRef.current = null
+      return
+    }
+
+    void loadCurrentUserId()
+
+    if (lastInitializedFormKeyRef.current === formInitializationKey) {
+      return
+    }
+
+    lastInitializedFormKeyRef.current = formInitializationKey
+    setFile(null)
+    setError(null)
+
+    if (isUpdate && hasExistingItem) {
+      setName(existingItemName)
+      setDescription(existingItemDescription)
+      setCategory(existingItemCategory)
+      setVersion(existingItemVersion)
+      setGuidance(existingItemGuidance)
+      setChineseName(existingItemChineseName)
       setPluginSkills(
-        resourceType === "plugin" ? parsePluginSkillsFromExtraJson(existingItem.extra_json) : []
+        resourceType === "plugin" ? parsePluginSkillsFromExtraJson(existingItemExtraJson) : []
       )
-      setGrayUserIds(parseGrayUserIdsFromExtraJson(existingItem.extra_json))
+      setGrayUserIds(parseGrayUserIdsFromExtraJson(existingItemExtraJson))
       setNameFromFile(false)
       setVersionFromSkillFile(false)
       setVersionFoundInSkillFrontmatter(false)
-    } else if (open) {
-      // Reset form for new upload
-      setName("")
-      setDescription("")
-      setCategory(DEFAULT_SCENE_CATEGORY)
-      resetVersionState()
-      setGuidance("")
-      setChineseName("")
-      setPluginSkills([])
-      setGrayUserIds([])
-      setNameFromFile(false)
+      return
     }
-    if (open) {
-      void loadCurrentUserId()
-    }
-  }, [isUpdate, existingItem, open, loadCurrentUserId, resetVersionState, resourceType])
+
+    // Reset form for new upload
+    setName("")
+    setDescription("")
+    setCategory(DEFAULT_SCENE_CATEGORY)
+    resetVersionState()
+    setGuidance("")
+    setChineseName("")
+    setPluginSkills([])
+    setGrayUserIds([])
+    setNameFromFile(false)
+  }, [
+    existingItemCategory,
+    existingItemChineseName,
+    existingItemDescription,
+    existingItemExtraJson,
+    existingItemGuidance,
+    existingItemName,
+    existingItemVersion,
+    formInitializationKey,
+    hasExistingItem,
+    isUpdate,
+    loadCurrentUserId,
+    open,
+    resetVersionState,
+    resourceType
+  ])
 
   const getAcceptedTypes = () => {
     switch (resourceType) {
