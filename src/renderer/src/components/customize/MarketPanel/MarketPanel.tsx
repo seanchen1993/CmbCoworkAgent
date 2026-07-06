@@ -105,6 +105,22 @@ import {
 // Local storage helper functions for tracking user uploads
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
 const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
+const MARKET_ALL_USER_CACHE_KEY = "market_panel_query_all_user_cache_v1"
+
+interface MarketPanelAllUserItem {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
+interface MarketPanelAllUserCachePayload {
+  cachedAt: string
+  users: MarketPanelAllUserItem[]
+}
+
+let marketAllUserRefreshPromise: Promise<MarketPanelAllUserItem[]> | null = null
 
 function normalizeSkillName(value?: string): string {
   return String(value || "")
@@ -214,6 +230,115 @@ function readLocalUploadedSkillPathSetFromStorage(): Set<string> {
     console.warn("[MarketPanel] Failed to read local uploaded skill paths from localStorage:", error)
     return new Set()
   }
+}
+
+function normalizeMarketPanelAllUserItem(value: unknown): MarketPanelAllUserItem | null {
+  if (!value || typeof value !== "object") return null
+
+  const record = value as Record<string, unknown>
+  const sapId = String(record.sapId || "").trim()
+  if (!sapId) return null
+
+  const userName = String(record.userName || "").trim()
+  const orgName = String(record.orgName || "").trim()
+  const upperOrgLv0 = String(record.upperOrgLv0 || "").trim()
+  const upperOrgLv1 = String(record.upperOrgLv1 || "").trim()
+
+  return {
+    sapId,
+    userName,
+    orgName,
+    upperOrgLv0: upperOrgLv0 || undefined,
+    upperOrgLv1: upperOrgLv1 || undefined
+  }
+}
+
+function normalizeMarketPanelAllUsers(value: unknown): MarketPanelAllUserItem[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => normalizeMarketPanelAllUserItem(item))
+    .filter((item): item is MarketPanelAllUserItem => item !== null)
+}
+
+function readMarketPanelAllUsersFromStorage(): MarketPanelAllUserItem[] | null {
+  try {
+    const raw = localStorage.getItem(MARKET_ALL_USER_CACHE_KEY)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw) as unknown
+    if (Array.isArray(parsed)) {
+      const users = normalizeMarketPanelAllUsers(parsed)
+      return users.length > 0 ? users : null
+    }
+
+    const payload =
+      parsed && typeof parsed === "object" ? (parsed as MarketPanelAllUserCachePayload) : null
+    const users = normalizeMarketPanelAllUsers(payload?.users)
+    return users.length > 0 ? users : null
+  } catch (error) {
+    console.warn("[MarketPanel] Failed to read cached all-user list:", error)
+    return null
+  }
+}
+
+function writeMarketPanelAllUsersToStorage(users: MarketPanelAllUserItem[]): void {
+  try {
+    const payload: MarketPanelAllUserCachePayload = {
+      cachedAt: new Date().toISOString(),
+      users: normalizeMarketPanelAllUsers(users)
+    }
+    localStorage.setItem(MARKET_ALL_USER_CACHE_KEY, JSON.stringify(payload))
+  } catch (error) {
+    console.warn("[MarketPanel] Failed to write cached all-user list:", error)
+  }
+}
+
+async function refreshMarketPanelAllUsers(): Promise<MarketPanelAllUserItem[]> {
+  if (marketAllUserRefreshPromise) return marketAllUserRefreshPromise
+
+  marketAllUserRefreshPromise = (async () => {
+    if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+      throw new Error("queryAllUser API unavailable")
+    }
+
+    const response = await window.api.dashboard.queryAllUser()
+    if (!response.success || !response.data) {
+      throw new Error(response.error || "获取全量用户信息失败")
+    }
+
+    const users = normalizeMarketPanelAllUsers(response.data)
+    writeMarketPanelAllUsersToStorage(users)
+    return users
+  })()
+
+  try {
+    return await marketAllUserRefreshPromise
+  } finally {
+    marketAllUserRefreshPromise = null
+  }
+}
+
+async function loadMarketPanelAllUsersPreferCache(options?: {
+  onCacheHit?: (users: MarketPanelAllUserItem[]) => void
+  onFreshData?: (users: MarketPanelAllUserItem[]) => void
+  onRefreshError?: (error: unknown) => void
+}): Promise<MarketPanelAllUserItem[]> {
+  const cachedUsers = readMarketPanelAllUsersFromStorage()
+  if (cachedUsers) {
+    options?.onCacheHit?.(cachedUsers)
+    void refreshMarketPanelAllUsers()
+      .then((freshUsers) => {
+        options?.onFreshData?.(freshUsers)
+      })
+      .catch((error) => {
+        options?.onRefreshError?.(error)
+      })
+    return cachedUsers
+  }
+
+  const freshUsers = await refreshMarketPanelAllUsers()
+  options?.onFreshData?.(freshUsers)
+  return freshUsers
 }
 
 interface SkillUserUsage {
@@ -911,6 +1036,7 @@ export function MarketPanel(): React.JSX.Element {
   const installedMcpsRef = useRef<string[]>([])
   const installedPluginsRef = useRef<string[]>([])
   const updateNoticeShownRef = useRef<Set<string>>(new Set())
+  const uploaderProfilesRequestIdRef = useRef(0)
   const openItemDetailRef = useRef<(item: MarketItem) => Promise<void>>(async () => {})
   const previousActiveTabRef = useRef<MarketItemType>(activeTab)
   const currentUserCandidateSet = useMemo(
@@ -1183,45 +1309,48 @@ export function MarketPanel(): React.JSX.Element {
   }, [])
 
   const loadUploaderProfiles = useCallback(async (sapIds: string[]) => {
+    const requestId = ++uploaderProfilesRequestIdRef.current
     const rawUserIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean)))
     if (rawUserIds.length === 0) {
       setUploaderProfiles({})
       return
     }
 
-    if (typeof window.api?.dashboard?.queryAllUser !== "function") {
-      setUploaderProfiles({})
-      return
-    }
-
     try {
-      const response = await window.api.dashboard.queryAllUser()
-      if (!response.success || !response.data) {
-        throw new Error(response.error || "获取全量用户信息失败")
+      const applyProfiles = (allUsers: MarketPanelAllUserItem[]) => {
+        if (requestId !== uploaderProfilesRequestIdRef.current) return
+
+        const nextMap: Record<string, UploaderProfile> = {}
+        for (const rawUserId of rawUserIds) {
+          const lookupIds = buildUploaderIdCandidates(rawUserId)
+          const target = allUsers.find((user) =>
+            lookupIds.some((lookupId) => user.sapId.includes(lookupId))
+          )
+          if (!target) continue
+          nextMap[rawUserId] = {
+            sapId: target.sapId,
+            userName: target.userName,
+            orgName: formatTopUserOrgName(
+              target.orgName || "",
+              target.upperOrgLv1 || "",
+              target.upperOrgLv0 || ""
+            ),
+            upperOrgLv0: target.upperOrgLv0,
+            upperOrgLv1: target.upperOrgLv1
+          }
+        }
+        setUploaderProfiles(nextMap)
       }
 
-      const allUsers = response.data.filter((user) => user.sapId?.trim())
-      const nextMap: Record<string, UploaderProfile> = {}
-      for (const rawUserId of rawUserIds) {
-        const lookupIds = buildUploaderIdCandidates(rawUserId)
-        const target = allUsers.find((user) =>
-          lookupIds.some((lookupId) => user.sapId.includes(lookupId))
-        )
-        if (!target) continue
-        nextMap[rawUserId] = {
-          sapId: target.sapId,
-          userName: target.userName,
-          orgName: formatTopUserOrgName(
-            target.orgName || "",
-            target.upperOrgLv1 || "",
-            target.upperOrgLv0 || ""
-          ),
-          upperOrgLv0: target.upperOrgLv0,
-          upperOrgLv1: target.upperOrgLv1
+      await loadMarketPanelAllUsersPreferCache({
+        onCacheHit: applyProfiles,
+        onFreshData: applyProfiles,
+        onRefreshError: (error) => {
+          console.warn("[MarketPanel] Failed to refresh uploader profiles cache:", error)
         }
-      }
-      setUploaderProfiles(nextMap)
+      })
     } catch (err) {
+      if (requestId !== uploaderProfilesRequestIdRef.current) return
       console.warn("[MarketPanel] Failed to load uploader profiles:", err)
       setUploaderProfiles({})
     }
