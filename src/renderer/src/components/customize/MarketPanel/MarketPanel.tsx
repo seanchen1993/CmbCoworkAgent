@@ -17,6 +17,7 @@ import {
   X,
   BarChart3,
   Check,
+  Calendar,
   ChevronDown, ArrowLeft
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -292,6 +293,28 @@ function getMarketUpdatedAt(item: Pick<MarketItem, "created_at" | "updated_at" |
   return parseMarketExtraJson(item.extra_json).updated_at || item.updated_at || item.created_at
 }
 
+function matchesMarketSearchQuery(item: Pick<MarketItem, "name" | "chinese_name" | "description" | "user_id">, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase()
+  if (!normalizedQuery) return true
+
+  return Boolean(
+    item.chinese_name?.toLowerCase().includes(normalizedQuery) ||
+      item.name.toLowerCase().includes(normalizedQuery) ||
+      item.description?.toLowerCase().includes(normalizedQuery) ||
+      item.user_id?.toLowerCase().includes(normalizedQuery)
+  )
+}
+
+function formatMarketListDateTime(value?: string): string {
+  if (!value) return ""
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const year = String(date.getFullYear())
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${year}/${month}/${day}`
+}
+
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
     String(value || "")
@@ -487,6 +510,7 @@ function MarketItemCard({
   const itemTag = item.tag?.trim()
   const isSkillCard = skillCallCount !== null || skillUserCount !== null
   const installActionDisabled = !!installDisabledReason
+  const uploadTimeLabel = formatMarketListDateTime(item.created_at)
 
   const installDisabledTooltip = (
     <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
@@ -594,10 +618,12 @@ function MarketItemCard({
       {/* Footer: metadata + actions */}
       <div className="mt-auto flex items-center justify-between flex-wrap gap-2 pt-3 border-t border-[#f0eee6]">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
-          {/*<div className="flex items-center gap-1">*/}
-          {/*  <Calendar className="size-3 shrink-0" />*/}
-          {/*  <span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span>*/}
-          {/*</div>*/}
+          {uploadTimeLabel ? (
+            <div className="flex items-center gap-1">
+              <Calendar className="size-3 shrink-0" />
+              <span>上传于 {uploadTimeLabel}</span>
+            </div>
+          ) : null}
           {/*{item.version && (*/}
           {/*  <div className="flex items-center gap-1">*/}
           {/*    <GitBranch className="size-3 shrink-0" />*/}
@@ -915,12 +941,12 @@ export function MarketPanel(): React.JSX.Element {
           : "Plugins"
   const getMarketSearchPlaceholder = (type: MarketItemType) =>
     type === "skill"
-      ? "搜索技能…"
+      ? "搜索技能名、描述或 user_id…"
       : type === "orgSkill"
         ? "搜索组织级技能…"
         : type === "mcp"
-          ? "搜索 MCP 连接器…"
-          : "搜索插件…"
+          ? "搜索 MCP、描述或 user_id…"
+          : "搜索插件名、描述或 user_id…"
   const tabIntros: Record<MarketItemType, { title: string; description: string }> = {
     skill: {
       title: "Skills 是可直接调用的专项能力",
@@ -1883,11 +1909,7 @@ export function MarketPanel(): React.JSX.Element {
         ) {
           return false
         }
-        const query = activeSearchQuery.trim().toLowerCase()
-        const matchesSearch =
-          item.chinese_name?.toLowerCase().includes(query) ||
-          item.name.toLowerCase().includes(query) ||
-          item.description?.toLowerCase().includes(query)
+        const matchesSearch = matchesMarketSearchQuery(item, activeSearchQuery)
         if (!matchesSearch) return false
         if (
           uploadFilterModes.length > 0 &&
