@@ -3359,10 +3359,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 persistedInternalGoalMessageTimeOrder
               })
 
+              let reasoning = ""
+              if (role === "assistant") {
+                const rawReasoning =
+                  additionalKwargs?.reasoning ??
+                  additionalKwargs?.reasoning_content ??
+                  additionalKwargs?.reasoning_text
+                if (typeof rawReasoning === "string" && rawReasoning.trim()) {
+                  reasoning = rawReasoning
+                }
+              }
+
               return {
                 id: messageId,
                 role,
                 content,
+                ...(reasoning && { reasoning }),
                 tool_calls: toolCalls as Message["tool_calls"],
                 ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
                 ...(role === "tool" && toolName && { name: toolName }),
