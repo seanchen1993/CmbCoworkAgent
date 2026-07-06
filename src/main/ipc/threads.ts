@@ -1,4 +1,4 @@
-import { IpcMain, BrowserWindow, dialog } from "electron"
+import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electron"
 import { existsSync } from "fs"
 import Store from "electron-store"
 import AdmZip from "adm-zip"
@@ -15,19 +15,24 @@ import {
 } from "../db"
 import {
   withCheckpointer,
-  closeCheckpointer,
-  closeWorkerCheckpointersForThread,
+  retireThreadCheckpointers,
   clearToolConcurrencyLocksForThread
 } from "../agent/runtime"
 import { forgetCoordinatorThreadState } from "./agent"
 import {
-  deleteThreadCheckpoint,
   deleteThreadWorkerCheckpoints,
   deleteThreadWorkflowCheckpoints,
-  getOpenworkDir
+  getOpenworkDir,
+  purgeThreadCheckpointArtifacts
 } from "../storage"
 import { workflowRunManager } from "../agent/workflow/run-manager"
-import { deleteWorkflowRunsForThread } from "../agent/workflow/run-store"
+import {
+  commitWorkflowThreadDisposal,
+  deleteWorkflowRunsForThread,
+  isWorkflowThreadMarkedDisposed,
+  markWorkflowThreadDisposed,
+  rollbackWorkflowThreadDisposal
+} from "../agent/workflow/run-store"
 import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT
@@ -182,6 +187,11 @@ async function assertCanPersistExplicitNormalMode(
           : undefined
     const active = workflowRunManager.isActive(threadId)
     const pendingRun = wsp ? workflowRunManager.findPendingNotification(wsp, threadId) : null
+    // Scan ALL pending runs, not just the first candidate: an exhausted newest
+    // run must not unlock the exit while an older, still-deliverable run waits.
+    const deliverablePending = wsp
+      ? workflowRunManager.hasDeliverablePendingNotification(wsp, threadId)
+      : false
     // Escape hatch: don't block on a pending run whose auto-re-report has been
     // exhausted this process (wedged report turn / API outage) — else the user is
     // locked in workflow mode with no exit but deleting the thread. HONEST CAVEAT
@@ -194,7 +204,7 @@ async function assertCanPersistExplicitNormalMode(
     // history panel), just off the auto-report path until the user returns to
     // workflow mode there. (So this is "leave but you'll have to come back for it",
     // not "leave and it follows you".)
-    const pending = pendingRun !== null && !workflowRunManager.isRenotifyExhausted(pendingRun.runId)
+    const pending = deliverablePending
     if (active || pending) {
       throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换模式。")
     }
@@ -657,77 +667,166 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   )
 
   // Delete a thread
-  ipcMain.handle("threads:delete", async (event, threadId: string) => {
+  // Serialize same-thread deletions: two overlapping attempts would interleave
+  // their tombstone mark/rollback — attempt A failing before dbDeleteThread
+  // rolls back the mark attempt B still depends on; if B then succeeds without
+  // a workspacePath, the no-sweep late-writer window the tombstone closes
+  // would silently reopen. ThreadIds are uuids, so the map stays tiny.
+  const deletingThreads = new Map<string, Promise<void>>()
+
+  const performThreadDeletion = async (
+    event: IpcMainInvokeEvent,
+    threadId: string
+  ): Promise<void> => {
     console.log("[Threads] Deleting thread:", threadId)
 
-    // A background dynamic workflow must not outlive its thread. Cancel and wait
-    // (bounded) for it to settle — best-effort, so a slow subagent can't hang
-    // this IPC. The orphan-directory race is closed regardless of the timeout:
-    // deleteWorkflowRunsForThread (below) marks the dir disposed, so any late
-    // flush from a still-settling run becomes a no-op and can't recreate it.
+    // ThreadId-keyed run-store tombstone FIRST, before any await: launches and
+    // flush-failed write-backs landing during the (multi-await) teardown below
+    // would otherwise recreate `.cmbdevclaw/workflows/<threadId>` — and when the
+    // thread's metadata lost its workspacePath, there is no directory sweep to
+    // clean that up afterwards. This only gates NEW work; live stores keep
+    // flushing until commitWorkflowThreadDisposal after the DB delete (the
+    // point of no return), so a failed attempt never eats a terminal flush.
+    // Prior membership is captured so the failure rollback RESTORES it — an
+    // earlier COMPLETED deletion's tombstone must survive our failed attempt.
+    const priorDisposalMark = isWorkflowThreadMarkedDisposed(threadId)
+    markWorkflowThreadDisposed(threadId)
+
+    // Everything from here up to (and including) the DB delete can still fail
+    // with the thread intact — the catch below rolls the workflow tombstone
+    // back so the SURVIVING thread isn't left with poisoned stores/launches
+    // until restart. The guard starts IMMEDIATELY after the mark: even the
+    // metadata reads above the hook dispatch are DB reads that can throw.
+    // After dbDeleteThread succeeds the thread is gone for good and the
+    // tombstone must stay, whatever the later best-effort cleanups do.
+    let workspacePath: string | undefined
     try {
-      await workflowRunManager.cancelAndWait(threadId)
-    } catch (error) {
-      console.warn("[Threads] Workflow cancel on delete failed:", error)
+      // Fallback workspace capture BEFORE cancelAndWait (which settles and
+      // removes the active entry): if the thread's metadata lost its
+      // workspacePath, the active run still knows where its artifacts live —
+      // without this, the row gets deleted but `.cmbdevclaw/workflows/<id>`
+      // survives in a workspace the sweep can no longer locate.
+      const activeWorkspaceFallback = workflowRunManager.activeWorkspaceForThread(threadId)
+      // A background dynamic workflow must not outlive its thread. Cancel and
+      // wait (bounded) for it to settle — best-effort, so a slow subagent
+      // can't hang this IPC. The orphan-directory race is closed regardless of
+      // the timeout: the tombstone above and deleteWorkflowRunsForThread
+      // (below) make any late flush from a still-settling run a no-op.
+      try {
+        await workflowRunManager.cancelAndWait(threadId)
+      } catch (error) {
+        console.warn("[Threads] Workflow cancel on delete failed:", error)
+      }
+      // Drop the thread's tool-concurrency locks so the module-level map
+      // doesn't keep one idle lock per deleted thread for the process lifetime.
+      clearToolConcurrencyLocksForThread(threadId)
+      // Fire SessionEnd before teardown so hooks can observe a valid thread
+      // record. No-op if SessionStart never fired for this thread.
+      const existingThread = getThread(threadId)
+      if (existingThread?.metadata) {
+        try {
+          const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
+          workspacePath =
+            typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+        } catch {
+          workspacePath = undefined
+        }
+      }
+      workspacePath = workspacePath ?? activeWorkspaceFallback
+      const window = BrowserWindow.fromWebContents(event.sender)
+      const hookChannel = `agent:stream:${threadId}`
+      await fireSessionEnd(
+        threadId,
+        workspacePath,
+        window ? makeHookResultCallback(window, hookChannel) : undefined
+      )
+      disposeAgentThreadState(threadId)
+
+      const cancelledWorkers = coordinatorWorkerManager.cancelWorkersForThread(
+        threadId,
+        "Thread was deleted."
+      )
+      const waitForCleanupBestEffort = async (workerIds?: string[]) => {
+        try {
+          await coordinatorWorkerManager.waitForWorkerCleanup(threadId, workerIds)
+        } catch (error) {
+          console.warn("[Threads] Timed out waiting for coordinator worker cleanup:", error)
+        }
+      }
+      if (cancelledWorkers.length > 0) {
+        await waitForCleanupBestEffort(cancelledWorkers.map((worker) => worker.worker_id))
+      }
+      await waitForCleanupBestEffort()
+
+      // Delete from our metadata store — the point of no return.
+      dbDeleteThread(threadId)
+      // Incarnation boundary crossed: permanently silence every store/snapshot
+      // born before this deletion (revive-immune epoch bump).
+      commitWorkflowThreadDisposal(threadId)
+      console.log("[Threads] Deleted from metadata store")
+    } catch (e) {
+      // Rollback restores ONLY the workflow tombstone. The other pre-DB-delete
+      // effects (workflow cancelAndWait, session-end hooks, turn-state dispose,
+      // worker cancellation) are deliberately NOT rolled back — an abort cannot
+      // be un-aborted, and the user's intent WAS deletion: a failed attempt
+      // leaves a surviving thread whose background work has been stopped, which
+      // is visible, recoverable state (re-run / re-delete both work). Only the
+      // tombstone must roll back, because it alone would silently poison future
+      // workflow use of the surviving thread until restart.
+      rollbackWorkflowThreadDisposal(threadId, priorDisposalMark)
+      throw e
     }
-    // Drop the thread's tool-concurrency locks so the module-level map doesn't
-    // keep one idle lock per deleted thread for the process lifetime.
-    clearToolConcurrencyLocksForThread(threadId)
-    // Drop any in-memory flush-failed workflow snapshots for this thread (each holds
-    // a full journal). A run whose persist failed lives only in memory; cancelAndWait
-    // above aborts the active run but never clears this table, so without this the
-    // journal leaks in the main process until restart even after the thread is gone. (#3)
+    // Drop the in-memory flush-failed snapshots only AFTER the point of no
+    // return: dropped earlier, a deletion failing pre-DB-delete would have
+    // already lost the surviving thread's only copy of a terminal state whose
+    // disk persist had failed. (Their retries are already no-ops during the
+    // attempt: persistRecoveredRun keeps the snapshot on a bare-set hit.)
     workflowRunManager.forgetThread(threadId)
 
-    // Fire SessionEnd before teardown so hooks can observe a valid thread record.
-    // No-op if SessionStart never fired for this thread.
-    const existingThread = getThread(threadId)
-    let workspacePath: string | undefined
-    if (existingThread?.metadata) {
-      try {
-        const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
-        workspacePath =
-          typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
-      } catch {
-        workspacePath = undefined
-      }
-    }
-    const window = BrowserWindow.fromWebContents(event.sender)
-    const hookChannel = `agent:stream:${threadId}`
-    await fireSessionEnd(
-      threadId,
-      workspacePath,
-      window ? makeHookResultCallback(window, hookChannel) : undefined
-    )
-    disposeAgentThreadState(threadId)
-
-    const cancelledWorkers = coordinatorWorkerManager.cancelWorkersForThread(
-      threadId,
-      "Thread was deleted."
-    )
-    const waitForCleanupBestEffort = async (workerIds?: string[]) => {
-      try {
-        await coordinatorWorkerManager.waitForWorkerCleanup(threadId, workerIds)
-      } catch (error) {
-        console.warn("[Threads] Timed out waiting for coordinator worker cleanup:", error)
-      }
-    }
-    if (cancelledWorkers.length > 0) {
-      await waitForCleanupBestEffort(cancelledWorkers.map((worker) => worker.worker_id))
-    }
-    await waitForCleanupBestEffort()
-
-    // Delete from our metadata store
-    dbDeleteThread(threadId)
-    console.log("[Threads] Deleted from metadata store")
-
-    // Close any open checkpointer for this thread
+    // Permanently retire every checkpointer of this thread (parent + all
+    // __worker__/__wf_ sub-threads): tombstone + poison, BEFORE the disk sweeps
+    // below — a writer that outlived its cancellation (hung subagent past
+    // cancelAndWait's timeout, or an LRU-evicted instance still held by a run)
+    // could otherwise flush a late snapshot and resurrect the just-deleted files.
     try {
-      await closeCheckpointer(threadId)
-      await closeWorkerCheckpointersForThread(threadId)
-      console.log("[Threads] Closed checkpointer")
+      await retireThreadCheckpointers(threadId)
+      console.log("[Threads] Retired thread checkpointers")
     } catch (e) {
-      console.warn("[Threads] Failed to close checkpointer:", e)
+      console.warn("[Threads] Failed to retire thread checkpointers:", e)
+    }
+
+    // Checkpoint disk sweeps IMMEDIATELY after retire, with NO await in
+    // between: a revived fixed-id beat (heartbeat) resumes on the same
+    // retiring-promise settlement this handler does — any await here would let
+    // it initialize and flush a FRESH checkpoint that these sweeps (belonging
+    // to the OLD deletion) would then eat. Single-threaded JS makes
+    // retire-settle → sync sweeps an atomic segment; the awaited workspace
+    // cleanups run after.
+    //
+    // Deep clean: durable sidecars AND quarantine archives — "delete thread"
+    // means the transcript is gone. Each cleanup is independently best-effort:
+    // one stubborn file (e.g. EPERM on a quarantine archive) must not block
+    // the other sweeps from removing sub-thread transcripts.
+    try {
+      purgeThreadCheckpointArtifacts(threadId)
+      console.log("[Threads] Purged thread checkpoint artifacts")
+    } catch (e) {
+      console.warn("[Threads] Failed to purge thread checkpoint artifacts:", e)
+    }
+    try {
+      const deletedWorkerCheckpoints = deleteThreadWorkerCheckpoints(threadId)
+      console.log("[Threads] Deleted worker checkpoints", { deletedWorkerCheckpoints })
+    } catch (e) {
+      console.warn("[Threads] Failed to delete worker checkpoints:", e)
+    }
+    // Workflow subagents self-clean their checkpoints in their finally; this
+    // sweeps the rare crash / failed-cleanup leftovers, mirroring the worker
+    // sweep (which only covers __worker__, not __wf_). (#3)
+    try {
+      const deletedWorkflowCheckpoints = deleteThreadWorkflowCheckpoints(threadId)
+      console.log("[Threads] Deleted workflow checkpoints", { deletedWorkflowCheckpoints })
+    } catch (e) {
+      console.warn("[Threads] Failed to delete workflow checkpoints:", e)
     }
 
     coordinatorWorkerManager.forgetThread(threadId)
@@ -744,27 +843,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       deleteWorkflowRunsForThread(workspacePath, threadId)
     }
 
-    // Delete the thread's checkpoint file
-    try {
-      deleteThreadCheckpoint(threadId)
-      const deletedWorkerCheckpoints = deleteThreadWorkerCheckpoints(threadId)
-      // Workflow subagents self-clean their checkpoints in their finally; this
-      // sweeps the rare crash / failed-cleanup leftovers, mirroring the worker
-      // sweep (which only covers __worker__, not __wf_). (#3)
-      const deletedWorkflowCheckpoints = deleteThreadWorkflowCheckpoints(threadId)
-      console.log("[Threads] Deleted checkpoint file", {
-        deletedWorkerCheckpoints,
-        deletedWorkflowCheckpoints
-      })
-    } catch (e) {
-      console.warn("[Threads] Failed to delete checkpoint file:", e)
-    }
-
     try {
       deleteTaskMmdThread(threadId)
       console.log("[Threads] Deleted task-mmd files")
     } catch (e) {
       console.warn("[Threads] Failed to delete task-mmd files:", e)
+    }
+  }
+
+  ipcMain.handle("threads:delete", async (event, threadId: string) => {
+    while (deletingThreads.has(threadId)) {
+      await deletingThreads.get(threadId)?.catch(() => undefined)
+    }
+    const deletion = performThreadDeletion(event, threadId)
+    deletingThreads.set(threadId, deletion)
+    try {
+      await deletion
+    } finally {
+      if (deletingThreads.get(threadId) === deletion) deletingThreads.delete(threadId)
     }
   })
 

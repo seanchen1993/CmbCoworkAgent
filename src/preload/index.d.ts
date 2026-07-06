@@ -7,6 +7,10 @@ import type {
   SkillMetadata,
   McpConnectorConfig,
   McpConnectorUpsert,
+  McpImportApplyResult,
+  McpImportConfigApplyRequest,
+  McpImportConfigRequest,
+  McpImportPreviewResult,
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
@@ -1090,7 +1094,10 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelMeta: (threadId: string, options?: { worktreePath?: string }) => Promise<{
+    getGitPanelMeta: (
+      threadId: string,
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -1216,7 +1223,10 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
-    pushWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
+    pushWorktree: (
+      threadId: string,
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
@@ -1226,7 +1236,10 @@ interface CustomAPI {
         detail: string
       }>
     }>
-    pullWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
+    pullWorktree: (
+      threadId: string,
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
       detail?: string
       error?: string
@@ -1377,6 +1390,8 @@ interface CustomAPI {
       url?: string
       advanced?: McpConnectorConfig["advanced"]
     }) => Promise<{ success: boolean; tools?: string[]; error?: string }>
+    previewImport: (params: McpImportConfigRequest) => Promise<McpImportPreviewResult>
+    importConfig: (params: McpImportConfigApplyRequest) => Promise<McpImportApplyResult>
   }
   memory: {
     listProjects: (request?: { workspacePath?: string | null }) => Promise<
@@ -1765,6 +1780,12 @@ interface CustomAPI {
     runElevatedSetup: (workspacePaths?: string[]) => Promise<{ success: boolean; error?: string }>
     getYoloMode: () => Promise<boolean>
     setYoloMode: (yolo: boolean) => Promise<void>
+    getFailureFuseWarning: () => Promise<boolean>
+    setFailureFuseWarning: (enabled: boolean) => Promise<void>
+    getFailureFuseModelFeedback: () => Promise<boolean>
+    setFailureFuseModelFeedback: (enabled: boolean) => Promise<void>
+    getFailureFuseDebug: () => Promise<boolean>
+    setFailureFuseDebug: (enabled: boolean) => Promise<void>
     getPendingApprovals: (threadId: string) => Promise<unknown[]>
     isNuxNeeded: () => Promise<boolean>
     completeNux: (mode: "elevated" | "unelevated" | "none") => Promise<void>
@@ -2434,9 +2455,7 @@ interface CustomAPI {
     onError: (callback: (err: { message: string; silent?: boolean }) => void) => () => void
   }
   git: {
-    currentBranch: (
-      cwd?: string
-    ) => Promise<{
+    currentBranch: (cwd?: string) => Promise<{
       isGitRepo: boolean
       branch: string | null
       isWorktree: boolean

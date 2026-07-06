@@ -1,11 +1,24 @@
 import { v4 as uuid } from "uuid"
 import { BrowserWindow } from "electron"
 import { HumanMessage } from "@langchain/core/messages"
-import { getScheduledTasks, getCustomModelConfigs, updateScheduledTaskRunResult, setScheduledTaskEnabled, addTaskRunRecord, getGlobalRoutingMode } from "../storage"
+import {
+  getScheduledTasks,
+  getCustomModelConfigs,
+  updateScheduledTaskRunResult,
+  setScheduledTaskEnabled,
+  addTaskRunRecord,
+  getGlobalRoutingMode
+} from "../storage"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
 import { trySendChatXReply } from "./chatx"
-import { createAgentRuntime, closeCheckpointer, pinCheckpointer } from "../agent/runtime"
+import {
+  createAgentRuntime,
+  closeCheckpointer,
+  pinCheckpointer,
+  retireThreadCheckpointers
+} from "../agent/runtime"
+import { purgeThreadCheckpointArtifacts } from "../storage"
 import { createThread as dbCreateThread, deleteThread as dbDeleteThread } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
@@ -19,14 +32,22 @@ const runningTasks = new Set<string>()
 const activeAbortControllers = new Map<string, AbortController>()
 
 function recordRun(
-  taskId: string, taskName: string, startedAt: Date,
-  status: "ok" | "error", error: string | null
+  taskId: string,
+  taskName: string,
+  startedAt: Date,
+  status: "ok" | "error",
+  error: string | null
 ): void {
   const finishedAt = new Date()
   addTaskRunRecord({
-    id: uuid(), taskId, taskName,
-    startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString(),
-    status, error, durationMs: finishedAt.getTime() - startedAt.getTime()
+    id: uuid(),
+    taskId,
+    taskName,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    status,
+    error,
+    durationMs: finishedAt.getTime() - startedAt.getTime()
   })
 }
 
@@ -38,9 +59,10 @@ function notifyRenderer(channel: string): void {
 
 function showTaskNotification(taskName: string, status: "ok" | "error", body?: string): void {
   const title = status === "ok" ? `✅ ${taskName}` : `❌ ${taskName}`
-  const text = status === "ok"
-    ? stripThink(body || "任务已完成").trim() || "任务已完成"
-    : (body || "任务执行失败")
+  const text =
+    status === "ok"
+      ? stripThink(body || "任务已完成").trim() || "任务已完成"
+      : body || "任务执行失败"
   notifyAlways(title, text)
 }
 
@@ -58,8 +80,11 @@ export function stopScheduler(): void {
     console.log(`[Scheduler] Aborting running task on shutdown: ${id}`)
     controller.abort()
   }
-  activeAbortControllers.clear()
-  runningTasks.clear()
+  // Abort only — run state (runningTasks / activeAbortControllers) is released
+  // by each executeTask's finally AFTER its own cleanup and checkpointer close
+  // settle (same owner-finally principle as stopChatX/stopHeartbeat). Clearing
+  // here would make isTaskRunning()/cancelTask() lie during the unwind window,
+  // and a stop→start could re-run a task whose previous run is still settling.
   console.log("[Scheduler] Stopped scheduler service")
 }
 
@@ -81,7 +106,9 @@ function tick(): void {
       const nextRun = new Date(task.nextRunAt)
       if (now >= nextRun) {
         if (task.frequency === "once" && now.getTime() - nextRun.getTime() > ONCE_EXPIRE_MS) {
-          console.log(`[Scheduler] Once task expired (>${ONCE_EXPIRE_MS / 60_000}min late), auto-disabling: ${task.name}`)
+          console.log(
+            `[Scheduler] Once task expired (>${ONCE_EXPIRE_MS / 60_000}min late), auto-disabling: ${task.name}`
+          )
           setScheduledTaskEnabled(task.id, false)
           notifyRenderer("scheduledTasks:changed")
           continue
@@ -131,9 +158,10 @@ async function executeTask(taskId: string): Promise<void> {
   let highWaterInputTokens = 0
 
   // reminder 类型：执行时动态包装暖心模板；action 类型：原样发送
-  const finalPrompt = task.taskType === "reminder"
-    ? `你是一个暖心的提醒助手。请用温暖、有趣的方式提醒用户：${task.prompt}\n要求：\n(1) 不要解释你是谁\n(2) 直接输出一条暖心的提醒消息\n(3) 可以加一句简短的鸡汤或关怀的话\n(4) 控制在2-3句话以内\n(5) 用emoji点缀`
-    : task.prompt
+  const finalPrompt =
+    task.taskType === "reminder"
+      ? `你是一个暖心的提醒助手。请用温暖、有趣的方式提醒用户：${task.prompt}\n要求：\n(1) 不要解释你是谁\n(2) 直接输出一条暖心的提醒消息\n(3) 可以加一句简短的鸡汤或关怀的话\n(4) 控制在2-3句话以内\n(5) 用emoji点缀`
+      : task.prompt
 
   const schedulerSource = task.taskType === "reminder" ? "scheduler_reminder" : "scheduler_action"
   const tracer = new TraceCollector(threadId, finalPrompt, task.modelId ?? "unknown", {
@@ -178,7 +206,9 @@ async function executeTask(taskId: string): Promise<void> {
     // Update tracer with resolved model info
     if (effectiveModelId) {
       tracer.setModelId(effectiveModelId)
-      const cfgId = effectiveModelId.startsWith("custom:") ? effectiveModelId.slice("custom:".length) : effectiveModelId
+      const cfgId = effectiveModelId.startsWith("custom:")
+        ? effectiveModelId.slice("custom:".length)
+        : effectiveModelId
       const cfg = getCustomModelConfigs().find((c) => c.id === cfgId)
       if (cfg?.model) tracer.setModelName(cfg.model)
     }
@@ -241,7 +271,9 @@ async function executeTask(taskId: string): Promise<void> {
         if (evt.type === "full-messages") {
           // 只取最后一条没有 tool_calls 的 assistant 消息（最终回复）
           const finalMsgs = evt.messages.filter(
-            (m) => m.role === "assistant" && (!m.tool_calls || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
+            (m) =>
+              m.role === "assistant" &&
+              (!m.tool_calls || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
           )
           const last = finalMsgs[finalMsgs.length - 1]
           if (last?.content?.trim()) lastAssistantText = last.content.trim()
@@ -306,9 +338,12 @@ async function executeTask(taskId: string): Promise<void> {
   } catch (error) {
     taskError = error
     const isAbortError =
-      error instanceof Error &&
-      (error.name === "AbortError" || error.message.includes("aborted"))
-    const errMsg = isAbortError ? "Cancelled by user" : (error instanceof Error ? error.message : String(error))
+      error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
+    const errMsg = isAbortError
+      ? "Cancelled by user"
+      : error instanceof Error
+        ? error.message
+        : String(error)
     if (isAbortError) {
       updateScheduledTaskRunResult(taskId, "error", errMsg)
       tracer.finish("cancelled").catch(() => {})
@@ -337,22 +372,46 @@ async function executeTask(taskId: string): Promise<void> {
         lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
       })
     }
-    // Clean up empty thread if runtime failed before any content was streamed
+    // Clean up empty thread if runtime failed before any content was streamed.
+    // Same semantics as threads:delete — the row AND the transcript: retire
+    // poisons any checkpointer this run created (making the finally's reusable
+    // close a no-op), then the purge sweeps its on-disk artifacts. Retire and
+    // purge are INDEPENDENT best-effort (a retire fault must not leave the
+    // orphan file behind), but both stay gated on the row delete actually
+    // succeeding — retiring a SURVIVING thread would poison it.
     if (threadCreated && !hasStreamedContent) {
+      let rowDeleted = false
       try {
         dbDeleteThread(threadId)
+        rowDeleted = true
       } catch {
         // ignore cleanup errors
       }
+      if (rowDeleted) {
+        try {
+          await retireThreadCheckpointers(threadId)
+        } catch {
+          // ignore cleanup errors
+        }
+        try {
+          purgeThreadCheckpointArtifacts(threadId)
+        } catch {
+          // ignore cleanup errors
+        }
+      }
     }
   } finally {
-    // IMPORTANT: delete from runningTasks BEFORE broadcasting done/error to the
-    // renderer, otherwise the renderer's loadThreadHistory → isRunning check will
-    // see the task as still running and re-set scheduledTaskLoading = true (race).
+    releaseCheckpointerPin()
+    // Close FIRST, then release run state, then broadcast — two contracts at
+    // once: (1) owner-finally principle (same as chatx/heartbeat): the task
+    // counts as running until its checkpointer close settles, so a runNow in
+    // the close window is refused instead of overlapping a still-settling
+    // run; (2) renderer contract: runningTasks is deleted BEFORE the done/
+    // error broadcast, so loadThreadHistory → isRunning never races back to
+    // scheduledTaskLoading = true.
+    await closeCheckpointer(threadId).catch(() => {})
     runningTasks.delete(taskId)
     activeAbortControllers.delete(taskId)
-    releaseCheckpointerPin()
-    await closeCheckpointer(threadId).catch(() => {})
 
     // Now broadcast lifecycle event — renderer can safely call isRunning() = false
     if (taskError) {

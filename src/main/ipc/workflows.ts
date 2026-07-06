@@ -213,6 +213,12 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
         // so the panel shows "已中断" (no dead cancel button) instead of "运行中".
         latestRun = await markWorkflowRunInterrupted(workspacePath, threadId, latestRun.runId)
       }
+      // DELIBERATE: this consults findPendingNotification WITHOUT the renotify
+      // exhaustion filter. "Exhausted" caps the same-process AUTO-retry loop;
+      // a hydrate (renderer reload) is a fresh user-driven entry and gives a
+      // wedged report one more chance — same at-least-once spirit as the
+      // restart-resets-the-budget rule. The mode-exit guards use the stricter
+      // deliverable/in-flight semantics instead (hasDeliverablePendingNotification).
       const hasPendingNotification =
         workflowRunManager.findPendingNotification(workspacePath, threadId) !== null
       return {

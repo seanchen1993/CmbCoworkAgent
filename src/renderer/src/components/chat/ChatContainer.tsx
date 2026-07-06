@@ -1459,12 +1459,16 @@ function ChatErrorCard({
     : "代理出错"
   const reason = (detail?.reason || error || "").trim()
   const hint = detail?.hint
+  const displayedModel = detail?.modelDisplayName || detail?.model || detail?.modelName
+  const apiModelName = detail?.modelName
   const hasDetails = Boolean(
     detail &&
     (detail.status != null ||
       detail.requestId ||
       detail.code ||
-      detail.model ||
+      displayedModel ||
+      apiModelName ||
+      detail.modelId ||
       (detail.failover && detail.failover.length > 0) ||
       detail.rawBody)
   )
@@ -1525,10 +1529,22 @@ function ChatErrorCard({
                     </button>
                   </div>
                 )}
-                {detail?.model && (
+                {displayedModel && (
                   <div className="flex gap-2">
                     <span className="shrink-0 w-16 text-muted-foreground/70">模型</span>
-                    <span className="font-mono break-all">{detail.model}</span>
+                    <span className="font-mono break-all">{displayedModel}</span>
+                  </div>
+                )}
+                {apiModelName && apiModelName !== displayedModel && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">Model</span>
+                    <span className="font-mono break-all">{apiModelName}</span>
+                  </div>
+                )}
+                {detail?.modelId && detail.modelId !== displayedModel && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">配置标识</span>
+                    <span className="font-mono break-all">{detail.modelId}</span>
                   </div>
                 )}
                 {detail?.failover && detail.failover.length > 0 && (
@@ -1537,7 +1553,14 @@ function ChatErrorCard({
                     <ul className="flex-1 min-w-0 space-y-0.5">
                       {detail.failover.map((f, i) => (
                         <li key={`${f.modelId}-${i}`} className="break-words">
-                          <span className="font-mono">{f.modelId}</span>：{f.reason}
+                          <span className="font-mono">
+                            {f.modelDisplayName
+                              ? `${f.modelDisplayName} (${f.modelId})`
+                              : f.modelName
+                                ? `${f.modelName} (${f.modelId})`
+                                : f.modelId}
+                          </span>
+                          ：{f.reason}
                         </li>
                       ))}
                     </ul>
@@ -4005,12 +4028,16 @@ export function ChatContainer({
       } catch (err) {
         console.error("[ChatContainer] Failed to cancel scheduled task:", err)
       }
+      // 取消是发信号等收敛;若主进程实际无任务在跑(渲染态因丢 done 冻结),
+      // 上面的调用是空操作且不会再有事件回来解锁——立即用权威态校正自愈。
+      threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading && threadId === "heartbeat") {
       try {
         await window.api.heartbeat.cancel()
       } catch (err) {
         console.error("[ChatContainer] Failed to cancel heartbeat:", err)
       }
+      threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
       // ChatX bot thread: scheduledTaskLoading is true but no scheduledTaskId
       try {
@@ -5258,9 +5285,11 @@ export function ChatContainer({
                       <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
                       <div className="flex-1 min-w-0">
                         <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {hookInterruption.action === "halt"
-                            ? "Hook 已停止本轮"
-                            : "Hook 已阻断本轮"}
+                          {hookInterruption.event.startsWith("Failure fuse")
+                            ? "工具失败熔断已停止本轮"
+                            : hookInterruption.action === "halt"
+                              ? "Hook 已停止本轮"
+                              : "Hook 已阻断本轮"}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
                           <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
@@ -5277,7 +5306,9 @@ export function ChatContainer({
                           </div>
                         )}
                         <div className="text-xs text-muted-foreground mt-2">
-                          这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。
+                          {hookInterruption.event.startsWith("Failure fuse")
+                            ? "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
+                            : "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"}
                         </div>
                       </div>
                       <button

@@ -116,7 +116,6 @@ import {
 import {
   isRetryableApiError,
   buildOrderedChain,
-  classifyApiError,
   extractErrorDetail,
   type FailoverAttempt,
   type ApiErrorDetail
@@ -134,6 +133,12 @@ import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
+import {
+  getFailureFuseHaltError,
+  shouldSendFailureFuseNotice,
+  type FailureFuseDecision,
+  type FailureFuseHaltError
+} from "../agent/failure-fuse"
 import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
 import {
   formatSkillUseBlock,
@@ -791,6 +796,48 @@ function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltErr
     }
   })
   window.webContents.send(channel, { type: "done" })
+}
+
+function sendFailureFuseHalt(
+  window: BrowserWindow,
+  channel: string,
+  error: FailureFuseHaltError
+): void {
+  window.webContents.send(channel, {
+    type: "custom",
+    data: {
+      type: "failure_fuse_tripped",
+      action: "halt",
+      reason: error.decision.reason,
+      toolName: error.decision.toolName,
+      fingerprint: error.decision.fingerprint,
+      count: error.decision.count,
+      threshold: error.decision.threshold,
+      lastError: error.decision.lastError
+    }
+  })
+  window.webContents.send(channel, { type: "done" })
+}
+
+function sendFailureFuseNotice(
+  window: BrowserWindow,
+  channel: string,
+  decision: FailureFuseDecision
+): void {
+  if (!shouldSendFailureFuseNotice(decision)) return
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "failure_fuse_warning",
+      action: decision.action,
+      reason: decision.reason,
+      toolName: decision.toolName,
+      fingerprint: decision.fingerprint,
+      count: decision.count,
+      threshold: decision.threshold,
+      lastError: decision.lastError
+    }
+  })
 }
 
 /**
@@ -1617,19 +1664,21 @@ function workflowLeaveBlockedMessage(
   workspacePath: string | undefined
 ): string | null {
   const active = workflowRunManager.isActive(threadId)
-  const pendingRun = workspacePath
-    ? workflowRunManager.findPendingNotification(workspacePath, threadId)
-    : null
-  // Escape hatch: if auto-re-report has given up on the pending run this process
-  // (a wedged report turn / API outage), stop blocking — otherwise the user is
-  // locked in workflow mode with no way out but deleting the thread. HONEST CAVEAT
-  // (#5): leaving takes the pending result OFF the auto-report path. A restart
-  // re-reports ONLY while the thread is still in workflow mode; after leaving (and
-  // especially after a later workspace switch, which makes list/hydrate look under
-  // the new path) the result is stranded under the ORIGINAL workspace — not lost
-  // (on disk, visible in that workspace's history), just reachable only by returning
-  // to workflow mode there. (Mirrors the caveat in threads.ts.)
-  const pending = pendingRun !== null && !workflowRunManager.isRenotifyExhausted(pendingRun.runId)
+  // Scan ALL pending runs (hasDeliverablePendingNotification), not just the
+  // first candidate: an exhausted newest run must not unlock the exit while an
+  // older, still-deliverable run waits. Escape hatch preserved: when EVERY
+  // pending run's auto-re-report has been exhausted this process (wedged report
+  // turn / API outage), stop blocking — otherwise the user is locked in
+  // workflow mode with no way out but deleting the thread. HONEST CAVEAT (#5):
+  // leaving takes the pending result OFF the auto-report path. A restart
+  // re-reports ONLY while the thread is still in workflow mode; after leaving
+  // (and especially after a later workspace switch, which makes list/hydrate
+  // look under the new path) the result is stranded under the ORIGINAL
+  // workspace — not lost (on disk, visible in that workspace's history), just
+  // reachable only by returning to workflow mode there. (Mirrors threads.ts.)
+  const pending = workspacePath
+    ? workflowRunManager.hasDeliverablePendingNotification(workspacePath, threadId)
+    : false
   return active || pending
     ? "仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换模式。"
     : null
@@ -2781,11 +2830,35 @@ function buildModelRetryHooks(window: BrowserWindow, channel: string): ModelRetr
  * `error` event so the card can render status / request-id / real reason).
  * Consumes & clears the captured fetch-layer body for the channel.
  */
+interface ErrorDetailModelInfo {
+  /** Runtime/config model id, e.g. custom:qwen3. */
+  modelId?: string
+  /** User-facing display name shown in the model switcher. */
+  modelDisplayName?: string
+  /** Actual Model field sent to the API, e.g. MiniMax-M2.7. */
+  modelName?: string
+  /** Backward-compatible display field consumed by older renderer code. */
+  model?: string
+}
+
+function resolveErrorDetailModelInfo(modelId: string | undefined): ErrorDetailModelInfo {
+  if (!modelId) return {}
+  const cfgId = modelId.startsWith("custom:") ? modelId.slice("custom:".length) : modelId
+  const configs = getCustomModelConfigs()
+  const cfg = configs.find((c) => c.id === cfgId) ?? configs.find((c) => c.model === cfgId)
+  return {
+    modelId,
+    modelDisplayName: cfg?.name,
+    modelName: cfg?.model,
+    model: cfg?.name ?? cfg?.model ?? modelId
+  }
+}
+
 function emitErrorDetail(
   window: BrowserWindow,
   channel: string,
   error: unknown,
-  extras?: { model?: string }
+  extras?: ErrorDetailModelInfo
 ): ApiErrorDetail {
   const fetchDetail = lastFetchErrorByChannel.get(channel)
   lastFetchErrorByChannel.delete(channel)
@@ -2793,16 +2866,21 @@ function emitErrorDetail(
   lastFailoverByChannel.delete(channel)
   const detail = extractErrorDetail(error, fetchDetail)
   const failover = attempts.map((a) => ({
+    ...resolveErrorDetailModelInfo(a.modelId),
     modelId: a.modelId,
     reason: extractErrorDetail(a.error).reason
   }))
+  const modelInfo = {
+    ...resolveErrorDetailModelInfo(extras?.modelId ?? extras?.model),
+    ...extras
+  }
   safeSendToWindow(window, channel, {
     type: "custom",
     data: {
       type: "error_detail",
       detail: {
         ...detail,
-        model: extras?.model,
+        ...modelInfo,
         failover: failover.length > 0 ? failover : undefined
       }
     }
@@ -4123,6 +4201,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+        sendFailureFuseNotice(window, channel, decision)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -4880,6 +4960,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -5628,6 +5709,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            onFailureFuseNotice,
             hookTurnId: turnState.turnId,
             onHookSkippedFactory,
             hookScope,
@@ -5734,6 +5816,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -5809,6 +5892,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (completionOutcome === "halted") {
               markInvokeIncomplete("Stop hook halted the turn.")
               pauseActiveGoalForRuntimeStop("Stop hook halted the turn.")
+              // A halted workflow-notification turn must NOT fall through to
+              // the success settlement below the loop — that would persist
+              // delivered=true for a report the model never finished, silently
+              // burying the run's result. Release the in-flight mark and keep
+              // delivered=false (the catch documents the same halt philosophy
+              // for the thrown shape): the next hydrate/restart re-surfaces it.
+              if (workflowNotificationToSettle) {
+                workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+                workflowNotificationToSettle = undefined
+              }
               break
             }
 
@@ -6270,6 +6363,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
+        const failureFuseHalt = getFailureFuseHaltError(error)
+        if (failureFuseHalt) {
+          clearCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn("[Agent] Failure fuse halted turn:", failureFuseHalt.decision.reason)
+          pauseActiveGoalForRuntimeStop(failureFuseHalt.decision.reason)
+          sendFailureFuseHalt(window, channel, failureFuseHalt)
+          syncUsedSkillsContext()
+          tracer.finish("cancelled", failureFuseHalt.decision.reason).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          turnStateShouldDispose = true
+          return
+        }
         // Ignore abort-related errors (expected when stream is cancelled)
         const isAbortError =
           error instanceof Error &&
@@ -6301,7 +6415,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           pauseActiveGoalForRuntimeStop(`Agent run failed: ${errMsg}`)
           console.error("[Agent] Error:", error)
           if (!stopHookFired) {
-            const stopFailureErrorCode = classifyApiError(error)
+            const stopFailureErrorCode = extractErrorDetail(
+              error,
+              lastFetchErrorByChannel.get(channel)
+            ).code
             const stopFailureContext: HookContext = {
               workspacePath: sessionWorkspacePath,
               sessionId: threadId,
@@ -6328,7 +6445,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // Sent BEFORE the error event: the error event terminates the stream
           // in the renderer (useStream), so any custom event sent after it is
           // dropped. error_detail must go first to populate the detail card.
-          emitErrorDetail(window, channel, error, { model: usedModelId })
+          emitErrorDetail(window, channel, error, { modelId: usedModelId })
           safeSendToWindow(window, channel, {
             type: "error",
             error: errMsg
@@ -6369,6 +6486,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
         }
       } finally {
+        // Safety net for EARLY RETURNS inside the try (Stop hook blocked
+        // completion, PostSkillUse max revisions, goal-continuation halts…):
+        // success settles on the ack path and thrown errors settle in the
+        // catch, but a bare `return` bypasses BOTH — leaving the runId in
+        // inFlightNotifications for the process lifetime, where
+        // findPendingNotification keeps excluding it and the (still
+        // delivered=false) run can never be re-reported until restart. Clear
+        // the in-flight mark WITHOUT persisting delivered and WITHOUT
+        // auto-renotify — these exits are user/policy stops, mirroring the
+        // catch's documented halt semantics; the run stays re-discoverable.
+        if (workflowNotificationToSettle) {
+          workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+          workflowNotificationToSettle = undefined
+        }
         window.removeListener("closed", onWindowClosed)
         await settleDrainedCoordinatorNotifications("restore")
         if (clearCoordinatorNotificationSelectedSkillsOnExit) {
@@ -6615,6 +6746,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+        sendFailureFuseNotice(window, channel, decision)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -6767,6 +6900,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       window.once("closed", onWindowClosed)
       sendActiveHookNotice(window, channel, workspacePath)
 
+      let resumeErrorModelId: string | undefined
       try {
         const requestedModelIdResume = modelId || (metadata.model as string | undefined)
         const resumeRoutingResult = await resolveModel({
@@ -6778,6 +6912,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }).catch(() => null)
         const effectiveResumeModelId =
           resumeRoutingResult?.resolvedModelId ?? requestedModelIdResume
+        resumeErrorModelId = effectiveResumeModelId
 
         const resumeStreamConfig = {
           configurable: { thread_id: threadId },
@@ -6827,6 +6962,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -6844,6 +6980,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             resumeAgentRuntime = resumeAgent
             resumeUsedModelId = candidateId
+            resumeErrorModelId = candidateId
             break
           } catch (err) {
             if (!isRetryableApiError(err)) throw err
@@ -6985,6 +7122,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -7002,6 +7140,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             resumeAgentRuntime = nextAgent
             resumeUsedModelId = nextCandidate
+            resumeErrorModelId = nextCandidate
             notifyResumeFailover()
           }
         }
@@ -7107,6 +7246,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
+        const failureFuseHalt = getFailureFuseHaltError(error)
+        if (failureFuseHalt) {
+          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn("[Agent] Resume failure fuse halted turn:", failureFuseHalt.decision.reason)
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            failureFuseHalt.decision.reason,
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
+          sendFailureFuseHalt(window, channel, failureFuseHalt)
+          turnStateShouldDispose = true
+          return
+        }
         const isAbortError =
           error instanceof Error &&
           (error.name === "AbortError" ||
@@ -7125,7 +7280,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             boundaryGoalActiveWindowId
           )
           // Before the error event — see note in agent:invoke handler.
-          emitErrorDetail(window, channel, error)
+          emitErrorDetail(window, channel, error, { modelId: resumeErrorModelId })
           safeSendToWindow(window, channel, {
             type: "error",
             error: error instanceof Error ? error.message : "Unknown error"
@@ -7339,6 +7494,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     }
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+      sendFailureFuseNotice(window, channel, decision)
     const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
       window,
       threadId,
@@ -7489,6 +7646,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     window.once("closed", onWindowClosed)
     sendActiveHookNotice(window, channel, workspacePath)
 
+    let interruptErrorModelId: string | undefined
     try {
       const interruptRoutingResult = await resolveModel({
         taskSource: "chat",
@@ -7499,6 +7657,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }).catch(() => null)
       const effectiveInterruptModelId =
         interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
+      interruptErrorModelId = effectiveInterruptModelId
 
       const interruptStreamConfig = {
         configurable: { thread_id: threadId },
@@ -7542,6 +7701,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -7556,6 +7716,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = intAgent
             intUsedModelId = candidateId
+            interruptErrorModelId = candidateId
             break
           } catch (err) {
             if (!isRetryableApiError(err)) throw err
@@ -7697,6 +7858,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -7711,6 +7873,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = nextAgent
             intUsedModelId = nextCandidate
+            interruptErrorModelId = nextCandidate
             notifyIntFailover()
           }
         }
@@ -7831,6 +7994,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         turnStateShouldDispose = true
         return
       }
+      const failureFuseHalt = getFailureFuseHaltError(error)
+      if (failureFuseHalt) {
+        console.warn("[Agent] Interrupt failure fuse halted turn:", failureFuseHalt.decision.reason)
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          failureFuseHalt.decision.reason,
+          boundaryGoalId,
+          boundaryGoalActiveWindowId
+        )
+        sendFailureFuseHalt(window, channel, failureFuseHalt)
+        turnStateShouldDispose = true
+        return
+      }
       const isAbortError =
         error instanceof Error &&
         (error.name === "AbortError" ||
@@ -7849,7 +8027,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           boundaryGoalActiveWindowId
         )
         // Before the error event — see note in agent:invoke handler.
-        emitErrorDetail(window, channel, error)
+        emitErrorDetail(window, channel, error, { modelId: interruptErrorModelId })
         safeSendToWindow(window, channel, {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"

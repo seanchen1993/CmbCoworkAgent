@@ -1,14 +1,10 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
+import { renameSync, unlinkSync } from "fs"
 import {
-  readFileSync,
-  existsSync,
-  mkdirSync,
-  statSync,
-  renameSync,
-  unlinkSync
-} from "fs"
-import { writeFile, rename } from "fs/promises"
-import { dirname } from "path"
+  openRecoveredSqliteDatabase,
+  persistSqliteSnapshot,
+  sqliteFileSize
+} from "../utils/sqlite-durable-file"
 
 // Debounce window for background checkpoint saves. Checkpoints are written very
 // frequently during a streaming agent run; coalescing keeps the synchronous
@@ -60,6 +56,13 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   /** Set while a flush/close drains the writer so no older rename can land
    * after the authoritative snapshot. */
   private blockAsyncWrite = false
+  /** Permanently dead (thread deleted). Unlike close(), this survives
+   * initialize(): a held reference in a writer that outlived deletion (hung
+   * subagent, evicted-then-reused instance) must never reopen the db and
+   * resurrect the just-deleted file. Gates every disk write, not just
+   * initialize(), so a write loop that raced past the front check still can't
+   * land a snapshot. */
+  private retired = false
 
   /** Max checkpoints to keep per (thread_id, checkpoint_ns). Older ones are pruned on each put().
    * Kept at 1 because sql.js loads the entire DB file into memory — retaining more checkpoints
@@ -75,21 +78,26 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Initialize the database asynchronously
    */
   async initialize(): Promise<void> {
+    if (this.retired) {
+      throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
+    }
     if (this.db) return
     // Reset in case this instance was previously closed (flush set the guard).
     this.blockAsyncWrite = false
 
     const SQL = await initSqlJs()
 
-    // Load existing database if it exists
-    if (existsSync(this.dbPath)) {
-      // Check file size - sql.js works entirely in memory, so large files will fail
-      const stats = statSync(this.dbPath)
-      const MAX_DB_SIZE = 100 * 1024 * 1024 // 100MB limit
-
-      if (stats.size > MAX_DB_SIZE) {
+    const MAX_DB_SIZE = 100 * 1024 * 1024 // 100MB limit
+    const recovered = await openRecoveredSqliteDatabase(SQL, this.dbPath, "SqlJsSaver", {
+      maxBytes: MAX_DB_SIZE
+    })
+    if (recovered.database) {
+      this.db = recovered.database
+    } else {
+      const liveSize = sqliteFileSize(this.dbPath)
+      if (liveSize && liveSize > MAX_DB_SIZE) {
         console.warn(
-          `[SqlJsSaver] Database file is too large (${Math.round(stats.size / 1024 / 1024)}MB). ` +
+          `[SqlJsSaver] Database file is too large (${Math.round(liveSize / 1024 / 1024)}MB). ` +
             `Creating fresh database to prevent memory issues.`
         )
         // Rename the old file for backup
@@ -106,16 +114,6 @@ export class SqlJsSaver extends BaseCheckpointSaver {
             console.error("[SqlJsSaver] Could not delete old database:", e2)
           }
         }
-        this.db = new SQL.Database()
-      } else {
-        const buffer = readFileSync(this.dbPath)
-        this.db = new SQL.Database(buffer)
-      }
-    } else {
-      // Ensure directory exists
-      const dir = dirname(this.dbPath)
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true })
       }
       this.db = new SQL.Database()
     }
@@ -210,19 +208,17 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * more checkpoints arrived while writing.
    */
   private async runSaveLoop(): Promise<void> {
-    while (this.db && this.dirty && !this.blockAsyncWrite) {
+    while (this.db && this.dirty && !this.blockAsyncWrite && !this.retired) {
       this.dirty = false
       try {
         const data = Buffer.from(this.db.export())
-        const tmp = `${this.dbPath}.tmp`
-        await writeFile(tmp, data)
-        // flush() took over: this snapshot isn't persisted yet, so re-mark dirty
-        // and let flush write it authoritatively rather than racing its write.
+        await persistSqliteSnapshot(this.dbPath, data, "SqlJsSaver")
+        // flush() took over while this save was in flight; re-mark dirty and let
+        // flush write the authoritative final snapshot after this save settles.
         if (this.blockAsyncWrite) {
           this.dirty = true
           return
         }
-        await rename(tmp, this.dbPath)
       } catch (e) {
         this.dirty = true
         console.warn("[SqlJsSaver] async save failed, will retry on next change:", e)
@@ -235,7 +231,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Save database to disk (debounced, async, atomic)
    */
   private saveToDisk(): void {
-    if (!this.db) return
+    if (!this.db || this.retired) return
 
     this.dirty = true
 
@@ -269,13 +265,12 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       if (pendingSave) await pendingSave
 
       // Mutations can land while an earlier async write is settling. Continue
-      // until the latest in-memory state has reached disk.
-      while (this.db && this.dirty) {
+      // until the latest in-memory state has reached disk. A retired saver
+      // skips the final flush entirely — its file is about to be deleted.
+      while (this.db && this.dirty && !this.retired) {
         this.dirty = false
         const data = Buffer.from(this.db.export())
-        const tmp = `${this.dbPath}.flush.tmp`
-        await writeFile(tmp, data)
-        await rename(tmp, this.dbPath)
+        await persistSqliteSnapshot(this.dbPath, data, "SqlJsSaver")
       }
     } catch (e) {
       this.dirty = true
@@ -588,6 +583,19 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     this.db.run(`DELETE FROM writes WHERE thread_id = ?`, [threadId])
 
     this.saveToDisk()
+  }
+
+  /**
+   * Permanently close for thread deletion. Unlike close() (reusable shutdown:
+   * flushes pending state, and a later initialize() may legitimately reopen),
+   * retire() poisons the instance first — in-flight writes are awaited, the
+   * final flush is skipped (the file is about to be deleted), and every future
+   * initialize()/save is refused. Call this, not close(), whenever the backing
+   * file is being removed from disk.
+   */
+  async retire(): Promise<void> {
+    this.retired = true
+    await this.close()
   }
 
   /**

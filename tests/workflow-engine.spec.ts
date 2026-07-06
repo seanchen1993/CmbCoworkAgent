@@ -23,6 +23,13 @@ import {
   loadWorkflowRunForResume,
   persistRecoveredRun,
   deleteWorkflowRunsForThread,
+  markWorkflowThreadDisposed,
+  commitWorkflowThreadDisposal,
+  isWorkflowThreadMarkedDisposed,
+  isWorkflowRunDirDisposed,
+  reviveWorkflowThread,
+  rollbackWorkflowThreadDisposal,
+  workflowThreadDisposalEpoch,
   markWorkflowRunInterrupted,
   markWorkflowRunNotified,
   rollbackWorkflowRunNotified,
@@ -668,7 +675,10 @@ async function testWorkflowAgentSnapshotBounding(): Promise<void> {
     (m as { kwargs?: { additional_kwargs?: Record<string, unknown> } }).kwargs?.additional_kwargs
       ?.cmb_worker_snapshot_index
   // `many` is m0..m499 tail-sliced to m100..m499 → oldest kept is absolute 100, newest absolute 499.
-  assert(snapIdxOf(many[0]) === 100, `oldest kept (m100) stamped absolute 100, got ${snapIdxOf(many[0])}`)
+  assert(
+    snapIdxOf(many[0]) === 100,
+    `oldest kept (m100) stamped absolute 100, got ${snapIdxOf(many[0])}`
+  )
   assert(
     snapIdxOf(many[399]) === 499,
     `newest kept (m499) stamped absolute 499, got ${snapIdxOf(many[399])}`
@@ -681,7 +691,9 @@ async function testWorkflowAgentSnapshotBounding(): Promise<void> {
       kwargs: { content: `m${index}` }
     }))
   }) as unknown[]
-  const m499In2 = many2.find((m) => (m as { kwargs?: { content?: string } }).kwargs?.content === "m499")
+  const m499In2 = many2.find(
+    (m) => (m as { kwargs?: { content?: string } }).kwargs?.content === "m499"
+  )
   assert(
     snapIdxOf(m499In2) === 499,
     `m499 keeps absolute index 499 across a slid window, got ${snapIdxOf(m499In2)}`
@@ -1516,6 +1528,275 @@ async function testPersistRecoveredRunVerifiesAvailableSidecar(workspace: string
     recoveredBadSidecar.resultSidecarStatus === "unavailable",
     `corrupt recovered sidecar should downgrade status to unavailable, got ${recoveredBadSidecar.resultSidecarStatus}`
   )
+}
+
+async function testPersistRecoveredRunRespectsDisposedTombstone(workspace: string): Promise<void> {
+  // Thread deletion vs in-flight flush-failed retry: persistRecoveredRun is the
+  // one run-store writer that mkdirs, so without the tombstone check a retry
+  // that grabbed its snapshot before forgetThread() would rebuild the removed
+  // `.cmbdevclaw/workflows/<threadId>` after the sweep. Dedicated threadId —
+  // the tombstone is process-lifetime, so it must not poison other scenarios.
+  const threadId = "thread-disposed-recovery"
+  const runId = generateWorkflowRunId()
+  const now = new Date().toISOString()
+  const run: PersistedWorkflowRun = {
+    version: 1,
+    runId,
+    threadId,
+    workflowName: "recover-after-delete",
+    script: "x",
+    scriptSha256: "sha",
+    status: "completed",
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    logs: [],
+    journal: [{ index: 0, hash: "h0", result: "r0" }],
+    stats: { agentsTotal: 1, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+    startedAt: now,
+    updatedAt: now
+  }
+  // Pre-existing artifacts of the (possibly surviving) thread: a bare-set hit
+  // must never rm them — the attempt may roll back and the thread keeps living.
+  const preexistingDir = getWorkflowRunsDir(workspace, threadId)
+  mkdirSync(preexistingDir, { recursive: true })
+  writeFileSync(join(preexistingDir, "sentinel.json"), "{}")
+  markWorkflowThreadDisposed(threadId)
+  assert(
+    (await persistRecoveredRun(workspace, threadId, run)) === false,
+    "a write-back during a mere deletion ATTEMPT must keep the snapshot (retry later) — the attempt may roll back"
+  )
+  assert(
+    existsSync(join(preexistingDir, "sentinel.json")),
+    "a bare-set (attempt-in-progress) hit must NOT sweep the surviving thread's artifacts"
+  )
+  rmSync(preexistingDir, { recursive: true, force: true })
+  commitWorkflowThreadDisposal(threadId) // the deletion reached its point of no return
+  assert(
+    (await persistRecoveredRun(workspace, threadId, run, 0)) === true,
+    "after the incarnation boundary, a stale-epoch write-back reports drop-success"
+  )
+  assert(
+    !existsSync(getWorkflowRunsDir(workspace, threadId)),
+    "a dead-incarnation write-back must not recreate the deleted run directory"
+  )
+}
+
+async function testReviveDoesNotRearmOldStores(): Promise<void> {
+  // Deletion → revive (fixed-id recreation, e.g. heartbeat) must NOT re-arm a
+  // store created BEFORE the deletion: doWrite mkdirs, so one late flush from
+  // the old incarnation would rebuild the swept `.cmbdevclaw/workflows/<id>`.
+  // The disposal-epoch fence keeps old stores permanently silent while the
+  // revived incarnation's NEW stores (born at the new epoch) persist normally.
+  const ws = mkdtempSync(join(tmpdir(), "cmb-revive-epoch-"))
+  try {
+    const threadId = "thread-revive-epoch"
+    const runId = generateWorkflowRunId()
+    const now = new Date().toISOString()
+    const store = createWorkflowRunStore({
+      workspacePath: ws,
+      threadId,
+      initial: {
+        version: 1,
+        runId,
+        threadId,
+        workflowName: "epoch",
+        script: "x",
+        scriptSha256: sha256Hex("x"),
+        status: "running",
+        phases: [],
+        currentPhase: null,
+        agents: [],
+        logs: [],
+        journal: [],
+        stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+        startedAt: now,
+        updatedAt: now
+      }
+    })
+    await store.whenInitialPersisted
+    deleteWorkflowRunsForThread(ws, threadId) // sweep + tombstones + epoch bump
+    reviveWorkflowThread(threadId) // legitimize the NEXT incarnation
+    store.update((run) => {
+      run.logs.push("late flush from the dead incarnation")
+    })
+    assert(
+      (await store.flush()) === true,
+      "an old-incarnation flush must report intentional-skip success, not an error"
+    )
+    assert(
+      !existsSync(getWorkflowRunsDir(ws, threadId)),
+      "revive must not re-arm an old-incarnation store (no run-dir resurrection)"
+    )
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+}
+
+async function testRecoveredRunRespectsDisposalEpoch(): Promise<void> {
+  // The standalone flush-failed write-back mkdirs too: a snapshot captured
+  // BEFORE a deletion must be dropped even after reviveWorkflowThread cleared
+  // the set tombstones — the epoch stamped at capture time is the fence. A
+  // snapshot from the CURRENT (revived) incarnation still persists normally.
+  const ws = mkdtempSync(join(tmpdir(), "cmb-epoch-recovery-"))
+  try {
+    const threadId = "thread-epoch-recovery"
+    const now = new Date().toISOString()
+    const makeRun = (runId: string): PersistedWorkflowRun => ({
+      version: 1,
+      runId,
+      threadId,
+      workflowName: "epoch-recovery",
+      script: "x",
+      scriptSha256: "sha",
+      status: "completed",
+      phases: [],
+      currentPhase: null,
+      agents: [],
+      logs: [],
+      journal: [],
+      stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+      startedAt: now,
+      updatedAt: now
+    })
+    const staleEpoch = workflowThreadDisposalEpoch(threadId) // captured pre-deletion
+    deleteWorkflowRunsForThread(ws, threadId) // bump epoch + tombstones
+    reviveWorkflowThread(threadId) // set tombstones cleared — epoch is the only fence left
+    assert(
+      (await persistRecoveredRun(ws, threadId, makeRun(generateWorkflowRunId()), staleEpoch)) ===
+        true,
+      "a stale-epoch snapshot must report drop-success, not an error"
+    )
+    assert(
+      !existsSync(getWorkflowRunsDir(ws, threadId)),
+      "a stale-epoch write-back after delete→revive must not rebuild the run directory"
+    )
+    const currentEpoch = workflowThreadDisposalEpoch(threadId)
+    assert(
+      (await persistRecoveredRun(ws, threadId, makeRun(generateWorkflowRunId()), currentEpoch)) ===
+        true,
+      "a current-epoch snapshot must persist"
+    )
+    assert(
+      existsSync(getWorkflowRunsDir(ws, threadId)),
+      "the revived incarnation's own write-back must still work"
+    )
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+}
+
+async function testDisposalRollbackRestoresSurvivingThread(): Promise<void> {
+  // New tier semantics: the mark (set) only gates NEW work and is rolled back
+  // on a failed attempt; live stores keep flushing until the point of no
+  // return (commit), so a failed delete never eats a terminal flush.
+  const ws = mkdtempSync(join(tmpdir(), "cmb-rollback-"))
+  try {
+    const threadId = "thread-disposal-rollback"
+    const runId = generateWorkflowRunId()
+    const now = new Date().toISOString()
+    const store = createWorkflowRunStore({
+      workspacePath: ws,
+      threadId,
+      initial: {
+        version: 1,
+        runId,
+        threadId,
+        workflowName: "rollback",
+        script: "x",
+        scriptSha256: sha256Hex("x"),
+        status: "running",
+        phases: [],
+        currentPhase: null,
+        agents: [],
+        logs: [],
+        journal: [],
+        stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+        startedAt: now,
+        updatedAt: now
+      }
+    })
+    await store.whenInitialPersisted
+    const prior = isWorkflowThreadMarkedDisposed(threadId)
+    markWorkflowThreadDisposed(threadId) // deletion attempt begins
+    assert(
+      isWorkflowRunDirDisposed(ws, threadId) === true,
+      "the mark gates new work while the attempt is in flight"
+    )
+    store.update((run) => {
+      run.logs.push("terminal flush during the attempt")
+    })
+    assert(
+      (await store.flush()) === true &&
+        loadWorkflowRun(ws, threadId, runId)?.logs.includes("terminal flush during the attempt") ===
+          true,
+      "a live store still flushes DURING the attempt — the mark must not eat a cancelled run's terminal state"
+    )
+    rollbackWorkflowThreadDisposal(threadId, prior) // ...and the attempt fails pre-dbDelete
+    assert(
+      isWorkflowRunDirDisposed(ws, threadId) === false,
+      "the failed attempt's rollback lifts its own mark (launches work again)"
+    )
+
+    // Prior-membership preservation: an id already tombstoned by a COMPLETED
+    // deletion must keep its tombstone through a later failed attempt.
+    const deadId = "thread-disposal-rollback-dead"
+    markWorkflowThreadDisposed(deadId)
+    commitWorkflowThreadDisposal(deadId) // a completed deletion
+    const deadPrior = isWorkflowThreadMarkedDisposed(deadId)
+    markWorkflowThreadDisposed(deadId) // a later attempt on the same id...
+    rollbackWorkflowThreadDisposal(deadId, deadPrior) // ...fails
+    assert(
+      isWorkflowThreadMarkedDisposed(deadId) === true,
+      "rollback restores prior membership — it must not lift an earlier COMPLETED deletion's tombstone"
+    )
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+}
+async function testUndeliveredScanEligibilityPredicate(): Promise<void> {
+  // Busy-guard support: with the newest undelivered run excluded by the
+  // predicate (e.g. renotify-exhausted), the scan must keep going and return
+  // the OLDER still-eligible run instead of reporting "nothing pending".
+  const ws = mkdtempSync(join(tmpdir(), "cmb-eligible-scan-"))
+  try {
+    const threadId = "thread-eligible-scan"
+    const now = new Date().toISOString()
+    const mk = (runId: string): PersistedWorkflowRun => ({
+      version: 1,
+      runId,
+      threadId,
+      workflowName: "scan",
+      script: "x",
+      scriptSha256: "sha",
+      status: "completed",
+      phases: [],
+      currentPhase: null,
+      agents: [],
+      logs: [],
+      journal: [],
+      stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+      startedAt: now,
+      updatedAt: now
+    })
+    const older = generateWorkflowRunId()
+    const newer = generateWorkflowRunId()
+    assert((await persistRecoveredRun(ws, threadId, mk(older))) === true)
+    await new Promise((r) => setTimeout(r, 20)) // distinct mtimes, newest-first order
+    assert((await persistRecoveredRun(ws, threadId, mk(newer))) === true)
+
+    const unfiltered = findUndeliveredTerminalRun(ws, threadId)
+    assert(unfiltered?.runId === newer, "without a predicate the newest undelivered wins")
+    const filtered = findUndeliveredTerminalRun(ws, threadId, (runId) => runId !== newer)
+    assert(
+      filtered?.runId === older,
+      "an ineligible newest candidate must not hide the older deliverable run (guard blind spot)"
+    )
+    const none = findUndeliveredTerminalRun(ws, threadId, () => false)
+    assert(none === null, "all-ineligible scan reports nothing pending")
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
 }
 
 async function testFlushReportsPersistFailure(): Promise<void> {
@@ -3845,6 +4126,11 @@ async function main(): Promise<void> {
     await testFlushReportsPersistFailure()
     await testPersistRecoveredRunKeepsJournal(workspace)
     await testPersistRecoveredRunVerifiesAvailableSidecar(workspace)
+    await testPersistRecoveredRunRespectsDisposedTombstone(workspace)
+    await testReviveDoesNotRearmOldStores()
+    await testRecoveredRunRespectsDisposalEpoch()
+    await testDisposalRollbackRestoresSurvivingThread()
+    await testUndeliveredScanEligibilityPredicate()
     testResumedFlagPersisted()
     testReconcileHydratedRun()
     await testGlobCapStreamEarlyStop()

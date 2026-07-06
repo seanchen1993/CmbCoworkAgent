@@ -304,6 +304,8 @@ export interface ModelRetryState {
 /** One failover attempt shown in the error detail card. */
 export interface ApiErrorFailoverAttempt {
   modelId: string
+  modelDisplayName?: string
+  modelName?: string
   reason: string
 }
 
@@ -321,6 +323,9 @@ export interface ApiErrorDetailState {
   reason?: string
   providerMessage?: string
   rawBody?: string
+  modelId?: string
+  modelDisplayName?: string
+  modelName?: string
   model?: string
   failover?: ApiErrorFailoverAttempt[]
 }
@@ -569,6 +574,8 @@ interface ThreadContextValue {
   // Subscribe to all stream updates
   subscribeToAllStreams: (callback: () => void) => () => void
   suppressCoordinatorNotificationAutoRun: (threadId: string) => void
+  // 以主进程 isRunning 为权威,校正心跳/定时任务线程的运行锁(丢 done 自愈)
+  reconcileScheduledRunStates: () => void
 }
 
 // Default thread state
@@ -921,6 +928,10 @@ const ThreadContext = createContext<ThreadContextValue | null>(null)
 interface CustomEventData {
   type?: string
   request?: HITLRequest
+  toolName?: string
+  fingerprint?: string
+  threshold?: number
+  lastError?: string
   files?: Array<{ path: string; is_dir?: boolean; size?: number }>
   path?: string
   subagents?: Array<{
@@ -2651,6 +2662,55 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           toast.warning(action === "halt" ? `Hook 已停止本轮：${reason}` : `Hook 已阻断：${reason}`)
           break
         }
+        case "failure_fuse_warning": {
+          const toolName =
+            typeof data.toolName === "string" && data.toolName.trim() ? data.toolName : undefined
+          const countText =
+            typeof data.count === "number" && typeof data.threshold === "number"
+              ? `（${data.count}/${data.threshold}）`
+              : ""
+          const prefix =
+            data.action === "strong_warn" ? "工具重复失败强提醒" : "工具重复失败提醒"
+          const message =
+            typeof data.count === "number"
+              ? `同类错误已重复出现 ${data.count} 次，本轮不会停止。`
+              : "同类工具错误重复出现，本轮不会停止。"
+          toast.warning(`${prefix}${toolName ? `：${toolName}` : ""}${countText}：${message}`)
+          break
+        }
+        case "failure_fuse_tripped": {
+          const reason =
+            (typeof data.reason === "string" && data.reason.trim()) ||
+            (typeof data.message === "string" && data.message.trim()) ||
+            "同类工具错误重复出现，已停止本轮以避免继续重试"
+          const toolName =
+            typeof data.toolName === "string" && data.toolName.trim() ? data.toolName : undefined
+          const details = [
+            toolName ? `tool=${toolName}` : undefined,
+            typeof data.count === "number" && typeof data.threshold === "number"
+              ? `count=${data.count}/${data.threshold}`
+              : undefined,
+            typeof data.fingerprint === "string" && data.fingerprint.trim()
+              ? `fingerprint=${data.fingerprint}`
+              : undefined,
+            typeof data.lastError === "string" && data.lastError.trim()
+              ? `lastError=${data.lastError}`
+              : undefined
+          ].filter((item): item is string => Boolean(item))
+          updateThreadState(threadId, () => ({
+            error: null,
+            errorDetail: null,
+            hookInterruption: {
+              event: toolName ? `Failure fuse: ${toolName}` : "Failure fuse",
+              action: "halt",
+              reason,
+              systemMessage: details.length > 0 ? details.join("\n") : undefined,
+              timestamp: new Date()
+            }
+          }))
+          toast.warning(`工具失败熔断已停止本轮：${reason}`)
+          break
+        }
         case "auto_commit_result":
           if (data.result) {
             const message = formatAutoCommitText(data.result)
@@ -3143,15 +3203,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 : {})
             }))
           }
+          // 双向水合:isRunning 是权威电平,false 也要落地——否则上次视图残留的
+          // 冻结 loading(丢 done)在重新打开时永远无人清除。刚起跑的竞争由
+          // started 边沿事件补齐,两者收敛。
           if (metadata.scheduledTaskId) {
             const taskId = metadata.scheduledTaskId as string
             updateThreadState(threadId, () => ({ scheduledTaskId: taskId }))
             window.api.scheduledTasks
               .isRunning(taskId)
               .then((running) => {
-                if (running) {
-                  updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
-                }
+                updateThreadState(threadId, (prev) =>
+                  prev.scheduledTaskLoading === running ? {} : { scheduledTaskLoading: running }
+                )
               })
               .catch(() => {})
           }
@@ -3159,9 +3222,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             window.api.heartbeat
               .isRunning()
               .then((running) => {
-                if (running) {
-                  updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
-                }
+                updateThreadState(threadId, (prev) =>
+                  prev.scheduledTaskLoading === running ? {} : { scheduledTaskLoading: running }
+                )
               })
               .catch(() => {})
           }
@@ -4140,6 +4203,53 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [clearSchedulerStreamingForThread, saveSubagentTranscripts]
   )
 
+  // 运行态电平校正(心跳 + 定时任务线程)安全网:输入锁 scheduledTaskLoading 平时
+  // 由流事件边沿驱动(started/数据置 true,done/error 清 false),一旦 done 丢失
+  // (监听器被清、窗口错过广播)就永久冻结——此时主进程已空闲,取消按钮打过去是
+  // 无任务可停的空操作,界面表现为"卡死且点不动"。这里以主进程 isRunning 为权威,
+  // 在 changed 广播与手动取消后校正。
+  //
+  // 只清不设:isRunning 按 taskId 判定,而多个线程可共用同一 taskId(同一定时任务被
+  // 反复触发,每次新建线程)。若在此把 running=true 回写,任务再次跑进新线程时会把
+  // 旧的已完成线程一并错标成 loading——反而制造旋转。设 true 是流 "started" 事件和
+  // 打开线程时水合(读该线程自身 metadata)的职责,各自按线程精确;这个 changed 安全
+  // 网只负责清除任务已停后仍残留的 loading。写入前重读当前 store,过期快照不落地;
+  // 清除时同步清残留流气泡并重载历史,恢复干净视图。
+  // (ChatX 线程同轨但缺按线程的 isRunning 查询,暂不覆盖,见 roadmap。)
+  const reconcileScheduledRunStates = useCallback(() => {
+    const reconcileThread = (threadId: string, runningPromise: Promise<boolean>): void => {
+      runningPromise
+        .then((running) => {
+          if (running) return // 只清不设:运行中交给 started 边沿/水合,避免 taskId 别名误标
+          if (!initializedThreadsRef.current.has(threadId)) return
+          if (threadStatesRef.current[threadId]?.scheduledTaskLoading !== true) return
+          clearSchedulerStreamingForThread(threadId)
+          loadThreadHistory(threadId)
+          updateThreadState(threadId, () => ({ scheduledTaskLoading: false }))
+        })
+        .catch(() => {})
+    }
+    if (initializedThreadsRef.current.has("heartbeat")) {
+      reconcileThread("heartbeat", window.api.heartbeat.isRunning())
+    }
+    for (const [threadId, state] of Object.entries(threadStatesRef.current)) {
+      if (threadId === "heartbeat") continue
+      const taskId = state?.scheduledTaskId
+      if (!taskId || !initializedThreadsRef.current.has(threadId)) continue
+      reconcileThread(threadId, window.api.scheduledTasks.isRunning(taskId))
+    }
+  }, [clearSchedulerStreamingForThread, loadThreadHistory, updateThreadState])
+
+  useEffect(() => {
+    const offHeartbeat = window.api.heartbeat.onChanged(reconcileScheduledRunStates)
+    const offTasks = window.api.scheduledTasks.onChanged(reconcileScheduledRunStates)
+    reconcileScheduledRunStates()
+    return () => {
+      offHeartbeat()
+      offTasks()
+    }
+  }, [reconcileScheduledRunStates])
+
   const contextValue = useMemo<ThreadContextValue>(
     () => ({
       getThreadState,
@@ -4153,7 +4263,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams,
-      suppressCoordinatorNotificationAutoRun
+      suppressCoordinatorNotificationAutoRun,
+      reconcileScheduledRunStates
     }),
     [
       getThreadState,
@@ -4167,7 +4278,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams,
-      suppressCoordinatorNotificationAutoRun
+      suppressCoordinatorNotificationAutoRun,
+      reconcileScheduledRunStates
     ]
   )
 
