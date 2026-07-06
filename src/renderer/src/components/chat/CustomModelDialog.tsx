@@ -964,9 +964,7 @@ export function CustomModelDialog({
               </div>
 
               <div className="space-y-1">
-                <ParameterLabel explanation="开启后，模型在输出回答的同时流式输出思考过程。仅当模型支持且已开启思考模式时可用，例如 minimax 模型。">
-                  交错思考
-                </ParameterLabel>
+                <label className="text-xs font-medium text-muted-foreground">交错思考</label>
                 <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
                   <div>
                     <div className="text-sm text-foreground">
