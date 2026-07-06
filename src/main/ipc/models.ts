@@ -3589,6 +3589,25 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           }
         }
 
+        if (enableThinking) {
+          const body = await res.json().catch(() => null)
+          if (!body || typeof body !== "object") {
+            return { success: false, error: "响应格式异常", latencyMs }
+          }
+          const choice = Array.isArray(body.choices) ? body.choices[0] : null
+          const message = choice?.message
+          const hasReasoning =
+            typeof message?.reasoning_content === "string" ||
+            typeof message?.reasoning === "string"
+          if (!hasReasoning) {
+            return {
+              success: false,
+              error: "思考模式已开启，但模型未返回思考内容（reasoning），该模型可能不支持思考功能",
+              latencyMs
+            }
+          }
+        }
+
         return { success: true, latencyMs }
       } catch (e) {
         const latencyMs = Date.now() - start
