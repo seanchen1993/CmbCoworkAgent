@@ -187,6 +187,11 @@ async function assertCanPersistExplicitNormalMode(
           : undefined
     const active = workflowRunManager.isActive(threadId)
     const pendingRun = wsp ? workflowRunManager.findPendingNotification(wsp, threadId) : null
+    // Scan ALL pending runs, not just the first candidate: an exhausted newest
+    // run must not unlock the exit while an older, still-deliverable run waits.
+    const deliverablePending = wsp
+      ? workflowRunManager.hasDeliverablePendingNotification(wsp, threadId)
+      : false
     // Escape hatch: don't block on a pending run whose auto-re-report has been
     // exhausted this process (wedged report turn / API outage) — else the user is
     // locked in workflow mode with no exit but deleting the thread. HONEST CAVEAT
@@ -199,7 +204,7 @@ async function assertCanPersistExplicitNormalMode(
     // history panel), just off the auto-report path until the user returns to
     // workflow mode there. (So this is "leave but you'll have to come back for it",
     // not "leave and it follows you".)
-    const pending = pendingRun !== null && !workflowRunManager.isRenotifyExhausted(pendingRun.runId)
+    const pending = deliverablePending
     if (active || pending) {
       throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换模式。")
     }
@@ -687,40 +692,49 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     const priorDisposalMark = isWorkflowThreadMarkedDisposed(threadId)
     markWorkflowThreadDisposed(threadId)
 
-    // A background dynamic workflow must not outlive its thread. Cancel and wait
-    // (bounded) for it to settle — best-effort, so a slow subagent can't hang
-    // this IPC. The orphan-directory race is closed regardless of the timeout:
-    // the tombstone above and deleteWorkflowRunsForThread (below) make any late
-    // flush from a still-settling run a no-op, so it can't recreate the dir.
-    try {
-      await workflowRunManager.cancelAndWait(threadId)
-    } catch (error) {
-      console.warn("[Threads] Workflow cancel on delete failed:", error)
-    }
-    // Drop the thread's tool-concurrency locks so the module-level map doesn't
-    // keep one idle lock per deleted thread for the process lifetime.
-    clearToolConcurrencyLocksForThread(threadId)
-    // Fire SessionEnd before teardown so hooks can observe a valid thread record.
-    // No-op if SessionStart never fired for this thread.
-    const existingThread = getThread(threadId)
-    let workspacePath: string | undefined
-    if (existingThread?.metadata) {
-      try {
-        const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
-        workspacePath =
-          typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
-      } catch {
-        workspacePath = undefined
-      }
-    }
-    const window = BrowserWindow.fromWebContents(event.sender)
-    const hookChannel = `agent:stream:${threadId}`
-    // Everything up to (and including) the DB delete can still fail with the
-    // thread intact — roll the workflow tombstone back in that case so the
-    // SURVIVING thread isn't left with poisoned stores/launches until restart.
+    // Everything from here up to (and including) the DB delete can still fail
+    // with the thread intact — the catch below rolls the workflow tombstone
+    // back so the SURVIVING thread isn't left with poisoned stores/launches
+    // until restart. The guard starts IMMEDIATELY after the mark: even the
+    // metadata reads above the hook dispatch are DB reads that can throw.
     // After dbDeleteThread succeeds the thread is gone for good and the
     // tombstone must stay, whatever the later best-effort cleanups do.
+    let workspacePath: string | undefined
     try {
+      // Fallback workspace capture BEFORE cancelAndWait (which settles and
+      // removes the active entry): if the thread's metadata lost its
+      // workspacePath, the active run still knows where its artifacts live —
+      // without this, the row gets deleted but `.cmbdevclaw/workflows/<id>`
+      // survives in a workspace the sweep can no longer locate.
+      const activeWorkspaceFallback = workflowRunManager.activeWorkspaceForThread(threadId)
+      // A background dynamic workflow must not outlive its thread. Cancel and
+      // wait (bounded) for it to settle — best-effort, so a slow subagent
+      // can't hang this IPC. The orphan-directory race is closed regardless of
+      // the timeout: the tombstone above and deleteWorkflowRunsForThread
+      // (below) make any late flush from a still-settling run a no-op.
+      try {
+        await workflowRunManager.cancelAndWait(threadId)
+      } catch (error) {
+        console.warn("[Threads] Workflow cancel on delete failed:", error)
+      }
+      // Drop the thread's tool-concurrency locks so the module-level map
+      // doesn't keep one idle lock per deleted thread for the process lifetime.
+      clearToolConcurrencyLocksForThread(threadId)
+      // Fire SessionEnd before teardown so hooks can observe a valid thread
+      // record. No-op if SessionStart never fired for this thread.
+      const existingThread = getThread(threadId)
+      if (existingThread?.metadata) {
+        try {
+          const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
+          workspacePath =
+            typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+        } catch {
+          workspacePath = undefined
+        }
+      }
+      workspacePath = workspacePath ?? activeWorkspaceFallback
+      const window = BrowserWindow.fromWebContents(event.sender)
+      const hookChannel = `agent:stream:${threadId}`
       await fireSessionEnd(
         threadId,
         workspacePath,
@@ -751,6 +765,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       commitWorkflowThreadDisposal(threadId)
       console.log("[Threads] Deleted from metadata store")
     } catch (e) {
+      // Rollback restores ONLY the workflow tombstone. The other pre-DB-delete
+      // effects (workflow cancelAndWait, session-end hooks, turn-state dispose,
+      // worker cancellation) are deliberately NOT rolled back — an abort cannot
+      // be un-aborted, and the user's intent WAS deletion: a failed attempt
+      // leaves a surviving thread whose background work has been stopped, which
+      // is visible, recoverable state (re-run / re-delete both work). Only the
+      // tombstone must roll back, because it alone would silently poison future
+      // workflow use of the surviving thread until restart.
       rollbackWorkflowThreadDisposal(threadId, priorDisposalMark)
       throw e
     }

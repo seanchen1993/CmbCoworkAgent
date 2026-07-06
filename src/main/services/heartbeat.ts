@@ -302,20 +302,30 @@ async function executeHeartbeat(): Promise<void> {
     reviveRetiredThread(threadId)
     reviveWorkflowThread(threadId)
 
-    // Ensure thread exists in DB and metadata stays current
+    // Ensure thread exists in DB and metadata stays current. `model` mirrors the
+    // heartbeat's selected model into the thread metadata so ModelSwitcher shows
+    // it on idle open (hydration reads metadata.model); without it currentModel
+    // hydrates empty and the footer falls back to models[0]. The live routing_result
+    // event above covers the running case; this covers the idle case. effectiveModelId
+    // is guaranteed non-empty here by the gate above.
     const existing = dbGetThread(threadId)
     if (!existing) {
       dbCreateThread(threadId, {
         workspacePath: config.workDir,
         title: "[Heartbeat] 心跳检查",
-        isHeartbeat: true
+        isHeartbeat: true,
+        model: effectiveModelId
       })
       notifyRenderer("threads:changed")
     } else {
       const meta = existing.metadata ? JSON.parse(existing.metadata) : {}
-      if (meta.workspacePath !== config.workDir) {
+      if (meta.workspacePath !== config.workDir || meta.model !== effectiveModelId) {
         dbUpdateThread(threadId, {
-          metadata: JSON.stringify({ ...meta, workspacePath: config.workDir })
+          metadata: JSON.stringify({
+            ...meta,
+            workspacePath: config.workDir,
+            model: effectiveModelId
+          })
         })
       }
     }
@@ -358,6 +368,25 @@ async function executeHeartbeat(): Promise<void> {
 
     let fullReply = ""
     broadcastToChannel(channel, { type: "started" })
+
+    // Surface the actually-used model to the renderer. The heartbeat thread never
+    // persists a model to its metadata (its selection lives in heartbeat-config),
+    // and this stream — unlike the chat agent path — otherwise emits no
+    // routing_result, so the footer's currentModel stays empty and ModelSwitcher
+    // falls back to models[0] (always "first model"). This mirrors the chat path's
+    // custom/routing_result envelope; handleCustomEvent syncs currentModel from it
+    // (in-memory only, not written back to metadata).
+    if (effectiveModelId) {
+      broadcastToChannel(channel, {
+        type: "custom",
+        data: {
+          type: "routing_result",
+          resolvedModelId: effectiveModelId,
+          resolvedTier: routingResult?.resolvedTier ?? "premium",
+          routeReason: routingResult?.routeReason ?? "heartbeat-config"
+        }
+      })
+    }
 
     for await (const chunk of stream) {
       if (controller.signal.aborted) break

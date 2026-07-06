@@ -357,6 +357,13 @@ class WorkflowRunManager {
     return this.active.get(threadId)?.runId
   }
 
+  /** The workspace of the thread's ACTIVE run, if any. threads:delete uses it
+   * as a fallback when the thread's metadata lost its workspacePath — the run
+   * entry knows where its artifacts live, so the sweep can still find them. */
+  activeWorkspaceForThread(threadId: string): string | undefined {
+    return this.active.get(threadId)?.workspacePath
+  }
+
   /**
    * A run active over the same workspace on ANY thread. NOT a launch mutex —
    * concurrent same-workspace workflows on different threads are intentionally
@@ -394,8 +401,32 @@ class WorkflowRunManager {
   isBusyForThread(threadId: string, workspacePath: string | undefined): boolean {
     if (this.isActive(threadId)) return true
     if (!workspacePath) return false
-    const pendingRun = this.findPendingNotification(workspacePath, threadId)
-    return pendingRun !== null && !this.isRenotifyExhausted(pendingRun.runId)
+    return this.hasDeliverablePendingNotification(workspacePath, threadId)
+  }
+
+  /** Busy-guard variant of findPendingNotification WITHOUT its first-candidate
+   * blind spot: that lookup returns the newest/flush-failed candidate only, so
+   * an exhausted (or in-flight) FIRST candidate makes single-candidate guards
+   * report idle while an older, perfectly deliverable run still waits — and a
+   * workspace switch / mode exit would orphan it off the auto-report path.
+   * Deliverable = not delivered AND renotify not exhausted; an in-flight one
+   * COUNTS as busy (it stays undelivered until its ack lands). */
+  hasDeliverablePendingNotification(workspacePath: string, threadId: string): boolean {
+    // In-flight explicitly counts as busy even for an exhausted run: a
+    // hydrate/kick can re-report an exhausted run, and exiting workflow mode
+    // mid-report would strand that delivery.
+    const deliverable = (runId: string): boolean =>
+      this.inFlightNotifications.has(runId) || !this.isRenotifyExhausted(runId)
+    for (const snapshot of this.flushFailedRuns.values()) {
+      if (
+        snapshot.threadId === threadId &&
+        !snapshot.notificationDelivered &&
+        deliverable(snapshot.runId)
+      ) {
+        return true
+      }
+    }
+    return findUndeliveredTerminalRun(workspacePath, threadId, deliverable) !== null
   }
 
   /** Launches a run in the background. Throws synchronously on invalid state. */
@@ -692,6 +723,10 @@ class WorkflowRunManager {
     // A run whose final persist failed has a stale on-disk copy (maybe still
     // "running", invisible to the disk scan below), so prefer its in-memory
     // snapshot — that's its true terminal state. Skip one already in-flight.
+    // NOTE: this scans in Map INSERTION order (oldest flush-failure first,
+    // FIFO reporting) — deliberately NOT the disk path's newest-first; with
+    // multiple flush-failed snapshots the earliest completed one reports
+    // first, and nothing is lost either way.
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
@@ -850,7 +885,17 @@ class WorkflowRunManager {
    */
   renotify(threadId: string, runId: string): boolean {
     const attempts = (this.renotifyAttempts.get(runId) ?? 0) + 1
-    if (attempts > MAX_RENOTIFY_ATTEMPTS) return false
+    if (attempts > MAX_RENOTIFY_ATTEMPTS) {
+      // Record the REFUSAL as the exhaustion sentinel (attempts becomes
+      // MAX+1). Exhaustion must not be declared one step earlier — at the
+      // MAXth broadcast the final re-report is merely SCHEDULED, and treating
+      // it as exhausted lets the mode-exit guard unlock before the renderer's
+      // timer fires; the renderer then drops the notification (thread no
+      // longer in workflow mode) and the last allowed report is silently
+      // thrown away.
+      this.renotifyAttempts.set(runId, attempts)
+      return false
+    }
     this.renotifyAttempts.set(runId, attempts)
     broadcast(threadId, { type: "workflow_notification", runId })
     return true
@@ -865,7 +910,10 @@ class WorkflowRunManager {
    * still retries it while the thread remains in workflow mode.
    */
   isRenotifyExhausted(runId: string): boolean {
-    return (this.renotifyAttempts.get(runId) ?? 0) >= MAX_RENOTIFY_ATTEMPTS
+    // STRICTLY greater: attempts === MAX means the final re-report has been
+    // dispatched and is still pending — deliverable, not exhausted. The
+    // sentinel (MAX+1) is written only when a further attempt is refused.
+    return (this.renotifyAttempts.get(runId) ?? 0) > MAX_RENOTIFY_ATTEMPTS
   }
 
   /**

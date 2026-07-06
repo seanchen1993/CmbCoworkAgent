@@ -1754,6 +1754,51 @@ async function testDisposalRollbackRestoresSurvivingThread(): Promise<void> {
     rmSync(ws, { recursive: true, force: true })
   }
 }
+async function testUndeliveredScanEligibilityPredicate(): Promise<void> {
+  // Busy-guard support: with the newest undelivered run excluded by the
+  // predicate (e.g. renotify-exhausted), the scan must keep going and return
+  // the OLDER still-eligible run instead of reporting "nothing pending".
+  const ws = mkdtempSync(join(tmpdir(), "cmb-eligible-scan-"))
+  try {
+    const threadId = "thread-eligible-scan"
+    const now = new Date().toISOString()
+    const mk = (runId: string): PersistedWorkflowRun => ({
+      version: 1,
+      runId,
+      threadId,
+      workflowName: "scan",
+      script: "x",
+      scriptSha256: "sha",
+      status: "completed",
+      phases: [],
+      currentPhase: null,
+      agents: [],
+      logs: [],
+      journal: [],
+      stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+      startedAt: now,
+      updatedAt: now
+    })
+    const older = generateWorkflowRunId()
+    const newer = generateWorkflowRunId()
+    assert((await persistRecoveredRun(ws, threadId, mk(older))) === true)
+    await new Promise((r) => setTimeout(r, 20)) // distinct mtimes, newest-first order
+    assert((await persistRecoveredRun(ws, threadId, mk(newer))) === true)
+
+    const unfiltered = findUndeliveredTerminalRun(ws, threadId)
+    assert(unfiltered?.runId === newer, "without a predicate the newest undelivered wins")
+    const filtered = findUndeliveredTerminalRun(ws, threadId, (runId) => runId !== newer)
+    assert(
+      filtered?.runId === older,
+      "an ineligible newest candidate must not hide the older deliverable run (guard blind spot)"
+    )
+    const none = findUndeliveredTerminalRun(ws, threadId, () => false)
+    assert(none === null, "all-ineligible scan reports nothing pending")
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+}
+
 async function testFlushReportsPersistFailure(): Promise<void> {
   // #4: flush() must report whether the FINAL write reached disk, so settle can
   // warn/retry instead of broadcasting a notification over a stale run. Force a
@@ -4085,6 +4130,7 @@ async function main(): Promise<void> {
     await testReviveDoesNotRearmOldStores()
     await testRecoveredRunRespectsDisposalEpoch()
     await testDisposalRollbackRestoresSurvivingThread()
+    await testUndeliveredScanEligibilityPredicate()
     testResumedFlagPersisted()
     testReconcileHydratedRun()
     await testGlobCapStreamEarlyStop()

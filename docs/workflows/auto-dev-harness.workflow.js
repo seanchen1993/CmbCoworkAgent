@@ -1686,7 +1686,14 @@ await writeFile(artifacts.finalVerification, stringify(finalReview))
 await writeFile(artifacts.deliveryReport, renderFinalReport(context, finalReview))
 await writeState(
   context,
-  finalReview.verdict === "ready" ? "verify_done" : "needs_fix",
+  // blocked 与 needs_fix 分开落账(镜像 requirement_blocked 先例):checkpoint
+  // 是只写标签、resume 走任务账本,但排障/UI 不该把"等人工介入"误读成
+  // "普通需要修复"。
+  finalReview.verdict === "ready"
+    ? "verify_done"
+    : finalReview.verdict === "blocked"
+      ? "verify_blocked"
+      : "needs_fix",
   finalReview.summary,
   finalReview.remainingIssues
 )

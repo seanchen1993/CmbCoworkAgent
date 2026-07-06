@@ -2595,13 +2595,13 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   // in workflow mode with no exit but deleting the thread.
   assert.match(
     agentIpcSource,
-    /!workflowRunManager\.isRenotifyExhausted\(pendingRun\.runId\)/,
-    "agent:invoke workflow guard releases a renotify-exhausted pending run"
+    /workflowRunManager\.hasDeliverablePendingNotification\(workspacePath, threadId\)/,
+    "agent:invoke workflow guard scans ALL pending runs (exhausted-only unlocks the exit; an older deliverable run keeps blocking)"
   )
   assert.match(
     threadsSource,
-    /!workflowRunManager\.isRenotifyExhausted\(pendingRun\.runId\)/,
-    "threads:update workflow guard releases a renotify-exhausted pending run"
+    /workflowRunManager\.hasDeliverablePendingNotification\(wsp, threadId\)/,
+    "threads:update workflow guard scans ALL pending runs (exhausted-only unlocks the exit; an older deliverable run keeps blocking)"
   )
   // #5 strand-caveat parity: the workspace-picker entry (the REAL switch path, hit
   // by "创建 Worktree 并切换" → workspace:set) must, after releasing a

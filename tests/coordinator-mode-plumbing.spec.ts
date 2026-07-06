@@ -2377,10 +2377,53 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "the deletion mutex entry is released on success AND failure (finally), so a failed delete can be retried"
   )
   const chatxService = await readProjectFile("src/main/services/chatx.ts")
+  assertIncludes(
+    chatxService,
+    "handleInbound(next, true)",
+    "chatx queue drain must skip receipt-dedup — the entry's id was marked when it was queued, so re-checking silently dropped every queued message"
+  )
+  assertOccurrenceCount(
+    chatxService,
+    "abortController.signal.reason === CHATX_STOP_ABORT_REASON",
+    1,
+    "the stop reason may be consulted ONCE, in the abort CLASSIFICATION only — never for a handler-side dedup release (stopChatX's synchronous release is the single point; a second delete can strip a redelivered copy's fresh mark)"
+  )
+  assertSourceOrder(
+    chatxService,
+    "const replySent = lastAssistantText",
+    'processedOutcome = "replied"',
+    "the replied outcome is claimed only AFTER the HTTP send is verified — a swallowed send failure must not masquerade as 回复完成 while the remote got nothing"
+  )
+  assertOccurrenceCount(
+    chatxService,
+    "drainNextQueued(",
+    5,
+    "queue draining continues on EVERY requeued exit (definition + main finally + robot-gone + workspace-missing + setup-failure) — an early-exiting requeued message must not strand the backlog"
+  )
   {
     const stopChatXBody = chatxService.slice(
       chatxService.indexOf("export function stopChatX"),
       chatxService.indexOf("export function cancelChatXByThreadId")
+    )
+    assertIncludes(
+      stopChatXBody,
+      "processedMsgIds.delete(queued.msgId)",
+      "stopChatX releases the dedup marks of the queued messages it drops — dropped ≠ processed, broker redeliveries must still land after a restart"
+    )
+    assertMatches(
+      chatxService,
+      /inFlightMsgIds\.delete\(chatKey\)[\s\S]{0,900}?sendChatXReply/,
+      "the success branch removes the message from the stop-releasable set BEFORE the reply is sent — a stop landing after the reply must not re-open an already-answered msgId for redelivery (duplicate tools/replies)"
+    )
+    assertIncludes(
+      stopChatXBody,
+      "processedMsgIds.delete(activeMsgId)",
+      "stopChatX releases the ACTIVE message's dedup mark synchronously at abort — the handler's finally-release loses the race against a quick reconnect's broker redelivery"
+    )
+    assertIncludes(
+      stopChatXBody,
+      "controller.abort(CHATX_STOP_ABORT_REASON)",
+      "stopChatX carries its intent ON the abort signal — the global `stopped` flag is reset by restartChatX before the aborted handler's catch runs, so a flag check there swallows broker redeliveries"
     )
     assertNotIncludes(
       stopChatXBody,
@@ -2389,6 +2432,12 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     )
   }
   const schedulerService = await readProjectFile("src/main/services/scheduler.ts")
+  assertSourceOrder(
+    schedulerService,
+    "await closeCheckpointer(threadId)",
+    "runningTasks.delete(taskId)",
+    "scheduler run state survives until the checkpointer close settles (owner-finally), while still deleting before the renderer broadcast"
+  )
   for (const [label, source] of [
     ["chatx", chatxService],
     ["scheduler", schedulerService]
@@ -2410,6 +2459,38 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     chatxService,
     /await closeCheckpointer\(threadId\)[^\n]*\n\s*runningChats\.delete\(chatKey\)/,
     "chatx keeps its runningChats gate up until the checkpointer close settles — an inbound in the close window would pin, skip the pending-close wait, and dual-write the reused thread's sqlite (heartbeat's finally, same family)"
+  )
+  {
+    const stopSchedulerBody = schedulerService.slice(
+      schedulerService.indexOf("export function stopScheduler"),
+      schedulerService.indexOf("function armTimer")
+    )
+    assertIncludes(
+      stopSchedulerBody,
+      "controller.abort()",
+      "stopScheduler still ABORTS every running task — abort-only means both halves: signal the stop AND leave run state to the owner's finally"
+    )
+    assertNotIncludes(
+      stopSchedulerBody,
+      "runningTasks.clear()",
+      "stopScheduler must NOT clear run state — executeTask's finally releases it after its own cleanup settles (owner-finally principle, same as stopChatX/stopHeartbeat)"
+    )
+    assertNotIncludes(
+      stopSchedulerBody,
+      "activeAbortControllers.clear()",
+      "stopScheduler must NOT clear controllers — isTaskRunning()/cancelTask() must stay accurate during the unwind window"
+    )
+  }
+  const workflowRunManagerSource = await readProjectFile("src/main/agent/workflow/run-manager.ts")
+  assertIncludes(
+    workflowRunManagerSource,
+    "> MAX_RENOTIFY_ATTEMPTS",
+    "exhaustion is STRICTLY greater-than: the MAXth (final) re-report is dispatched-and-pending, not exhausted — >= would unlock the mode-exit guard before the renderer timer fires and silently drop the last report"
+  )
+  assertIncludes(
+    workflowRunManagerSource,
+    "this.inFlightNotifications.has(runId) || !this.isRenotifyExhausted(runId)",
+    "the busy guard counts an in-flight (even exhausted) run as deliverable — exiting workflow mode mid-report would strand that delivery"
   )
   const heartbeatService = await readProjectFile("src/main/services/heartbeat.ts")
   assertIncludes(

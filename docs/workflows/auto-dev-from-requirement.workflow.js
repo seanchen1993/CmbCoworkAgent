@@ -1284,14 +1284,22 @@ const stats = {
 }
 await writeFile(
   artifacts.state,
-  renderState(finalStatus === "ready" ? "verify_done" : "needs_fix", {
-    normalized,
-    status: finalStatus,
-    summary: finalReview.summary,
-    blockers: finalReview.issues,
-    artifacts,
-    stats
-  })
+  // blocked 独立落账(镜像 plan_blocked/requirement_blocked 先例)。
+  renderState(
+    finalStatus === "ready"
+      ? "verify_done"
+      : finalStatus === "blocked"
+        ? "verify_blocked"
+        : "needs_fix",
+    {
+      normalized,
+      status: finalStatus,
+      summary: finalReview.summary,
+      blockers: finalReview.issues,
+      artifacts,
+      stats
+    }
+  )
 )
 
 const visibleArtifacts = {

@@ -80,8 +80,11 @@ export function stopScheduler(): void {
     console.log(`[Scheduler] Aborting running task on shutdown: ${id}`)
     controller.abort()
   }
-  activeAbortControllers.clear()
-  runningTasks.clear()
+  // Abort only — run state (runningTasks / activeAbortControllers) is released
+  // by each executeTask's finally AFTER its own cleanup and checkpointer close
+  // settle (same owner-finally principle as stopChatX/stopHeartbeat). Clearing
+  // here would make isTaskRunning()/cancelTask() lie during the unwind window,
+  // and a stop→start could re-run a task whose previous run is still settling.
   console.log("[Scheduler] Stopped scheduler service")
 }
 
@@ -398,13 +401,17 @@ async function executeTask(taskId: string): Promise<void> {
       }
     }
   } finally {
-    // IMPORTANT: delete from runningTasks BEFORE broadcasting done/error to the
-    // renderer, otherwise the renderer's loadThreadHistory → isRunning check will
-    // see the task as still running and re-set scheduledTaskLoading = true (race).
+    releaseCheckpointerPin()
+    // Close FIRST, then release run state, then broadcast — two contracts at
+    // once: (1) owner-finally principle (same as chatx/heartbeat): the task
+    // counts as running until its checkpointer close settles, so a runNow in
+    // the close window is refused instead of overlapping a still-settling
+    // run; (2) renderer contract: runningTasks is deleted BEFORE the done/
+    // error broadcast, so loadThreadHistory → isRunning never races back to
+    // scheduledTaskLoading = true.
+    await closeCheckpointer(threadId).catch(() => {})
     runningTasks.delete(taskId)
     activeAbortControllers.delete(taskId)
-    releaseCheckpointerPin()
-    await closeCheckpointer(threadId).catch(() => {})
 
     // Now broadcast lifecycle event — renderer can safely call isRunning() = false
     if (taskError) {

@@ -1664,19 +1664,21 @@ function workflowLeaveBlockedMessage(
   workspacePath: string | undefined
 ): string | null {
   const active = workflowRunManager.isActive(threadId)
-  const pendingRun = workspacePath
-    ? workflowRunManager.findPendingNotification(workspacePath, threadId)
-    : null
-  // Escape hatch: if auto-re-report has given up on the pending run this process
-  // (a wedged report turn / API outage), stop blocking — otherwise the user is
-  // locked in workflow mode with no way out but deleting the thread. HONEST CAVEAT
-  // (#5): leaving takes the pending result OFF the auto-report path. A restart
-  // re-reports ONLY while the thread is still in workflow mode; after leaving (and
-  // especially after a later workspace switch, which makes list/hydrate look under
-  // the new path) the result is stranded under the ORIGINAL workspace — not lost
-  // (on disk, visible in that workspace's history), just reachable only by returning
-  // to workflow mode there. (Mirrors the caveat in threads.ts.)
-  const pending = pendingRun !== null && !workflowRunManager.isRenotifyExhausted(pendingRun.runId)
+  // Scan ALL pending runs (hasDeliverablePendingNotification), not just the
+  // first candidate: an exhausted newest run must not unlock the exit while an
+  // older, still-deliverable run waits. Escape hatch preserved: when EVERY
+  // pending run's auto-re-report has been exhausted this process (wedged report
+  // turn / API outage), stop blocking — otherwise the user is locked in
+  // workflow mode with no way out but deleting the thread. HONEST CAVEAT (#5):
+  // leaving takes the pending result OFF the auto-report path. A restart
+  // re-reports ONLY while the thread is still in workflow mode; after leaving
+  // (and especially after a later workspace switch, which makes list/hydrate
+  // look under the new path) the result is stranded under the ORIGINAL
+  // workspace — not lost (on disk, visible in that workspace's history), just
+  // reachable only by returning to workflow mode there. (Mirrors threads.ts.)
+  const pending = workspacePath
+    ? workflowRunManager.hasDeliverablePendingNotification(workspacePath, threadId)
+    : false
   return active || pending
     ? "仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换模式。"
     : null
@@ -5890,6 +5892,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (completionOutcome === "halted") {
               markInvokeIncomplete("Stop hook halted the turn.")
               pauseActiveGoalForRuntimeStop("Stop hook halted the turn.")
+              // A halted workflow-notification turn must NOT fall through to
+              // the success settlement below the loop — that would persist
+              // delivered=true for a report the model never finished, silently
+              // burying the run's result. Release the in-flight mark and keep
+              // delivered=false (the catch documents the same halt philosophy
+              // for the thrown shape): the next hydrate/restart re-surfaces it.
+              if (workflowNotificationToSettle) {
+                workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+                workflowNotificationToSettle = undefined
+              }
               break
             }
 
@@ -6474,6 +6486,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
         }
       } finally {
+        // Safety net for EARLY RETURNS inside the try (Stop hook blocked
+        // completion, PostSkillUse max revisions, goal-continuation halts…):
+        // success settles on the ack path and thrown errors settle in the
+        // catch, but a bare `return` bypasses BOTH — leaving the runId in
+        // inFlightNotifications for the process lifetime, where
+        // findPendingNotification keeps excluding it and the (still
+        // delivered=false) run can never be re-reported until restart. Clear
+        // the in-flight mark WITHOUT persisting delivered and WITHOUT
+        // auto-renotify — these exits are user/policy stops, mirroring the
+        // catch's documented halt semantics; the run stays re-discoverable.
+        if (workflowNotificationToSettle) {
+          workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+          workflowNotificationToSettle = undefined
+        }
         window.removeListener("closed", onWindowClosed)
         await settleDrainedCoordinatorNotifications("restore")
         if (clearCoordinatorNotificationSelectedSkillsOnExit) {

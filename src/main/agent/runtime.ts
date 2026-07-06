@@ -1106,9 +1106,10 @@ When NOT to use the task tool:
 // Skill lifecycle hooks can return guidance for the model, but that guidance
 // must not be appended to the SKILL.md file content returned by read_file.
 // Drain it into an independent system-message section on the next model call.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
 export function createSkillHookContextMiddleware(
   filesystemBackend: Partial<SkillHookContextProvider>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): any {
   return createMiddleware({
     name: "skillHookContext",
@@ -1293,7 +1294,6 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       schema: (taskTool as any).schema
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ) as unknown as DynamicStructuredTool
 }
 
@@ -1476,6 +1476,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Replace the default execute tool with a version that supports run_in_background.
     // Long-running commands (builds, dependency downloads) can be started in background
     // and their output retrieved later via task_output tool.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
       const oldExecute = mw.tools![executeIdx]
@@ -1521,6 +1522,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
             return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
           // Delegate to original execute handler for foreground execution
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const result = await (oldExecute as any).invoke(input)
           if (typeof result === "string") return result
           try {
@@ -1531,6 +1533,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         },
         {
           name: "execute",
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           description: (oldExecute as any).description,
           schema: z.object({
             command: z.string().describe("The shell command to execute"),
@@ -1797,13 +1800,14 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   })
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   const gradedToolConcurrencyMiddleware =
     createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
   const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
     `${toolConcurrencyQueueId}:subagent`
   )
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
     todoListMiddleware(),
     createFsMiddleware(),
@@ -2520,8 +2524,19 @@ export async function closeCheckpointer(threadId: string): Promise<void> {
     }
     approvalStores.delete(threadId)
   })().finally(() => {
-    if (closingCheckpointers.get(threadId) === closing) closingCheckpointers.delete(threadId)
-    if (instanceAtCall && closingInstances.get(threadId) === instanceAtCall) {
+    const stillOwnsClose = closingCheckpointers.get(threadId) === closing
+    if (stillOwnsClose) closingCheckpointers.delete(threadId)
+    // Mirror cleanup must ALSO verify close ownership, not just the instance:
+    // two overlapping closes of the SAME saver register the same instance
+    // value, and the first to settle would otherwise remove the mirror entry
+    // the still-in-flight second close (and a concurrent retire's poisoning)
+    // depends on. Complementary case: when WE own the channel but started with
+    // instanceAtCall undefined (the predecessor had already emptied the map),
+    // the predecessor deferred its mirror cleanup to us — sweep the stale
+    // entry, or the closed saver object is retained for the process lifetime.
+    // (Only close-deferred entries can be present here: evict and retire both
+    // clean their own mirror registrations on settle.)
+    if (stillOwnsClose && (!instanceAtCall || closingInstances.get(threadId) === instanceAtCall)) {
       closingInstances.delete(threadId)
     }
   })
@@ -2620,6 +2635,13 @@ export async function retireThreadCheckpointers(threadId: string): Promise<void>
       })().finally(() => {
         if (closingCheckpointers.get(id) === retiring) closingCheckpointers.delete(id)
         if (retiringCheckpointers.get(id) === retiring) retiringCheckpointers.delete(id)
+        // The superseded close's finally deliberately skips mirror cleanup
+        // once we took close ownership — so the mirror entry is OURS to clear,
+        // or the closed saver object leaks in closingInstances for the process
+        // lifetime.
+        if (closingInstance && closingInstances.get(id) === closingInstance) {
+          closingInstances.delete(id)
+        }
       })
       // Register synchronously, before any await, in BOTH channels: the
       // closing map keeps ordinary close/getCheckpointer chaining intact, and
@@ -3865,7 +3887,7 @@ The workspace root is: ${workspacePath}`
     // Disable ad hoc code_exec authoring in Agent Team and project mode. Saved tools remain
     // available through the deferred-tool bridge when code exec is enabled.
     codeExecRouteEnabled =
-      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !Boolean(featureId)
+      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !featureId
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)

@@ -1,7 +1,7 @@
 /**
  * Behavioral dry-run suite for docs/workflows/contract-delivery.workflow.js — mocks the workflow
  * sandbox globals (agent/parallel/phase/log/glob/readFile/writeFile) and runs
- * the REAL script end-to-end across scenarios (resume, gating, hard gates,
+ * the REAL script end-to-end across scenarios (gating, hard gates,
  * cascade invalidation...). Assertions print PASS/FAIL lines; any FAIL makes
  * the process exit non-zero so CI hard-fails.
  *
@@ -215,55 +215,6 @@ async function scenario1() {
   )
   console.log("最终 ready:", r.状态 === "可交付" ? "PASS" : "FAIL " + r.说明)
   return { files, behavior }
-}
-
-// ===== 场景2：续跑（全复用直达终审）+ forceAcIds 精确重打 =====
-async function scenario2(prev) {
-  const logs = []
-  const env = makeEnv({ files: prev.files, agentBehavior: prev.behavior, logs })
-  await runScript(
-    env.agent,
-    env.parallel,
-    env.phase,
-    env.log,
-    "契约测试需求甲",
-    env.glob,
-    env.readFile,
-    env.writeFile
-  )
-  console.log("\n== 场景2 续跑 ==")
-  console.log("复用合同与账本:", logs.some((l) => l.includes("复用已有交付合同")) ? "PASS" : "FAIL")
-  console.log("复用项目画像:", logs.some((l) => l.includes("复用已有项目画像")) ? "PASS" : "FAIL")
-  const calls = logs.filter((l) => l.startsWith("AGENT")).map((l) => l.slice(7))
-  console.log(
-    "跳过交付循环直达终审:",
-    JSON.stringify(calls) === JSON.stringify(["终审命令核对"])
-      ? "PASS"
-      : "FAIL " + JSON.stringify(calls)
-  )
-
-  const logs2 = []
-  const env2 = makeEnv({ files: prev.files, agentBehavior: prev.behavior, logs: logs2 })
-  const r2 = await runScript(
-    env2.agent,
-    env2.parallel,
-    env2.phase,
-    env2.log,
-    { requirement: "契约测试需求甲", forceAcIds: ["AC-1"] },
-    env2.glob,
-    env2.readFile,
-    env2.writeFile
-  )
-  const calls2 = logs2.filter((l) => l.startsWith("AGENT")).map((l) => l.slice(7))
-  // 轮次跨续跑连续计数:场景1用了2轮,此处续跑应从第3轮接着编号(不覆盖历史轮次产物)
-  const replanned = calls2.includes("第3轮规划") && calls2.some((c) => c.startsWith("实现R3"))
-  console.log(
-    "forceAcIds 重置并重打 AC-1(轮次续编):",
-    logs2.some((l) => l.includes("已重置标准 AC-1")) && replanned
-      ? "PASS"
-      : "FAIL " + JSON.stringify(calls2)
-  )
-  console.log("重打后仍 ready:", r2.状态 === "可交付" ? "PASS" : "FAIL")
 }
 
 // ===== 场景3：规划漏认领 → 告警且如实 needs_fix =====
@@ -683,6 +634,7 @@ async function scenario8() {
   // 8b: perAc 全 pass 但命令检查有 fail → 通过结论不予采信 → 不得证实
   {
     const logs = []
+    const contradictionFiles = {}
     const contradictoryVerify = (acIds) => ({
       status: "pass",
       summary: "看着行",
@@ -704,7 +656,7 @@ async function scenario8() {
       if (label.startsWith("对抗复核")) return { summary: "ok", refutations: [] }
       throw new Error("未知 label: " + label)
     }
-    const env = makeEnv({ files: {}, agentBehavior: behavior, logs })
+    const env = makeEnv({ files: contradictionFiles, agentBehavior: behavior, logs })
     const r = await runScript(
       env.agent,
       env.parallel,
@@ -723,80 +675,24 @@ async function scenario8() {
         ? "PASS"
         : "FAIL " + JSON.stringify(r.未证实)
     )
+    // 口径一致:矛盾降级后,包级报告头不得残留"总体:通过"(明细已全失败)。
+    const contradictionReports = Object.entries(contradictionFiles).filter(([, content]) =>
+      String(content).includes("包级验证不一致")
+    )
+    console.log(
+      "报告总体状态随明细同口径降级:",
+      contradictionReports.length > 0 &&
+        contradictionReports.every(([, content]) => !String(content).includes("**总体：** 通过"))
+        ? "PASS"
+        : "FAIL " + JSON.stringify(contradictionReports.map(([k]) => k))
+    )
   }
 }
 
 // ===== 场景9:显式合同覆盖旧状态 + 终审额外失败命令不可丢弃 =====
 async function scenario9() {
-  console.log("\n== 场景9 显式合同覆盖 + 额外失败命令 ==")
-  // 9a: 已交付状态存在时再显式注入新合同 → 必须按新合同重建账本并重新执行
-  {
-    const files = {}
-    const mkBehavior = () => (label, prompt) => {
-      if (label.startsWith("探索：")) return EXPLORE
-      if (/^第\d+轮规划$/.test(label)) return planFor(pendingFromPlanPrompt(prompt))
-      if (label.startsWith("实现R")) return IMPL_OK
-      if (label.startsWith("验证R")) {
-        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
-        const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
-        return {
-          status: "pass",
-          summary: "ok",
-          perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
-          commandChecks: [],
-          issues: [],
-          recommendedFixes: []
-        }
-      }
-      if (label.startsWith("对抗复核")) return { summary: "ok", refutations: [] }
-      if (label === "需求成契") throw new Error("显式合同注入不应调用成契")
-      throw new Error("未知 label: " + label)
-    }
-    const logsA = []
-    const envA = makeEnv({ files, agentBehavior: mkBehavior(), logs: logsA })
-    const rA = await runScript(
-      envA.agent,
-      envA.parallel,
-      envA.phase,
-      envA.log,
-      { requirement: "合同覆盖测试需求", contract: contractOf(1, [], "standard") },
-      envA.glob,
-      envA.readFile,
-      envA.writeFile
-    )
-    const logsB = []
-    const envB = makeEnv({ files, agentBehavior: mkBehavior(), logs: logsB })
-    const rB = await runScript(
-      envB.agent,
-      envB.parallel,
-      envB.phase,
-      envB.log,
-      { requirement: "合同覆盖测试需求", contract: contractOf(2, [], "standard") },
-      envB.glob,
-      envB.readFile,
-      envB.writeFile
-    )
-    console.log("首跑按合同A交付:", rA.状态 === "可交付" && rA.验收标准总数 === 1 ? "PASS" : "FAIL")
-    console.log(
-      "新合同覆盖旧状态并告警:",
-      logsB.some((l) => l.includes("账本按新合同重建")) ? "PASS" : "FAIL"
-    )
-    console.log(
-      "账本按新合同重建并重新执行:",
-      rB.验收标准总数 === 2 &&
-        logsB.some((l) => l.startsWith("AGENT: 实现R")) &&
-        rB.状态 === "可交付"
-        ? "PASS"
-        : "FAIL " + rB.验收标准总数 + "/" + rB.状态
-    )
-    console.log(
-      "新合同不复用旧项目画像且轮次重置:",
-      logsB.some((l) => l.startsWith("AGENT: 探索：")) && rB.轮次 === 1
-        ? "PASS"
-        : "FAIL " + JSON.stringify(logsB.filter((l) => l.startsWith("AGENT"))) + "/round=" + rB.轮次
-    )
-  }
-  // 9b: 终审如实报告清单外失败命令 → 不得丢弃,必须降级
+  console.log("\n== 场景9 终审额外失败命令不可丢弃 ==")
+  // 终审如实报告清单外失败命令 → 不得丢弃,必须降级
   {
     const files = {}
     const logs = []
@@ -1009,411 +905,6 @@ async function scenario10() {
   }
 }
 
-// ===== 场景11:同一显式合同重跑 → 按账本续跑,不得从零重置 =====
-async function scenario11() {
-  const files = {}
-  const mkBehavior = () => (label, prompt) => {
-    if (label.startsWith("探索：")) return EXPLORE
-    if (/^第\d+轮规划$/.test(label)) {
-      const pending = pendingFromPlanPrompt(prompt)
-      // 每轮只认领第一条待证实标准(制造跨运行分批)
-      return {
-        strategy: "s",
-        conventionsBrief: "公约",
-        canImplement: true,
-        blockers: [],
-        packages: [
-          {
-            id: "pkg-" + pending[0],
-            title: "包" + pending[0],
-            objective: "o",
-            acIds: [pending[0]],
-            targetFiles: [],
-            validationCommands: [],
-            dependencies: [],
-            riskLevel: "low"
-          }
-        ]
-      }
-    }
-    if (label.startsWith("实现R")) return IMPL_OK
-    if (label.startsWith("验证R")) {
-      const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
-      const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
-      return {
-        status: "pass",
-        summary: "ok",
-        perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
-        commandChecks: [],
-        issues: [],
-        recommendedFixes: []
-      }
-    }
-    if (label.startsWith("对抗复核")) return { summary: "ok", refutations: [] }
-    if (label === "需求成契") throw new Error("显式合同不应调用成契")
-    throw new Error("未知 label: " + label)
-  }
-  const logs1 = []
-  const env1 = makeEnv({ files, agentBehavior: mkBehavior(), logs: logs1 })
-  const r1 = await runScript(
-    env1.agent,
-    env1.parallel,
-    env1.phase,
-    env1.log,
-    { requirement: "同合同续跑测试需求", contract: contractOf(2, [], "standard"), maxRounds: 1.9 }, // 小数轮次必须取整为 1
-    env1.glob,
-    env1.readFile,
-    env1.writeFile
-  )
-  const logs2 = []
-  const env2 = makeEnv({ files, agentBehavior: mkBehavior(), logs: logs2 })
-  const r2 = await runScript(
-    env2.agent,
-    env2.parallel,
-    env2.phase,
-    env2.log,
-    {
-      requirement: "同合同续跑测试需求",
-      // 指纹鲁棒性:criteria 重排(显式 id 映射不变)+ 公约尾随空格,仍应判为同一合同
-      contract: (() => {
-        const base = contractOf(2, [], "standard")
-        return {
-          ...base,
-          criteria: [base.criteria[1], base.criteria[0]],
-          conventions: ["统一审计入口 "]
-        }
-      })()
-    },
-    env2.glob,
-    env2.readFile,
-    env2.writeFile
-  )
-  console.log("\n== 场景11 同一显式合同续跑 ==")
-  console.log(
-    "首跑分批后如实 needs_fix:",
-    r1.状态 === "需要修复" && r1.已证实 === 1 ? "PASS" : "FAIL " + r1.状态 + "/" + r1.已证实
-  )
-  console.log(
-    "同指纹合同按账本续跑:",
-    logs2.some((l) => l.includes("按同一合同续跑账本")) ? "PASS" : "FAIL"
-  )
-  console.log(
-    "画像复用(无重复探索):",
-    logs2.every((l) => !l.startsWith("AGENT: 探索：")) ? "PASS" : "FAIL"
-  )
-  console.log(
-    "轮次续编且最终可交付:",
-    r2.状态 === "可交付" && r2.已证实 === 2 && r2.轮次 === 2
-      ? "PASS"
-      : "FAIL " + r2.状态 + "/" + r2.已证实 + "/" + r2.轮次
-  )
-}
-
-// ===== 场景12:同验收语义换元数据(档位/标题)→ 账本续跑 + 新元数据生效;含旧状态无指纹 fallback =====
-async function scenario12() {
-  const files = {}
-  const mkBehavior = () => (label, prompt) => {
-    if (label.startsWith("探索：")) return EXPLORE
-    if (/^第\d+轮规划$/.test(label)) {
-      const pending = pendingFromPlanPrompt(prompt)
-      return {
-        strategy: "s",
-        conventionsBrief: "公约",
-        canImplement: true,
-        blockers: [],
-        packages: [
-          {
-            id: "pkg-" + pending[0],
-            title: "包" + pending[0],
-            objective: "o",
-            acIds: [pending[0]],
-            targetFiles: [],
-            validationCommands: [],
-            dependencies: [],
-            riskLevel: "low"
-          }
-        ]
-      }
-    }
-    if (label.startsWith("实现R")) return IMPL_OK
-    if (label.startsWith("验证R")) {
-      const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
-      const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
-      return {
-        status: "pass",
-        summary: "ok",
-        perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
-        commandChecks: [],
-        issues: [],
-        recommendedFixes: []
-      }
-    }
-    if (label.startsWith("对抗复核")) return { summary: "ok", refutations: [] }
-    if (label === "需求成契") throw new Error("显式合同不应调用成契")
-    throw new Error("未知 label: " + label)
-  }
-  // 首跑:standard 档,只完成 AC-1(maxRounds:1 分批)
-  const logs1 = []
-  const env1 = makeEnv({ files, agentBehavior: mkBehavior(), logs: logs1 })
-  await runScript(
-    env1.agent,
-    env1.parallel,
-    env1.phase,
-    env1.log,
-    { requirement: "元数据切换测试需求", contract: contractOf(2, [], "standard"), maxRounds: 1 },
-    env1.glob,
-    env1.readFile,
-    env1.writeFile
-  )
-  // 二跑:同 criteria,换 simple 档 + 新标题 → 账本续跑,新档位/标题生效
-  const logs2 = []
-  const env2 = makeEnv({ files, agentBehavior: mkBehavior(), logs: logs2 })
-  const c2 = { ...contractOf(2, [], "simple"), title: "新标题合同" }
-  const r2 = await runScript(
-    env2.agent,
-    env2.parallel,
-    env2.phase,
-    env2.log,
-    { requirement: "元数据切换测试需求", contract: c2 },
-    env2.glob,
-    env2.readFile,
-    env2.writeFile
-  )
-  console.log("\n== 场景12 元数据切换续跑 ==")
-  console.log(
-    "同指纹按账本续跑:",
-    logs2.some((l) => l.includes("按同一合同续跑账本")) ? "PASS" : "FAIL"
-  )
-  console.log(
-    "新档位生效(simple 直通,跳过规划代理):",
-    logs2.some((l) => l.includes("复杂度档位：simple")) &&
-      logs2.some((l) => l.includes("跳过规划代理"))
-      ? "PASS"
-      : "FAIL"
-  )
-  console.log("新标题生效:", r2.标题 === "新标题合同" ? "PASS" : "FAIL " + r2.标题)
-  console.log(
-    "进度未被重置(2/2 且可交付):",
-    r2.已证实 === 2 && r2.状态 === "可交付" ? "PASS" : "FAIL " + r2.已证实 + "/" + r2.状态
-  )
-
-  // 12b:旧状态无 contractFingerprint(升级前写入)→ 现场回算 fallback,仍按同一合同续跑
-  const files3 = {}
-  const logsA = []
-  const envA = makeEnv({ files: files3, agentBehavior: mkBehavior(), logs: logsA })
-  await runScript(
-    envA.agent,
-    envA.parallel,
-    envA.phase,
-    envA.log,
-    { requirement: "旧状态指纹测试需求", contract: contractOf(2, [], "standard"), maxRounds: 1 },
-    envA.glob,
-    envA.readFile,
-    envA.writeFile
-  )
-  const stateKey = Object.keys(files3).find((k) => k.endsWith("状态.json"))
-  const legacy = JSON.parse(files3[stateKey])
-  delete legacy.contractFingerprint // 模拟升级前的旧状态
-  files3[stateKey] = JSON.stringify(legacy)
-  const logsB = []
-  const envB = makeEnv({ files: files3, agentBehavior: mkBehavior(), logs: logsB })
-  const rB = await runScript(
-    envB.agent,
-    envB.parallel,
-    envB.phase,
-    envB.log,
-    { requirement: "旧状态指纹测试需求", contract: contractOf(2, [], "standard") },
-    envB.glob,
-    envB.readFile,
-    envB.writeFile
-  )
-  console.log(
-    "旧状态回算指纹仍续跑(不白重置):",
-    logsB.some((l) => l.includes("按同一合同续跑账本")) && rB.已证实 === 2 && rB.状态 === "可交付"
-      ? "PASS"
-      : "FAIL " + rB.已证实 + "/" + rB.状态
-  )
-}
-
-// ===== 场景13:档位升级重探(simple→standard) + 缺省元数据不改档 =====
-async function scenario13() {
-  console.log("\n== 场景13 档位升级重探 + 缺省元数据 ==")
-  const mkBehavior = () => (label, prompt) => {
-    if (label.startsWith("探索：")) return EXPLORE
-    if (/^第\d+轮规划$/.test(label)) {
-      const pending = pendingFromPlanPrompt(prompt)
-      return {
-        strategy: "s",
-        conventionsBrief: "公约",
-        canImplement: true,
-        blockers: [],
-        packages: [
-          {
-            id: "pkg-" + pending[0],
-            title: "包" + pending[0],
-            objective: "o",
-            acIds: [pending[0]],
-            targetFiles: [],
-            validationCommands: [],
-            dependencies: [],
-            riskLevel: "low"
-          }
-        ]
-      }
-    }
-    if (label.startsWith("实现R")) return IMPL_OK
-    if (label.startsWith("验证R")) {
-      const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
-      const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
-      return {
-        status: "pass",
-        summary: "ok",
-        perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
-        commandChecks: [],
-        issues: [],
-        recommendedFixes: []
-      }
-    }
-    if (label.startsWith("对抗复核")) return { summary: "ok", refutations: [] }
-    if (label === "需求成契") throw new Error("显式合同不应调用成契")
-    throw new Error("未知 label: " + label)
-  }
-  // 13a: simple 首跑(单视角画像,分批 1/2)→ 升 standard:必须重探(三视角)
-  {
-    const files = {}
-    const logsA = []
-    const envA = makeEnv({ files, agentBehavior: mkBehavior(), logs: logsA })
-    await runScript(
-      envA.agent,
-      envA.parallel,
-      envA.phase,
-      envA.log,
-      { requirement: "档位升级测试需求", contract: contractOf(4, [], "simple"), maxRounds: 1 },
-      envA.glob,
-      envA.readFile,
-      envA.writeFile
-    )
-    const exploreA = logsA.filter((l) => l.startsWith("AGENT: 探索：")).length
-    const logsB = []
-    const envB = makeEnv({ files, agentBehavior: mkBehavior(), logs: logsB })
-    await runScript(
-      envB.agent,
-      envB.parallel,
-      envB.phase,
-      envB.log,
-      { requirement: "档位升级测试需求", contract: contractOf(4, [], "standard"), maxRounds: 1 },
-      envB.glob,
-      envB.readFile,
-      envB.writeFile
-    )
-    const exploreB = logsB.filter((l) => l.startsWith("AGENT: 探索：")).length
-    console.log("simple 首跑单视角:", exploreA === 1 ? "PASS" : "FAIL " + exploreA)
-    console.log(
-      "升级日志出现:",
-      logsB.some((l) => l.includes("档位从 simple 升级")) ? "PASS" : "FAIL"
-    )
-    console.log("升 standard 重探三视角:", exploreB === 3 ? "PASS" : "FAIL " + exploreB)
-    console.log(
-      "账本仍续跑(非重置):",
-      logsB.some((l) => l.includes("按同一合同续跑账本")) ? "PASS" : "FAIL"
-    )
-  }
-  // 13c(旧状态兼容,检视方复现原样): simple 首跑后删掉 explorationComplexity 字段,
-  // 升 standard 续跑仍必须重探(从状态中的合同档位回推)
-  {
-    const files = {}
-    const logsA = []
-    const envA = makeEnv({ files, agentBehavior: mkBehavior(), logs: logsA })
-    await runScript(
-      envA.agent,
-      envA.parallel,
-      envA.phase,
-      envA.log,
-      {
-        requirement: "旧状态画像档位测试需求",
-        contract: contractOf(4, [], "simple"),
-        maxRounds: 1
-      },
-      envA.glob,
-      envA.readFile,
-      envA.writeFile
-    )
-    const stateKey = Object.keys(files).find((k) => k.endsWith("状态.json"))
-    const legacy = JSON.parse(files[stateKey])
-    delete legacy.explorationComplexity // 模拟升级前的旧状态
-    files[stateKey] = JSON.stringify(legacy)
-    const logsB = []
-    const envB = makeEnv({ files, agentBehavior: mkBehavior(), logs: logsB })
-    await runScript(
-      envB.agent,
-      envB.parallel,
-      envB.phase,
-      envB.log,
-      {
-        requirement: "旧状态画像档位测试需求",
-        contract: contractOf(4, [], "standard"),
-        maxRounds: 1
-      },
-      envB.glob,
-      envB.readFile,
-      envB.writeFile
-    )
-    const exploreLegacy = logsB.filter((l) => l.startsWith("AGENT: 探索：")).length
-    console.log("旧状态缺字段仍触发重探:", exploreLegacy === 3 ? "PASS" : "FAIL " + exploreLegacy)
-    console.log(
-      "回推路径日志正确:",
-      logsB.some((l) => l.includes("档位从 simple 升级")) ? "PASS" : "FAIL"
-    )
-  }
-  // 13b: standard 首跑 → 二跑只传 criteria(缺省 complexity/title)→ 沿用旧档位与标题
-  {
-    const files = {}
-    const logsA = []
-    const envA = makeEnv({ files, agentBehavior: mkBehavior(), logs: logsA })
-    await runScript(
-      envA.agent,
-      envA.parallel,
-      envA.phase,
-      envA.log,
-      { requirement: "缺省元数据测试需求", contract: contractOf(2, [], "standard"), maxRounds: 1 },
-      envA.glob,
-      envA.readFile,
-      envA.writeFile
-    )
-    const base = contractOf(2, [], "standard")
-    const minimal = {
-      criteria: base.criteria,
-      nonGoals: base.nonGoals,
-      constraints: base.constraints,
-      conventions: base.conventions,
-      globalValidationCommands: base.globalValidationCommands
-      // 故意不传 title/problem/goal/complexity
-    }
-    const logsB = []
-    const envB = makeEnv({ files, agentBehavior: mkBehavior(), logs: logsB })
-    const rB = await runScript(
-      envB.agent,
-      envB.parallel,
-      envB.phase,
-      envB.log,
-      { requirement: "缺省元数据测试需求", contract: minimal },
-      envB.glob,
-      envB.readFile,
-      envB.writeFile
-    )
-    console.log(
-      "缺省 complexity 沿用旧档(standard,不降 simple):",
-      logsB.some((l) => l.includes("复杂度档位：standard")) ? "PASS" : "FAIL"
-    )
-    console.log(
-      "规划代理仍被调用(非 simple 直通):",
-      logsB.some((l) => /AGENT: 第\d+轮规划/.test(l)) ? "PASS" : "FAIL"
-    )
-    console.log("缺省标题沿用旧标题:", rB.标题 === "测试合同" ? "PASS" : "FAIL " + rB.标题)
-    console.log("最终可交付:", rB.状态 === "可交付" ? "PASS" : "FAIL " + rB.状态)
-  }
-}
-
 // ===== 场景14:命令空白漂移不误判(归一化)+ 非法 complexity 必须报错 =====
 async function scenario14() {
   console.log("\n== 场景14 命令空白归一化 + complexity 校验 ==")
@@ -1541,9 +1032,65 @@ async function scenario14() {
   }
 }
 
+// ===== 场景15:对抗复核代理彻底故障 → 有声降级,绝不静默跳过 =====
+async function scenario15() {
+  console.log("\n== 场景15 对抗复核故障有声降级 ==")
+  const files = {}
+  const logs = []
+  const behavior = (label, prompt) => {
+    if (label === "需求成契") return contractOf(1, ["mvn test"], "simple")
+    if (label.startsWith("探索：")) return EXPLORE
+    if (label.startsWith("实现R")) return IMPL_OK
+    if (label.startsWith("验证R")) {
+      const acIds = acIdsFromPrompt(prompt)
+      return {
+        status: "pass",
+        summary: "ok",
+        perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
+        commandChecks: [{ command: "mvn test", result: "pass", evidence: "ok" }],
+        issues: [],
+        recommendedFixes: []
+      }
+    }
+    if (label.startsWith("对抗复核")) return null // 代理终态故障:引擎对重试耗尽返回 null
+    if (label === "终审命令核对")
+      return {
+        summary: "ok",
+        commands: [{ command: "mvn test", passed: true, evidence: "BUILD SUCCESS" }]
+      }
+    throw new Error("未知 label: " + label)
+  }
+  const env = makeEnv({ files, agentBehavior: behavior, logs })
+  const r = await runScript(
+    env.agent,
+    env.parallel,
+    env.phase,
+    env.log,
+    "契约测试需求复核故障",
+    env.glob,
+    env.readFile,
+    env.writeFile
+  )
+  console.log("复核故障不阻断交付(硬门禁仍在):", r.状态 === "可交付" ? "PASS" : "FAIL " + r.状态)
+  console.log(
+    "缺口有声记录到日志:",
+    logs.some((l) => l.includes("对抗复核未执行")) ? "PASS" : "FAIL"
+  )
+  const report = files[Object.keys(files).find((k) => k.endsWith("交付报告.md"))] || ""
+  console.log(
+    "交付报告披露质量机制缺口:",
+    report.includes("质量机制完整性") && report.includes("对抗复核未执行") ? "PASS" : "FAIL"
+  )
+  const state = files[Object.keys(files).find((k) => k.endsWith("状态.json"))] || "{}"
+  console.log(
+    "缺口持久化进状态(续跑不丢):",
+    JSON.parse(state).auditGaps?.length > 0 ? "PASS" : "FAIL"
+  )
+  console.log("标准备注留痕:", state.includes("本轮对抗复核未执行") ? "PASS" : "FAIL")
+}
+
 ;(async () => {
-  const prev = await scenario1()
-  await scenario2(prev)
+  await scenario1()
   await scenario3()
   await scenario4()
   await scenario5()
@@ -1552,10 +1099,8 @@ async function scenario14() {
   await scenario8()
   await scenario9()
   await scenario10()
-  await scenario11()
-  await scenario12()
-  await scenario13()
   await scenario14()
+  await scenario15()
 })()
   .catch((e) => {
     console.error("DRYRUN ERROR:", e)

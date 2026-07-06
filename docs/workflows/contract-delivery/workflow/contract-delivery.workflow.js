@@ -3,7 +3,7 @@ export const meta = {
   description:
     "把需求固化为逐条可核查的验收合同，多轮自主实现-验证-对抗复核，直到每条标准都有证据；交付逐条对照的证据矩阵。",
   whenToUse:
-    "端到端交付开发需求时使用，简单/中等/复杂需求同一入口：成契时自动评定复杂度档位，simple 档跳过规划代理与多视角探索（低开销直通），standard/complex 档走完整多轮收敛。需求先成契（每条验收标准带 ID 和核查方式），执行按轮次收敛（每轮只做未证实的标准），同一需求文本重跑即续跑。可选 args：contract（预先协商好的合同对象）、complexity（simple|standard|complex 覆盖自动档位）、artifactDir、outputPath、resume:false、forceAcIds、maxRounds、maxFixRounds。",
+    "端到端交付开发需求时使用，简单/中等/复杂需求同一入口：成契时自动评定复杂度档位，simple 档跳过规划代理与多视角探索（低开销直通），standard/complex 档走完整多轮收敛。需求先成契（每条验收标准带 ID 和核查方式），执行按轮次收敛（每轮只做未证实的标准）。运行中断后可用引擎的 resumeFromRunId 重放已完成的 agent 调用。可选 args：contract（预先协商好的合同对象）、complexity（simple|standard|complex 覆盖自动档位）、artifactDir、outputPath、maxRounds、maxFixRounds。",
   phases: [
     { title: "成契" },
     { title: "项目探索" },
@@ -188,24 +188,27 @@ const PACKAGE_VERIFY_SCHEMA = {
   additionalProperties: false
 }
 
+// 只保留下游真正消费的 refutations(id + reason)。原先的 summary 是死字段
+// (代码从不读),且自由文本会诱导模型"先写一段总结叙述再吐结构化"——正是弱模型
+// 尾部结构化调用被截断的诱因,一并去掉。数组与理由封上界,进一步压小输出。
 const AUDIT_SCHEMA = {
   type: "object",
   properties: {
-    summary: { type: "string" },
     refutations: {
       type: "array",
+      maxItems: 40,
       items: {
         type: "object",
         properties: {
           id: { type: "string" },
-          reason: { type: "string", minLength: 1 }
+          reason: { type: "string", minLength: 1, maxLength: 600 }
         },
         required: ["id", "reason"],
         additionalProperties: false
       }
     }
   },
-  required: ["summary", "refutations"],
+  required: ["refutations"],
   additionalProperties: false
 }
 
@@ -367,16 +370,6 @@ function throwIfGlobOverflow() {
 async function safeRead(path) {
   try {
     return await readFile(path)
-  } catch (_error) {
-    return null
-  }
-}
-
-async function readJson(path) {
-  const text = await safeRead(path)
-  if (!text) return null
-  try {
-    return JSON.parse(text)
   } catch (_error) {
     return null
   }
@@ -584,6 +577,15 @@ function enforcePerAcCompleteness(verification, pkg) {
         item.evidence = note + " 原证据:" + item.evidence
       }
     }
+    // 总体状态与明细同口径降级:交付门禁本就走强制后的 perAc,不受影响,
+    // 但包级报告若保留原始 status,会渲染出"总体:通过 + 明细:失败"的
+    // 口径冲突,误导排障(与轻量版"验证报告不残留可交付结论"同一条规矩)。
+    return {
+      ...verification,
+      status: "fail",
+      summary: note + " " + String(verification.summary || ""),
+      perAc: effective
+    }
   }
   return { ...verification, perAc: effective }
 }
@@ -599,13 +601,13 @@ function renderState(data) {
     artifactDir: data.artifactDir,
     outputPath: data.outputPath,
     contract: data.contract || null,
-    contractFingerprint: data.contractFingerprint || "",
     exploration: data.exploration || null,
     explorationComplexity: data.explorationComplexity || "",
     conventionsBrief: data.conventionsBrief || "",
     criteria: data.criteria || [],
     roundsUsed: data.roundsUsed || 0,
     changedFiles: data.changedFiles || [],
+    auditGaps: data.auditGaps || [],
     summary: data.summary || "",
     blockers: data.blockers || []
   })
@@ -620,13 +622,13 @@ async function writeState(context, checkpoint, summary, blockers) {
       artifactDir: context.artifactDir,
       outputPath: context.outputPath,
       contract: context.contract,
-      contractFingerprint: context.contractFingerprint,
       exploration: context.exploration,
       explorationComplexity: context.explorationComplexity,
       conventionsBrief: context.conventionsBrief,
       criteria: context.criteria,
       roundsUsed: context.roundsUsed,
       changedFiles: context.changedFiles,
+      auditGaps: context.auditGaps,
       summary,
       blockers: blockers || []
     })
@@ -819,6 +821,14 @@ ${
     : "- 未执行（合同未定义全局验证命令）"
 }
 
+## 质量机制完整性
+
+${
+  context.auditGaps && context.auditGaps.length > 0
+    ? context.auditGaps.map((g) => `- ⚠️ ${g}`).join("\n")
+    : "- 各轮对抗复核均已执行。"
+}
+
 ## 变更文件
 
 ${lines(take(context.changedFiles, MAX_CHANGED_FILES))}
@@ -836,7 +846,7 @@ ${
     ? "- 全部验收标准已证实，可进入提交/PR 流程。"
     : unresolvedCriteria(criteria)
         .map((c) => `- ${c.id}（${statusText(c.status)}）：${c.note || c.text}`)
-        .join("\n") || "- 检查终审命令失败项后重跑同一需求即可续跑。"
+        .join("\n") || "- 检查终审命令失败项，修正后重跑同一需求即可（每次全新交付）。"
 }
 
 ## 关键产物
@@ -852,18 +862,14 @@ ${
 
 const options = argObject()
 const requirement = asRequirement(args)
-const resumeEnabled = options.resume !== false
 const maxRounds = numberInRange(options.maxRounds, MAX_ROUNDS, 1, 6)
 const maxFixRounds = numberInRange(options.maxFixRounds, MAX_FIX_ROUNDS, 0, MAX_FIX_ROUNDS)
-const forceAcIds = Array.isArray(options.forceAcIds)
-  ? options.forceAcIds.map((id) => String(id).trim().toUpperCase())
-  : []
 
 if (!requirement) {
   throw new Error("缺少需求内容。请传入 args.requirement，或直接传入一段需求文本。")
 }
 
-// 产物目录锚定在原始需求文本上：同一需求重跑时路径稳定，账本才能被找到并续跑。
+// 产物目录锚定在原始需求文本上：同一需求重跑时路径稳定，产物归于同一目录。
 const artifactDir =
   typeof options.artifactDir === "string"
     ? options.artifactDir
@@ -876,76 +882,24 @@ const artifacts = {
   profile: joinPath(artifactDir, "项目画像.md"),
   report: outputPath
 }
-const previousState = resumeEnabled ? await readJson(artifacts.state) : null
-const canReuse =
-  !!previousState &&
-  previousState.version === WORKFLOW_VERSION &&
-  previousState.mode === "contract-delivery" &&
-  previousState.requirement === requirement
 const hasExplicitContract =
   options.contract &&
   typeof options.contract === "object" &&
   Array.isArray(options.contract.criteria)
 if (options.contract && !hasExplicitContract) {
   // contract 是公开参数:传了但形状不合法(criteria 缺失/拼错/非数组)时,
-  // 静默当没传会让续跑复用旧合同——必须显式报错。
+  // 静默当没传会让本次退化成 agent 自动成契、悄悄改变行为——必须显式报错。
   throw new Error("options.contract 形状不合法:必须是携带 criteria 数组的对象(请检查字段拼写)。")
 }
 
-// 显式合同的稳定指纹:只捕捉"验收语义"(标准/命令/约束/公约/非目标)。
-// 元数据(title/problem/goal/complexity)有意不入指纹——它们是执行策略与呈现,
-// 变更时应"续跑进度 + 生效新元数据",而不是重置账本。
-// 指纹一致 → 同一合同,按账本续跑未完成标准;不一致 → 新合同,全部重建。
-function contractFingerprintOf(criteriaList, contractLike) {
-  // criteria 按 id 排序(id↔text 映射不变即同一语义;注意不能对"输入"重排——
-  // 自动分配的 id 依赖位置);公约/约束/命令/非目标语义无序,排序 + trim 后
-  // 入指纹,避免顺序调整或尾随空白造成不必要的账本重置。
-  const sortedCriteria = criteriaList
-    .map(({ id, text, verify, hint }) => ({ id, text, verify, hint }))
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  const sortedArr = (value) => [...asStringArray(value)].sort()
-  // 命令入指纹前经 normalizeCommandText:门禁匹配已按归一化口径,指纹若对
-  // 内部空白敏感,`mvn  test` 与 `mvn test` 会被当成新合同、误重置账本——
-  // 与技能文档"顺序与空白不敏感"的承诺不一致。
-  const sortedCmds = (value) => [...asStringArray(value)].map(normalizeCommandText).sort()
-  return stringify({
-    criteria: sortedCriteria,
-    globalValidationCommands: sortedCmds(contractLike.globalValidationCommands),
-    constraints: sortedArr(contractLike.constraints),
-    conventions: sortedArr(contractLike.conventions),
-    nonGoals: sortedArr(contractLike.nonGoals)
-  })
-}
 let explicitCriteria = null
-let explicitFingerprint = null
 if (hasExplicitContract) {
   explicitCriteria = normalizeCriteria(options.contract.criteria)
   if (explicitCriteria.length === 0) {
     // 零条有效标准的合同会让 every() 空真、直接"可交付"——必须硬性拒绝。
     throw new Error("外部合同必须包含至少一条有效验收标准（text 非空）。")
   }
-  explicitFingerprint = contractFingerprintOf(explicitCriteria, options.contract)
 }
-// 旧状态可能没有 contractFingerprint(升级前写入):用状态里的合同现场回算,
-// 避免同一合同在升级后被误判为"新合同"而白白重置一次账本。
-const stateFingerprint = canReuse
-  ? (Array.isArray(previousState.criteria) &&
-    previousState.criteria.length > 0 &&
-    previousState.contract
-      ? contractFingerprintOf(previousState.criteria, previousState.contract)
-      : null) ||
-    previousState.contractFingerprint ||
-    null
-  : null
-const explicitContractMatchesState =
-  hasExplicitContract &&
-  canReuse &&
-  stateFingerprint === explicitFingerprint &&
-  Array.isArray(previousState.criteria) &&
-  previousState.criteria.length > 0
-// 旧进度(账本/轮次/变更清单/画像)是否可复用:同需求续跑,且要么没有显式合同,
-// 要么显式合同与状态指纹一致。
-const reusePriorProgress = canReuse && (!hasExplicitContract || explicitContractMatchesState)
 
 const context = {
   requirement,
@@ -953,63 +907,19 @@ const context = {
   outputPath,
   artifacts,
   contract: null,
-  contractFingerprint: "",
   explorationComplexity: "",
   exploration: null,
   conventionsBrief: "",
   criteria: [],
-  // 轮次跨续跑连续计数:续跑的新轮次接着编号(round N+1...),既保留历史轮次
-  // 产物目录不被覆盖,报告里的轮次也反映真实累计;每次调用仍有完整的 maxRounds 预算。
-  roundsUsed:
-    reusePriorProgress && Number.isFinite(previousState.roundsUsed) ? previousState.roundsUsed : 0,
-  changedFiles:
-    reusePriorProgress && Array.isArray(previousState.changedFiles)
-      ? previousState.changedFiles
-      : []
+  roundsUsed: 0,
+  changedFiles: [],
+  auditGaps: []
 }
 
 // ---- 成契 ----
 phase("成契")
-if (hasExplicitContract && explicitContractMatchesState) {
-  // 同一显式合同(验收语义一致)重跑:账本进度续跑;但合同元数据(complexity/
-  // title/problem/goal)按本次注入重建——元数据有意不入指纹,用户只调档位或
-  // 措辞时进度保留、新策略立即生效。
-  const provided = options.contract
-  const prevContract = previousState.contract || {}
-  context.criteria = previousState.criteria
-  context.conventionsBrief = previousState.conventionsBrief || ""
-  // 非指纹元数据:显式提供才覆盖,缺省沿用旧合同——只传 criteria 的注入
-  // 不应把旧 standard 意外降成按标准数默认的 simple。
-  context.contract = {
-    title:
-      provided.title !== undefined
-        ? String(provided.title)
-        : String(prevContract.title || "外部合同"),
-    problem:
-      provided.problem !== undefined
-        ? String(provided.problem)
-        : String(prevContract.problem || requirement),
-    goal: provided.goal !== undefined ? String(provided.goal) : String(prevContract.goal || ""),
-    complexity:
-      provided.complexity !== undefined
-        ? String(provided.complexity)
-        : String(prevContract.complexity || ""),
-    nonGoals: asStringArray(provided.nonGoals),
-    constraints: asStringArray(provided.constraints),
-    conventions: asStringArray(provided.conventions),
-    globalValidationCommands: asStringArray(provided.globalValidationCommands),
-    criteria: explicitCriteria.map(({ id, text, verify, hint }) => ({ id, text, verify, hint })),
-    openQuestions: [],
-    canProceed: true,
-    proceedReason: "使用外部注入的合同(与状态指纹一致,账本续跑)。"
-  }
-  log("显式合同与状态指纹一致:按同一合同续跑账本(未完成标准继续,已证实跳过;元数据按本次注入生效)。")
-} else if (hasExplicitContract) {
+if (hasExplicitContract) {
   // 支持在聊天里人机协商好合同后直接注入（成契前置到对话，是人工投入价值最高的一段）。
-  // 显式注入的新合同优先于续跑复用:必须按新合同验收,账本重建。
-  if (canReuse) {
-    log("检测到显式注入的新合同(指纹与状态不一致):忽略旧合同,账本按新合同重建。")
-  }
   const provided = options.contract
   context.criteria = explicitCriteria
   context.contract = {
@@ -1028,20 +938,14 @@ if (hasExplicitContract && explicitContractMatchesState) {
     proceedReason: "使用外部注入的合同。"
   }
   log(`使用外部注入合同：${context.criteria.length} 条验收标准。`)
-} else if (
-  canReuse &&
-  previousState.contract &&
-  Array.isArray(previousState.criteria) &&
-  previousState.criteria.length > 0
-) {
-  context.contract = previousState.contract
-  context.criteria = previousState.criteria
-  context.conventionsBrief = previousState.conventionsBrief || ""
-  log("续跑：复用已有交付合同与验收账本。")
 } else {
   const contract = await agent(
     `请把下面的开发需求固化为一份"交付合同"。合同的核心是验收标准清单（criteria）：
-- 必须把需求里每个可独立核查的承诺拆成一条标准，宁细勿粗（"五类事件都要记录 IP"应拆成每类事件一条）。
+- 把需求里每个可独立核查的承诺拆成一条标准，粒度以"对应一段独立实现或一条独立证据"为准：
+  · 不同的行为/规则各自一条（"五类事件都要记录 IP"是五种不同行为，拆成每类一条）；
+  · 但同一条规则作用于多个入口时合并，不要机械重复——如"title 非空校验"在创建和更新接口都生效，合为一条即可，不必每个端点各拆一遍；
+  · 不要为"编写了单元测试""遵循分层"这类元承诺或横切约定单列标准（测试用 verify=test 覆盖在功能标准里，约定写进 conventions）；
+  · routine 需求（如带校验的 CRUD）通常十来条标准足矣，不要拆碎成仪式感。
 - 每条标准给出核查方式 verify：command（跑命令看结果）、code（读代码给文件:行号证据）、test（对应测试必须存在且通过）、e2e（启动应用用浏览器自动化实测——前端页面、交互、视觉类标准必须用 e2e，不允许用 code 代替）。
 - 评定复杂度 complexity：simple（1-3 条标准、单模块小改动）、standard（跨少数模块）、complex（跨多模块、需要多轮实现验证）。
 - conventions 写跨任务公约：统一入口、命名、错误码风格等，防止多个实现代理各写各的。
@@ -1115,23 +1019,6 @@ const complexity = ["simple", "standard", "complex"].includes(complexityRaw)
     : "standard"
 log(`复杂度档位：${complexity}`)
 
-// 任何来源的合同定稿后计算指纹并随状态持久化,供下次显式注入比对。
-context.contractFingerprint = contractFingerprintOf(context.criteria, context.contract || {})
-
-if (forceAcIds.length > 0) {
-  for (const id of forceAcIds) {
-    const entry = criterionById(context.criteria, id)
-    if (entry) {
-      entry.status = "unproven"
-      entry.evidence = ""
-      entry.note = "人工要求重新证实。"
-      log(`已重置标准 ${id} 为未证实。`)
-    } else {
-      log(`forceAcIds 中的 ${id} 不在合同里，已忽略。`)
-    }
-  }
-}
-
 await writeFile(
   artifacts.contract,
   renderContractDoc(context.contract, context.criteria, requirement)
@@ -1142,33 +1029,7 @@ await writeState(context, "contract_done", "合同已成立。", [])
 // 注：不在脚本层注入技能——运行时会自动给每个子代理注入技能目录（含 read_only 角色），
 // 子代理自己会按需调用相关 SKILL.md，脚本重复注入只会浪费上下文。
 phase("项目探索")
-// simple 档只做单视角画像:档位升到 standard/complex 时低配画像撑不起规划,
-// 必须重新完整探索;其余方向(同档/降档)复用更丰富的画像是安全的。
-// 旧状态无 explorationComplexity 字段:从状态中的合同档位回推;连合同档位都
-// 没有(极老状态)则视为无法确认,当前非 simple 时保守重探——宁可多花一次
-// 探索,不在低配画像上做高档规划。
-const priorExplorationTier = reusePriorProgress
-  ? previousState.explorationComplexity ||
-    (previousState.contract && previousState.contract.complexity) ||
-    ""
-  : ""
-const explorationUpgradeNeeded =
-  reusePriorProgress &&
-  previousState.exploration &&
-  complexity !== "simple" &&
-  (priorExplorationTier === "simple" || priorExplorationTier === "")
-if (explorationUpgradeNeeded) {
-  log(
-    priorExplorationTier === "simple"
-      ? "档位从 simple 升级:不复用单视角画像,重新进行完整探索。"
-      : "旧画像档位无法确认且当前为非 simple 档:保守重探,不复用旧画像。"
-  )
-}
-if (reusePriorProgress && previousState.exploration && !explorationUpgradeNeeded) {
-  context.exploration = previousState.exploration
-  context.explorationComplexity = previousState.explorationComplexity || ""
-  log("续跑：复用已有项目画像。")
-} else {
+{
   // 同时扫根目录与一级子目录：前后端同仓（frontend/ + backend/）时两侧清单都要被发现。
   const manifestPatterns = [
     "AGENTS.md",
@@ -1219,6 +1080,9 @@ if (reusePriorProgress && previousState.exploration && !explorationUpgradeNeeded
     if (content) manifestSnippets.push(`--- ${file} ---\n${content.slice(0, 6000)}`)
   }
   const inventory = take(sourceFiles, MAX_SOURCE_FILES)
+  // 档位分级探索:每加一个探索 agent 都要有"单 agent 覆盖不了"的理由(harness 原则:
+  // 基线够就别加 agent)。simple/standard 一个 agent 一遍即可覆盖"相关文件+命令+风险";
+  // 只有 complex(跨多模块)才值得拆成架构/验证/风险三视角各自深挖。
   const explorePrompts =
     complexity === "simple"
       ? [
@@ -1228,14 +1092,22 @@ if (reusePriorProgress && previousState.exploration && !explorationUpgradeNeeded
               "识别本次修改直接涉及的文件、可用的构建/测试命令和主要风险，聚焦即可，不必全面。"
           }
         ]
-      : [
-          {
-            label: "架构",
-            prompt: "识别项目类型、关键模块、合同标准最可能触及的文件，以及实现入口。"
-          },
-          { label: "验证", prompt: "识别可用构建/测试/lint 命令、测试目录、现有验证习惯和风险。" },
-          { label: "风险", prompt: "识别兼容性、安全、数据、配置、发布和回滚风险。" }
-        ]
+      : complexity === "complex"
+        ? [
+            {
+              label: "架构",
+              prompt: "识别项目类型、关键模块、合同标准最可能触及的文件，以及实现入口。"
+            },
+            { label: "验证", prompt: "识别可用构建/测试/lint 命令、测试目录、现有验证习惯和风险。" },
+            { label: "风险", prompt: "识别兼容性、安全、数据、配置、发布和回滚风险。" }
+          ]
+        : [
+            {
+              label: "画像",
+              prompt:
+                "一遍覆盖三件事，不必分视角：(1) 项目类型、关键模块、合同标准最可能触及的文件与实现入口；(2) 可用的构建/测试/lint 命令、测试目录与现有验证习惯；(3) 兼容性/安全/数据/配置/发布的主要风险。"
+            }
+          ]
   const explorationParts = (
     await parallel(
       explorePrompts.map(
@@ -1503,7 +1375,9 @@ ${lines(pkg.validationCommands)}
               {
                 label: `验证R${round}：${pkg.title}`,
                 phase: "交付循环",
-                agentType: "verification",
+                // 全部核验类角色(验证/复验/终审/对抗复核)统一用默认 agent:不用 verification
+                // 角色那套报告式系统提示——它偏长篇输出、尾部结构化调用在弱模型上易截断。各处
+                // prompt 已写明"不要修改文件",约束从物理强制降为提示约束(已知取舍)。
                 schema: PACKAGE_VERIFY_SCHEMA
               }
             )) || fallbackVerification("验证代理没有返回结构化结果。", pkg.acIds),
@@ -1566,7 +1440,6 @@ perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报
           {
             label: `复验R${round}：${pkg.title} #${fixRound}`,
             phase: "交付循环",
-            agentType: "verification",
             schema: PACKAGE_VERIFY_SCHEMA
           }
         )) || fallbackVerification("复验代理没有返回结构化结果。", pkg.acIds),
@@ -1616,18 +1489,37 @@ perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报
     const audit = await agent(
       `你是对抗复核代理。你的唯一任务是推翻下面这些"已证实"的验收标准——逐条检查证据是否真实、充分、与标准语义一致（证据可以在代码库里核实，必要时运行只读命令）。
 宁可错杀不可放过：证据模糊、以偏概全、文件行号对不上的，一律驳回。确实无懈可击的才放行。不要修改文件。
+职责边界：只核对证据与代码本身（读文件、grep、行号比对），必要时最多运行轻量只读命令；不要重跑完整构建或测试套件——那是终审命令核对的职责，重复执行只会拖慢并增加故障面。
 
 本轮新证实的标准与证据：
 ${stringify(newlyProven.map((c) => ({ id: c.id, text: c.text, verify: c.verify, evidence: c.evidence })))}
 
-对每条要驳回的标准，给出 id 和具体驳回理由。`,
+对每条要驳回的标准，给出 id 和具体驳回理由。
+重要：核查完成后直接提交结构化结果（structured_output），不要先写长篇分析再提交——你的裁决只以结构化结果为准，正文分析不会被读取。`,
       {
         label: `对抗复核R${round}`,
         phase: "交付循环",
-        agentType: "verification",
+        // 用默认 agent(中性系统提示),不用 verification 角色:后者的报告式提示会把
+        // 审计带成"先写长篇证据分析、再补 structured_output",尾部结构化调用在弱模型上
+        // 易被截断/损坏(本轮 AC-7 复核故障即此)。审计只需读证据/grep 出裁决,不跑测试,
+        // 中性提示更贴合"直接提交小结构化结果"。auditGaps 兜底仍在,截断了照样如实披露。
         schema: AUDIT_SCHEMA
       }
     )
+    if (!audit) {
+      // 对抗复核代理彻底故障(重试仍失败,如模型输出截断):绝不静默跳过质量
+      // 层——账本与交付报告必须留痕,让读者知道本轮标准未经对抗审查(证据
+      // 本身仍来自独立验证代理 + 终审命令核对,交付门禁不受影响,但知情权
+      // 必须保留——"如实转告,不要粉饰"同样约束脚本自己)。
+      const gap = `第 ${round} 轮对抗复核未执行(复核代理故障):本轮新证实的 ${newlyProven
+        .map((c) => c.id)
+        .join("、")} 未经对抗审查。`
+      log(gap)
+      context.auditGaps.push(gap)
+      for (const c of newlyProven) {
+        c.note = (c.note ? c.note + " " : "") + "[本轮对抗复核未执行]"
+      }
+    }
     for (const refutation of (audit && audit.refutations) || []) {
       const entry = criterionById(
         context.criteria,
@@ -1675,7 +1567,6 @@ ${lines(globalCommands)}`,
     {
       label: "终审命令核对",
       phase: "终审",
-      agentType: "verification",
       schema: RUNNER_SCHEMA
     }
   )
@@ -1734,7 +1625,7 @@ if (planBlockedExit) {
   verdictReason = [
     pendingIds.length > 0 ? `未证实标准：${pendingIds.join("、")}。` : "",
     !runnerOk ? "终审命令存在失败项。" : "",
-    "用同一需求文本重跑即可续跑（只处理未证实标准）。"
+    "修正后用同一需求文本重跑即可（每次全新交付）。"
   ]
     .filter(Boolean)
     .join(" ")
@@ -1742,7 +1633,9 @@ if (planBlockedExit) {
 await writeFile(outputPath, renderDeliveryReport(context, verdict, runnerResult, verdictReason))
 await writeState(
   context,
-  verdict === "ready" ? "delivered" : "needs_fix",
+  // blocked 与 needs_fix 分开落账(与 harness 的 verify_blocked 同构):
+  // checkpoint 是只写标签,但"等人工介入"不该被排障/UI 误读成"普通需要修复"。
+  verdict === "ready" ? "delivered" : verdict === "blocked" ? "delivery_blocked" : "needs_fix",
   verdictReason,
   planBlockedExit || []
 )

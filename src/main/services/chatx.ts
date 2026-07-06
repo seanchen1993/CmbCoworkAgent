@@ -55,6 +55,39 @@ export function getChatXStatus(): ChatXWsStatus {
 }
 
 const processedMsgIds = new Set<string>()
+
+/** Abort reason used ONLY by stopChatX. The abort-intent must travel WITH the
+ * signal, not via the global `stopped` flag: restartChatX() flips `stopped`
+ * back to false synchronously, BEFORE the aborted handler's catch runs — a
+ * flag check there would misread a restart-induced abort as a user cancel and
+ * keep the dedup mark (silently swallowing the broker's redelivery). */
+const CHATX_STOP_ABORT_REASON = "chatx-service-stop"
+
+/** chatKey -> the msgId currently being processed. stopChatX() must release
+ * the ACTIVE message's dedup mark SYNCHRONOUSLY at abort time: the handler's
+ * own finally-release runs only after the abort unwinds, and a quick
+ * reconnect's broker redelivery can arrive in that gap — the entry dedup
+ * would bounce it, and if the broker doesn't try a third time the message is
+ * lost. (Safe vs dual-writer: runningChats is NOT cleared on stop, so the
+ * redelivered copy queues behind the old handler instead of re-entering.) */
+const inFlightMsgIds = new Map<string, string>()
+
+/** Kick the next queued message for this chat (fire-and-forget). Must run on
+ * EVERY exit of a requeued invocation — not just the main finally: a requeued
+ * message that exits before the main try/finally (robot config gone,
+ * workspace missing, setup failure) would otherwise strand the rest of the
+ * queue — and their receipt-dedup marks — until some future message for the
+ * chat completes a full run. */
+function drainNextQueued(chatKey: string): void {
+  const queue = messageQueues.get(chatKey)
+  if (queue && queue.length > 0) {
+    const next = queue.shift()!
+    if (queue.length === 0) messageQueues.delete(chatKey)
+    handleInbound(next, true).catch((err) => {
+      console.error("[ChatX] Queued message processing error:", err)
+    })
+  }
+}
 const runningChats = new Set<string>()
 const activeAbortControllers = new Map<string, AbortController>()
 const threadIdToChatKey = new Map<string, string>()
@@ -108,16 +141,20 @@ function findChatXThread(chatId: string, sender: string): string | null {
 
 const HTTP_TIMEOUT_MS = 30_000
 
-export async function sendChatXReply(robot: ChatXRobotConfig, content: string): Promise<void> {
+/** Returns whether the reply verifiably reached the HTTP endpoint (2xx).
+ * false = not configured / non-2xx / timeout / network error. Callers that
+ * report "回复完成" MUST consult this — a swallowed failure otherwise
+ * masquerades as success while the remote got nothing. */
+export async function sendChatXReply(robot: ChatXRobotConfig, content: string): Promise<boolean> {
   const cleanContent = stripThink(content).trim()
-  if (!cleanContent) return
+  if (!cleanContent) return true
   const httpUrl = (import.meta.env.VITE_CHATX_HTTP_URL as string) || robot.httpUrl
   const channel = (import.meta.env.VITE_CHATX_CHANNEL as string) || robot.channel || ""
   if (!httpUrl) {
     const msg = "HTTP 回复地址未配置，请检查 .env 中的 VITE_CHATX_HTTP_URL"
     console.error(`[ChatX] ${msg}`)
     notifyAlways("🤖 机器人回复失败", msg)
-    return
+    return false
   }
   if (!channel) {
     console.warn("[ChatX] channel not configured, using empty string")
@@ -140,13 +177,19 @@ export async function sendChatXReply(robot: ChatXRobotConfig, content: string): 
     })
     if (!res.ok) {
       console.error(`[ChatX] HTTP reply failed: ${res.status} ${res.statusText}`)
+      return false
     }
+    return true
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
+      // NOTE: a timeout is only "unconfirmed" — the request may have reached
+      // the remote. Callers must NOT auto-redeliver on false (double-reply
+      // risk); report the failure and keep the dedup mark instead.
       console.error(`[ChatX] HTTP reply timed out after ${HTTP_TIMEOUT_MS / 1000}s`)
     } else {
       console.error("[ChatX] HTTP reply error:", err)
     }
+    return false
   } finally {
     clearTimeout(timer)
   }
@@ -178,15 +221,30 @@ interface ChatXInboundMessage {
   chatId: string
 }
 
-async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
+async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promise<void> {
   const config = getChatXConfig()
   const robot = config.robots.find((r) => r.chatId === msg.chatId)
   if (!robot) {
     console.log(`[ChatX] No robot config for chatId: ${msg.chatId}, ignoring`)
+    // A REQUEUED message was dedup-marked when it first arrived; dropping it
+    // here (robot config removed/reloading) without releasing would swallow
+    // every later redelivery — same accounting rule as the other drop sites.
+    // First-arrival drops never marked anything, so nothing to release there.
+    // Keep draining: if the whole chat's config is gone, this walks the queue
+    // releasing each mark instead of stranding the backlog.
+    if (requeued) {
+      processedMsgIds.delete(msg.msgId)
+      drainNextQueued(`${msg.chatId}:${msg.fromId}`)
+    }
     return
   }
 
-  if (dedup(msg.msgId)) {
+  // Dedup marks the id at RECEIPT — that intentionally also swallows broker
+  // re-deliveries of a message that is still sitting in the busy queue. But a
+  // drained queue entry re-enters through this same function, and its id was
+  // marked when it was queued — re-checking here silently dropped EVERY queued
+  // message. The drain path passes requeued=true to skip the check.
+  if (!requeued && dedup(msg.msgId)) {
     console.log(`[ChatX] Duplicate message: ${msg.msgId}, ignoring`)
     return
   }
@@ -196,6 +254,9 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     const queue = messageQueues.get(chatKey) || []
     if (queue.length >= MAX_QUEUE_SIZE) {
       console.warn(`[ChatX] Queue full for ${chatKey}, dropping message: ${msg.msgId}`)
+      // Dropped ≠ processed: release the receipt-dedup mark so a broker
+      // redelivery of this message is not silently swallowed.
+      processedMsgIds.delete(msg.msgId)
       return
     }
     queue.push(msg)
@@ -209,6 +270,7 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
   runningChats.add(chatKey)
   const abortController = new AbortController()
   activeAbortControllers.set(chatKey, abortController)
+  inFlightMsgIds.set(chatKey, msg.msgId)
 
   // Find or create thread. The whole pre-run setup is guarded: a throw here
   // (db lookup/create, renderer notify) lands BEFORE the main try/finally
@@ -226,6 +288,11 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
         console.error("[ChatX] No workspace directory configured for robot:", msg.chatId)
         runningChats.delete(chatKey)
         activeAbortControllers.delete(chatKey)
+        inFlightMsgIds.delete(chatKey)
+        // Not processed — release the dedup mark so the message can be
+        // redelivered once the robot's workDir is configured.
+        processedMsgIds.delete(msg.msgId)
+        drainNextQueued(chatKey)
         return
       }
       threadId = uuid()
@@ -245,7 +312,11 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
   } catch (e) {
     runningChats.delete(chatKey)
     activeAbortControllers.delete(chatKey)
+    inFlightMsgIds.delete(chatKey)
     if (threadId) threadIdToChatKey.delete(threadId)
+    // Setup failed before the run — the message was never processed.
+    processedMsgIds.delete(msg.msgId)
+    drainNextQueued(chatKey)
     throw e
   }
   const channel = `scheduler:stream:${threadId}`
@@ -308,21 +379,46 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     }
 
     if (!abortController.signal.aborted) {
+      // SUCCESS-COMMIT POINT: from here on the message counts as answered —
+      // remove it from the stop-releasable set BEFORE the HTTP reply goes
+      // out. inFlightMsgIds means "unanswered; a stop must re-open it for
+      // broker redelivery" — a stop landing between the reply and the
+      // finally would otherwise release an ALREADY-ANSWERED msgId, and its
+      // redelivery would re-run tools / reply twice. (If the send below
+      // fails, that's a genuine processing error — same keep-the-mark policy
+      // as every other error path.)
+      inFlightMsgIds.delete(chatKey)
       broadcastToChannel(channel, { type: "done" })
-      // Send final reply via HTTP
-      if (lastAssistantText) {
-        await sendChatXReply(robot, lastAssistantText)
+      // Send final reply via HTTP — and VERIFY it before claiming success.
+      const replySent = lastAssistantText ? await sendChatXReply(robot, lastAssistantText) : true
+      if (replySent) {
+        notifyAlways(`🤖 ${msg.fromId} 回复完成`, lastAssistantText || "处理完成")
+        showPetCompletedTaskNotice(threadId, `${msg.fromId} 回复`)
+        emitAppAttention({
+          kind: "task-complete",
+          threadId,
+          key: `chatx:${msg.msgId}`
+        })
+        console.log(`[ChatX] Message processed: ${msg.msgId}`)
+        processedOutcome = "replied"
+        repliedWithContent = !!lastAssistantText
+      } else {
+        // Conservative failure semantics (deliberate): tell the user, keep
+        // the dedup mark, do NOT auto-redeliver — a timed-out send may have
+        // actually reached the remote, and a redelivered copy would reply
+        // twice. The user resends explicitly if the remote truly got nothing.
+        notifyAlways(
+          "🤖 机器人回复发送失败",
+          `${msg.fromId} 的回复未能确认送达远端(HTTP 发送失败/超时),请检查网络与配置后手动重试`
+        )
+        emitAppAttention({
+          kind: "task-error",
+          threadId,
+          key: `chatx:${msg.msgId}`
+        })
+        console.error(`[ChatX] Reply send failed for message: ${msg.msgId}`)
+        processedOutcome = "error"
       }
-      notifyAlways(`🤖 ${msg.fromId} 回复完成`, lastAssistantText || "处理完成")
-      showPetCompletedTaskNotice(threadId, `${msg.fromId} 回复`)
-      emitAppAttention({
-        kind: "task-complete",
-        threadId,
-        key: `chatx:${msg.msgId}`
-      })
-      console.log(`[ChatX] Message processed: ${msg.msgId}`)
-      processedOutcome = "replied"
-      repliedWithContent = !!lastAssistantText
     } else {
       broadcastToChannel(channel, { type: "done" })
       console.log(`[ChatX] Message cancelled: ${msg.msgId}`)
@@ -330,7 +426,12 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     }
   } catch (error) {
     const isAbortError =
-      error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
+      // Some layers reject with signal.reason ITSELF (our stop reason string),
+      // not an Error — a service stop must never be reported as a failure.
+      error === CHATX_STOP_ABORT_REASON ||
+      (abortController.signal.aborted &&
+        abortController.signal.reason === CHATX_STOP_ABORT_REASON) ||
+      (error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted")))
     const errMsg = isAbortError
       ? "Cancelled"
       : error instanceof Error
@@ -392,6 +493,7 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
       console.warn("[event] failed to emit chatx.message.processed:", e)
     }
     activeAbortControllers.delete(chatKey)
+    inFlightMsgIds.delete(chatKey)
     threadIdToChatKey.delete(threadId)
     releaseCheckpointerPin()
     // Close BEFORE dropping the runningChats gate (mirrors heartbeat's finally):
@@ -406,14 +508,7 @@ async function handleInbound(msg: ChatXInboundMessage): Promise<void> {
     notifyRenderer("threads:changed")
 
     // Process next queued message for this chat
-    const queue = messageQueues.get(chatKey)
-    if (queue && queue.length > 0) {
-      const next = queue.shift()!
-      if (queue.length === 0) messageQueues.delete(chatKey)
-      handleInbound(next).catch((err) => {
-        console.error("[ChatX] Queued message processing error:", err)
-      })
-    }
+    drainNextQueued(chatKey)
   }
 }
 
@@ -575,7 +670,16 @@ export function stopChatX(): void {
   }
   for (const [key, controller] of activeAbortControllers) {
     console.log(`[ChatX] Aborting running chat: ${key}`)
-    controller.abort()
+    controller.abort(CHATX_STOP_ABORT_REASON)
+    // Release the ACTIVE message's dedup mark NOW — and ONLY here. This is
+    // deliberately the single release point for stop-cancellations: a
+    // finally-side release is not idempotent in effect, because a quick
+    // redelivery can RE-MARK the same msgId (it queues behind runningChats)
+    // before the old handler's finally runs — a second delete there would
+    // strip the redelivered copy's mark, leaving the message unmarked after
+    // it processes and re-runnable by a later delivery.
+    const activeMsgId = inFlightMsgIds.get(key)
+    if (activeMsgId) processedMsgIds.delete(activeMsgId)
   }
   // Owner-managed run state (runningChats / activeAbortControllers /
   // threadIdToChatKey) is NOT cleared here — each handler's finally removes
@@ -584,7 +688,11 @@ export function stopChatX(): void {
   // → a message for the same chatKey passes the gate while the old handler is
   // still flushing, dual-writing the reused thread's sqlite (same family as
   // stopHeartbeat's abort-only fix). Queued messages carry no running state —
-  // dropping them on stop is fine.
+  // dropping them on stop is fine, but dropped ≠ processed: release their
+  // receipt-dedup marks so broker redeliveries after a restart still land.
+  for (const queue of messageQueues.values()) {
+    for (const queued of queue) processedMsgIds.delete(queued.msgId)
+  }
   messageQueues.clear()
   cleanup()
 }

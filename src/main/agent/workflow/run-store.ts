@@ -533,7 +533,12 @@ export function listWorkflowRuns(workspacePath: string, threadId: string): Workf
  */
 export function findUndeliveredTerminalRun(
   workspacePath: string,
-  threadId: string
+  threadId: string,
+  // Busy-guard support: keep scanning past undelivered runs the caller deems
+  // ineligible (e.g. renotify-exhausted) instead of stopping at the first —
+  // a single-candidate answer has a blind spot when the newest pending is
+  // exhausted but an older one is still perfectly deliverable.
+  isEligible?: (runId: string) => boolean
 ): PersistedWorkflowRun | null {
   try {
     const dir = getWorkflowRunsDir(workspacePath, threadId)
@@ -561,7 +566,10 @@ export function findUndeliveredTerminalRun(
     // runs stay undelivered (the "don't lose results" invariant wins over the cap).
     for (const candidate of candidates) {
       const run = loadWorkflowRun(workspacePath, threadId, candidate.runId)
-      if (run && run.status !== "running" && !run.notificationDelivered) return run
+      if (run && run.status !== "running" && !run.notificationDelivered) {
+        if (isEligible && !isEligible(run.runId)) continue
+        return run
+      }
     }
     return null
   } catch (error) {

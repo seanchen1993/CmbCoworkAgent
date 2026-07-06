@@ -20,7 +20,8 @@ import {
   FolderPlus,
   Download,
   MessageSquare,
-  Terminal
+  Terminal,
+  HeartPulse
 } from "lucide-react"
 import { toast } from "sonner"
 import type { ChatXRobotConfig } from "@/types"
@@ -303,6 +304,12 @@ function ThreadListItemImpl({
                     <span className="shrink-0 text-[10px] px-1 py-px rounded bg-primary/15 text-primary font-medium">
                       定时
                     </span>
+                    <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
+                    {pendingUserInputBadge}
+                  </>
+                ) : thread.title?.startsWith("[Heartbeat]") ? (
+                  <>
+                    <HeartPulse className="mr-1 size-3 shrink-0 text-red-400" />
                     <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
                     {pendingUserInputBadge}
                   </>
