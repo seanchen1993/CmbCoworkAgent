@@ -27,15 +27,12 @@ import {
   type EditResult,
   type WriteResult,
   type ExecuteResponse,
-  type SandboxBackendProtocolV2,
+  type SandboxBackendProtocol,
   type GrepMatch,
   type FileInfo,
+  type FileData,
   type FileUploadResponse,
-  type FileOperationError,
-  type GlobResult,
-  type GrepResult,
-  type LsResult,
-  type ReadResult
+  type FileOperationError
 } from "deepagents"
 import fg from "fast-glob"
 import * as iconv from "iconv-lite"
@@ -97,49 +94,6 @@ import {
 } from "./read-file-output"
 
 const execFileP = promisify(execFile)
-
-const TEXT_MIME_TYPES = new Set([
-  ".css",
-  ".csv",
-  ".html",
-  ".htm",
-  ".js",
-  ".jsx",
-  ".json",
-  ".md",
-  ".mjs",
-  ".cjs",
-  ".svg",
-  ".ts",
-  ".tsx",
-  ".txt",
-  ".xml",
-  ".yaml",
-  ".yml"
-])
-
-function getLocalMimeType(filePath: string): string {
-  const ext = path.extname(filePath).toLowerCase()
-  if (ext === ".png") return "image/png"
-  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg"
-  if (ext === ".gif") return "image/gif"
-  if (ext === ".webp") return "image/webp"
-  if (ext === ".svg") return "image/svg+xml"
-  if (ext === ".pdf") return "application/pdf"
-  if (ext === ".json") return "application/json"
-  if (ext === ".js" || ext === ".mjs" || ext === ".cjs") return "application/javascript"
-  if (TEXT_MIME_TYPES.has(ext)) return "text/plain"
-  return "text/plain"
-}
-
-function isLocalTextMimeType(mimeType: string): boolean {
-  return (
-    mimeType.startsWith("text/") ||
-    mimeType === "application/json" ||
-    mimeType === "application/javascript" ||
-    mimeType === "image/svg+xml"
-  )
-}
 
 async function pathExists(filePath: string): Promise<boolean> {
   try {
@@ -460,7 +414,7 @@ export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
 
 export class LocalSandbox
   extends FilesystemBackend
-  implements SandboxBackendProtocolV2, SkillHookContextProvider
+  implements SandboxBackendProtocol, SkillHookContextProvider
 {
   /** Unique identifier for this sandbox instance */
   readonly id: string
@@ -2943,11 +2897,6 @@ export class LocalSandbox
     return capped
   }
 
-  async grep(pattern: string, dirPath?: string | null, glob?: string | null): Promise<GrepResult> {
-    const result = await this.grepRaw(pattern, dirPath ?? undefined, glob)
-    return typeof result === "string" ? { error: result } : { matches: result }
-  }
-
   /**
    * Cap glob results because repository-wide globs can easily return thousands
    * of files and consume context on small windows.
@@ -2980,11 +2929,7 @@ export class LocalSandbox
     if (this.isBlockedBySandbox(effectivePath, realpathCache)) {
       return []
     }
-    const globResult = await super.glob(effectivePattern, effectivePath)
-    let infos = globResult.files ?? []
-    if (globResult.error) {
-      return [{ path: `Error finding files: ${globResult.error}`, is_dir: false } as FileInfo]
-    }
+    let infos = await super.globInfo(effectivePattern, effectivePath)
     // Hide files that fall inside any disabled skill so the agent cannot list them.
     if (this._hiddenSkillDirKeys.size > 0) {
       infos = infos.filter((f) => !this.isHiddenSkillPath(f.path, realpathCache))
@@ -3027,10 +2972,6 @@ export class LocalSandbox
       ]
     }
     return finalInfos
-  }
-
-  async glob(pattern: string, path = "/"): Promise<GlobResult> {
-    return { files: await this.globInfo(pattern, path) }
   }
 
   /**
@@ -3080,11 +3021,7 @@ export class LocalSandbox
         } as FileInfo
       ]
     }
-    const lsResult = await super.ls(effectivePath)
-    let infos = lsResult.files ?? []
-    if (lsResult.error) {
-      return [{ path: `Error listing files: ${lsResult.error}`, is_dir: false } as FileInfo]
-    }
+    let infos = await super.lsInfo(effectivePath)
     infos = infos.filter((f) => !this.isHiddenSkillPath(f.path, realpathCache))
     // Filter out any results that fall within sensitive directories
     if (this.windowsSandbox === "elevated") {
@@ -3124,10 +3061,6 @@ export class LocalSandbox
       ]
     }
     return finalInfos
-  }
-
-  async ls(path: string): Promise<LsResult> {
-    return { files: await this.lsInfo(path) }
   }
 
   private static readonly LINE_NUMBER_WIDTH = 6
@@ -3889,44 +3822,33 @@ export class LocalSandbox
     offset = 0,
     limit = READ_FILE_DEFAULT_LIMIT,
     options: LocalSandboxReadFileOptions = {}
-  ): Promise<ReadResult> {
-    const mimeType = getLocalMimeType(filePath)
-    if (isLocalTextMimeType(mimeType)) {
-      const content = await this.readText(filePath, offset, limit, options)
-      return content.startsWith("Error") ? { error: content } : { content, mimeType }
-    }
-
-    const raw = await this.readRaw(filePath)
-    if (raw.error || !raw.data) return { error: raw.error || "File data not found" }
-    return { content: raw.data.content, mimeType: raw.data.mimeType }
+  ): Promise<string> {
+    return await this.readText(filePath, offset, limit, options)
   }
 
-  async readRaw(filePath: string) {
+  async readRaw(filePath: string): Promise<FileData> {
     if (this.isHiddenSkillPath(filePath)) {
-      return { error: `Error reading file '${filePath}': skill is disabled` }
+      throw new Error(`Error reading file '${filePath}': skill is disabled`)
     }
     if (this.isBlockedBySandbox(filePath)) {
-      return { error: `Error: Access denied — '${filePath}' is restricted by sandbox policy.` }
+      throw new Error(`Error: Access denied — '${filePath}' is restricted by sandbox policy.`)
     }
-    try {
-      const resolvedPath = this._resolvePath(filePath)
-      const { buffer } = await this.readResolvedFileBuffer(resolvedPath, filePath, this._maxFileSizeBytes)
-      const stat = await fs.stat(resolvedPath)
-      const mimeType = getLocalMimeType(filePath)
-      const content = isLocalTextMimeType(mimeType)
-        ? iconv.decode(buffer, this.detectEncoding(buffer, path.extname(resolvedPath).toLowerCase()))
-        : new Uint8Array(buffer)
-      return {
-        data: {
-          content,
-          mimeType,
-          created_at: stat.birthtime.toISOString(),
-          modified_at: stat.mtime.toISOString()
-        }
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      return { error: `Error reading file '${filePath}': ${msg}` }
+    const resolvedPath = this._resolvePath(filePath)
+    const ext = path.extname(resolvedPath).toLowerCase()
+    if (LocalSandbox.KNOWN_BINARY_EXTENSIONS.has(ext)) {
+      throw new Error(`Cannot read binary file type: ${ext}`)
+    }
+    const { buffer } = await this.readResolvedFileBuffer(
+      resolvedPath,
+      filePath,
+      this._maxFileSizeBytes
+    )
+    const stat = await fs.stat(resolvedPath)
+    const content = iconv.decode(buffer, this.detectEncoding(buffer, ext))
+    return {
+      content: content.split("\n"),
+      created_at: stat.birthtime.toISOString(),
+      modified_at: stat.mtime.toISOString()
     }
   }
 
