@@ -3546,7 +3546,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
       const start = Date.now()
       const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 15_000)
+      const timeout = setTimeout(() => controller.abort(), 30_000)
       try {
         const res = await fetch(url, {
           method: "POST",
