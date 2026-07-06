@@ -748,8 +748,10 @@ export function CustomModelDialog({
                   onChange={(e) => {
                     const nextModel = e.target.value
                     setConfig((c) => {
-                      const currentDefault = defaultInterleavedThinkingForModel(c.model)
-                      const nextDefault = defaultInterleavedThinkingForModel(nextModel)
+                      const currentInterleavedDefault = defaultInterleavedThinkingForModel(c.model)
+                      const nextInterleavedDefault = defaultInterleavedThinkingForModel(nextModel)
+                      const currentEnableThinkingDefault = defaultInterleavedThinkingForModel(c.model)
+                      const nextEnableThinkingDefault = defaultInterleavedThinkingForModel(nextModel)
                       const currentSamplingDefault = defaultSamplingForModel(c.model, tokenLimits)
                       const nextSamplingDefault = defaultSamplingForModel(nextModel, tokenLimits)
                       const shouldUseNextSamplingDefault =
@@ -763,9 +765,13 @@ export function CustomModelDialog({
                         model: nextModel,
                         ...(shouldUseNextSamplingDefault ? nextSamplingDefault : {}),
                         interleavedThinking:
-                          c.interleavedThinking === currentDefault
-                            ? nextDefault
-                            : c.interleavedThinking
+                          c.interleavedThinking === currentInterleavedDefault
+                            ? nextInterleavedDefault
+                            : c.interleavedThinking,
+                        enableThinking:
+                          c.enableThinking === currentEnableThinkingDefault
+                            ? nextEnableThinkingDefault
+                            : c.enableThinking
                       }
                     })
                     setTestResult(null)
@@ -895,36 +901,6 @@ export function CustomModelDialog({
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">交错思考</label>
-                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
-                  <div>
-                    <div className="text-sm text-foreground">
-                      {config.interleavedThinking ? "已开启" : "已关闭"}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={config.interleavedThinking}
-                    onClick={() =>
-                      setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
-                    }
-                    className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
-                      config.interleavedThinking ? "bg-primary" : "bg-muted-foreground/30"
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
-                        config.interleavedThinking ? "translate-x-4" : "translate-x-0"
-                      )}
-                    />
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-1">
                 <ParameterLabel explanation="开启后，支持的模型会在回答前进行更充分的推理，并可在对话中展示思考内容。是否生效取决于模型能力，例如 deepseek-flash 支持思考开关和思考强度。">
                   思考模式
                 </ParameterLabel>
@@ -938,7 +914,13 @@ export function CustomModelDialog({
                     type="button"
                     role="switch"
                     aria-checked={config.enableThinking}
-                    onClick={() => setConfig((c) => ({ ...c, enableThinking: !c.enableThinking }))}
+                    onClick={() =>
+                      setConfig((c) => ({
+                        ...c,
+                        enableThinking: !c.enableThinking,
+                        ...(c.enableThinking ? { interleavedThinking: false } : {})
+                      }))
+                    }
                     className={cn(
                       "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
                       config.enableThinking ? "bg-primary" : "bg-muted-foreground/30"
@@ -978,6 +960,43 @@ export function CustomModelDialog({
                       {option.label}
                     </button>
                   ))}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <ParameterLabel explanation="开启后，模型在输出回答的同时流式输出思考过程。仅当模型支持且已开启思考模式时可用，例如 minimax 模型。">
+                  交错思考
+                </ParameterLabel>
+                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                  <div>
+                    <div className="text-sm text-foreground">
+                      {config.interleavedThinking ? "已开启" : "已关闭"}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={config.interleavedThinking}
+                    disabled={!config.enableThinking}
+                    onClick={() =>
+                      setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
+                    }
+                    className={cn(
+                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                      !config.enableThinking
+                        ? "cursor-not-allowed bg-muted-foreground/20"
+                        : config.interleavedThinking
+                          ? "cursor-pointer bg-primary"
+                          : "cursor-pointer bg-muted-foreground/30"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        config.interleavedThinking ? "translate-x-4" : "translate-x-0"
+                      )}
+                    />
+                  </button>
                 </div>
               </div>
 
