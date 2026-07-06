@@ -3,6 +3,8 @@ import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/cor
 import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
 import { extractTextFromUnknownContent } from "../coordinator-worker-stream"
+import { TraceCollector } from "../trace/collector"
+import type { TraceContext, TraceOutcome } from "../trace/types"
 import { validateJsonSchemaValue } from "./json-schema"
 import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
@@ -79,6 +81,7 @@ export interface WorkflowSubagentDeps {
   isRetryableApiError: (error: unknown) => boolean
   parentThreadId: string
   defaultModelId?: string
+  traceContext?: TraceContext
   /** True while any subagent of this run is blocked on a pending user approval —
    * lets the engine's inactivity watchdog treat the run as waiting, not hung. Pass
    * the run's `runId` so the check is scoped to THIS run (concurrent runs on one
@@ -92,6 +95,7 @@ export interface RunWorkflowSubagentRequest {
   model?: string
   agentIndex: number
   label: string
+  phase?: string | null
   runId: string
   signal: AbortSignal
   /** Role system prompt resolved from the call's agentType (prepended to the
@@ -228,6 +232,53 @@ function raceWithAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 
+function normalizeWorkflowModelId(model: string | undefined): string | undefined {
+  if (!model) return undefined
+  return model.startsWith("custom:") ? model : `custom:${model}`
+}
+
+function describeWorkflowTraceError(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name || "Workflow subagent failed"
+  if (typeof error === "string" && error) return error
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
+function createWorkflowSubagentTrace(
+  deps: WorkflowSubagentDeps,
+  request: RunWorkflowSubagentRequest,
+  threadId: string
+): TraceCollector | undefined {
+  const parent = deps.traceContext
+  if (!parent) return undefined
+  const requestedModelId = normalizeWorkflowModelId(request.model) ?? deps.defaultModelId ?? "unknown"
+  const workflowPhase = request.phase ?? undefined
+  return new TraceCollector(threadId, request.prompt, requestedModelId, {
+    traceKind: "subagent",
+    executionMode: "workflow",
+    rootTraceId: parent.rootTraceId,
+    rootThreadId: parent.rootThreadId,
+    parentTraceId: parent.traceId,
+    parentThreadId: parent.threadId,
+    parentSpanId: parent.rootNodeId,
+    linkType: "async_span_link",
+    subagentKind: "workflow_agent",
+    subagentRunId: `${request.runId}:agent:${request.agentIndex}`,
+    subagentThreadId: threadId,
+    handoffAction: "workflow_agent",
+    handoffSourceAgent: "workflow",
+    handoffTargetAgent: request.label,
+    workflowRunId: request.runId,
+    workflowAgentIndex: request.agentIndex,
+    workflowPhase,
+    workflowAgentLabel: request.label,
+    includeSkillEval: false
+  })
+}
+
 async function runOnce(
   deps: WorkflowSubagentDeps,
   request: RunWorkflowSubagentRequest,
@@ -249,6 +300,15 @@ async function runOnce(
   timeoutTimer?.unref?.()
 
   const structured: { value: unknown; called: boolean } = { value: undefined, called: false }
+  let tracer: TraceCollector | undefined
+  let latestSnapshot: unknown
+  let traceTerminalRecorded = false
+  let traceOutcome: TraceOutcome = "success"
+  let traceError: string | undefined
+  const recordValuesSnapshot = (snapshot: unknown): void => {
+    latestSnapshot = snapshot
+    request.onValues?.(snapshot)
+  }
 
   try {
     // agentIndex is deterministic, so after a crash-resume this threadId can
@@ -256,6 +316,7 @@ async function runOnce(
     // transcript poisons the subagent (or 400s on a dangling tool_call).
     // Purge any stale per-thread state before creating the runtime.
     await deps.cleanupThread(threadId).catch(() => undefined)
+    tracer = createWorkflowSubagentTrace(deps, request, threadId)
 
     const additionalTools = request.schema
       ? [
@@ -290,6 +351,11 @@ async function runOnce(
       disallowedTools: request.disallowedTools,
       shellAccess: request.shellAccess
     })
+    tracer?.setModelId(
+      modelFellBack
+        ? (deps.defaultModelId ?? "unknown")
+        : (normalizeWorkflowModelId(request.model) ?? deps.defaultModelId ?? "unknown")
+    )
 
     const streamConfig = {
       configurable: { thread_id: threadId },
@@ -315,10 +381,11 @@ async function runOnce(
           await runtime.stream({ messages: [new HumanMessage(request.prompt)] }, streamConfig),
           controller.signal,
           stopAfterStructuredAccepted,
-          request.onValues
+          recordValuesSnapshot
         ))(),
       controller.signal
     )
+    latestSnapshot = snapshot
     throwIfStructuredOutputInterrupt(snapshot)
 
     // Structured mode: if the model never called structured_output, give it one
@@ -386,10 +453,11 @@ async function runOnce(
             ),
             controller.signal,
             stopAfterStructuredAccepted,
-            request.onValues
+            recordValuesSnapshot
           ))(),
         controller.signal
       )
+      latestSnapshot = snapshot
       throwIfStructuredOutputInterrupt(snapshot)
     }
 
@@ -397,6 +465,7 @@ async function runOnce(
 
     const text = extractFinalAssistantText(snapshot)
     const outputTokens = extractOutputTokens(snapshot, text)
+    const toolCallCount = extractWorkflowToolCallCount(snapshot)
 
     if (request.schema) {
       if (!isStructuredAccepted(structured, request.schema)) {
@@ -406,17 +475,70 @@ async function runOnce(
             : "subagent completed without calling the structured_output tool"
         )
       }
+      tracer?.addTerminalNode({
+        type: "message",
+        output: text.trim() ? text : structured.value,
+        metadata: {
+          outputTokens,
+          toolCallCount,
+          modelFellBack,
+          structuredOutput: true
+        }
+      })
+      traceTerminalRecorded = true
       return { text, structured: structured.value, outputTokens, modelFellBack }
     }
 
     if (!text.trim()) {
       throw new Error("subagent produced no assistant output")
     }
+    tracer?.addTerminalNode({
+      type: "message",
+      output: text,
+      metadata: {
+        outputTokens,
+        toolCallCount,
+        modelFellBack,
+        structuredOutput: false
+      }
+    })
+    traceTerminalRecorded = true
     return { text, structured: undefined, outputTokens, modelFellBack }
   } catch (error) {
-    throwIfAborted(controller.signal, request.signal, timeoutMs)
+    if (isWorkflowAbortError(error)) {
+      traceOutcome = "cancelled"
+      traceError = describeWorkflowTraceError(error)
+      throw error
+    }
+    try {
+      throwIfAborted(controller.signal, request.signal, timeoutMs)
+    } catch (abortError) {
+      traceOutcome = "cancelled"
+      traceError = describeWorkflowTraceError(abortError)
+      throw abortError
+    }
+    traceOutcome = "error"
+    traceError = describeWorkflowTraceError(error)
     throw error
   } finally {
+    if (tracer) {
+      try {
+        const toolCallCount = extractWorkflowToolCallCount(latestSnapshot)
+        if (!traceTerminalRecorded && toolCallCount > 0) {
+          tracer.addTerminalNode({
+            type: traceOutcome === "cancelled" ? "cancel" : "error",
+            output: traceError,
+            metadata: {
+              toolCallCount
+            }
+          })
+          traceTerminalRecorded = true
+        }
+        await tracer.finish(traceOutcome, traceError)
+      } catch (traceFinishError) {
+        console.warn("[Workflow] Subagent trace finish failed:", traceFinishError)
+      }
+    }
     if (timeoutTimer) clearTimeout(timeoutTimer)
     request.signal.removeEventListener("abort", onParentAbort)
     // Abort the per-subagent controller on every exit path (including normal
@@ -1821,6 +1943,23 @@ export function extractOutputTokens(snapshot: unknown, text: string): number {
   if (total > 0) return total
   // Last resort when the snapshot carried no assistant content at all.
   return Math.max(1, estimateTokenCount(text))
+}
+
+function extractWorkflowToolCallCount(snapshot: unknown): number {
+  let count = 0
+  const seenIds = new Set<string>()
+  for (const message of snapshotMessages(snapshot)) {
+    if (!isAiMessage(message)) continue
+    for (const call of messageNormalizedToolCalls(message)) {
+      const id = toolCallId(call)
+      if (id) {
+        if (seenIds.has(id)) continue
+        seenIds.add(id)
+      }
+      count += 1
+    }
+  }
+  return count
 }
 
 /**

@@ -30,6 +30,10 @@ import {
 import { v4 as uuid } from "uuid"
 import type {
   AgentTrace,
+  TraceContext,
+  TraceExecutionMode,
+  TraceKind,
+  TraceObservabilityContext,
   TraceSkillEvalExtension,
   TraceStep,
   TraceToolCall,
@@ -41,7 +45,7 @@ import type {
   ITraceReporter,
   RoutingTrace
 } from "./types"
-import { NoopTraceReporter } from "./types"
+import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
 import { app } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
@@ -150,6 +154,12 @@ function pruneOldTraces(threadId: string): void {
 function normalizeTrace(parsed: AgentTrace): AgentTrace {
   return {
     ...parsed,
+    observabilitySchemaVersion:
+      parsed.observabilitySchemaVersion ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind: parsed.traceKind ?? "root",
+    executionMode: parsed.executionMode ?? "normal",
+    rootTraceId: parsed.rootTraceId ?? parsed.traceId,
+    rootThreadId: parsed.rootThreadId ?? parsed.threadId,
     usedSkills: Array.isArray(parsed.usedSkills) ? parsed.usedSkills : [],
     evolvedSkills: Array.isArray(parsed.evolvedSkills) ? parsed.evolvedSkills : [],
     triggerSource: parsed.triggerSource ?? "chat"
@@ -202,6 +212,58 @@ function buildSkillAuthorByRawName(
 // TraceCollector class
 // ─────────────────────────────────────────────────────────
 
+export interface TraceCollectorOptions extends Partial<TraceObservabilityContext> {
+  traceId?: string
+  triggerSource?: TraceTriggerSource
+  harnessFeature?: { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
+  includeSkillEval?: boolean
+}
+
+function compactUndefined<T extends Record<string, unknown>>(record: T): T {
+  for (const key of Object.keys(record)) {
+    if (record[key] === undefined) delete record[key]
+  }
+  return record
+}
+
+function buildObservabilityContext(
+  traceId: string,
+  threadId: string,
+  options: TraceCollectorOptions
+): TraceObservabilityContext {
+  const traceKind: TraceKind = options.traceKind ?? "root"
+  const executionMode: TraceExecutionMode = options.executionMode ?? "normal"
+  const rootTraceId = options.rootTraceId ?? traceId
+  const rootThreadId = options.rootThreadId ?? threadId
+  const subagentThreadId =
+    options.subagentThreadId ?? (traceKind === "subagent" ? threadId : undefined)
+  return compactUndefined({
+    observabilitySchemaVersion: TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind,
+    executionMode,
+    rootTraceId,
+    rootThreadId,
+    parentTraceId: options.parentTraceId,
+    parentThreadId: options.parentThreadId,
+    parentSpanId: options.parentSpanId,
+    linkType: options.linkType,
+    subagentKind: options.subagentKind,
+    subagentRunId: options.subagentRunId,
+    subagentThreadId,
+    handoffAction: options.handoffAction,
+    handoffSourceAgent: options.handoffSourceAgent,
+    handoffTargetAgent: options.handoffTargetAgent,
+    coordinatorWorkerId: options.coordinatorWorkerId,
+    coordinatorWorkerTurn: options.coordinatorWorkerTurn,
+    coordinatorWorkerRole: options.coordinatorWorkerRole,
+    coordinatorWorkerWorkload: options.coordinatorWorkerWorkload,
+    workflowRunId: options.workflowRunId,
+    workflowAgentIndex: options.workflowAgentIndex,
+    workflowPhase: options.workflowPhase,
+    workflowAgentLabel: options.workflowAgentLabel
+  }) as TraceObservabilityContext
+}
+
 export class TraceCollector {
   private readonly traceId: string
   private readonly threadId: string
@@ -214,6 +276,8 @@ export class TraceCollector {
   private readonly harnessFeature:
     | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
     | undefined
+  private observability: TraceObservabilityContext
+  private readonly includeSkillEval: boolean
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
@@ -235,17 +299,16 @@ export class TraceCollector {
     threadId: string,
     userMessage: string,
     modelId: string,
-    options: {
-      triggerSource?: TraceTriggerSource
-      harnessFeature?: { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
-    } = {}
+    options: TraceCollectorOptions = {}
   ) {
-    this.traceId = uuid()
+    this.traceId = options.traceId ?? uuid()
     this.threadId = threadId
     this.userMessage = userMessage
     this.modelId = modelId
     this.triggerSource = options.triggerSource ?? "chat"
     this.harnessFeature = options.harnessFeature
+    this.observability = buildObservabilityContext(this.traceId, threadId, options)
+    this.includeSkillEval = options.includeSkillEval ?? (this.observability.traceKind === "root")
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
@@ -257,6 +320,7 @@ export class TraceCollector {
       startedAt: this.startedAt,
       input: { userMessage },
       metadata: {
+        ...this.observability,
         traceId: this.traceId,
         threadId: this.threadId,
         modelId: this.modelId,
@@ -279,6 +343,7 @@ export class TraceCollector {
       setAdoptionContext(this.threadId, {
         traceId: this.traceId,
         modelId: this.modelId,
+        ...this.observability,
         ...(this.harnessFeature
           ? {
               harnessProjectId: this.harnessFeature.projectId,
@@ -293,6 +358,39 @@ export class TraceCollector {
     } catch {
       // never block trace setup
     }
+  }
+
+  getTraceId(): string {
+    return this.traceId
+  }
+
+  getTraceContext(): TraceContext {
+    return {
+      traceId: this.traceId,
+      threadId: this.threadId,
+      rootNodeId: this.rootNodeId,
+      ...this.observability
+    }
+  }
+
+  setObservabilityContext(patch: Partial<TraceObservabilityContext>): void {
+    this.observability = compactUndefined({
+      ...this.observability,
+      ...patch
+    }) as TraceObservabilityContext
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      root.metadata = { ...(root.metadata ?? {}), ...this.observability }
+    }
+    try {
+      setAdoptionContext(this.threadId, this.observability)
+    } catch {
+      // ignore
+    }
+  }
+
+  setExecutionMode(mode: TraceExecutionMode): void {
+    this.setObservabilityContext({ executionMode: mode })
   }
 
   /** Update the modelId (can be resolved after construction). */
@@ -384,6 +482,22 @@ export class TraceCollector {
   /** Record a tool call within the current step. */
   recordToolCall(call: TraceToolCall): void {
     this.currentToolCalls.push(call)
+  }
+
+  private getTotalToolCalls(): number {
+    const stepToolCalls = this.steps.reduce((sum, step) => sum + step.toolCalls.length, 0)
+    const nodeToolCalls = this.nodes.filter((node) => node.type === "tool").length
+    const metadataToolCalls = this.nodes.reduce((sum, node) => {
+      const toolNames = node.metadata?.toolNames
+      if (!Array.isArray(toolNames)) return sum
+      return sum + toolNames.filter((name) => typeof name === "string" && name.trim().length > 0).length
+    }, 0)
+    const metadataToolCallCounts = this.nodes.reduce((sum, node) => {
+      const count = node.metadata?.toolCallCount
+      if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return sum
+      return sum + Math.floor(count)
+    }, 0)
+    return Math.max(stepToolCalls, nodeToolCalls, metadataToolCalls, metadataToolCallCounts)
   }
 
   /** Record one LLM run (input context + output message). */
@@ -569,7 +683,7 @@ export class TraceCollector {
   async finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
     const endedAt = nowIsoLocal()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
-    const totalToolCalls = this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0)
+    const totalToolCalls = this.getTotalToolCalls()
 
     // Resolve skill versions and merge into "name-version" format
     let skillAuthorByRawName: Record<string, string | undefined> = {}
@@ -640,6 +754,7 @@ export class TraceCollector {
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
+      ...this.observability,
       startedAt: this.startedAt,
       endedAt,
       durationMs,
@@ -690,29 +805,31 @@ export class TraceCollector {
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
     let skillEval: TraceSkillEvalExtension | undefined
-    try {
-      const windowTurn = appendSkillEvalWindowTurn({
-        traceId: trace.traceId,
-        threadId: trace.threadId,
-        startedAt: trace.startedAt,
-        endedAt: trace.endedAt,
-        usedSkills: usedSkillsWithVersions,
-        userMessage: trace.userMessage,
-        assistantText: getSkillEvalWindowAssistantText(trace),
-        outcome: trace.outcome
-      })
-      const evalRawSkillNames = windowTurn.evalSkillNames
-      const windowContextByRawName = getSkillEvalWindowContextByRawName(
-        trace.threadId,
-        evalRawSkillNames
-      )
-      skillEval = buildSkillEvalTraceExtension(trace, {
-        skillAuthorByRawName,
-        windowContextByRawName,
-        evalRawSkillNames
-      })
-    } catch (e) {
-      console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+    if (this.includeSkillEval) {
+      try {
+        const windowTurn = appendSkillEvalWindowTurn({
+          traceId: trace.traceId,
+          threadId: trace.threadId,
+          startedAt: trace.startedAt,
+          endedAt: trace.endedAt,
+          usedSkills: usedSkillsWithVersions,
+          userMessage: trace.userMessage,
+          assistantText: getSkillEvalWindowAssistantText(trace),
+          outcome: trace.outcome
+        })
+        const evalRawSkillNames = windowTurn.evalSkillNames
+        const windowContextByRawName = getSkillEvalWindowContextByRawName(
+          trace.threadId,
+          evalRawSkillNames
+        )
+        skillEval = buildSkillEvalTraceExtension(trace, {
+          skillAuthorByRawName,
+          windowContextByRawName,
+          evalRawSkillNames
+        })
+      } catch (e) {
+        console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+      }
     }
     const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
 
@@ -804,11 +921,12 @@ export class TraceCollector {
       root.output = {
         outcome,
         totalSteps: this.steps.length,
-        totalToolCalls: this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0),
+        totalToolCalls: this.getTotalToolCalls(),
         ...(errorMessage ? { errorMessage } : {})
       }
       root.metadata = {
         ...(root.metadata ?? {}),
+        ...this.observability,
         usedSkills: [...resolvedUsedSkills],
         evolvedSkills: [...resolvedEvolvedSkills],
         triggerSource: this.triggerSource

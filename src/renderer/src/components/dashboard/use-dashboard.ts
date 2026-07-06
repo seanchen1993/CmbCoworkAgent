@@ -126,6 +126,29 @@ export interface DashboardTraceDetail {
   userIp?: string
   modelId?: string
   modelName?: string
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number
@@ -1604,6 +1627,10 @@ function parseSkillEvalArtifacts(raw: any): DashboardSkillEvalRun["resultArtifac
 
 function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
   if (!raw || typeof raw !== "object") return undefined
+  const optionalStringField = (key: keyof DashboardTraceDetail): Record<string, string> =>
+    raw[key] ? { [key]: String(raw[key]) } : {}
+  const optionalNumberField = (key: keyof DashboardTraceDetail): Record<string, number> =>
+    raw[key] !== undefined && raw[key] !== null ? { [key]: numberValue(raw[key]) } : {}
   return {
     traceId: String(raw.traceId ?? ""),
     threadId: String(raw.threadId ?? ""),
@@ -1618,6 +1645,29 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
     ...(raw.userIp ? { userIp: String(raw.userIp) } : {}),
     ...(raw.modelId ? { modelId: String(raw.modelId) } : {}),
     ...(raw.modelName ? { modelName: String(raw.modelName) } : {}),
+    ...optionalNumberField("observabilitySchemaVersion"),
+    ...optionalStringField("traceKind"),
+    ...optionalStringField("executionMode"),
+    ...optionalStringField("rootTraceId"),
+    ...optionalStringField("rootThreadId"),
+    ...optionalStringField("parentTraceId"),
+    ...optionalStringField("parentThreadId"),
+    ...optionalStringField("parentSpanId"),
+    ...optionalStringField("linkType"),
+    ...optionalStringField("subagentKind"),
+    ...optionalStringField("subagentRunId"),
+    ...optionalStringField("subagentThreadId"),
+    ...optionalStringField("handoffAction"),
+    ...optionalStringField("handoffSourceAgent"),
+    ...optionalStringField("handoffTargetAgent"),
+    ...optionalStringField("coordinatorWorkerId"),
+    ...optionalNumberField("coordinatorWorkerTurn"),
+    ...optionalStringField("coordinatorWorkerRole"),
+    ...optionalStringField("coordinatorWorkerWorkload"),
+    ...optionalStringField("workflowRunId"),
+    ...optionalNumberField("workflowAgentIndex"),
+    ...optionalStringField("workflowPhase"),
+    ...optionalStringField("workflowAgentLabel"),
     outcome: String(raw.outcome ?? "unknown"),
     totalToolCalls: numberValue(raw.totalToolCalls),
     modelCallCount: numberValue(raw.modelCallCount),

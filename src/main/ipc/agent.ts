@@ -4498,6 +4498,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const effectiveAgentMode: AgentMode = coordinatorForcedByRequest
           ? "coordinator"
           : (requestedMode ?? (coordinatorFromMetadata ? "coordinator" : metadataAgentMode))
+        tracer.setExecutionMode(effectiveAgentMode)
+        const runtimeTraceContext = tracer.getTraceContext()
         if (
           isCoordinatorNotificationTurn &&
           hasExplicitNormalAgentMode &&
@@ -4877,6 +4879,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
+              traceContext: runtimeTraceContext,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
@@ -5625,6 +5628,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             agentMode: effectiveAgentMode,
+            traceContext: runtimeTraceContext,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
@@ -5731,6 +5735,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
+              traceContext: runtimeTraceContext,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,

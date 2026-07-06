@@ -36,6 +36,10 @@ import { promisify } from "util"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
+import {
+  TRACE_OBSERVABILITY_SCHEMA_VERSION,
+  type TraceObservabilityContext
+} from "../agent/trace/types"
 import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
 import { extractShellFileOps } from "../agent/exec-policy"
 import { trackEvent } from "./event-reporter"
@@ -171,7 +175,7 @@ const EXCLUDED_FILENAME_PATTERNS = [
 // Types
 // ─────────────────────────────────────────────────────────
 
-export interface AdoptionContext {
+export interface AdoptionContext extends Partial<TraceObservabilityContext> {
   traceId?: string
   modelId?: string
   modelName?: string
@@ -285,6 +289,59 @@ const inFlightFileMeasurements = new Set<string>()
 
 /** threadId → AdoptionContext. Evicted oldest-first at MAX_CONTEXT_ENTRIES. */
 const threadContexts = new Map<string, AdoptionContext>()
+
+type GenIndexObservabilityColumns = Pick<
+  GenIndexRow,
+  | "observability_schema_version"
+  | "trace_kind"
+  | "execution_mode"
+  | "root_trace_id"
+  | "root_thread_id"
+  | "parent_trace_id"
+  | "parent_thread_id"
+  | "parent_span_id"
+  | "link_type"
+  | "subagent_kind"
+  | "subagent_run_id"
+  | "subagent_thread_id"
+  | "handoff_action"
+  | "handoff_source_agent"
+  | "handoff_target_agent"
+  | "coordinator_worker_id"
+  | "coordinator_worker_turn"
+  | "coordinator_worker_role"
+  | "coordinator_worker_workload"
+  | "workflow_run_id"
+  | "workflow_agent_index"
+  | "workflow_phase"
+  | "workflow_agent_label"
+>
+
+type AdoptionObservabilityEventProperties = {
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string | null
+  rootThreadId?: string | null
+  parentTraceId?: string | null
+  parentThreadId?: string | null
+  parentSpanId?: string | null
+  linkType?: string | null
+  subagentKind?: string | null
+  subagentRunId?: string | null
+  subagentThreadId?: string | null
+  handoffAction?: string | null
+  handoffSourceAgent?: string | null
+  handoffTargetAgent?: string | null
+  coordinatorWorkerId?: string | null
+  coordinatorWorkerTurn?: number | null
+  coordinatorWorkerRole?: string | null
+  coordinatorWorkerWorkload?: string | null
+  workflowRunId?: string | null
+  workflowAgentIndex?: number | null
+  workflowPhase?: string | null
+  workflowAgentLabel?: string | null
+}
 
 // ─────────────────────────────────────────────────────────
 // Paths
@@ -572,6 +629,131 @@ function normalizeUsedSkills(skills: unknown): string[] {
 // Context (set by TraceCollector during agent lifecycle)
 // ─────────────────────────────────────────────────────────
 
+function hasObservabilityContext(ctx: AdoptionContext): boolean {
+  return Boolean(
+    ctx.traceId ||
+      ctx.observabilitySchemaVersion ||
+      ctx.traceKind ||
+      ctx.executionMode ||
+      ctx.rootTraceId ||
+      ctx.parentTraceId ||
+      ctx.subagentKind ||
+      ctx.workflowRunId ||
+      ctx.coordinatorWorkerId
+  )
+}
+
+function buildObservabilityEventProperties(
+  ctx: AdoptionContext,
+  threadId: string | null | undefined
+): AdoptionObservabilityEventProperties {
+  if (!hasObservabilityContext(ctx)) return {}
+  return {
+    observabilitySchemaVersion:
+      ctx.observabilitySchemaVersion ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind: ctx.traceKind ?? "root",
+    executionMode: ctx.executionMode ?? "normal",
+    rootTraceId: ctx.rootTraceId ?? ctx.traceId ?? null,
+    rootThreadId: ctx.rootThreadId ?? threadId ?? null,
+    parentTraceId: ctx.parentTraceId ?? null,
+    parentThreadId: ctx.parentThreadId ?? null,
+    parentSpanId: ctx.parentSpanId ?? null,
+    linkType: ctx.linkType ?? null,
+    subagentKind: ctx.subagentKind ?? null,
+    subagentRunId: ctx.subagentRunId ?? null,
+    subagentThreadId: ctx.subagentThreadId ?? null,
+    handoffAction: ctx.handoffAction ?? null,
+    handoffSourceAgent: ctx.handoffSourceAgent ?? null,
+    handoffTargetAgent: ctx.handoffTargetAgent ?? null,
+    coordinatorWorkerId: ctx.coordinatorWorkerId ?? null,
+    coordinatorWorkerTurn: ctx.coordinatorWorkerTurn ?? null,
+    coordinatorWorkerRole: ctx.coordinatorWorkerRole ?? null,
+    coordinatorWorkerWorkload: ctx.coordinatorWorkerWorkload ?? null,
+    workflowRunId: ctx.workflowRunId ?? null,
+    workflowAgentIndex: ctx.workflowAgentIndex ?? null,
+    workflowPhase: ctx.workflowPhase ?? null,
+    workflowAgentLabel: ctx.workflowAgentLabel ?? null
+  }
+}
+
+function buildGenIndexObservabilityColumns(
+  ctx: AdoptionContext,
+  threadId: string | null | undefined
+): GenIndexObservabilityColumns {
+  const props = buildObservabilityEventProperties(ctx, threadId)
+  return {
+    observability_schema_version: props.observabilitySchemaVersion ?? null,
+    trace_kind: props.traceKind ?? null,
+    execution_mode: props.executionMode ?? null,
+    root_trace_id: props.rootTraceId ?? null,
+    root_thread_id: props.rootThreadId ?? null,
+    parent_trace_id: props.parentTraceId ?? null,
+    parent_thread_id: props.parentThreadId ?? null,
+    parent_span_id: props.parentSpanId ?? null,
+    link_type: props.linkType ?? null,
+    subagent_kind: props.subagentKind ?? null,
+    subagent_run_id: props.subagentRunId ?? null,
+    subagent_thread_id: props.subagentThreadId ?? null,
+    handoff_action: props.handoffAction ?? null,
+    handoff_source_agent: props.handoffSourceAgent ?? null,
+    handoff_target_agent: props.handoffTargetAgent ?? null,
+    coordinator_worker_id: props.coordinatorWorkerId ?? null,
+    coordinator_worker_turn: props.coordinatorWorkerTurn ?? null,
+    coordinator_worker_role: props.coordinatorWorkerRole ?? null,
+    coordinator_worker_workload: props.coordinatorWorkerWorkload ?? null,
+    workflow_run_id: props.workflowRunId ?? null,
+    workflow_agent_index: props.workflowAgentIndex ?? null,
+    workflow_phase: props.workflowPhase ?? null,
+    workflow_agent_label: props.workflowAgentLabel ?? null
+  }
+}
+
+function hasPendingObservabilityContext(pending: GenIndexRow): boolean {
+  return Boolean(
+    pending.trace_id ||
+      pending.observability_schema_version ||
+      pending.trace_kind ||
+      pending.execution_mode ||
+      pending.root_trace_id ||
+      pending.parent_trace_id ||
+      pending.subagent_kind ||
+      pending.workflow_run_id ||
+      pending.coordinator_worker_id
+  )
+}
+
+function buildPendingObservabilityEventProperties(
+  pending: GenIndexRow
+): AdoptionObservabilityEventProperties {
+  if (!hasPendingObservabilityContext(pending)) return {}
+  return {
+    observabilitySchemaVersion:
+      pending.observability_schema_version ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind: pending.trace_kind ?? "root",
+    executionMode: pending.execution_mode ?? "normal",
+    rootTraceId: pending.root_trace_id ?? pending.trace_id ?? null,
+    rootThreadId: pending.root_thread_id ?? pending.thread_id ?? null,
+    parentTraceId: pending.parent_trace_id ?? null,
+    parentThreadId: pending.parent_thread_id ?? null,
+    parentSpanId: pending.parent_span_id ?? null,
+    linkType: pending.link_type ?? null,
+    subagentKind: pending.subagent_kind ?? null,
+    subagentRunId: pending.subagent_run_id ?? null,
+    subagentThreadId: pending.subagent_thread_id ?? null,
+    handoffAction: pending.handoff_action ?? null,
+    handoffSourceAgent: pending.handoff_source_agent ?? null,
+    handoffTargetAgent: pending.handoff_target_agent ?? null,
+    coordinatorWorkerId: pending.coordinator_worker_id ?? null,
+    coordinatorWorkerTurn: pending.coordinator_worker_turn ?? null,
+    coordinatorWorkerRole: pending.coordinator_worker_role ?? null,
+    coordinatorWorkerWorkload: pending.coordinator_worker_workload ?? null,
+    workflowRunId: pending.workflow_run_id ?? null,
+    workflowAgentIndex: pending.workflow_agent_index ?? null,
+    workflowPhase: pending.workflow_phase ?? null,
+    workflowAgentLabel: pending.workflow_agent_label ?? null
+  }
+}
+
 export function setAdoptionContext(threadId: string, ctx: AdoptionContext): void {
   if (!threadId) return
   // Evict oldest if size cap would be exceeded (Map preserves insertion order).
@@ -857,6 +1039,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
     const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+    const observabilityColumns = buildGenIndexObservabilityColumns(ctx, input.threadId)
+    const observabilityProps = buildObservabilityEventProperties(ctx, input.threadId)
     insertGenEvent({
       event_id: eventId,
       file_path: absPath,
@@ -878,7 +1062,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       harness_node_name: ctx.harnessNodeName ?? null,
       harness_node_status: ctx.harnessNodeStatus ?? null,
       harness_adapter_name: ctx.harnessAdapterName ?? null,
-      harness_adapter_version: ctx.harnessAdapterVersion ?? null
+      harness_adapter_version: ctx.harnessAdapterVersion ?? null,
+      ...observabilityColumns
     })
 
     // ── Cloud event (metadata only) ─────────────────────
@@ -901,6 +1086,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       harnessNodeStatus: ctx.harnessNodeStatus ?? null,
       harnessAdapterName: ctx.harnessAdapterName ?? null,
       harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+      ...observabilityProps,
       // note: filePath / content / fingerprint intentionally withheld
       createdAt: new Date(createdAt).toISOString(),
       relativeHint: relPath.split("/").slice(-1)[0] // leaf filename only, not a full path
@@ -932,6 +1118,7 @@ function emitSkippedLargeAtGen(args: {
   const language = extname(absPath).slice(1).toLowerCase() || null
   const deletedLineCount = deriveDeletedLineCount(input)
   const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+  const observabilityProps = buildObservabilityEventProperties(ctx, input.threadId)
 
   // L1 — record that the agent generated code (metadata only, no path/content)
   trackEvent("code_gen", "code_adoption", {
@@ -953,6 +1140,7 @@ function emitSkippedLargeAtGen(args: {
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    ...observabilityProps,
     createdAt: new Date(createdAt).toISOString(),
     relativeHint: relPath.split("/").slice(-1)[0]
   })
@@ -984,7 +1172,8 @@ function emitSkippedLargeAtGen(args: {
     harnessNodeName: ctx.harnessNodeName ?? null,
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
-    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null
+    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    ...observabilityProps
   })
 }
 
@@ -1070,6 +1259,7 @@ async function emitSupersededAdopt(
       // corrupt row — treat as no skill attribution
     }
   }
+  const observabilityProps = buildPendingObservabilityEventProperties(pending)
 
   trackEvent("code_adopt", "code_adoption", {
     schemaVersion: 1,
@@ -1095,7 +1285,8 @@ async function emitSupersededAdopt(
     harnessNodeName: pending.harness_node_name ?? null,
     harnessNodeStatus: pending.harness_node_status ?? null,
     harnessAdapterName: pending.harness_adapter_name ?? null,
-    harnessAdapterVersion: pending.harness_adapter_version ?? null
+    harnessAdapterVersion: pending.harness_adapter_version ?? null,
+    ...observabilityProps
   })
 
   console.log(
@@ -1254,6 +1445,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
           // corrupt row — treat as no skill attribution
         }
       }
+      const observabilityProps = buildPendingObservabilityEventProperties(pending)
 
       trackEvent("code_adopt", "code_adoption", {
         schemaVersion: 1,
@@ -1278,7 +1470,8 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         harnessNodeName: pending.harness_node_name ?? null,
         harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
-        harnessAdapterVersion: pending.harness_adapter_version ?? null
+        harnessAdapterVersion: pending.harness_adapter_version ?? null,
+        ...observabilityProps
       })
 
       console.log(

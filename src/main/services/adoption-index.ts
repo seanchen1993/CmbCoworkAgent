@@ -22,6 +22,7 @@ import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { dirname, join } from "path"
 import { getOpenworkDir } from "../storage"
+import { TRACE_OBSERVABILITY_SCHEMA_VERSION } from "../agent/trace/types"
 
 // ─────────────────────────────────────────────────────────
 // Paths
@@ -88,6 +89,29 @@ export interface GenIndexRow {
   /** Adapter plugin bound to the project at gen time, so adoption can be sliced by plugin version. */
   harness_adapter_name: string | null
   harness_adapter_version: string | null
+  observability_schema_version: number | null
+  trace_kind: string | null
+  execution_mode: string | null
+  root_trace_id: string | null
+  root_thread_id: string | null
+  parent_trace_id: string | null
+  parent_thread_id: string | null
+  parent_span_id: string | null
+  link_type: string | null
+  subagent_kind: string | null
+  subagent_run_id: string | null
+  subagent_thread_id: string | null
+  handoff_action: string | null
+  handoff_source_agent: string | null
+  handoff_target_agent: string | null
+  coordinator_worker_id: string | null
+  coordinator_worker_turn: number | null
+  coordinator_worker_role: string | null
+  coordinator_worker_workload: string | null
+  workflow_run_id: string | null
+  workflow_agent_index: number | null
+  workflow_phase: string | null
+  workflow_agent_label: string | null
 }
 
 // ─────────────────────────────────────────────────────────
@@ -132,7 +156,30 @@ export async function initializeAdoptionIndex(): Promise<void> {
         harness_node_name TEXT,
         harness_node_status TEXT,
         harness_adapter_name TEXT,
-        harness_adapter_version TEXT
+        harness_adapter_version TEXT,
+        observability_schema_version INTEGER,
+        trace_kind TEXT,
+        execution_mode TEXT,
+        root_trace_id TEXT,
+        root_thread_id TEXT,
+        parent_trace_id TEXT,
+        parent_thread_id TEXT,
+        parent_span_id TEXT,
+        link_type TEXT,
+        subagent_kind TEXT,
+        subagent_run_id TEXT,
+        subagent_thread_id TEXT,
+        handoff_action TEXT,
+        handoff_source_agent TEXT,
+        handoff_target_agent TEXT,
+        coordinator_worker_id TEXT,
+        coordinator_worker_turn INTEGER,
+        coordinator_worker_role TEXT,
+        coordinator_worker_workload TEXT,
+        workflow_run_id TEXT,
+        workflow_agent_index INTEGER,
+        workflow_phase TEXT,
+        workflow_agent_label TEXT
       )
     `)
 
@@ -152,7 +199,30 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "harness_node_name TEXT",
       "harness_node_status TEXT",
       "harness_adapter_name TEXT",
-      "harness_adapter_version TEXT"
+      "harness_adapter_version TEXT",
+      "observability_schema_version INTEGER",
+      "trace_kind TEXT",
+      "execution_mode TEXT",
+      "root_trace_id TEXT",
+      "root_thread_id TEXT",
+      "parent_trace_id TEXT",
+      "parent_thread_id TEXT",
+      "parent_span_id TEXT",
+      "link_type TEXT",
+      "subagent_kind TEXT",
+      "subagent_run_id TEXT",
+      "subagent_thread_id TEXT",
+      "handoff_action TEXT",
+      "handoff_source_agent TEXT",
+      "handoff_target_agent TEXT",
+      "coordinator_worker_id TEXT",
+      "coordinator_worker_turn INTEGER",
+      "coordinator_worker_role TEXT",
+      "coordinator_worker_workload TEXT",
+      "workflow_run_id TEXT",
+      "workflow_agent_index INTEGER",
+      "workflow_phase TEXT",
+      "workflow_agent_label TEXT"
     ]) {
       try {
         db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
@@ -160,6 +230,26 @@ export async function initializeAdoptionIndex(): Promise<void> {
         // column already exists — safe to ignore
       }
     }
+
+    // Historical code-gen rows pre-date coordinator/workflow telemetry. Because
+    // those modes were not emitted in that history, rows with an existing trace_id
+    // can be safely normalized as root/normal for commit-time code_adopt events.
+    db.run(
+      `UPDATE gen_events
+          SET observability_schema_version = COALESCE(observability_schema_version, ?),
+              trace_kind = COALESCE(trace_kind, 'root'),
+              execution_mode = COALESCE(execution_mode, 'normal'),
+              root_trace_id = COALESCE(root_trace_id, trace_id),
+              root_thread_id = COALESCE(root_thread_id, thread_id)
+        WHERE trace_id IS NOT NULL
+          AND (observability_schema_version IS NULL
+            OR trace_kind IS NULL
+            OR execution_mode IS NULL
+            OR root_trace_id IS NULL
+            OR root_thread_id IS NULL)`,
+      [TRACE_OBSERVABILITY_SCHEMA_VERSION]
+    )
+    if (db.getRowsModified() > 0) scheduleSave()
 
     db.run(
       `CREATE INDEX IF NOT EXISTS idx_gen_file_pending
@@ -209,8 +299,13 @@ export function insertGenEvent(row: GenIndexRow): void {
       `INSERT OR REPLACE INTO gen_events
        (event_id, file_path, tool, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes, created_at, measured,
         used_skills, thread_id, trace_id, model_id, model_name,
-        harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+        observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
+        parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
+        subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
+        coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
+        workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -232,7 +327,30 @@ export function insertGenEvent(row: GenIndexRow): void {
         row.harness_node_name,
         row.harness_node_status,
         row.harness_adapter_name,
-        row.harness_adapter_version
+        row.harness_adapter_version,
+        row.observability_schema_version,
+        row.trace_kind,
+        row.execution_mode,
+        row.root_trace_id,
+        row.root_thread_id,
+        row.parent_trace_id,
+        row.parent_thread_id,
+        row.parent_span_id,
+        row.link_type,
+        row.subagent_kind,
+        row.subagent_run_id,
+        row.subagent_thread_id,
+        row.handoff_action,
+        row.handoff_source_agent,
+        row.handoff_target_agent,
+        row.coordinator_worker_id,
+        row.coordinator_worker_turn,
+        row.coordinator_worker_role,
+        row.coordinator_worker_workload,
+        row.workflow_run_id,
+        row.workflow_agent_index,
+        row.workflow_phase,
+        row.workflow_agent_label
       ]
     )
     scheduleSave()
@@ -262,12 +380,17 @@ export function findPendingGensForFile(
   if (!db) return []
   const hasMax = typeof maxCreatedAt === "number" && Number.isFinite(maxCreatedAt)
   const stmt = db.prepare(
-    `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
-            line_hashes, old_line_hashes, created_at, measured,
-            used_skills, thread_id, trace_id, model_id, model_name,
-            harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
-            tool
-       FROM gen_events
+      `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
+              line_hashes, old_line_hashes, created_at, measured,
+              used_skills, thread_id, trace_id, model_id, model_name,
+              harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+              observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
+              parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
+              subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
+              coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
+              workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+              tool
+         FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?${hasMax ? " AND created_at <= ?" : ""}
       ORDER BY created_at DESC`
   )
@@ -293,12 +416,17 @@ export function findPendingGensForFile(
 export function getGenRowByEventId(eventId: string): GenIndexRow | null {
   if (!db || !eventId) return null
   const stmt = db.prepare(
-    `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
-            line_hashes, old_line_hashes, created_at, measured,
-            used_skills, thread_id, trace_id, model_id, model_name,
-            harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
-            tool
-       FROM gen_events
+      `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
+              line_hashes, old_line_hashes, created_at, measured,
+              used_skills, thread_id, trace_id, model_id, model_name,
+              harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+              observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
+              parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
+              subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
+              coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
+              workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+              tool
+         FROM gen_events
       WHERE event_id = ?`
   )
   stmt.bind([eventId])

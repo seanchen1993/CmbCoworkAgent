@@ -42,6 +42,29 @@ export interface TraceConversationSource {
   outcome?: string
   errorMessage?: string
   totalToolCalls?: number
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
   nodes?: TraceConversationNode[]
   modelCalls?: TraceConversationModelCall[]
   steps?: TraceConversationStep[]
@@ -139,6 +162,80 @@ function summarizeToolNames(tools: TraceConversationToolInfo[], limit = 8): stri
   return `${labels.slice(0, limit).join("、")} 等`
 }
 
+function shortId(value?: string): string {
+  return value ? value.slice(0, 8) : ""
+}
+
+function isSubagentTrace(trace: TraceConversationSource): boolean {
+  return trace.traceKind === "subagent" || Boolean(trace.parentTraceId || trace.subagentKind)
+}
+
+function traceActorLabel(trace: TraceConversationSource): string {
+  if (trace.subagentKind === "coordinator_worker") {
+    const role = trace.coordinatorWorkerRole === "verifier" ? "Verifier" : "Worker"
+    return trace.coordinatorWorkerId ? `${role} ${trace.coordinatorWorkerId}` : role
+  }
+  if (trace.subagentKind === "workflow_agent") {
+    return trace.workflowAgentLabel || `Workflow Agent ${trace.workflowAgentIndex ?? ""}`.trim()
+  }
+  if (trace.subagentKind === "task") return "Task Agent"
+  if (trace.traceKind === "subagent") return "子 Agent"
+  if (trace.executionMode === "coordinator") return "Agent Team"
+  if (trace.executionMode === "workflow") return "Ultra Workflow"
+  return "主 Agent"
+}
+
+function instructionLabel(trace: TraceConversationSource): string {
+  return isSubagentTrace(trace) ? `${traceActorLabel(trace)} 指令` : "用户"
+}
+
+function responseLabel(trace: TraceConversationSource): string {
+  if (isSubagentTrace(trace)) return `${traceActorLabel(trace)} 结果`
+  if (trace.executionMode === "coordinator" || trace.executionMode === "workflow") {
+    return `${traceActorLabel(trace)} 回复`
+  }
+  return "助手"
+}
+
+function toolMessageLabel(trace: TraceConversationSource): string {
+  return isSubagentTrace(trace) ? `${traceActorLabel(trace)} 工具` : "工具"
+}
+
+function traceContextLabels(trace: TraceConversationSource): string[] {
+  const labels = [traceActorLabel(trace)]
+  if (trace.executionMode && trace.executionMode !== "normal") labels.push(trace.executionMode)
+  if (trace.workflowPhase) labels.push(`phase ${trace.workflowPhase}`)
+  if (trace.parentTraceId) labels.push(`parent ${shortId(trace.parentTraceId)}`)
+  if (trace.rootTraceId && trace.rootTraceId !== trace.traceId) labels.push(`root ${shortId(trace.rootTraceId)}`)
+  return labels
+}
+
+function displayToolCount(trace: TraceConversationSource, inferred: number): number {
+  return trace.totalToolCalls && trace.totalToolCalls > 0 ? trace.totalToolCalls : inferred
+}
+
+function TraceContextPills({ trace }: { trace: TraceConversationSource }): React.JSX.Element | null {
+  const labels = traceContextLabels(trace).filter(Boolean)
+  if (labels.length === 0) return null
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {labels.map((label, index) => (
+        <span
+          key={`${label}-${index}`}
+          className={cn(
+            "rounded border px-1.5 py-0 text-[10px] leading-4",
+            index === 0
+              ? "border-blue-500/25 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+              : "border-border bg-background text-muted-foreground"
+          )}
+        >
+          {label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 function serializeValue(value: unknown): string {
   if (value === undefined || value === null) return ""
   let text = ""
@@ -193,7 +290,7 @@ function extractToolInfos(trace: TraceConversationSource): TraceConversationTool
   )
   if (stepTools.length > 0) return stepTools
 
-  return (trace.modelCalls ?? []).flatMap((call) =>
+  const modelTools = (trace.modelCalls ?? []).flatMap((call) =>
     (call.toolCalls ?? []).map((tool): TraceConversationToolInfo => ({
       name: tool.name ?? "unknown",
       input: tool.args,
@@ -201,6 +298,19 @@ function extractToolInfos(trace: TraceConversationSource): TraceConversationTool
       durationMs: tool.durationMs
     }))
   )
+  if (modelTools.length > 0) return modelTools
+
+  return (trace.nodes ?? []).flatMap((node) => {
+    const toolNames = node.metadata?.toolNames
+    if (!Array.isArray(toolNames)) return []
+    return toolNames
+      .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+      .map((name): TraceConversationToolInfo => ({
+        name,
+        status: node.status,
+        output: node.output
+      }))
+  })
 }
 
 function isUsefulAssistantText(text: string): boolean {
@@ -237,13 +347,13 @@ export function buildTraceConversation(trace: TraceConversationSource | null | u
   const toolNames = uniqueToolNames(tools.map((tool) => tool.name))
 
   const messages: TraceConversationMessage[] = []
-  if (userText) messages.push({ role: "user", label: "用户", content: userText })
-  if (assistantText) messages.push({ role: "assistant", label: "助手", content: assistantText })
+  if (userText) messages.push({ role: "user", label: instructionLabel(trace), content: userText })
+  if (assistantText) messages.push({ role: "assistant", label: responseLabel(trace), content: assistantText })
   if (toolNames.length > 0) {
     messages.push({
       role: "tool",
-      label: "工具",
-      content: `调用 ${trace.totalToolCalls ?? tools.length} 次工具：${summarizeToolNames(tools)}`,
+      label: toolMessageLabel(trace),
+      content: `调用 ${displayToolCount(trace, tools.length)} 次工具：${summarizeToolNames(tools)}`,
       tools
     })
   }
@@ -265,12 +375,17 @@ export function buildThreadConversation(traces: TraceConversationSource[]): Trac
     const time = formatMessageTime(trace.startedAt)
     const suffix = time ? ` · ${time}` : ""
     if (item.userText) {
-      messages.push({ role: "user", label: `用户${suffix}`, content: item.userText, traceId: trace.traceId })
+      messages.push({
+        role: "user",
+        label: `${instructionLabel(trace)}${suffix}`,
+        content: item.userText,
+        traceId: trace.traceId
+      })
     }
     if (item.assistantText) {
       messages.push({
         role: "assistant",
-        label: `助手${suffix}`,
+        label: `${responseLabel(trace)}${suffix}`,
         content: item.assistantText,
         traceId: trace.traceId
       })
@@ -278,8 +393,8 @@ export function buildThreadConversation(traces: TraceConversationSource[]): Trac
     if (item.tools.length > 0) {
       messages.push({
         role: "tool",
-        label: `工具${suffix}`,
-        content: `调用 ${trace.totalToolCalls ?? item.tools.length} 次工具：${summarizeToolNames(item.tools)}`,
+        label: `${toolMessageLabel(trace)}${suffix}`,
+        content: `调用 ${displayToolCount(trace, item.tools.length)} 次工具：${summarizeToolNames(item.tools)}`,
         tools: item.tools,
         traceId: trace.traceId
       })
@@ -406,6 +521,7 @@ export function TraceConversation({
     <section className={cn("space-y-3 rounded-lg border border-border bg-card/50 px-4 py-3", className)}>
       <div className="flex items-center justify-between gap-3">
         <h4 className="text-xs font-semibold text-foreground">{title}</h4>
+        <TraceContextPills trace={trace} />
       </div>
 
       <div className="space-y-2">
@@ -472,6 +588,7 @@ export function TraceThreadConversation({
   selectedTraceId?: string | null
 }): React.JSX.Element {
   const conversation = useMemo(() => buildThreadConversation(traces), [traces])
+  const subagentCount = useMemo(() => traces.filter(isSubagentTrace).length, [traces])
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // When the user picks a trace in the left list, jump the reconstructed
@@ -501,7 +618,7 @@ export function TraceThreadConversation({
           <p className="mt-0.5 text-[10px] text-muted-foreground">
             {loading
               ? `正在加载完整会话…（已展示 ${traces.length} 条 trace）`
-              : `已聚合 ${traces.length} 条 trace 的用户输入与助手回复`}
+              : `已聚合 ${traces.length} 条 trace（主 ${traces.length - subagentCount} / 子 ${subagentCount}）的输入与回复`}
           </p>
         </div>
       </div>

@@ -203,6 +203,8 @@ import {
   type WorkflowSubagentRuntime
 } from "./workflow/subagent"
 import { isWorkflowSubagentThreadOf } from "./workflow/types"
+import { TraceCollector } from "./trace/collector"
+import type { TraceContext, TraceOutcome } from "./trace/types"
 
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -2860,6 +2862,8 @@ export interface CreateAgentRuntimeOptions {
   coordinatorWorkerTurnPlanning?: CoordinatorWorkerTurnPlanningState
   /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables async worker orchestration. */
   agentMode?: AgentMode
+  /** Parent/root trace context used to link async worker and workflow subagent traces. */
+  traceContext?: TraceContext
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
   /** Optional filesystem access limits for leaf runtimes: coordinator async
@@ -2955,6 +2959,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     disableMemoryInjection = false,
     memoryEnabled: inheritedMemoryEnabled,
     agentMode = "normal",
+    traceContext,
     disableSubagents = false,
     onHookResult,
     onCoordinatorWorkerHookResult,
@@ -3671,6 +3676,7 @@ The workspace root is: ${workspacePath}`
         runExclusiveFileWrite: <T>(fn: () => Promise<T>): Promise<T> =>
           getToolConcurrencyLock(threadId).write(fn),
         subagentDeps: {
+          traceContext,
           createRuntime: async (subagentOptions): Promise<WorkflowSubagentRuntime> => {
             // read_only AND none are both restricted roles → skip AGENTS.md +
             // MEMORY.md (CC omitClaudeMd parity). Only full (write/verify) keeps
@@ -3965,7 +3971,12 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let tokenUsage: CoordinatorWorkerTokenUsage | undefined
     const seenWorkerToolCallKeys = new Set<string>()
     const workerToolNames = new Set<string>()
+    let workerToolCallCount = 0
     const workerSkillUsageDetector = new SkillUsageDetector()
+    let workerTracer: TraceCollector | undefined
+    let workerTraceTerminalRecorded = false
+    let workerTraceOutcome: TraceOutcome = "success"
+    let workerTraceError: string | undefined
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
     }
@@ -4040,6 +4051,34 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         workerRoutingResult?.resolvedTier ?? "premium",
         workerRoutingResult?.layer !== "pinned"
       )
+      if (traceContext) {
+        workerTracer = new TraceCollector(
+          workerInput.workerThreadId,
+          effectiveWorkerPrompt,
+          workerRoutingResult?.resolvedModelId ?? modelId ?? "unknown",
+          {
+            traceKind: "subagent",
+            executionMode: "coordinator",
+            rootTraceId: traceContext.rootTraceId,
+            rootThreadId: traceContext.rootThreadId,
+            parentTraceId: traceContext.traceId,
+            parentThreadId: traceContext.threadId,
+            parentSpanId: traceContext.rootNodeId,
+            linkType: "async_span_link",
+            subagentKind: "coordinator_worker",
+            subagentRunId: `${workerInput.workerId}:turn:${workerInput.workerTurn}`,
+            subagentThreadId: workerInput.workerThreadId,
+            handoffAction: workerInput.workerTurn > 1 ? "continue_worker" : "start_worker",
+            handoffSourceAgent: "coordinator",
+            handoffTargetAgent: workerInput.role,
+            coordinatorWorkerId: workerInput.workerId,
+            coordinatorWorkerTurn: workerInput.workerTurn,
+            coordinatorWorkerRole: workerInput.role,
+            coordinatorWorkerWorkload: workerInput.workload,
+            includeSkillEval: false
+          }
+        )
+      }
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
         callbacks: [],
@@ -4064,8 +4103,11 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             data,
             seenWorkerToolCallKeys,
             (event) => {
-              if (event.type === "tool_call" && event.toolName) {
-                workerToolNames.add(event.toolName)
+              if (event.type === "tool_call") {
+                workerToolCallCount += 1
+                if (event.toolName) {
+                  workerToolNames.add(event.toolName)
+                }
               }
               workerInput.onProgress(event)
             },
@@ -4153,6 +4195,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             streamConfig
           )
           usedWorkerModelId = candidateId
+          workerTracer?.setModelId(candidateId)
           break
         } catch (error) {
           if (!isRetryableApiError(error)) throw error
@@ -4219,6 +4262,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
           usedWorkerModelId = nextCandidate
+          workerTracer?.setModelId(nextCandidate)
         }
       }
 
@@ -4323,12 +4367,46 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         throw new Error(workerStopHookFailure ?? "Stop hook blocked worker completion.")
       }
 
+      const summary = summarizeWorkerText(finalText)
+      workerTracer?.addTerminalNode({
+        type: "message",
+        output: summary,
+        metadata: {
+          tokenUsage,
+          toolNames: Array.from(workerToolNames),
+          toolCallCount: workerToolCallCount
+        }
+      })
+      workerTraceTerminalRecorded = true
       return {
-        summary: summarizeWorkerText(finalText),
+        summary,
         rawText: finalText,
         tokenUsage
       }
+    } catch (error) {
+      workerTraceOutcome = workerInput.abortSignal.aborted || isAbortError(error) ? "cancelled" : "error"
+      workerTraceError = describeToolError(error)
+      throw error
     } finally {
+      if (workerTracer) {
+        try {
+          if (!workerTraceTerminalRecorded && workerToolCallCount > 0) {
+            workerTracer.addTerminalNode({
+              type: workerTraceOutcome === "cancelled" ? "cancel" : "error",
+              output: workerTraceError,
+              metadata: {
+                tokenUsage,
+                toolNames: Array.from(workerToolNames),
+                toolCallCount: workerToolCallCount
+              }
+            })
+            workerTraceTerminalRecorded = true
+          }
+          await workerTracer.finish(workerTraceOutcome, workerTraceError)
+        } catch (traceFinishError) {
+          console.warn("[CoordinatorWorker] trace finish failed:", traceFinishError)
+        }
+      }
       workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)
       const cleanupResults = await Promise.allSettled([
         Promise.resolve().then(cancelWorkerBackgroundTasks),
