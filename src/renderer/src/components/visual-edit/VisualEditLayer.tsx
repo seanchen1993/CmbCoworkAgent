@@ -41,6 +41,31 @@ function screenPoint(
   }
 }
 
+const FLOATING_PANEL_MARGIN = 12
+const DRAFT_PANEL_SIZE = { width: 270, height: 240 }
+
+function floatingPanelPosition(
+  point: ClawVisualPoint,
+  bounds: { width: number; height: number },
+  size: { width: number; height: number }
+): { left: number; top: number } {
+  const maxLeft = Math.max(FLOATING_PANEL_MARGIN, bounds.width - size.width - FLOATING_PANEL_MARGIN)
+  const maxTop = Math.max(FLOATING_PANEL_MARGIN, bounds.height - size.height - FLOATING_PANEL_MARGIN)
+  const preferredLeft =
+    point.x + FLOATING_PANEL_MARGIN + size.width <= bounds.width
+      ? point.x + FLOATING_PANEL_MARGIN
+      : point.x - size.width - FLOATING_PANEL_MARGIN
+  const preferredTop =
+    point.y + FLOATING_PANEL_MARGIN + size.height <= bounds.height
+      ? point.y + FLOATING_PANEL_MARGIN
+      : point.y - size.height - FLOATING_PANEL_MARGIN
+
+  return {
+    left: Math.min(Math.max(FLOATING_PANEL_MARGIN, preferredLeft), maxLeft),
+    top: Math.min(Math.max(FLOATING_PANEL_MARGIN, preferredTop), maxTop)
+  }
+}
+
 function findScrollableParent(element: HTMLElement | null): HTMLElement | null {
   let current = element?.parentElement ?? null
   while (current) {
@@ -85,6 +110,7 @@ export function VisualEditLayer({
   onSubmit: (context: ClawVisualFeedbackContext) => Promise<boolean | void> | boolean | void
 }): React.JSX.Element | null {
   const overlayRef = useRef<HTMLDivElement>(null)
+  const draftTextareaRef = useRef<HTMLTextAreaElement>(null)
   const idCounterRef = useRef(1)
   const mountedRef = useRef(false)
   const [mode, setMode] = useState<ClawVisualToolMode>("comment")
@@ -142,6 +168,14 @@ export function VisualEditLayer({
       window.removeEventListener("resize", syncViewport)
     }
   }, [active, iframeRef, syncViewport])
+
+  useEffect(() => {
+    if (!draft) return
+    const frameId = window.requestAnimationFrame(() => {
+      draftTextareaRef.current?.focus({ preventScroll: true })
+    })
+    return () => window.cancelAnimationFrame(frameId)
+  }, [draft])
 
   const getPagePointFromEvent = useCallback(
     (event: React.MouseEvent<HTMLDivElement> | React.PointerEvent<HTMLDivElement>) => {
@@ -313,8 +347,22 @@ export function VisualEditLayer({
         .map((annotation) => annotation.stroke as ClawVisualStroke),
     [annotations]
   )
+  const visibleStrokes = useMemo(() => {
+    if (draft?.kind === "draw" && draft.stroke) {
+      return [...strokes, draft.stroke]
+    }
+    return strokes
+  }, [draft, strokes])
 
   if (!active) return null
+
+  const overlaySize = {
+    width: overlayRef.current?.clientWidth ?? viewport.width,
+    height: overlayRef.current?.clientHeight ?? viewport.height
+  }
+  const draftPosition = draft
+    ? floatingPanelPosition(screenPoint(draft, viewport, scale), overlaySize, DRAFT_PANEL_SIZE)
+    : null
 
   return (
     <div
@@ -332,7 +380,7 @@ export function VisualEditLayer({
       </div>
       <VisualDrawLayer
         active={mode === "draw" && !submitting}
-        strokes={strokes}
+        strokes={visibleStrokes}
         viewport={viewport}
         zoom={zoom}
         onStrokeComplete={handleStrokeComplete}
@@ -350,6 +398,7 @@ export function VisualEditLayer({
               annotation={annotation}
               x={point.x}
               y={point.y}
+              containerSize={overlaySize}
               active={activeId === annotation.id}
               onToggle={() =>
                 setActiveId((prev) => (prev === annotation.id ? null : annotation.id))
@@ -373,8 +422,8 @@ export function VisualEditLayer({
         <div
           className="absolute z-50 w-[270px] rounded-lg border border-border bg-background p-3 shadow-2xl"
           style={{
-            left: Math.max(12, screenPoint(draft, viewport, scale).x + 12),
-            top: Math.max(12, screenPoint(draft, viewport, scale).y + 12)
+            left: draftPosition?.left ?? FLOATING_PANEL_MARGIN,
+            top: draftPosition?.top ?? FLOATING_PANEL_MARGIN
           }}
           onClick={(event) => event.stopPropagation()}
         >
@@ -399,7 +448,7 @@ export function VisualEditLayer({
             </div>
           )}
           <textarea
-            autoFocus
+            ref={draftTextareaRef}
             value={draftText}
             onChange={(event) => setDraftText(event.target.value)}
             className="min-h-[88px] w-full resize-none rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none focus:border-primary"

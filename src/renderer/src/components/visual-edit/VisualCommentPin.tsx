@@ -2,6 +2,9 @@ import { useState } from "react"
 import { Check, Trash2, X } from "lucide-react"
 import type { ClawVisualAnnotation } from "./visual-edit-types"
 
+const FLOATING_PANEL_MARGIN = 12
+const COMMENT_PANEL_SIZE = { width: 260, height: 240 }
+
 function statusLabel(status: ClawVisualAnnotation["status"]): string {
   switch (status) {
     case "submitted":
@@ -19,10 +22,33 @@ function statusLabel(status: ClawVisualAnnotation["status"]): string {
   }
 }
 
+function floatingPanelPosition(
+  point: { x: number; y: number },
+  bounds: { width: number; height: number },
+  size: { width: number; height: number }
+): { left: number; top: number } {
+  const maxLeft = Math.max(FLOATING_PANEL_MARGIN, bounds.width - size.width - FLOATING_PANEL_MARGIN)
+  const maxTop = Math.max(FLOATING_PANEL_MARGIN, bounds.height - size.height - FLOATING_PANEL_MARGIN)
+  const preferredLeft =
+    point.x + FLOATING_PANEL_MARGIN + size.width <= bounds.width
+      ? point.x + FLOATING_PANEL_MARGIN
+      : point.x - size.width - FLOATING_PANEL_MARGIN
+  const preferredTop =
+    point.y + FLOATING_PANEL_MARGIN + size.height <= bounds.height
+      ? point.y + FLOATING_PANEL_MARGIN
+      : point.y - size.height - FLOATING_PANEL_MARGIN
+
+  return {
+    left: Math.min(Math.max(FLOATING_PANEL_MARGIN, preferredLeft), maxLeft),
+    top: Math.min(Math.max(FLOATING_PANEL_MARGIN, preferredTop), maxTop)
+  }
+}
+
 export function VisualCommentPin({
   annotation,
   x,
   y,
+  containerSize,
   active,
   onToggle,
   onTextChange,
@@ -31,6 +57,7 @@ export function VisualCommentPin({
   annotation: ClawVisualAnnotation
   x: number
   y: number
+  containerSize: { width: number; height: number }
   active: boolean
   onToggle: () => void
   onTextChange: (text: string) => void
@@ -76,10 +103,7 @@ export function VisualCommentPin({
       {active && (
         <div
           className="absolute z-40 w-[260px] rounded-lg border border-border bg-background p-3 shadow-2xl"
-          style={{
-            left: Math.min(Math.max(12, x + 12), Math.max(12, window.innerWidth - 292)),
-            top: Math.max(12, y + 12)
-          }}
+          style={floatingPanelPosition({ x, y }, containerSize, COMMENT_PANEL_SIZE)}
           onClick={(event) => event.stopPropagation()}
         >
           <div className="mb-2 flex items-center gap-2">
