@@ -4090,12 +4090,16 @@ export function ChatContainer({
       } catch (err) {
         console.error("[ChatContainer] Failed to cancel scheduled task:", err)
       }
+      // 取消是发信号等收敛;若主进程实际无任务在跑(渲染态因丢 done 冻结),
+      // 上面的调用是空操作且不会再有事件回来解锁——立即用权威态校正自愈。
+      threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading && threadId === "heartbeat") {
       try {
         await window.api.heartbeat.cancel()
       } catch (err) {
         console.error("[ChatContainer] Failed to cancel heartbeat:", err)
       }
+      threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
       // ChatX bot thread: scheduledTaskLoading is true but no scheduledTaskId
       try {

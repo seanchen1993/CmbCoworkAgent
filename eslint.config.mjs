@@ -41,5 +41,33 @@ export default defineConfig(
     files: ["**/*.{js,mjs,cjs}"],
     rules: { "@typescript-eslint/explicit-function-return-type": "off" }
   },
+  {
+    // Dynamic-workflow scripts are executable assets run inside the workflow
+    // sandbox (engine.ts/sandbox.ts), which injects these globals at runtime.
+    files: ["**/*.workflow.js"],
+    languageOptions: {
+      globals: {
+        agent: "readonly",
+        parallel: "readonly",
+        pipeline: "readonly",
+        workflow: "readonly",
+        phase: "readonly",
+        log: "readonly",
+        glob: "readonly",
+        readFile: "readonly",
+        writeFile: "readonly",
+        exists: "readonly",
+        args: "readonly",
+        budget: "readonly"
+      }
+    },
+    rules: {
+      // `catch (_error)` is the scripts' deliberate ignore convention.
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { caughtErrorsIgnorePattern: "^_", argsIgnorePattern: "^_", varsIgnorePattern: "^_" }
+      ]
+    }
+  },
   eslintConfigPrettier
 )

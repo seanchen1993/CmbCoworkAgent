@@ -61,6 +61,13 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   /** Set while a flush/close drains the writer so no older rename can land
    * after the authoritative snapshot. */
   private blockAsyncWrite = false
+  /** Permanently dead (thread deleted). Unlike close(), this survives
+   * initialize(): a held reference in a writer that outlived deletion (hung
+   * subagent, evicted-then-reused instance) must never reopen the db and
+   * resurrect the just-deleted file. Gates every disk write, not just
+   * initialize(), so a write loop that raced past the front check still can't
+   * land a snapshot. */
+  private retired = false
 
   /** Max checkpoints to keep per (thread_id, checkpoint_ns). Older ones are pruned on each put().
    * Kept at 1 because sql.js loads the entire DB file into memory — retaining more checkpoints
@@ -78,6 +85,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Initialize the database asynchronously
    */
   async initialize(): Promise<void> {
+    if (this.retired) {
+      throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
+    }
     if (this.db) return
     // Reset in case this instance was previously closed (flush set the guard).
     this.blockAsyncWrite = false
@@ -213,7 +223,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * more checkpoints arrived while writing.
    */
   private async runSaveLoop(): Promise<void> {
-    while (this.db && this.dirty && !this.blockAsyncWrite) {
+    while (this.db && this.dirty && !this.blockAsyncWrite && !this.retired) {
       this.dirty = false
       try {
         const data = Buffer.from(this.db.export())
@@ -236,7 +246,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Save database to disk (debounced, async, atomic)
    */
   private saveToDisk(): void {
-    if (!this.db) return
+    if (!this.db || this.retired) return
 
     this.dirty = true
 
@@ -270,8 +280,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       if (pendingSave) await pendingSave
 
       // Mutations can land while an earlier async write is settling. Continue
-      // until the latest in-memory state has reached disk.
-      while (this.db && this.dirty) {
+      // until the latest in-memory state has reached disk. A retired saver
+      // skips the final flush entirely — its file is about to be deleted.
+      while (this.db && this.dirty && !this.retired) {
         this.dirty = false
         const data = Buffer.from(this.db.export())
         await persistSqliteSnapshot(this.dbPath, data, "SqlJsSaver")
@@ -660,6 +671,19 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     this.db.run(`DELETE FROM writes WHERE thread_id = ?`, [threadId])
 
     this.saveToDisk()
+  }
+
+  /**
+   * Permanently close for thread deletion. Unlike close() (reusable shutdown:
+   * flushes pending state, and a later initialize() may legitimately reopen),
+   * retire() poisons the instance first — in-flight writes are awaited, the
+   * final flush is skipped (the file is about to be deleted), and every future
+   * initialize()/save is refused. Call this, not close(), whenever the backing
+   * file is being removed from disk.
+   */
+  async retire(): Promise<void> {
+    this.retired = true
+    await this.close()
   }
 
   /**

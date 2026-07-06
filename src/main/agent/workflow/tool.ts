@@ -13,6 +13,7 @@ import {
   clearAllAgentToolStreams,
   generateWorkflowRunId,
   isValidWorkflowRunId,
+  isWorkflowRunDirDisposed,
   loadWorkflowRunForResume,
   sha256Hex
 } from "./run-store"
@@ -135,6 +136,13 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         throw new Error(
           `A dynamic workflow (${workflowRunManager.activeRunId(threadId)}) is already running in this thread. Wait for its task-notification, or the user can cancel it from the workflow panel.`
         )
+      }
+      // Deleted-thread gate BEFORE the approval prompt (launch() re-checks, but
+      // that guard sits after ensureWorkflowApproved): a foreground turn that
+      // outlived its thread's deletion would otherwise pop an approval nobody
+      // can answer — the thread's UI is gone — and hang this tool call.
+      if (isWorkflowRunDirDisposed(workspacePath, threadId)) {
+        throw new Error("This thread has been deleted; a workflow can no longer be launched on it.")
       }
       // No workspace-level lock: concurrent workflows over the same workspace on
       // different threads are intentionally allowed (matches Claude Code desktop).
