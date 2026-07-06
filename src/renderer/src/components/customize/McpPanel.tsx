@@ -164,7 +164,9 @@ export function McpPanel(): React.JSX.Element {
         name: connector.name,
         description: marketMcpMap[key]?.description || connector.url || connector.command || "",
         category: marketMcpMap[key]?.category,
-        chineseName: marketMcpMap[key]?.chinese_name
+        chineseName: marketMcpMap[key]?.chinese_name,
+        guidance: marketMcpMap[key]?.guidance,
+        extraJson: marketMcpMap[key]?.extra_json
       })
       setPublishDialogOpen(true)
     },

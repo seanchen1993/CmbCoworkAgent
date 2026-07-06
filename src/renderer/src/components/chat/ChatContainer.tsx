@@ -1256,7 +1256,7 @@ const getMessageBubbleText = (content: Message["content"]): string => {
 
 // MessageBubble renders `null` for messages with no visible content: tool-result
 // messages, empty system notices, and assistant/user messages whose text is empty
-// and that carry no tool calls. Such empty wrappers must NOT get content-visibility
+// and that carry no tool calls or reasoning. Such empty wrappers must NOT get content-visibility
 // containment — when scrolled off-screen the intrinsic-size fallback would reserve
 // phantom height (stacking across many empty tool results into a large blank gap
 // between tools and text). Detection is intentionally generous: a false positive
@@ -1272,6 +1272,12 @@ const messageRendersNothing = (message: Message): boolean => {
   if (message.role === "tool") return true
   const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
   if (hasToolCalls) return false
+  if (message.role === "assistant" && typeof message.reasoning === "string") {
+    return (
+      message.reasoning.trim().length === 0 &&
+      getMessageBubbleText(message.content).trim().length === 0
+    )
+  }
   const visibleText =
     message.role === "system"
       ? getMessageText(message.content)
@@ -2903,6 +2909,22 @@ export function ChatContainer({
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
+    const liveReasoningById = new Map<string, string>()
+    for (const liveMessage of streamData.liveMessages || []) {
+      if (
+        liveMessage.id &&
+        liveStreamMessageRole(liveMessage.type) === "assistant" &&
+        typeof liveMessage.reasoning === "string" &&
+        liveMessage.reasoning.trim()
+      ) {
+        liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
+      }
+    }
+    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
+      if (message.role !== "assistant" || message.reasoning) return message
+      const liveReasoning = liveReasoningById.get(message.id)
+      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
+    })
     const streamingMsgs: Message[] = (streamData.liveMessages || [])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
@@ -2913,6 +2935,7 @@ export function ChatContainer({
           id: streamMsg.id,
           role,
           content: normalizeLiveStreamMessageContent(streamMsg.content),
+          ...(role === "assistant" && streamMsg.reasoning ? { reasoning: streamMsg.reasoning } : {}),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
@@ -2926,7 +2949,7 @@ export function ChatContainer({
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs].filter(
+    const allMessages = [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
       isVisibleCheckpointTranscriptMessage
     )
     const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {

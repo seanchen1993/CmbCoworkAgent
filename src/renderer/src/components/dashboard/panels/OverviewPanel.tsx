@@ -118,8 +118,7 @@ export function OverviewPanel({
   onSkillClick,
   onActiveUsersClick,
   onFunnelFirstStageClick,
-  marketSkillKeys = new Set(),
-  pluginSkillKeys = new Set()
+  marketSkillKeys = new Set()
 }: {
   data: OverviewData | null
   loading: boolean
@@ -127,7 +126,6 @@ export function OverviewPanel({
   onActiveUsersClick?: () => void
   onFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
-  pluginSkillKeys?: Set<string>
 }) {
   if (loading && !data) {
     return <div className="text-sm text-muted-foreground py-8 text-center">加载中...</div>
@@ -272,7 +270,6 @@ export function OverviewPanel({
           bySkillAdoption={data.bySkillAdoption}
           onSkillClick={onSkillClick}
           marketSkillKeys={marketSkillKeys}
-          pluginSkillKeys={pluginSkillKeys}
         />
         <ToolRankingPanel
           byTool={data.byTool}

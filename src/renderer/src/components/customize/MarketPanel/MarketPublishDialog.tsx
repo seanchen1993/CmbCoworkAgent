@@ -15,6 +15,7 @@ export type MarketPublishTarget = {
   chineseName?: string
   category?: string
   guidance?: string
+  extraJson?: string
 }
 
 export type MarketPublishFileBuildContext = GeneratedMarketFileBuildContext
@@ -29,7 +30,7 @@ export function MarketPublishDialog(props: {
   target: MarketPublishTarget | null
   marketInfo?: Pick<
     MarketItem,
-    "name" | "description" | "category" | "chinese_name" | "guidance" | "version"
+    "name" | "description" | "category" | "chinese_name" | "guidance" | "version" | "extra_json"
   >
   buildFile: (
     target: MarketPublishTarget,
@@ -55,7 +56,7 @@ export function MarketPublishDialog(props: {
         onSuccess({ name: target.name, type: target.type, mode })
       }}
       resourceType={target?.type ?? "mcp"}
-      onUpload={(file, name, description, category, version, guidance, chineseName, userId) => {
+      onUpload={(file, name, description, category, version, guidance, chineseName, userId, extraJson) => {
         if (!target) return Promise.resolve({ success: false, error: "未选择项目" })
         if (mode === "update") {
           return marketApi.updateItem(
@@ -67,7 +68,8 @@ export function MarketPublishDialog(props: {
             version,
             guidance,
             chineseName,
-            userId
+            userId,
+            extraJson
           )
         }
         if (!file) return Promise.resolve({ success: false, error: "文件不能为空" })
@@ -80,7 +82,8 @@ export function MarketPublishDialog(props: {
           version,
           guidance,
           chineseName,
-          userId
+          userId,
+          extraJson
         )
       }}
       isUpdate={mode === "update"}
@@ -92,7 +95,11 @@ export function MarketPublishDialog(props: {
               category: target.category || marketInfo?.category || "",
               version: marketInfo?.version || undefined,
               guidance: target.guidance || marketInfo?.guidance || "",
-              chinese_name: target.chineseName || marketInfo?.chinese_name || ""
+              chinese_name: target.chineseName || marketInfo?.chinese_name || "",
+              extra_json:
+                mode === "update"
+                  ? target.extraJson || marketInfo?.extra_json || undefined
+                  : target.extraJson || marketInfo?.extra_json || undefined
             }
           : undefined
       }

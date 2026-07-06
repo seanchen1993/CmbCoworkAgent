@@ -8,7 +8,7 @@
 import { execFile } from "child_process"
 import { createHash } from "crypto"
 import { existsSync } from "fs"
-import { mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from "fs/promises"
 import { homedir, tmpdir } from "os"
 import { join } from "path"
 import { promisify } from "util"
@@ -262,6 +262,40 @@ async function testGitPanelPathSkipsHookAndUsesDirectStagedCapture(): Promise<vo
   })
 }
 
+async function testCoreHooksPathInWorkspaceIsNotModified(): Promise<void> {
+  await withTempRepo("git-hook-husky-skip", async (repo) => {
+    await git(repo, ["config", "core.hooksPath", ".husky"])
+    const huskyDir = join(repo, ".husky")
+    const preCommit = join(huskyDir, "pre-commit")
+    const originalHook = `#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+npm test
+`
+    await mkdir(huskyDir, { recursive: true })
+    await writeFile(preCommit, originalHook)
+
+    const status = await installGitHooks(repo)
+    assert(
+      status.state === "external_hooks_path",
+      `workspace core.hooksPath should be skipped, got ${status.state}`
+    )
+    assert(status.canInstall === false, "workspace core.hooksPath should not be installable")
+    assert(
+      (await readFile(preCommit, "utf-8")) === originalHook,
+      ".husky/pre-commit must not be modified"
+    )
+    assert(
+      !existsSync(`${preCommit}.cmbdevclaw-user`),
+      "should not create a .cmbdevclaw-user backup in .husky"
+    )
+    assert(
+      !existsSync(join(repo, ".git", "hooks", "pre-commit")),
+      "should not install an inert .git/hooks hook"
+    )
+  })
+}
+
 async function testExternalCommitReconciledWithoutHook(): Promise<void> {
   await withIsolatedAdoptionStore(async () => {
     await initializeAdoptionTracker()
@@ -336,6 +370,8 @@ async function run(): Promise<void> {
   console.log("PASS external command commit with code_gen is collected through Git hook")
   await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
   console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
+  await testCoreHooksPathInWorkspaceIsNotModified()
+  console.log("PASS workspace core.hooksPath is skipped without modifying .husky")
   await testExternalCommitReconciledWithoutHook()
   console.log("PASS external commit without hook is reconciled and measured")
 }

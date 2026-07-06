@@ -4,6 +4,7 @@ export interface LiveStreamMessage {
   id?: string
   type?: string
   content?: string | unknown[]
+  reasoning?: string
   tool_calls?: Message["tool_calls"]
   tool_call_id?: string
   name?: string
@@ -38,7 +39,10 @@ export function mergeLiveStreamMessages(
       ...existing,
       ...message,
       content: shouldUseIncomingContent ? message.content : (existing?.content ?? message.content),
-      content_priority: Math.max(existingContentPriority, incomingContentPriority),
+      reasoning: message.reasoning ?? existing?.reasoning,
+      content_priority: shouldUseIncomingContent
+        ? Math.max(existingContentPriority, incomingContentPriority)
+        : existingContentPriority,
       tool_calls: hasToolCallsField ? message.tool_calls : existing?.tool_calls,
       tool_call_id: message.tool_call_id ?? existing?.tool_call_id,
       name: message.name ?? existing?.name

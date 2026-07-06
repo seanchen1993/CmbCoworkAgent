@@ -47,6 +47,7 @@ function makeRow(overrides: Partial<GenIndexRow> = {}): GenIndexRow {
     created_at: Date.now(),
     measured: 0,
     used_skills: null,
+    skill_source: null,
     thread_id: "thread-1",
     trace_id: "trace-1",
     model_id: "m1",
