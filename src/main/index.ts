@@ -186,6 +186,7 @@ import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
+import { registerBrowserHandlers } from "./ipc/browser"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -220,6 +221,7 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
+let browserService: ReturnType<typeof registerBrowserHandlers> | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -577,6 +579,7 @@ if (!gotTheLock) {
     registerTaskCardHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
+    browserService = registerBrowserHandlers(ipcMain, () => mainWindow)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -759,6 +762,8 @@ if (!gotTheLock) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
+    browserService?.disposeAll()
+    browserService = null
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()

@@ -81,6 +81,15 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type {
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserClickTarget,
+  BrowserDomResult,
+  BrowserNavigateOptions,
+  BrowserScreenshotResult,
+  BrowserState
+} from "../shared/browser-types"
 import {
   APP_ATTENTION_CHANNEL,
   getAgentStreamAttentionKind,
@@ -1881,6 +1890,54 @@ const api = {
   taskCards: {
     list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>
       ipcRenderer.invoke("taskCards:list", query) as Promise<TaskCardsListResult>
+  },
+  browser: {
+    attach: (sessionId: string, options?: BrowserAttachOptions): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:attach", sessionId, options) as Promise<BrowserState>,
+    detach: (sessionId: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:detach", sessionId) as Promise<BrowserState>,
+    setBounds: (
+      sessionId: string,
+      bounds: BrowserBounds,
+      visible?: boolean
+    ): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:setBounds", sessionId, bounds, visible) as Promise<BrowserState>,
+    navigate: (
+      sessionId: string,
+      url: string,
+      options?: BrowserNavigateOptions
+    ): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:navigate", sessionId, url, options) as Promise<BrowserState>,
+    goBack: (sessionId: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goBack", sessionId) as Promise<BrowserState>,
+    goForward: (sessionId: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goForward", sessionId) as Promise<BrowserState>,
+    reload: (sessionId: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:reload", sessionId) as Promise<BrowserState>,
+    stop: (sessionId: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:stop", sessionId) as Promise<BrowserState>,
+    getState: (sessionId: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:getState", sessionId) as Promise<BrowserState>,
+    captureScreenshot: (sessionId: string): Promise<BrowserScreenshotResult> =>
+      ipcRenderer.invoke("browser:captureScreenshot", sessionId) as Promise<BrowserScreenshotResult>,
+    readRenderedState: (sessionId: string, includeHtml?: boolean): Promise<BrowserDomResult> =>
+      ipcRenderer.invoke("browser:readRenderedState", sessionId, includeHtml) as Promise<BrowserDomResult>,
+    click: (sessionId: string, target: BrowserClickTarget): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:click", sessionId, target) as Promise<BrowserState>,
+    typeText: (sessionId: string, text: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:typeText", sessionId, text) as Promise<BrowserState>,
+    press: (sessionId: string, keyCode: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:press", sessionId, keyCode) as Promise<BrowserState>,
+    onState: (sessionId: string, callback: (state: BrowserState) => void): (() => void) => {
+      const channel = `browser:state:${sessionId}`
+      const handler = (_: unknown, state: BrowserState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    }
   },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>

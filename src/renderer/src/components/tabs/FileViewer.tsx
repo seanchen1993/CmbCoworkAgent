@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef, useCallback } from "react"
+import { useEffect, useState, useMemo, useRef } from "react"
 import { Loader2, AlertCircle, FileCode } from "lucide-react"
 import { useCurrentThread } from "@/lib/thread-context"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
@@ -8,13 +8,11 @@ import { MediaViewer } from "./MediaViewer"
 import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
-import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
 
 interface FileViewerProps {
   filePath: string
   threadId: string
   externalFullPath?: string
-  htmlFillHeight?: boolean
   reloadToken?: number
   previewMode?: "preview" | "source"
 }
@@ -56,7 +54,6 @@ export function FileViewer({
   filePath,
   threadId,
   externalFullPath,
-  htmlFillHeight = true,
   reloadToken,
   previewMode
 }: FileViewerProps): React.JSX.Element | null {
@@ -72,26 +69,9 @@ export function FileViewer({
   const fileName = displayPath.split("/").pop() || displayPath
   const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() ?? "" : ""
   const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
-  const htmlLike = ext === "html" || ext === "htm"
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
   const lastLoadedReloadTokenRef = useRef<number | undefined>(undefined)
-
-  const readHtmlDependencyFile = useCallback(
-    async (resolvedPath: string): Promise<string | null> => {
-      // HTML 依赖读取统一走 preload 暴露的 API，避免 file:// 直链受限。
-      const result = externalFullPath
-        ? await window.api.workspace.readExternalFile(resolvedPath)
-        : await window.api.workspace.readFile(threadId, resolvedPath)
-
-      if (result.success && typeof result.content === "string") {
-        return result.content
-      }
-
-      return null
-    },
-    [externalFullPath, threadId]
-  )
 
   // Get cached content or load it
   const content = fileContents[cacheKey]
@@ -262,20 +242,6 @@ export function FileViewer({
           className="markdown-preview"
         />
       </div>
-    )
-  }
-
-  if (htmlLike && content !== undefined) {
-    return (
-      <HtmlPreview
-        content={content}
-        path={displayPath}
-        fillHeight={htmlFillHeight}
-        showHeader={false}
-        showModeToggle={false}
-        viewMode={previewMode}
-        readDependencyFile={readHtmlDependencyFile}
-      />
     )
   }
 

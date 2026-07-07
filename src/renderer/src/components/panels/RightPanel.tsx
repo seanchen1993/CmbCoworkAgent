@@ -78,6 +78,9 @@ const FileViewer = lazy(() =>
 const GitPanelView = lazy(() =>
   import("@/components/panels/GitPanelView").then((m) => ({ default: m.GitPanelView }))
 )
+const BrowserPanel = lazy(() =>
+  import("@/components/browser/BrowserPanel").then((m) => ({ default: m.BrowserPanel }))
+)
 
 const HEADER_HEIGHT = 52 // px
 const HANDLE_HEIGHT = 6 // px
@@ -200,8 +203,9 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 
 interface RightPanelProps {
   threadId?: string | null
-  moduleMode: "work" | "preview" | "git"
+  moduleMode: "work" | "preview" | "git" | "browser"
   onRequestPreviewMode?: () => void
+  onRequestBrowserMode?: () => void
   onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
 }
@@ -219,6 +223,7 @@ export function RightPanel({
   threadId,
   moduleMode,
   onRequestPreviewMode,
+  onRequestBrowserMode,
   onRequestWorkMode,
   onPreviewFullscreenChange
 }: RightPanelProps): React.JSX.Element {
@@ -620,29 +625,34 @@ export function RightPanel({
       setPreviewPath(latestResourceEvent.path)
       setPreviewReloadToken((v) => v + 1)
       if (switchToPreview) {
-        onRequestPreviewMode?.()
+        if (isHtmlPreviewPath(latestResourceEvent.path)) {
+          onRequestBrowserMode?.()
+        } else {
+          onRequestPreviewMode?.()
+        }
       }
     }
 
     // Render preview when this round finishes: true -> false
     if (!(wasLoading && !isLoading)) return
+    const shouldAutoSwitchToPreview = moduleMode !== "git" && moduleMode !== "browser"
     if (
       latestCompletedLlmBatch?.files?.length &&
       lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
     ) {
       lastAutoSwitchedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-      // Never auto-open git panel. If user is already on git, only refresh preview data silently.
-      applyPreviewUpdate(moduleMode !== "git")
+      // Do not steal focus from operational panels; refresh preview data silently.
+      applyPreviewUpdate(shouldAutoSwitchToPreview)
       return
     }
 
-    // For non-edit resource events, respect current panel choice:
-    // if user stays on git panel, don't switch away; otherwise keep preview behavior.
-    applyPreviewUpdate(moduleMode !== "git")
+    // For non-edit resource events, respect current panel choice.
+    applyPreviewUpdate(shouldAutoSwitchToPreview)
   }, [
     streamData.isLoading,
     latestResourceEvent,
     latestCompletedLlmBatch,
+    onRequestBrowserMode,
     onRequestPreviewMode,
     moduleMode
   ])
@@ -674,16 +684,26 @@ export function RightPanel({
       if (!currentThreadId || threadId !== currentThreadId) return
       setPreviewPath(filePath)
       setPreviewReloadToken((v) => v + 1)
-      onRequestPreviewMode?.()
+      if (isHtmlPreviewPath(filePath)) {
+        onRequestBrowserMode?.()
+      } else {
+        onRequestPreviewMode?.()
+      }
     })
     return cleanup
-  }, [currentThreadId, onRequestPreviewMode])
+  }, [currentThreadId, onRequestBrowserMode, onRequestPreviewMode])
 
   useEffect(() => {
     if (moduleMode !== "preview" || !previewPath) {
       onPreviewFullscreenChange?.(false)
     }
   }, [moduleMode, previewPath, onPreviewFullscreenChange])
+
+  useEffect(() => {
+    if (moduleMode === "preview" && previewPath && isHtmlPreviewPath(previewPath)) {
+      onRequestBrowserMode?.()
+    }
+  }, [moduleMode, onRequestBrowserMode, previewPath])
 
   useEffect(() => {
     if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0)
@@ -1155,6 +1175,10 @@ export function RightPanel({
     !pluginsOpen &&
     !hooksOpen &&
     !lspOpen
+  const browserPreviewUrl = useMemo(() => {
+    if (!previewPath || !isHtmlPreviewPath(previewPath)) return null
+    return resolvePreviewPaths(previewPath, threadState?.workspacePath ?? null).fullPath
+  }, [previewPath, threadState?.workspacePath])
 
   return (
     <aside
@@ -1164,6 +1188,19 @@ export function RightPanel({
         allPanelsClosed ? "h-auto self-start" : "h-full"
       )}
     >
+      {moduleMode === "browser" && (
+        <div className="flex h-full min-h-0 flex-col rounded-2xl border border-border/75 bg-background p-2">
+          <Suspense fallback={<LazySectionFallback label="加载 Browser..." />}>
+            <BrowserPanel
+              threadId={currentThreadId}
+              workspacePath={threadState?.workspacePath ?? null}
+              initialUrl={browserPreviewUrl}
+              reloadToken={previewReloadToken}
+            />
+          </Suspense>
+        </div>
+      )}
+
       {moduleMode === "preview" && (
         <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-background">
           <div className="bg-background p-2 h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
@@ -1546,6 +1583,11 @@ function getPathExtension(filePath: string): string {
   return ext || ""
 }
 
+function isHtmlPreviewPath(filePath: string): boolean {
+  const ext = getPathExtension(filePath)
+  return ext === "html" || ext === "htm"
+}
+
 function isResourcePreviewPath(filePath: string): boolean {
   const ext = getPathExtension(filePath)
   return RESOURCE_PREVIEW_EXTENSIONS.has(ext)
@@ -1803,9 +1845,7 @@ function ResourcePreview({
   const supportsSourceView =
     extension === "md" ||
     extension === "markdown" ||
-    extension === "mdx" ||
-    extension === "html" ||
-    extension === "htm"
+    extension === "mdx"
   const previewFileType = useMemo(() => getFileType(fileName), [fileName])
   const canCopyContent = previewFileType.type === "code" || previewFileType.type === "text"
 
@@ -1977,7 +2017,6 @@ function ResourcePreview({
             threadId={threadId}
             filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
             externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
-            htmlFillHeight
             reloadToken={reloadToken}
             previewMode={supportsSourceView ? previewMode : undefined}
           />

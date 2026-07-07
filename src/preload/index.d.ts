@@ -81,6 +81,15 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type {
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserClickTarget,
+  BrowserDomResult,
+  BrowserNavigateOptions,
+  BrowserScreenshotResult,
+  BrowserState
+} from "../shared/browser-types"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -1481,6 +1490,31 @@ interface CustomAPI {
   }
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
+  }
+  browser: {
+    attach: (sessionId: string, options?: BrowserAttachOptions) => Promise<BrowserState>
+    detach: (sessionId: string) => Promise<BrowserState>
+    setBounds: (
+      sessionId: string,
+      bounds: BrowserBounds,
+      visible?: boolean
+    ) => Promise<BrowserState>
+    navigate: (
+      sessionId: string,
+      url: string,
+      options?: BrowserNavigateOptions
+    ) => Promise<BrowserState>
+    goBack: (sessionId: string) => Promise<BrowserState>
+    goForward: (sessionId: string) => Promise<BrowserState>
+    reload: (sessionId: string) => Promise<BrowserState>
+    stop: (sessionId: string) => Promise<BrowserState>
+    getState: (sessionId: string) => Promise<BrowserState>
+    captureScreenshot: (sessionId: string) => Promise<BrowserScreenshotResult>
+    readRenderedState: (sessionId: string, includeHtml?: boolean) => Promise<BrowserDomResult>
+    click: (sessionId: string, target: BrowserClickTarget) => Promise<BrowserState>
+    typeText: (sessionId: string, text: string) => Promise<BrowserState>
+    press: (sessionId: string, keyCode: string) => Promise<BrowserState>
+    onState: (sessionId: string, callback: (state: BrowserState) => void) => () => void
   }
   lsp: {
     getConfig: () => Promise<LspConfig>

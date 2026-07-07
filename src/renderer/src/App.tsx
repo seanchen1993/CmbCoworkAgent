@@ -3,6 +3,7 @@ import {
   Briefcase,
   Eye,
   GitBranch,
+  Globe2,
   GripVertical,
   Loader2,
   PanelLeftClose,
@@ -199,7 +200,7 @@ function App(): React.JSX.Element {
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
   const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
-  const [rightModule, setRightModule] = useState<"work" | "preview" | "git">("work")
+  const [rightModule, setRightModule] = useState<"work" | "preview" | "git" | "browser">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
@@ -469,6 +470,11 @@ function App(): React.JSX.Element {
     setRightModule("work")
     handlePreviewCollapse()
   }, [handlePreviewCollapse])
+
+  const selectBrowserModule = useCallback(() => {
+    setRightModule("browser")
+    handlePreviewExpand()
+  }, [handlePreviewExpand])
 
   const setThreadPendingGitDiff = useCallback((threadId: string, pending: boolean) => {
     setPendingGitDiffByThread((prev) => {
@@ -866,6 +872,21 @@ function App(): React.JSX.Element {
                 <button
                   type="button"
                   className={`${panelToggleBaseClass} ${
+                    rightModule === "browser"
+                      ? moduleActiveClass
+                      : moduleInactiveClass
+                  }`}
+                  onClick={selectBrowserModule}
+                  title="内置浏览器"
+                  aria-label="内置浏览器"
+                  aria-pressed={rightModule === "browser"}
+                >
+                  <Globe2 size={16} className="shrink-0" strokeWidth={1.8} />
+                  <span>浏览器</span>
+                </button>
+                <button
+                  type="button"
+                  className={`${panelToggleBaseClass} ${
                     rightModule === "work"
                       ? moduleActiveClass
                       : moduleInactiveClass
@@ -1008,6 +1029,7 @@ function App(): React.JSX.Element {
                   <RightPanel
                     moduleMode={rightModule}
                     onRequestPreviewMode={selectPreviewModule}
+                    onRequestBrowserMode={selectBrowserModule}
                     onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
                   />
@@ -1096,6 +1118,7 @@ function App(): React.JSX.Element {
                     threadId={harnessSessionThreadId}
                     moduleMode={rightModule}
                     onRequestPreviewMode={selectPreviewModule}
+                    onRequestBrowserMode={selectBrowserModule}
                     onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
                   />
