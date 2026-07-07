@@ -1,0 +1,7 @@
+{
+  "name": "财富w+",
+  "description": "A PC-side wealth business UI system based on Ant Design 5 defaults, Less CSS Modules, dense desktop layouts, and practical enterprise component conventions.",
+  "category": "Core",
+  "source": "custom",
+  "license": "internal"
+}

@@ -3377,7 +3377,8 @@ const api = {
       imageData: string,
       mimeType: string,
       onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
-      modelId?: string
+      modelId?: string,
+      designSystemId?: string
     ): (() => void) => {
       const channel = `design:image-stream:${sessionId}`
       const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string }): void => {
@@ -3390,7 +3391,14 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:generate-from-image", { sessionId, prompt, imageData, mimeType, modelId })
+      ipcRenderer.send("design:generate-from-image", {
+        sessionId,
+        prompt,
+        imageData,
+        mimeType,
+        modelId,
+        designSystemId
+      })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     cancel: (sessionId: string): Promise<void> => ipcRenderer.invoke("design:cancel", sessionId),

@@ -676,6 +676,10 @@ const DESIGN_PROTOTYPE_ZIP_MAX_TOTAL_IMAGE_BYTES = 90 * 1024 * 1024
 const DESIGN_PROTOTYPE_ZIP_MAX_JSON_BYTES = 5 * 1024 * 1024
 const DESIGN_PROTOTYPE_ZIP_MAX_JSON_FILES = 20
 const DESIGN_PROTOTYPE_ZIP_MAX_TOTAL_JSON_BYTES = 20 * 1024 * 1024
+const DESIGN_SYSTEM_PINNED_ORDER = new Map<string, number>([
+  ["wplus", 0],
+  ["wealth", 1]
+])
 
 function makeSafeDesignId(tabId: string): string {
   const safeId = String(tabId || "tab")
@@ -778,7 +782,14 @@ function listDesignSystems(): DesignSystemInfo[] {
       // Ignore malformed systems.
     }
   }
-  return systems.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"))
+  return systems.sort((a, b) => {
+    const aPinned = DESIGN_SYSTEM_PINNED_ORDER.get(a.id)
+    const bPinned = DESIGN_SYSTEM_PINNED_ORDER.get(b.id)
+    if (aPinned !== undefined || bPinned !== undefined) {
+      return (aPinned ?? Number.MAX_SAFE_INTEGER) - (bPinned ?? Number.MAX_SAFE_INTEGER)
+    }
+    return a.name.localeCompare(b.name, "zh-CN")
+  })
 }
 
 function getDesignSystemById(id: string | undefined): { info?: DesignSystemInfo; content?: string; error?: string } {
@@ -2659,6 +2670,7 @@ function buildSelectedDesignSystemContext(designSystemId: string | undefined): s
   }
   return `\n\n---\n[Active Design System: ${selected.info.name}]\n` +
     `The user selected this DESIGN.md for the current Design request. Treat it as the authoritative visual system for palette, typography, spacing, layout, components, motion and anti-patterns. Do not ask for another visual direction unless the user explicitly asks to switch.\n` +
+    `Because the selected design system already fixes the visual direction, generate exactly ONE canonical design artifact. Do NOT generate A/B variations, do NOT create elements with id="variation-a" or id="variation-b", and do NOT present alternative versions.\n` +
     `Design system path: ${selected.info.path}\n\n` +
     selected.content +
     `\n\nWhen generating HTML, bind the design-system tokens to :root CSS variables and keep visible user-facing text in Chinese unless the user's product copy requires another language.`
@@ -2985,12 +2997,13 @@ export function registerDesignHandlers(): void {
     "design:generate-from-image",
     async (
       event,
-      { sessionId, prompt, imageData, mimeType, modelId }: {
+      { sessionId, prompt, imageData, mimeType, modelId, designSystemId }: {
         sessionId: string
         prompt: string
         imageData: string
         mimeType: string
         modelId?: string
+        designSystemId?: string
       }
     ) => {
       const channel = `design:image-stream:${sessionId}`
@@ -3028,7 +3041,11 @@ export function registerDesignHandlers(): void {
       try {
         send({ type: "start" })
 
-        const userPrompt = prompt?.trim() || "请完整还原截图中的页面，包括布局、配色、所有文字内容和组件。"
+        const baseUserPrompt = prompt?.trim() || "请完整还原截图中的页面，包括布局、配色、所有文字内容和组件。"
+        const designSystemContext = buildSelectedDesignSystemContext(designSystemId)
+        const userPrompt = designSystemContext
+          ? `${baseUserPrompt}${designSystemContext}`
+          : baseUserPrompt
         console.log(`[Design:Image] Sending to model — prompt="${userPrompt.slice(0, 80)}"`)
 
         const stream = await model.stream(

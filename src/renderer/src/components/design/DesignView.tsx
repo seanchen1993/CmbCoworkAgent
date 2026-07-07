@@ -157,6 +157,20 @@ function getDesignSystemGroupLabel(label: string | null | undefined): string {
   }
 }
 
+const DESIGN_SYSTEM_DISPLAY_ORDER = new Map<string, number>([
+  ["wplus", 0],
+  ["wealth", 1]
+])
+
+function compareDesignSystemsForDisplay(a: DesignSystemInfo, b: DesignSystemInfo): number {
+  const aPinned = DESIGN_SYSTEM_DISPLAY_ORDER.get(a.id)
+  const bPinned = DESIGN_SYSTEM_DISPLAY_ORDER.get(b.id)
+  if (aPinned !== undefined || bPinned !== undefined) {
+    return (aPinned ?? Number.MAX_SAFE_INTEGER) - (bPinned ?? Number.MAX_SAFE_INTEGER)
+  }
+  return a.name.localeCompare(b.name, "zh-CN")
+}
+
 function getDefaultDesignSystemId(systems: DesignSystemInfo[]): string | null {
   return systems.find((system) => system.id === "neutral-modern")?.id ?? systems[0]?.id ?? null
 }
@@ -217,11 +231,9 @@ function buildNewDesignPrompt(
   basePrompt: string,
   options: { designSystemId?: string | null; forceVariations?: boolean } = {}
 ): string {
-  const instruction = options.forceVariations
-    ? MULTI_VARIATION_INSTRUCTION
-    : options.designSystemId
-      ? CANONICAL_ARTIFACT_INSTRUCTION
-      : MULTI_VARIATION_INSTRUCTION
+  const instruction = options.designSystemId
+    ? CANONICAL_ARTIFACT_INSTRUCTION
+    : MULTI_VARIATION_INSTRUCTION
   return `${basePrompt}\n\n---\n${instruction}\n\n始终使用中文回答。`
 }
 
@@ -433,8 +445,10 @@ function restoreIterationRollbackSnapshot(
 }
 
 function hydrateTabStateHtml(state: TabState, html: string): TabState {
-  const patchedHtml = ensureEditMode(html)
-  const variations = parseVariations(patchedHtml)
+  const baseHtml = ensureEditMode(html)
+  const hasDesignSystem = Boolean(state.selectedDesignSystemId)
+  const patchedHtml = hasDesignSystem ? collapseVariationsToSingleArtifact(baseHtml) : baseHtml
+  const variations = hasDesignSystem ? [] : parseVariations(patchedHtml)
   return {
     ...state,
     html: patchedHtml,
@@ -929,6 +943,41 @@ ${stubs}
     }, [])
   } catch {
     return []
+  }
+}
+
+function collapseVariationsToSingleArtifact(fullHtml: string): string {
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(fullHtml, "text/html")
+    const primary = doc.getElementById("variation-a") ?? doc.getElementById("variation-b")
+    if (!primary) return fullHtml
+
+    const headHtml = doc.head.innerHTML
+    const primaryId = primary.id === "variation-b" ? "b" : "a"
+    const stubs = (["a", "b"] as const)
+      .filter((id) => id !== primaryId)
+      .map(
+        (id) =>
+          `<div id="variation-${id}" style="display:none!important;visibility:hidden!important;position:absolute!important;pointer-events:none!important"></div>`
+      )
+      .join("\n")
+
+    return ensureEditMode(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+${headHtml}
+<style>html,body{margin:0;padding:0;min-height:100vh;}</style>
+</head>
+<body>
+${primary.outerHTML}
+${stubs}
+</body>
+</html>`)
+  } catch {
+    return fullHtml
   }
 }
 
@@ -1911,7 +1960,8 @@ export function DesignView(): React.JSX.Element {
   const zoom = ts.zoom
   const selectedDesignSystem =
     designSystems.find((system) => system.id === ts.selectedDesignSystemId) ?? null
-  const designSystemGroups = groupByLabel(designSystems, (system) =>
+  const orderedDesignSystems = [...designSystems].sort(compareDesignSystemsForDisplay)
+  const designSystemGroups = groupByLabel(orderedDesignSystems, (system) =>
     getDesignSystemGroupLabel(system.category || system.source)
   )
 
@@ -2336,8 +2386,11 @@ export function DesignView(): React.JSX.Element {
     }) => {
       const tabId = SINGLE_DESIGN_TAB_ID
       const storeKey = makeDesignArtifactId(options.sessionId, tabId)
-      const importedHtml = ensureEditMode(options.html)
-      const variations = parseVariations(importedHtml)
+      const baseImportedHtml = ensureEditMode(options.html)
+      const importedHtml = options.designSystemId
+        ? collapseVariationsToSingleArtifact(baseImportedHtml)
+        : baseImportedHtml
+      const variations = options.designSystemId ? [] : parseVariations(importedHtml)
       const importedDesignSystem = options.designSystemId
         ? (designSystems.find((system) => system.id === options.designSystemId) ?? null)
         : null
@@ -3169,9 +3222,13 @@ export function DesignView(): React.JSX.Element {
 
         if (event.type === "done" && event.html) {
           // Guarantee every generated design has a working EDITMODE block
-          const patchedHtml = await prepareHtmlForSrcDoc(event.html, event.artifactPath ?? null)
-          const variations = parseVariations(patchedHtml)
           const runState = tabStatesRef.current[tabId]
+          const basePatchedHtml = await prepareHtmlForSrcDoc(event.html, event.artifactPath ?? null)
+          const hasDesignSystem = Boolean(runState?.selectedDesignSystemId)
+          const patchedHtml = hasDesignSystem
+            ? collapseVariationsToSingleArtifact(basePatchedHtml)
+            : basePatchedHtml
+          const variations = hasDesignSystem ? [] : parseVariations(patchedHtml)
           const selectedDesignSystemForRun =
             designSystems.find((system) => system.id === runState?.selectedDesignSystemId) ?? null
           const artifactMetadata =
@@ -3438,7 +3495,14 @@ export function DesignView(): React.JSX.Element {
   // ── Generate Design from Screenshot ──────────────────────
 
   const startGenerationFromImage = useCallback(
-    (prompt: string, imageBase64: string, mimeType: string, tabId: string, modelId?: string) => {
+    (
+      prompt: string,
+      imageBase64: string,
+      mimeType: string,
+      tabId: string,
+      modelId?: string,
+      designSystemId?: string | null
+    ) => {
       const sessionId = uuid()
       const designSessionId = currentSessionIdRef.current
       console.log(
@@ -3486,7 +3550,10 @@ export function DesignView(): React.JSX.Element {
           }
 
           if (event.type === "done" && event.html) {
-            const patchedHtml = ensureEditMode(event.html)
+            const basePatchedHtml = ensureEditMode(event.html)
+            const patchedHtml = designSystemId
+              ? collapseVariationsToSingleArtifact(basePatchedHtml)
+              : basePatchedHtml
             // Store full HTML in main process so subsequent text iterations can reference it
             const storeKey = makeDesignArtifactId(currentSessionIdRef.current, tabId)
             window.api.design.storeHtml(storeKey, patchedHtml).catch((err) => {
@@ -3547,7 +3614,8 @@ export function DesignView(): React.JSX.Element {
             tabSessionsRef.current.delete(tabId)
           }
         },
-        modelId
+        modelId,
+        designSystemId ?? undefined
       )
       tabSessionsRef.current.set(tabId, { cleanup, sessionId })
     },
@@ -4319,7 +4387,8 @@ ${noteLines || "无"}${variantNote}`
           attachedImage.base64,
           attachedImage.mimeType,
           tabId,
-          selectedModelId
+          selectedModelId,
+          tabStates[tabId]?.selectedDesignSystemId ?? null
         )
       }
       return

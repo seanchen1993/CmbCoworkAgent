@@ -1768,7 +1768,8 @@ interface CustomAPI {
       imageData: string,
       mimeType: string,
       onEvent: (event: { type: string; token?: string; html?: string; error?: string }) => void,
-      modelId?: string
+      modelId?: string,
+      designSystemId?: string
     ) => () => void
     cancel: (sessionId: string) => Promise<void>
     saveVariant: (variantId: string, html: string) => Promise<{ filePath: string }>
