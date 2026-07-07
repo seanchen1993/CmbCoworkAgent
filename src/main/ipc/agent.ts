@@ -404,6 +404,7 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
 interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
+  enableTaskTool?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
   additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
@@ -459,6 +460,7 @@ function getHarnessAgentContext(
     return {
       pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
+      enableTaskTool: featureContext.enableTaskTool,
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
       additionalAgentsWorkspaceMappings: featureContext.additionalAgentsWorkspaceMappings,

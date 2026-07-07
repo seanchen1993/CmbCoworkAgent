@@ -373,6 +373,10 @@ function isProjectModeSubagentsEnabled(): boolean {
   return raw ? !PROJECT_MODE_SUBAGENTS_DISABLED_VALUES.has(raw) : true
 }
 
+function resolveProjectModeTaskToolEnabled(enableTaskTool?: boolean): boolean {
+  return enableTaskTool ?? isProjectModeSubagentsEnabled()
+}
+
 type RuntimePromptToolPolicy = {
   isProjectMode: boolean
   includeCurrentTime: boolean
@@ -389,6 +393,7 @@ function createRuntimePromptToolPolicy(input: {
   featureId?: string
   agentMode: AgentMode
   memoryEnabled: boolean
+  enableTaskTool?: boolean
 }): RuntimePromptToolPolicy {
   const isProjectMode = Boolean(input.featureId)
   return {
@@ -396,7 +401,7 @@ function createRuntimePromptToolPolicy(input: {
     includeCurrentTime: !isProjectMode,
     includeTimestampRule: !isProjectMode,
     includeMemory: input.memoryEnabled && isMemoryAllowedForProjectMode(input.featureId),
-    includeSubagents: !isProjectMode || isProjectModeSubagentsEnabled(),
+    includeSubagents: !isProjectMode || resolveProjectModeTaskToolEnabled(input.enableTaskTool),
     includeCodeExecRoute: !isProjectMode && input.agentMode !== "coordinator",
     includeSavedCodeExecTools: true,
     includeInjectedToolUsagePrompt: true,
@@ -3154,6 +3159,8 @@ export interface CreateAgentRuntimeOptions {
   enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
+  /** Project-mode plugin switch for the inline task tool. Undefined keeps legacy env behavior. */
+  enableTaskTool?: boolean
   /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
   harnessAgentsPrompt?: string
   /** Optional Harness project AGENTS.md load status returned by the plugin. */
@@ -3280,6 +3287,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
+    enableTaskTool,
     harnessAgentsPrompt,
     agentmdLoadStatus,
     additionalAgentsWorkspacePaths,
@@ -3330,7 +3338,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const runtimePolicy = createRuntimePromptToolPolicy({
     featureId,
     agentMode,
-    memoryEnabled: memoryEnabledForThread
+    memoryEnabled: memoryEnabledForThread,
+    enableTaskTool
   })
 
   console.log("[Runtime] Creating agent runtime...")
@@ -3340,7 +3349,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   if (runtimePolicy.isProjectMode) {
     const envValue = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
     console.log(
-      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
+      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"}, ${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
     )
     const memoryEnvValue = (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
     console.log(

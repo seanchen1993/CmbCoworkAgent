@@ -873,6 +873,11 @@ function boardConfigPublicAgentmdDeployUnits(cwd: string): string[] {
   return parsed ? uniqueStringsInOrder(parsed.supported_deploy_units) : []
 }
 
+function boardConfigEnableTaskTool(cwd: string): boolean | undefined {
+  const parsed = readBoardConfig(cwd)
+  return typeof parsed?.enable_task_tool === "boolean" ? parsed.enable_task_tool : undefined
+}
+
 function boardConfigSupportsSessionContextInjection(cwd: string): boolean {
   return readBoardConfigInspectCommand(cwd, "sessionContext") !== null
 }
@@ -2532,6 +2537,7 @@ export function readHarnessFeatureMetadata(
 export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   enableAgentsPrompt?: boolean
+  enableTaskTool?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
   additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
@@ -2655,6 +2661,7 @@ export function buildHarnessFeatureAgentContext(
   const plugin = findAdapterPlugin(project)
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
+  const enableTaskTool = boardConfigEnableTaskTool(cwd)
   const systemId = normalizeText(project.systemId).trim()
   const featureBinding = findFeatureDeployUnitBinding(project.projectId, feature.slug)
   const sessionContextInjectionSource =
@@ -2695,6 +2702,7 @@ export function buildHarnessFeatureAgentContext(
   return {
     systemPromptInject,
     enableAgentsPrompt: !pluginPromptLoaded,
+    ...(enableTaskTool !== undefined ? { enableTaskTool } : {}),
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
       ? {
