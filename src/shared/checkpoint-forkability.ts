@@ -1,6 +1,7 @@
 import type { CheckpointTuple } from "@langchain/langgraph-checkpoint"
 import {
   checkpointHasInterrupt,
+  describeCheckpointMessageForkTarget,
   deriveCheckpointTranscriptIndex,
   type CheckpointTranscriptIndex
 } from "./checkpoint-transcript"
@@ -57,12 +58,24 @@ export function getCheckpointThreadId(tuple: CheckpointTuple): string {
   return typeof threadId === "string" ? threadId : ""
 }
 
-function getForkBoundaryMarker(tuple: CheckpointTuple): Record<string, unknown> | null {
+export function getForkBoundaryMarker(tuple: CheckpointTuple): Record<string, unknown> | null {
   const metadata = tuple.metadata as Record<string, unknown> | undefined
   const boundary = metadata?.cmb_fork_boundary
   if (!boundary || typeof boundary !== "object" || Array.isArray(boundary)) return null
   const marker = boundary as Record<string, unknown>
   return marker.kind === "turn_complete" ? marker : null
+}
+
+export function isForkableCheckpointForMessage(tuple: CheckpointTuple, messageId: string): boolean {
+  const targetMessageId = messageId.trim()
+  const status = describeCheckpointMessageForkTarget(tuple.checkpoint, targetMessageId)
+  if (!status.isForkableMessageBoundary) return false
+
+  const marker = getForkBoundaryMarker(tuple)
+  const markerLastVisibleMessageId = marker?.lastVisibleMessageId
+  return (
+    typeof markerLastVisibleMessageId !== "string" || markerLastVisibleMessageId === targetMessageId
+  )
 }
 
 function previewText(text: string | undefined): string {

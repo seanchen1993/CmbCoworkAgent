@@ -1,6 +1,7 @@
 export interface CheckpointTranscriptIndex {
   visibleMessageIds: string[]
   internalGoalMessageIds: string[]
+  subagentTranscriptIds: string[]
   visibleMessages: CheckpointTranscriptMessage[]
 }
 
@@ -10,6 +11,19 @@ export interface CheckpointTranscriptMessage {
   text: string
 }
 
+export type CheckpointMessageForkTargetReason =
+  | "missing_message"
+  | "not_assistant"
+  | "not_visible_boundary"
+  | "not_checkpoint_tail"
+
+export interface CheckpointMessageForkTargetStatus {
+  isForkableMessageBoundary: boolean
+  reason?: CheckpointMessageForkTargetReason
+  message?: CheckpointTranscriptMessage
+  transcript: CheckpointTranscriptIndex
+}
+
 export interface FilteredThreadValuesInput {
   messageTimes?: unknown
   messageTimeOrder?: unknown
@@ -17,10 +31,21 @@ export interface FilteredThreadValuesInput {
   internalGoalMessageTimeOrder?: unknown
 }
 
+export const WORKFLOW_NOTIFICATION_MARKER_PREFIX = "[[CMB_WORKFLOW_NOTIFICATION_V1:"
+/** Renderer-submitted trigger; the main process expands it into the real notification. */
+export const WORKFLOW_NOTIFICATION_TURN_TRIGGER = "[[CMB_WORKFLOW_NOTIFICATION_TURN]]"
+/**
+ * The exact internal notification prompt. It must stay byte-identical to the
+ * renderer's WORKFLOW_NOTIFICATION_TURN_PROMPT; workflow-engine tests pin that
+ * equality because silent drift breaks workflow completion delivery.
+ */
+export const WORKFLOW_NOTIFICATION_TURN_PROMPT = `${WORKFLOW_NOTIFICATION_TURN_TRIGGER}
+Process the completed workflow task-notification. This is an internal system turn, not a new user request.`
 const MESSAGE_TIMES_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_KEY = "messageTimeOrder"
 const INTERNAL_GOAL_MESSAGE_TIMES_KEY = "internalGoalMessageTimes"
 const INTERNAL_GOAL_MESSAGE_TIME_ORDER_KEY = "internalGoalMessageTimeOrder"
+const SUBAGENT_TRANSCRIPTS_KEY = "subagentTranscripts"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
@@ -106,6 +131,30 @@ function getAdditionalKwargs(
   return isRecord(additional) ? additional : undefined
 }
 
+function collectToolCallIds(value: unknown, ids: Set<string>): void {
+  if (!Array.isArray(value)) return
+  for (const toolCall of value) {
+    if (!isRecord(toolCall)) continue
+    const id = readString(toolCall.id)
+    if (id) ids.add(id)
+  }
+}
+
+function getReferencedToolCallIds(message: Record<string, unknown>): string[] {
+  const ids = new Set<string>()
+  const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+  const additionalKwargs = getAdditionalKwargs(message)
+
+  collectToolCallIds(message.tool_calls, ids)
+  collectToolCallIds(kwargs?.tool_calls, ids)
+  collectToolCallIds(additionalKwargs?.tool_calls, ids)
+
+  const directToolCallId = readString(message.tool_call_id) ?? readString(kwargs?.tool_call_id)
+  if (directToolCallId) ids.add(directToolCallId)
+
+  return [...ids]
+}
+
 function isInternalGoalPrompt(role: string, content: unknown): boolean {
   if (role !== "user" || typeof content !== "string") return false
   const text = content.trimStart()
@@ -134,14 +183,43 @@ function isGoalTranscriptArtifact(role: string, content: unknown): boolean {
   )
 }
 
+export function isWorkflowPlumbingTranscriptContent(content: unknown): boolean {
+  if (typeof content !== "string") return false
+  const text = content.trimStart()
+  return (
+    text === WORKFLOW_NOTIFICATION_TURN_PROMPT ||
+    text.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
+  )
+}
+
 function isVisibleTranscriptMessage(role: string, content: unknown): boolean {
-  return !isInternalGoalPrompt(role, content) && !isGoalTranscriptArtifact(role, content)
+  return (
+    !isInternalGoalPrompt(role, content) &&
+    !isGoalTranscriptArtifact(role, content) &&
+    !isWorkflowPlumbingTranscriptContent(content)
+  )
 }
 
 function getCheckpointMessages(checkpoint: unknown): unknown[] {
   if (!isRecord(checkpoint)) return []
   const channelValues = isRecord(checkpoint.channel_values) ? checkpoint.channel_values : undefined
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
+}
+
+function isVisibleRawTranscriptMessage(raw: unknown): boolean {
+  if (!isRecord(raw)) return false
+  const additionalKwargs = getAdditionalKwargs(raw)
+  if (additionalKwargs?.cmb_internal_coordinator_notification === true) return false
+
+  const role = getMessageRole(raw)
+  const checkpointContent = getMessageContent(raw)
+  const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
+  const effectiveContent =
+    role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
+      ? visibleUserMessage
+      : checkpointContent
+
+  return isVisibleTranscriptMessage(role, effectiveContent)
 }
 
 export function truncateCheckpointMessagesAfter(checkpoint: unknown, messageId: string): boolean {
@@ -173,12 +251,20 @@ export function checkpointHasInterrupt(checkpoint: unknown): boolean {
 export function deriveCheckpointTranscriptIndex(checkpoint: unknown): CheckpointTranscriptIndex {
   const visibleMessageIds: string[] = []
   const internalGoalMessageIds: string[] = []
+  const subagentTranscriptIds: string[] = []
+  const seenSubagentTranscriptIds = new Set<string>()
   const visibleMessages: CheckpointTranscriptMessage[] = []
 
   getCheckpointMessages(checkpoint).forEach((raw, index) => {
     if (!isRecord(raw)) return
     const additionalKwargs = getAdditionalKwargs(raw)
     if (additionalKwargs?.cmb_internal_coordinator_notification === true) return
+
+    for (const toolCallId of getReferencedToolCallIds(raw)) {
+      if (seenSubagentTranscriptIds.has(toolCallId)) continue
+      seenSubagentTranscriptIds.add(toolCallId)
+      subagentTranscriptIds.push(toolCallId)
+    }
 
     const role = getMessageRole(raw)
     const checkpointContent = getMessageContent(raw)
@@ -204,11 +290,71 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
     }
   })
 
-  return { visibleMessageIds, internalGoalMessageIds, visibleMessages }
+  return { visibleMessageIds, internalGoalMessageIds, subagentTranscriptIds, visibleMessages }
+}
+
+export function describeCheckpointMessageForkTarget(
+  checkpoint: unknown,
+  messageId: string
+): CheckpointMessageForkTargetStatus {
+  const targetMessageId = messageId.trim()
+  const transcript = deriveCheckpointTranscriptIndex(checkpoint)
+  const missing = (
+    reason: CheckpointMessageForkTargetReason
+  ): CheckpointMessageForkTargetStatus => ({
+    isForkableMessageBoundary: false,
+    reason,
+    transcript
+  })
+  if (!targetMessageId) return missing("missing_message")
+
+  const target = transcript.visibleMessages.find((message) => message.id === targetMessageId)
+  if (!target) return missing("missing_message")
+  if (target.role !== "assistant") {
+    return {
+      isForkableMessageBoundary: false,
+      reason: "not_assistant",
+      message: target,
+      transcript
+    }
+  }
+  if (transcript.visibleMessageIds.at(-1) !== targetMessageId) {
+    return {
+      isForkableMessageBoundary: false,
+      reason: "not_visible_boundary",
+      message: target,
+      transcript
+    }
+  }
+
+  const rawMessages = getCheckpointMessages(checkpoint)
+  const targetRawIndex = rawMessages.findIndex((raw, index) => {
+    return isRecord(raw) && getMessageId(raw, index) === targetMessageId
+  })
+  const hasVisibleMessagesAfterTarget =
+    targetRawIndex < 0 || rawMessages.slice(targetRawIndex + 1).some(isVisibleRawTranscriptMessage)
+  if (hasVisibleMessagesAfterTarget) {
+    return {
+      isForkableMessageBoundary: false,
+      reason: "not_checkpoint_tail",
+      message: target,
+      transcript
+    }
+  }
+
+  return {
+    isForkableMessageBoundary: true,
+    message: target,
+    transcript
+  }
 }
 
 function cloneJsonObject(value: Record<string, unknown>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(value)) as Record<string, unknown>
+}
+
+function cloneJsonValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
 }
 
 function filterTimeMap(
@@ -252,6 +398,19 @@ function buildOrder(
   return next.length > 0 ? next : undefined
 }
 
+function filterSubagentTranscripts(
+  value: unknown,
+  ids: readonly string[]
+): Record<string, unknown> | undefined {
+  if (!isRecord(value) || ids.length === 0) return undefined
+  const next: Record<string, unknown> = {}
+  for (const id of ids) {
+    const transcript = value[id]
+    if (Array.isArray(transcript)) next[id] = cloneJsonValue(transcript)
+  }
+  return Object.keys(next).length > 0 ? next : undefined
+}
+
 export function buildFilteredThreadValues(
   sourceThreadValues: Record<string, unknown> | null | undefined,
   transcriptIndex: CheckpointTranscriptIndex
@@ -277,6 +436,10 @@ export function buildFilteredThreadValues(
     sourceThreadValues[INTERNAL_GOAL_MESSAGE_TIMES_KEY],
     sourceThreadValues[INTERNAL_GOAL_MESSAGE_TIME_ORDER_KEY]
   )
+  const subagentTranscripts = filterSubagentTranscripts(
+    sourceThreadValues[SUBAGENT_TRANSCRIPTS_KEY],
+    transcriptIndex.subagentTranscriptIds
+  )
 
   if (messageTimes) next[MESSAGE_TIMES_KEY] = messageTimes
   if (messageTimeOrder) next[MESSAGE_TIME_ORDER_KEY] = messageTimeOrder
@@ -284,6 +447,7 @@ export function buildFilteredThreadValues(
   if (internalGoalMessageTimeOrder) {
     next[INTERNAL_GOAL_MESSAGE_TIME_ORDER_KEY] = internalGoalMessageTimeOrder
   }
+  if (subagentTranscripts) next[SUBAGENT_TRANSCRIPTS_KEY] = subagentTranscripts
 
   return next
 }

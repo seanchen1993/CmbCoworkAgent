@@ -38,35 +38,10 @@ import {
   rollbackWorkflowThreadDisposal
 } from "../agent/workflow/run-store"
 import {
-  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
-  WORKFLOW_NOTIFICATION_TURN_PROMPT
-} from "../agent/workflow/notification"
-
-/**
- * Workflow notification plumbing messages (the completion trigger and the
- * expanded notification) are hidden in the chat UI; they must not leak into an
- * exported session either. The model's user-facing summary does NOT start with
- * these markers, so it is still exported.
- *
- * NOTE: this intentionally does NOT filter coordinator plumbing ([[CMB_COORDINATOR_
- * ...]]). Coordinator export keeps its HEAD behavior verbatim (those messages stay
- * in the export, as they always have) so this feature does not alter the existing
- * coordinator mode. Only the new workflow markers are dropped.
- */
-function isWorkflowPlumbingContent(content: string): boolean {
-  const trimmed = content.trimStart()
-  return (
-    // FULL-match the turn prompt (mirrors the main process's full-match fix) so a
-    // user who pastes text merely STARTING with the trigger isn't dropped on export.
-    trimmed === WORKFLOW_NOTIFICATION_TURN_PROMPT ||
-    // The expanded notification carries a runId suffix, so it stays a prefix match.
-    trimmed.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
-  )
-}
-import {
   coordinatorWorkerManager,
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
+import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
@@ -87,7 +62,9 @@ import type { ThreadGoal } from "../agent/goals/types"
 import { GOAL_UI_EVENT_LIMIT } from "../../shared/goal-events"
 import {
   buildFilteredThreadValues,
+  describeCheckpointMessageForkTarget,
   deriveCheckpointTranscriptIndex,
+  isWorkflowPlumbingTranscriptContent,
   truncateCheckpointMessagesAfter
 } from "../../shared/checkpoint-transcript"
 import {
@@ -96,6 +73,7 @@ import {
   describeCheckpointForkability,
   getCheckpointId,
   getCheckpointThreadId,
+  isForkableCheckpointForMessage,
   toForkabilityError
 } from "../../shared/checkpoint-forkability"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
@@ -327,6 +305,10 @@ function isAgentMode(value: unknown): value is "normal" | "coordinator" | "workf
   return value === "normal" || value === "coordinator" || value === "workflow"
 }
 
+function hasOwnProperty(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
 function hasPendingApprovalForThread(threadId: string): boolean {
   for (const approval of pendingApprovals.values()) {
     if (approval.threadId === threadId || approval.runtimeThreadId === threadId) return true
@@ -385,7 +367,8 @@ function assertForkableTuple(
     allowLegacyLatestFallback: options.allowLegacyLatestFallback,
     pendingApproval: hasPendingApprovalForThread(threadId)
   })
-  if (!forkability.isStableTurnBoundary) throw new Error(toForkabilityError(forkability.unstableReason))
+  if (!forkability.isStableTurnBoundary)
+    throw new Error(toForkabilityError(forkability.unstableReason))
 }
 
 function buildForkMetadata(input: {
@@ -401,14 +384,19 @@ function buildForkMetadata(input: {
     input
   const next: Record<string, unknown> = {}
 
-  const workspacePath = overrides?.workspacePath ?? sourceMetadata.workspacePath
+  const hasWorkspacePathOverride = overrides ? hasOwnProperty(overrides, "workspacePath") : false
+  const workspacePath = hasWorkspacePathOverride
+    ? overrides?.workspacePath
+    : sourceMetadata.workspacePath
   if (typeof workspacePath === "string" || workspacePath === null)
     next.workspacePath = workspacePath
 
   const model = overrides?.model ?? sourceMetadata.model
   if (typeof model === "string" && model.trim()) next.model = model
 
-  const agentMode = overrides?.agentMode ?? sourceMetadata.agentMode
+  const agentMode = isAgentMode(overrides?.agentMode)
+    ? overrides.agentMode
+    : getAgentModeFromMetadata(sourceMetadata)
   if (isAgentMode(agentMode)) next.agentMode = agentMode
 
   const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
@@ -456,7 +444,7 @@ async function forkThread(params: ThreadForkParams): Promise<ThreadForkResponse>
     const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
     const workspacePath =
       typeof sourceMetadata.workspacePath === "string" ? sourceMetadata.workspacePath : null
-    const agentMode = isAgentMode(sourceMetadata.agentMode) ? sourceMetadata.agentMode : undefined
+    const agentMode = getAgentModeFromMetadata(sourceMetadata)
     if (await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })) {
       throw new Error("当前会话仍在运行，请停止或等待完成后再 fork。")
     }
@@ -474,6 +462,15 @@ async function forkThread(params: ThreadForkParams): Promise<ThreadForkResponse>
     assertForkableTuple(tuple, { allowLegacyLatestFallback: !explicitCheckpointId })
 
     const checkpointId = getCheckpointId(tuple)
+    if (explicitMessageId) {
+      const messageTarget = describeCheckpointMessageForkTarget(tuple.checkpoint, explicitMessageId)
+      if (
+        !messageTarget.isForkableMessageBoundary ||
+        !isForkableCheckpointForMessage(tuple, explicitMessageId)
+      ) {
+        throw new Error("该消息不是稳定完成边界上的 assistant 回复，无法从这里 fork。")
+      }
+    }
     const forkCheckpoint = explicitMessageId ? copyCheckpoint(tuple.checkpoint) : tuple.checkpoint
     if (explicitMessageId && !truncateCheckpointMessagesAfter(forkCheckpoint, explicitMessageId)) {
       throw new Error("该消息不在目标 checkpoint 中，无法从这里 fork。")
@@ -518,6 +515,7 @@ async function forkThread(params: ThreadForkParams): Promise<ThreadForkResponse>
 
       dbCreateThread(targetThreadId, targetMetadata)
       rowCreated = true
+
       const row = dbUpdateThread(targetThreadId, {
         thread_values: JSON.stringify(filteredThreadValues)
       })
@@ -576,19 +574,22 @@ async function resolveForkCheckpointForMessage(
     const activeRun = hasActiveAgentRun(sourceThreadId)
     const pendingApproval = hasPendingApprovalForThread(sourceThreadId)
     return withCheckpointer(sourceThreadId, async (sourceSaver) => {
-      let candidate: ForkableCheckpoint | null = null
       for await (const tuple of sourceSaver.list({
         configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
       })) {
         const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
-        if (!transcript.visibleMessageIds.includes(messageId)) continue
+        if (!isForkableCheckpointForMessage(tuple, messageId)) continue
 
-        const summary = buildForkableCheckpointSummary(tuple, { activeRun, pendingApproval })
+        const summary = buildForkableCheckpointSummary(tuple, {
+          activeRun,
+          pendingApproval,
+          transcript
+        })
         if (summary.isStableTurnBoundary) {
-          candidate = summary
+          return summary
         }
       }
-      return candidate
+      return null
     })
   })
 }
@@ -810,7 +811,7 @@ function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportM
     const rawContent = stringifyContent(msg.content)
     // Drop the new workflow notification plumbing from the export. Coordinator
     // plumbing is intentionally left as-is (HEAD behavior) — see helper note.
-    if (isWorkflowPlumbingContent(rawContent)) return []
+    if (isWorkflowPlumbingTranscriptContent(rawContent)) return []
     const { content, attachments } = sanitizeAttachmentContent(rawContent)
     const exportedContent =
       role === "tool"

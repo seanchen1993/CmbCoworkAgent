@@ -51,7 +51,7 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
 }
 
 async function readProjectFile(path: string): Promise<string> {
-  return readFile(join(PROJECT_ROOT, path), "utf8")
+  return (await readFile(join(PROJECT_ROOT, path), "utf8")).replace(/\r\n/g, "\n")
 }
 
 async function testIpcTypesExposeAgentMode(): Promise<void> {
@@ -176,14 +176,14 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
 
   const threadContextSource = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
-  assertIncludes(
+  assertMatches(
     threadContextSource,
-    "state.workspacePath === data.path\n                ? { workspacePath: data.path }\n                : { workspacePath: data.path, coordinatorWorkers: [] }",
+    /state\.workspacePath === data\.path\s*\?\s*\{ workspacePath: data\.path \}\s*:\s*\{ workspacePath: data\.path, coordinatorWorkers: \[\] \}/,
     "ThreadContext clears stale coordinator workers when a backend workspace path change arrives"
   )
-  assertIncludes(
+  assertMatches(
     threadContextSource,
-    "state.workspacePath === path\n              ? { workspacePath: path }\n              : { workspacePath: path, coordinatorWorkers: [] }",
+    /state\.workspacePath === path\s*\?\s*\{ workspacePath: path \}\s*:\s*\{ workspacePath: path, coordinatorWorkers: \[\] \}/,
     "ThreadContext clears stale coordinator workers when the current thread switches workspace locally"
   )
   assertIncludes(
@@ -198,9 +198,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
 
   const tabbedPanel = await readProjectFile("src/renderer/src/components/tabs/TabbedPanel.tsx")
-  assertIncludes(
+  assertMatches(
     tabbedPanel,
-    "<ChatContainer\n            key={threadId}",
+    /<ChatContainer\s+key=\{threadId\}/,
     "TabbedPanel remounts ChatContainer when switching threads so old agent mode state cannot leak across threads"
   )
   assertIncludes(
@@ -427,9 +427,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "msg.additional_kwargs ?? msg.kwargs?.additional_kwargs",
     "thread context recognizes internal notification metadata from live and serialized messages"
   )
-  assertIncludes(
+  assertMatches(
     threadContext,
-    'const messageId =\n                msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)',
+    /const messageId =\s*msg\.kwargs\?\.id \?\? \(typeof msg\.id === "string" \? msg\.id : `msg-\$\{index\}`\)/,
     "thread context uses LangChain message kwargs.id before serialized class-path ids"
   )
   assertIncludes(
@@ -480,9 +480,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
     'worker.status === "running"',
     "thread context treats running coordinator workers as unresolved work"
   )
-  assertIncludes(
+  assertMatches(
     threadContext,
-    "worker.notification_acknowledged === false &&\n            worker.suppress_notification_auto_run !== true",
+    /worker\.notification_acknowledged === false &&\s*worker\.suppress_notification_auto_run !== true/,
     "thread context only treats unsuppressed terminal notifications as unresolved auto-run work"
   )
   assertIncludes(
@@ -490,9 +490,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "if (!initializedThreadsRef.current.has(threadId)) return false",
     "thread context does not keep polling cold threads whose coordinator notifications cannot auto-run yet"
   )
-  assertIncludes(
+  assertMatches(
     threadContext,
-    "if (isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode) {\n          return false\n        }",
+    /if \(isThreadMetadataExplicitNormalMode\(threadId\) && !isEnvironmentCoordinatorMode\) \{\s*return false\s*\}/,
     "thread context lets unresolved terminal notifications drop out of the periodic refresh loop when explicit normal mode suppresses coordinator auto-runs"
   )
   assertIncludes(
@@ -1009,9 +1009,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "if (controller && !cancelWorkers) {",
     "agent cancel only aborts the foreground controller for full-turn cancellation, not background worker cancellation"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "suppressNotificationAutoRun: true,\n              dismissNotificationOnTerminalPersist: true",
+    /suppressNotificationAutoRun: true,\s*dismissNotificationOnTerminalPersist: true/,
     "agent cancel marks user-requested background worker cancellation notifications as non-resuming UI updates"
   )
   assertIncludes(
@@ -1019,14 +1019,14 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "LocalSandbox.cancelBackgroundTasks(threadId)",
     "agent cancel still revokes foreground thread-scoped background tasks for full-turn cancellation"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "sendCoordinatorWorkers(\n          window,\n          `agent:stream:${threadId}`,\n          coordinatorWorkerManager.readWorkers(threadId)\n        )",
+    /sendCoordinatorWorkers\(\s*window,\s*`agent:stream:\$\{threadId\}`,\s*coordinatorWorkerManager\.readWorkers\(threadId\)\s*\)/,
     "agent cancel immediately publishes the full worker snapshot instead of a truncated cancelled-only list"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    'console.warn("[Agent] Failed to wait for coordinator worker cancellation:", error)\n            if (!window || window.isDestroyed()) return\n            sendCoordinatorWorkers(',
+    /console\.warn\("\[Agent\] Failed to wait for coordinator worker cancellation:", error\)\s*if \(!window \|\| window\.isDestroyed\(\)\) return\s*sendCoordinatorWorkers\(/,
     "agent cancel publishes a full worker snapshot even when cleanup wait fails"
   )
   assertIncludes(
@@ -1614,14 +1614,14 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "User cancelled coordinator workers.",
     "agent IPC cancels workers only on explicit background-worker stop"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "void coordinatorWorkerManager\n          .waitForWorkerCleanup",
+    /void coordinatorWorkerManager\s*\.waitForWorkerCleanup/,
     "agent IPC waits for explicit worker stop cleanup without blocking the cancel response"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "coordinatorWorkerManager.acknowledgeNotifications(\n              threadId,\n              workers.map((worker) => worker.worker_id)",
+    /coordinatorWorkerManager\.acknowledgeNotifications\(\s*threadId,\s*workers\.map\(\(worker\) => worker\.worker_id\)/,
     "agent IPC acknowledges explicitly cancelled worker notifications to avoid an extra auto coordinator turn"
   )
   assertIncludes(
@@ -1678,6 +1678,26 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     threadsIpc,
+    "getAgentModeFromMetadata(sourceMetadata)",
+    "thread fork inherits legacy coordinatorMode metadata through the shared mode resolver"
+  )
+  assertNotIncludes(
+    threadsIpc,
+    "overrides?.agentMode ?? sourceMetadata.agentMode",
+    "thread fork must not bypass legacy coordinatorMode metadata when inheriting agent mode"
+  )
+  assertIncludes(
+    threadsIpc,
+    'hasOwnProperty(overrides, "workspacePath")',
+    "thread fork treats explicit workspacePath null overrides as intentional"
+  )
+  assertNotIncludes(
+    threadsIpc,
+    "overrides?.workspacePath ?? sourceMetadata.workspacePath",
+    "thread fork must not swallow explicit workspacePath null overrides"
+  )
+  assertIncludes(
+    threadsIpc,
     "Timed out waiting for coordinator worker cleanup",
     "thread deletion logs cleanup timeout warnings instead of aborting the rest of teardown"
   )
@@ -1686,7 +1706,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   // alter what an existing coordinator session exports.
   assertIncludes(
     threadsIpc,
-    "if (isWorkflowPlumbingContent(rawContent)) return []",
+    "if (isWorkflowPlumbingTranscriptContent(rawContent)) return []",
     "session export filters workflow plumbing messages"
   )
   // Guard against regressing coordinator: the export filter must NOT match

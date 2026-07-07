@@ -947,8 +947,9 @@ export function ThreadSidebar(): React.JSX.Element {
         if (forkCheckpointRequestRef.current !== requestId) return
         toast.error(error instanceof Error ? error.message : "读取 checkpoint 失败")
       } finally {
-        if (forkCheckpointRequestRef.current !== requestId) return
-        setLoadingForkCheckpoints(false)
+        if (forkCheckpointRequestRef.current === requestId) {
+          setLoadingForkCheckpoints(false)
+        }
       }
     },
     [listForkableCheckpoints]

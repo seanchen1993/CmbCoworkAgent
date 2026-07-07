@@ -426,8 +426,24 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const params: string[] = [thread_id, checkpoint_ns]
 
     if (before?.configurable?.checkpoint_id) {
-      sql += ` AND checkpoint_id < ?`
-      params.push(before.configurable.checkpoint_id)
+      const beforeStmt = this.db.prepare(`
+        SELECT COALESCE(checkpoint_ts, checkpoint_id) AS checkpoint_sort_key
+        FROM checkpoints
+        WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+      `)
+      beforeStmt.bind([thread_id, checkpoint_ns, before.configurable.checkpoint_id])
+      if (!beforeStmt.step()) {
+        beforeStmt.free()
+        return
+      }
+      const beforeRow = beforeStmt.getAsObject() as { checkpoint_sort_key?: string | null }
+      beforeStmt.free()
+      const beforeSortKey = beforeRow.checkpoint_sort_key ?? before.configurable.checkpoint_id
+      sql += ` AND (
+        COALESCE(checkpoint_ts, checkpoint_id) < ?
+        OR (COALESCE(checkpoint_ts, checkpoint_id) = ? AND checkpoint_id < ?)
+      )`
+      params.push(beforeSortKey, beforeSortKey, before.configurable.checkpoint_id)
     }
 
     sql += ` ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC`

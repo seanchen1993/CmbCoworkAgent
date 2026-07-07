@@ -591,6 +591,7 @@ function MessageBubbleImpl({
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
   const isForkingThisMessage = forkingMessageId === message.id
+  const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
 
   useEffect(() => {
@@ -971,10 +972,10 @@ function MessageBubbleImpl({
                 <Copy className="size-3" />
               )}
             </button>
-            {onForkFromMessage ? (
+            {canForkFromMessage ? (
               <button
                 type="button"
-                onClick={() => onForkFromMessage(message)}
+                onClick={() => onForkFromMessage?.(message)}
                 disabled={forkFromMessageDisabled}
                 className={cn(
                   "inline-flex items-center justify-center rounded p-1 transition-all transform active:scale-95",

@@ -10,17 +10,26 @@ import { mkdtemp, rm } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import type { RunnableConfig } from "@langchain/core/runnables"
-import type { Checkpoint, CheckpointMetadata, CheckpointTuple } from "@langchain/langgraph-checkpoint"
+import type {
+  Checkpoint,
+  CheckpointMetadata,
+  CheckpointTuple
+} from "@langchain/langgraph-checkpoint"
 import { SqlJsSaver } from "../src/main/checkpointer/sqljs-saver"
 import {
   buildForkableCheckpointSummary,
   buildVisibleForkableCheckpointList,
-  describeCheckpointForkability
+  describeCheckpointForkability,
+  isForkableCheckpointForMessage
 } from "../src/shared/checkpoint-forkability"
 import {
   buildFilteredThreadValues,
   checkpointHasInterrupt,
+  describeCheckpointMessageForkTarget,
   deriveCheckpointTranscriptIndex,
+  isWorkflowPlumbingTranscriptContent,
+  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT,
   truncateCheckpointMessagesAfter
 } from "../src/shared/checkpoint-transcript"
 
@@ -69,16 +78,22 @@ function makeMetadata(step: number): CheckpointMetadata {
   } as CheckpointMetadata
 }
 
-function makeForkBoundaryMetadata(checkpointId: string, step = 1): CheckpointMetadata {
+function makeForkBoundaryMetadata(
+  checkpointId: string,
+  step = 1,
+  lastVisibleMessageId?: string
+): CheckpointMetadata {
+  const boundary: Record<string, unknown> = {
+    version: 1,
+    kind: "turn_complete",
+    boundaryId: `turn_complete:source:${checkpointId}`,
+    completedAt: "2026-07-03T00:00:01.000Z",
+    source: "agent_run_complete"
+  }
+  if (lastVisibleMessageId) boundary.lastVisibleMessageId = lastVisibleMessageId
   return {
     ...makeMetadata(step),
-    cmb_fork_boundary: {
-      version: 1,
-      kind: "turn_complete",
-      boundaryId: `turn_complete:source:${checkpointId}`,
-      completedAt: "2026-07-03T00:00:01.000Z",
-      source: "agent_run_complete"
-    }
+    cmb_fork_boundary: boundary
   } as CheckpointMetadata
 }
 
@@ -186,6 +201,41 @@ async function testConfigurableCheckpointRetention(dir: string): Promise<void> {
 
   assert.deepEqual(timestampIds, ["a-new", "m-mid"])
   assert.equal(latestByTimestamp?.checkpoint.id, "a-new")
+
+  const paginationPath = join(dir, "timestamp-pagination.sqlite")
+  const paginationSaver = new SqlJsSaver(paginationPath, undefined, {
+    maxCheckpointsPerNamespace: 3
+  })
+  await paginationSaver.put(
+    config("timestamp-page"),
+    makeCheckpoint("z-old", "2026-07-03T00:00:00.000Z"),
+    makeMetadata(1)
+  )
+  await paginationSaver.put(
+    config("timestamp-page", "z-old"),
+    makeCheckpoint("m-mid", "2026-07-03T00:00:01.000Z"),
+    makeMetadata(2)
+  )
+  await paginationSaver.put(
+    config("timestamp-page", "m-mid"),
+    makeCheckpoint("a-new", "2026-07-03T00:00:02.000Z"),
+    makeMetadata(3)
+  )
+
+  const firstPageIds: string[] = []
+  for await (const tuple of paginationSaver.list(config("timestamp-page"), { limit: 1 })) {
+    firstPageIds.push(tuple.checkpoint.id)
+  }
+  const afterFirstPageIds: string[] = []
+  for await (const tuple of paginationSaver.list(config("timestamp-page"), {
+    before: config("timestamp-page", "a-new")
+  })) {
+    afterFirstPageIds.push(tuple.checkpoint.id)
+  }
+  await paginationSaver.close()
+
+  assert.deepEqual(firstPageIds, ["a-new"])
+  assert.deepEqual(afterFirstPageIds, ["m-mid", "z-old"])
   console.log("PASS checkpoint retention can keep historical root checkpoints")
 }
 
@@ -224,6 +274,13 @@ async function testMetadataUpdatePreservesCheckpointShape(dir: string): Promise<
 
 function testThreadValuesFiltering(): void {
   const checkpoint = makeCheckpoint("cp-filter")
+  const messages = (checkpoint.channel_values as Record<string, unknown>).messages as Array<
+    Record<string, unknown>
+  >
+  messages[1] = {
+    ...messages[1],
+    tool_calls: [{ id: "task-keep", name: "task", args: { description: "kept" } }]
+  }
   const index = deriveCheckpointTranscriptIndex(checkpoint)
   const filtered = buildFilteredThreadValues(
     {
@@ -237,6 +294,10 @@ function testThreadValuesFiltering(): void {
         { id: "assistant-1", start_at: "2026-07-03T00:00:01.000Z" },
         { id: "assistant-after-fork", start_at: "2026-07-03T00:00:02.000Z" }
       ],
+      subagentTranscripts: {
+        "task-keep": [{ id: "sub-1", role: "assistant", content: "kept subagent detail" }],
+        "task-drop": [{ id: "sub-2", role: "assistant", content: "future subagent detail" }]
+      },
       unknownRuntimeState: { shouldNotCopy: true }
     },
     index
@@ -250,8 +311,42 @@ function testThreadValuesFiltering(): void {
     (filtered.messageTimeOrder as Array<{ id: string }>).map((entry) => entry.id),
     ["user-1", "assistant-1"]
   )
+  assert.deepEqual(index.subagentTranscriptIds, ["task-keep"])
+  assert.deepEqual(Object.keys(filtered.subagentTranscripts as Record<string, unknown>), [
+    "task-keep"
+  ])
   assert.equal(filtered.unknownRuntimeState, undefined, "unknown thread_values should not copy")
   console.log("PASS fork thread_values are rebuilt from the checkpoint transcript")
+}
+
+function testWorkflowPlumbingFilteredFromTranscript(): void {
+  const checkpoint = makeCheckpoint("cp-workflow-plumbing") as Checkpoint
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: "user-1", type: "human", content: "hello" },
+    { id: "assistant-1", type: "ai", content: "hi" },
+    { id: "wf-trigger", type: "human", content: WORKFLOW_NOTIFICATION_TURN_PROMPT },
+    {
+      id: "wf-expanded",
+      type: "human",
+      content: `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}wf_run_1]]\n<task-notification />`
+    },
+    { id: "assistant-2", type: "ai", content: "workflow summary" }
+  ]
+
+  assert.equal(isWorkflowPlumbingTranscriptContent(WORKFLOW_NOTIFICATION_TURN_PROMPT), true)
+  assert.equal(
+    isWorkflowPlumbingTranscriptContent(
+      `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}wf_run_1]]\n<task-notification />`
+    ),
+    true
+  )
+  const index = deriveCheckpointTranscriptIndex(checkpoint)
+  assert.deepEqual(index.visibleMessageIds, ["user-1", "assistant-1", "assistant-2"])
+  assert.deepEqual(
+    index.visibleMessages.map((message) => message.text),
+    ["hello", "hi", "workflow summary"]
+  )
+  console.log("PASS workflow plumbing is hidden from checkpoint fork transcripts")
 }
 
 function testCheckpointMessageTruncation(): void {
@@ -268,6 +363,88 @@ function testCheckpointMessageTruncation(): void {
   assert.deepEqual(index.visibleMessageIds, ["user-1", "assistant-1"])
   assert.equal(truncateCheckpointMessagesAfter(checkpoint, "missing"), false)
   console.log("PASS checkpoint fork can truncate transcript to a selected message")
+}
+
+function testMessageForkBoundaryValidation(): void {
+  const assistantBoundary = makeCheckpoint("cp-assistant-boundary") as Checkpoint
+  let status = describeCheckpointMessageForkTarget(assistantBoundary, "assistant-1")
+  assert.equal(status.isForkableMessageBoundary, true)
+  assert.equal(
+    isForkableCheckpointForMessage(
+      makeTuple({
+        checkpoint: assistantBoundary,
+        metadata: makeForkBoundaryMetadata("cp-assistant-boundary", 1, "assistant-1")
+      }),
+      "assistant-1"
+    ),
+    true
+  )
+
+  status = describeCheckpointMessageForkTarget(assistantBoundary, "user-1")
+  assert.equal(status.isForkableMessageBoundary, false)
+  assert.equal(status.reason, "not_assistant")
+
+  const laterVisible = makeCheckpoint("cp-later-visible") as Checkpoint
+  ;(laterVisible.channel_values as Record<string, unknown>).messages = [
+    { id: "user-1", type: "human", content: "hello" },
+    { id: "assistant-1", type: "ai", content: "hi" },
+    { id: "user-2", type: "human", content: "next" },
+    { id: "assistant-2", type: "ai", content: "later" }
+  ]
+  status = describeCheckpointMessageForkTarget(laterVisible, "assistant-1")
+  assert.equal(status.isForkableMessageBoundary, false)
+  assert.equal(status.reason, "not_visible_boundary")
+  assert.equal(
+    isForkableCheckpointForMessage(
+      makeTuple({
+        checkpoint: laterVisible,
+        metadata: makeForkBoundaryMetadata("cp-later-visible", 1, "assistant-2")
+      }),
+      "assistant-1"
+    ),
+    false
+  )
+
+  const hiddenTail = makeCheckpoint("cp-hidden-tail") as Checkpoint
+  ;(hiddenTail.channel_values as Record<string, unknown>).messages = [
+    { id: "user-1", type: "human", content: "hello" },
+    { id: "assistant-1", type: "ai", content: "hi" },
+    { id: "wf-trigger", type: "human", content: WORKFLOW_NOTIFICATION_TURN_PROMPT }
+  ]
+  status = describeCheckpointMessageForkTarget(hiddenTail, "assistant-1")
+  assert.equal(status.isForkableMessageBoundary, true)
+  assert.equal(
+    isForkableCheckpointForMessage(
+      makeTuple({
+        checkpoint: hiddenTail,
+        metadata: makeForkBoundaryMetadata("cp-hidden-tail", 1, "assistant-1")
+      }),
+      "assistant-1"
+    ),
+    true
+  )
+
+  const visibleRawTail = makeCheckpoint("cp-visible-raw-tail") as Checkpoint
+  ;(visibleRawTail.channel_values as Record<string, unknown>).messages = [
+    { id: "user-1", type: "human", content: "hello" },
+    { id: "assistant-1", type: "ai", content: "hi" },
+    { id: "tool-1", type: "tool", content: "visible tool output" }
+  ]
+  status = describeCheckpointMessageForkTarget(visibleRawTail, "assistant-1")
+  assert.equal(status.isForkableMessageBoundary, false)
+  assert.equal(status.reason, "not_visible_boundary")
+
+  assert.equal(
+    isForkableCheckpointForMessage(
+      makeTuple({
+        checkpoint: assistantBoundary,
+        metadata: makeForkBoundaryMetadata("cp-marker-mismatch", 1, "assistant-2")
+      }),
+      "assistant-1"
+    ),
+    false
+  )
+  console.log("PASS message fork requires a visible assistant boundary with no later visible tail")
 }
 
 function testInterruptDetection(): void {
@@ -291,15 +468,21 @@ function testForkabilitySummary(): void {
   assert.equal(stableSummary.lastMessagePreview, "hi")
   assert.equal(stableSummary.lastUserMessagePreview, "hello")
 
-  const missingMarker = describeCheckpointForkability(makeTuple({ checkpoint: makeCheckpoint("cp-missing") }), {
-    allowLegacyLatestFallback: false
-  })
+  const missingMarker = describeCheckpointForkability(
+    makeTuple({ checkpoint: makeCheckpoint("cp-missing") }),
+    {
+      allowLegacyLatestFallback: false
+    }
+  )
   assert.equal(missingMarker.isStableTurnBoundary, false)
   assert.equal(missingMarker.unstableReason, "missing_boundary_marker")
 
-  const legacyLatest = describeCheckpointForkability(makeTuple({ checkpoint: makeCheckpoint("cp-legacy") }), {
-    allowLegacyLatestFallback: true
-  })
+  const legacyLatest = describeCheckpointForkability(
+    makeTuple({ checkpoint: makeCheckpoint("cp-legacy") }),
+    {
+      allowLegacyLatestFallback: true
+    }
+  )
   assert.equal(legacyLatest.isStableTurnBoundary, true)
   assert.equal(legacyLatest.boundarySource, "legacy_latest_idle_fallback")
 
@@ -378,7 +561,9 @@ async function main(): Promise<void> {
     await testConfigurableCheckpointRetention(dir)
     await testMetadataUpdatePreservesCheckpointShape(dir)
     testThreadValuesFiltering()
+    testWorkflowPlumbingFilteredFromTranscript()
     testCheckpointMessageTruncation()
+    testMessageForkBoundaryValidation()
     testInterruptDetection()
     testForkabilitySummary()
     testVisibleForkableCheckpointList()
