@@ -2803,7 +2803,7 @@ function getModelInstance(
     }
   }
 
-  if (customConfig.interleavedThinking) {
+  if (customConfig.enableThinking && customConfig.interleavedThinking) {
     return new ChatOpenAI({
       ...baseFields,
       completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {

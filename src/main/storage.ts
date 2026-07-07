@@ -1130,7 +1130,12 @@ function defaultInterleavedThinkingForModel(model: string): boolean {
   return /minimax/i.test(model)
 }
 
-function resolveInterleavedThinkingSetting(model: string, value: unknown): boolean {
+function resolveInterleavedThinkingSetting(
+  model: string,
+  value: unknown,
+  enableThinking: unknown
+): boolean {
+  if (enableThinking !== true) return false
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
 }
 
@@ -1414,11 +1419,12 @@ function toPublicConfig(
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
+    enableThinking: config.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
-      config.interleavedThinking
+      config.interleavedThinking,
+      config.enableThinking
     ),
-    enableThinking: config.enableThinking === true,
     thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
@@ -1438,8 +1444,12 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
     temperature: normalizeTemperature(item.temperature),
     topP: normalizeTopP(item.topP),
     topK: normalizeTopK(item.topK),
-    interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
     enableThinking: item.enableThinking === true,
+    interleavedThinking: resolveInterleavedThinkingSetting(
+      item.model,
+      item.interleavedThinking,
+      item.enableThinking
+    ),
     thinkingEffort: normalizeThinkingEffort(item.thinkingEffort),
     ...(item.tier !== undefined && { tier: item.tier })
   }))
@@ -1460,11 +1470,12 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
+    enableThinking: record.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
-      record.interleavedThinking
+      record.interleavedThinking,
+      record.enableThinking
     ),
-    enableThinking: record.enableThinking === true,
     thinkingEffort: normalizeThinkingEffort(record.thinkingEffort),
     ...(record.tier !== undefined && { tier: record.tier })
   }
@@ -1527,11 +1538,12 @@ export function upsertCustomModelConfig(
     temperature: validatedTemperature,
     topP: validatedTopP,
     topK: validatedTopK,
+    enableThinking: config.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
-      config.interleavedThinking
+      config.interleavedThinking,
+      config.enableThinking
     ),
-    enableThinking: config.enableThinking === true,
     thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
