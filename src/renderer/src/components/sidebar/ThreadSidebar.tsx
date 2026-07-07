@@ -46,7 +46,7 @@ import {
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
 import { useFeatureGate } from "@/lib/feature-gates"
-import { isHarnessFeatureThread } from "@/lib/thread-classification"
+import { isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
@@ -480,12 +480,12 @@ export function ThreadSidebar(): React.JSX.Element {
       const previousThread = previousThreadId
         ? threads.find((thread) => thread.thread_id === previousThreadId)
         : null
-      if (previousThread && !isHarnessFeatureThread(previousThread)) {
+      if (previousThread && !isHarnessProjectModeThread(previousThread)) {
         setShowHarnessBoardView(false)
         return
       }
 
-      const firstThread = threads.find((thread) => !isHarnessFeatureThread(thread))
+      const firstThread = threads.find((thread) => !isHarnessProjectModeThread(thread))
       if (firstThread) {
         await selectThread(firstThread.thread_id)
         return
@@ -575,7 +575,7 @@ export function ThreadSidebar(): React.JSX.Element {
     const projectMap = new Map<string, ThreadProject>()
     let sortIndex = 0
 
-    for (const thread of threads.filter((item) => !isHarnessFeatureThread(item))) {
+    for (const thread of threads.filter((item) => !isHarnessProjectModeThread(item))) {
       const path = getThreadWorkspacePath(thread, allThreadStates[thread.thread_id]?.workspacePath)
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)

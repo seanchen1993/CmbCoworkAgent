@@ -95,6 +95,8 @@ type HarnessPlatformConfigKey =
   | "dialog_tips"
   | "knowledge_path"
 
+type HarnessRootConfigKey = "knowledge_slash_skill"
+
 const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   HarnessInspectCommandName,
   HarnessInspectCommandConfigKey
@@ -859,6 +861,14 @@ function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey)
 
   const command = normalizeText(platformCommands[key]).trim()
   return command || null
+}
+
+function readBoardConfigRootText(cwd: string, key: HarnessRootConfigKey): string | null {
+  const parsed = readBoardConfig(cwd)
+  if (!parsed) return null
+
+  const value = normalizeText(parsed[key]).trim()
+  return value || null
 }
 
 function readBoardConfigInspectCommand(
@@ -2470,6 +2480,38 @@ function makeWatchRefs(slug?: string): HarnessWatchRef[] {
     : [{ path: `${base}/STATE.md`, purpose: "run-list" }]
 }
 
+function resolveProjectKnowledgePath(project: HarnessProjectMetadata, cwd: string): string | null {
+  const rawPath = readBoardConfigPlatformText(cwd, "knowledge_path")
+  if (!rawPath) return null
+
+  const replaced = replaceHarnessConfigPlaceholders(rawPath, project, "pullKnowledge", cwd).trim()
+  if (!replaced) return null
+
+  return isAbsolute(replaced) ? resolve(replaced) : resolve(cwd, replaced)
+}
+
+function resolveSystemConstraintUpdateConfig(
+  project: HarnessProjectMetadata
+): HarnessProjectDetailViewModel["systemConstraintUpdate"] | undefined {
+  try {
+    const cwd = adapterPluginDir(project)
+    const slashSkill = readBoardConfigRootText(cwd, "knowledge_slash_skill")
+    if (!slashSkill) return undefined
+
+    const knowledgePath = resolveProjectKnowledgePath(project, cwd)
+    return {
+      slashSkill,
+      ...(knowledgePath ? { knowledgePath } : {})
+    }
+  } catch (error) {
+    console.warn("[HarnessBoard] Failed to resolve system constraint update config:", {
+      projectId: project.projectId,
+      error
+    })
+    return undefined
+  }
+}
+
 function makeProjectDetailViewModel(
   project: HarnessProjectMetadata,
   data: {
@@ -2480,6 +2522,8 @@ function makeProjectDetailViewModel(
     error: string | null
   }
 ): HarnessProjectDetailViewModel {
+  const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project)
+
   return {
     project: {
       projectId: project.projectId,
@@ -2499,6 +2543,7 @@ function makeProjectDetailViewModel(
     projectState: data.projectState,
     workflow: data.workflow,
     runs: data.runs,
+    ...(systemConstraintUpdate ? { systemConstraintUpdate } : {}),
     watchRefs: data.watchRefs,
     loading: false,
     error: data.error

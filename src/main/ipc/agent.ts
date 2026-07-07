@@ -452,10 +452,13 @@ function getHarnessAgentContext(
   options: { workspacePath?: string } = {}
 ): HarnessAgentContext {
   try {
+    const disableAgentsPrompt = metadata.disableAgentsPrompt === true
     const featureContext = buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
-    if (!featureContext) return {}
+    if (!featureContext) {
+      return disableAgentsPrompt ? { enableAgentsPrompt: false } : {}
+    }
 
     return {
       pluginPromptInject: featureContext.systemPromptInject,

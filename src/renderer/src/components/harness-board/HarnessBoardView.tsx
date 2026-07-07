@@ -60,6 +60,7 @@ import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
+import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
 import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
 import { cn } from "@/lib/utils"
@@ -159,6 +160,7 @@ const PROJECT_DESCRIPTION_MAX_CHARS = 100
 const PROJECT_DIR_MAX_CHARS = 30
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
+const SYSTEM_CONSTRAINT_UPDATE_KIND = "system-constraints-update"
 const OTHER_ADAPTER_SCENARIO = "其他类别"
 const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的插件"
 const PROJECT_STATUS_POLL_INTERVAL_MS = 60 * 1000
@@ -282,6 +284,12 @@ interface SelectedFeature {
   deleted?: boolean
 }
 
+interface SelectedProjectSession {
+  projectId: string
+  threadId: string
+  deleted?: boolean
+}
+
 type PendingProjectAction = {
   type: "archive" | "delete"
   project: HarnessProjectListItem
@@ -301,6 +309,15 @@ interface ProjectFeatureSessionGroup {
   title: string
   sessions: HarnessSessionBinding[]
   section: ProjectFeatureSessionGroupSection
+  deleted?: boolean
+}
+
+interface ProjectSessionProjectGroup {
+  key: string
+  project: ProjectFeatureSidebarProject
+  section: ProjectFeatureSessionGroupSection
+  projectSessions: HarnessProjectSessionBinding[]
+  featureGroups: ProjectFeatureSessionGroup[]
   deleted?: boolean
 }
 
@@ -372,9 +389,25 @@ interface HarnessFeatureThreadMetadata {
   source: string
 }
 
+interface HarnessProjectSessionMetadata {
+  projectId: string
+  kind: string
+  label: string
+}
+
+interface HarnessProjectSessionBinding {
+  projectId: string
+  kind: string
+  label: string
+  threadId: string
+  createdAt: string
+  lastActiveAt: string
+}
+
 interface HarnessSessionIndex {
   byProject: Map<string, HarnessSessionBinding[]>
   byProjectSlug: Map<string, Map<string, HarnessSessionBinding[]>>
+  projectSessionsByProject: Map<string, HarnessProjectSessionBinding[]>
 }
 
 function getWorkspaceName(path: string): string {
@@ -445,15 +478,37 @@ function readThreadHarnessFeature(thread: Thread): HarnessFeatureThreadMetadata 
   return { projectId, slug, source }
 }
 
+function readThreadHarnessProjectSession(thread: Thread): HarnessProjectSessionMetadata | null {
+  const harnessProjectSession = thread.metadata?.harnessProjectSession
+  if (!harnessProjectSession || typeof harnessProjectSession !== "object") return null
+
+  const metadata = harnessProjectSession as Record<string, unknown>
+  const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
+  const kind = typeof metadata.kind === "string" ? metadata.kind.trim() : ""
+  if (!projectId || !kind) return null
+
+  const label =
+    typeof metadata.label === "string" && metadata.label.trim()
+      ? metadata.label.trim()
+      : getThreadTitle(thread)
+  return { projectId, kind, label }
+}
+
 function readThreadHarnessProjectName(thread: Thread | null | undefined): string {
   const metadata = thread?.metadata
   const harnessFeature =
     metadata?.harnessFeature && typeof metadata.harnessFeature === "object"
       ? metadata.harnessFeature as Record<string, unknown>
       : null
+  const harnessProjectSession =
+    metadata?.harnessProjectSession && typeof metadata.harnessProjectSession === "object"
+      ? metadata.harnessProjectSession as Record<string, unknown>
+      : null
   const candidates = [
     harnessFeature?.projectName,
     harnessFeature?.name,
+    harnessProjectSession?.projectName,
+    harnessProjectSession?.name,
     metadata?.harnessProjectName,
     metadata?.projectName
   ]
@@ -497,11 +552,27 @@ function toSessionTimestamp(value: Date | string): string {
 function buildHarnessSessionIndex(threads: Thread[]): HarnessSessionIndex {
   const byProject = new Map<string, HarnessSessionBinding[]>()
   const byProjectSlug = new Map<string, Map<string, HarnessSessionBinding[]>>()
+  const projectSessionsByProject = new Map<string, HarnessProjectSessionBinding[]>()
 
   for (const thread of threads) {
+    const projectSessionMetadata = readThreadHarnessProjectSession(thread)
+    if (projectSessionMetadata) {
+      const session: HarnessProjectSessionBinding = {
+        projectId: projectSessionMetadata.projectId,
+        kind: projectSessionMetadata.kind,
+        label: projectSessionMetadata.label,
+        threadId: thread.thread_id,
+        createdAt: toSessionTimestamp(thread.created_at),
+        lastActiveAt: toSessionTimestamp(thread.updated_at)
+      }
+      const projectSessions = projectSessionsByProject.get(projectSessionMetadata.projectId) ?? []
+      projectSessions.push(session)
+      projectSessionsByProject.set(projectSessionMetadata.projectId, projectSessions)
+      continue
+    }
+
     const metadata = readThreadHarnessFeature(thread)
     if (!metadata) continue
-
     const session: HarnessSessionBinding = {
       projectId: metadata.projectId,
       slug: metadata.slug,
@@ -528,15 +599,16 @@ function buildHarnessSessionIndex(threads: Thread[]): HarnessSessionIndex {
     byProjectSlug.set(metadata.projectId, slugMap)
   }
 
-  const sortSessions = (sessions: HarnessSessionBinding[]): void => {
+  const sortSessions = <T extends { lastActiveAt: string }>(sessions: T[]): void => {
     sessions.sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
   }
   for (const sessions of byProject.values()) sortSessions(sessions)
+  for (const sessions of projectSessionsByProject.values()) sortSessions(sessions)
   for (const slugMap of byProjectSlug.values()) {
     for (const sessions of slugMap.values()) sortSessions(sessions)
   }
 
-  return { byProject, byProjectSlug }
+  return { byProject, byProjectSlug, projectSessionsByProject }
 }
 
 function getProjectSessions(index: HarnessSessionIndex, projectId: string): HarnessSessionBinding[] {
@@ -547,20 +619,24 @@ function getFeatureSessions(index: HarnessSessionIndex, projectId: string, slug:
   return index.byProjectSlug.get(projectId)?.get(slug) ?? []
 }
 
+function getProjectLevelSessions(index: HarnessSessionIndex, projectId: string): HarnessProjectSessionBinding[] {
+  return index.projectSessionsByProject.get(projectId) ?? []
+}
+
 function getProjectFeatureGroupSectionLabel(
   previousSection: ProjectFeatureSessionGroupSection | undefined,
   section: ProjectFeatureSessionGroupSection,
-  hasSelectedFeature: boolean
+  hasSelection: boolean
 ): string | null {
   if (!previousSection || previousSection === section) return null
-  if (hasSelectedFeature && previousSection === "current" && section === "project") {
-    return "同项目其他特性会话"
+  if (hasSelection && previousSection === "current" && section === "project") {
+    return "当前项目"
   }
-  if (hasSelectedFeature && section === "other") {
-    return "其他项目特性会话"
+  if (hasSelection && section === "other") {
+    return "其他项目会话"
   }
   if (section === "other") {
-    return "其他特性会话"
+    return "其他项目会话"
   }
   return null
 }
@@ -3740,6 +3816,7 @@ function StageArtifactPanel({
 
 function FeatureConversationPanel({
   threadId,
+  chatSurface = "harness-project",
   readOnlyReason,
   hasPendingGitDiffNotice,
   onHarnessSessionCreated,
@@ -3748,6 +3825,7 @@ function FeatureConversationPanel({
   onThreadGitStatusChange
 }: {
   threadId: string | null
+  chatSurface?: "harness-project" | "harness-feature-session"
   readOnlyReason?: string | null
   hasPendingGitDiffNotice?: boolean
   onHarnessSessionCreated?: (threadId: string) => void
@@ -3763,7 +3841,7 @@ function FeatureConversationPanel({
             threadId={threadId}
             showTabBar={false}
             hasPendingGitDiffNotice={hasPendingGitDiffNotice}
-            chatSurface="harness-project"
+            chatSurface={chatSurface}
             hideWelcomeSkillTabs
             readOnlyReason={readOnlyReason}
             onRequestOpenGitPanel={onRequestOpenGitPanel}
@@ -4274,8 +4352,10 @@ function ProjectDetailPage({
   enterpriseProjectDetail,
   loading,
   creatingFeature,
+  creatingSystemConstraintUpdate,
   onBackToList,
   onCreateFeature,
+  onOpenSystemConstraintUpdate,
   onRefresh,
   onEditProject,
   onOpenFeature
@@ -4285,8 +4365,13 @@ function ProjectDetailPage({
   enterpriseProjectDetail?: EnterpriseProjectDetailCacheEntry
   loading: boolean
   creatingFeature: boolean
+  creatingSystemConstraintUpdate: boolean
   onBackToList: () => void
   onCreateFeature: (project: HarnessProjectListItem) => void
+  onOpenSystemConstraintUpdate: (
+    project: HarnessProjectListItem,
+    config: NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]>
+  ) => void
   onRefresh: (projectId: string) => void
   onEditProject: (project: HarnessProjectListItem) => void
   onOpenFeature: (projectId: string, slug: string) => void
@@ -4316,6 +4401,26 @@ function ProjectDetailPage({
             </ProjectBadgeRow>
           </div>
           <div className={harnessPageHeaderActionsClassName}>
+            {detail?.systemConstraintUpdate && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-2"
+                onClick={() => {
+                  if (detail.systemConstraintUpdate) {
+                    onOpenSystemConstraintUpdate(project, detail.systemConstraintUpdate)
+                  }
+                }}
+                disabled={creatingSystemConstraintUpdate}
+              >
+                {creatingSystemConstraintUpdate ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <ShieldAlert className="size-4" />
+                )}
+                系统约束更新
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
@@ -4473,6 +4578,65 @@ function ProjectDetailPage({
           </section>
         </main>
       </ScrollArea>
+    </div>
+  )
+}
+
+function ProjectSessionPage({
+  project,
+  thread,
+  deleted,
+  onBackToList,
+  onBackToProject,
+  hasPendingGitDiffNotice,
+  onRequestOpenGitPanel,
+  onDismissGitChangeNotice,
+  onThreadGitStatusChange
+}: {
+  project: ProjectFeatureSidebarProject
+  thread: Thread | null
+  deleted?: boolean
+  onBackToList: () => void
+  onBackToProject: () => void
+  hasPendingGitDiffNotice?: boolean
+  onRequestOpenGitPanel?: () => void
+  onDismissGitChangeNotice?: () => void
+  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
+}): React.JSX.Element {
+  const title = thread ? getThreadTitle(thread) : "项目会话"
+  const readOnlyReason = deleted ? "所属项目已删除，当前会话只读。" : null
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className={harnessPageHeaderClassName}>
+        <div className={harnessPageHeaderContentClassName}>
+          <div className="min-w-0 space-y-2">
+            <HarnessBreadcrumb
+              project={project as HarnessProjectListItem}
+              sessionTitle={title}
+              onBack={onBackToProject}
+              onProjectList={onBackToList}
+              onProject={deleted ? undefined : onBackToProject}
+            />
+            <ProjectBadgeRow project={project as HarnessProjectListItem}>
+              <ShieldAlert className="size-5 shrink-0 text-status-info" />
+              <h1 className="truncate text-xl font-semibold">{title}</h1>
+            </ProjectBadgeRow>
+          </div>
+        </div>
+      </div>
+
+      <main className="flex min-h-0 flex-1 p-4">
+        <FeatureConversationPanel
+          threadId={thread?.thread_id ?? null}
+          chatSurface="harness-feature-session"
+          readOnlyReason={readOnlyReason}
+          hasPendingGitDiffNotice={hasPendingGitDiffNotice}
+          onRequestOpenGitPanel={onRequestOpenGitPanel}
+          onDismissGitChangeNotice={onDismissGitChangeNotice}
+          onThreadGitStatusChange={onThreadGitStatusChange}
+        />
+      </main>
     </div>
   )
 }
@@ -5024,7 +5188,9 @@ function ProjectFeatureSidebar({
   threadsById,
   allThreadStates,
   allStreamLoadingStates,
+  selectedProjectId,
   selectedFeature,
+  selectedProjectSession,
   isViewingSession,
   unreadIds,
   exportingThreadId,
@@ -5033,6 +5199,7 @@ function ProjectFeatureSidebar({
   onToggleCollapse,
   onToggleAll,
   onCreateSession,
+  onSelectProjectSession,
   onSelectSession,
   onRunFinished,
   onDeleteSession,
@@ -5042,14 +5209,16 @@ function ProjectFeatureSidebar({
   onCancelEditing,
   onEditingTitleChange
 }: {
-  groups: ProjectFeatureSessionGroup[]
+  groups: ProjectSessionProjectGroup[]
   collapsedKeys: Set<string>
   allCollapsed: boolean
   creatingSessionKey: string | null
   threadsById: Map<string, Thread>
   allThreadStates: ThreadWorkspaceStateMap
   allStreamLoadingStates: Record<string, boolean>
+  selectedProjectId: string | null
   selectedFeature: SelectedFeature | null
+  selectedProjectSession: SelectedProjectSession | null
   isViewingSession: boolean
   unreadIds: Set<string>
   exportingThreadId: string | null
@@ -5062,6 +5231,7 @@ function ProjectFeatureSidebar({
     slug: string,
     sessions: HarnessSessionBinding[]
   ) => void
+  onSelectProjectSession: (projectId: string, threadId: string, deleted?: boolean) => void
   onSelectSession: (projectId: string, slug: string, threadId: string, deleted?: boolean) => void
   onRunFinished: (threadId: string) => void
   onDeleteSession: (thread: Thread) => void
@@ -5073,16 +5243,63 @@ function ProjectFeatureSidebar({
 }): React.JSX.Element {
   const { currentThreadId } = useAppStore()
   const highlightThreadId = isViewingSession ? currentThreadId : null
+  const sessionCount = groups.reduce(
+    (total, group) =>
+      total +
+      group.projectSessions.length +
+      group.featureGroups.reduce((count, featureGroup) => count + featureGroup.sessions.length, 0),
+    0
+  )
+
+  const renderThreadItem = (
+    thread: Thread,
+    hoverTitle: string,
+    onSelect: () => void
+  ): React.JSX.Element => {
+    const threadState = allThreadStates[thread.thread_id]
+    const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
+    const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
+    const hasPendingApproval = Boolean(threadState?.pendingApproval)
+    const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
+    const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
+
+    return (
+      <ThreadListItem
+        key={thread.thread_id}
+        thread={thread}
+        isLoading={isLoading}
+        hasPendingApproval={hasPendingApproval}
+        hasContextReminder={hasContextReminder}
+        scheduledTaskLoading={scheduledTaskLoading}
+        isExporting={exportingThreadId === thread.thread_id}
+        isSelected={highlightThreadId === thread.thread_id}
+        isEditing={editingThreadId === thread.thread_id}
+        isUnread={unreadIds.has(thread.thread_id)}
+        hasPendingUserInput={hasPendingUserInput}
+        editingTitle={editingTitle}
+        hoverTitle={hoverTitle}
+        onSelect={onSelect}
+        onRunFinished={() => onRunFinished(thread.thread_id)}
+        onDelete={() => onDeleteSession(thread)}
+        onExport={() => void onExportSession(thread)}
+        onStartEditing={() => onStartEditing(thread)}
+        onSaveTitle={onSaveTitle}
+        onCancelEditing={onCancelEditing}
+        onEditingTitleChange={onEditingTitleChange}
+      />
+    )
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
-        <span className="min-w-0 flex-1 truncate">特性会话 {groups.length}</span>
+        <span className="min-w-0 flex-1 truncate">项目会话 {sessionCount}</span>
         {groups.length > 0 && (
           <Button
             variant="ghost"
             size="icon-sm"
             className="size-6 shrink-0 cursor-pointer"
-            title={allCollapsed ? "全部展开特性会话" : "全部收起特性会话"}
+            title={allCollapsed ? "全部展开项目会话" : "全部收起项目会话"}
             onClick={onToggleAll}
           >
             {allCollapsed ? <Maximize2 className="size-3.5" /> : <Minimize2 className="size-3.5" />}
@@ -5092,21 +5309,26 @@ function ProjectFeatureSidebar({
       <ScrollArea className="min-h-0 flex-1">
         <div className="space-y-1 px-2 pb-2">
           {groups.map((group, index) => {
-            const isCollapsed = collapsedKeys.has(group.key)
-            const selected =
-              selectedFeature?.projectId === group.project.projectId &&
-              selectedFeature.slug === group.slug
-            const creatingSession = creatingSessionKey === group.key
+            const projectCollapsed = collapsedKeys.has(group.key)
+            const projectSelected =
+              selectedProjectId === group.project.projectId &&
+              !selectedFeature &&
+              !selectedProjectSession
             const sectionLabel = getProjectFeatureGroupSectionLabel(
               groups[index - 1]?.section,
               group.section,
-              !!selectedFeature
+              Boolean(selectedFeature || selectedProjectSession || selectedProjectId)
             )
-            const hasUnreadSession = group.sessions.some((session) =>
-              unreadIds.has(session.threadId)
-            )
+            const hasUnreadSession =
+              group.projectSessions.some((session) => unreadIds.has(session.threadId)) ||
+              group.featureGroups.some((featureGroup) =>
+                featureGroup.sessions.some((session) => unreadIds.has(session.threadId))
+              )
             const projectArchived = group.project.lifecycle.status === "archived"
             const projectDeleted = group.deleted === true
+            const groupSessionCount =
+              group.projectSessions.length +
+              group.featureGroups.reduce((count, featureGroup) => count + featureGroup.sessions.length, 0)
 
             return (
               <div key={group.key} className="space-y-1">
@@ -5120,25 +5342,25 @@ function ProjectFeatureSidebar({
                 <div
                   className={cn(
                     "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
-                    selected ? "bg-sidebar-accent/70 text-sidebar-accent-foreground" : "hover:bg-sidebar-accent/40"
+                    projectSelected ? "bg-sidebar-accent/70 text-sidebar-accent-foreground" : "hover:bg-sidebar-accent/40"
                   )}
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-1.5">
                     <button
                       type="button"
                       className="flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-sidebar-accent/50"
-                      title={isCollapsed ? "展开会话" : "收起会话"}
+                      title={projectCollapsed ? "展开项目会话" : "收起项目会话"}
                       onClick={(event) => {
                         event.stopPropagation()
                         onToggleCollapse(group.key)
                       }}
                     >
-                      {isCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                      {projectCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
                     </button>
                     <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                      <Workflow className="size-4 shrink-0 text-muted-foreground" />
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium" title={group.title}>
-                        {group.title}
+                      <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={group.project.name}>
+                        {group.project.name}
                       </span>
                       {projectDeleted ? (
                         <span
@@ -5160,83 +5382,111 @@ function ProjectFeatureSidebar({
                   </div>
                   <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
                     <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-                      {group.sessions.length}
-                    </span>
-                    <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
-                        title={projectDeleted ? "项目已删除，无法新增会话" : "新增会话"}
-                        disabled={creatingSession || projectDeleted}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          if (projectDeleted) return
-                          void onCreateSession(group.project, group.slug, group.sessions)
-                        }}
-                      >
-                        {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
-                      </Button>
+                      {groupSessionCount}
                     </span>
                   </span>
                 </div>
 
-                {!isCollapsed && (
+                {!projectCollapsed && (
                   <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-                    {group.sessions.length === 0 ? (
-                      <div className="px-2 py-2 text-xs text-muted-foreground">暂无关联会话</div>
-                    ) : (
-                      group.sessions.map((session) => {
-                        const thread = threadsById.get(session.threadId)
-                        if (!thread) return null
-                        const threadState = allThreadStates[thread.thread_id]
-                        const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
-                        const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
-                        const hasPendingApproval = Boolean(threadState?.pendingApproval)
-                        const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
-                        const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
+                    {group.projectSessions.map((session) => {
+                      const thread = threadsById.get(session.threadId)
+                      if (!thread) return null
+                      return renderThreadItem(
+                        thread,
+                        `所属项目：${group.project.name}`,
+                        () => onSelectProjectSession(group.project.projectId, thread.thread_id, projectDeleted)
+                      )
+                    })}
+                    {group.featureGroups.map((featureGroup) => {
+                      const featureCollapsed = collapsedKeys.has(featureGroup.key)
+                      const featureSelected =
+                        selectedFeature?.projectId === group.project.projectId &&
+                        selectedFeature.slug === featureGroup.slug
+                      const creatingSession = creatingSessionKey === featureGroup.key
+                      const hasUnreadFeatureSession = featureGroup.sessions.some((session) =>
+                        unreadIds.has(session.threadId)
+                      )
 
-                        return (
-                          <ThreadListItem
-                            key={thread.thread_id}
-                            thread={thread}
-                            isLoading={isLoading}
-                            hasPendingApproval={hasPendingApproval}
-                            hasContextReminder={hasContextReminder}
-                            scheduledTaskLoading={scheduledTaskLoading}
-                            isExporting={exportingThreadId === thread.thread_id}
-                            isSelected={highlightThreadId === thread.thread_id}
-                            isEditing={editingThreadId === thread.thread_id}
-                            isUnread={unreadIds.has(thread.thread_id)}
-                            hasPendingUserInput={hasPendingUserInput}
-                            editingTitle={editingTitle}
-                            hoverTitle={`所属项目：${group.project.name} / ${group.title}`}
-                            onSelect={() =>
-                              onSelectSession(
-                                group.project.projectId,
-                                session.slug,
-                                thread.thread_id,
-                                projectDeleted
-                              )
-                            }
-                            onRunFinished={() => onRunFinished(thread.thread_id)}
-                            onDelete={() => onDeleteSession(thread)}
-                            onExport={() => void onExportSession(thread)}
-                            onStartEditing={() => onStartEditing(thread)}
-                            onSaveTitle={onSaveTitle}
-                            onCancelEditing={onCancelEditing}
-                            onEditingTitleChange={onEditingTitleChange}
-                          />
-                        )
-                      })
-                    )}
+                      return (
+                        <div key={featureGroup.key} className="space-y-1">
+                          <div
+                            className={cn(
+                              "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
+                              featureSelected ? "bg-sidebar-accent/70 text-sidebar-accent-foreground" : "hover:bg-sidebar-accent/40"
+                            )}
+                          >
+                            <button
+                              type="button"
+                              className="flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-sidebar-accent/50"
+                              title={featureCollapsed ? "展开特性会话" : "收起特性会话"}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                onToggleCollapse(featureGroup.key)
+                              }}
+                            >
+                              {featureCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                            </button>
+                            <Workflow className="size-4 shrink-0 text-muted-foreground" />
+                            <span className="min-w-0 flex-1 truncate text-xs font-medium" title={featureGroup.title}>
+                              {featureGroup.title}
+                            </span>
+                            {hasUnreadFeatureSession && <span className="size-2 rounded-full bg-blue-500 shrink-0" />}
+                            <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
+                              <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                                {featureGroup.sessions.length}
+                              </span>
+                              <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                                <Button
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
+                                  title={projectDeleted ? "项目已删除，无法新增会话" : "新增会话"}
+                                  disabled={creatingSession || projectDeleted}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    if (projectDeleted) return
+                                    void onCreateSession(group.project, featureGroup.slug, featureGroup.sessions)
+                                  }}
+                                >
+                                  {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
+                                </Button>
+                              </span>
+                            </span>
+                          </div>
+                          {!featureCollapsed && (
+                            <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
+                              {featureGroup.sessions.length === 0 ? (
+                                <div className="px-2 py-2 text-xs text-muted-foreground">暂无关联会话</div>
+                              ) : (
+                                featureGroup.sessions.map((session) => {
+                                  const thread = threadsById.get(session.threadId)
+                                  if (!thread) return null
+                                  return renderThreadItem(
+                                    thread,
+                                    `所属项目：${group.project.name} / ${featureGroup.title}`,
+                                    () =>
+                                      onSelectSession(
+                                        group.project.projectId,
+                                        session.slug,
+                                        thread.thread_id,
+                                        projectDeleted
+                                      )
+                                  )
+                                })
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </div>
             )
           })}
           {groups.length === 0 && (
-            <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无特性会话</div>
+            <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无项目会话</div>
           )}
         </div>
       </ScrollArea>
@@ -5267,6 +5517,7 @@ export function HarnessBoardView({
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
+  const [selectedProjectSession, setSelectedProjectSession] = useState<SelectedProjectSession | null>(null)
   const [isViewingSession, setIsViewingSession] = useState(false)
   const [runDetail, setRunDetail] = useState<HarnessRunDetailViewModel | null>(null)
   const [adapterRegistry, setAdapterRegistry] = useState<HarnessAdapterRegistryItem[]>([])
@@ -5343,6 +5594,7 @@ export function HarnessBoardView({
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [sidebarThreadToDelete, setSidebarThreadToDelete] = useState<Thread | null>(null)
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
+  const [creatingProjectSessionProjectId, setCreatingProjectSessionProjectId] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
   const projectsRef = useRef(projects)
   const enterpriseProjectDetailsByCodeRef = useRef(enterpriseProjectDetailsByCode)
@@ -5351,6 +5603,7 @@ export function HarnessBoardView({
   const enterpriseProjectDetailTimerRef = useRef<number | null>(null)
   const selectedProjectIdRef = useRef(selectedProjectId)
   const selectedFeatureRef = useRef(selectedFeature)
+  const selectedProjectSessionRef = useRef(selectedProjectSession)
   const currentThreadIdRef = useRef(currentThreadId)
   const isViewingSessionRef = useRef(isViewingSession)
   const projectDetailsRefreshInFlightRef = useRef(false)
@@ -5362,6 +5615,7 @@ export function HarnessBoardView({
   enterpriseProjectDetailsByCodeRef.current = enterpriseProjectDetailsByCode
   selectedProjectIdRef.current = selectedProjectId
   selectedFeatureRef.current = selectedFeature
+  selectedProjectSessionRef.current = selectedProjectSession
   currentThreadIdRef.current = currentThreadId
   isViewingSessionRef.current = isViewingSession
 
@@ -6215,6 +6469,7 @@ export function HarnessBoardView({
         })
         if (selectedProjectId === project.projectId) {
           setSelectedProjectId(null)
+          setSelectedProjectSession(null)
           setSelectedFeature(null)
         }
         await loadProjects()
@@ -6242,6 +6497,7 @@ export function HarnessBoardView({
         })
         if (selectedProjectId === project.projectId) {
           setSelectedProjectId(null)
+          setSelectedProjectSession(null)
           setSelectedFeature(null)
           setIsViewingSession(false)
         }
@@ -6347,6 +6603,7 @@ export function HarnessBoardView({
   const handleOpenDeployUnitSettings = useCallback((): void => {
     if (creatingFeatureProjectId) return
     handleFeatureDialogOpenChange(false)
+    setSelectedProjectSession(null)
     setSelectedFeature(null)
     setSelectedProjectId(null)
     setIsViewingSession(false)
@@ -6450,6 +6707,7 @@ export function HarnessBoardView({
       setFeatureName("")
       setSelectedDeployUnitIds(new Set())
       await loadProjectDetail(result.projectId)
+      setSelectedProjectSession(null)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
         projectId: result.projectId,
@@ -6513,6 +6771,17 @@ export function HarnessBoardView({
     )
   const selectedProject =
     selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
+  const selectedProjectSessionThread = selectedProjectSession
+    ? threadsById.get(selectedProjectSession.threadId) ?? null
+    : null
+  const selectedProjectSessionProject =
+    selectedProject ??
+    (selectedProjectSession
+      ? makeDeletedProjectSidebarItem(
+          selectedProjectSession.projectId,
+          readThreadHarnessProjectName(selectedProjectSessionThread)
+        )
+      : null)
   const selectedProjectDetail = selectedProjectId ? detailsByProjectId[selectedProjectId] : undefined
   const selectedProjectCode = selectedProject
     ? normalizeEnterpriseProjectCode(selectedProject.projectCode)
@@ -6582,8 +6851,10 @@ export function HarnessBoardView({
 
   const openProjectDetail = useCallback(
     (projectId: string): void => {
+      setSelectedProjectSession(null)
       setSelectedFeature(null)
       setSelectedProjectId(projectId)
+      setIsViewingSession(false)
       if (!loadingDetailIds.has(projectId)) {
         void loadProjectDetail(
           projectId,
@@ -6646,6 +6917,7 @@ export function HarnessBoardView({
 
   const openFeatureDetail = useCallback(
     (projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean): void => {
+      setSelectedProjectSession(null)
       setSelectedProjectId(projectId)
       setSelectedFeature({ projectId, slug, activeSessionThreadId, deleted })
       setIsViewingSession(!!activeSessionThreadId)
@@ -6656,14 +6928,32 @@ export function HarnessBoardView({
     [detailsByProjectId, loadProjectDetail, loadingDetailIds]
   )
 
+  const openProjectSession = useCallback(
+    (projectId: string, threadId: string, deleted?: boolean): void => {
+      setSelectedProjectId(projectId)
+      setSelectedFeature(null)
+      setSelectedProjectSession({ projectId, threadId, deleted })
+      setIsViewingSession(true)
+      if (!deleted && !detailsByProjectId[projectId] && !loadingDetailIds.has(projectId)) {
+        void loadProjectDetail(projectId)
+      }
+    },
+    [detailsByProjectId, loadProjectDetail, loadingDetailIds]
+  )
+
   const handleBackToProjectList = useCallback((): void => {
+    setSelectedProjectSession(null)
     setSelectedFeature(null)
     setSelectedProjectId(null)
     setIsViewingSession(false)
   }, [])
 
   const handleBackToProject = useCallback((): void => {
-    const projectId = selectedFeatureRef.current?.projectId ?? selectedProjectIdRef.current
+    const projectId =
+      selectedProjectSessionRef.current?.projectId ??
+      selectedFeatureRef.current?.projectId ??
+      selectedProjectIdRef.current
+    setSelectedProjectSession(null)
     setSelectedFeature(null)
     setIsViewingSession(false)
     if (projectId) {
@@ -6671,10 +6961,67 @@ export function HarnessBoardView({
     }
   }, [loadProjectDetail])
 
-  const projectSidebarGroups = useMemo<ProjectFeatureSessionGroup[]>(() => {
-    const groups: ProjectFeatureSessionGroup[] = []
-    const activeProjectId = selectedFeature?.projectId ?? selectedProjectId
+  const handleOpenSystemConstraintUpdate = useCallback(
+    async (
+      project: HarnessProjectListItem,
+      config: NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]>
+    ): Promise<void> => {
+      if (creatingProjectSessionProjectId) return
+      setCreatingProjectSessionProjectId(project.projectId)
+      try {
+        const thread = await createThread(
+          {
+            workspacePath: config.knowledgePath ?? null,
+            disableAgentsPrompt: true,
+            harnessProjectSession: {
+              projectId: project.projectId,
+              kind: SYSTEM_CONSTRAINT_UPDATE_KIND
+            }
+          },
+          { preserveView: true }
+        )
+        setPendingHarnessNextAction(thread.thread_id, {
+          slashSkill: config.slashSkill,
+          preferredPlugin: {
+            id: project.harnessAdapter.id,
+            name: project.harnessAdapter.name
+          }
+        })
+        setSelectedProjectId(project.projectId)
+        setSelectedFeature(null)
+        setSelectedProjectSession({ projectId: project.projectId, threadId: thread.thread_id })
+        setIsViewingSession(true)
+        markRead(thread.thread_id)
+        await selectThread(thread.thread_id, { preserveView: true })
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+      } finally {
+        setCreatingProjectSessionProjectId(null)
+      }
+    },
+    [createThread, creatingProjectSessionProjectId, markRead, selectThread]
+  )
+
+  const projectSidebarGroups = useMemo<ProjectSessionProjectGroup[]>(() => {
+    const groups: ProjectSessionProjectGroup[] = []
+    const activeProjectId = selectedProjectSession?.projectId ?? selectedFeature?.projectId ?? selectedProjectId
     const knownProjectIds = new Set(projects.map((project) => project.projectId))
+
+    const makeFeatureGroups = (
+      project: ProjectFeatureSidebarProject,
+      sessionsBySlug: Map<string, HarnessSessionBinding[]>,
+      section: ProjectFeatureSessionGroupSection,
+      deleted = false
+    ): ProjectFeatureSessionGroup[] =>
+      Array.from(sessionsBySlug.entries()).map(([slug, sessions]) => ({
+        key: `feature:${project.projectId}:${slug}`,
+        project,
+        slug,
+        title: slug,
+        sessions,
+        section,
+        ...(deleted ? { deleted: true } : {})
+      }))
 
     for (const project of projects) {
       const sessionsBySlug = new Map<string, HarnessSessionBinding[]>()
@@ -6684,51 +7031,50 @@ export function HarnessBoardView({
         sessionsBySlug.set(session.slug, sessions)
       }
 
-      for (const [slug, sessions] of sessionsBySlug) {
-        const section: ProjectFeatureSessionGroupSection =
-          selectedFeature && project.projectId === selectedFeature.projectId && slug === selectedFeature.slug
-            ? "current"
-            : activeProjectId && project.projectId === activeProjectId
-              ? "project"
-              : "other"
+      const projectSessions = getProjectLevelSessions(harnessSessionIndex, project.projectId)
+      if (sessionsBySlug.size === 0 && projectSessions.length === 0) continue
 
-        groups.push({
-          key: `${project.projectId}:${slug}`,
-          project,
-          slug,
-          title: slug,
-          sessions,
-          section
-        })
-      }
+      const section: ProjectFeatureSessionGroupSection =
+        activeProjectId && project.projectId === activeProjectId ? "current" : "other"
+
+      groups.push({
+        key: `project:${project.projectId}`,
+        project,
+        section,
+        projectSessions,
+        featureGroups: makeFeatureGroups(project, sessionsBySlug, section)
+      })
     }
 
-    for (const [projectId, sessionsBySlug] of harnessSessionIndex.byProjectSlug) {
+    const unknownProjectIds = new Set<string>([
+      ...Array.from(harnessSessionIndex.byProjectSlug.keys()),
+      ...Array.from(harnessSessionIndex.projectSessionsByProject.keys())
+    ])
+
+    for (const projectId of unknownProjectIds) {
       if (knownProjectIds.has(projectId)) continue
+      const sessionsBySlug = harnessSessionIndex.byProjectSlug.get(projectId) ?? new Map()
+      const projectSessions = getProjectLevelSessions(harnessSessionIndex, projectId)
+      if (sessionsBySlug.size === 0 && projectSessions.length === 0) continue
 
-      for (const [slug, sessions] of sessionsBySlug) {
-        const firstThread = threadsById.get(sessions[0]?.threadId ?? "")
-        const deletedProject = makeDeletedProjectSidebarItem(
-          projectId,
-          readThreadHarnessProjectName(firstThread)
-        )
-        const section: ProjectFeatureSessionGroupSection =
-          selectedFeature && projectId === selectedFeature.projectId && slug === selectedFeature.slug
-            ? "current"
-            : activeProjectId && projectId === activeProjectId
-              ? "project"
-              : "other"
+      const firstProjectSessionThread = threadsById.get(projectSessions[0]?.threadId ?? "")
+      const firstFeatureSessions = sessionsBySlug.values().next().value as HarnessSessionBinding[] | undefined
+      const firstFeatureThread = threadsById.get(firstFeatureSessions?.[0]?.threadId ?? "")
+      const deletedProject = makeDeletedProjectSidebarItem(
+        projectId,
+        readThreadHarnessProjectName(firstProjectSessionThread ?? firstFeatureThread)
+      )
+      const section: ProjectFeatureSessionGroupSection =
+        activeProjectId && projectId === activeProjectId ? "current" : "other"
 
-        groups.push({
-          key: `deleted:${projectId}:${slug}`,
-          project: deletedProject,
-          slug,
-          title: slug,
-          sessions,
-          section,
-          deleted: true
-        })
-      }
+      groups.push({
+        key: `deleted-project:${projectId}`,
+        project: deletedProject,
+        section,
+        projectSessions,
+        featureGroups: makeFeatureGroups(deletedProject, sessionsBySlug, section, true),
+        deleted: true
+      })
     }
 
     if (!activeProjectId) return groups
@@ -6740,7 +7086,7 @@ export function HarnessBoardView({
       })
       .sort((a, b) => a.priority - b.priority || a.index - b.index)
       .map(({ group }) => group)
-  }, [harnessSessionIndex, projects, selectedFeature, selectedProjectId, threadsById])
+  }, [harnessSessionIndex, projects, selectedFeature, selectedProjectId, selectedProjectSession, threadsById])
 
   useEffect(() => {
     if (!selectedFeature && !selectedProjectId) return
@@ -6750,17 +7096,20 @@ export function HarnessBoardView({
       let changed = false
 
       for (const group of projectSidebarGroups) {
-        const isCurrentFeature =
-          selectedFeature &&
-          group.project.projectId === selectedFeature.projectId &&
-          group.slug === selectedFeature.slug
         const isCurrentProject =
-          !selectedFeature &&
-          selectedProjectId &&
-          group.project.projectId === selectedProjectId
+          (selectedProjectSession && group.project.projectId === selectedProjectSession.projectId) ||
+          (selectedFeature && group.project.projectId === selectedFeature.projectId) ||
+          (!selectedProjectSession &&
+            !selectedFeature &&
+            selectedProjectId &&
+            group.project.projectId === selectedProjectId)
+        const currentFeatureGroup = selectedFeature
+          ? group.featureGroups.find((featureGroup) => featureGroup.slug === selectedFeature.slug)
+          : null
 
-        if (isCurrentFeature) {
+        if (isCurrentProject) {
           if (next.delete(group.key)) changed = true
+          if (currentFeatureGroup && next.delete(currentFeatureGroup.key)) changed = true
         } else if (!isCurrentProject && !next.has(group.key)) {
           next.add(group.key)
           changed = true
@@ -6773,6 +7122,7 @@ export function HarnessBoardView({
     projectSidebarGroups,
     selectedFeature?.projectId,
     selectedFeature?.slug,
+    selectedProjectSession?.projectId,
     selectedProjectId
   ])
 
@@ -6837,9 +7187,14 @@ export function HarnessBoardView({
     async (): Promise<void> => {
       if (!sidebarThreadToDelete) return
       try {
+        const deletingThreadId = sidebarThreadToDelete.thread_id
         cleanupThread(sidebarThreadToDelete.thread_id)
         await deleteThread(sidebarThreadToDelete.thread_id)
-        markRead(sidebarThreadToDelete.thread_id)
+        markRead(deletingThreadId)
+        if (selectedProjectSessionRef.current?.threadId === deletingThreadId) {
+          setSelectedProjectSession(null)
+          setIsViewingSession(false)
+        }
         setSidebarThreadToDelete(null)
       } catch (error) {
         toast.error(cleanIpcError(error))
@@ -6861,7 +7216,7 @@ export function HarnessBoardView({
       sessions: HarnessSessionBinding[]
     ): Promise<void> => {
       if (project.lifecycle.status === "deleted") return
-      const key = `${project.projectId}:${slug}`
+      const key = `feature:${project.projectId}:${slug}`
       if (creatingSidebarSessionKey) return
       setCreatingSidebarSessionKey(key)
       try {
@@ -6881,6 +7236,7 @@ export function HarnessBoardView({
           slug,
           thread.thread_id
         )
+        setSelectedProjectSession(null)
         setSelectedProjectId(project.projectId)
         setSelectedFeature({ projectId: project.projectId, slug, activeSessionThreadId: thread.thread_id })
         setRunDetail((currentDetail) =>
@@ -6945,7 +7301,8 @@ export function HarnessBoardView({
   }, [])
 
   const sidebarPortalNode = useHarnessSidebarPortalNode()
-  const projectListSelected = selectedProjectId === null && selectedFeature === null
+  const projectListSelected =
+    selectedProjectId === null && selectedFeature === null && selectedProjectSession === null
   const sidebarPortal =
     sidebarPortalNode
       ? createPortal(
@@ -6975,7 +7332,9 @@ export function HarnessBoardView({
               threadsById={threadsById}
               allThreadStates={allThreadStates}
               allStreamLoadingStates={allStreamLoadingStates}
+              selectedProjectId={selectedProjectId}
               selectedFeature={selectedFeature}
+              selectedProjectSession={selectedProjectSession}
               isViewingSession={isViewingSession}
               unreadIds={unreadIds}
               exportingThreadId={exportingThreadId}
@@ -6992,6 +7351,11 @@ export function HarnessBoardView({
               onToggleAll={toggleAllFeatureGroups}
               onCreateSession={(project, slug, sessions) => {
                 void handleCreateSidebarSession(project, slug, sessions)
+              }}
+              onSelectProjectSession={(projectId, threadId, deleted) => {
+                openProjectSession(projectId, threadId, deleted)
+                markRead(threadId)
+                void selectThread(threadId, { preserveView: true })
               }}
               onSelectSession={(projectId, slug, threadId, deleted) => {
                 openFeatureDetail(projectId, slug, threadId, deleted)
@@ -7026,8 +7390,8 @@ export function HarnessBoardView({
 
   useEffect(() => {
     if (selectedFeature) return
-    onActiveSessionThreadChange?.(null)
-  }, [onActiveSessionThreadChange, selectedFeature])
+    onActiveSessionThreadChange?.(selectedProjectSession?.threadId ?? null)
+  }, [onActiveSessionThreadChange, selectedFeature, selectedProjectSession?.threadId])
 
   if (selectedFeature) {
     const selectedFeatureDeleted = selectedFeature.deleted === true
@@ -7065,6 +7429,26 @@ export function HarnessBoardView({
     )
   }
 
+  if (selectedProjectSession && selectedProjectSessionProject) {
+    return (
+      <>
+        <ProjectSessionPage
+          project={selectedProjectSessionProject}
+          thread={selectedProjectSessionThread}
+          deleted={selectedProjectSession.deleted}
+          onBackToList={handleBackToProjectList}
+          onBackToProject={handleBackToProject}
+          hasPendingGitDiffNotice={hasPendingGitDiffNotice}
+          onRequestOpenGitPanel={onRequestOpenGitPanel}
+          onDismissGitChangeNotice={onDismissGitChangeNotice}
+          onThreadGitStatusChange={onThreadGitStatusChange}
+        />
+        {sidebarDeleteDialog}
+        {sidebarPortal}
+      </>
+    )
+  }
+
   if (selectedProject) {
     return (
       <>
@@ -7074,8 +7458,12 @@ export function HarnessBoardView({
           enterpriseProjectDetail={selectedEnterpriseProjectDetail}
           loading={loadingDetailIds.has(selectedProject.projectId)}
           creatingFeature={creatingFeatureProjectId === selectedProject.projectId}
+          creatingSystemConstraintUpdate={creatingProjectSessionProjectId === selectedProject.projectId}
           onBackToList={handleBackToProjectList}
           onCreateFeature={openFeatureCreateDialog}
+          onOpenSystemConstraintUpdate={(project, config) => {
+            void handleOpenSystemConstraintUpdate(project, config)
+          }}
           onRefresh={(projectId) => void loadProjectDetail(projectId)}
           onEditProject={handleEditProject}
           onOpenFeature={openFeatureDetail}

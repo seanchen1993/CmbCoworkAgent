@@ -363,6 +363,10 @@ export interface HarnessProjectDetailViewModel {
   projectState?: HarnessStatus
   workflow: HarnessWorkflow
   runs: HarnessFeatureSummary[]
+  systemConstraintUpdate?: {
+    slashSkill: string
+    knowledgePath?: string
+  }
   watchRefs: HarnessWatchRef[]
   loading: boolean
   error: string | null
@@ -393,6 +397,10 @@ export interface HarnessWorkflowNextAction {
   slashSkill?: string
   userMessage?: string
   dialogTips?: string
+  preferredPlugin?: {
+    id?: string
+    name?: string
+  }
 }
 
 export interface HarnessWorkflowStateDefinition {

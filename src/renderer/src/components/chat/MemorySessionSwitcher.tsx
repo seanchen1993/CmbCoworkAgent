@@ -4,7 +4,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useAppStore } from "@/lib/store"
-import { isHarnessFeatureThread } from "@/lib/thread-classification"
+import { isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { cn } from "@/lib/utils"
 
 interface MemorySessionSwitcherProps {
@@ -39,7 +39,7 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
   )
   const sessionEnabled = isSessionMemoryEnabled(currentThread?.metadata)
   const projectModeMemoryBlocked =
-    isHarnessFeatureThread(currentThread) && !projectModeMemoryEnabled
+    isHarnessProjectModeThread(currentThread) && !projectModeMemoryEnabled
   const effectiveEnabled = sessionEnabled && globalEnabled && !projectModeMemoryBlocked
   const pausedByGlobal = sessionEnabled && !globalEnabled && !projectModeMemoryBlocked
   const enabledOptionSelected = sessionEnabled && !projectModeMemoryBlocked

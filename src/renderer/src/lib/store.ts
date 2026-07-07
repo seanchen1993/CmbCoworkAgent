@@ -1,7 +1,7 @@
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type { Thread, ModelConfig, Provider, Message } from "@/types"
-import { findFirstChatThread, isHarnessFeatureThread } from "./thread-classification"
+import { findFirstChatThread, isHarnessProjectModeThread } from "./thread-classification"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -194,7 +194,7 @@ function resolveChatThreadId(threads: Thread[], preferredThreadId?: string | nul
   const preferredThread = preferredThreadId
     ? threads.find((thread) => thread.thread_id === preferredThreadId)
     : null
-  if (preferredThread && !isHarnessFeatureThread(preferredThread)) {
+  if (preferredThread && !isHarnessProjectModeThread(preferredThread)) {
     return preferredThread.thread_id
   }
   return findFirstChatThread(threads)?.thread_id ?? null
@@ -477,8 +477,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const threads = await window.api.threads.list()
     set({ threads })
 
-    // Select the first chat thread if none selected. Harness feature threads
-    // are rendered inside project mode and should not become the default chat.
+    // Select the first chat thread if none selected. Project-mode threads are
+    // rendered inside the harness board and should not become the default chat.
     if (!get().currentThreadId) {
       const firstChatThread = findFirstChatThread(threads)
       if (firstChatThread) {

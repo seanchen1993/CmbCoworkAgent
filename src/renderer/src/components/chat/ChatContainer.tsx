@@ -3385,8 +3385,9 @@ export function ChatContainer({
     const nextAction = pendingHarnessNextAction
     const userMessage = nextAction?.userMessage?.trim() ?? ""
     const slashSkill = nextAction?.slashSkill?.trim() ?? ""
+    const pendingPreferredPlugin = nextAction?.preferredPlugin ?? null
 
-    if (!harnessFeatureBinding) return
+    if (!harnessFeatureBinding && !pendingPreferredPlugin) return
     if (!userMessage && !slashSkill) {
       if (nextAction?.dialogTips) consumePendingHarnessNextAction(threadId)
       return
@@ -3400,14 +3401,14 @@ export function ChatContainer({
     let nextSkill: SkillMetadata | null = null
     if (slashSkill) {
       if (skillsLoading) return
-      if (skillsLoadTargetProjectId !== harnessFeatureBinding.projectId) return
-      if (skillsHarnessProjectId === harnessFeatureBinding.projectId) {
-        nextSkill = selectSkillForSlashName(
-          enabledSkillsForSlash,
-          slashSkill,
-          skillsHarnessPreferredPlugin
-        )
-      }
+      const expectedProjectId = harnessFeatureBinding?.projectId ?? null
+      if (skillsLoadTargetProjectId !== expectedProjectId) return
+      if (skillsHarnessProjectId !== expectedProjectId) return
+      nextSkill = selectSkillForSlashName(
+        enabledSkillsForSlash,
+        slashSkill,
+        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin
+      )
     }
 
     if (userMessage) setInput(userMessage)
