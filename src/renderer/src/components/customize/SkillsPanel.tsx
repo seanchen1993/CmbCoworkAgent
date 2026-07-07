@@ -3215,8 +3215,8 @@ export function SkillDetail(props: {
         </div>
       ) : (
         <ScrollArea className="flex-1">
-          <div className="p-4 space-y-3">
-            <div className="rounded-lg border border-border/70 bg-background/70 p-3">
+          <div className="space-y-3">
+            <div className="rounded-lg border border-border/70 bg-background/70 px-3">
               {isLoading ? (
                 <p className="text-sm text-muted-foreground">加载中...</p>
               ) : previewKind === "image" && binaryDataUrl ? (
