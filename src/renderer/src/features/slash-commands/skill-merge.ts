@@ -15,6 +15,18 @@ function normalizePluginId(value: string | undefined | null): string {
 
 export type PreferredPlugin = string | { id?: string | null; name?: string | null }
 
+function hasPreferredPlugin(preferredPlugin?: PreferredPlugin | null): boolean {
+  return Boolean(
+    typeof preferredPlugin === "string"
+      ? normalizePluginName(preferredPlugin)
+      : normalizePluginId(preferredPlugin?.id) || normalizePluginName(preferredPlugin?.name)
+  )
+}
+
+function isPluginSkill(skill: SkillMetadata): boolean {
+  return Boolean(skill.pluginId?.trim() || skill.pluginName?.trim())
+}
+
 export function isPreferredPluginSkill(skill: SkillMetadata, preferredPlugin?: PreferredPlugin | null): boolean {
   if (!preferredPlugin) return false
   if (typeof preferredPlugin === "string") {
@@ -35,7 +47,11 @@ export function selectSkillForSlashName(
 ): SkillMetadata | null {
   const normalizedSlashSkill = normalizeSkillName(slashSkill)
   if (!normalizedSlashSkill) return null
-  const matches = skills.filter((skill) => normalizeSkillName(skill.name) === normalizedSlashSkill)
+  const matches = skills.filter((skill) => {
+    if (normalizeSkillName(skill.name) !== normalizedSlashSkill) return false
+    if (!hasPreferredPlugin(preferredPlugin)) return true
+    return !isPluginSkill(skill) || isPreferredPluginSkill(skill, preferredPlugin)
+  })
   if (matches.length === 0) return null
   return matches.find((skill) => isPreferredPluginSkill(skill, preferredPlugin)) ?? matches[0]
 }
@@ -48,9 +64,8 @@ export function selectSkillForSlashName(
  * The selected skill is later serialized with its absolute SKILL.md path, so
  * runtime routing does not have to guess by name.
  *
- * When `preferredPlugin` is set, duplicate plugin skills are deduplicated in
- * favour of the preferred plugin. Standalone skills are still shown alongside
- * plugin skills with the same name.
+ * When `preferredPlugin` is set, project-mode chat surfaces only expose
+ * standalone skills and skills owned by the bound plugin.
  */
 export function mergeChatSkills(
   localSkills: SkillMetadata[],
@@ -58,11 +73,7 @@ export function mergeChatSkills(
   disabledSkillIds: ReadonlySet<string>,
   preferredPlugin?: PreferredPlugin | null
 ): SkillMetadata[] {
-  const hasPreferredPlugin = Boolean(
-    typeof preferredPlugin === "string"
-      ? normalizePluginName(preferredPlugin)
-      : normalizePluginId(preferredPlugin?.id) || normalizePluginName(preferredPlugin?.name)
-  )
+  const hasProjectPlugin = hasPreferredPlugin(preferredPlugin)
   const visibleLocalSkills = localSkills
   const enabledVisibleLocalSkills = visibleLocalSkills.filter(
     (skill) => !isSkillDisabled(skill, disabledSkillIds)
@@ -70,34 +81,12 @@ export function mergeChatSkills(
 
   // Conversation mode: list every enabled standalone skill and every enabled
   // plugin skill. Same-name rows are disambiguated by source labels in the UI.
-  if (!hasPreferredPlugin) {
+  if (!hasProjectPlugin) {
     return [...enabledVisibleLocalSkills, ...pluginSkills]
   }
 
-  // Harness mode: keep the bound plugin's row when multiple plugins provide
-  // the same skill name, but do not collapse standalone-vs-plugin collisions.
-  const seenNames = new Set<string>()
-  const dedupedPlugins: SkillMetadata[] = []
-
-  for (const skill of pluginSkills) {
-    const name = normalizeSkillName(skill.name)
-    const isPreferredPlugin = isPreferredPluginSkill(skill, preferredPlugin)
-    if (!name || seenNames.has(name)) {
-      if (isPreferredPlugin) {
-        const idx = dedupedPlugins.findIndex(
-          (s) =>
-            normalizeSkillName(s.name) === name &&
-            !isPreferredPluginSkill(s, preferredPlugin)
-        )
-        if (idx >= 0) {
-          dedupedPlugins[idx] = skill
-        }
-      }
-      continue
-    }
-    seenNames.add(name)
-    dedupedPlugins.push(skill)
-  }
-
-  return [...enabledVisibleLocalSkills, ...dedupedPlugins]
+  const boundPluginSkills = pluginSkills.filter((skill) =>
+    isPreferredPluginSkill(skill, preferredPlugin)
+  )
+  return [...enabledVisibleLocalSkills, ...boundPluginSkills]
 }

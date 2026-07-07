@@ -2151,9 +2151,8 @@ export function ChatContainer({
         (s) => s.source === "project" || s.source === "user"
       )
 
-      // In harness mode, resolve the project's bound plugin name so same-name
-      // plugin rows can prefer the project's own plugin. Standalone-vs-plugin
-      // duplicates remain visible and are disambiguated in the slash popover.
+      // In harness mode, resolve the project's bound plugin so slash surfaces
+      // only expose standalone skills and skills owned by that plugin.
       let preferredPlugin: { id?: string; name?: string } | null = null
       if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
         try {
@@ -2170,8 +2169,8 @@ export function ChatContainer({
         }
       }
 
-      // Keep same-name standalone/plugin rows visible; in harness mode only
-      // same-name plugin rows are collapsed toward the bound plugin.
+      // Keep same-name standalone/plugin rows visible outside harness mode; in
+      // harness mode, plugin skills are restricted to the bound plugin.
       const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
       setSkillsHarnessProjectId(targetProjectId)
