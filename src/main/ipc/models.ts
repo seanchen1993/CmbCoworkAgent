@@ -3330,9 +3330,10 @@ import {
   MAX_TOP_P,
   DEFAULT_TOP_K,
   MIN_TOP_K,
-  MAX_TOP_K
+  MAX_TOP_K,
+  DEFAULT_THINKING_EFFORT
 } from "../storage"
-import type { CustomModelConfig } from "../storage"
+import type { CustomModelConfig, ThinkingEffort } from "../storage"
 
 // Store for non-sensitive settings only (no encryption needed)
 const store = new Store({
@@ -3491,6 +3492,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         apiKey?: string
         maxOutputTokens?: number
         temperature?: number
+        enableThinking?: boolean
+        thinkingEffort?: ThinkingEffort
       }
     ): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       let baseUrl: string
@@ -3498,6 +3501,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       let apiKey: string
       let maxOutputTokens: number
       let temperature: number
+      let enableThinking: boolean
+      let thinkingEffort: ThinkingEffort
 
       if (params.id) {
         // Test an existing saved config — read API key from storage
@@ -3508,12 +3513,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         apiKey = params.apiKey || saved.apiKey || ""
         maxOutputTokens = params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
         temperature = params.temperature ?? saved.temperature ?? DEFAULT_TEMPERATURE
+        enableThinking = params.enableThinking ?? saved.enableThinking === true
+        thinkingEffort = params.thinkingEffort ?? saved.thinkingEffort ?? DEFAULT_THINKING_EFFORT
       } else {
         baseUrl = params.baseUrl || ""
         model = params.model || ""
         apiKey = params.apiKey || ""
         maxOutputTokens = params.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
         temperature = params.temperature ?? DEFAULT_TEMPERATURE
+        enableThinking = params.enableThinking === true
+        thinkingEffort = params.thinkingEffort ?? DEFAULT_THINKING_EFFORT
       }
 
       if (!baseUrl) return { success: false, error: "接口地址不能为空" }
@@ -3537,7 +3546,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
       const start = Date.now()
       const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 15_000)
+      const timeout = setTimeout(() => controller.abort(), 30_000)
       try {
         const res = await fetch(url, {
           method: "POST",
@@ -3550,6 +3559,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             messages: [{ role: "user", content: "Hi" }],
             max_tokens: maxOutputTokens,
             temperature,
+            chat_template_kwargs: {
+              enable_thinking: enableThinking,
+              reasoning_effort: thinkingEffort
+            },
+            ...(enableThinking
+              ? { thinking: { type: "enabled" } }
+              : {}),
             stream: false
           }),
           signal: controller.signal
@@ -3579,7 +3595,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const msg =
           e instanceof Error
             ? e.name === "AbortError"
-              ? "连接超时（15 秒）"
+              ? "连接超时（30 秒）"
               : e.message
             : "未知错误"
         return { success: false, error: msg, latencyMs }

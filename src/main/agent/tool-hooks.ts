@@ -30,6 +30,8 @@ export interface ToolHookMiddlewareOptions {
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   skipToolNames?: ReadonlySet<string>
@@ -60,6 +62,8 @@ function buildHookContext(
     harnessProjectId: options.harnessProjectId,
     harnessAdapterName: options.harnessAdapterName,
     harnessAdapterVersion: options.harnessAdapterVersion,
+    harnessNodeName: options.harnessNodeName,
+    harnessNodeStatus: options.harnessNodeStatus,
     projectCode: options.projectCode,
     projectDir: options.projectDir
   }

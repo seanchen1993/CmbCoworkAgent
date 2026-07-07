@@ -510,10 +510,14 @@ interface DashboardProjectModeFeature {
 interface DashboardProjectModeSkillCount {
   skill: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
   skill: string
+  isPlugin?: boolean
+  pluginName?: string
   commitCount: number
 }
 
@@ -567,6 +571,7 @@ interface DashboardProjectModeProject {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
   featureCount: number
@@ -591,6 +596,7 @@ interface DashboardProjectModeProjectCounts {
 
 type DashboardProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -928,6 +934,8 @@ interface CustomAPI {
         topP: number
         topK: number
         interleavedThinking?: boolean
+        enableThinking?: boolean
+        thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       }>
     >
@@ -943,6 +951,8 @@ interface CustomAPI {
       topP: number
       topK: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null>
     setCustomConfig: (config: {
@@ -957,6 +967,8 @@ interface CustomAPI {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<void>
     // Backward-compatible alias, prefer upsertCustomConfig in new code.
@@ -972,6 +984,8 @@ interface CustomAPI {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
@@ -986,6 +1000,8 @@ interface CustomAPI {
       temperature?: number
       topP?: number
       topK?: number
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   ide: {
@@ -1565,6 +1581,7 @@ interface CustomAPI {
       claudeModelId?: string
       syncSkills?: boolean
       syncMemory?: boolean
+      launchSource?: "select_dir" | "restart"
     }) => Promise<string>
     write: (id: string, data: string) => void
     resize: (id: string, cols: number, rows: number) => void

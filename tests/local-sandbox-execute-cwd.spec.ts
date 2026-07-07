@@ -8,7 +8,7 @@
 import assert from "node:assert"
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
 import { SkillLifecycleRegistry } from "../src/main/agent/skill-lifecycle/registry.ts"
 import type { HookConfig } from "../src/main/hooks/types.ts"
@@ -58,6 +58,8 @@ async function run(): Promise<void> {
       rootDir: workspace,
       windowsSandbox: "none",
       timeout: 30_000,
+      harnessNodeName: "Dev-代码实现",
+      harnessNodeStatus: "进行中",
       skillLifecycleRegistry: new SkillLifecycleRegistry([skillSource]),
       hooks: [
         hook({
@@ -71,8 +73,20 @@ async function run(): Promise<void> {
     })
     const result = await sandbox.execute(nodeCommand("console.log(process.cwd())"), skillRoot)
     assert.equal(result.exitCode, 0)
-    assert.equal(resolve(result.output.trim()), resolve(skillRoot))
-    assert.equal(resolve((await readFile(hookOut, "utf8")).trim()), resolve(workspace))
+    assert.equal(await realpath(result.output.trim()), await realpath(skillRoot))
+    assert.equal(await realpath((await readFile(hookOut, "utf8")).trim()), await realpath(workspace))
+
+    const envResult = await sandbox.execute(
+      nodeCommand(
+        "console.log(JSON.stringify({name: process.env.HARNESS_NODE_NAME || '', status: process.env.HARNESS_NODE_STATUS || ''}))"
+      ),
+      workspace
+    )
+    assert.equal(envResult.exitCode, 0)
+    assert.deepEqual(JSON.parse(envResult.output.trim()), {
+      name: "Dev-代码实现",
+      status: "进行中"
+    })
 
     const denied = await sandbox.execute(nodeCommand("console.log(process.cwd())"), outside)
     assert.notEqual(denied.exitCode, 0)

@@ -23,6 +23,8 @@ interface StartedSession {
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   hookScope?: HookScopeController
@@ -52,6 +54,8 @@ export async function fireSessionStartOnce(
     | "harnessProjectId"
     | "harnessAdapterName"
     | "harnessAdapterVersion"
+    | "harnessNodeName"
+    | "harnessNodeStatus"
     | "projectCode"
     | "projectDir"
   >
@@ -68,6 +72,8 @@ export async function fireSessionStartOnce(
       harnessAdapterName: harnessContext?.harnessAdapterName ?? existing.harnessAdapterName,
       harnessAdapterVersion:
         harnessContext?.harnessAdapterVersion ?? existing.harnessAdapterVersion,
+      harnessNodeName: harnessContext?.harnessNodeName ?? existing.harnessNodeName,
+      harnessNodeStatus: harnessContext?.harnessNodeStatus ?? existing.harnessNodeStatus,
       projectCode: harnessContext?.projectCode ?? existing.projectCode,
       projectDir: harnessContext?.projectDir ?? existing.projectDir,
       hookScope: hookScope ?? existing.hookScope
@@ -83,6 +89,8 @@ export async function fireSessionStartOnce(
     harnessProjectId: harnessContext?.harnessProjectId,
     harnessAdapterName: harnessContext?.harnessAdapterName,
     harnessAdapterVersion: harnessContext?.harnessAdapterVersion,
+    harnessNodeName: harnessContext?.harnessNodeName,
+    harnessNodeStatus: harnessContext?.harnessNodeStatus,
     projectCode: harnessContext?.projectCode,
     projectDir: harnessContext?.projectDir,
     hookScope
@@ -201,6 +209,8 @@ export async function fireSessionEnd(
     harnessProjectId: started.harnessProjectId,
     harnessAdapterName: started.harnessAdapterName,
     harnessAdapterVersion: started.harnessAdapterVersion,
+    harnessNodeName: started.harnessNodeName,
+    harnessNodeStatus: started.harnessNodeStatus,
     projectCode: started.projectCode,
     projectDir: started.projectDir,
     sessionId: threadId,
@@ -243,6 +253,8 @@ export async function fireSessionEndAll(
         harnessProjectId: session.harnessProjectId,
         harnessAdapterName: session.harnessAdapterName,
         harnessAdapterVersion: session.harnessAdapterVersion,
+        harnessNodeName: session.harnessNodeName,
+        harnessNodeStatus: session.harnessNodeStatus,
         projectCode: session.projectCode,
         projectDir: session.projectDir,
         // PR-16 follow-up — before-quit drain → CC `reason: "logout"`.

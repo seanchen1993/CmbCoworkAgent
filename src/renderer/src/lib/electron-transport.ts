@@ -109,6 +109,7 @@ export type TransformedValuesMessage = {
   id: string
   type: "ai" | "tool" | "system" | "human"
   content: string
+  reasoning?: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
   name?: string
@@ -157,6 +158,56 @@ function extractSerializedContent(
   return ""
 }
 
+function extractReasoningText(reasoning: unknown): string {
+  if (typeof reasoning === "string") return reasoning
+  if (Array.isArray(reasoning)) return reasoning.map(extractReasoningText).filter(Boolean).join("")
+  if (reasoning && typeof reasoning === "object") {
+    const record = reasoning as Record<string, unknown>
+    if (typeof record.text === "string") return record.text
+    if (typeof record.reasoning === "string") return record.reasoning
+    if (typeof record.reasoning_content === "string") return record.reasoning_content
+    if (typeof record.reasoning_text === "string") return record.reasoning_text
+    if (typeof record.content === "string") return record.content
+    if (typeof record.summary === "string") return record.summary
+    if (typeof record.delta === "string") return record.delta
+    if (Array.isArray(record.parts)) {
+      return record.parts.map(extractReasoningText).filter(Boolean).join("")
+    }
+    if (Array.isArray(record.reasoning_details)) {
+      return record.reasoning_details.map(extractReasoningText).filter(Boolean).join("")
+    }
+    if (Array.isArray(record.summary)) {
+      return record.summary.map(extractReasoningText).filter(Boolean).join("")
+    }
+    if (Array.isArray(record.details)) {
+      return record.details.map(extractReasoningText).filter(Boolean).join("")
+    }
+  }
+  return ""
+}
+
+function extractReasoningFromKwargs(kwargs?: SerializedMessageChunk["kwargs"]): string {
+  if (!kwargs) return ""
+  const kwargsRecord = kwargs as Record<string, unknown>
+  const additionalKwargs = kwargs.additional_kwargs
+  return extractReasoningText(
+    kwargsRecord.reasoning ??
+      kwargsRecord.reasoning_content ??
+      kwargsRecord.reasoning_text ??
+      kwargsRecord.reasoning_details ??
+      kwargsRecord.summary ??
+      kwargsRecord.details ??
+      kwargsRecord.delta ??
+      additionalKwargs?.reasoning ??
+      additionalKwargs?.reasoning_content ??
+      additionalKwargs?.reasoning_text ??
+      additionalKwargs?.reasoning_details ??
+      additionalKwargs?.summary ??
+      additionalKwargs?.details ??
+      additionalKwargs?.delta
+  )
+}
+
 export function transformSerializedValuesMessages(
   messages: SerializedMessageChunk[] | undefined
 ): TransformedValuesMessage[] {
@@ -192,6 +243,7 @@ export function transformSerializedValuesMessages(
           ? "human"
           : "ai"
     const content = extractSerializedContent(kwargs.content)
+    const reasoning = type === "ai" ? extractReasoningFromKwargs(kwargs) : ""
     const fallbackIndex = fallbackIndexes[type]++
     const id =
       kwargs.id ||
@@ -211,6 +263,7 @@ export function transformSerializedValuesMessages(
       id,
       type,
       content,
+      ...(reasoning && { reasoning }),
       ...(type === "ai" && kwargs.tool_calls && { tool_calls: kwargs.tool_calls }),
       ...(type === "tool" && kwargs.tool_call_id && { tool_call_id: kwargs.tool_call_id }),
       ...(type === "tool" && kwargs.name && { name: kwargs.name })
@@ -307,6 +360,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private workerCurrentMessageIds: Map<string, string> = new Map()
 
   private workerAssistantTextByMessageId: Map<string, string> = new Map()
+  private workerAssistantReasoningByMessageId: Map<string, string> = new Map()
 
   private workerLiveMessageSequenceByThread: Map<string, number> = new Map()
 
@@ -359,6 +413,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // `useStream` treats repeated messages with the same ID as incremental text.
   // Values snapshots are full-state, so only forward the newly appended suffix.
   private mainAssistantTextByMessageId: Map<string, string> = new Map()
+  private mainAssistantReasoningByMessageId: Map<string, string> = new Map()
 
   // Track accumulated tool call chunks (for streaming tool calls)
   private accumulatedToolCalls: Map<string, AccumulatedToolCall> = new Map()
@@ -395,6 +450,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.applyFallbackIndexBaselines()
     this.workerCurrentMessageIds.clear()
     this.workerAssistantTextByMessageId.clear()
+    this.workerAssistantReasoningByMessageId.clear()
     this.workerLiveMessageSequenceByThread.clear()
     this.workerCurrentTurnByThread.clear()
     this.activeSubagents.clear()
@@ -410,6 +466,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.quietCoordinatorToolCallIds.clear()
     this.emittedMessageIds.clear()
     this.mainAssistantTextByMessageId.clear()
+    this.mainAssistantReasoningByMessageId.clear()
     this.accumulatedToolCalls.clear()
     this.toolCallChunkIndexToId.clear()
     this.completedToolCallsByName.clear()
@@ -869,7 +926,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       if (additionalKwargs?.cmb_internal_coordinator_notification === true) continue
       if (className.includes("System") || kwargs.type === "system") continue
 
+      const isAssistantMessage = this.isSerializedAIMessage(message)
       const content = this.extractContent(kwargs.content)
+      const reasoning = isAssistantMessage ? extractReasoningFromKwargs(kwargs) : ""
       const toolCalls = this.isSerializedAIMessage(message)
         ? this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
         : []
@@ -899,6 +958,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           id: rawId,
           role: "assistant",
           content,
+          ...(reasoning && { reasoning }),
           ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
           created_at: new Date()
         })
@@ -1142,6 +1202,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         } else {
           // Main agent message
           const content = this.extractContent(kwargs.content)
+          const reasoning = extractReasoningFromKwargs(kwargs)
           const messageIndex = this.currentMessageIndex ?? this.nextMessageFallbackIndex("ai")
           const msgId =
             kwargs.id ||
@@ -1163,8 +1224,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
             isCoordinatorMode
           )
           const contentDelta = this.prepareMainAssistantChunkContent(msgId, content)
+          const reasoningUpdate = this.prepareMainAssistantReasoning(msgId, reasoning)
 
-          if (contentDelta !== undefined || visibleToolCalls.length) {
+          if (
+            contentDelta !== undefined ||
+            reasoningUpdate !== undefined ||
+            visibleToolCalls.length
+          ) {
             if (visibleToolCalls.length) {
               this.rememberCompletedToolCallsForMessage(msgId, visibleToolCalls)
             }
@@ -1176,6 +1242,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
                   id: msgId,
                   type: "ai",
                   content: contentDelta ?? "",
+                  ...(reasoningUpdate !== undefined && { reasoning: reasoningUpdate }),
                   ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
                 },
                 {
@@ -1185,6 +1252,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 }
               ]
             })
+            if (reasoningUpdate !== undefined) {
+              events.push(
+                this.createCoordinatorAssistantSnapshotEvent({
+                  id: msgId,
+                  reasoning: reasoningUpdate
+                })
+              )
+            }
           }
 
           // Handle tool call chunks (streaming) - these have args as strings
@@ -1617,6 +1692,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (isAIMessage) {
       const isChunk = input.className.includes("Chunk")
       const extractedContent = this.extractContent(kwargs.content)
+      const extractedReasoning = extractReasoningFromKwargs(kwargs)
       const providerMessageId =
         typeof kwargs.id === "string"
           ? this.createFocusedWorkerTurnScopedMessageId(focused.workerThreadId, kwargs.id)
@@ -1640,17 +1716,27 @@ export class ElectronIPCTransport implements UseStreamTransport {
         content = this.workerAssistantTextByMessageId.get(msgId) ?? ""
       }
 
+      let reasoning = this.workerAssistantReasoningByMessageId.get(msgId) ?? ""
+      if (isChunk && extractedReasoning) {
+        reasoning = this.mergeWorkerAssistantTextChunk(reasoning, extractedReasoning)
+        this.workerAssistantReasoningByMessageId.set(msgId, reasoning)
+      } else if (extractedReasoning) {
+        reasoning = extractedReasoning
+        this.workerAssistantReasoningByMessageId.set(msgId, reasoning)
+      }
+
       const toolCalls = this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
       if (toolCalls.length) {
         this.rememberCompletedToolCallsForMessage(msgId, toolCalls)
       }
 
-      if (content || toolCalls.length) {
+      if (content || reasoning || toolCalls.length) {
         events.push(
           this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, {
             id: msgId,
             role: "assistant",
             content,
+            ...(reasoning && { reasoning }),
             ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
             created_at: new Date()
           })
@@ -1669,6 +1755,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
               id: msgId,
               role: "assistant",
               content: this.workerAssistantTextByMessageId.get(msgId) ?? "",
+              ...(this.workerAssistantReasoningByMessageId.get(msgId)
+                ? { reasoning: this.workerAssistantReasoningByMessageId.get(msgId) }
+                : {}),
               tool_calls: this.getCompletedToolCallsForMessage(msgId) as Message["tool_calls"],
               created_at: new Date()
             })
@@ -1730,7 +1819,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private createCoordinatorAssistantSnapshotEvent(input: {
     id: string
-    content: string
+    content?: string
+    reasoning?: string
     toolCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
   }): StreamEvent {
     return {
@@ -1740,7 +1830,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
         assistantMessage: {
           id: input.id,
           type: "ai",
-          content: input.content,
+          ...(input.content !== undefined && { content: input.content }),
+          ...(input.reasoning !== undefined && { reasoning: input.reasoning }),
           ...(input.toolCalls !== undefined && { tool_calls: input.toolCalls })
         }
       }
@@ -1780,6 +1871,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.workerCurrentMessageIds.delete(workerThreadId)
     if (messageId) {
       this.workerAssistantTextByMessageId.delete(messageId)
+      this.workerAssistantReasoningByMessageId.delete(messageId)
     }
   }
 
@@ -1822,6 +1914,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.mainAssistantTextByMessageId.set(messageId, merged)
     pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
     return merged.slice(existing.length)
+  }
+
+  private prepareMainAssistantReasoning(
+    messageId: string,
+    incoming: string
+  ): string | undefined {
+    if (!incoming) return undefined
+    const existing = this.mainAssistantReasoningByMessageId.get(messageId) ?? ""
+    const merged = this.mergeWorkerAssistantTextChunk(existing, incoming)
+    if (merged === existing) return undefined
+    this.mainAssistantReasoningByMessageId.set(messageId, merged)
+    pruneMapToLimit(this.mainAssistantReasoningByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
+    return merged
   }
 
   private prepareMainAssistantSnapshotUpdate(
@@ -2025,10 +2130,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       if (this.isSerializedAIMessage(message)) {
         const content = this.extractContent(kwargs.content)
+        const reasoning = extractReasoningFromKwargs(kwargs)
         const visibleToolCalls = this.hydrateToolCallsWithAccumulatedArgs(
           this.filterVisibleMainToolCalls(kwargs.tool_calls, true)
         )
-        if (!content && visibleToolCalls.length === 0) continue
+        if (!content && !reasoning && visibleToolCalls.length === 0) continue
         if (
           reusableCurrentMessageText &&
           index !== currentMessageValuesIndex &&
@@ -2067,13 +2173,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
           msgId = reusableCurrentMessageIdForIndex
         }
         const snapshotUpdate = this.prepareMainAssistantSnapshotUpdate(msgId, content)
-        if (snapshotUpdate.kind === "skip" && visibleToolCalls.length === 0) continue
+        const reasoningUpdate = this.prepareMainAssistantReasoning(msgId, reasoning)
+        if (
+          snapshotUpdate.kind === "skip" &&
+          reasoningUpdate === undefined &&
+          visibleToolCalls.length === 0
+        )
+          continue
         this.rememberEmittedMessage(msgId)
         if (snapshotUpdate.kind === "replace") {
           events.push(
             this.createCoordinatorAssistantSnapshotEvent({
               id: msgId,
               content: snapshotUpdate.content,
+              reasoning: reasoningUpdate,
               toolCalls: visibleToolCalls
             })
           )
@@ -2085,11 +2198,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 id: msgId,
                 type: "ai",
                 content: snapshotUpdate.kind === "delta" ? snapshotUpdate.content : "",
+                ...(reasoningUpdate !== undefined && { reasoning: reasoningUpdate }),
                 ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
               },
               { langgraph_node: "agent" }
             ]
           })
+          if (reasoningUpdate !== undefined) {
+            events.push(
+              this.createCoordinatorAssistantSnapshotEvent({
+                id: msgId,
+                reasoning: reasoningUpdate
+              })
+            )
+          }
         }
 
         if (visibleToolCalls.length) {
