@@ -241,11 +241,14 @@ function buildFormInitializationKey(
   isUpdate: boolean | undefined,
   existingItem?: ExistingUploadItem
 ): string {
-  if (!isUpdate || !existingItem) {
-    return `create:${resourceType}`
+  const mode = isUpdate ? "update" : "create"
+
+  if (!existingItem) {
+    return `${mode}:${resourceType}`
   }
 
   return JSON.stringify({
+    mode,
     resourceType,
     name: existingItem.name || "",
     description: existingItem.description || "",
@@ -484,7 +487,7 @@ export function UniversalUploadDialog({
     setFile(null)
     setError(null)
 
-    if (isUpdate && hasExistingItem) {
+    if (hasExistingItem) {
       setName(existingItemName)
       setDescription(existingItemDescription)
       setCategory(existingItemCategory)
