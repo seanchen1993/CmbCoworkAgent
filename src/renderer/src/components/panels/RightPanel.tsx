@@ -31,7 +31,8 @@ import {
   EyeOff,
   Loader2,
   Copy,
-  Check
+  Check,
+  Eye
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -50,15 +51,18 @@ import {
 } from "@/lib/workspace-file-load"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
+import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { getRightPanelSkillPathSegments } from "@/components/panels/skill-tree-path"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
 type SkillHookMetadata = Awaited<ReturnType<typeof window.api.hooks.skills.list>>[number]
+type RightPanelSkillMarketInfo = Pick<MarketItem, "name" | "chinese_name">
 type DisplayHook = HookConfig & {
   source: "global" | "workspace" | "plugin" | "skill"
   pluginId?: string
@@ -270,6 +274,9 @@ export function RightPanel({
   const [lspConfig, setLspConfig] = useState<LspConfig | null>(null)
   const [lspStatus, setLspStatus] = useState<LspStatus | null>(null)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
+  const [marketSkillMap, setMarketSkillMap] = useState<Record<string, RightPanelSkillMarketInfo>>(
+    {}
+  )
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
   const [hooks, setHooks] = useState<DisplayHook[]>([])
@@ -307,6 +314,39 @@ export function RightPanel({
   useEffect(() => {
     window.api.plugins.list().then(setPlugins).catch(console.error)
   }, [pluginVersion])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadMarketSkills = async (): Promise<void> => {
+      try {
+        const res = await marketApi.getSkills()
+        if (!res.success || !res.data || cancelled) return
+
+        const next: Record<string, RightPanelSkillMarketInfo> = {}
+        for (const item of res.data) {
+          const normalized = normalizeRightPanelSkillName(item.name)
+          if (!normalized) continue
+          next[normalized] = {
+            name: item.name,
+            chinese_name: item.chinese_name
+          }
+        }
+
+        if (!cancelled) {
+          setMarketSkillMap(next)
+        }
+      } catch (error) {
+        console.warn("[RightPanel] Failed to load market skills:", error)
+      }
+    }
+
+    void loadMarketSkills()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -1269,7 +1309,12 @@ export function RightPanel({
             />
             {skillsOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.skills }}>
-                <SkillsContent skills={skills} disabledSkills={disabledSkills} />
+                <SkillsContent
+                  skills={skills}
+                  disabledSkills={disabledSkills}
+                  marketSkillMap={marketSkillMap}
+                  threadId={currentThreadId}
+                />
               </div>
             )}
           </div>
@@ -2876,6 +2921,35 @@ function countRightPanelTreeSkills(node: RightPanelSkillTreeNode): number {
   )
 }
 
+function normalizeRightPanelSkillName(value?: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+}
+
+function resolveRightPanelSkillMarketInfo(
+  skill: SkillMetadata,
+  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
+): RightPanelSkillMarketInfo | undefined {
+  if (skill.pluginId || skill.pluginName) return undefined
+  if (skill.source !== "user") return undefined
+  return marketSkillMap[normalizeRightPanelSkillName(skill.name)]
+}
+
+function getRightPanelSkillDisplayName(
+  skill: SkillMetadata,
+  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
+): string {
+  const marketInfo = resolveRightPanelSkillMarketInfo(skill, marketSkillMap)
+  if (!marketInfo) return skill.name
+
+  const marketChinese = marketInfo.chinese_name?.trim()
+  if (marketChinese) return marketChinese
+
+  const metadataChinese = skill.metadata?.chinese_name?.trim()
+  return metadataChinese || skill.name
+}
+
 function splitRightPanelSkillsByEnabled(
   skills: SkillMetadata[],
   disabledSkills: ReadonlySet<string>
@@ -2893,10 +2967,14 @@ function splitRightPanelSkillsByEnabled(
 
 function SkillsContent({
   skills,
-  disabledSkills
+  disabledSkills,
+  marketSkillMap,
+  threadId
 }: {
   skills: SkillMetadata[]
   disabledSkills: Set<string>
+  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
+  threadId?: string | null
 }): React.JSX.Element {
   const [expandedTreeNodes, setExpandedTreeNodes] = useState<Set<string>>(new Set())
   const toggleTreeNode = useCallback((nodeKey: string) => {
@@ -2907,6 +2985,23 @@ function SkillsContent({
       return next
     })
   }, [])
+  const openSkillPreview = useCallback(
+    (skill: SkillMetadata) => {
+      if (!threadId) {
+        toast.error("当前线程不可用，无法预览技能文件")
+        return
+      }
+      if (!skill.path) {
+        toast.error("未找到技能文件路径")
+        return
+      }
+      emitOpenResourcePreview({
+        threadId,
+        filePath: skill.path
+      })
+    },
+    [threadId]
+  )
 
   if (skills.length === 0) {
     return (
@@ -2957,6 +3052,9 @@ function SkillsContent({
             0
           )
           const childrenExpanded = expandedTreeNodes.has(node.key)
+          const displayName = node.skill
+            ? getRightPanelSkillDisplayName(node.skill, marketSkillMap)
+            : node.label
           return (
             <div key={node.key} className="space-y-2">
               {node.skill ? (
@@ -2976,8 +3074,33 @@ function SkillsContent({
                         disabled && "text-muted-foreground line-through"
                       )}
                     >
-                      {node.skill.name}
+                      {displayName}
                     </span>
+                    <IconPopoverButton
+                      icon={<Eye className="size-3.5" />}
+                      popoverContent="可以预览完整信息"
+                      aria-label="预览完整技能信息"
+                      className="shrink-0 rounded-md p-1"
+                      stopPropagation
+                      onClick={() => {
+                        if (!node.skill) return
+                        openSkillPreview(node.skill)
+                      }}
+                    />
+                    {(node.skill.pluginName || node.skill.pluginId) && (
+                      <div className="mt-1 flex min-w-0 items-center gap-1">
+                        <Badge
+                          variant="outline"
+                          className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
+                          title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
+                        >
+                        <span className="truncate">
+                          插件
+                        </span>
+                        </Badge>
+                      </div>
+                    )}
+
                     {childCount > 0 && (
                       <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
                         <Folder className="mr-1 size-2.5" />
@@ -2990,19 +3113,7 @@ function SkillsContent({
                       </Badge>
                     )}
                   </div>
-                  {(node.skill.pluginName || node.skill.pluginId) && (
-                    <div className="mt-1 flex min-w-0 items-center gap-1">
-                      <Badge
-                        variant="outline"
-                        className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
-                        title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
-                      >
-                        <span className="truncate">
-                          插件 · {node.skill.pluginName ?? node.skill.pluginId}
-                        </span>
-                      </Badge>
-                    </div>
-                  )}
+
                   {node.skill.description && (
                     <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                       {node.skill.description}
