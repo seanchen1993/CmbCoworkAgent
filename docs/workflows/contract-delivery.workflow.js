@@ -16,12 +16,14 @@ export const meta = {
 const WORKFLOW_VERSION = 1
 const DEFAULT_ARTIFACT_ROOT = ".cmbdevclaw/契约交付"
 const MAX_MANIFESTS = 16
-// 探索输入瘦身:manifest 不再全文灌(旧版 16×6000≈96K),只内联少量关键 manifest 头部作为
-// 项目类型锚点,其余给路径清单让 Explore 代理按需读全文(它有 read/glob/grep)。
-const MAX_MANIFEST_PREVIEW = 5
-const MANIFEST_INLINE_CHARS = 2000
-// 源码清单仅作定位概览(旧版 500 条≈25K);更精准的定位交给 Explore 用验收标准关键词 grep。
-const MAX_SOURCE_FILES = 200
+// 探索输入的相关性优先设计:候选文件按"合同标识符命中"排序取头部,而不是按 glob 顺序硬
+// 截断——顺序截断在多语言 monorepo 上会被无关目录吃光配额(实测:前端几百个 .vue 挤掉
+// 全部后端 Java,manifest 预览选中 3 个前端 package.json 而漏掉要改的模块 pom)。
+// manifest 只内联根级头部作项目类型/构建体系锚点;其余一律给路径,Explore 代理自己读。
+const MAX_ROOT_MANIFEST_PREVIEW = 2
+const MANIFEST_INLINE_CHARS = 1200
+const MAX_MATCHED_FILES = 40
+const MAX_SAMPLED_FILES = 40
 const MAX_ROUNDS = 3
 const MAX_PACKAGES_PER_ROUND = 8
 const MAX_FIX_ROUNDS = 2
@@ -312,9 +314,9 @@ function renderWorkCriteria(criteria) {
   return (
     (criteria || [])
       .map((c) => {
-        let line = `- ${c.id}（${c.verify}）：${c.text}`
-        if (c.hint) line += `\n  · 提示：${c.hint}`
-        if (c.note) line += `\n  · 上一轮：${c.note}`
+        let line = `- ${c.id}（${c.verify}）：${clip(c.text, 500)}`
+        if (c.hint) line += `\n  · 提示：${clip(c.hint, 200)}`
+        if (c.note) line += `\n  · 上一轮：${clip(c.note, 400)}`
         return line
       })
       .join("\n") || "- 无"
@@ -340,6 +342,70 @@ function renderPerAc(perAc) {
   return (
     (perAc || []).map((p) => `- ${p.id}：${p.result} — ${clip(p.evidence, 500)}`).join("\n") || "- 无"
   )
+}
+
+// ---- 合同关键词驱动的相关性选择 ----
+// 从合同文本里抽出"代码标识符样式"的词(类名/接口路径段/字段名,如 WE_OutService、
+// creatorBranchId、xsmf),用它们给候选文件/manifest 打分排序:命中越多越靠前。纯中文
+// 合同抽不出标识符时命中为空,自然回退到各模式轮流抽样——行为不劣化,只会更公平。
+const COMMON_TOKEN_STOPWORDS = Object.assign(Object.create(null), {
+  http: 1, https: 1, post: 1, get: 1, put: 1, delete: 1, json: 1, xml: 1, html: 1,
+  null: 1, true: 1, false: 1, list: 1, status: 1, update: 1, create: 1, query: 1,
+  header: 1, token: 1, string: 1, number: 1, count: 1, time: 1, date: 1, page: 1,
+  size: 1, code: 1, data: 1, info: 1, type: 1, name: 1, test: 1, tests: 1, main: 1,
+  java: 1, node: 1, src: 1, com: 1, org: 1, www: 1, item: 1, file: 1, path: 1,
+  begin: 1, end: 1, with: 1, from: 1, that: 1, this: 1, must: 1, when: 1, then: 1
+})
+function contractIdentifierTokens(contract, criteria) {
+  const text = [
+    contract.title,
+    contract.goal,
+    ...(contract.constraints || []),
+    ...(contract.conventions || []),
+    ...(criteria || []).map((c) => `${c.text} ${c.hint || ""}`)
+  ].join(" ")
+  const seen = Object.create(null)
+  const out = []
+  for (const raw of text.match(/[A-Za-z][A-Za-z0-9_]{3,}/g) || []) {
+    const token = raw.toLowerCase()
+    if (COMMON_TOKEN_STOPWORDS[token] || seen[token]) continue
+    seen[token] = true
+    out.push(token)
+  }
+  return out.slice(0, 40)
+}
+function rankPathsByTokens(paths, tokens, limit) {
+  if (!tokens.length) return []
+  const scored = []
+  for (const p of paths) {
+    const lower = p.toLowerCase()
+    let score = 0
+    for (const t of tokens) if (lower.includes(t)) score += 1
+    if (score > 0) scored.push({ p, score })
+  }
+  // 同分按路径字典序,保证同一输入的排序稳定(缓存身份可复现)。
+  scored.sort((a, b) => b.score - a.score || (a.p < b.p ? -1 : a.p > b.p ? 1 : 0))
+  return scored.slice(0, limit).map((s) => s.p)
+}
+// 各 glob 模式轮流抽样:多语言仓里每种模式都有代表,单一模式(如前端 .vue)吃不光配额。
+function interleaveUnique(lists, limit, exclude) {
+  const seen = Object.create(null)
+  for (const p of exclude || []) seen[p] = true
+  const out = []
+  for (let i = 0; out.length < limit; i++) {
+    let any = false
+    for (const list of lists) {
+      if (i >= list.length) continue
+      any = true
+      const p = list[i]
+      if (seen[p]) continue
+      seen[p] = true
+      out.push(p)
+      if (out.length >= limit) break
+    }
+    if (!any) break
+  }
+  return out
 }
 
 function uniq(items) {
@@ -500,7 +566,9 @@ function normalizePackages(rawPackages, criteria) {
         droppedAcRefs.push(`${id} -> ${ref}`)
       }
     }
-    packages.push({ ...raw, id, acIds })
+    // targetFiles 是给实现代理的定位提示(信息性,可自行补充),加帽防规划代理倾倒长清单;
+    // validationCommands 是被逐条交叉核对的门禁,绝不截——截掉等于放松验收。
+    packages.push({ ...raw, id, acIds, targetFiles: take(raw.targetFiles || [], 40) })
   }
   const remapped = packages.map((pkg) => {
     const dependencies = []
@@ -1000,6 +1068,7 @@ if (hasExplicitContract) {
 - 每条标准给出核查方式 verify：command（跑命令看结果）、code（读代码给文件:行号证据）、test（对应测试必须存在且通过）、e2e（启动应用用浏览器自动化实测——前端页面、交互、视觉类标准必须用 e2e，不允许用 code 代替）。
 - 评定复杂度 complexity：simple（1-3 条标准、单模块小改动）、standard（跨少数模块）、complex（跨多模块、需要多轮实现验证）。
 - conventions 写跨任务公约：统一入口、命名、错误码风格等，防止多个实现代理各写各的。
+- globalValidationCommands 必须是可在 shell 里原样执行的完整命令：含通配符等特殊字符时必须加引号（如 -Dtest='*Test' 而不是 -Dtest=*Test，后者会被 shell 展开导致命令失真、验证空跑）。
 - 如果缺少关键业务规则或安全边界，将 canProceed 设为 false 并列出 openQuestions，不要编造。
 
 需求内容：
@@ -1122,22 +1191,30 @@ phase("项目探索")
     "tests/**/*",
     "__tests__/**/*"
   ]
-  const manifests = uniq((await parallel(manifestPatterns.map((p) => () => safeGlob(p)))).flat())
-  const sourceFiles = uniq((await parallel(sourcePatterns.map((p) => () => safeGlob(p)))).flat())
+  const manifestLists = await parallel(manifestPatterns.map((p) => () => safeGlob(p)))
+  const sourceLists = await parallel(sourcePatterns.map((p) => () => safeGlob(p)))
   throwIfGlobOverflow()
-  const manifestList = take(manifests, MAX_MANIFESTS)
-  // 只内联少量关键 manifest 的头部(项目类型/构建/依赖等关键信息通常在文件头);根级优先,
-  // 不足再补子模块。完整内容让 Explore 代理按需自读——它能读全文,不受此处截断限制。
-  const previewManifests = [
-    ...manifestList.filter((f) => !f.includes("/")),
-    ...manifestList.filter((f) => f.includes("/"))
-  ].slice(0, MAX_MANIFEST_PREVIEW)
+  const manifests = uniq(manifestLists.flat())
+  const sourceFiles = uniq(sourceLists.flat())
+  const contractTokens = contractIdentifierTokens(context.contract, context.criteria)
+  // manifest 清单:根级在前(项目类型/构建体系),其余按合同命中排序,无命中的按原序补足。
+  // 这样"要改的模块的 pom/package.json"必然进清单头部,不会被无关模块挤出。
+  const rootManifests = manifests.filter((f) => !f.includes("/"))
+  const manifestList = uniq([
+    ...rootManifests,
+    ...rankPathsByTokens(manifests, contractTokens, MAX_MANIFESTS),
+    ...manifests
+  ]).slice(0, MAX_MANIFESTS)
+  // 只内联根级 manifest 头部(识别项目类型/构建体系);模块级一律给路径让 Explore 自读全文。
   const manifestSnippets = []
-  for (const file of previewManifests) {
+  for (const file of rootManifests.slice(0, MAX_ROOT_MANIFEST_PREVIEW)) {
     const content = await safeRead(file)
     if (content) manifestSnippets.push(`--- ${file} ---\n${content.slice(0, MANIFEST_INLINE_CHARS)}`)
   }
-  const inventory = take(sourceFiles, MAX_SOURCE_FILES)
+  // 候选文件两段式:合同命中的排最前(信号),再各模式轮流抽样补结构感(公平)。总量硬帽,
+  // 项目再大也不膨胀;真正的全量定位靠 Explore 自己 grep/glob。
+  const matchedFiles = rankPathsByTokens(sourceFiles, contractTokens, MAX_MATCHED_FILES)
+  const sampledFiles = interleaveUnique(sourceLists, MAX_SAMPLED_FILES, matchedFiles)
   // 档位分级探索:每加一个探索 agent 都要有"单 agent 覆盖不了"的理由(harness 原则:
   // 基线够就别加 agent)。simple/standard 一个 agent 一遍即可覆盖"相关文件+命令+风险";
   // 只有 complex(跨多模块)才值得拆成架构/验证/风险三视角各自深挖。
@@ -1183,16 +1260,19 @@ ${item.prompt}
 验收标准：
 ${context.criteria.map((c) => `- ${c.id}：${c.text}`).join("\n")}
 
-项目 manifest（配置/构建文件）路径清单：
+项目 manifest（配置/构建文件）路径清单（根级与合同相关的在前；需要任何模块的完整依赖/配置，直接读文件）：
 ${lines(manifestList) || "- 未找到"}
 
-其中关键 manifest 头部预览（仅头部；需要完整依赖/配置就自行读取上面列出的文件，你能读全文，不受此预览截断限制）：
+根级 manifest 头部预览（仅头部，供识别项目类型与构建体系）：
 ${manifestSnippets.join("\n\n") || "未找到"}
 
-源码/测试文件概览（前 ${inventory.length} 条，仅供定位；这不是全部，需要更多请用 glob 自行检索）：
-${lines(inventory)}
+与合同关键词匹配的候选文件（按命中度排序，这是定位起点，不是全集）：
+${lines(matchedFiles) || "- 无命中（合同未含代码标识符，请直接用 grep/glob 检索）"}
 
-请返回相关文件、命令和风险。定位"合同标准最可能触及的文件"时，优先用 grep 按验收标准里的关键词（接口名/类名/字段名等）精确检索，而不是仅凭上面的概览列表——grep 命中的才是可靠依据。`,
+其他源码/测试文件抽样（各类型轮流抽取，仅示意项目结构，绝非全量）：
+${lines(sampledFiles)}
+
+请返回相关文件、命令和风险。定位"合同标准最可能触及的文件"时，必须用 grep 按验收标准里的关键词（接口名/类名/字段名等）实际检索核实——上面清单只是起点，grep 命中的才是可靠依据；若合同提到的模块在清单/根 manifest 的 modules 里不存在，这本身就是要上报的风险。`,
             {
               label: "探索：" + item.label,
               phase: "项目探索",
@@ -1220,12 +1300,14 @@ ${lines(inventory)}
     for (const c of part.buildCommands || []) buildCommands.push(c)
     for (const r of part.risks || []) risks.push(r)
   }
+  // 合并即封顶:探索是三个 agent 的并集,数量无 schema 上限,这里统一加帽,下游所有
+  // prompt(规划/实现/修复)天然有界。截掉的是排序靠后的溢出项,核心定位信息在头部。
   context.exploration = {
     summary: summaries.join("\n\n") || "没有获得项目探索摘要。",
-    relevantFiles,
-    testCommands: uniq(testCommands),
-    buildCommands: uniq(buildCommands),
-    risks: uniq(risks)
+    relevantFiles: take(relevantFiles, 80),
+    testCommands: take(uniq(testCommands), 10),
+    buildCommands: take(uniq(buildCommands), 10),
+    risks: take(uniq(risks), 20)
   }
   context.explorationComplexity = complexity
 }
@@ -1283,11 +1365,11 @@ while (roundsThisRun < maxRounds) {
 构建命令：${lines(context.exploration.buildCommands)}
 测试命令：${lines(context.exploration.testCommands)}
 风险：${lines(context.exploration.risks)}
-相关文件（路径 — 简述；完整清单见画像文件）：
-${take(context.exploration.relevantFiles || [], 60).map((f) => `- ${f.path}：${f.reason}`).join("\n") || "- 无"}
+相关文件（路径 — 简述；完整清单与用途见画像文件）：
+${take(context.exploration.relevantFiles || [], 40).map((f) => `- ${f.path}：${clip(f.reason, 160)}`).join("\n") || "- 无"}
 
 待证实标准（含上一轮失败/驳回原因，规划必须针对性回应）：
-${pending.map((c) => `- ${c.id}（${c.verify}）：${c.text}${c.note ? `\n  · 上一轮：${c.note}` : ""}`).join("\n")}
+${pending.map((c) => `- ${c.id}（${c.verify}）：${clip(c.text, 500)}${c.note ? `\n  · 上一轮：${clip(c.note, 400)}` : ""}`).join("\n")}
 
 ${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）：\n${clip(context.conventionsBrief, 2000)}\n` : ""}
 要求：
@@ -1475,7 +1557,7 @@ ${stringify(pkg)}
 
 首轮实现：
 ${renderImplResult(implementation)}
-${previousFix && previousFix.changedFiles && previousFix.changedFiles.length ? `\n上一轮修复已改动的文件（当前代码已包含这些修改，需要细节请直接读取这些文件）：\n${lines(previousFix.changedFiles)}\n` : ""}
+${previousFix && previousFix.changedFiles && previousFix.changedFiles.length ? `\n上一轮修复已改动的文件（当前代码已包含这些修改，需要细节请直接读取这些文件）：\n${lines(take(previousFix.changedFiles, 50))}\n` : ""}
 未通过的标准及证据：
 ${renderPerAc(failing)}
 
@@ -1565,7 +1647,7 @@ ${
         : ""
     }
 本轮新证实的标准与证据：
-${newlyProven.map((c) => `- ${c.id}（${c.verify}）：${c.text}\n  · 证据：${clip(c.evidence, 600)}`).join("\n")}
+${newlyProven.map((c) => `- ${c.id}（${c.verify}）：${clip(c.text, 400)}\n  · 证据：${clip(c.evidence, 600)}`).join("\n")}
 
 对每条要驳回的标准，给出 id 和具体驳回理由。
 重要：核查完成后直接提交结构化结果（structured_output），不要先写长篇分析再提交——你的裁决只以结构化结果为准，正文分析不会被读取。`,
