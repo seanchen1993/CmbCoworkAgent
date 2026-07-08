@@ -97,6 +97,7 @@ import type {
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
   HarnessBoardCompatibility,
@@ -3036,134 +3037,206 @@ function ProjectModeSettingsPanel({
   saving,
   dirty,
   error,
+  leanToken,
+  leanTokenLoading,
+  leanTokenSaving,
+  leanTokenDirty,
+  leanTokenError,
   onAdd,
   onRemove,
   onChange,
   onPickPath,
-  onSave
+  onSave,
+  onLeanTokenChange,
+  onSaveLeanToken,
+  onOpenLeanToken
 }: {
   mappings: HarnessDeployUnitMapping[]
   loading: boolean
   saving: boolean
   dirty: boolean
   error: string | null
+  leanToken: string
+  leanTokenLoading: boolean
+  leanTokenSaving: boolean
+  leanTokenDirty: boolean
+  leanTokenError: string | null
   onAdd: () => void
   onRemove: (index: number) => void
   onChange: (index: number, mapping: HarnessDeployUnitMapping) => void
   onPickPath: (index: number) => void
   onSave: () => void
+  onLeanTokenChange: (value: string) => void
+  onSaveLeanToken: () => void
+  onOpenLeanToken: () => void
 }): React.JSX.Element {
   return (
-    <section className="rounded-md border border-border bg-background shadow-sm">
-      <div className="flex min-w-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
-        <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-foreground">本地工程配置</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            配置本地工程路径以及对应的发布单元。该配置用于 1.注入公共系统约束 2.便捷选择代码工作路径
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            className="gap-2"
-            onClick={onSave}
-            disabled={loading || saving || !dirty}
-          >
-            {saving ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
-            保存
-          </Button>
-        </div>
-      </div>
-
-      <div className="space-y-4 p-4">
-        {error && (
-          <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
-            {error}
+    <div className="space-y-4">
+      <section className="rounded-md border border-border bg-background shadow-sm">
+        <div className="flex min-w-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-foreground">本地工程配置</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              配置本地工程路径以及对应的发布单元。该配置用于 1.注入公共系统约束 2.便捷选择代码工作路径
+            </p>
           </div>
-        )}
-
-        {loading ? (
-          <div className="flex min-h-[220px] items-center justify-center text-sm text-muted-foreground">
-            <Loader2 className="mr-2 size-4 animate-spin" />
-            加载中
-          </div>
-        ) : mappings.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-10 text-center">
-            <div className="text-sm font-medium text-foreground">暂无发布单元映射</div>
-            <div className="mt-1 text-xs text-muted-foreground">添加后即可在项目模式中选择对应代码库。</div>
-            <Button type="button" variant="secondary" className="mt-4 gap-2" onClick={onAdd}>
-              <Plus className="size-4" />
-              添加发布单元
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="gap-2"
+              onClick={onSave}
+              disabled={loading || saving || !dirty}
+            >
+              {saving ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+              保存
             </Button>
           </div>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] gap-2 px-1 text-xs font-medium text-muted-foreground">
-              <div className="flex min-w-0 items-center gap-1">
-                <span>发布单元</span>
-                <ReleaseUnitIdTip />
-              </div>
-              <div>描述</div>
-              <div>本机代码库路径</div>
-              <div />
+        </div>
+
+        <div className="space-y-4 p-4">
+          {error && (
+            <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
+              {error}
             </div>
-            {mappings.map((mapping, index) => (
-              <div
-                key={index}
-                className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] items-center gap-2"
-              >
-                <Input
-                  value={mapping.deployUnitId}
-                  onChange={(event) =>
-                    onChange(index, { ...mapping, deployUnitId: event.target.value })
-                  }
-                  placeholder="请输入发布单元 ID"
-                  className={harnessProjectCreateInputClassName}
-                />
-                <Input
-                  value={mapping.description || ""}
-                  onChange={(event) =>
-                    onChange(index, { ...mapping, description: event.target.value })
-                  }
-                  placeholder="请输入描述（选填）"
-                  className={harnessProjectCreateInputClassName}
-                />
-                <Input
-                  value={mapping.localRepoPath}
-                  readOnly
-                  placeholder="请选择本机代码库路径"
-                  className={harnessProjectCreateInputClassName}
-                  title={mapping.localRepoPath}
-                />
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="gap-2"
-                  onClick={() => onPickPath(index)}
-                >
-                  <FolderOpen className="size-4" />
-                  选择路径
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => onRemove(index)}
-                  title="删除映射"
-                >
-                  <Trash2 className="size-4" />
-                </Button>
+          )}
+
+          {loading ? (
+            <div className="flex min-h-[220px] items-center justify-center text-sm text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin" />
+              加载中
+            </div>
+          ) : mappings.length === 0 ? (
+            <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-10 text-center">
+              <div className="text-sm font-medium text-foreground">暂无发布单元映射</div>
+              <div className="mt-1 text-xs text-muted-foreground">添加后即可在项目模式中选择对应代码库。</div>
+              <Button type="button" variant="secondary" className="mt-4 gap-2" onClick={onAdd}>
+                <Plus className="size-4" />
+                添加发布单元
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] gap-2 px-1 text-xs font-medium text-muted-foreground">
+                <div className="flex min-w-0 items-center gap-1">
+                  <span>发布单元</span>
+                  <ReleaseUnitIdTip />
+                </div>
+                <div>描述</div>
+                <div>本机代码库路径</div>
+                <div />
               </div>
-            ))}
-            <Button type="button" variant="outline" className="gap-2" onClick={onAdd}>
-              <Plus className="size-4" />
-              添加发布单元
+              {mappings.map((mapping, index) => (
+                <div
+                  key={index}
+                  className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] items-center gap-2"
+                >
+                  <Input
+                    value={mapping.deployUnitId}
+                    onChange={(event) =>
+                      onChange(index, { ...mapping, deployUnitId: event.target.value })
+                    }
+                    placeholder="请输入发布单元 ID"
+                    className={harnessProjectCreateInputClassName}
+                  />
+                  <Input
+                    value={mapping.description || ""}
+                    onChange={(event) =>
+                      onChange(index, { ...mapping, description: event.target.value })
+                    }
+                    placeholder="请输入描述（选填）"
+                    className={harnessProjectCreateInputClassName}
+                  />
+                  <Input
+                    value={mapping.localRepoPath}
+                    readOnly
+                    placeholder="请选择本机代码库路径"
+                    className={harnessProjectCreateInputClassName}
+                    title={mapping.localRepoPath}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="gap-2"
+                    onClick={() => onPickPath(index)}
+                  >
+                    <FolderOpen className="size-4" />
+                    选择路径
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => onRemove(index)}
+                    title="删除映射"
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              ))}
+              <Button type="button" variant="outline" className="gap-2" onClick={onAdd}>
+                <Plus className="size-4" />
+                添加发布单元
+              </Button>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-md border border-border bg-background shadow-sm">
+        <div className="flex min-w-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-foreground">精益平台 token 配置</h2>
+            <div className="mt-1 flex min-w-0 items-center gap-3 text-xs text-muted-foreground">
+              <span className="min-w-0 truncate">用于查询精益平台相关接口</span>
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-auto shrink-0 px-0 py-0 text-xs"
+                onClick={onOpenLeanToken}
+              >
+                获取精益平台 token
+              </Button>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="gap-2"
+              onClick={onSaveLeanToken}
+              disabled={leanTokenLoading || leanTokenSaving || !leanTokenDirty}
+            >
+              {leanTokenSaving ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
+              保存
             </Button>
           </div>
-        )}
-      </div>
-    </section>
+        </div>
+        <div className="space-y-4 p-4">
+          {leanTokenError && (
+            <div className="rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical">
+              {leanTokenError}
+            </div>
+          )}
+          {leanTokenLoading ? (
+            <div className="flex min-h-[92px] items-center justify-center text-sm text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin" />
+              加载中
+            </div>
+          ) : (
+            <label className="block space-y-2">
+              <Input
+                value={leanToken}
+                onChange={(event) => onLeanTokenChange(event.target.value)}
+                placeholder="请输入 sk-ai-xFu...."
+                className={harnessProjectCreateInputClassName}
+              />
+            </label>
+          )}
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -5631,6 +5704,11 @@ export function HarnessBoardView({
   const [deployUnitMappingsSaving, setDeployUnitMappingsSaving] = useState(false)
   const [deployUnitMappingsDirty, setDeployUnitMappingsDirty] = useState(false)
   const [deployUnitMappingsError, setDeployUnitMappingsError] = useState<string | null>(null)
+  const [leanTokenConfig, setLeanTokenConfig] = useState<HarnessLeanTokenConfig>({ leanToken: "" })
+  const [leanTokenLoading, setLeanTokenLoading] = useState(true)
+  const [leanTokenSaving, setLeanTokenSaving] = useState(false)
+  const [leanTokenDirty, setLeanTokenDirty] = useState(false)
+  const [leanTokenError, setLeanTokenError] = useState<string | null>(null)
   const {
     threads,
     currentThreadId,
@@ -5813,6 +5891,24 @@ export function HarnessBoardView({
     void loadDeployUnitMappings()
   }, [loadDeployUnitMappings])
 
+  const loadLeanTokenConfig = useCallback(async (): Promise<void> => {
+    setLeanTokenLoading(true)
+    setLeanTokenError(null)
+    try {
+      const config = await window.api.harnessBoard.getLeanTokenConfig()
+      setLeanTokenConfig(config)
+      setLeanTokenDirty(false)
+    } catch (error) {
+      setLeanTokenError(cleanIpcError(error))
+    } finally {
+      setLeanTokenLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadLeanTokenConfig()
+  }, [loadLeanTokenConfig])
+
   const handleAddDeployUnitMapping = useCallback((): void => {
     setDeployUnitMappings((current) => [...current, createEmptyDeployUnitMapping()])
     setDeployUnitMappingsDirty(true)
@@ -5851,6 +5947,37 @@ export function HarnessBoardView({
     []
   )
 
+  const handleLeanTokenChange = useCallback((value: string): void => {
+    setLeanTokenConfig({ leanToken: value })
+    setLeanTokenDirty(true)
+    setLeanTokenError(null)
+  }, [])
+
+  const handleOpenLeanToken = useCallback((): void => {
+    void window.electron
+      .openExternal(
+        "https://leanstar-devops.paas.cmbchina.cn/outside?microAppCode=personal-center&subRoute=personal-token"
+      )
+      .catch((error) => {
+        setLeanTokenError(cleanIpcError(error))
+      })
+  }, [])
+
+  const handleSaveLeanTokenConfig = useCallback(async (): Promise<void> => {
+    setLeanTokenSaving(true)
+    setLeanTokenError(null)
+    try {
+      const saved = await window.api.harnessBoard.saveLeanTokenConfig(leanTokenConfig)
+      setLeanTokenConfig(saved)
+      setLeanTokenDirty(false)
+      toast.success("配置已保存")
+    } catch (error) {
+      setLeanTokenError(cleanIpcError(error))
+    } finally {
+      setLeanTokenSaving(false)
+    }
+  }, [leanTokenConfig])
+
   const handleSaveDeployUnitMappings = useCallback(async (): Promise<void> => {
     const payload = buildDeployUnitMappingSavePayload(deployUnitMappings)
     if (payload.error) {
@@ -5884,16 +6011,23 @@ export function HarnessBoardView({
         ) {
           void handleSaveDeployUnitMappings()
         }
+        if (leanTokenDirty && !leanTokenLoading && !leanTokenSaving) {
+          void handleSaveLeanTokenConfig()
+        }
       }
       setProjectModeTab(nextTab)
     },
     [
       handleSaveDeployUnitMappings,
+      handleSaveLeanTokenConfig,
       projectModeTab,
       deployUnitMappings,
       deployUnitMappingsDirty,
       deployUnitMappingsLoading,
-      deployUnitMappingsSaving
+      deployUnitMappingsSaving,
+      leanTokenDirty,
+      leanTokenLoading,
+      leanTokenSaving
     ]
   )
 
@@ -7045,7 +7179,7 @@ export function HarnessBoardView({
           { preserveView: true }
         )
         setPendingHarnessNextAction(thread.thread_id, {
-          slashSkill: config.slashSkill,
+          ...config.nextAction,
           preferredPlugin: {
             id: project.harnessAdapter.id,
             name: project.harnessAdapter.name
@@ -7681,7 +7815,7 @@ export function HarnessBoardView({
                 </TabsTrigger>
                 <TabsTrigger value="settings" className="gap-2">
                   <Settings className="size-4" />
-                  本地工程路径配置
+                  工程与精益配置
                 </TabsTrigger>
                 <TabsTrigger value="constraint-sync" className="gap-2">
                   <RefreshCw className="size-4" />
@@ -7803,11 +7937,19 @@ export function HarnessBoardView({
                 saving={deployUnitMappingsSaving}
                 dirty={deployUnitMappingsDirty}
                 error={deployUnitMappingsError}
+                leanToken={leanTokenConfig.leanToken}
+                leanTokenLoading={leanTokenLoading}
+                leanTokenSaving={leanTokenSaving}
+                leanTokenDirty={leanTokenDirty}
+                leanTokenError={leanTokenError}
                 onAdd={handleAddDeployUnitMapping}
                 onRemove={handleRemoveDeployUnitMapping}
                 onChange={handleChangeDeployUnitMapping}
                 onPickPath={(index) => void handlePickDeployUnitRepoPath(index)}
                 onSave={() => void handleSaveDeployUnitMappings()}
+                onLeanTokenChange={handleLeanTokenChange}
+                onSaveLeanToken={() => void handleSaveLeanTokenConfig()}
+                onOpenLeanToken={handleOpenLeanToken}
               />
             </TabsContent>
 

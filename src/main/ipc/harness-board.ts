@@ -15,7 +15,9 @@ import {
   listHarnessAdapters,
   listHarnessProjects,
   listHarnessDeployUnitMappings,
+  getHarnessLeanTokenConfig,
   saveHarnessDeployUnitMappings,
+  saveHarnessLeanTokenConfig,
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
   updateHarnessProjectMetadata
@@ -40,6 +42,7 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -66,10 +69,21 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     return listHarnessDeployUnitMappings()
   })
 
+  ipcMain.handle("harnessBoard:getLeanTokenConfig", async (): Promise<HarnessLeanTokenConfig> => {
+    return getHarnessLeanTokenConfig()
+  })
+
   ipcMain.handle(
     "harnessBoard:saveDeployUnitMappings",
     async (_event, mappings: HarnessDeployUnitMapping[]): Promise<HarnessDeployUnitMapping[]> => {
       return saveHarnessDeployUnitMappings(mappings)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:saveLeanTokenConfig",
+    async (_event, input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> => {
+      return saveHarnessLeanTokenConfig(input)
     }
   )
 

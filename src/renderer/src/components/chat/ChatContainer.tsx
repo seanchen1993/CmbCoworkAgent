@@ -2259,6 +2259,8 @@ export function ChatContainer({
   } = useCurrentThread(threadId)
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
+  const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
+  const shouldShowNextActionDialogTips = Boolean(nextActionDialogTips) && !readOnly
   const systemConstraintCounts = getSystemConstraintsLoadCounts(harnessAgentmdLoadStatus)
   const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
   const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
@@ -2288,14 +2290,13 @@ export function ChatContainer({
   }, [pendingHarnessDialogTips, setHarnessNextActionDialogTips])
 
   useEffect(() => {
-    if (!shouldShowHarnessDialogTips || !harnessDialogTipsProjectId || !harnessDialogTipsSlug) {
-      setHarnessDialogTips(null)
+    if (shouldShowNextActionDialogTips && nextActionDialogTips) {
+      setHarnessDialogTips(nextActionDialogTips)
       return
     }
 
-    const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
-    if (nextActionDialogTips) {
-      setHarnessDialogTips(nextActionDialogTips)
+    if (!shouldShowHarnessDialogTips || !harnessDialogTipsProjectId || !harnessDialogTipsSlug) {
+      setHarnessDialogTips(null)
       return
     }
 
@@ -2317,9 +2318,9 @@ export function ChatContainer({
   }, [
     harnessDialogTipsProjectId,
     harnessDialogTipsSlug,
-    pendingHarnessDialogTips,
+    nextActionDialogTips,
     shouldShowHarnessDialogTips,
-    storedHarnessNextActionDialogTips
+    shouldShowNextActionDialogTips
   ])
 
   // Hook logs live in an external store so updates don't re-render the full provider tree.
@@ -4828,7 +4829,7 @@ export function ChatContainer({
 
     return (
       <div className="pt-6 pb-8">
-        {shouldShowHarnessDialogTips && harnessDialogTips ? (
+        {(shouldShowHarnessDialogTips || shouldShowNextActionDialogTips) && harnessDialogTips ? (
           <DialogTipsMarkdown content={harnessDialogTips} />
         ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
           <RotatingHeadline />
@@ -5081,6 +5082,7 @@ export function ChatContainer({
     programmingSkillCards,
     programmingSkills.length,
     shouldShowHarnessDialogTips,
+    shouldShowNextActionDialogTips,
     shouldShowWelcomeHeadline,
     shouldShowWelcomeSkillTabs,
     showAllCustomSkills,

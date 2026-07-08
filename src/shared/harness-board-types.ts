@@ -105,6 +105,10 @@ export interface HarnessDeployUnitMapping {
   description?: string
 }
 
+export interface HarnessLeanTokenConfig {
+  leanToken: string
+}
+
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
 
 export interface HarnessAgentmdLoadStatusItem {
@@ -364,7 +368,8 @@ export interface HarnessProjectDetailViewModel {
   workflow: HarnessWorkflow
   runs: HarnessFeatureSummary[]
   systemConstraintUpdate?: {
-    slashSkill: string
+    syncType: "invoke_session"
+    nextAction: HarnessWorkflowNextAction
     knowledgePath?: string
   }
   watchRefs: HarnessWatchRef[]

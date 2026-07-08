@@ -38,6 +38,7 @@ import type {
   HarnessRunNode,
   HarnessSessionContextInjectionSource,
   HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
@@ -57,6 +58,10 @@ interface HarnessProjectStoreFile {
 interface HarnessDeployUnitMappingStoreFile {
   version: 1
   mappings: HarnessDeployUnitMapping[]
+}
+
+interface HarnessLeanTokenStoreFile {
+  leanToken: string
 }
 
 interface HarnessFeatureDeployUnitBindingRecord extends HarnessFeatureDeployUnitBinding {
@@ -94,8 +99,6 @@ type HarnessPlatformConfigKey =
   | "plugin_dir_hook"
   | "dialog_tips"
   | "knowledge_path"
-
-type HarnessRootConfigKey = "knowledge_slash_skill"
 
 const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   HarnessInspectCommandName,
@@ -140,11 +143,13 @@ interface HarnessCommandParseOptions {
   workflowTemplate?: string
   workflowNodes?: string
   nodeId?: string
+  preserveMissingPlaceholders?: boolean
 }
 
 const HARNESS_BOARD_FILE = join(getOpenworkDir(), "harness-board-projects.json")
 const HARNESS_DEPLOY_UNIT_MAPPING_FILE = join(getOpenworkDir(), "harness-deployUnitId-mapping.json")
 const HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE = join(getOpenworkDir(), "harness-board-features.json")
+const HARNESS_LEAN_TOKEN_FILE = join(getOpenworkDir(), "leanstar-config.json")
 
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS = 45_000
@@ -293,6 +298,12 @@ function emptyDeployUnitMappingStore(): HarnessDeployUnitMappingStoreFile {
   return {
     version: 1,
     mappings: []
+  }
+}
+
+function emptyLeanTokenStore(): HarnessLeanTokenStoreFile {
+  return {
+    leanToken: ""
   }
 }
 
@@ -769,11 +780,13 @@ function replaceHarnessConfigPlaceholders(
   options: HarnessCommandParseOptions = {}
 ): string {
   const projectDir = projectDirectoryName(project)
-  const replacements: Record<string, string> = {
+  const leanToken = readLeanTokenStore().leanToken
+  const replacements: Record<string, string | undefined> = {
     pluginWorkspace: project.workspacePath,
     project: projectDir,
     projectDir,
     projectCode: project.projectCode,
+    leanToken,
     feature: options.feature ?? "",
     selectedDeployUnits: options.selectedDeployUnitsJson ?? "",
     sessionWorkspacePath: options.sessionWorkspacePath ?? "",
@@ -784,8 +797,12 @@ function replaceHarnessConfigPlaceholders(
     nodeId: options.nodeId ?? ""
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
-    (_, key: string) => replacements[key] ?? ""
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
+    (placeholder: string, key: string) => {
+      const replacement = replacements[key]
+      if (replacement) return replacement
+      return options.preserveMissingPlaceholders ? placeholder : ""
+    }
   )
 }
 
@@ -863,12 +880,9 @@ function readBoardConfigPlatformText(cwd: string, key: HarnessPlatformConfigKey)
   return command || null
 }
 
-function readBoardConfigRootText(cwd: string, key: HarnessRootConfigKey): string | null {
+function readBoardConfigRootValue(cwd: string, key: string): unknown {
   const parsed = readBoardConfig(cwd)
-  if (!parsed) return null
-
-  const value = normalizeText(parsed[key]).trim()
-  return value || null
+  return parsed?.[key]
 }
 
 function readBoardConfigInspectCommand(
@@ -1635,6 +1649,42 @@ function normalizeWorkflowNextAction(value: unknown): HarnessWorkflowNextAction 
   return Object.keys(nextAction).length > 0 ? nextAction : undefined
 }
 
+function resolveHarnessDialogTipsTemplate(
+  template: string,
+  project: HarnessProjectMetadata,
+  mode: HarnessInspectCommandName,
+  cwd: string,
+  options: HarnessCommandParseOptions = {}
+): string | undefined {
+  return replaceHarnessConfigPlaceholders(template, project, mode, cwd, options).trim() || undefined
+}
+
+function resolveHarnessNextActionTemplate(
+  value: unknown,
+  project: HarnessProjectMetadata,
+  mode: HarnessInspectCommandName,
+  cwd: string,
+  options: HarnessCommandParseOptions = {},
+  config: { replaceUserMessagePlaceholders?: boolean } = {}
+): HarnessWorkflowNextAction | undefined {
+  const nextAction = normalizeWorkflowNextAction(value)
+  if (!nextAction) return undefined
+
+  const userMessage =
+    nextAction.userMessage && config.replaceUserMessagePlaceholders
+      ? replaceHarnessConfigPlaceholders(nextAction.userMessage, project, mode, cwd, options).trim()
+      : nextAction.userMessage
+  const dialogTips = nextAction.dialogTips
+    ? resolveHarnessDialogTipsTemplate(nextAction.dialogTips, project, mode, cwd, options)
+    : undefined
+  const resolved = {
+    ...(nextAction.slashSkill ? { slashSkill: nextAction.slashSkill } : {}),
+    ...(userMessage ? { userMessage } : {}),
+    ...(dialogTips ? { dialogTips } : {})
+  }
+  return Object.keys(resolved).length > 0 ? resolved : undefined
+}
+
 function normalizeWorkflowArtifactDefinition(
   value: unknown
 ): HarnessWorkflowArtifactDefinition | null {
@@ -2117,6 +2167,29 @@ function writeDeployUnitMappingStore(store: HarnessDeployUnitMappingStoreFile): 
   writeFileSync(HARNESS_DEPLOY_UNIT_MAPPING_FILE, `${JSON.stringify(store, null, 2)}\n`)
 }
 
+function normalizeLeanTokenStore(value: unknown): HarnessLeanTokenStoreFile {
+  if (!isObject(value)) return emptyLeanTokenStore()
+  return {
+    leanToken: normalizeText(value.leanToken).trim()
+  }
+}
+
+function readLeanTokenStore(): HarnessLeanTokenStoreFile {
+  getOpenworkDir()
+  if (!existsSync(HARNESS_LEAN_TOKEN_FILE)) return emptyLeanTokenStore()
+  try {
+    const parsed = JSON.parse(readFileSync(HARNESS_LEAN_TOKEN_FILE, "utf-8")) as unknown
+    return normalizeLeanTokenStore(parsed)
+  } catch {
+    return emptyLeanTokenStore()
+  }
+}
+
+function writeLeanTokenStore(store: HarnessLeanTokenStoreFile): void {
+  getOpenworkDir()
+  writeFileSync(HARNESS_LEAN_TOKEN_FILE, `${JSON.stringify(store, null, 2)}\n`)
+}
+
 function featureDeployUnitBindingKey(projectId: string, featureId: string): string {
   return `${projectId}\0${featureId}`
 }
@@ -2202,6 +2275,16 @@ export function saveHarnessDeployUnitMappings(
     version: 1,
     mappings: normalized
   })
+  return normalized
+}
+
+export function getHarnessLeanTokenConfig(): HarnessLeanTokenConfig {
+  return readLeanTokenStore()
+}
+
+export function saveHarnessLeanTokenConfig(input: HarnessLeanTokenConfig): HarnessLeanTokenConfig {
+  const normalized = normalizeLeanTokenStore(input)
+  writeLeanTokenStore(normalized)
   return normalized
 }
 
@@ -2495,12 +2578,26 @@ function resolveSystemConstraintUpdateConfig(
 ): HarnessProjectDetailViewModel["systemConstraintUpdate"] | undefined {
   try {
     const cwd = adapterPluginDir(project)
-    const slashSkill = readBoardConfigRootText(cwd, "knowledge_slash_skill")
-    if (!slashSkill) return undefined
+    const knowledgeConfig = readBoardConfigRootValue(cwd, "knowledge_config")
+    if (!isObject(knowledgeConfig)) return undefined
+
+    const syncType = normalizeText(knowledgeConfig.sync_type).trim()
+    if (syncType !== "invoke_session") return undefined
+
+    const nextAction =
+      resolveHarnessNextActionTemplate(
+        knowledgeConfig.nextAction,
+        project,
+        "pullKnowledge",
+        cwd,
+        { preserveMissingPlaceholders: true },
+        { replaceUserMessagePlaceholders: true }
+      ) ?? {}
 
     const knowledgePath = resolveProjectKnowledgePath(project, cwd)
     return {
-      slashSkill,
+      syncType: "invoke_session",
+      nextAction,
       ...(knowledgePath ? { knowledgePath } : {})
     }
   } catch (error) {
@@ -2839,7 +2936,7 @@ export function buildHarnessFeatureDialogTips(projectId: string, slug: string): 
   const template = readBoardConfigPlatformText(cwd, "dialog_tips")
   if (!template) return null
 
-  return replaceHarnessConfigPlaceholders(template, project, "run", cwd, { feature }).trim() || null
+  return resolveHarnessDialogTipsTemplate(template, project, "run", cwd, { feature }) ?? null
 }
 
 export function listHarnessProjects(): HarnessProjectListItem[] {

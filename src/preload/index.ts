@@ -66,6 +66,7 @@ import type {
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
   HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -3103,6 +3104,8 @@ const api = {
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
       ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<HarnessDeployUnitMapping[]>,
+    getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
+      ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
     saveDeployUnitMappings: (
       mappings: HarnessDeployUnitMapping[]
     ): Promise<HarnessDeployUnitMapping[]> =>
@@ -3110,6 +3113,11 @@ const api = {
         "harnessBoard:saveDeployUnitMappings",
         mappings
       ) as Promise<HarnessDeployUnitMapping[]>,
+    saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
+      ipcRenderer.invoke(
+        "harnessBoard:saveLeanTokenConfig",
+        input
+      ) as Promise<HarnessLeanTokenConfig>,
     syncProjectConstraints: (adapterId: string): Promise<HarnessProjectConstraintSyncResult> =>
       ipcRenderer.invoke(
         "harnessBoard:syncProjectConstraints",
