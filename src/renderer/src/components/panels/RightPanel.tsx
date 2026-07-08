@@ -694,7 +694,13 @@ export function RightPanel({
   }, [currentThreadId, onRequestBrowserMode, onRequestPreviewMode])
 
   useEffect(() => {
-    if (moduleMode !== "preview" || !previewPath) {
+    if (moduleMode === "preview") {
+      if (!previewPath) {
+        onPreviewFullscreenChange?.(false)
+      }
+      return
+    }
+    if (moduleMode !== "browser") {
       onPreviewFullscreenChange?.(false)
     }
   }, [moduleMode, previewPath, onPreviewFullscreenChange])
@@ -1196,6 +1202,7 @@ export function RightPanel({
               workspacePath={threadState?.workspacePath ?? null}
               initialUrl={browserPreviewUrl}
               reloadToken={previewReloadToken}
+              onFullscreenChange={onPreviewFullscreenChange}
             />
           </Suspense>
         </div>

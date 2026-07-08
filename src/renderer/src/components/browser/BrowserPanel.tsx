@@ -3,22 +3,33 @@ import {
   ArrowLeft,
   ArrowRight,
   Camera,
-  Code2,
+  ChevronDown,
+  Check,
+  Copy,
   Globe2,
   Loader2,
+  Maximize2,
+  Minimize2,
   RotateCcw,
   ShieldAlert,
   Square,
+  Terminal,
+  Trash2,
   X
 } from "lucide-react"
 import { toast } from "sonner"
-import type { BrowserBounds, BrowserState } from "../../../../shared/browser-types"
+import type {
+  BrowserBounds,
+  BrowserConsoleEntry,
+  BrowserState
+} from "../../../../shared/browser-types"
 
 interface BrowserPanelProps {
   threadId?: string | null
   workspacePath?: string | null
   initialUrl?: string | null
   reloadToken?: number
+  onFullscreenChange?: (isFullscreen: boolean) => void
 }
 
 const EMPTY_STATE: BrowserState = {
@@ -29,7 +40,8 @@ const EMPTY_STATE: BrowserState = {
   canGoBack: false,
   canGoForward: false,
   visible: false,
-  created: false
+  created: false,
+  consoleEntries: []
 }
 
 function getSessionId(threadId?: string | null): string {
@@ -44,24 +56,31 @@ export function BrowserPanel({
   threadId,
   workspacePath,
   initialUrl,
-  reloadToken
+  reloadToken,
+  onFullscreenChange
 }: BrowserPanelProps): React.JSX.Element {
   const sessionId = useMemo(() => getSessionId(threadId), [threadId])
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastBoundsRef = useRef<BrowserBounds | null>(null)
   const isUrlFocusedRef = useRef(false)
   const lastInitialNavigationRef = useRef<string | null>(null)
+  const consoleScrollerRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<BrowserState>({ ...EMPTY_STATE, sessionId })
   const [urlInput, setUrlInput] = useState("")
   const [isUrlFocused, setIsUrlFocused] = useState(false)
   const [isCapturing, setIsCapturing] = useState(false)
-  const [isReading, setIsReading] = useState(false)
+  const [copiedConsole, setCopiedConsole] = useState(false)
+  const [consoleOpen, setConsoleOpen] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
 
   useEffect(() => {
     setState({ ...EMPTY_STATE, sessionId })
     setUrlInput("")
     lastBoundsRef.current = null
     lastInitialNavigationRef.current = null
+    setCopiedConsole(false)
+    setConsoleOpen(false)
+    setIsFullscreen(false)
   }, [sessionId])
 
   useEffect(() => {
@@ -150,6 +169,35 @@ export function BrowserPanel({
   }, [isUrlFocused, state.url])
 
   useEffect(() => {
+    const scroller = consoleScrollerRef.current
+    if (!scroller || !consoleOpen) return
+    scroller.scrollTop = scroller.scrollHeight
+  }, [consoleOpen, state.consoleEntries])
+
+  useEffect(() => {
+    if (!isFullscreen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        setIsFullscreen(false)
+      }
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => {
+      document.removeEventListener("keydown", onKeyDown)
+    }
+  }, [isFullscreen])
+
+  useEffect(() => {
+    onFullscreenChange?.(isFullscreen)
+  }, [isFullscreen, onFullscreenChange])
+
+  useEffect(() => {
+    return () => {
+      onFullscreenChange?.(false)
+    }
+  }, [onFullscreenChange])
+
+  useEffect(() => {
     const target = initialUrl?.trim()
     if (!target) return
 
@@ -219,34 +267,43 @@ export function BrowserPanel({
     }
   }, [sessionId])
 
-  const copyRenderedState = useCallback(async () => {
-    setIsReading(true)
+  const copyConsole = useCallback(async () => {
+    if (state.consoleEntries.length === 0) return
     try {
-      const result = await window.api.browser.readRenderedState(sessionId, false)
-      if (!result.success || !result.state) {
-        toast.error(result.error || "读取页面状态失败")
-        return
-      }
-      await navigator.clipboard.writeText(
-        JSON.stringify(
-          {
-            url: result.state.url,
-            title: result.state.title,
-            text: result.state.text,
-            truncated: result.state.truncated
-          },
-          null,
-          2
-        )
-      )
-      toast.success("页面状态已复制")
+      const payload = state.consoleEntries
+        .map((entry) => {
+          const source = entry.sourceId ? ` ${entry.sourceId}${entry.line ? `:${entry.line}` : ""}` : ""
+          return `[${formatConsoleTime(entry.timestamp)}] ${entry.level.toUpperCase()}${source} ${entry.message}`
+        })
+        .join("\n")
+      await navigator.clipboard.writeText(payload)
+      setCopiedConsole(true)
+      window.setTimeout(() => {
+        setCopiedConsole(false)
+      }, 1500)
+      toast.success("Console 内容已复制")
     } catch (error) {
-      console.error("[BrowserPanel] Read rendered state failed:", error)
-      toast.error("读取页面状态失败")
-    } finally {
-      setIsReading(false)
+      console.error("[BrowserPanel] Copy console failed:", error)
+      toast.error("复制 Console 内容失败")
     }
+  }, [state.consoleEntries])
+
+  const clearConsole = useCallback(() => {
+    void window.api.browser
+      .clearConsole(sessionId)
+      .then(setState)
+      .catch((error) => {
+        console.error("[BrowserPanel] Clear console failed:", error)
+        toast.error("清空控制台失败")
+      })
   }, [sessionId])
+
+  const consoleCount = state.consoleEntries.length
+  const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
+  const consoleToggleTitle = latestConsoleEntry ? `控制台 (${consoleCount})` : "控制台"
+  const toggleFullscreen = (): void => {
+    setIsFullscreen((prev) => !prev)
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-sm border border-border bg-background">
@@ -322,18 +379,31 @@ export function BrowserPanel({
         </form>
         <button
           type="button"
+          className="relative inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          title={consoleToggleTitle}
+          aria-label={consoleToggleTitle}
+          aria-pressed={consoleOpen}
+          onClick={() => setConsoleOpen((open) => !open)}
+        >
+          <Terminal className="size-4" strokeWidth={1.8} />
+          {consoleCount > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
+              {consoleCount > 99 ? "99+" : consoleCount}
+            </span>
+          )}
+        </button>
+        {/* 暂时隐藏“读取页面状态”动作，后续可能恢复。
+        <button
+          type="button"
           className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
           title="读取页面状态"
           aria-label="读取页面状态"
-          disabled={isReading || !state.created}
+          disabled={!state.created}
           onClick={copyRenderedState}
         >
-          {isReading ? (
-            <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-          ) : (
-            <Code2 className="size-4" strokeWidth={1.8} />
-          )}
+          <Code2 className="size-4" strokeWidth={1.8} />
         </button>
+        */}
         <button
           type="button"
           className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
@@ -346,6 +416,20 @@ export function BrowserPanel({
             <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
           ) : (
             <Camera className="size-4" strokeWidth={1.8} />
+          )}
+        </button>
+        <button
+          type="button"
+          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          title={isFullscreen ? "缩小全屏" : "全屏预览"}
+          aria-label={isFullscreen ? "缩小全屏" : "全屏预览"}
+          aria-pressed={isFullscreen}
+          onClick={toggleFullscreen}
+        >
+          {isFullscreen ? (
+            <Minimize2 className="size-4" strokeWidth={1.8} />
+          ) : (
+            <Maximize2 className="size-4" strokeWidth={1.8} />
           )}
         </button>
       </div>
@@ -365,6 +449,108 @@ export function BrowserPanel({
           </div>
         )}
         <div ref={viewportRef} className="absolute inset-0" />
+      </div>
+
+      {consoleOpen && (
+        <div className="shrink-0 border-t border-border bg-background">
+          <div className="flex h-9 items-center justify-between gap-2 px-3 text-[11px] text-muted-foreground">
+            <div className="flex min-w-0 items-center gap-2">
+              <Terminal className="size-3.5 shrink-0" strokeWidth={1.8} />
+              <span className="font-medium text-foreground">Console</span>
+              <span className="tabular-nums">{consoleCount}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+                title="复制 Console 内容"
+                aria-label="复制 Console 内容"
+                disabled={consoleCount === 0}
+                onClick={() => void copyConsole()}
+              >
+                {copiedConsole ? (
+                  <Check className="size-3.5" strokeWidth={1.8} />
+                ) : (
+                  <Copy className="size-3.5" strokeWidth={1.8} />
+                )}
+              </button>
+              <button
+                type="button"
+                className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+                title="清空控制台"
+                aria-label="清空控制台"
+                disabled={consoleCount === 0}
+                onClick={clearConsole}
+              >
+                <Trash2 className="size-3.5" strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title="收起控制台"
+                aria-label="收起控制台"
+                onClick={() => setConsoleOpen(false)}
+              >
+                <span>收起</span>
+                <ChevronDown className="size-3.5" strokeWidth={1.8} />
+              </button>
+            </div>
+          </div>
+          <div
+            ref={consoleScrollerRef}
+            className="h-44 overflow-auto border-t border-border/70 bg-[#0b0f14] px-3 py-2 font-mono text-[11px] leading-5 text-slate-100"
+          >
+            {consoleCount === 0 ? (
+              <div className="flex h-full items-center justify-center text-slate-400">
+                暂无 console 输出
+              </div>
+            ) : (
+              state.consoleEntries.map((entry) => <ConsoleRow key={entry.id} entry={entry} />)
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function formatConsoleTime(timestamp: string): string {
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return "--:--:--"
+  return date.toLocaleTimeString("zh-CN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  })
+}
+
+function getConsoleLevelClass(level: BrowserConsoleEntry["level"]): string {
+  switch (level) {
+    case "error":
+      return "text-rose-300"
+    case "warn":
+      return "text-amber-300"
+    case "info":
+      return "text-sky-300"
+    case "debug":
+      return "text-violet-300"
+    default:
+      return "text-slate-300"
+  }
+}
+
+function ConsoleRow({ entry }: { entry: BrowserConsoleEntry }): React.JSX.Element {
+  const sourceLabel =
+    entry.sourceId && entry.line ? `${entry.sourceId}:${entry.line}` : entry.sourceId || ""
+
+  return (
+    <div className="grid grid-cols-[64px_48px_minmax(0,1fr)] gap-3 py-1">
+      <span className="text-slate-500">{formatConsoleTime(entry.timestamp)}</span>
+      <span className={getConsoleLevelClass(entry.level)}>{entry.level.toUpperCase()}</span>
+      <div className="min-w-0 whitespace-pre-wrap break-words text-slate-100">
+        {sourceLabel && <span className="mr-2 text-slate-500">{sourceLabel}</span>}
+        {entry.message}
       </div>
     </div>
   )

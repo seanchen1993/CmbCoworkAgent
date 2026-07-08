@@ -1508,6 +1508,7 @@ interface CustomAPI {
     goForward: (sessionId: string) => Promise<BrowserState>
     reload: (sessionId: string) => Promise<BrowserState>
     stop: (sessionId: string) => Promise<BrowserState>
+    clearConsole: (sessionId: string) => Promise<BrowserState>
     getState: (sessionId: string) => Promise<BrowserState>
     captureScreenshot: (sessionId: string) => Promise<BrowserScreenshotResult>
     readRenderedState: (sessionId: string, includeHtml?: boolean) => Promise<BrowserDomResult>

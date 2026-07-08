@@ -1916,6 +1916,8 @@ const api = {
       ipcRenderer.invoke("browser:reload", sessionId) as Promise<BrowserState>,
     stop: (sessionId: string): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:stop", sessionId) as Promise<BrowserState>,
+    clearConsole: (sessionId: string): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:clearConsole", sessionId) as Promise<BrowserState>,
     getState: (sessionId: string): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:getState", sessionId) as Promise<BrowserState>,
     captureScreenshot: (sessionId: string): Promise<BrowserScreenshotResult> =>

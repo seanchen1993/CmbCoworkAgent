@@ -41,6 +41,10 @@ export function registerBrowserHandlers(
 
   ipcMain.handle("browser:stop", (_event, sessionId: string) => browserService.stop(sessionId))
 
+  ipcMain.handle("browser:clearConsole", (_event, sessionId: string) =>
+    browserService.clearConsole(sessionId)
+  )
+
   ipcMain.handle("browser:getState", (_event, sessionId: string) =>
     browserService.getState(sessionId)
   )

@@ -5,6 +5,17 @@ export interface BrowserBounds {
   height: number
 }
 
+export type BrowserConsoleLevel = "info" | "warn" | "error" | "debug" | "log"
+
+export interface BrowserConsoleEntry {
+  id: string
+  timestamp: string
+  level: BrowserConsoleLevel
+  message: string
+  sourceId?: string
+  line?: number
+}
+
 export interface BrowserState {
   sessionId: string
   url: string
@@ -14,6 +25,7 @@ export interface BrowserState {
   canGoForward: boolean
   visible: boolean
   created: boolean
+  consoleEntries: BrowserConsoleEntry[]
   error?: string
 }
 

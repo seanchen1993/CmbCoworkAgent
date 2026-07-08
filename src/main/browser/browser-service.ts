@@ -6,6 +6,8 @@ import type {
   BrowserAttachOptions,
   BrowserBounds,
   BrowserClickTarget,
+  BrowserConsoleEntry,
+  BrowserConsoleLevel,
   BrowserDomResult,
   BrowserNavigateOptions,
   BrowserRenderedState,
@@ -15,11 +17,15 @@ import type {
 
 const MAX_TEXT_CHARS = 80_000
 const MAX_HTML_CHARS = 200_000
+const MAX_BROWSER_CONSOLE_ENTRIES = 200
+const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
 
 interface BrowserSession {
   id: string
   view: WebContentsView
   workspacePath: string | null
+  consoleEntries: BrowserConsoleEntry[]
+  nextConsoleEntryId: number
   error?: string
 }
 
@@ -103,6 +109,36 @@ export function getUrlPermissionError(url: string, _workspacePath: string | null
   if (parsed.protocol === "file:") return null
 
   return `不允许加载 ${parsed.protocol} 协议`
+}
+
+function getBrowserConsoleLevel(level: number): BrowserConsoleLevel {
+  switch (level) {
+    case 0:
+      return "info"
+    case 1:
+      return "warn"
+    case 2:
+      return "error"
+    case 3:
+      return "debug"
+    default:
+      return "log"
+  }
+}
+
+function truncateBrowserConsoleMessage(message: string): string {
+  if (message.length <= MAX_BROWSER_CONSOLE_MESSAGE_CHARS) return message
+  return `${message.slice(0, MAX_BROWSER_CONSOLE_MESSAGE_CHARS)}\n[message truncated]`
+}
+
+export function appendBrowserConsoleEntry(
+  entries: BrowserConsoleEntry[],
+  entry: BrowserConsoleEntry
+): BrowserConsoleEntry[] {
+  const next = [...entries, entry]
+  return next.length > MAX_BROWSER_CONSOLE_ENTRIES
+    ? next.slice(next.length - MAX_BROWSER_CONSOLE_ENTRIES)
+    : next
 }
 
 function getChannel(sessionId: string): string {
@@ -218,6 +254,15 @@ export class BrowserService {
     return this.getState(sessionId)
   }
 
+  clearConsole(sessionId: string): BrowserState {
+    const session = this.getActiveSession(sessionId)
+    if (session) {
+      session.consoleEntries = []
+      this.emitState(sessionId)
+    }
+    return this.getState(sessionId)
+  }
+
   async captureScreenshot(sessionId: string): Promise<BrowserScreenshotResult> {
     const session = this.getActiveSession(sessionId)
     if (!session) return { success: false, error: "Browser session has not been created" }
@@ -290,7 +335,8 @@ export class BrowserService {
         canGoBack: false,
         canGoForward: false,
         visible: false,
-        created: false
+        created: false,
+        consoleEntries: []
       }
     }
 
@@ -305,6 +351,7 @@ export class BrowserService {
       canGoForward: isDestroyed ? false : webContents.canGoForward(),
       visible: session.view.getVisible(),
       created: true,
+      consoleEntries: session.consoleEntries.slice(),
       error: session.error
     }
   }
@@ -337,7 +384,9 @@ export class BrowserService {
     const session: BrowserSession = {
       id: sessionId,
       view,
-      workspacePath
+      workspacePath,
+      consoleEntries: [],
+      nextConsoleEntryId: 1
     }
 
     this.activeSession = session
@@ -358,9 +407,24 @@ export class BrowserService {
     const webContents = session.view.webContents
     const emit = (): void => this.emitState(session.id)
 
-    webContents.on("did-start-loading", emit)
+    webContents.on("did-start-loading", () => {
+      session.error = undefined
+      session.consoleEntries = []
+      emit()
+    })
     webContents.on("did-stop-loading", emit)
     webContents.on("page-title-updated", emit)
+    webContents.on("console-message", (_event, level, message, line, sourceId) => {
+      session.consoleEntries = appendBrowserConsoleEntry(session.consoleEntries, {
+        id: `${session.id}:${session.nextConsoleEntryId++}`,
+        timestamp: new Date().toISOString(),
+        level: getBrowserConsoleLevel(level),
+        message: truncateBrowserConsoleMessage(message),
+        sourceId: sourceId || undefined,
+        line: Number.isFinite(line) && line > 0 ? line : undefined
+      })
+      emit()
+    })
     webContents.on("did-navigate", (_event, url) => {
       session.error = undefined
       const permissionError = getUrlPermissionError(url, session.workspacePath)
