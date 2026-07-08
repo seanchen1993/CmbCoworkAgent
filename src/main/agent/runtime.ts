@@ -156,6 +156,10 @@ import {
   InterleavedThinkingChatOpenAICompletions,
   ReasoningDisplayChatOpenAICompletions
 } from "./interleaved-thinking-completions"
+import {
+  createMalformedToolCallGuardMiddleware,
+  createMalformedToolCallRecoveryMiddleware
+} from "./malformed-tool-call-recovery"
 import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
@@ -1817,6 +1821,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
+    // FIRST for the same reason as the main agent: reject recovered-malformed
+    // calls before any tool lifecycle (hooks/fuse/task-mmd) can observe them.
+    createMalformedToolCallGuardMiddleware(),
     todoListMiddleware(),
     createFsMiddleware(),
     ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
@@ -1826,6 +1833,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
+    // Same malformed tool-call recovery as the main agent — task subagents call
+    // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
+    createMalformedToolCallRecoveryMiddleware(),
     createPatchToolCallsMiddleware()
   ]
 
@@ -1956,6 +1966,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     systemPrompt: finalSystemPrompt,
     tools,
     middleware: [
+      // FIRST (outermost wrapToolCall): reject recovered-malformed calls before
+      // ANY tool lifecycle — PreToolUse hooks must not block/rewrite them (that
+      // would replace the diagnosis with a misleading message), and the fuse/
+      // task-mmd must not observe a tool that never runs. Mirrors Claude Code's
+      // validate-before-permissions order.
+      createMalformedToolCallGuardMiddleware(),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware()] : []),
       ...postFsToolDocStripMiddleware,
@@ -1981,6 +1997,13 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         : []),
       createSummarizationMiddleware(summarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
+      // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
+      // invalid_tool_calls into normalized tool_calls (the guard middleware above
+      // rejects them with a cause-targeted error before the tool runs), and strip
+      // any already-poisoned raw tool call from the outgoing request so the
+      // OpenAI-compatible API can't 400. Complementary to patchToolCalls below
+      // (which only pairs NORMALIZED dangling calls).
+      createMalformedToolCallRecoveryMiddleware(),
       createPatchToolCallsMiddleware(),
       ...skillsMiddlewareArray,
       ...memoryMiddlewareArray,
@@ -3141,9 +3164,7 @@ function getModelInstance(
         enable_thinking: customConfig.enableThinking === true,
         reasoning_effort: thinkingEffort
       },
-      ...(customConfig.enableThinking
-        ? { thinking: { type: "enabled" } }
-        : {})
+      ...(customConfig.enableThinking ? { thinking: { type: "enabled" } } : {})
     },
     configuration: {
       baseURL: customConfig.baseUrl,
