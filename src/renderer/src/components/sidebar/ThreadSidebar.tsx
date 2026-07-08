@@ -20,7 +20,6 @@ import {
   FolderPlus,
   Download,
   MessageSquare,
-  Terminal,
   HeartPulse
 } from "lucide-react"
 import { toast } from "sonner"
@@ -427,8 +426,6 @@ export function ThreadSidebar(): React.JSX.Element {
     setShowCustomizeView,
     showKanbanView,
     setShowKanbanView,
-    showClaudeCodeView,
-    setShowClaudeCodeView,
     showHarnessBoardView,
     setShowHarnessBoardView,
     showDashboardView,
@@ -1013,20 +1010,6 @@ export function ThreadSidebar(): React.JSX.Element {
                 <LayoutDashboard className="size-3" />
               </div>
               <span className="text-muted-foreground">看板视图</span>
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                "w-full justify-start gap-2 text-sm font-semibold",
-                showClaudeCodeView && "bg-muted"
-              )}
-              onClick={() => setShowClaudeCodeView(!showClaudeCodeView)}
-            >
-              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                <Terminal className="size-3" />
-              </div>
-              <span className="text-muted-foreground">Code</span>
             </Button>
             {dashboardAllowed && (
               <Button
