@@ -80,6 +80,7 @@ import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
   getRecentSkillUsageNames,
+  getThreadActiveSkillSource,
   getThreadActiveSkills,
   setThreadActiveSkills,
   snapshotSkillProposalWindow,
@@ -421,8 +422,17 @@ interface HarnessAgentContext {
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
+}
+
+type HarnessFeatureBindingContext = {
+  projectId: string
+  slug: string
+  nodeName?: string
+  nodeStatus?: string
 }
 
 function getHarnessHookContext(
@@ -434,6 +444,8 @@ function getHarnessHookContext(
   | "harnessProjectId"
   | "harnessAdapterName"
   | "harnessAdapterVersion"
+  | "harnessNodeName"
+  | "harnessNodeStatus"
   | "projectCode"
   | "projectDir"
 > {
@@ -443,14 +455,29 @@ function getHarnessHookContext(
     harnessProjectId: context.harnessProjectId,
     harnessAdapterName: context.harnessAdapterName,
     harnessAdapterVersion: context.harnessAdapterVersion,
+    harnessNodeName: context.harnessNodeName,
+    harnessNodeStatus: context.harnessNodeStatus,
     projectCode: context.projectCode,
     projectDir: context.projectDir
   }
 }
 
+function resolveHarnessCurrentStageForContext(
+  projectId?: string,
+  slug?: string
+): Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus"> {
+  if (!projectId || !slug) return {}
+  const currentStage = resolveHarnessFeatureCurrentStage(projectId, slug)
+  if (!currentStage?.name) return {}
+  return {
+    harnessNodeName: currentStage.name,
+    ...(currentStage.status ? { harnessNodeStatus: currentStage.status } : {})
+  }
+}
+
 function getHarnessAgentContext(
   metadata: Record<string, unknown>,
-  options: { workspacePath?: string } = {}
+  options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
 ): HarnessAgentContext {
   const isHarnessProjectSession =
     Boolean(metadata.harnessProjectSession) &&
@@ -467,6 +494,16 @@ function getHarnessAgentContext(
         ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
       }
     }
+    const currentStage =
+      options.featureBinding !== undefined
+        ? {
+            harnessNodeName: options.featureBinding.nodeName,
+            harnessNodeStatus: options.featureBinding.nodeStatus
+          }
+        : resolveHarnessCurrentStageForContext(
+            featureContext.harnessProjectId,
+            featureContext.featureId
+          )
 
     return {
       pluginPromptInject: featureContext.systemPromptInject,
@@ -488,6 +525,7 @@ function getHarnessAgentContext(
       harnessProjectId: featureContext.harnessProjectId,
       harnessAdapterName: featureContext.harnessAdapterName,
       harnessAdapterVersion: featureContext.harnessAdapterVersion,
+      ...currentStage,
       projectCode: featureContext.projectCode,
       projectDir: featureContext.projectDir
     }
@@ -1066,6 +1104,8 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   threadId: string
@@ -1102,6 +1142,8 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     harnessProjectId: params.harnessProjectId,
     harnessAdapterName: params.harnessAdapterName,
     harnessAdapterVersion: params.harnessAdapterVersion,
+    harnessNodeName: params.harnessNodeName,
+    harnessNodeStatus: params.harnessNodeStatus,
     projectCode: params.projectCode,
     projectDir: params.projectDir,
     sessionId: params.threadId,
@@ -1292,6 +1334,8 @@ async function activateExplicitSkillFromMessage({
   harnessProjectId,
   harnessAdapterName,
   harnessAdapterVersion,
+  harnessNodeName,
+  harnessNodeStatus,
   projectCode,
   projectDir,
   sessionId,
@@ -1311,6 +1355,8 @@ async function activateExplicitSkillFromMessage({
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   sessionId: string
@@ -1365,6 +1411,8 @@ async function activateExplicitSkillFromMessage({
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     sessionId,
@@ -1786,19 +1834,21 @@ function workflowLeaveBlockedMessage(
   workspacePath: string | undefined
 ): string | null {
   const active = workflowRunManager.isActive(threadId)
-  const pendingRun = workspacePath
-    ? workflowRunManager.findPendingNotification(workspacePath, threadId)
-    : null
-  // Escape hatch: if auto-re-report has given up on the pending run this process
-  // (a wedged report turn / API outage), stop blocking — otherwise the user is
-  // locked in workflow mode with no way out but deleting the thread. HONEST CAVEAT
-  // (#5): leaving takes the pending result OFF the auto-report path. A restart
-  // re-reports ONLY while the thread is still in workflow mode; after leaving (and
-  // especially after a later workspace switch, which makes list/hydrate look under
-  // the new path) the result is stranded under the ORIGINAL workspace — not lost
-  // (on disk, visible in that workspace's history), just reachable only by returning
-  // to workflow mode there. (Mirrors the caveat in threads.ts.)
-  const pending = pendingRun !== null && !workflowRunManager.isRenotifyExhausted(pendingRun.runId)
+  // Scan ALL pending runs (hasDeliverablePendingNotification), not just the
+  // first candidate: an exhausted newest run must not unlock the exit while an
+  // older, still-deliverable run waits. Escape hatch preserved: when EVERY
+  // pending run's auto-re-report has been exhausted this process (wedged report
+  // turn / API outage), stop blocking — otherwise the user is locked in
+  // workflow mode with no way out but deleting the thread. HONEST CAVEAT (#5):
+  // leaving takes the pending result OFF the auto-report path. A restart
+  // re-reports ONLY while the thread is still in workflow mode; after leaving
+  // (and especially after a later workspace switch, which makes list/hydrate
+  // look under the new path) the result is stranded under the ORIGINAL
+  // workspace — not lost (on disk, visible in that workspace's history), just
+  // reachable only by returning to workflow mode there. (Mirrors threads.ts.)
+  const pending = workspacePath
+    ? workflowRunManager.hasDeliverablePendingNotification(workspacePath, threadId)
+    : false
   return active || pending
     ? "仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换模式。"
     : null
@@ -4095,9 +4145,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // at this turn (进行中/已完成/...) to the binding, so this turn's trace + code
       // events are sliceable by stage and by status-within-stage. Best-effort: any
       // failure leaves nodeName/nodeStatus absent (we never report the raw node id).
-      let harnessFeatureBinding:
-        | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
-        | undefined
+      let harnessFeatureBinding: HarnessFeatureBindingContext | undefined
       try {
         const bindingThread = getThread(threadId)
         if (bindingThread?.metadata) {
@@ -4149,15 +4197,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return getThreadActiveSkills(threadId)
       }
 
+      const computeCodeGenAttributionSkillSource = (
+        currentRunSkills: string[],
+        currentRunSkillSource: string[]
+      ): string[] => {
+        if (currentRunSkills.length > 0) return currentRunSkillSource
+        return getThreadActiveSkillSource(threadId)
+      }
+
       const syncUsedSkillsContext = (): void => {
         const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+        const currentRunSkillSource = skillUsageDetector.getUsedSkillSourceRefs()
         tracer.setUsedSkills(currentRunSkills)
+        tracer.setSkillSource(currentRunSkillSource)
         tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
         // A non-empty current-run skill set becomes (supersedes) the thread's
         // active skills; a skill-less run leaves the prior active set intact.
-        if (currentRunSkills.length > 0) setThreadActiveSkills(threadId, currentRunSkills)
+        if (currentRunSkills.length > 0) {
+          setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource)
+        }
         setAdoptionContext(threadId, {
-          usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
+          usedSkills: computeCodeGenAttributionSkills(currentRunSkills),
+          skillSource: computeCodeGenAttributionSkillSource(
+            currentRunSkills,
+            currentRunSkillSource
+          )
         })
       }
 
@@ -4431,7 +4495,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
-        const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+        const harnessAgentContext = getHarnessAgentContext(metadata, {
+          workspacePath,
+          featureBinding: harnessFeatureBinding
+        })
         sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
         const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
           window,
@@ -6038,6 +6105,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (completionOutcome === "halted") {
               markInvokeIncomplete("Stop hook halted the turn.")
               pauseActiveGoalForRuntimeStop("Stop hook halted the turn.")
+              // A halted workflow-notification turn must NOT fall through to
+              // the success settlement below the loop — that would persist
+              // delivered=true for a report the model never finished, silently
+              // burying the run's result. Release the in-flight mark and keep
+              // delivered=false (the catch documents the same halt philosophy
+              // for the thrown shape): the next hydrate/restart re-surfaces it.
+              if (workflowNotificationToSettle) {
+                workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+                workflowNotificationToSettle = undefined
+              }
               break
             }
 
@@ -6625,6 +6702,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
         }
       } finally {
+        // Safety net for EARLY RETURNS inside the try (Stop hook blocked
+        // completion, PostSkillUse max revisions, goal-continuation halts…):
+        // success settles on the ack path and thrown errors settle in the
+        // catch, but a bare `return` bypasses BOTH — leaving the runId in
+        // inFlightNotifications for the process lifetime, where
+        // findPendingNotification keeps excluding it and the (still
+        // delivered=false) run can never be re-reported until restart. Clear
+        // the in-flight mark WITHOUT persisting delivered and WITHOUT
+        // auto-renotify — these exits are user/policy stops, mirroring the
+        // catch's documented halt semantics; the run stays re-discoverable.
+        if (workflowNotificationToSettle) {
+          workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+          workflowNotificationToSettle = undefined
+        }
         window.removeListener("closed", onWindowClosed)
         await settleDrainedCoordinatorNotifications("restore")
         if (clearCoordinatorNotificationSelectedSkillsOnExit) {

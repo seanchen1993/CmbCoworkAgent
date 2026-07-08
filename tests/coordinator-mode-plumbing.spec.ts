@@ -1638,8 +1638,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   const threadsIpc = await readProjectFile("src/main/ipc/threads.ts")
   assertIncludes(
     threadsIpc,
-    "closeWorkerCheckpointersForThread(threadId)",
-    "thread deletion closes worker checkpointers"
+    "retireThreadCheckpointers(threadId)",
+    "thread deletion retires the parent AND all sub-thread checkpointers (tombstone + poison)"
   )
   assertIncludes(
     threadsIpc,
@@ -2300,8 +2300,244 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    'if (parentThreadId.includes("__worker__"))',
-    "runtime refuses ambiguous worker-checkpoint cleanup requests for invalid parent thread ids"
+    "retiredThreadIds.add(threadId)",
+    "thread retirement tombstones FIRST so no interleaved caller can recreate a checkpointer"
+  )
+  assertIncludes(
+    runtime,
+    "await checkpointer.retire()",
+    "thread retirement poisons instances (retire, not close) so held references cannot resurrect files"
+  )
+  assertIncludes(
+    runtime,
+    'if (threadId.includes("__")) continue',
+    "LRU eviction skips ALL sub-thread checkpointers (rule, not a name list)"
+  )
+  assertIncludes(
+    runtime,
+    "if (isRetiredThreadId(threadId) || !checkpointers.has(threadId)) {",
+    "the mid-init refusal re-sweeps on active tombstone OR no-cached-saver — a BEST-EFFORT mitigation (accepted residual: a revived saver mid-initialize is not cached either; its fallout is bounded and self-healing), not an ownership proof"
+  )
+  const workflowRunManager = await readProjectFile("src/main/agent/workflow/run-manager.ts")
+  assertIncludes(
+    workflowRunManager,
+    "isWorkflowRunDirDisposed(request.workspacePath, request.threadId)",
+    "workflow launch refuses a deleted thread (persistScriptFile would mkdir the swept run dir back)"
+  )
+  const workflowTool = await readProjectFile("src/main/agent/workflow/tool.ts")
+  assertSourceOrder(
+    workflowTool,
+    "isWorkflowRunDirDisposed(workspacePath, threadId)",
+    "await ensureWorkflowApproved(",
+    "workflow tool refuses a deleted thread BEFORE prompting for approval — the thread's UI is gone, so the prompt would hang the tool call"
+  )
+  const threadsIpcForRollback = await readProjectFile("src/main/ipc/threads.ts")
+  assertIncludes(
+    threadsIpcForRollback,
+    "rollbackWorkflowThreadDisposal(threadId, priorDisposalMark)",
+    "a deletion failing before dbDeleteThread rolls the workflow tombstone back — the surviving thread must not stay poisoned until restart"
+  )
+  assertSourceOrder(
+    threadsIpcForRollback,
+    "purgeThreadCheckpointArtifacts(threadId)",
+    "deleteCoordinatorWorkerArtifacts(threadId, workspacePath)",
+    "checkpoint sweeps run in the SAME sync segment as the retire settlement — an await before them would let a revived fixed-id beat flush a fresh checkpoint the old deletion then eats"
+  )
+  const retireCall = "await retireThreadCheckpointers(threadId)"
+  const purgeCall = "purgeThreadCheckpointArtifacts(threadId)"
+  const retireIndex = threadsIpcForRollback.indexOf(retireCall)
+  const purgeIndex = threadsIpcForRollback.indexOf(purgeCall)
+  assert(retireIndex >= 0, "thread deletion must await retireThreadCheckpointers")
+  assert(purgeIndex > retireIndex, "thread deletion must purge checkpoints after retire settles")
+  const retireToPurgeCodeOnly = threadsIpcForRollback
+    .slice(retireIndex + retireCall.length, purgeIndex)
+    .replace(/\/\/.*$/gm, "")
+  assert(
+    !/^\s*await\b/m.test(retireToPurgeCodeOnly),
+    "no await may be inserted between retire settlement and checkpoint sweeps"
+  )
+  // Same-thread deletion mutex (was a real P2: overlapping deletes interleave
+  // mark/rollback — A's failure rollback lifts the tombstone B depends on).
+  // Source-level guard: a behavioral test would need a full electron/db mock
+  // harness for the IPC handler; these three assertions lock the mutex shape.
+  assertIncludes(
+    threadsIpcForRollback,
+    "const deletingThreads = new Map<string, Promise<void>>()",
+    "thread deletion keeps a per-thread serialization map"
+  )
+  assertSourceOrder(
+    threadsIpcForRollback,
+    "while (deletingThreads.has(threadId))",
+    "const deletion = performThreadDeletion(event, threadId)",
+    "a new deletion WAITS OUT any in-flight deletion of the same thread before starting"
+  )
+  assertMatches(
+    threadsIpcForRollback,
+    /finally \{\s*if \(deletingThreads\.get\(threadId\) === deletion\) deletingThreads\.delete\(threadId\)/,
+    "the deletion mutex entry is released on success AND failure (finally), so a failed delete can be retried"
+  )
+  const chatxService = await readProjectFile("src/main/services/chatx.ts")
+  assertIncludes(
+    chatxService,
+    "handleInbound(next, true)",
+    "chatx queue drain must skip receipt-dedup — the entry's id was marked when it was queued, so re-checking silently dropped every queued message"
+  )
+  assertOccurrenceCount(
+    chatxService,
+    "abortController.signal.reason === CHATX_STOP_ABORT_REASON",
+    1,
+    "the stop reason may be consulted ONCE, in the abort CLASSIFICATION only — never for a handler-side dedup release (stopChatX's synchronous release is the single point; a second delete can strip a redelivered copy's fresh mark)"
+  )
+  assertSourceOrder(
+    chatxService,
+    "const replySent = lastAssistantText",
+    'processedOutcome = "replied"',
+    "the replied outcome is claimed only AFTER the HTTP send is verified — a swallowed send failure must not masquerade as 回复完成 while the remote got nothing"
+  )
+  assertOccurrenceCount(
+    chatxService,
+    "drainNextQueued(",
+    5,
+    "queue draining continues on EVERY requeued exit (definition + main finally + robot-gone + workspace-missing + setup-failure) — an early-exiting requeued message must not strand the backlog"
+  )
+  {
+    const stopChatXBody = chatxService.slice(
+      chatxService.indexOf("export function stopChatX"),
+      chatxService.indexOf("export function cancelChatXByThreadId")
+    )
+    assertIncludes(
+      stopChatXBody,
+      "processedMsgIds.delete(queued.msgId)",
+      "stopChatX releases the dedup marks of the queued messages it drops — dropped ≠ processed, broker redeliveries must still land after a restart"
+    )
+    assertMatches(
+      chatxService,
+      /inFlightMsgIds\.delete\(chatKey\)[\s\S]{0,900}?sendChatXReply/,
+      "the success branch removes the message from the stop-releasable set BEFORE the reply is sent — a stop landing after the reply must not re-open an already-answered msgId for redelivery (duplicate tools/replies)"
+    )
+    assertIncludes(
+      stopChatXBody,
+      "processedMsgIds.delete(activeMsgId)",
+      "stopChatX releases the ACTIVE message's dedup mark synchronously at abort — the handler's finally-release loses the race against a quick reconnect's broker redelivery"
+    )
+    assertIncludes(
+      stopChatXBody,
+      "controller.abort(CHATX_STOP_ABORT_REASON)",
+      "stopChatX carries its intent ON the abort signal — the global `stopped` flag is reset by restartChatX before the aborted handler's catch runs, so a flag check there swallows broker redeliveries"
+    )
+    assertNotIncludes(
+      stopChatXBody,
+      "runningChats.clear()",
+      "stopChatX must NOT clear owner-managed run state — the handler's finally does, after its close settles (else stop→restart reopens the dual-writer window on a reused chat thread)"
+    )
+  }
+  const schedulerService = await readProjectFile("src/main/services/scheduler.ts")
+  assertSourceOrder(
+    schedulerService,
+    "await closeCheckpointer(threadId)",
+    "runningTasks.delete(taskId)",
+    "scheduler run state survives until the checkpointer close settles (owner-finally), while still deleting before the renderer broadcast"
+  )
+  for (const [label, source] of [
+    ["chatx", chatxService],
+    ["scheduler", schedulerService]
+  ] as const) {
+    assertSourceOrder(
+      source,
+      "dbDeleteThread(threadId)",
+      "purgeThreadCheckpointArtifacts(threadId)",
+      `${label}'s discarded-thread cleanup deletes the transcript too (retire + purge), matching threads:delete semantics — a bare DB-row delete leaves an orphan checkpoint the finally's reusable close just flushed`
+    )
+    assertSourceOrder(
+      source,
+      "await retireThreadCheckpointers(threadId)",
+      "purgeThreadCheckpointArtifacts(threadId)",
+      `${label}'s discarded-thread cleanup must RETIRE before purging (writers poisoned before the disk sweep) — dbDelete + purge without retire would let the finally's reusable close resurrect the file`
+    )
+  }
+  assertMatches(
+    chatxService,
+    /await closeCheckpointer\(threadId\)[^\n]*\n\s*runningChats\.delete\(chatKey\)/,
+    "chatx keeps its runningChats gate up until the checkpointer close settles — an inbound in the close window would pin, skip the pending-close wait, and dual-write the reused thread's sqlite (heartbeat's finally, same family)"
+  )
+  {
+    const stopSchedulerBody = schedulerService.slice(
+      schedulerService.indexOf("export function stopScheduler"),
+      schedulerService.indexOf("function armTimer")
+    )
+    assertIncludes(
+      stopSchedulerBody,
+      "controller.abort()",
+      "stopScheduler still ABORTS every running task — abort-only means both halves: signal the stop AND leave run state to the owner's finally"
+    )
+    assertNotIncludes(
+      stopSchedulerBody,
+      "runningTasks.clear()",
+      "stopScheduler must NOT clear run state — executeTask's finally releases it after its own cleanup settles (owner-finally principle, same as stopChatX/stopHeartbeat)"
+    )
+    assertNotIncludes(
+      stopSchedulerBody,
+      "activeAbortControllers.clear()",
+      "stopScheduler must NOT clear controllers — isTaskRunning()/cancelTask() must stay accurate during the unwind window"
+    )
+  }
+  const workflowRunManagerSource = await readProjectFile("src/main/agent/workflow/run-manager.ts")
+  assertIncludes(
+    workflowRunManagerSource,
+    "> MAX_RENOTIFY_ATTEMPTS",
+    "exhaustion is STRICTLY greater-than: the MAXth (final) re-report is dispatched-and-pending, not exhausted — >= would unlock the mode-exit guard before the renderer timer fires and silently drop the last report"
+  )
+  assertIncludes(
+    workflowRunManagerSource,
+    "this.inFlightNotifications.has(runId) || !this.isRenotifyExhausted(runId)",
+    "the busy guard counts an in-flight (even exhausted) run as deliverable — exiting workflow mode mid-report would strand that delivery"
+  )
+  const heartbeatService = await readProjectFile("src/main/services/heartbeat.ts")
+  assertIncludes(
+    heartbeatService,
+    "reviveRetiredThread(threadId)",
+    "heartbeat lifts the runtime tombstone for its fixed thread id (else every beat fails until restart)"
+  )
+  assertIncludes(
+    heartbeatService,
+    "reviveWorkflowThread(threadId)",
+    "heartbeat lifts the run-store tombstone for its fixed thread id"
+  )
+  assertSourceOrder(
+    heartbeatService,
+    "reviveRetiredThread(threadId)",
+    "const existing = dbGetThread(threadId)",
+    "heartbeat revives UNCONDITIONALLY (before the row-exists branch) — a row-missing-only revive deadlocks when a deletion's late retire re-tombstones a mid-deletion recreation"
+  )
+  assertMatches(
+    heartbeatService,
+    /await closeCheckpointer\(HEARTBEAT_THREAD_ID\)[^\n]*\n(?:\s*\}\n)?\s*running = false/,
+    "heartbeat keeps `running` up until its checkpointer close settles — a run-now in the close window would pin, skip the pending-close wait, and dual-write the same file"
+  )
+  assertSourceOrder(
+    heartbeatService,
+    "running = true",
+    "await resolveModel",
+    "heartbeat sets its re-entry gate SYNCHRONOUSLY before the first await — a gate set after routing lets two fire-and-forget triggers race getCheckpointer's create-then-cache and dual-write the fixed-id sqlite"
+  )
+  const stopHeartbeatBody = heartbeatService.slice(
+    heartbeatService.indexOf("export function stopHeartbeat"),
+    heartbeatService.indexOf("/** Restart the timer")
+  )
+  assertNotIncludes(
+    stopHeartbeatBody,
+    "running = false",
+    "stopHeartbeat must NOT release the runNow re-entry gate — only the owning run's finally may, after its close settles (else stop+run-now reopens the dual-writer window)"
+  )
+  assertNotIncludes(
+    stopHeartbeatBody,
+    "abortController = null",
+    "stopHeartbeat must NOT null the shared controller — the running execution still reads its signal; the owner clears it identity-checked"
+  )
+  assertIncludes(
+    heartbeatService,
+    "if (abortController === controller) abortController = null",
+    "heartbeat run finally clears the shared controller only when it still owns it"
   )
   assertIncludes(
     runtime,

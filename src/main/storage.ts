@@ -13,6 +13,11 @@ import {
   readdirSync
 } from "fs"
 import {
+  deleteSqliteDurableFileSync,
+  sqliteDurableVariantBase,
+  sqliteQuarantineVariantBase
+} from "./utils/sqlite-durable-file"
+import {
   isSupportedHookEvent,
   type HookConfig,
   type HookInjectUserContext,
@@ -112,10 +117,72 @@ export function getThreadCheckpointPath(threadId: string): string {
 }
 
 export function deleteThreadCheckpoint(threadId: string): void {
-  const path = getThreadCheckpointPath(threadId)
-  if (existsSync(path)) {
-    unlinkSync(path)
+  // Checkpoints are durable sqlite files: the live .sqlite plus .bak/.tmp
+  // sidecars that openRecoveredSqliteDatabase can restore from. Deleting only
+  // the live file lets a reused threadId (workflow resume reuses runId and
+  // restarts agent indices) resurrect the dead transcript from .bak — purge
+  // every variant.
+  //
+  // HOT PATH: called from every workflow subagent's finally, so it deletes the
+  // known fixed-suffix variants only (no directory scan). Quarantine archives
+  // never resurrect (not recovery candidates); their privacy cleanup belongs to
+  // thread deletion — see purgeThreadCheckpointArtifacts.
+  deleteSqliteDurableFileSync(getThreadCheckpointPath(threadId))
+}
+
+/** Deep cleanup for the USER-FACING "delete thread" semantic: durable variants
+ * plus quarantine archives (`.corrupt.<ts>` / `.bak.<ts>`), which are not
+ * recovery candidates but still hold full transcripts (privacy residue). Does a
+ * directory scan, so keep it on the cold thread-deletion path — subagent
+ * self-clean uses the fast deleteThreadCheckpoint instead. */
+export function purgeThreadCheckpointArtifacts(threadId: string): void {
+  deleteSqliteDurableFileSync(getThreadCheckpointPath(threadId))
+  const dir = getThreadCheckpointDir()
+  for (const filename of readdirSync(dir)) {
+    if (sqliteQuarantineVariantBase(filename) !== threadId) continue
+    try {
+      unlinkSync(join(dir, filename))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
   }
+}
+
+/** Shared sweep for prefix-scoped checkpoint cleanup: removes the live file,
+ * every durable sidecar (a `.bak` whose live file is already gone still counts
+ * as a leftover checkpoint) AND quarantine archives (transcript-bearing
+ * `.corrupt.<ts>` / `.bak.<ts>` files). Returns the number of distinct
+ * checkpoint thread ids removed. */
+function sweepCheckpointVariants(prefix: string): number {
+  const dir = getThreadCheckpointDir()
+
+  // Group by checkpoint first, then delete each through the durable helper so
+  // every checkpoint gets the safe deletion order (sidecars first, live last)
+  // instead of readdir's arbitrary file order. The helper tolerates ENOENT, so
+  // a concurrent cleanup (subagent self-clean) racing this sweep is safe.
+  const checkpointThreadIds = new Set<string>()
+  const quarantineFiles: string[] = []
+  for (const filename of readdirSync(dir)) {
+    const durableBase = sqliteDurableVariantBase(filename)
+    const quarantineBase = durableBase === null ? sqliteQuarantineVariantBase(filename) : null
+    const checkpointThreadId = durableBase ?? quarantineBase
+    if (!checkpointThreadId || !checkpointThreadId.startsWith(prefix)) continue
+    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
+    if (quarantineBase !== null) quarantineFiles.push(filename)
+    checkpointThreadIds.add(checkpointThreadId)
+  }
+  for (const checkpointThreadId of checkpointThreadIds) {
+    deleteSqliteDurableFileSync(join(dir, `${checkpointThreadId}.sqlite`))
+  }
+  for (const filename of quarantineFiles) {
+    try {
+      unlinkSync(join(dir, filename))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+  }
+
+  return checkpointThreadIds.size
 }
 
 export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
@@ -128,20 +195,7 @@ export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
     )
   }
 
-  const dir = getThreadCheckpointDir()
-  const prefix = `${parentThreadId}__worker__`
-  let deleted = 0
-
-  for (const filename of readdirSync(dir)) {
-    if (!filename.endsWith(".sqlite")) continue
-    const checkpointThreadId = filename.slice(0, -".sqlite".length)
-    if (!checkpointThreadId.startsWith(prefix)) continue
-    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
-    unlinkSync(join(dir, filename))
-    deleted += 1
-  }
-
-  return deleted
+  return sweepCheckpointVariants(`${parentThreadId}__worker__`)
 }
 
 /** Delete leftover workflow-subagent checkpoints for a thread. Workflow subagents
@@ -160,20 +214,7 @@ export function deleteThreadWorkflowCheckpoints(parentThreadId: string): number 
     )
   }
 
-  const dir = getThreadCheckpointDir()
-  const prefix = `${parentThreadId}__wf_`
-  let deleted = 0
-
-  for (const filename of readdirSync(dir)) {
-    if (!filename.endsWith(".sqlite")) continue
-    const checkpointThreadId = filename.slice(0, -".sqlite".length)
-    if (!checkpointThreadId.startsWith(prefix)) continue
-    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
-    unlinkSync(join(dir, filename))
-    deleted += 1
-  }
-
-  return deleted
+  return sweepCheckpointVariants(`${parentThreadId}__wf_`)
 }
 
 export function getEnvFilePath(): string {
@@ -972,6 +1013,8 @@ export interface CustomModelConfig {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1005,6 +1048,8 @@ export const MAX_TOP_P = 1
 export const DEFAULT_TOP_K = 40
 export const MIN_TOP_K = 0
 export const MAX_TOP_K = 1_000
+export type ThinkingEffort = "high" | "max"
+export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 
 export interface CustomModelPublicConfig {
   id: string
@@ -1018,6 +1063,8 @@ export interface CustomModelPublicConfig {
   topP: number
   topK: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1032,6 +1079,8 @@ interface StoredCustomModelRecord {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1114,11 +1163,20 @@ function normalizeTopK(value: unknown): number {
   return Math.min(MAX_TOP_K, Math.max(MIN_TOP_K, Math.floor(value)))
 }
 
+function normalizeThinkingEffort(value: unknown): ThinkingEffort {
+  return value === "max" ? "max" : DEFAULT_THINKING_EFFORT
+}
+
 function defaultInterleavedThinkingForModel(model: string): boolean {
   return /minimax/i.test(model)
 }
 
-function resolveInterleavedThinkingSetting(model: string, value: unknown): boolean {
+function resolveInterleavedThinkingSetting(
+  model: string,
+  value: unknown,
+  enableThinking: unknown
+): boolean {
+  if (enableThinking !== true) return false
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
 }
 
@@ -1402,10 +1460,13 @@ function toPublicConfig(
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
+    enableThinking: config.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
-      config.interleavedThinking
+      config.interleavedThinking,
+      config.enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 }
@@ -1424,7 +1485,13 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
     temperature: normalizeTemperature(item.temperature),
     topP: normalizeTopP(item.topP),
     topK: normalizeTopK(item.topK),
-    interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
+    enableThinking: item.enableThinking === true,
+    interleavedThinking: resolveInterleavedThinkingSetting(
+      item.model,
+      item.interleavedThinking,
+      item.enableThinking
+    ),
+    thinkingEffort: normalizeThinkingEffort(item.thinkingEffort),
     ...(item.tier !== undefined && { tier: item.tier })
   }))
 }
@@ -1444,10 +1511,13 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
+    enableThinking: record.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
-      record.interleavedThinking
+      record.interleavedThinking,
+      record.enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(record.thinkingEffort),
     ...(record.tier !== undefined && { tier: record.tier })
   }
 }
@@ -1509,10 +1579,13 @@ export function upsertCustomModelConfig(
     temperature: validatedTemperature,
     topP: validatedTopP,
     topK: validatedTopK,
+    enableThinking: config.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
-      config.interleavedThinking
+      config.interleavedThinking,
+      config.enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 

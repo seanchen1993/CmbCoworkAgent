@@ -2322,6 +2322,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     supportsSessionContextInjection,
     lifecycle: {
       status: project.lifecycle.status,
+      createAt: project.lifecycle.createAt,
       updateAt: project.lifecycle.updateAt
     }
   }

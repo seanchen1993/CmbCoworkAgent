@@ -297,6 +297,7 @@ export interface HarnessProjectListItem {
   supportsSessionContextInjection: boolean
   lifecycle: {
     status: "active" | "archived"
+    createAt: string
     /** Last lifecycle/metadata change (set on metadata edit and on archive). */
     updateAt?: string
   }

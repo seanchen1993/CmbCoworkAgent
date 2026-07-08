@@ -30,9 +30,9 @@ import type {
 
 /** 团队标杆奖一行：后端室/组指标 + 前端按市场作者归属补的贡献技能数 / 覆盖室数。 */
 export interface TeamBenchmarkRow extends DashboardAwardTeamBenchmarkRow {
-  /** 贡献技能数（室级有值；组级为 null，该指标按室口径）。 */
+  /** 贡献技能数（室级/组级按应用市场作者归属补齐）。 */
   contributedSkillCount: number | null
-  /** 技能试用覆盖室数（室级有值；组级为 null）。 */
+  /** 技能试用覆盖室数（室级/组级按本行贡献技能集统计）。 */
   skillCoverageShiCount: number | null
   children?: TeamBenchmarkRow[]
 }
@@ -647,7 +647,7 @@ function ApplicationTable({
 }
 
 const TEAM_HINT =
-  "按 室(upperOrgLv1) → 组(upperOrgLv0) 两级统计。室/组人均使用次数=本行使用次数/本行去重用户；总量人均使用次数=全员总使用次数/全员去重用户，仅作全局参考；超过人均人数=该室/组内使用次数高于本行室/组人均使用次数的用户数。代码提交行数取已采纳行数；AI 代码入库率四口径同其它榜单。贡献技能数 / 技能覆盖室数按应用市场作者归属（发布者所属室）统计，仅在室级展示。"
+  "按 室(upperOrgLv1) → 组(upperOrgLv0) 两级统计。室/组人均使用次数=本行使用次数/本行去重用户；总量人均使用次数=全员总使用次数/全员去重用户，仅作全局参考；超过人均人数=该室/组内使用次数高于本行室/组人均使用次数的用户数。代码提交行数取已采纳行数；AI 代码入库率四口径同其它榜单。贡献技能数 / 技能覆盖室数按应用市场作者归属与技能上传时间统计，室级汇总全室，组级汇总本组。"
 
 type TeamSortKey =
   | "usageCount"

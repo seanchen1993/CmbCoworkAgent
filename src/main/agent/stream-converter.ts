@@ -16,6 +16,7 @@ export type SchedulerEvent =
       type: "message-delta"
       id: string
       content: string
+      reasoning?: string
       toolCalls?: unknown[]
       /**
        * When present, this delta is subagent-interior (its checkpoint_ns matched
@@ -41,6 +42,7 @@ export type SchedulerEvent =
         id: string
         role: "user" | "assistant" | "tool" | "system"
         content: string
+        reasoning?: string
         tool_calls?: unknown[]
         tool_call_id?: string
         name?: string
@@ -105,6 +107,57 @@ function extractContent(raw: unknown): string {
       .join("")
   }
   return ""
+}
+
+function extractReasoningText(reasoning: unknown): string {
+  if (typeof reasoning === "string") return reasoning
+  if (Array.isArray(reasoning)) return reasoning.map(extractReasoningText).filter(Boolean).join("")
+  if (reasoning && typeof reasoning === "object") {
+    const record = reasoning as Record<string, unknown>
+    if (typeof record.text === "string") return record.text
+    if (typeof record.reasoning === "string") return record.reasoning
+    if (typeof record.reasoning_content === "string") return record.reasoning_content
+    if (typeof record.reasoning_text === "string") return record.reasoning_text
+    if (typeof record.content === "string") return record.content
+    if (typeof record.summary === "string") return record.summary
+    if (typeof record.delta === "string") return record.delta
+    if (Array.isArray(record.parts)) {
+      return record.parts.map(extractReasoningText).filter(Boolean).join("")
+    }
+    if (Array.isArray(record.reasoning_details)) {
+      return record.reasoning_details.map(extractReasoningText).filter(Boolean).join("")
+    }
+    if (Array.isArray(record.summary)) {
+      return record.summary.map(extractReasoningText).filter(Boolean).join("")
+    }
+    if (Array.isArray(record.details)) {
+      return record.details.map(extractReasoningText).filter(Boolean).join("")
+    }
+  }
+  return ""
+}
+
+function extractReasoningFromKwargs(kwargs: Record<string, unknown>): string {
+  const additionalKwargs =
+    kwargs.additional_kwargs && typeof kwargs.additional_kwargs === "object"
+      ? (kwargs.additional_kwargs as Record<string, unknown>)
+      : undefined
+  return extractReasoningText(
+    kwargs.reasoning ??
+      kwargs.reasoning_content ??
+      kwargs.reasoning_text ??
+      kwargs.reasoning_details ??
+      kwargs.summary ??
+      kwargs.details ??
+      kwargs.delta ??
+      additionalKwargs?.reasoning ??
+      additionalKwargs?.reasoning_content ??
+      additionalKwargs?.reasoning_text ??
+      additionalKwargs?.reasoning_details ??
+      additionalKwargs?.summary ??
+      additionalKwargs?.details ??
+      additionalKwargs?.delta
+  )
 }
 
 function isToolMessageError(kwargs: Record<string, unknown>): boolean {
@@ -223,6 +276,7 @@ export class StreamConverter {
 
     if (className.includes("AI")) {
       const content = extractContent(kwargs.content ?? msgChunk.content)
+      const reasoning = extractReasoningFromKwargs(kwargs)
       const msgId = kwargs.id as string | undefined
       if (!msgId) return events
 
@@ -230,11 +284,12 @@ export class StreamConverter {
         kwargs.tool_calls,
         kwargs.tool_call_chunks
       )
-      if (content || toolCalls.length) {
+      if (content || reasoning || toolCalls.length) {
         events.push({
           type: "message-delta",
           id: msgId,
           content: content || "",
+          ...(reasoning ? { reasoning } : {}),
           ...(toolCalls.length ? { toolCalls } : {}),
           ...(subagentId ? { subagentId } : {})
         })
@@ -436,10 +491,12 @@ export class StreamConverter {
         else if (cn.includes("Tool")) role = "tool"
         else if (cn.includes("System")) role = "system"
 
+        const reasoning = role === "assistant" ? extractReasoningFromKwargs(kw) : ""
         return {
           id: (kw.id as string) || `msg-${index}`,
           role,
           content: extractContent(kw.content ?? msg.content),
+          ...(reasoning ? { reasoning } : {}),
           tool_calls: kw.tool_calls as unknown[] | undefined,
           ...(role === "tool" && kw.tool_call_id ? { tool_call_id: kw.tool_call_id as string } : {}),
           ...(role === "tool" && kw.name ? { name: kw.name as string } : {})

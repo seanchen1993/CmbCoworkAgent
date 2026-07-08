@@ -45,7 +45,7 @@ import {
   PlayCircle,
   Trash2,
   Copy,
-  Workflow
+  Workflow, Paperclip
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -53,6 +53,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { useAppStore } from "@/lib/store"
 import {
   consumePendingHarnessNextAction,
@@ -129,6 +130,18 @@ import {
   useSlashCommands,
   type SlashCommandItem
 } from "@/features/slash-commands/useSlashCommands"
+import {
+  removeAtFileTokenFromInput,
+  useAtFileMentions,
+  type AtFileSuggestion
+} from "@/features/mentions/useAtFileMentions"
+import { AtFileMentionPopover } from "@/features/mentions/AtFileMentionPopover"
+import {
+  resolveAtFileAttachments,
+  resolveAtFileSelection,
+  type MentionedWorkspaceFile
+} from "@/features/mentions/atFileAttachments"
+import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
@@ -1167,6 +1180,13 @@ const THINKING_MESSAGES = [
 ]
 
 const SUPPORTED_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
+const ATTACH_FILE_POPOVER_CONTENT = (
+  <div className="space-y-1">
+    <div>1. 添加文件 (txt, md, csv, docx, xlsx)</div>
+    <div>2. doc文件：不要直接改后缀，在文件系统“另存为”docx之后，再选择上传。</div>
+  </div>
+)
+const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
@@ -1265,7 +1285,7 @@ const getMessageBubbleText = (content: Message["content"]): string => {
 
 // MessageBubble renders `null` for messages with no visible content: tool-result
 // messages, empty system notices, and assistant/user messages whose text is empty
-// and that carry no tool calls. Such empty wrappers must NOT get content-visibility
+// and that carry no tool calls or reasoning. Such empty wrappers must NOT get content-visibility
 // containment — when scrolled off-screen the intrinsic-size fallback would reserve
 // phantom height (stacking across many empty tool results into a large blank gap
 // between tools and text). Detection is intentionally generous: a false positive
@@ -1281,6 +1301,12 @@ const messageRendersNothing = (message: Message): boolean => {
   if (message.role === "tool") return true
   const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
   if (hasToolCalls) return false
+  if (message.role === "assistant" && typeof message.reasoning === "string") {
+    return (
+      message.reasoning.trim().length === 0 &&
+      getMessageBubbleText(message.content).trim().length === 0
+    )
+  }
   const visibleText =
     message.role === "system"
       ? getMessageText(message.content)
@@ -2232,6 +2258,7 @@ export function ChatContainer({
     draftInput: input,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
+    workspaceFiles,
     coordinatorWorkers,
     workflowRun,
     scheduledTaskLoading,
@@ -2497,19 +2524,31 @@ export function ChatContainer({
 
   // ── File attachments state ──
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
+  const [mentionedFiles, setMentionedFiles] = useState<MentionedWorkspaceFile[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const attachmentsRef = useRef<FileAttachment[]>([])
+  const mentionedFilesRef = useRef<MentionedWorkspaceFile[]>([])
 
   // Keep ref in sync with state
   useEffect(() => {
     attachmentsRef.current = attachments
   }, [attachments])
+  useEffect(() => {
+    mentionedFilesRef.current = mentionedFiles
+  }, [mentionedFiles])
 
   const totalAttachmentChars = useMemo(
     () => attachments.reduce((sum, a) => sum + a.content.length, 0),
     [attachments]
   )
+  const totalMentionedFileChars = useMemo(
+    () => mentionedFiles.reduce((sum, file) => sum + (file.contentChars ?? 0), 0),
+    [mentionedFiles]
+  )
+  const totalPendingFileChars = totalAttachmentChars + totalMentionedFileChars
+  const totalPendingFileCount = attachments.length + mentionedFiles.length
+  const hasPendingFilePayload = totalPendingFileCount > 0
 
   const handleFileSelectByPath = useCallback(
     async (filePaths: string[]) => {
@@ -2518,9 +2557,12 @@ export function ChatContainer({
       clearError()
       try {
         const snapshot = attachmentsRef.current
-        let currentCount = snapshot.length
+        let currentCount = snapshot.length + mentionedFilesRef.current.length
         let currentChars = snapshot.reduce((sum, a) => sum + a.content.length, 0)
-        const existingPaths = new Set(snapshot.map((a) => a.filePath))
+        const existingPaths = new Set([
+          ...snapshot.map((a) => a.filePath),
+          ...mentionedFilesRef.current.map((item) => item.absolutePath)
+        ])
 
         for (const filePath of filePaths) {
           // #7: skip duplicates
@@ -2535,7 +2577,11 @@ export function ChatContainer({
           const ext = lastDot >= 0 ? filePath.substring(lastDot).toLowerCase() : ""
           if (!ext || !SUPPORTED_EXTS.has(ext)) {
             const fileName = filePath.replace(/^.*[/\\]/, "") || filePath
-            setError(`不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            if (ext === ".doc") {
+              setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
+            } else {
+              setError(`不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            }
             continue
           }
 
@@ -2553,9 +2599,9 @@ export function ChatContainer({
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
-              if (result.attachment.filename.includes(".doc")) {
+              if (result.attachment.filename.toLowerCase().endsWith(".docx")) {
                 setError(
-                  `文件 "${result.attachment.filename}" 内容为空，可尝试将文件用 WPS 另存为 docx 后添加`
+                  `文件 "${result.attachment.filename}" 内容为空；若原始文件为 doc，请${DOC_SAVE_AS_DOCX_HINT}`
                 )
               } else {
                 setError(`文件 "${result.attachment.filename}" 内容为空`)
@@ -2580,8 +2626,8 @@ export function ChatContainer({
   )
 
   const handleAttachClick = useCallback(async () => {
-    if (attachmentsRef.current.length >= MAX_ATTACHMENTS) {
-      setError(`最多只能添加 ${MAX_ATTACHMENTS} 个附件`)
+    if (attachmentsRef.current.length + mentionedFilesRef.current.length >= MAX_ATTACHMENTS) {
+      setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
       return
     }
     const result = await window.api.file.select()
@@ -2592,6 +2638,9 @@ export function ChatContainer({
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
+  }, [])
+  const removeMentionedFile = useCallback((index: number) => {
+    setMentionedFiles((prev) => prev.filter((_, i) => i !== index))
   }, [])
 
   const dropZoneRef = useRef<HTMLDivElement>(null)
@@ -3084,6 +3133,22 @@ export function ChatContainer({
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
+    const liveReasoningById = new Map<string, string>()
+    for (const liveMessage of streamData.liveMessages || []) {
+      if (
+        liveMessage.id &&
+        liveStreamMessageRole(liveMessage.type) === "assistant" &&
+        typeof liveMessage.reasoning === "string" &&
+        liveMessage.reasoning.trim()
+      ) {
+        liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
+      }
+    }
+    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
+      if (message.role !== "assistant" || message.reasoning) return message
+      const liveReasoning = liveReasoningById.get(message.id)
+      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
+    })
     const streamingMsgs: Message[] = (streamData.liveMessages || [])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
@@ -3094,6 +3159,7 @@ export function ChatContainer({
           id: streamMsg.id,
           role,
           content: normalizeLiveStreamMessageContent(streamMsg.content),
+          ...(role === "assistant" && streamMsg.reasoning ? { reasoning: streamMsg.reasoning } : {}),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
@@ -3107,7 +3173,7 @@ export function ChatContainer({
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs].filter(
+    const allMessages = [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
       isVisibleCheckpointTranscriptMessage
     )
     const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {
@@ -3437,8 +3503,14 @@ export function ChatContainer({
     skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null
   })
+  const atFileMentions = useAtFileMentions({
+    input,
+    cursorOffset: inputRef.current?.selectionStart ?? input.length,
+    workspaceFiles,
+    disabled: slash.mode.kind === "slash" || !workspacePath
+  })
   const slashPopoverKind = slash.mode.kind
-  const hasPendingGoalTransportPayload = attachments.length > 0 || selectedSkill !== null
+  const hasPendingGoalTransportPayload = hasPendingFilePayload || selectedSkill !== null
   const hasActiveGoalRunning = goalUi.goal?.status === "active"
   const goalControlAllowedWhileLoading =
     streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning
@@ -3478,8 +3550,8 @@ export function ChatContainer({
       }
       return "任务运行中，可使用取消按钮停止当前任务"
     }
-    if (attachments.length > 0) return "输入消息或直接发送文件..."
-    if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
+    if (hasPendingFilePayload) return "输入消息或直接发送文件..."
+    if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；@ 引用文件；Shift + Enter 换行"
     if (goal.status === "active") {
       return "输入新消息会暂停当前 Goal；查看详情用 /goal status"
     }
@@ -3488,9 +3560,9 @@ export function ChatContainer({
     }
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
-    attachments.length,
     contextReminderPending,
     goalUi.goal,
+    hasPendingFilePayload,
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
@@ -3506,6 +3578,24 @@ export function ChatContainer({
     }
   }, [slashPopoverKind, loadSkills])
 
+  const insertTextAtCursor = useCallback(
+    (text: string, replaceRange?: { start: number; end: number }) => {
+      const textarea = inputRef.current
+      const selectionStart = replaceRange?.start ?? textarea?.selectionStart ?? input.length
+      const selectionEnd = replaceRange?.end ?? textarea?.selectionEnd ?? input.length
+      const nextInput = `${input.slice(0, selectionStart)}${text}${input.slice(selectionEnd)}`
+      const nextCursor = selectionStart + text.length
+
+      setInput(nextInput)
+      requestAnimationFrame(() => {
+        const target = inputRef.current
+        if (!target) return
+        target.setSelectionRange(nextCursor, nextCursor)
+      })
+    },
+    [input, setInput]
+  )
+
   // Depend on the stable callback refs, not the whole `slash` object —
   // the hook returns a fresh literal every render, which would re-create
   // applySkillSelection each keystroke and cascade into popover rerenders.
@@ -3515,7 +3605,6 @@ export function ChatContainer({
       setSelectedSkill(s)
       setInput("")
       slashResetSelection()
-      requestAnimationFrame(() => inputRef.current?.focus())
     },
     [setInput, slashResetSelection, setSelectedSkill]
   )
@@ -3528,12 +3617,79 @@ export function ChatContainer({
       requestAnimationFrame(() => {
         const textarea = inputRef.current
         if (!textarea) return
-        textarea.focus()
         const cursor = nextInput.length
         textarea.setSelectionRange(cursor, cursor)
       })
     },
     [setInput, slashResetSelection]
+  )
+
+  const applyAtFileMention = useCallback(
+    (file: AtFileSuggestion) => {
+      if (atFileMentions.mode.kind !== "at-file" || !workspacePath) return
+
+      try {
+        const selection = resolveAtFileSelection({
+          file,
+          workspacePath,
+          attachments: attachmentsRef.current,
+          mentionedFiles: mentionedFilesRef.current,
+          maxAttachments: MAX_ATTACHMENTS
+        })
+        if (selection.kind === "duplicate") {
+          setError(`文件"${selection.filename}"已添加，跳过重复`)
+          return
+        }
+        if (selection.kind === "limit") {
+          setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
+          return
+        }
+        if (selection.kind === "unsupported") {
+          // 这里直接拦住不支持类型，避免它进入 chip 之后又在发送时悄悄失效。
+          setError(`@文件暂不支持 "${selection.filename}" 这种类型`)
+          return
+        }
+
+        clearError()
+          void (async () => {
+            let contentChars = 0
+            try {
+              const readResult = await window.api.workspace.readFile(
+                threadId,
+                selection.mentionedFile.workspaceFilePath
+              )
+              if (readResult.success && typeof readResult.content === "string") {
+                contentChars = readResult.content.length
+              }
+            } catch {
+              contentChars = 0
+            }
+
+            setMentionedFiles((prev) => [
+              ...prev,
+              {
+                ...selection.mentionedFile,
+                contentChars
+              }
+            ])
+          })()
+
+        const { nextInput, nextCursor } = removeAtFileTokenFromInput(input, {
+          startPos: atFileMentions.mode.startPos,
+          endPos: atFileMentions.mode.endPos
+        })
+
+        setInput(nextInput)
+        requestAnimationFrame(() => {
+          const textarea = inputRef.current
+          if (!textarea) return
+          textarea.setSelectionRange(nextCursor, nextCursor)
+        })
+      } catch {
+        setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
+      }
+    },
+    [atFileMentions.mode, clearError, input, setError, setInput, threadId, workspacePath]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
@@ -3618,6 +3774,7 @@ export function ChatContainer({
       }
       setInput("")
       setAttachments([])
+      setMentionedFiles([])
       setSelectedSkill(null)
       insertLog("send: /goal resume")
       await appendVisibleUserMessageWithTime("/goal resume", { persistTiming: false })
@@ -3745,9 +3902,9 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent, defaultText=''): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = input.trim()
+    const trimmedInput = defaultText ||  input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -3759,7 +3916,7 @@ export function ChatContainer({
     if (readOnly) return
     if (contextReminderPending) return
     if (
-      (!trimmedInput && attachments.length === 0 && !selectedSkill) ||
+      (!trimmedInput && !hasPendingFilePayload && !selectedSkill) ||
       historyLoading ||
       (isLoading && !allowSubmitWhileLoading) ||
       !stream
@@ -3897,8 +4054,38 @@ export function ChatContainer({
       // Snapshot the skill selection before we clear it — synchronous path, no
       // async gap, so no token/stillOurs needed.
       const skill = selectedSkill
-      const rawMessage = trimmedInput
-      const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
+      let rawMessage = trimmedInput
+      // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
+      // 这里仅消费结果，避免发送流程继续堆积细节分支。
+      const {
+        cleanedMessage,
+        attachments: resolvedAttachments,
+        mentionCountLimitHit,
+        mentionAttachmentLimitHit,
+        warningMessage: atFileWarningMessage
+      } = await resolveAtFileAttachments({
+        rawMessage,
+        attachments,
+        mentionedFiles,
+        workspacePath,
+        workspaceFiles,
+        maxAttachments: MAX_ATTACHMENTS,
+        maxTotalChars: MAX_TOTAL_CHARS,
+        readWorkspaceFile: (filePath) => window.api.workspace.readFile(threadId, filePath)
+      })
+      rawMessage = cleanedMessage
+
+      // 优先提示数量上限；如果数量没超，再提示内容总量上限。
+      if (mentionCountLimitHit) {
+        setError(`@文件最多只会带入前 ${MAX_ATTACHMENTS} 个附件`)
+      } else if (mentionAttachmentLimitHit) {
+        setError(`@文件内容总量已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
+      } else if (atFileWarningMessage) {
+        // 非致命失败只做提示，不中断后面的普通发送流程。
+        setError(atFileWarningMessage)
+      }
+
+      const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
       // If user only uploaded files without text, add a default prompt.
       // skill-only sends (text empty, no attachments) still fall into this branch
       // because the default prompt requires attachments — for skill-only we let
@@ -3906,9 +4093,10 @@ export function ChatContainer({
       // When a skill is active we also skip the default prompt: the skill's own
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
-      const userText = rawMessage || (currentAttachments && !skill ? "请分析以下文件内容。" : "")
+      const userText = rawMessage || (attachmentPayload && !skill ? "请分析以下文件内容。" : "")
       setInput("")
       setAttachments([])
+      setMentionedFiles([])
       if (skill) setSelectedSkill(null)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
@@ -3923,8 +4111,8 @@ export function ChatContainer({
 
       // Build the full message with attachments as XML tags (sent to model)
       let fullMessage = userText
-      if (currentAttachments && currentAttachments.length > 0) {
-        const attachmentTexts = currentAttachments.map((att) => {
+      if (attachmentPayload && attachmentPayload.length > 0) {
+        const attachmentTexts = attachmentPayload.map((att) => {
           const truncAttr = att.truncated ? ' truncated="true"' : ""
           const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
           const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
@@ -3960,8 +4148,8 @@ export function ChatContainer({
       // That replay-vs-live divergence is a pre-existing limitation of the
       // attachment pipeline and is not introduced by the slash-command code.
       let displayContent: string = userText
-      if (currentAttachments && currentAttachments.length > 0) {
-        const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
+      if (attachmentPayload && attachmentPayload.length > 0) {
+        const fileNames = attachmentPayload.map((a) => `📎 ${a.filename}`).join("\n")
         displayContent = `${fileNames}\n\n${userText}`
       }
       displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
@@ -4130,9 +4318,41 @@ export function ChatContainer({
       }
     }
 
+    if (atFileMentions.mode.kind === "at-file") {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        atFileMentions.moveSelection(1)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        atFileMentions.moveSelection(-1)
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        atFileMentions.dismiss()
+        return
+      }
+      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+        const selected = atFileMentions.mode.suggestions[atFileMentions.selectedIdx]
+        if (selected) {
+          e.preventDefault()
+          applyAtFileMention(selected)
+          return
+        }
+      }
+    }
+
     // Backspace at start of empty input removes the skill chip.
     // Skip while IME is composing — there Backspace edits the pinyin buffer,
     // not the textarea, and the user doesn't intend to drop the chip.
+    if (e.key === "Backspace" && !isComposing && input.length === 0 && mentionedFiles.length > 0) {
+      e.preventDefault()
+      setMentionedFiles((prev) => prev.slice(0, -1))
+      return
+    }
+
     if (e.key === "Backspace" && !isComposing && selectedSkill && input.length === 0) {
       e.preventDefault()
       setSelectedSkill(null)
@@ -4147,21 +4367,8 @@ export function ChatContainer({
 
   const handleInsertNewline = useCallback((): void => {
     if (effectiveInputDisabled) return
-
-    const textarea = inputRef.current
-    const selectionStart = textarea?.selectionStart ?? input.length
-    const selectionEnd = textarea?.selectionEnd ?? input.length
-    const nextInput = `${input.slice(0, selectionStart)}\n${input.slice(selectionEnd)}`
-    const nextCursor = selectionStart + 1
-
-    setInput(nextInput)
-    requestAnimationFrame(() => {
-      const target = inputRef.current
-      if (!target) return
-      target.focus()
-      target.setSelectionRange(nextCursor, nextCursor)
-    })
-  }, [effectiveInputDisabled, input, setInput])
+    insertTextAtCursor("\n")
+  }, [effectiveInputDisabled, insertTextAtCursor])
 
   // Auto-resize textarea based on content
   const adjustTextareaHeight = useCallback((): void => {
@@ -4188,19 +4395,26 @@ export function ChatContainer({
     }
   }, [adjustTextareaHeight, input])
 
-  const handleCancel = async (): Promise<void> => {
+  const handleCancel = async (e): Promise<void> => {
+    e.preventDefault()
+    e.stopPropagation()
+
     if (scheduledTaskLoading && scheduledTaskId) {
       try {
         await window.api.scheduledTasks.cancel(scheduledTaskId)
       } catch (err) {
         console.error("[ChatContainer] Failed to cancel scheduled task:", err)
       }
+      // 取消是发信号等收敛;若主进程实际无任务在跑(渲染态因丢 done 冻结),
+      // 上面的调用是空操作且不会再有事件回来解锁——立即用权威态校正自愈。
+      threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading && threadId === "heartbeat") {
       try {
         await window.api.heartbeat.cancel()
       } catch (err) {
         console.error("[ChatContainer] Failed to cancel heartbeat:", err)
       }
+      threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
       // ChatX bot thread: scheduledTaskLoading is true but no scheduledTaskId
       try {
@@ -5839,6 +6053,12 @@ export function ChatContainer({
                   onSelectSkill={applySkillSelection}
                   skillsLoading={skillsLoading}
                 />
+                <AtFileMentionPopover
+                  mode={atFileMentions.mode}
+                  selectedIdx={atFileMentions.selectedIdx}
+                  onHoverIdx={atFileMentions.setSelectedIdx}
+                  onSelectFile={applyAtFileMention}
+                />
                 <div className="flex flex-col gap-2">
                   <div className="flex items-end gap-2">
                     <div
@@ -5856,7 +6076,7 @@ export function ChatContainer({
                       onDragOver={handleDragOver}
                       onDragLeave={handleDragLeave}
                     >
-                      {/* Selected-skill chip sits above attachments and the textarea */}
+                      {/* Selected chips sit above the textarea inside the composer shell. */}
                       {selectedSkill && (
                         <div className="flex items-center gap-1.5 px-3 pt-2.5">
                           <SkillChip
@@ -5886,17 +6106,26 @@ export function ChatContainer({
                           <span className="text-sm text-primary">拖放文件到这里</span>
                         </div>
                       )}
-                      {/* Attachment chips inside input box */}
-                      {attachments.length > 0 && (
+                      {/* File chips inside input box */}
+                      {(mentionedFiles.length > 0 || attachments.length > 0) && (
                         <div className="flex flex-col gap-1 px-3 pt-2.5">
-                          <div className="flex flex-wrap gap-1.5">
+                          <ul className="flex flex-wrap gap-1.5">
+                            {mentionedFiles.map((file, idx) => (
+                              <li key={file.absolutePath}>
+                                <MentionFileChip
+                                  label={file.displayPath}
+                                  popoverText={file.absolutePath}
+                                  onRemove={() => removeMentionedFile(idx)}
+                                />
+                              </li>
+                            ))}
                             {attachments.map((att, idx) => (
-                              <div
+                              <li
                                 key={`${att.filename}-${idx}`}
-                                className="flex items-center gap-1.5 px-2 py-1 bg-muted/50 rounded-md text-xs group"
+                                className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1 text-xs group cursor-default"
                               >
-                                <FileText className="size-3 text-muted-foreground shrink-0" />
-                                <span className="truncate max-w-[160px]" title={att.filePath}>
+                                <Paperclip className="size-3 shrink-0 text-muted-foreground" />
+                                <span className="max-w-[160px] truncate" title={att.filePath}>
                                   {att.filename}
                                 </span>
                                 {att.truncated && (
@@ -5907,20 +6136,28 @@ export function ChatContainer({
                                 <button
                                   type="button"
                                   onClick={() => removeAttachment(idx)}
-                                  className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+                                  className="text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                                  aria-label={`移除附件 ${att.filename}`}
                                 >
                                   <X className="size-3" />
                                 </button>
-                              </div>
+                              </li>
                             ))}
                             {attachmentLoading && (
-                              <Loader2 className="size-4 animate-spin text-muted-foreground self-center" />
+                              <li>
+                                <Loader2 className="size-4 animate-spin self-center text-muted-foreground" />
+                              </li>
                             )}
-                          </div>
+                          </ul>
                           <div className="text-[10px] text-muted-foreground/50">
-                            {attachments.length}/{MAX_ATTACHMENTS} 个文件 ·{" "}
-                            {totalAttachmentChars.toLocaleString()}/
-                            {MAX_TOTAL_CHARS.toLocaleString()} 字符
+                            {totalPendingFileCount}/{MAX_ATTACHMENTS} 个文件
+                            {hasPendingFilePayload && (
+                              <>
+                                {" · "}
+                                {totalPendingFileChars.toLocaleString()}/
+                                {MAX_TOTAL_CHARS.toLocaleString()} 字符
+                              </>
+                            )}
                           </div>
                         </div>
                       )}
@@ -5942,7 +6179,7 @@ export function ChatContainer({
                           "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                           "p-4 text-sm placeholder:text-muted-foreground",
                           "focus:outline-none disabled:opacity-70",
-                          attachments.length > 0 && "pt-1.5"
+                          hasPendingFilePayload && "pt-1.5"
                         )}
                         rows={3}
                         style={{ minHeight: "44px", maxHeight: "200px" }}
@@ -5950,20 +6187,20 @@ export function ChatContainer({
                       {/* Bottom bar: + button left, send button right */}
                       <div className="flex items-center justify-between px-3 pb-2 w-full">
                         <div className="flex items-center gap-1 flex-1 overflow-auto">
-                          <button
-                            type="button"
+                          <IconPopoverButton
+                            icon={<Plus className="size-4" />}
+                            popoverContent={ATTACH_FILE_POPOVER_CONTENT}
+                            popoverClassName="max-w-64 leading-relaxed"
                             disabled={
                               effectiveComposerControlsDisabled ||
                               attachmentLoading ||
-                              attachments.length >= MAX_ATTACHMENTS ||
-                              totalAttachmentChars >= MAX_TOTAL_CHARS
+                              totalPendingFileCount >= MAX_ATTACHMENTS ||
+                              totalPendingFileChars >= MAX_TOTAL_CHARS
                             }
+                            aria-label="添加文件"
+                            className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
                             onClick={handleAttachClick}
-                            title="添加文件 (txt, md, csv, docx, xlsx)"
-                            className="flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            <Plus className="size-4" />
-                          </button>
+                          />
                           <div className="w-px h-4 bg-border mx-1" />
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
@@ -6056,11 +6293,39 @@ export function ChatContainer({
                                   </Tooltip>
                                 </TooltipProvider>
                               )}
+                              <TooltipProvider delayDuration={180}>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (effectiveInputDisabled) return
+                                        // 创建伪造的表单提交事件
+                                        const fakeEvent = {
+                                          preventDefault: () => {}
+                                        } as React.FormEvent
+                                        // 发送继续消息
+                                        handleSubmit(fakeEvent, '继续')
+                                      }}
+                                      disabled={effectiveInputDisabled}
+                                      className="flex items-center justify-center gap-1 px-2.5 h-7 rounded-md border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                      aria-label="继续对话"
+                                    >
+                                      <Send className="size-3.5" />
+                                      <span className="text-xs font-medium">继续</span>
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top" sideOffset={6}>
+                                    点击自动发送"继续"2字
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+
                               <button
                                 type="submit"
                                 disabled={
                                   effectiveInputDisabled ||
-                                  (!input.trim() && attachments.length === 0 && !selectedSkill) ||
+                                  (!input.trim() && !hasPendingFilePayload && !selectedSkill) ||
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }

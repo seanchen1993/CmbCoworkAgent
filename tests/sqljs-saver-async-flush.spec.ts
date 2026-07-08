@@ -149,6 +149,40 @@ async function testRecoverFromNewerTempSnapshot(dir: string): Promise<void> {
   console.log("PASS newer temp snapshot wins over older live database")
 }
 
+async function testRetirePoisonsLateWriters(dir: string): Promise<void> {
+  const dbPath = join(dir, "retire.sqlite")
+  const saver = new SqlJsSaver(dbPath)
+  await putCheckpoint(saver, "t1", "cp-1")
+  await saver.flush()
+
+  // A newer mutation is still pending (debounce not fired) when the thread is
+  // deleted: retire must not flush it — the file is about to be swept.
+  await putCheckpoint(saver, "t1", "cp-2")
+  await saver.retire()
+  for (const suffix of ["", ".bak", ".tmp"]) {
+    await rm(`${dbPath}${suffix}`, { force: true })
+  }
+
+  // A writer that outlived deletion holds this reference: unlike close(), a
+  // retired saver must refuse to re-initialize instead of resurrecting the file.
+  let lateWriteRefused = false
+  try {
+    await putCheckpoint(saver, "t1", "cp-3")
+  } catch {
+    lateWriteRefused = true
+  }
+  assert(lateWriteRefused, "late put on a retired saver must be refused")
+
+  await saver.flush() // must be a silent no-op, not a write
+  await new Promise((r) => setTimeout(r, 450)) // past any debounced save
+  const resurrected = (await readdir(dir)).filter((file) => file.startsWith("retire.sqlite"))
+  assert(
+    resurrected.length === 0,
+    `retired saver resurrected its file(s): ${resurrected.join(", ")}`
+  )
+  console.log("PASS retire poisons late writers; nothing resurrects the deleted file")
+}
+
 async function main(): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "sqljs-saver-flush-"))
   try {
@@ -158,6 +192,7 @@ async function main(): Promise<void> {
     await testFlushRemainsReusable(dir)
     await testRecoverFromBackupWhenLiveFileIsCorrupt(dir)
     await testRecoverFromNewerTempSnapshot(dir)
+    await testRetirePoisonsLateWriters(dir)
     console.log("sqljs-saver async/flush tests passed")
   } finally {
     await rm(dir, { recursive: true, force: true })

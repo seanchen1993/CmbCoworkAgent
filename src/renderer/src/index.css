@@ -350,6 +350,9 @@
   font-weight: 400;
   letter-spacing: 0.005em;
 }
+.streaming-markdown .language-bash{
+  white-space: break-spaces;
+}
 
 .streaming-markdown p {
   margin-bottom: 0.75em;

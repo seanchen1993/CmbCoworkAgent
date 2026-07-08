@@ -589,6 +589,8 @@ interface ThreadContextValue {
   // Subscribe to all stream updates
   subscribeToAllStreams: (callback: () => void) => () => void
   suppressCoordinatorNotificationAutoRun: (threadId: string) => void
+  // 以主进程 isRunning 为权威,校正心跳/定时任务线程的运行锁(丢 done 自愈)
+  reconcileScheduledRunStates: () => void
 }
 
 // Default thread state
@@ -2285,6 +2287,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   ...(typeof snapshotMessage.content === "string" && {
                     content: snapshotMessage.content
                   }),
+                  ...(typeof snapshotMessage.reasoning === "string" && {
+                    reasoning: snapshotMessage.reasoning
+                  }),
                   ...(snapshotMessage.tool_calls && { tool_calls: snapshotMessage.tool_calls })
                 }
               : committed
@@ -2312,12 +2317,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         start_at: accumulator.messageTimes[messageId]?.start_at ?? now,
         end_at: now
       }
+      const hasSnapshotContent =
+        (typeof snapshotMessage.content === "string" && snapshotMessage.content.length > 0) ||
+        (Array.isArray(snapshotMessage.content) && snapshotMessage.content.length > 0)
       accumulator.messages = mergeLiveStreamMessages(accumulator.messages, [
         {
           ...snapshotMessage,
           id: messageId,
           type: snapshotMessage.type ?? "ai",
-          content_priority: 1
+          ...(hasSnapshotContent ? { content_priority: 1 } : {})
         }
       ])
 
@@ -2989,7 +2997,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }
             if (exists) {
               return {
-                messages: state.messages.map((m) => (m.id === message.id ? message : m)),
+                messages: state.messages.map((m) =>
+                  m.id === message.id
+                    ? {
+                        ...message,
+                        ...(message.role === "assistant" &&
+                        !message.reasoning &&
+                        m.role === "assistant" &&
+                        m.reasoning
+                          ? { reasoning: m.reasoning }
+                          : {})
+                      }
+                    : m
+                ),
                 toolCallStates: nextToolCallStates,
                 hookInterruption: message.role === "user" ? null : state.hookInterruption
               }
@@ -3003,6 +3023,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setMessages: (messages: Message[]) => {
           updateThreadState(threadId, (state) => {
+            const existingReasoningById = new Map(
+              state.messages
+                .filter((message) => message.role === "assistant" && message.reasoning)
+                .map((message) => [message.id, message.reasoning] as const)
+            )
+            const messagesWithPreservedReasoning = messages.map((message) => {
+              if (message.role !== "assistant" || message.reasoning) return message
+              const existingReasoning = existingReasoningById.get(message.id)
+              return existingReasoning ? { ...message, reasoning: existingReasoning } : message
+            })
             const nextToolCallStates = messages.reduce<Record<string, ToolCallState>>(
               (acc, message) => {
                 if (Array.isArray(message.tool_calls)) {
@@ -3025,7 +3055,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               state.toolCallStates
             )
 
-            return { messages, toolCallStates: nextToolCallStates }
+            return { messages: messagesWithPreservedReasoning, toolCallStates: nextToolCallStates }
           })
         },
         setGoalUi: (goalUi: GoalUiState) => {
@@ -3248,15 +3278,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 : {})
             }))
           }
+          // 双向水合:isRunning 是权威电平,false 也要落地——否则上次视图残留的
+          // 冻结 loading(丢 done)在重新打开时永远无人清除。刚起跑的竞争由
+          // started 边沿事件补齐,两者收敛。
           if (metadata.scheduledTaskId) {
             const taskId = metadata.scheduledTaskId as string
             updateThreadState(threadId, () => ({ scheduledTaskId: taskId }))
             window.api.scheduledTasks
               .isRunning(taskId)
               .then((running) => {
-                if (running) {
-                  updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
-                }
+                updateThreadState(threadId, (prev) =>
+                  prev.scheduledTaskLoading === running ? {} : { scheduledTaskLoading: running }
+                )
               })
               .catch(() => {})
           }
@@ -3264,9 +3297,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             window.api.heartbeat
               .isRunning()
               .then((running) => {
-                if (running) {
-                  updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
-                }
+                updateThreadState(threadId, (prev) =>
+                  prev.scheduledTaskLoading === running ? {} : { scheduledTaskLoading: running }
+                )
               })
               .catch(() => {})
           }
@@ -3436,10 +3469,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 persistedInternalGoalMessageTimeOrder
               })
 
+              let reasoning = ""
+              if (role === "assistant") {
+                const rawReasoning =
+                  additionalKwargs?.reasoning ??
+                  additionalKwargs?.reasoning_content ??
+                  additionalKwargs?.reasoning_text
+                if (typeof rawReasoning === "string" && rawReasoning.trim()) {
+                  reasoning = rawReasoning
+                }
+              }
+
               return {
                 id: messageId,
                 role,
                 content,
+                ...(reasoning && { reasoning }),
                 tool_calls: toolCalls as Message["tool_calls"],
                 ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
                 ...(role === "tool" && toolName && { name: toolName }),
@@ -3620,7 +3665,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   // Track streaming AI message state per thread (for token-by-token accumulation)
   const schedulerStreamingRef = useRef<
-    Record<string, { currentMsgId: string | null; accumulatedContent: string }>
+    Record<
+      string,
+      { currentMsgId: string | null; accumulatedContent: string; accumulatedReasoning: string }
+    >
   >({})
   const clearSchedulerStreamingForThread = useCallback((threadId: string) => {
     delete schedulerStreamingRef.current[threadId]
@@ -3680,6 +3728,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             id: string
             role: string
             content: string
+            reasoning?: string
             tool_calls?: unknown[]
             tool_call_id?: string
             name?: string
@@ -3743,21 +3792,30 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "message-delta": {
           const id = event.id as string
           const content = event.content as string
+          const reasoning = typeof event.reasoning === "string" ? event.reasoning : ""
           const toolCalls = event.toolCalls as Message["tool_calls"] | undefined
           const subagentId =
             typeof event.subagentId === "string" ? (event.subagentId as string) : undefined
           const streamKey = subagentId ? `${threadId}:subagent:${subagentId}` : threadId
           const tracker = (schedulerStreamingRef.current[streamKey] ||= {
             currentMsgId: null,
-            accumulatedContent: ""
+            accumulatedContent: "",
+            accumulatedReasoning: ""
           })
           if (id !== tracker.currentMsgId) {
             tracker.currentMsgId = id
             tracker.accumulatedContent = content
+            tracker.accumulatedReasoning = reasoning
           } else {
             tracker.accumulatedContent += content
+            if (reasoning) {
+              tracker.accumulatedReasoning = reasoning.startsWith(tracker.accumulatedReasoning)
+                ? reasoning
+                : `${tracker.accumulatedReasoning}${reasoning}`
+            }
           }
           const finalContent = tracker.accumulatedContent
+          const finalReasoning = tracker.accumulatedReasoning
           if (subagentId) {
             const now = new Date()
             appendSubagentTranscriptMessages(threadId, subagentId, [
@@ -3765,6 +3823,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 id,
                 role: "assistant" as const,
                 content: finalContent,
+                ...(finalReasoning && { reasoning: finalReasoning }),
                 ...(toolCalls?.length && { tool_calls: toolCalls }),
                 created_at: now
               }
@@ -3790,6 +3849,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               updated[idx] = {
                 ...updated[idx],
                 content: finalContent,
+                ...(finalReasoning && { reasoning: finalReasoning }),
                 ...(toolCalls?.length && { tool_calls: toolCalls })
               }
               return { ...clearRetry, messages: updated, toolCallStates: nextToolCallStates }
@@ -3804,6 +3864,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   id,
                   role: "assistant" as const,
                   content: finalContent,
+                  ...(finalReasoning && { reasoning: finalReasoning }),
                   ...(toolCalls?.length && { tool_calls: toolCalls }),
                   created_at: now
                 }
@@ -4245,6 +4306,53 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [clearSchedulerStreamingForThread, saveSubagentTranscripts]
   )
 
+  // 运行态电平校正(心跳 + 定时任务线程)安全网:输入锁 scheduledTaskLoading 平时
+  // 由流事件边沿驱动(started/数据置 true,done/error 清 false),一旦 done 丢失
+  // (监听器被清、窗口错过广播)就永久冻结——此时主进程已空闲,取消按钮打过去是
+  // 无任务可停的空操作,界面表现为"卡死且点不动"。这里以主进程 isRunning 为权威,
+  // 在 changed 广播与手动取消后校正。
+  //
+  // 只清不设:isRunning 按 taskId 判定,而多个线程可共用同一 taskId(同一定时任务被
+  // 反复触发,每次新建线程)。若在此把 running=true 回写,任务再次跑进新线程时会把
+  // 旧的已完成线程一并错标成 loading——反而制造旋转。设 true 是流 "started" 事件和
+  // 打开线程时水合(读该线程自身 metadata)的职责,各自按线程精确;这个 changed 安全
+  // 网只负责清除任务已停后仍残留的 loading。写入前重读当前 store,过期快照不落地;
+  // 清除时同步清残留流气泡并重载历史,恢复干净视图。
+  // (ChatX 线程同轨但缺按线程的 isRunning 查询,暂不覆盖,见 roadmap。)
+  const reconcileScheduledRunStates = useCallback(() => {
+    const reconcileThread = (threadId: string, runningPromise: Promise<boolean>): void => {
+      runningPromise
+        .then((running) => {
+          if (running) return // 只清不设:运行中交给 started 边沿/水合,避免 taskId 别名误标
+          if (!initializedThreadsRef.current.has(threadId)) return
+          if (threadStatesRef.current[threadId]?.scheduledTaskLoading !== true) return
+          clearSchedulerStreamingForThread(threadId)
+          loadThreadHistory(threadId)
+          updateThreadState(threadId, () => ({ scheduledTaskLoading: false }))
+        })
+        .catch(() => {})
+    }
+    if (initializedThreadsRef.current.has("heartbeat")) {
+      reconcileThread("heartbeat", window.api.heartbeat.isRunning())
+    }
+    for (const [threadId, state] of Object.entries(threadStatesRef.current)) {
+      if (threadId === "heartbeat") continue
+      const taskId = state?.scheduledTaskId
+      if (!taskId || !initializedThreadsRef.current.has(threadId)) continue
+      reconcileThread(threadId, window.api.scheduledTasks.isRunning(taskId))
+    }
+  }, [clearSchedulerStreamingForThread, loadThreadHistory, updateThreadState])
+
+  useEffect(() => {
+    const offHeartbeat = window.api.heartbeat.onChanged(reconcileScheduledRunStates)
+    const offTasks = window.api.scheduledTasks.onChanged(reconcileScheduledRunStates)
+    reconcileScheduledRunStates()
+    return () => {
+      offHeartbeat()
+      offTasks()
+    }
+  }, [reconcileScheduledRunStates])
+
   const contextValue = useMemo<ThreadContextValue>(
     () => ({
       getThreadState,
@@ -4258,7 +4366,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams,
-      suppressCoordinatorNotificationAutoRun
+      suppressCoordinatorNotificationAutoRun,
+      reconcileScheduledRunStates
     }),
     [
       getThreadState,
@@ -4272,7 +4381,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams,
-      suppressCoordinatorNotificationAutoRun
+      suppressCoordinatorNotificationAutoRun,
+      reconcileScheduledRunStates
     ]
   )
 
