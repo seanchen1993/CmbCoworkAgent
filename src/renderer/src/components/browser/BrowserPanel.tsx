@@ -161,6 +161,11 @@ export function BrowserPanel({
       .navigate(sessionId, target, { workspacePath })
       .then((nextState) => {
         setState(nextState)
+        if (nextState.error) {
+          setUrlInput(target)
+          toast.error(nextState.error)
+          return
+        }
         if (!isUrlFocusedRef.current) {
           setUrlInput(nextState.url || target)
         }
@@ -179,6 +184,11 @@ export function BrowserPanel({
       try {
         const nextState = await window.api.browser.navigate(sessionId, target, { workspacePath })
         setState(nextState)
+        if (nextState.error) {
+          setUrlInput(target)
+          toast.error(nextState.error)
+          return
+        }
         setUrlInput(nextState.url || target)
       } catch (error) {
         console.error("[BrowserPanel] Navigate failed:", error)

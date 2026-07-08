@@ -1,7 +1,7 @@
 import { BrowserWindow, WebContentsView, type Rectangle, type WebContents } from "electron"
 import { existsSync } from "fs"
-import { resolve } from "path"
-import { fileURLToPath, pathToFileURL } from "url"
+import { posix, resolve, win32 } from "path"
+import { pathToFileURL } from "url"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
@@ -36,17 +36,30 @@ function normalizeBounds(bounds: BrowserBounds): Rectangle {
   }
 }
 
-function isUnderDir(filePath: string, rootPath: string): boolean {
-  const normalizedFile = resolve(filePath)
-  const normalizedRoot = resolve(rootPath)
-  return normalizedFile === normalizedRoot || normalizedFile.startsWith(`${normalizedRoot}/`)
+type PathApi = typeof posix
+
+function usesWindowsPaths(...paths: Array<string | null | undefined>): boolean {
+  return paths.some((value) => typeof value === "string" && /^[a-zA-Z]:[\\/]/.test(value.trim()))
+}
+
+function getPathApi(...paths: Array<string | null | undefined>): PathApi {
+  return usesWindowsPaths(...paths) ? win32 : posix
+}
+
+function filesystemPathToFileUrl(filePath: string): string {
+  if (usesWindowsPaths(filePath)) {
+    const url = new URL("file:///")
+    url.pathname = `/${win32.resolve(filePath).replace(/\\/g, "/")}`
+    return url.toString()
+  }
+  return pathToFileURL(resolve(filePath)).toString()
 }
 
 function isAbsoluteFilesystemPath(value: string): boolean {
   return /^(?:[a-zA-Z]:[\\/]|\/)/.test(value)
 }
 
-function normalizeUrlInput(input: string, workspacePath: string | null): string {
+export function normalizeUrlInput(input: string, workspacePath: string | null): string {
   const value = input.trim()
   if (!value) return "about:blank"
   if (value === "about:blank") return value
@@ -60,13 +73,13 @@ function normalizeUrlInput(input: string, workspacePath: string | null): string 
   }
 
   if (isAbsoluteFilesystemPath(value)) {
-    return pathToFileURL(resolve(value)).toString()
+    return filesystemPathToFileUrl(value)
   }
 
   if (workspacePath) {
-    const candidate = resolve(workspacePath, value)
+    const candidate = getPathApi(workspacePath, value).resolve(workspacePath, value)
     if (existsSync(candidate)) {
-      return pathToFileURL(candidate).toString()
+      return filesystemPathToFileUrl(candidate)
     }
   }
 
@@ -77,7 +90,7 @@ function normalizeUrlInput(input: string, workspacePath: string | null): string 
   return `https://${value}`
 }
 
-function getUrlPermissionError(url: string, workspacePath: string | null): string | null {
+export function getUrlPermissionError(url: string, _workspacePath: string | null): string | null {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -87,17 +100,7 @@ function getUrlPermissionError(url: string, workspacePath: string | null): strin
 
   if (parsed.protocol === "about:" && parsed.href === "about:blank") return null
   if (parsed.protocol === "http:" || parsed.protocol === "https:") return null
-
-  if (parsed.protocol === "file:") {
-    if (!workspacePath) return "file:// 预览需要当前线程关联工作目录"
-    let filePath = ""
-    try {
-      filePath = fileURLToPath(parsed)
-    } catch {
-      return "file:// 路径无效"
-    }
-    return isUnderDir(filePath, workspacePath) ? null : "只能预览当前工作目录内的 file:// 资源"
-  }
+  if (parsed.protocol === "file:") return null
 
   return `不允许加载 ${parsed.protocol} 协议`
 }
