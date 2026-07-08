@@ -16,7 +16,12 @@ export const meta = {
 const WORKFLOW_VERSION = 1
 const DEFAULT_ARTIFACT_ROOT = ".cmbdevclaw/契约交付"
 const MAX_MANIFESTS = 16
-const MAX_SOURCE_FILES = 500
+// 探索输入瘦身:manifest 不再全文灌(旧版 16×6000≈96K),只内联少量关键 manifest 头部作为
+// 项目类型锚点,其余给路径清单让 Explore 代理按需读全文(它有 read/glob/grep)。
+const MAX_MANIFEST_PREVIEW = 5
+const MANIFEST_INLINE_CHARS = 2000
+// 源码清单仅作定位概览(旧版 500 条≈25K);更精准的定位交给 Explore 用验收标准关键词 grep。
+const MAX_SOURCE_FILES = 200
 const MAX_ROUNDS = 3
 const MAX_PACKAGES_PER_ROUND = 8
 const MAX_FIX_ROUNDS = 2
@@ -289,6 +294,52 @@ function numberInRange(value, fallback, min, max) {
 function lines(items) {
   if (!items || items.length === 0) return "- 无"
   return items.map((item) => `- ${item}`).join("\n")
+}
+
+// ---- agent prompt 紧凑渲染 ----
+// 统一原则:喂给 agent 的不是 pretty-JSON 全对象(缩进/引号/字段名 + status/evidence/round
+// 等工作流内部记账字段都是纯噪音),而是"决策真正需要的信息"的紧凑文本;可无限增长的自由
+// 文本(实现小结/公约)按需截断,长列表(变更文件)加帽。目的:单个 agent 的输入不随项目
+// 规模膨胀吃满上下文窗口。效果不降——被截断的都是冗余/可从代码与产物文件复得的内容。
+function clip(text, max) {
+  const s = String(text == null ? "" : text)
+  if (s.length <= max) return s
+  return s.slice(0, max) + `…〔已截断 ${s.length - max} 字〕`
+}
+// 工作包验收标准:只保留 agent 需要的 id/核查方式/文本/实现提示/上一轮备注,
+// 丢弃 status/evidence/round 等内部记账字段。
+function renderWorkCriteria(criteria) {
+  return (
+    (criteria || [])
+      .map((c) => {
+        let line = `- ${c.id}（${c.verify}）：${c.text}`
+        if (c.hint) line += `\n  · 提示：${c.hint}`
+        if (c.note) line += `\n  · 上一轮：${c.note}`
+        return line
+      })
+      .join("\n") || "- 无"
+  )
+}
+// 实现/修复结果:状态 + 截断的小结 + 加帽的变更文件/命令清单(schema 无正文/diff,
+// 但 changedFiles 无上限,复杂包可能上百条)。
+function renderImplResult(impl) {
+  const r = impl || {}
+  return [
+    `状态：${r.status}`,
+    `小结：${clip(r.summary, 1200)}`,
+    `变更文件：\n${lines(take(r.changedFiles || [], 50))}`,
+    `执行命令：\n${lines(take(r.commandsRun || [], 20))}`,
+    r.blockers && r.blockers.length ? `阻塞：\n${lines(r.blockers)}` : "",
+    r.notes && r.notes.length ? `备注：\n${lines(take(r.notes, 12))}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n")
+}
+// 逐条裁决结论:id/结果/截断的证据。
+function renderPerAc(perAc) {
+  return (
+    (perAc || []).map((p) => `- ${p.id}：${p.result} — ${clip(p.evidence, 500)}`).join("\n") || "- 无"
+  )
 }
 
 function uniq(items) {
@@ -1074,10 +1125,17 @@ phase("项目探索")
   const manifests = uniq((await parallel(manifestPatterns.map((p) => () => safeGlob(p)))).flat())
   const sourceFiles = uniq((await parallel(sourcePatterns.map((p) => () => safeGlob(p)))).flat())
   throwIfGlobOverflow()
+  const manifestList = take(manifests, MAX_MANIFESTS)
+  // 只内联少量关键 manifest 的头部(项目类型/构建/依赖等关键信息通常在文件头);根级优先,
+  // 不足再补子模块。完整内容让 Explore 代理按需自读——它能读全文,不受此处截断限制。
+  const previewManifests = [
+    ...manifestList.filter((f) => !f.includes("/")),
+    ...manifestList.filter((f) => f.includes("/"))
+  ].slice(0, MAX_MANIFEST_PREVIEW)
   const manifestSnippets = []
-  for (const file of take(manifests, MAX_MANIFESTS)) {
+  for (const file of previewManifests) {
     const content = await safeRead(file)
-    if (content) manifestSnippets.push(`--- ${file} ---\n${content.slice(0, 6000)}`)
+    if (content) manifestSnippets.push(`--- ${file} ---\n${content.slice(0, MANIFEST_INLINE_CHARS)}`)
   }
   const inventory = take(sourceFiles, MAX_SOURCE_FILES)
   // 档位分级探索:每加一个探索 agent 都要有"单 agent 覆盖不了"的理由(harness 原则:
@@ -1125,13 +1183,16 @@ ${item.prompt}
 验收标准：
 ${context.criteria.map((c) => `- ${c.id}：${c.text}`).join("\n")}
 
-配置/说明文件片段：
+项目 manifest（配置/构建文件）路径清单：
+${lines(manifestList) || "- 未找到"}
+
+其中关键 manifest 头部预览（仅头部；需要完整依赖/配置就自行读取上面列出的文件，你能读全文，不受此预览截断限制）：
 ${manifestSnippets.join("\n\n") || "未找到"}
 
-候选源码/测试文件列表（已截断）：
+源码/测试文件概览（前 ${inventory.length} 条，仅供定位；这不是全部，需要更多请用 glob 自行检索）：
 ${lines(inventory)}
 
-请返回相关文件、命令和风险。`,
+请返回相关文件、命令和风险。定位"合同标准最可能触及的文件"时，优先用 grep 按验收标准里的关键词（接口名/类名/字段名等）精确检索，而不是仅凭上面的概览列表——grep 命中的才是可靠依据。`,
             {
               label: "探索：" + item.label,
               phase: "项目探索",
@@ -1210,22 +1271,25 @@ while (roundsThisRun < maxRounds) {
       `这是需求交付的第 ${round} 轮。请只为下面"待证实标准"规划工作包（package），已证实的标准不要碰。
 
 交付合同摘要（验收标准以下方"待证实标准"为唯一依据）：
-${stringify({
-  title: context.contract.title,
-  goal: context.contract.goal,
-  nonGoals: context.contract.nonGoals,
-  constraints: context.contract.constraints,
-  conventions: context.contract.conventions,
-  globalValidationCommands: context.contract.globalValidationCommands
-})}
+标题：${context.contract.title}
+目标：${context.contract.goal}
+非目标：${lines(context.contract.nonGoals)}
+约束：${lines(context.contract.constraints)}
+公约：${lines(context.contract.conventions)}
+全局验证命令：${lines(context.contract.globalValidationCommands)}
 
-项目画像：
-${stringify(context.exploration)}
+项目画像（概述/命令/风险见下；相关文件给了路径与简述，每个文件的完整用途见画像文件 ${context.artifacts.profile}，规划 targetFiles 时按需读取）：
+概述：${clip(context.exploration.summary, 1500)}
+构建命令：${lines(context.exploration.buildCommands)}
+测试命令：${lines(context.exploration.testCommands)}
+风险：${lines(context.exploration.risks)}
+相关文件（路径 — 简述；完整清单见画像文件）：
+${take(context.exploration.relevantFiles || [], 60).map((f) => `- ${f.path}：${f.reason}`).join("\n") || "- 无"}
 
 待证实标准（含上一轮失败/驳回原因，规划必须针对性回应）：
-${stringify(pending)}
+${pending.map((c) => `- ${c.id}（${c.verify}）：${c.text}${c.note ? `\n  · 上一轮：${c.note}` : ""}`).join("\n")}
 
-${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）：\n${context.conventionsBrief}\n` : ""}
+${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）：\n${clip(context.conventionsBrief, 2000)}\n` : ""}
 要求：
 - 每个工作包声明它负责证实哪些标准（acIds），粒度小到一个 agent 可以安全完成。
 - 每条待证实标准必须被至少一个工作包认领；确实无法认领的，在 blockers 里说明原因。
@@ -1322,18 +1386,16 @@ ${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）�
         `请实现当前工作包。只做这个工作包，不要扩大范围。
 
 交付合同摘要（标题/目标/非目标/约束）：
-${stringify({
-  title: context.contract.title,
-  goal: context.contract.goal,
-  nonGoals: context.contract.nonGoals,
-  constraints: context.contract.constraints
-})}
+标题：${context.contract.title}
+目标：${context.contract.goal}
+非目标：${lines(context.contract.nonGoals)}
+约束：${lines(context.contract.constraints)}
 
 公约简报（必须遵守，防止与其他工作包风格漂移）：
-${context.conventionsBrief}
+${clip(context.conventionsBrief, 2000)}
 
 项目画像（概述与命令；本工作包的目标文件见下方"当前工作包"，需要项目其它文件定位时读取完整画像文件 ${context.artifacts.profile}）：
-概述：${context.exploration.summary}
+概述：${clip(context.exploration.summary, 1500)}
 构建命令：${lines(context.exploration.buildCommands)}
 测试命令：${lines(context.exploration.testCommands)}
 风险：${lines(context.exploration.risks)}
@@ -1343,7 +1405,7 @@ ${stringify(pkg)}
 （提示：如果你的可用技能里有与本工作包领域相关的技能，优先遵循其指引。）
 
 你要证实的验收标准（实现必须逐条对得上，注意每条的核查方式和失败备注）：
-${stringify(pkgCriteria)}
+${renderWorkCriteria(pkgCriteria)}
 
 执行要求：
 - 做最小且正确的修改；变更后尽量运行工作包的验证命令。
@@ -1367,10 +1429,10 @@ ${stringify(pkgCriteria)}
 ${stringify(pkg)}
 
 逐条验收标准（perAc 必须覆盖每一条 id，pass 必须给证据：文件:行号或命令输出摘录）：
-${stringify(pkgCriteria)}
+${renderWorkCriteria(pkgCriteria)}
 
 实现结果：
-${stringify(implementation)}
+${renderImplResult(implementation)}
 
 建议验证命令：
 ${lines(pkg.validationCommands)}
@@ -1406,16 +1468,16 @@ ${lines(pkg.validationCommands)}
           `第 ${fixRound} 轮聚焦修复。只修复未通过的标准，不要扩大范围。
 
 公约简报：
-${context.conventionsBrief}
+${clip(context.conventionsBrief, 2000)}
 
 当前工作包：
 ${stringify(pkg)}
 
 首轮实现：
-${stringify(implementation)}
+${renderImplResult(implementation)}
 ${previousFix && previousFix.changedFiles && previousFix.changedFiles.length ? `\n上一轮修复已改动的文件（当前代码已包含这些修改，需要细节请直接读取这些文件）：\n${lines(previousFix.changedFiles)}\n` : ""}
 未通过的标准及证据：
-${stringify(failing)}
+${renderPerAc(failing)}
 
 如果无法安全修复，返回 status=blocked。`,
           {
@@ -1433,13 +1495,13 @@ ${stringify(failing)}
 ${stringify(pkg)}
 
 逐条验收标准：
-${stringify(pkgCriteria)}
+${renderWorkCriteria(pkgCriteria)}
 
 修复结果：
-${stringify(fix)}
+${renderImplResult(fix)}
 
 上一次逐条结论：
-${stringify(verification.perAc)}
+${renderPerAc(verification.perAc)}
 
 perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报会被判失败);
 工作包声明的验证命令必须逐条执行,commandChecks.command 原样填写声明的命令字符串。
@@ -1503,7 +1565,7 @@ ${
         : ""
     }
 本轮新证实的标准与证据：
-${stringify(newlyProven.map((c) => ({ id: c.id, text: c.text, verify: c.verify, evidence: c.evidence })))}
+${newlyProven.map((c) => `- ${c.id}（${c.verify}）：${c.text}\n  · 证据：${clip(c.evidence, 600)}`).join("\n")}
 
 对每条要驳回的标准，给出 id 和具体驳回理由。
 重要：核查完成后直接提交结构化结果（structured_output），不要先写长篇分析再提交——你的裁决只以结构化结果为准，正文分析不会被读取。`,

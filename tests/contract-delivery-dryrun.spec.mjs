@@ -131,8 +131,9 @@ function acIdsFromPrompt(prompt) {
 }
 
 function pendingFromPlanPrompt(prompt) {
+  // 规划 prompt 的待证实标准已从 JSON 改为紧凑文本：每条为 "- AC-N（verify）：text"。
   const after = prompt.split("待证实标准（含上一轮")[1] || ""
-  const ids = [...after.matchAll(/"id":\s*"(AC-\d+)"/g)].map((m) => m[1])
+  const ids = [...after.matchAll(/^- (AC-\d+)/gm)].map((m) => m[1])
   return [...new Set(ids)]
 }
 
