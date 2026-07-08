@@ -46,7 +46,7 @@ import {
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
 import { useFeatureGate } from "@/lib/feature-gates"
-import { isHarnessProjectModeThread } from "@/lib/thread-classification"
+import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
