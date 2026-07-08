@@ -707,6 +707,8 @@ const api = {
         topP: number
         topK: number
         interleavedThinking?: boolean
+        enableThinking?: boolean
+        thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       }>
     > => {
@@ -723,6 +725,8 @@ const api = {
           topP: number
           topK: number
           interleavedThinking?: boolean
+          enableThinking?: boolean
+          thinkingEffort?: "high" | "max"
           tier?: "premium" | "economy"
         }>
       >
@@ -741,6 +745,8 @@ const api = {
       topP: number
       topK: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null> => {
       return ipcRenderer.invoke("models:getCustomConfig", id) as Promise<{
@@ -755,6 +761,8 @@ const api = {
         topP: number
         topK: number
         interleavedThinking?: boolean
+        enableThinking?: boolean
+        thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       } | null>
     },
@@ -770,6 +778,8 @@ const api = {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }): Promise<void> => {
       return ipcRenderer.invoke("models:setCustomConfig", config) as Promise<void>
@@ -786,6 +796,8 @@ const api = {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }): Promise<{ id: string }> => {
       return ipcRenderer.invoke("models:upsertCustomConfig", config) as Promise<{ id: string }>
@@ -808,6 +820,8 @@ const api = {
       temperature?: number
       topP?: number
       topK?: number
+      enableThinking?: boolean
+      thinkingEffort?: "high" | "max"
     }): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       return ipcRenderer.invoke("models:testConnection", params) as Promise<{
         success: boolean
@@ -1692,6 +1706,7 @@ const api = {
       claudeModelId?: string
       syncSkills?: boolean
       syncMemory?: boolean
+      launchSource?: "select_dir" | "restart"
     }): Promise<string> => ipcRenderer.invoke("terminal:create", opts),
     write: (id: string, data: string): void => ipcRenderer.send("terminal:write", { id, data }),
     resize: (id: string, cols: number, rows: number): void =>

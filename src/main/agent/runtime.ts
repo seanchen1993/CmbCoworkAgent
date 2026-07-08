@@ -24,6 +24,7 @@ import {
   DEFAULT_TEMPERATURE,
   DEFAULT_TOP_P,
   DEFAULT_TOP_K,
+  DEFAULT_THINKING_EFFORT,
   getEnabledPluginSkillSourceMetadata,
   getEnabledPluginSkillMiddlewareSources,
   getPlugins,
@@ -151,7 +152,10 @@ import {
   getGlobalMcpCapabilityService
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
-import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
+import {
+  InterleavedThinkingChatOpenAICompletions,
+  ReasoningDisplayChatOpenAICompletions
+} from "./interleaved-thinking-completions"
 import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
@@ -724,6 +728,8 @@ export function createScopedMcpCapabilityService(
     harnessProjectId?: string
     harnessAdapterName?: string
     harnessAdapterVersion?: string
+    harnessNodeName?: string
+    harnessNodeStatus?: string
     projectCode?: string
     projectDir?: string
   }
@@ -957,6 +963,8 @@ export function createScopedMcpCapabilityService(
         harnessProjectId: baseContext.harnessProjectId,
         harnessAdapterName: baseContext.harnessAdapterName,
         harnessAdapterVersion: baseContext.harnessAdapterVersion,
+        harnessNodeName: baseContext.harnessNodeName,
+        harnessNodeStatus: baseContext.harnessNodeStatus,
         projectCode: baseContext.projectCode,
         projectDir: baseContext.projectDir,
         pluginId,
@@ -3096,6 +3104,8 @@ function getModelInstance(
     topP?: number
     topK?: number
     interleavedThinking?: boolean
+    enableThinking?: boolean
+    thinkingEffort?: "high" | "max"
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number
@@ -3114,6 +3124,7 @@ function getModelInstance(
   const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
   const topP = customConfig.topP ?? DEFAULT_TOP_P
   const topK = customConfig.topK ?? DEFAULT_TOP_K
+  const thinkingEffort = customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT
 
   const baseFields = {
     model: resolvedModel,
@@ -3128,7 +3139,14 @@ function getModelInstance(
     maxRetries: 0,
     modelKwargs: {
       parallel_tool_calls: true,
-      ...(topK > 0 ? { top_k: topK } : {})
+      ...(topK > 0 ? { top_k: topK } : {}),
+      chat_template_kwargs: {
+        enable_thinking: customConfig.enableThinking === true,
+        reasoning_effort: thinkingEffort
+      },
+      ...(customConfig.enableThinking
+        ? { thinking: { type: "enabled" } }
+        : {})
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -3139,14 +3157,23 @@ function getModelInstance(
     }
   }
 
-  if (!customConfig.interleavedThinking) {
-    return new ChatOpenAI(baseFields)
+  if (customConfig.enableThinking && customConfig.interleavedThinking) {
+    return new ChatOpenAI({
+      ...baseFields,
+      completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {
+        exposeReasoning: customConfig.enableThinking === true
+      })
+    } as never)
   }
 
-  return new ChatOpenAI({
-    ...baseFields,
-    completions: new InterleavedThinkingChatOpenAICompletions(baseFields)
-  } as never)
+  if (customConfig.enableThinking) {
+    return new ChatOpenAI({
+      ...baseFields,
+      completions: new ReasoningDisplayChatOpenAICompletions(baseFields)
+    } as never)
+  }
+
+  return new ChatOpenAI(baseFields)
 }
 
 export interface CreateAgentRuntimeOptions {
@@ -3182,6 +3209,10 @@ export interface CreateAgentRuntimeOptions {
   harnessAdapterName?: string
   /** Bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
   harnessAdapterVersion?: string
+  /** Current harness workflow node/stage name exposed to child processes as HARNESS_NODE_NAME. */
+  harnessNodeName?: string
+  /** Current harness workflow node/stage status exposed to child processes as HARNESS_NODE_STATUS. */
+  harnessNodeStatus?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to child processes as PROJECT_DIR. */
@@ -3302,6 +3333,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     retryHooks,
@@ -3513,6 +3546,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     onFileMutation,
@@ -3643,6 +3678,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         harnessProjectId,
         harnessAdapterName,
         harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
         projectCode,
         projectDir,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
@@ -3840,6 +3877,8 @@ The workspace root is: ${workspacePath}`
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       turnId: hookTurnId
@@ -4186,6 +4225,8 @@ The workspace root is: ${workspacePath}`
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     skipToolNames: toolHookExclusions,
@@ -4391,6 +4432,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       pluginOutputDir,
@@ -5018,6 +5061,17 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         workspacePath,
         sessionId: threadId,
         turnId: hookTurnId,
+        pluginOutputDir,
+        systemId,
+        pluginWorkspace,
+        featureId,
+        harnessProjectId,
+        harnessAdapterName,
+        harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
+        projectCode,
+        projectDir,
         toolName: input.toolName,
         toolArgs:
           input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)

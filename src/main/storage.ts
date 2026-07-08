@@ -1013,6 +1013,8 @@ export interface CustomModelConfig {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1046,6 +1048,8 @@ export const MAX_TOP_P = 1
 export const DEFAULT_TOP_K = 40
 export const MIN_TOP_K = 0
 export const MAX_TOP_K = 1_000
+export type ThinkingEffort = "high" | "max"
+export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 
 export interface CustomModelPublicConfig {
   id: string
@@ -1059,6 +1063,8 @@ export interface CustomModelPublicConfig {
   topP: number
   topK: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1073,6 +1079,8 @@ interface StoredCustomModelRecord {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1155,11 +1163,20 @@ function normalizeTopK(value: unknown): number {
   return Math.min(MAX_TOP_K, Math.max(MIN_TOP_K, Math.floor(value)))
 }
 
+function normalizeThinkingEffort(value: unknown): ThinkingEffort {
+  return value === "max" ? "max" : DEFAULT_THINKING_EFFORT
+}
+
 function defaultInterleavedThinkingForModel(model: string): boolean {
   return /minimax/i.test(model)
 }
 
-function resolveInterleavedThinkingSetting(model: string, value: unknown): boolean {
+function resolveInterleavedThinkingSetting(
+  model: string,
+  value: unknown,
+  enableThinking: unknown
+): boolean {
+  if (enableThinking !== true) return false
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
 }
 
@@ -1443,10 +1460,13 @@ function toPublicConfig(
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
+    enableThinking: config.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
-      config.interleavedThinking
+      config.interleavedThinking,
+      config.enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 }
@@ -1465,7 +1485,13 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
     temperature: normalizeTemperature(item.temperature),
     topP: normalizeTopP(item.topP),
     topK: normalizeTopK(item.topK),
-    interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
+    enableThinking: item.enableThinking === true,
+    interleavedThinking: resolveInterleavedThinkingSetting(
+      item.model,
+      item.interleavedThinking,
+      item.enableThinking
+    ),
+    thinkingEffort: normalizeThinkingEffort(item.thinkingEffort),
     ...(item.tier !== undefined && { tier: item.tier })
   }))
 }
@@ -1485,10 +1511,13 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
+    enableThinking: record.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
-      record.interleavedThinking
+      record.interleavedThinking,
+      record.enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(record.thinkingEffort),
     ...(record.tier !== undefined && { tier: record.tier })
   }
 }
@@ -1550,10 +1579,13 @@ export function upsertCustomModelConfig(
     temperature: validatedTemperature,
     topP: validatedTopP,
     topK: validatedTopK,
+    enableThinking: config.enableThinking === true,
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
-      config.interleavedThinking
+      config.interleavedThinking,
+      config.enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 

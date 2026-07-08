@@ -54,6 +54,12 @@ import {
   ensureVersionedSkillIdentifier,
   parseSkillIdentifier
 } from "../../utils/skill-identifiers"
+import {
+  makePluginSkillSourceRef,
+  normalizeSkillSourceRefs,
+  parsePluginSkillSourceRef,
+  type PluginSkillSourceRef
+} from "../../utils/skill-source"
 import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
 import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
@@ -217,6 +223,7 @@ export class TraceCollector {
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
+  private skillSource: string[] = []
   private evolvedSkills: string[] = []
   private modelCalls: TraceModelCall[] = []
   private nodes: TraceNode[] = []
@@ -355,6 +362,19 @@ export class TraceCollector {
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
+    }
+  }
+
+  /** Set source markers keyed by the same skill identifier used in usedSkills. */
+  setSkillSource(skillSource: string[]): void {
+    this.skillSource = normalizeSkillSourceRefs(skillSource)
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      const metadata = { ...(root.metadata ?? {}) }
+      const normalized = normalizeSkillSourceRefs(this.skillSource)
+      if (normalized.length > 0) metadata.skillSource = normalized
+      else delete metadata.skillSource
+      root.metadata = metadata
     }
   }
 
@@ -609,6 +629,26 @@ export class TraceCollector {
     }
 
     const usedSkillsWithVersions = await resolveSkillVersions(this.usedSkills, true)
+    const parsedSkillSource = this.skillSource
+      .map(parsePluginSkillSourceRef)
+      .filter((ref): ref is PluginSkillSourceRef => Boolean(ref))
+    const skillSourceSkillsWithVersions = await resolveSkillVersions(
+      parsedSkillSource.map((ref) => ref.skill)
+    )
+    const usedSkillSet = new Set(usedSkillsWithVersions)
+    const skillSource = normalizeSkillSourceRefs(
+      parsedSkillSource.map((ref, index) =>
+        makePluginSkillSourceRef(
+          ref.pluginId,
+          skillSourceSkillsWithVersions[index] ?? ref.skill,
+          ref.pluginName
+        )
+      ),
+      usedSkillsWithVersions
+    ).filter((ref) => {
+      const parsed = parsePluginSkillSourceRef(ref)
+      return Boolean(parsed && usedSkillSet.has(parsed.skill))
+    })
     const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
 
     const userInfo = getUserInfo()
@@ -665,6 +705,7 @@ export class TraceCollector {
         outcome,
         endedAt,
         usedSkillsWithVersions,
+        skillSource,
         evolvedSkillsWithVersions,
         errorMessage
       ),
@@ -672,6 +713,7 @@ export class TraceCollector {
       outcome,
       ...(errorMessage ? { errorMessage } : {}),
       usedSkills: usedSkillsWithVersions,
+      ...(skillSource.length > 0 ? { skillSource } : {}),
       evolvedSkills: evolvedSkillsWithVersions,
       triggerSource: this.triggerSource,
       ...(this.harnessFeature
@@ -741,6 +783,7 @@ export class TraceCollector {
     outcome: TraceOutcome,
     endedAt: string,
     resolvedUsedSkills: string[],
+    resolvedSkillSource: string[],
     resolvedEvolvedSkills: string[],
     errorMessage?: string
   ): TraceNode[] {
@@ -810,6 +853,7 @@ export class TraceCollector {
       root.metadata = {
         ...(root.metadata ?? {}),
         usedSkills: [...resolvedUsedSkills],
+        ...(resolvedSkillSource.length > 0 ? { skillSource: [...resolvedSkillSource] } : {}),
         evolvedSkills: [...resolvedEvolvedSkills],
         triggerSource: this.triggerSource
       }

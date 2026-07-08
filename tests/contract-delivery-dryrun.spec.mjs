@@ -161,7 +161,7 @@ async function scenario1() {
   let omittedOnce = false
   let auditCalls = 0
   const behavior = (label, prompt) => {
-    if (label === "需求成契") return contractOf(4, ["mvn test"])
+    if (label === "确定验收标准") return contractOf(4, ["mvn test"])
     if (label.startsWith("探索：")) return EXPLORE
     if (/^第\d+轮规划$/.test(label)) return planFor(pendingFromPlanPrompt(prompt))
     if (label.startsWith("实现R") || label.startsWith("修复R")) return IMPL_OK
@@ -222,7 +222,7 @@ async function scenario3() {
   const files = {}
   const logs = []
   const behavior = (label, prompt) => {
-    if (label === "需求成契") return contractOf(2, [], "standard")
+    if (label === "确定验收标准") return contractOf(2, [], "standard")
     if (label.startsWith("探索：")) return EXPLORE
     if (/^第\d+轮规划$/.test(label))
       return {
@@ -308,7 +308,7 @@ async function scenario4() {
         summary: "只跑了一条",
         commands: [{ command: "mvn test", passed: true, evidence: "ok" }]
       }
-    if (label === "需求成契") throw new Error("外部合同注入时不应调用成契 agent")
+    if (label === "确定验收标准") throw new Error("外部合同注入时不应调用确定验收标准 agent")
     throw new Error("未知 label: " + label)
   }
   const env = makeEnv({ files, agentBehavior: behavior, logs })
@@ -330,7 +330,7 @@ async function scenario4() {
   )
   console.log("\n== 场景4 外部合同 + 终审交叉核对 ==")
   console.log(
-    "外部合同生效(未调成契):",
+    "外部合同生效(未调确定验收标准):",
     logs.some((l) => l.includes("使用外部注入合同")) ? "PASS" : "FAIL"
   )
   console.log(
@@ -347,7 +347,7 @@ async function scenario5() {
   const files = {}
   const logs = []
   const behavior = (label, prompt) => {
-    if (label === "需求成契") return contractOf(2, [], "standard")
+    if (label === "确定验收标准") return contractOf(2, [], "standard")
     if (label.startsWith("探索：")) return EXPLORE
     if (/^第\d+轮规划$/.test(label)) return planFor(pendingFromPlanPrompt(prompt))
     if (label.startsWith("实现R") || label.startsWith("修复R")) return IMPL_OK
@@ -390,7 +390,7 @@ async function scenario6() {
   const files = {}
   const logs = []
   const behavior = (label, prompt) => {
-    if (label === "需求成契") return contractOf(2, ["mvn test"], "simple")
+    if (label === "确定验收标准") return contractOf(2, ["mvn test"], "simple")
     if (label.startsWith("探索：")) return EXPLORE
     if (/^第\d+轮规划$/.test(label)) throw new Error("simple 档不应调用规划代理")
     if (label.startsWith("实现R")) return IMPL_OK
@@ -479,7 +479,7 @@ async function scenario7() {
   // 7c: agent 生成合同全是空白文本标准(穿过 schema minLength) → 同样硬性失败
   {
     const behavior = (label) => {
-      if (label === "需求成契") {
+      if (label === "确定验收标准") {
         const c = contractOf(2, [], "standard")
         c.criteria = c.criteria.map((x) => ({ ...x, text: "   " }))
         return c
@@ -562,7 +562,7 @@ async function scenario8() {
   {
     const logs = []
     const behavior = (label, prompt) => {
-      if (label === "需求成契") return contractOf(1, [], "standard")
+      if (label === "确定验收标准") return contractOf(1, [], "standard")
       if (label.startsWith("探索：")) return EXPLORE
       if (/^第\d+轮规划$/.test(label))
         return {
@@ -644,7 +644,7 @@ async function scenario8() {
       recommendedFixes: []
     })
     const behavior = (label, prompt) => {
-      if (label === "需求成契") return contractOf(1, [], "standard")
+      if (label === "确定验收标准") return contractOf(1, [], "standard")
       if (label.startsWith("探索：")) return EXPLORE
       if (/^第\d+轮规划$/.test(label)) return planFor(pendingFromPlanPrompt(prompt))
       if (label.startsWith("实现R") || label.startsWith("修复R")) return IMPL_OK
@@ -914,7 +914,7 @@ async function scenario14() {
     const files = {}
     const logs = []
     const behavior = (label, prompt) => {
-      if (label === "需求成契") return contractOf(2, ["mvn test"], "simple")
+      if (label === "确定验收标准") return contractOf(2, ["mvn test"], "simple")
       if (label.startsWith("探索：")) return EXPLORE
       if (label.startsWith("实现R")) return IMPL_OK
       if (label.startsWith("验证R")) {
@@ -957,7 +957,7 @@ async function scenario14() {
     const files = {}
     const logs = []
     const behavior = (label) => {
-      if (label === "需求成契") return contractOf(2, ["mvn test"], "")
+      if (label === "确定验收标准") return contractOf(2, ["mvn test"], "")
       throw new Error("不应到达: " + label)
     }
     const env = makeEnv({ files, agentBehavior: behavior, logs })
@@ -1009,7 +1009,7 @@ async function scenario14() {
             { command: "mvn test", passed: true, evidence: "重跑过了" }
           ]
         }
-      if (label === "需求成契") throw new Error("外部合同注入时不应调用成契 agent")
+      if (label === "确定验收标准") throw new Error("外部合同注入时不应调用确定验收标准 agent")
       throw new Error("未知 label: " + label)
     }
     const env = makeEnv({ files, agentBehavior: behavior, logs })
@@ -1038,7 +1038,7 @@ async function scenario15() {
   const files = {}
   const logs = []
   const behavior = (label, prompt) => {
-    if (label === "需求成契") return contractOf(1, ["mvn test"], "simple")
+    if (label === "确定验收标准") return contractOf(1, ["mvn test"], "simple")
     if (label.startsWith("探索：")) return EXPLORE
     if (label.startsWith("实现R")) return IMPL_OK
     if (label.startsWith("验证R")) {

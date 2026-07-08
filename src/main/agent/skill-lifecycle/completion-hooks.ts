@@ -145,6 +145,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
   harnessProjectId,
   harnessAdapterName,
   harnessAdapterVersion,
+  harnessNodeName,
+  harnessNodeStatus,
   projectCode,
   projectDir,
   getStopContext,
@@ -165,6 +167,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   getStopContext: () => StopHookContext
@@ -195,6 +199,8 @@ export async function runPostSkillUseHooksForActivatedSkills({
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       sessionId: threadId,
@@ -242,6 +248,8 @@ export async function runCompletionHooksWithRevision({
   harnessProjectId,
   harnessAdapterName,
   harnessAdapterVersion,
+  harnessNodeName,
+  harnessNodeStatus,
   projectCode,
   projectDir,
   abortSignal,
@@ -269,6 +277,8 @@ export async function runCompletionHooksWithRevision({
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   abortSignal: AbortSignal
@@ -302,6 +312,8 @@ export async function runCompletionHooksWithRevision({
           harnessProjectId,
           harnessAdapterName,
           harnessAdapterVersion,
+          harnessNodeName,
+          harnessNodeStatus,
           projectCode,
           projectDir,
           getStopContext,
@@ -367,6 +379,8 @@ export async function runCompletionHooksWithRevision({
               harnessProjectId,
               harnessAdapterName,
               harnessAdapterVersion,
+              harnessNodeName,
+              harnessNodeStatus,
               projectCode,
               projectDir,
               sessionId: threadId,
@@ -386,6 +400,8 @@ export async function runCompletionHooksWithRevision({
             harnessProjectId,
             harnessAdapterName,
             harnessAdapterVersion,
+            harnessNodeName,
+            harnessNodeStatus,
             projectCode,
             projectDir,
             sessionId: threadId,

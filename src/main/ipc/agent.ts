@@ -82,6 +82,7 @@ import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
   getRecentSkillUsageNames,
+  getThreadActiveSkillSource,
   getThreadActiveSkills,
   setThreadActiveSkills,
   snapshotSkillProposalWindow,
@@ -450,8 +451,17 @@ interface HarnessAgentContext {
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
+}
+
+type HarnessFeatureBindingContext = {
+  projectId: string
+  slug: string
+  nodeName?: string
+  nodeStatus?: string
 }
 
 function getHarnessHookContext(
@@ -463,6 +473,8 @@ function getHarnessHookContext(
   | "harnessProjectId"
   | "harnessAdapterName"
   | "harnessAdapterVersion"
+  | "harnessNodeName"
+  | "harnessNodeStatus"
   | "projectCode"
   | "projectDir"
 > {
@@ -472,15 +484,43 @@ function getHarnessHookContext(
     harnessProjectId: context.harnessProjectId,
     harnessAdapterName: context.harnessAdapterName,
     harnessAdapterVersion: context.harnessAdapterVersion,
+    harnessNodeName: context.harnessNodeName,
+    harnessNodeStatus: context.harnessNodeStatus,
     projectCode: context.projectCode,
     projectDir: context.projectDir
   }
 }
 
-function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
+function resolveHarnessCurrentStageForContext(
+  projectId?: string,
+  slug?: string
+): Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus"> {
+  if (!projectId || !slug) return {}
+  const currentStage = resolveHarnessFeatureCurrentStage(projectId, slug)
+  if (!currentStage?.name) return {}
+  return {
+    harnessNodeName: currentStage.name,
+    ...(currentStage.status ? { harnessNodeStatus: currentStage.status } : {})
+  }
+}
+
+function getHarnessAgentContext(
+  metadata: Record<string, unknown>,
+  featureBinding?: HarnessFeatureBindingContext
+): HarnessAgentContext {
   try {
     const featureContext = buildHarnessFeatureAgentContext(metadata)
     if (!featureContext) return {}
+    const currentStage =
+      featureBinding !== undefined
+        ? {
+            harnessNodeName: featureBinding.nodeName,
+            harnessNodeStatus: featureBinding.nodeStatus
+          }
+        : resolveHarnessCurrentStageForContext(
+            featureContext.harnessProjectId,
+            featureContext.featureId
+          )
 
     return {
       workingDirPromptAppendix: featureContext.systemPromptInject,
@@ -494,6 +534,7 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
       harnessProjectId: featureContext.harnessProjectId,
       harnessAdapterName: featureContext.harnessAdapterName,
       harnessAdapterVersion: featureContext.harnessAdapterVersion,
+      ...currentStage,
       projectCode: featureContext.projectCode,
       projectDir: featureContext.projectDir
     }
@@ -1069,6 +1110,8 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   threadId: string
@@ -1105,6 +1148,8 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     harnessProjectId: params.harnessProjectId,
     harnessAdapterName: params.harnessAdapterName,
     harnessAdapterVersion: params.harnessAdapterVersion,
+    harnessNodeName: params.harnessNodeName,
+    harnessNodeStatus: params.harnessNodeStatus,
     projectCode: params.projectCode,
     projectDir: params.projectDir,
     sessionId: params.threadId,
@@ -1295,6 +1340,8 @@ async function activateExplicitSkillFromMessage({
   harnessProjectId,
   harnessAdapterName,
   harnessAdapterVersion,
+  harnessNodeName,
+  harnessNodeStatus,
   projectCode,
   projectDir,
   sessionId,
@@ -1314,6 +1361,8 @@ async function activateExplicitSkillFromMessage({
   harnessProjectId?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   sessionId: string
@@ -1368,6 +1417,8 @@ async function activateExplicitSkillFromMessage({
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     sessionId,
@@ -4028,9 +4079,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // at this turn (进行中/已完成/...) to the binding, so this turn's trace + code
       // events are sliceable by stage and by status-within-stage. Best-effort: any
       // failure leaves nodeName/nodeStatus absent (we never report the raw node id).
-      let harnessFeatureBinding:
-        | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
-        | undefined
+      let harnessFeatureBinding: HarnessFeatureBindingContext | undefined
       try {
         const bindingThread = getThread(threadId)
         if (bindingThread?.metadata) {
@@ -4082,15 +4131,31 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return getThreadActiveSkills(threadId)
       }
 
+      const computeCodeGenAttributionSkillSource = (
+        currentRunSkills: string[],
+        currentRunSkillSource: string[]
+      ): string[] => {
+        if (currentRunSkills.length > 0) return currentRunSkillSource
+        return getThreadActiveSkillSource(threadId)
+      }
+
       const syncUsedSkillsContext = (): void => {
         const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+        const currentRunSkillSource = skillUsageDetector.getUsedSkillSourceRefs()
         tracer.setUsedSkills(currentRunSkills)
+        tracer.setSkillSource(currentRunSkillSource)
         tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
         // A non-empty current-run skill set becomes (supersedes) the thread's
         // active skills; a skill-less run leaves the prior active set intact.
-        if (currentRunSkills.length > 0) setThreadActiveSkills(threadId, currentRunSkills)
+        if (currentRunSkills.length > 0) {
+          setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource)
+        }
         setAdoptionContext(threadId, {
-          usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
+          usedSkills: computeCodeGenAttributionSkills(currentRunSkills),
+          skillSource: computeCodeGenAttributionSkillSource(
+            currentRunSkills,
+            currentRunSkillSource
+          )
         })
       }
 
@@ -4364,7 +4429,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
-        const harnessAgentContext = getHarnessAgentContext(metadata)
+        const harnessAgentContext = getHarnessAgentContext(metadata, harnessFeatureBinding)
         const memoryEnabledForThread = isThreadMemoryEnabled(metadata)
 
         if (!workspacePath) {

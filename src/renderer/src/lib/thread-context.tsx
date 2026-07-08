@@ -2268,6 +2268,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   ...(typeof snapshotMessage.content === "string" && {
                     content: snapshotMessage.content
                   }),
+                  ...(typeof snapshotMessage.reasoning === "string" && {
+                    reasoning: snapshotMessage.reasoning
+                  }),
                   ...(snapshotMessage.tool_calls && { tool_calls: snapshotMessage.tool_calls })
                 }
               : committed
@@ -2295,12 +2298,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         start_at: accumulator.messageTimes[messageId]?.start_at ?? now,
         end_at: now
       }
+      const hasSnapshotContent =
+        (typeof snapshotMessage.content === "string" && snapshotMessage.content.length > 0) ||
+        (Array.isArray(snapshotMessage.content) && snapshotMessage.content.length > 0)
       accumulator.messages = mergeLiveStreamMessages(accumulator.messages, [
         {
           ...snapshotMessage,
           id: messageId,
           type: snapshotMessage.type ?? "ai",
-          content_priority: 1
+          ...(hasSnapshotContent ? { content_priority: 1 } : {})
         }
       ])
 
@@ -2949,7 +2955,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }
             if (exists) {
               return {
-                messages: state.messages.map((m) => (m.id === message.id ? message : m)),
+                messages: state.messages.map((m) =>
+                  m.id === message.id
+                    ? {
+                        ...message,
+                        ...(message.role === "assistant" &&
+                        !message.reasoning &&
+                        m.role === "assistant" &&
+                        m.reasoning
+                          ? { reasoning: m.reasoning }
+                          : {})
+                      }
+                    : m
+                ),
                 toolCallStates: nextToolCallStates,
                 hookInterruption: message.role === "user" ? null : state.hookInterruption
               }
@@ -2963,6 +2981,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setMessages: (messages: Message[]) => {
           updateThreadState(threadId, (state) => {
+            const existingReasoningById = new Map(
+              state.messages
+                .filter((message) => message.role === "assistant" && message.reasoning)
+                .map((message) => [message.id, message.reasoning] as const)
+            )
+            const messagesWithPreservedReasoning = messages.map((message) => {
+              if (message.role !== "assistant" || message.reasoning) return message
+              const existingReasoning = existingReasoningById.get(message.id)
+              return existingReasoning ? { ...message, reasoning: existingReasoning } : message
+            })
             const nextToolCallStates = messages.reduce<Record<string, ToolCallState>>(
               (acc, message) => {
                 if (Array.isArray(message.tool_calls)) {
@@ -2985,7 +3013,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               state.toolCallStates
             )
 
-            return { messages, toolCallStates: nextToolCallStates }
+            return { messages: messagesWithPreservedReasoning, toolCallStates: nextToolCallStates }
           })
         },
         setGoalUi: (goalUi: GoalUiState) => {
@@ -3394,10 +3422,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 persistedInternalGoalMessageTimeOrder
               })
 
+              let reasoning = ""
+              if (role === "assistant") {
+                const rawReasoning =
+                  additionalKwargs?.reasoning ??
+                  additionalKwargs?.reasoning_content ??
+                  additionalKwargs?.reasoning_text
+                if (typeof rawReasoning === "string" && rawReasoning.trim()) {
+                  reasoning = rawReasoning
+                }
+              }
+
               return {
                 id: messageId,
                 role,
                 content,
+                ...(reasoning && { reasoning }),
                 tool_calls: toolCalls as Message["tool_calls"],
                 ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
                 ...(role === "tool" && toolName && { name: toolName }),
@@ -3578,7 +3618,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   // Track streaming AI message state per thread (for token-by-token accumulation)
   const schedulerStreamingRef = useRef<
-    Record<string, { currentMsgId: string | null; accumulatedContent: string }>
+    Record<
+      string,
+      { currentMsgId: string | null; accumulatedContent: string; accumulatedReasoning: string }
+    >
   >({})
   const clearSchedulerStreamingForThread = useCallback((threadId: string) => {
     delete schedulerStreamingRef.current[threadId]
@@ -3638,6 +3681,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             id: string
             role: string
             content: string
+            reasoning?: string
             tool_calls?: unknown[]
             tool_call_id?: string
             name?: string
@@ -3701,21 +3745,30 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "message-delta": {
           const id = event.id as string
           const content = event.content as string
+          const reasoning = typeof event.reasoning === "string" ? event.reasoning : ""
           const toolCalls = event.toolCalls as Message["tool_calls"] | undefined
           const subagentId =
             typeof event.subagentId === "string" ? (event.subagentId as string) : undefined
           const streamKey = subagentId ? `${threadId}:subagent:${subagentId}` : threadId
           const tracker = (schedulerStreamingRef.current[streamKey] ||= {
             currentMsgId: null,
-            accumulatedContent: ""
+            accumulatedContent: "",
+            accumulatedReasoning: ""
           })
           if (id !== tracker.currentMsgId) {
             tracker.currentMsgId = id
             tracker.accumulatedContent = content
+            tracker.accumulatedReasoning = reasoning
           } else {
             tracker.accumulatedContent += content
+            if (reasoning) {
+              tracker.accumulatedReasoning = reasoning.startsWith(tracker.accumulatedReasoning)
+                ? reasoning
+                : `${tracker.accumulatedReasoning}${reasoning}`
+            }
           }
           const finalContent = tracker.accumulatedContent
+          const finalReasoning = tracker.accumulatedReasoning
           if (subagentId) {
             const now = new Date()
             appendSubagentTranscriptMessages(threadId, subagentId, [
@@ -3723,6 +3776,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 id,
                 role: "assistant" as const,
                 content: finalContent,
+                ...(finalReasoning && { reasoning: finalReasoning }),
                 ...(toolCalls?.length && { tool_calls: toolCalls }),
                 created_at: now
               }
@@ -3748,6 +3802,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               updated[idx] = {
                 ...updated[idx],
                 content: finalContent,
+                ...(finalReasoning && { reasoning: finalReasoning }),
                 ...(toolCalls?.length && { tool_calls: toolCalls })
               }
               return { ...clearRetry, messages: updated, toolCallStates: nextToolCallStates }
@@ -3762,6 +3817,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   id,
                   role: "assistant" as const,
                   content: finalContent,
+                  ...(finalReasoning && { reasoning: finalReasoning }),
                   ...(toolCalls?.length && { tool_calls: toolCalls }),
                   created_at: now
                 }

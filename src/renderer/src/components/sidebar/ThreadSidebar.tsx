@@ -681,6 +681,15 @@ export function ThreadSidebar(): React.JSX.Element {
     })
   }, [allThreadStates, pinnedProjectKeys, projectNameOverrides, threads])
 
+  const currentThreadWorkspacePath = useMemo(() => {
+    if (!currentThreadId) return null
+
+    const currentThread = threads.find((thread) => thread.thread_id === currentThreadId)
+    if (!currentThread || isHarnessFeatureThread(currentThread)) return null
+
+    return getThreadWorkspacePath(currentThread, allThreadStates[currentThreadId]?.workspacePath)
+  }, [allThreadStates, currentThreadId, threads])
+
   const toggleProject = useCallback(
     (projectKey: string) => {
       setCollapsedProjectKeys((prev) => {
@@ -818,7 +827,17 @@ export function ThreadSidebar(): React.JSX.Element {
   }, [loadRobots, showCustomizeView])
 
   const handleNewThread = async (): Promise<void> => {
-    await createThread({ title: `Thread ${new Date().toLocaleDateString()}` })
+    const metadata: Record<string, unknown> = {
+      title: `Thread ${new Date().toLocaleDateString()}`
+    }
+
+    // When the user creates a new task from an existing thread, keep it in the
+    // same workspace instead of falling back to the last globally selected one.
+    if (currentThreadWorkspacePath) {
+      metadata.workspacePath = currentThreadWorkspacePath
+    }
+
+    await createThread(metadata)
   }
 
   const handleNewProjectThread = async (project: ThreadProject): Promise<void> => {
@@ -1086,27 +1105,27 @@ export function ThreadSidebar(): React.JSX.Element {
     <aside className="flex h-full w-full flex-col border-r border-border bg-sidebar overflow-hidden">
       {/* New Thread Button - with dynamic safe area padding when zoomed out */}
       <div
-        className="p-2 space-y-1.5"
+        className="p-1 space-y-1.5"
         style={{ paddingTop: "calc(8px + var(--sidebar-safe-padding, 0px))" }}
       >
         <div
           role="tablist"
           aria-label="侧边栏模式"
-          className="mb-2 grid h-10 grid-cols-2 rounded-lg bg-muted/70 p-1"
+          className="mb-2 grid h-8 grid-cols-2 rounded bg-sidebar-accent p-1"
         >
           <button
             type="button"
             role="tab"
             aria-selected={activeSidebarTab === "chat"}
             className={cn(
-              "flex min-w-0 items-center justify-center gap-1.5 rounded-md px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
               activeSidebarTab === "chat"
-                ? "border border-border/70 bg-background text-foreground shadow-sm"
+                ? "shadow border border-border/70 bg-background text-foreground"
                 : "text-muted-foreground hover:text-foreground"
             )}
             onClick={() => void handleSelectChatTab()}
           >
-            <MessageSquare className="size-4 shrink-0" />
+            <MessageSquare className="size-3 shrink-0" />
             <span className="min-w-0 truncate">对话模式</span>
           </button>
           <TooltipProvider delayDuration={120}>
@@ -1118,17 +1137,17 @@ export function ThreadSidebar(): React.JSX.Element {
                   aria-selected={activeSidebarTab === "project"}
                   aria-disabled={!projectModeEnabled}
                   className={cn(
-                    "flex min-w-0 items-center justify-center gap-1.5 rounded-md px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                    "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                     projectModeEnabled
                       ? activeSidebarTab === "project"
-                        ? "border border-border/70 bg-background text-foreground shadow-sm"
+                        ? "shadow border border-border/70 bg-background text-foreground"
                         : "text-muted-foreground hover:text-foreground"
                       : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
                     projectModeLoading && !projectModeEnabled && "opacity-55"
                   )}
                   onClick={() => void handleSelectProjectTab()}
                 >
-                  <Workflow className="size-4 shrink-0" />
+                  <Workflow className="size-3 shrink-0" />
                   <span className="min-w-0 truncate">项目模式</span>
                 </button>
               </TooltipTrigger>

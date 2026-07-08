@@ -210,6 +210,7 @@ export interface Message {
   id: string
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  reasoning?: string
   tool_calls?: ToolCall[]
   created_at: Date
 }

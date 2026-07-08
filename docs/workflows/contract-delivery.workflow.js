@@ -1,11 +1,11 @@
 export const meta = {
-  name: "契约驱动端到端交付",
+  name: "端到端需求交付(验收标准驱动)",
   description:
     "把需求固化为逐条可核查的验收合同，多轮自主实现-验证-对抗复核，直到每条标准都有证据；交付逐条对照的证据矩阵。",
   whenToUse:
-    "端到端交付开发需求时使用，简单/中等/复杂需求同一入口：成契时自动评定复杂度档位，simple 档跳过规划代理与多视角探索（低开销直通），standard/complex 档走完整多轮收敛。需求先成契（每条验收标准带 ID 和核查方式），执行按轮次收敛（每轮只做未证实的标准）。运行中断后可用引擎的 resumeFromRunId 重放已完成的 agent 调用。可选 args：contract（预先协商好的合同对象）、complexity（simple|standard|complex 覆盖自动档位）、artifactDir、outputPath、maxRounds、maxFixRounds。",
+    "端到端交付开发需求时使用，简单/中等/复杂需求同一入口：确定验收标准时自动评定复杂度档位，simple 档跳过规划代理与多视角探索（低开销直通），standard/complex 档走完整多轮收敛。需求先确定验收标准（每条验收标准带 ID 和核查方式），执行按轮次收敛（每轮只做未证实的标准）。运行中断后可用引擎的 resumeFromRunId 重放已完成的 agent 调用。可选 args：contract（预先协商好的合同对象）、complexity（simple|standard|complex 覆盖自动档位）、artifactDir、outputPath、maxRounds、maxFixRounds。",
   phases: [
-    { title: "成契" },
+    { title: "确定验收标准" },
     { title: "项目探索" },
     { title: "交付循环" },
     { title: "终审" },
@@ -788,7 +788,7 @@ ${lines(verification.issues)}
 function renderDeliveryReport(context, verdict, runnerResult, verdictReason) {
   const criteria = context.criteria
   const proven = criteria.filter((c) => c.status === "proven")
-  return `# 契约交付报告
+  return `# 需求交付报告
 
 ## 总体结论
 
@@ -888,7 +888,7 @@ const hasExplicitContract =
   Array.isArray(options.contract.criteria)
 if (options.contract && !hasExplicitContract) {
   // contract 是公开参数:传了但形状不合法(criteria 缺失/拼错/非数组)时,
-  // 静默当没传会让本次退化成 agent 自动成契、悄悄改变行为——必须显式报错。
+  // 静默当没传会让本次退化成 agent 自动确定验收标准、悄悄改变行为——必须显式报错。
   throw new Error("options.contract 形状不合法:必须是携带 criteria 数组的对象(请检查字段拼写)。")
 }
 
@@ -916,10 +916,10 @@ const context = {
   auditGaps: []
 }
 
-// ---- 成契 ----
-phase("成契")
+// ---- 确定验收标准 ----
+phase("确定验收标准")
 if (hasExplicitContract) {
-  // 支持在聊天里人机协商好合同后直接注入（成契前置到对话，是人工投入价值最高的一段）。
+  // 支持在聊天里人机协商好合同后直接注入（确定验收标准前置到对话，是人工投入价值最高的一段）。
   const provided = options.contract
   context.criteria = explicitCriteria
   context.contract = {
@@ -954,14 +954,14 @@ if (hasExplicitContract) {
 需求内容：
 ${requirement}`,
     {
-      label: "需求成契",
-      phase: "成契",
+      label: "确定验收标准",
+      phase: "确定验收标准",
       agentType: "Plan",
       schema: CONTRACT_SCHEMA
     }
   )
   if (!contract || !contract.canProceed) {
-    const report = `# 契约交付已阻塞
+    const report = `# 需求交付已阻塞
 
 ## 原始需求
 
@@ -969,24 +969,24 @@ ${requirement}
 
 ## 阻塞原因
 
-${contract ? contract.proceedReason : "成契代理没有返回结构化结果。"}
+${contract ? contract.proceedReason : "确定验收标准代理没有返回结构化结果。"}
 
 ## 待确认项
 
-${contract ? lines(contract.openQuestions) : "- 成契失败"}
+${contract ? lines(contract.openQuestions) : "- 确定验收标准失败"}
 `
     await writeFile(outputPath, report)
     context.contract = contract
     await writeState(
       context,
       "contract_blocked",
-      contract ? contract.proceedReason : "成契失败",
-      contract ? contract.openQuestions : ["成契失败"]
+      contract ? contract.proceedReason : "确定验收标准失败",
+      contract ? contract.openQuestions : ["确定验收标准失败"]
     )
     return {
       状态: "已阻塞",
       报告路径: outputPath,
-      待确认项: contract ? contract.openQuestions : ["成契失败"]
+      待确认项: contract ? contract.openQuestions : ["确定验收标准失败"]
     }
   }
   context.contract = contract
@@ -994,7 +994,7 @@ ${contract ? lines(contract.openQuestions) : "- 成契失败"}
   if (context.criteria.length === 0) {
     // schema 的 minLength:1 拦不住纯空白文本;normalize 剔除后为 0 条时必须硬性
     // 失败,否则 every() 空真会直接"可交付 0/0"。与外部合同路径的防线对齐。
-    throw new Error("成契产出的合同没有任何有效验收标准（全部为空白文本），请重试或补充需求。")
+    throw new Error("确定验收标准产出的合同没有任何有效验收标准（全部为空白文本），请重试或补充需求。")
   }
   log(`合同成立：${context.criteria.length} 条验收标准。`)
 }
@@ -1118,8 +1118,12 @@ phase("项目探索")
 探索视角：${item.label}
 ${item.prompt}
 
-交付合同：
-${stringify(context.contract)}
+交付合同（摘要，供定位相关文件/命令/风险；每条标准的核查方式与提示、非目标/约定等留给后续实现与验证阶段，此处不展开）：
+标题：${context.contract.title}
+目标：${context.contract.goal}
+约束：${lines(context.contract.constraints)}
+验收标准：
+${context.criteria.map((c) => `- ${c.id}：${c.text}`).join("\n")}
 
 配置/说明文件片段：
 ${manifestSnippets.join("\n\n") || "未找到"}
@@ -1203,7 +1207,7 @@ while (roundsThisRun < maxRounds) {
     log(`第 ${round} 轮（simple 档）：跳过规划代理，单工作包直通实现。`)
   } else {
     plan = await agent(
-      `这是契约交付的第 ${round} 轮。请只为下面"待证实标准"规划工作包（package），已证实的标准不要碰。
+      `这是需求交付的第 ${round} 轮。请只为下面"待证实标准"规划工作包（package），已证实的标准不要碰。
 
 交付合同摘要（验收标准以下方"待证实标准"为唯一依据）：
 ${stringify({
@@ -1328,8 +1332,11 @@ ${stringify({
 公约简报（必须遵守，防止与其他工作包风格漂移）：
 ${context.conventionsBrief}
 
-项目画像：
-${stringify(context.exploration)}
+项目画像（概述与命令；本工作包的目标文件见下方"当前工作包"，需要项目其它文件定位时读取完整画像文件 ${context.artifacts.profile}）：
+概述：${context.exploration.summary}
+构建命令：${lines(context.exploration.buildCommands)}
+测试命令：${lines(context.exploration.testCommands)}
+风险：${lines(context.exploration.risks)}
 
 当前工作包：
 ${stringify(pkg)}
@@ -1406,7 +1413,7 @@ ${stringify(pkg)}
 
 首轮实现：
 ${stringify(implementation)}
-${previousFix ? `\n上一轮修复（当前代码已包含这些修改）：\n${stringify(previousFix)}\n` : ""}
+${previousFix && previousFix.changedFiles && previousFix.changedFiles.length ? `\n上一轮修复已改动的文件（当前代码已包含这些修改，需要细节请直接读取这些文件）：\n${lines(previousFix.changedFiles)}\n` : ""}
 未通过的标准及证据：
 ${stringify(failing)}
 
@@ -1490,7 +1497,11 @@ perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报
       `你是对抗复核代理。你的唯一任务是推翻下面这些"已证实"的验收标准——逐条检查证据是否真实、充分、与标准语义一致（证据可以在代码库里核实，必要时运行只读命令）。
 宁可错杀不可放过：证据模糊、以偏概全、文件行号对不上的，一律驳回。确实无懈可击的才放行。不要修改文件。
 职责边界：只核对证据与代码本身（读文件、grep、行号比对），必要时最多运行轻量只读命令；不要重跑完整构建或测试套件——那是终审命令核对的职责，重复执行只会拖慢并增加故障面。
-
+${
+      context.contract.globalValidationCommands && context.contract.globalValidationCommands.length
+        ? `\n本合同声明的全局验证命令（下列命令是合法声明的，终审阶段会真实执行并核对）：\n${lines(context.contract.globalValidationCommands)}\n注意：证据若引用了上列已声明的命令，不得以"命令不在合同里/无此命令/无据编造"为由驳回；这类命令的实际执行由终审阶段负责，不要求在本阶段已经跑过——只判证据与标准语义、代码事实是否一致。真正凭空捏造（引用一条未声明、代码里也不存在的命令或结果）才驳回。\n`
+        : ""
+    }
 本轮新证实的标准与证据：
 ${stringify(newlyProven.map((c) => ({ id: c.id, text: c.text, verify: c.verify, evidence: c.evidence })))}
 

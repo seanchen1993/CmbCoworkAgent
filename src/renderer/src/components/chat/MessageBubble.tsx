@@ -3,7 +3,7 @@ import { ToolCallRenderer } from "./ToolCallRenderer"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
-import React, { useEffect, useMemo, useState } from "react"
+import React, { useEffect, useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
@@ -147,6 +147,20 @@ function normalizeToolCallForDisplay<T extends { name: string; args?: Record<str
     ...toolCall,
     args: normalizeCoordinatorWorkerToolArgsForDisplay(toolCall.name, toolCall.args)
   }
+}
+
+function cleanReasoningText(text: string): string {
+  return text
+    .replace(/^\s*<think>\s*/i, "")
+    .replace(/\s*<\/think>\s*$/i, "")
+    .trim()
+}
+
+function stripThinkBlocksForDisplay(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>\s*/gi, "")
+    .replace(/^\s*<think>[\s\S]*$/i, "")
+    .replace(/^[\s\S]*?<\/think>\s*/i, "")
 }
 
 // 获取工具调用的简要描述
@@ -587,12 +601,31 @@ function MessageBubbleImpl({
   const [likedMessageId, setLikedMessageId] = useState<string | null>(null)
   const [dislikedMessageId, setDislikedMessageId] = useState<string | null>(null)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
+  const [reasoningOpen, setReasoningOpen] = useState(false)
+  const autoOpenedReasoningForMessageRef = useRef<string | null>(null)
+  const autoCollapsedReasoningForMessageRef = useRef<string | null>(null)
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
   const isForkingThisMessage = forkingMessageId === message.id
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
+  const reasoningText =
+    !isUser && typeof message.reasoning === "string" ? cleanReasoningText(message.reasoning) : ""
+  const visibleAssistantContentText = useMemo(() => {
+    if (isUser) return ""
+    if (typeof message.content === "string") {
+      return reasoningText ? stripThinkBlocksForDisplay(message.content) : message.content
+    }
+    if (!Array.isArray(message.content)) return ""
+    return message.content
+      .map((block) => {
+        if (block.type !== "text" || !block.text) return ""
+        return reasoningText ? stripThinkBlocksForDisplay(block.text) : block.text
+      })
+      .join("\n")
+  }, [isUser, message.content, reasoningText])
+  const hasVisibleAssistantContent = visibleAssistantContentText.trim().length > 0
 
   useEffect(() => {
     if (
@@ -603,6 +636,20 @@ function MessageBubbleImpl({
       console.log(message, "message///")
     }
   }, [message])
+
+  useEffect(() => {
+    if (!isStreaming || !reasoningText) return
+    if (autoOpenedReasoningForMessageRef.current === message.id) return
+    autoOpenedReasoningForMessageRef.current = message.id
+    setReasoningOpen(true)
+  }, [isStreaming, message.id, reasoningText])
+
+  useEffect(() => {
+    if (!isStreaming || !reasoningText || !hasVisibleAssistantContent) return
+    if (autoCollapsedReasoningForMessageRef.current === message.id) return
+    autoCollapsedReasoningForMessageRef.current = message.id
+    setReasoningOpen(false)
+  }, [hasVisibleAssistantContent, isStreaming, message.id, reasoningText])
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
   const shouldShowMessageHead =
@@ -725,8 +772,10 @@ function MessageBubbleImpl({
     }
 
     if (typeof message.content === "string") {
+      const displayContent =
+        !isUser && reasoningText ? stripThinkBlocksForDisplay(message.content) : message.content
       // Empty content (after potentially stripping the trailing skill-use block below)
-      if (!message.content.trim()) {
+      if (!displayContent.trim()) {
         return null
       }
 
@@ -735,7 +784,7 @@ function MessageBubbleImpl({
         // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
-        const { visibleText, skillName } = parseUserVisibleSkillContent(message.content)
+        const { visibleText, skillName } = parseUserVisibleSkillContent(displayContent)
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
             {skillName && <SkillChip label={skillName} compact className="mr-2" />}
@@ -743,16 +792,19 @@ function MessageBubbleImpl({
           </div>
         )
       }
-      return <StreamingMarkdown isStreaming={isStreaming}>{message.content}</StreamingMarkdown>
+      return <StreamingMarkdown isStreaming={isStreaming}>{displayContent}</StreamingMarkdown>
     }
 
     // Handle content blocks
     const renderedBlocks = message.content
       .map((block, index) => {
         if (block.type === "text" && block.text) {
+          const displayText =
+            !isUser && reasoningText ? stripThinkBlocksForDisplay(block.text) : block.text
+          if (!displayText.trim()) return null
           // Use streaming markdown for assistant text blocks
           if (isUser) {
-            const { visibleText, skillName } = parseUserVisibleSkillContent(block.text)
+            const { visibleText, skillName } = parseUserVisibleSkillContent(displayText)
             return (
               <div
                 key={index}
@@ -765,7 +817,7 @@ function MessageBubbleImpl({
           }
           return (
             <StreamingMarkdown key={index} isStreaming={isStreaming}>
-              {block.text}
+              {displayText}
             </StreamingMarkdown>
           )
         }
@@ -854,7 +906,7 @@ function MessageBubbleImpl({
   }
 
   // Don't render if there's no content and no tool calls
-  if (!content && !hasToolCalls) {
+  if (!content && !hasToolCalls && !reasoningText) {
     return null
   }
 
@@ -951,6 +1003,30 @@ function MessageBubbleImpl({
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden">
+        {reasoningText && (
+          <div className="px-3">
+            <button
+              type="button"
+              onClick={() => setReasoningOpen((open) => !open)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-muted/35 px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+              aria-expanded={reasoningOpen}
+            >
+              {reasoningOpen ? (
+                <ChevronDown className="size-3.5" />
+              ) : (
+                <ChevronRight className="size-3.5" />
+              )}
+              <span>思考</span>
+            </button>
+            {reasoningOpen && (
+              <div className="mt-2 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-sm text-muted-foreground">
+                <StreamingMarkdown isStreaming={Boolean(isStreaming)}>
+                  {reasoningText}
+                </StreamingMarkdown>
+              </div>
+            )}
+          </div>
+        )}
         {content && (
           <div className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]">
             {content}
