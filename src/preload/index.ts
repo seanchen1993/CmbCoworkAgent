@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
 import type {
   Thread,
+  Message,
   ModelConfig,
   Provider,
   StreamEvent,
@@ -521,6 +522,12 @@ const api = {
     },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
+    },
+    getMessages: (threadId: string): Promise<Message[]> => {
+      return ipcRenderer.invoke("threads:messages", threadId)
+    },
+    appendMessages: (threadId: string, messages: Message[]): Promise<{ count: number }> => {
+      return ipcRenderer.invoke("threads:appendMessages", { threadId, messages })
     },
     exportSession: (
       threadId: string

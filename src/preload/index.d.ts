@@ -1,5 +1,6 @@
 import type {
   Thread,
+  Message,
   ModelConfig,
   Provider,
   StreamEvent,
@@ -849,6 +850,8 @@ interface CustomAPI {
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
+    getMessages: (threadId: string) => Promise<Message[]>
+    appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
     exportSession: (
       threadId: string
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>

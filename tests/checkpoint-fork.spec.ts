@@ -27,14 +27,20 @@ import {
   checkpointHasInterrupt,
   describeCheckpointMessageForkTarget,
   deriveCheckpointTranscriptIndex,
+  filterMessagesToCheckpointVisibleIds,
+  findMessagesAfterCheckpointVisibleIds,
   isWorkflowPlumbingTranscriptContent,
+  mergeCheckpointAuthorityTranscriptMessage,
+  mergeCheckpointAuthorityTranscriptMessages,
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
   truncateCheckpointMessagesAfter
 } from "../src/shared/checkpoint-transcript"
 
-function config(threadId: string, checkpointId?: string): RunnableConfig {
-  return { configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: checkpointId } }
+function config(threadId: string, checkpointId?: string, checkpointNs = ""): RunnableConfig {
+  return {
+    configurable: { thread_id: threadId, checkpoint_ns: checkpointNs, checkpoint_id: checkpointId }
+  }
 }
 
 function makeCheckpoint(id: string, ts = "2026-07-03T00:00:00.000Z"): Checkpoint {
@@ -53,6 +59,99 @@ function makeCheckpoint(id: string, ts = "2026-07-03T00:00:00.000Z"): Checkpoint
     versions_seen: {},
     pending_sends: []
   } as Checkpoint
+}
+
+function testCheckpointAuthorityMergeKeepsCompleteCheckpointContent(): void {
+  const merged = mergeCheckpointAuthorityTranscriptMessage(
+    {
+      id: "assistant-1",
+      role: "assistant",
+      content: "complete checkpoint answer",
+      tool_calls: [{ id: "call-1", name: "read_file", args: { path: "a.ts" } }],
+      created_at: new Date("2026-07-03T00:00:00.000Z")
+    },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      content: "complete",
+      tool_calls: [],
+      goal_id: "goal-1",
+      created_at: new Date("2026-07-03T00:00:01.000Z")
+    }
+  )
+
+  assert.equal(merged.content, "complete checkpoint answer")
+  assert.deepEqual(merged.tool_calls, [{ id: "call-1", name: "read_file", args: { path: "a.ts" } }])
+  assert.equal(merged.goal_id, "goal-1")
+  assert.equal(
+    merged.created_at instanceof Date ? merged.created_at.toISOString() : merged.created_at,
+    "2026-07-03T00:00:01.000Z"
+  )
+
+  const upgraded = mergeCheckpointAuthorityTranscriptMessage(
+    {
+      id: "assistant-2",
+      role: "assistant",
+      content: "partial",
+      created_at: new Date("2026-07-03T00:00:00.000Z")
+    },
+    {
+      id: "assistant-2",
+      role: "assistant",
+      content: "partial answer completed",
+      created_at: new Date("2026-07-03T00:00:01.000Z")
+    }
+  )
+  assert.equal(upgraded.content, "partial answer completed")
+  console.log("PASS DB transcript cannot overwrite complete checkpoint content")
+}
+
+function testDurableTranscriptMergeKeepsMessagesAfterCheckpoint(): void {
+  const merged = mergeCheckpointAuthorityTranscriptMessages(
+    [
+      {
+        id: "user-1",
+        content: "old question",
+        created_at: new Date("2026-07-03T00:00:00.000Z")
+      },
+      {
+        id: "assistant-1",
+        content: "complete checkpoint answer",
+        created_at: new Date("2026-07-03T00:00:01.000Z")
+      }
+    ],
+    [
+      {
+        id: "assistant-1",
+        content: "complete",
+        goal_id: "goal-1",
+        created_at: new Date("2026-07-03T00:00:01.500Z")
+      },
+      {
+        id: "user-2",
+        content: "new question after checkpoint",
+        created_at: new Date("2026-07-03T00:01:00.000Z")
+      },
+      {
+        id: "assistant-2",
+        content: "new answer after checkpoint",
+        created_at: new Date("2026-07-03T00:01:01.000Z")
+      }
+    ]
+  )
+
+  assert.deepEqual(
+    merged.map((message) => message.id),
+    ["user-1", "assistant-1", "user-2", "assistant-2"],
+    "durable transcript messages after the checkpoint must remain visible"
+  )
+  assert.equal(
+    merged[1].content,
+    "complete checkpoint answer",
+    "checkpoint content stays authoritative for the overlapping message"
+  )
+  assert.equal(merged[1].goal_id, "goal-1", "durable metadata still enriches checkpoint messages")
+  console.log("PASS durable transcript merge keeps messages after checkpoint")
 }
 
 function makeTuple(input: {
@@ -236,6 +335,46 @@ async function testConfigurableCheckpointRetention(dir: string): Promise<void> {
 
   assert.deepEqual(firstPageIds, ["a-new"])
   assert.deepEqual(afterFirstPageIds, ["m-mid", "z-old"])
+
+  const splitRetentionPath = join(dir, "split-retention.sqlite")
+  const splitRetentionSaver = new SqlJsSaver(splitRetentionPath, undefined, {
+    maxRootCheckpoints: 3,
+    maxNonRootCheckpoints: 1
+  })
+  await splitRetentionSaver.put(config("split"), makeCheckpoint("root-1"), makeMetadata(1))
+  await splitRetentionSaver.put(config("split", "root-1"), makeCheckpoint("root-2"), makeMetadata(2))
+  await splitRetentionSaver.put(config("split", "root-2"), makeCheckpoint("root-3"), makeMetadata(3))
+  await splitRetentionSaver.put(config("split", "root-3"), makeCheckpoint("root-4"), makeMetadata(4))
+  await splitRetentionSaver.put(
+    config("split", undefined, "tools:workflow-agent"),
+    makeCheckpoint("tool-1"),
+    makeMetadata(1)
+  )
+  await splitRetentionSaver.put(
+    config("split", "tool-1", "tools:workflow-agent"),
+    makeCheckpoint("tool-2"),
+    makeMetadata(2)
+  )
+  await splitRetentionSaver.put(
+    config("split", "tool-2", "tools:workflow-agent"),
+    makeCheckpoint("tool-3"),
+    makeMetadata(3)
+  )
+
+  const splitRootIds: string[] = []
+  for await (const tuple of splitRetentionSaver.list(config("split"))) {
+    splitRootIds.push(tuple.checkpoint.id)
+  }
+  const splitToolIds: string[] = []
+  for await (const tuple of splitRetentionSaver.list(
+    config("split", undefined, "tools:workflow-agent")
+  )) {
+    splitToolIds.push(tuple.checkpoint.id)
+  }
+  await splitRetentionSaver.close()
+
+  assert.deepEqual(splitRootIds, ["root-4", "root-3", "root-2"])
+  assert.deepEqual(splitToolIds, ["tool-3"])
   console.log("PASS checkpoint retention can keep historical root checkpoints")
 }
 
@@ -317,6 +456,74 @@ function testThreadValuesFiltering(): void {
   ])
   assert.equal(filtered.unknownRuntimeState, undefined, "unknown thread_values should not copy")
   console.log("PASS fork thread_values are rebuilt from the checkpoint transcript")
+}
+
+function testPersistedTranscriptFilteringUsesCheckpointBoundary(): void {
+  const checkpoint = makeCheckpoint("cp-transcript-filter")
+  const index = deriveCheckpointTranscriptIndex(checkpoint)
+  const filtered = filterMessagesToCheckpointVisibleIds(
+    [
+      { id: "user-1", content: "hello" },
+      { id: "assistant-1", content: "hi" },
+      { id: "future-user", content: "future" },
+      { id: "future-assistant", content: "future answer" }
+    ],
+    index
+  )
+
+  assert.deepEqual(
+    filtered.map((message) => message.id),
+    ["user-1", "assistant-1"],
+    "durable transcript merge should ignore messages outside the checkpoint"
+  )
+  assert.deepEqual(
+    filterMessagesToCheckpointVisibleIds([{ id: "future" }], {
+      visibleMessageIds: []
+    }),
+    [],
+    "an empty checkpoint transcript should not fall back to all persisted messages"
+  )
+  console.log("PASS persisted transcript filtering stays inside checkpoint visible ids")
+}
+
+function testMessagesAfterCheckpointVisibleIds(): void {
+  const messages = [
+    { id: "user-1", content: "hello" },
+    { id: "assistant-1", content: "hi" },
+    { id: "future-user", content: "future" },
+    { id: "future-assistant", content: "future answer" }
+  ]
+
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(messages, ["user-1", "assistant-1"]).map(
+      (message) => message.id
+    ),
+    ["future-user", "future-assistant"],
+    "durable tail should start after the last checkpoint-visible id"
+  )
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(messages, ["user-1", "assistant-1"], {
+      excludeMessageIds: ["future-user"]
+    }).map((message) => message.id),
+    ["future-assistant"],
+    "current-turn user ids can be excluded from runtime tail"
+  )
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds([{ id: "future-user" }], [
+      "user-1",
+      "assistant-1"
+    ]).map((message) => message.id),
+    ["future-user"],
+    "partial durable transcripts without checkpoint ids are all checkpoint tail"
+  )
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds([{ id: "future-user" }], []).map(
+      (message) => message.id
+    ),
+    [],
+    "empty checkpoint transcripts do not create a runtime tail"
+  )
+  console.log("PASS durable tail detection follows checkpoint visible ids")
 }
 
 function testWorkflowPlumbingFilteredFromTranscript(): void {
@@ -412,7 +619,8 @@ function testMessageForkBoundaryValidation(): void {
     { id: "wf-trigger", type: "human", content: WORKFLOW_NOTIFICATION_TURN_PROMPT }
   ]
   status = describeCheckpointMessageForkTarget(hiddenTail, "assistant-1")
-  assert.equal(status.isForkableMessageBoundary, true)
+  assert.equal(status.isForkableMessageBoundary, false)
+  assert.equal(status.reason, "not_checkpoint_tail")
   assert.equal(
     isForkableCheckpointForMessage(
       makeTuple({
@@ -421,7 +629,7 @@ function testMessageForkBoundaryValidation(): void {
       }),
       "assistant-1"
     ),
-    true
+    false
   )
 
   const visibleRawTail = makeCheckpoint("cp-visible-raw-tail") as Checkpoint
@@ -444,7 +652,7 @@ function testMessageForkBoundaryValidation(): void {
     ),
     false
   )
-  console.log("PASS message fork requires a visible assistant boundary with no later visible tail")
+  console.log("PASS message fork requires a visible assistant boundary with no later raw tail")
 }
 
 function testInterruptDetection(): void {
@@ -467,6 +675,13 @@ function testForkabilitySummary(): void {
   assert.equal(stableSummary.messageCount, 2)
   assert.equal(stableSummary.lastMessagePreview, "hi")
   assert.equal(stableSummary.lastUserMessagePreview, "hello")
+
+  const activeRunSummary = buildForkableCheckpointSummary(
+    makeTuple({ checkpoint: makeCheckpoint("cp-active-run"), metadata: stableMetadata }),
+    { activeRun: true, pendingApproval: false }
+  )
+  assert.equal(activeRunSummary.isStableTurnBoundary, false)
+  assert.equal(activeRunSummary.unstableReason, "in_progress_turn")
 
   const missingMarker = describeCheckpointForkability(
     makeTuple({ checkpoint: makeCheckpoint("cp-missing") }),
@@ -511,6 +726,13 @@ function testForkabilitySummary(): void {
 }
 
 function testVisibleForkableCheckpointList(): void {
+  const hiddenTailDupe = makeCheckpoint("cp-dupe-hidden-newer") as Checkpoint
+  ;(hiddenTailDupe.channel_values as Record<string, unknown>).messages = [
+    { id: "user-1", type: "human", content: "hello" },
+    { id: "assistant-1", type: "ai", content: "hi" },
+    { id: "wf-trigger", type: "human", content: WORKFLOW_NOTIFICATION_TURN_PROMPT }
+  ]
+
   const unique = makeCheckpoint("cp-unique") as Checkpoint
   ;(unique.channel_values as Record<string, unknown>).messages = [
     { id: "user-1", type: "human", content: "hello" },
@@ -521,6 +743,10 @@ function testVisibleForkableCheckpointList(): void {
 
   const summaries = buildVisibleForkableCheckpointList(
     [
+      makeTuple({
+        checkpoint: hiddenTailDupe,
+        metadata: makeForkBoundaryMetadata("cp-dupe-hidden-newer", 5, "assistant-1")
+      }),
       makeTuple({
         checkpoint: makeCheckpoint("cp-dupe-newer"),
         metadata: makeForkBoundaryMetadata("cp-dupe-newer", 4)
@@ -551,16 +777,35 @@ function testVisibleForkableCheckpointList(): void {
     ["cp-dupe-newer", "cp-unique"]
   )
   assert.ok(summaries.every((summary) => summary.isStableTurnBoundary))
-  console.log("PASS visible fork checkpoint list hides internal states and duplicate messages")
+
+  const busySummaries = buildVisibleForkableCheckpointList(
+    [
+      makeTuple({
+        checkpoint: unique,
+        metadata: makeForkBoundaryMetadata("cp-unique", 1)
+      })
+    ],
+    { activeRun: true, pendingApproval: false }
+  )
+  assert.deepEqual(
+    busySummaries.map((summary) => summary.checkpointId),
+    [],
+    "UI forkable list should hide checkpoints while the thread is busy"
+  )
+  console.log("PASS visible fork checkpoint list hides internal states and hidden raw tails")
 }
 
 async function main(): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "checkpoint-fork-"))
   try {
+    testCheckpointAuthorityMergeKeepsCompleteCheckpointContent()
+    testDurableTranscriptMergeKeepsMessagesAfterCheckpoint()
     await testTupleCopyToNewThread(dir)
     await testConfigurableCheckpointRetention(dir)
     await testMetadataUpdatePreservesCheckpointShape(dir)
     testThreadValuesFiltering()
+    testPersistedTranscriptFilteringUsesCheckpointBoundary()
+    testMessagesAfterCheckpointVisibleIds()
     testWorkflowPlumbingFilteredFromTranscript()
     testCheckpointMessageTruncation()
     testMessageForkBoundaryValidation()

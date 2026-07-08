@@ -1,5 +1,18 @@
 // Re-export types from electron for use in renderer
 
+import type {
+  ForkableCheckpoint as SharedForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
+  ThreadForkOverrides as SharedThreadForkOverrides,
+  ThreadForkParams as SharedThreadForkParams,
+  ThreadForkResponse as SharedThreadForkResponse
+} from "../../shared/checkpoint-forkability"
+
+export type {
+  ForkBoundarySource,
+  ForkUnstableReason
+} from "../../shared/checkpoint-forkability"
+
 export interface FileAttachment {
   filename: string
   filePath: string // full path for display
@@ -21,58 +34,11 @@ export interface Thread {
   title?: string
 }
 
-export interface ThreadForkOverrides {
-  title?: string
-  model?: string
-  workspacePath?: string | null
-  memoryEnabled?: boolean
-  agentMode?: "normal" | "coordinator" | "workflow"
-}
-
-export interface ThreadForkParams {
-  sourceThreadId: string
-  checkpointId?: string
-  messageId?: string
-  title?: string
-  overrides?: ThreadForkOverrides
-}
-
-export interface ThreadForkResponse {
-  thread: Thread
-  sourceThreadId: string
-  sourceCheckpointId: string
-  sourceCheckpointNs: ""
-}
-
-export interface ThreadForkCheckpointForMessageParams {
-  threadId: string
-  messageId: string
-}
-
-export type ForkBoundarySource = "metadata_marker" | "legacy_latest_idle_fallback"
-
-export type ForkUnstableReason =
-  | "missing_boundary_marker"
-  | "in_progress_turn"
-  | "interrupt"
-  | "pending_approval"
-  | "pending_writes"
-  | "unknown"
-
-export interface ForkableCheckpoint {
-  checkpointId: string
-  checkpointNs: ""
-  createdAt?: string
-  messageCount: number
-  lastMessagePreview: string
-  lastUserMessagePreview?: string
-  isStableTurnBoundary: boolean
-  stableTurnId?: string
-  boundarySource?: ForkBoundarySource
-  unstableReason?: ForkUnstableReason
-  hasInterrupt: boolean
-  hasPendingWrites: boolean
-}
+export type ThreadForkOverrides = SharedThreadForkOverrides
+export type ThreadForkParams = SharedThreadForkParams
+export type ThreadForkResponse = SharedThreadForkResponse<Thread>
+export type ThreadForkCheckpointForMessageParams = SharedThreadForkCheckpointForMessageParams
+export type ForkableCheckpoint = SharedForkableCheckpoint
 
 export type RunStatus = "pending" | "running" | "error" | "success" | "interrupted"
 

@@ -1090,6 +1090,11 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
+    "visibleTranscriptUserMessage = effectiveMessage",
+    "agent IPC persists the de-weaponized coordinator marker text into the durable transcript"
+  )
+  assertIncludes(
+    agentIpc,
     "containsCoordinatorInternalMarker(effectiveMessage)",
     "agent IPC treats all coordinator internal markers as user-supplied text unless the IPC flag is trusted"
   )
@@ -1243,7 +1248,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertSourceOrder(
     agentIpc,
-    "const humanMessages = [",
+    "const humanMessages",
     "const acknowledgeDeliveredCoordinatorNotificationsIfNeeded",
     "agent IPC delivery-acknowledges task-notifications only after constructing the internal HumanMessage batch"
   )

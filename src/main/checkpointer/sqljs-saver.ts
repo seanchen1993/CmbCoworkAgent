@@ -1,5 +1,5 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
-import { renameSync, unlinkSync } from "fs"
+import { readFileSync, renameSync, unlinkSync } from "fs"
 import {
   openRecoveredSqliteDatabase,
   persistSqliteSnapshot,
@@ -10,6 +10,8 @@ import {
 // frequently during a streaming agent run; coalescing keeps the synchronous
 // db.export() snapshot off the hot path while the disk write runs async.
 const CHECKPOINT_SAVE_DEBOUNCE_MS = 300
+const DEFAULT_MAX_DB_SIZE_BYTES = 100 * 1024 * 1024
+const DEFAULT_MAX_OVERSIZED_RECOVERY_BYTES = 128 * 1024 * 1024
 import type { RunnableConfig } from "@langchain/core/runnables"
 import {
   BaseCheckpointSaver,
@@ -41,7 +43,31 @@ interface WriteRow {
 }
 
 export interface SqlJsSaverOptions {
+  /** Legacy option: applies to every namespace unless the split options below are set. */
   maxCheckpointsPerNamespace?: number
+  /** Root namespace checkpoints back runtime resume and recent checkpoint fork. */
+  maxRootCheckpoints?: number
+  /** Non-root namespaces are LangGraph internals/tool subgraphs and can grow very large. */
+  maxNonRootCheckpoints?: number
+  /** Soft size guard for opening a database without emergency pruning. */
+  maxDatabaseBytes?: number
+  /** Harder cap for attempting to open and compact an oversized live database. */
+  maxOversizedRecoveryBytes?: number
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && value !== undefined && value > 0
+    ? Math.max(1, Math.floor(value))
+    : fallback
+}
+
+function isSqliteIntegrityOk(database: SqlJsDatabase): boolean {
+  try {
+    const result = database.exec("PRAGMA integrity_check")
+    return result[0]?.values[0]?.[0] === "ok"
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -56,7 +82,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private dirty = false
   /** In-flight async save, so flush() knows bytes may be in an unrenamed temp. */
   private savePromise: Promise<void> | null = null
-  private flushPromise: Promise<void> | null = null
+  private flushPromise: Promise<unknown | null> | null = null
   private closePromise: Promise<void> | null = null
   /** Set while a flush/close drains the writer so no older rename can land
    * after the authoritative snapshot. */
@@ -69,16 +95,37 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * land a snapshot. */
   private retired = false
 
-  /** Max checkpoints to keep per (thread_id, checkpoint_ns). Older ones are pruned on each put().
-   * Kept at 1 because sql.js loads the entire DB file into memory — retaining more checkpoints
-   * increases memory usage without benefit since we don't use LangGraph's time-travel feature. */
-  private maxCheckpointsPerNamespace = 1
+  /** Root checkpoints are for runtime state and recent fork boundaries. User-visible
+   * transcript history lives in the main database, so checkpoint retention can stay small.
+   * Non-root namespaces are internal/tool subgraphs and balloon sql.js DBs quickly. */
+  private maxRootCheckpoints = 1
+  private maxNonRootCheckpoints = 1
+  private maxDatabaseBytes = DEFAULT_MAX_DB_SIZE_BYTES
+  private maxOversizedRecoveryBytes = DEFAULT_MAX_OVERSIZED_RECOVERY_BYTES
 
   constructor(dbPath: string, serde?: SerializerProtocol, options: SqlJsSaverOptions = {}) {
     super(serde)
     this.dbPath = dbPath
-    const maxCheckpoints = options.maxCheckpointsPerNamespace ?? 1
-    this.maxCheckpointsPerNamespace = Math.max(1, Math.floor(maxCheckpoints))
+    const legacyMax = options.maxCheckpointsPerNamespace
+    this.maxRootCheckpoints = normalizePositiveInteger(
+      options.maxRootCheckpoints ?? legacyMax,
+      1
+    )
+    this.maxNonRootCheckpoints = normalizePositiveInteger(
+      options.maxNonRootCheckpoints ?? legacyMax,
+      1
+    )
+    this.maxDatabaseBytes = normalizePositiveInteger(
+      options.maxDatabaseBytes,
+      DEFAULT_MAX_DB_SIZE_BYTES
+    )
+    this.maxOversizedRecoveryBytes = Math.max(
+      this.maxDatabaseBytes,
+      normalizePositiveInteger(
+        options.maxOversizedRecoveryBytes,
+        DEFAULT_MAX_OVERSIZED_RECOVERY_BYTES
+      )
+    )
   }
 
   /**
@@ -94,38 +141,124 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     const SQL = await initSqlJs()
 
-    const MAX_DB_SIZE = 100 * 1024 * 1024 // 100MB limit
+    const liveSize = sqliteFileSize(this.dbPath)
+    const recoveryMaxBytes =
+      liveSize && liveSize > this.maxDatabaseBytes
+        ? this.maxOversizedRecoveryBytes
+        : this.maxDatabaseBytes
     const recovered = await openRecoveredSqliteDatabase(SQL, this.dbPath, "SqlJsSaver", {
-      maxBytes: MAX_DB_SIZE
+      maxBytes: recoveryMaxBytes
     })
     if (recovered.database) {
       this.db = recovered.database
-    } else {
-      const liveSize = sqliteFileSize(this.dbPath)
-      if (liveSize && liveSize > MAX_DB_SIZE) {
-        console.warn(
-          `[SqlJsSaver] Database file is too large (${Math.round(liveSize / 1024 / 1024)}MB). ` +
-            `Creating fresh database to prevent memory issues.`
-        )
-        // Rename the old file for backup
-        const backupPath = this.dbPath + ".bak." + Date.now()
-        try {
-          renameSync(this.dbPath, backupPath)
-          console.log(`[SqlJsSaver] Old database backed up to: ${backupPath}`)
-        } catch (e) {
-          console.warn("[SqlJsSaver] Could not backup old database:", e)
-          // Try to delete instead
-          try {
-            unlinkSync(this.dbPath)
-          } catch (e2) {
-            console.error("[SqlJsSaver] Could not delete old database:", e2)
-          }
-        }
-      }
+    }
+
+    const selectedSize = sqliteFileSize(this.dbPath)
+    if (this.db && selectedSize && selectedSize > this.maxDatabaseBytes) {
+      this.db.close()
+      this.db = await this.tryCompactOversizedLiveDatabase(SQL, selectedSize)
+      if (!this.db) this.backupOversizedLiveDatabase(selectedSize)
+    } else if (!this.db && liveSize && liveSize > this.maxDatabaseBytes) {
+      this.db = await this.tryCompactOversizedLiveDatabase(SQL, liveSize)
+      if (!this.db) this.backupOversizedLiveDatabase(liveSize)
+    }
+
+    if (!this.db) {
       this.db = new SQL.Database()
     }
 
     this.setup()
+  }
+
+  private retentionLimitForNamespace(checkpointNs: string): number {
+    return checkpointNs === "" ? this.maxRootCheckpoints : this.maxNonRootCheckpoints
+  }
+
+  private migrateCheckpointTimestampColumn(database: SqlJsDatabase): void {
+    const table = database.exec(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'checkpoints'`
+    )
+    if (!table[0]?.values.length) return
+    try {
+      database.run(`ALTER TABLE checkpoints ADD COLUMN checkpoint_ts TEXT`)
+    } catch {
+      // Column already exists.
+    }
+    database.run(`UPDATE checkpoints SET checkpoint_ts = checkpoint_id WHERE checkpoint_ts IS NULL`)
+  }
+
+  private pruneAllCheckpointNamespaces(database: SqlJsDatabase): void {
+    const namespaces = database.exec(
+      `SELECT thread_id, checkpoint_ns FROM checkpoints GROUP BY thread_id, checkpoint_ns`
+    )
+    for (const row of namespaces[0]?.values ?? []) {
+      const threadId = typeof row[0] === "string" ? row[0] : String(row[0] ?? "")
+      const checkpointNs = typeof row[1] === "string" ? row[1] : String(row[1] ?? "")
+      if (!threadId) continue
+      this.pruneOldCheckpoints(threadId, checkpointNs, database)
+    }
+  }
+
+  private async tryCompactOversizedLiveDatabase(
+    SQL: Awaited<ReturnType<typeof initSqlJs>>,
+    liveSize: number
+  ): Promise<SqlJsDatabase | null> {
+    if (liveSize > this.maxOversizedRecoveryBytes) {
+      console.warn(
+        `[SqlJsSaver] Database file is too large to compact safely ` +
+          `(${Math.round(liveSize / 1024 / 1024)}MB).`
+      )
+      return null
+    }
+
+    let database: SqlJsDatabase | null = null
+    try {
+      database = new SQL.Database(readFileSync(this.dbPath))
+      if (!isSqliteIntegrityOk(database)) {
+        throw new Error("integrity_check failed")
+      }
+
+      this.migrateCheckpointTimestampColumn(database)
+      this.pruneAllCheckpointNamespaces(database)
+      database.run("VACUUM")
+
+      await persistSqliteSnapshot(
+        this.dbPath,
+        Buffer.from(database.export()),
+        "SqlJsSaver",
+        { tmpSuffix: ".recovery.tmp" }
+      )
+      const nextSize = sqliteFileSize(this.dbPath)
+      console.warn(
+        `[SqlJsSaver] Compacted oversized database from ` +
+          `${Math.round(liveSize / 1024 / 1024)}MB to ` +
+          `${nextSize ? Math.round(nextSize / 1024 / 1024) : "unknown"}MB.`
+      )
+      return database
+    } catch (error) {
+      database?.close()
+      console.warn("[SqlJsSaver] Failed to compact oversized database:", error)
+      return null
+    }
+  }
+
+  private backupOversizedLiveDatabase(liveSize: number): void {
+    console.warn(
+      `[SqlJsSaver] Database file is too large (${Math.round(liveSize / 1024 / 1024)}MB). ` +
+        `Creating fresh database to prevent memory issues.`
+    )
+    const backupPath = this.dbPath + ".bak." + Date.now()
+    try {
+      renameSync(this.dbPath, backupPath)
+      console.log(`[SqlJsSaver] Old database backed up to: ${backupPath}`)
+    } catch (e) {
+      console.warn("[SqlJsSaver] Could not backup old database:", e)
+      try {
+        unlinkSync(this.dbPath)
+      } catch (e2) {
+        console.error("[SqlJsSaver] Could not delete old database:", e2)
+      }
+    }
   }
 
   private setup(): void {
@@ -146,12 +279,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       )
     `)
 
-    try {
-      this.db.run(`ALTER TABLE checkpoints ADD COLUMN checkpoint_ts TEXT`)
-    } catch {
-      // Column already exists.
-    }
-    this.db.run(`UPDATE checkpoints SET checkpoint_ts = checkpoint_id WHERE checkpoint_ts IS NULL`)
+    this.migrateCheckpointTimestampColumn(this.db)
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS writes (
@@ -175,11 +303,15 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Delete old checkpoints (and their writes) beyond the retention limit.
    * Keeps the most recent N checkpoints per (thread_id, checkpoint_ns).
    */
-  private pruneOldCheckpoints(threadId: string, checkpointNs: string): void {
-    if (!this.db) return
+  private pruneOldCheckpoints(
+    threadId: string,
+    checkpointNs: string,
+    database: SqlJsDatabase | null = this.db
+  ): void {
+    if (!database) return
 
-    const limit = this.maxCheckpointsPerNamespace
-    const countResult = this.db.exec(
+    const limit = this.retentionLimitForNamespace(checkpointNs)
+    const countResult = database.exec(
       `SELECT COUNT(*) FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?`,
       [threadId, checkpointNs]
     )
@@ -187,9 +319,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     if (total <= limit) return
 
     try {
-      this.db.run("BEGIN")
+      database.run("BEGIN")
 
-      this.db.run(
+      database.run(
         `DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN (
           SELECT checkpoint_id FROM checkpoints
           WHERE thread_id = ? AND checkpoint_ns = ?
@@ -199,7 +331,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         [threadId, checkpointNs, threadId, checkpointNs, limit]
       )
 
-      this.db.run(
+      database.run(
         `DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id NOT IN (
           SELECT checkpoint_id FROM checkpoints
           WHERE thread_id = ? AND checkpoint_ns = ?
@@ -209,9 +341,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         [threadId, checkpointNs, threadId, checkpointNs, limit]
       )
 
-      this.db.run("COMMIT")
+      database.run("COMMIT")
     } catch (e) {
-      this.db.run("ROLLBACK")
+      database.run("ROLLBACK")
       console.warn("[SqlJsSaver] Failed to prune old checkpoints:", e)
     }
   }
@@ -268,12 +400,15 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     this.saveTimer.unref?.()
   }
 
-  private async drainSaves(keepBlocked: boolean): Promise<void> {
+  private async drainSaves(
+    keepBlocked: boolean
+  ): Promise<unknown | null> {
+    let failure: unknown
     if (this.saveTimer) {
       clearTimeout(this.saveTimer)
       this.saveTimer = null
     }
-    if (!this.db) return
+    if (!this.db) return null
     this.blockAsyncWrite = true
     try {
       const pendingSave = this.savePromise
@@ -289,6 +424,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
     } catch (e) {
       this.dirty = true
+      failure = e
       console.warn("[SqlJsSaver] flush write failed:", e)
     } finally {
       if (!keepBlocked) {
@@ -296,11 +432,24 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         if (this.db && this.dirty) this.saveToDisk()
       }
     }
+    return failure ?? null
   }
 
   /**
    * Force an immediate durable save without blocking the Electron main thread.
    */
+  private ensureFlushDrain(): Promise<unknown | null> {
+    if (this.flushPromise) return this.flushPromise
+
+    const flushPromise = this.drainSaves(false).finally(() => {
+      if (this.flushPromise === flushPromise) {
+        this.flushPromise = null
+      }
+    })
+    this.flushPromise = flushPromise
+    return flushPromise
+  }
+
   async flush(): Promise<void> {
     if (this.closePromise) {
       try {
@@ -310,12 +459,16 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
       return
     }
-    if (this.flushPromise) return this.flushPromise
+    await this.ensureFlushDrain()
+  }
 
-    this.flushPromise = this.drainSaves(false).finally(() => {
-      this.flushPromise = null
-    })
-    return this.flushPromise
+  async flushStrict(): Promise<void> {
+    if (this.closePromise) await this.closePromise
+    while (this.flushPromise) {
+      await this.flushPromise
+    }
+    const failure = await this.ensureFlushDrain()
+    if (failure) throw failure
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
@@ -453,59 +606,64 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
 
     const stmt = this.db.prepare(sql)
-    stmt.bind(params)
+    try {
+      stmt.bind(params)
 
-    while (stmt.step()) {
-      const row = stmt.getAsObject() as unknown as CheckpointRow
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as unknown as CheckpointRow
 
-      // Get pending writes for this checkpoint
-      const writesStmt = this.db.prepare(`
-        SELECT task_id, channel, type, value
-        FROM writes
-        WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
-      `)
-      writesStmt.bind([row.thread_id, row.checkpoint_ns, row.checkpoint_id])
+        // Get pending writes for this checkpoint
+        const writesStmt = this.db.prepare(`
+          SELECT task_id, channel, type, value
+          FROM writes
+          WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+        `)
+        writesStmt.bind([row.thread_id, row.checkpoint_ns, row.checkpoint_id])
 
-      const pendingWrites: [string, string, unknown][] = []
-      while (writesStmt.step()) {
-        const write = writesStmt.getAsObject() as unknown as WriteRow
-        const value = await this.serde.loadsTyped(write.type ?? "json", write.value ?? "")
-        pendingWrites.push([write.task_id, write.channel, value])
-      }
-      writesStmt.free()
-
-      const checkpoint = (await this.serde.loadsTyped(
-        row.type ?? "json",
-        row.checkpoint
-      )) as Checkpoint
-
-      yield {
-        config: {
-          configurable: {
-            thread_id: row.thread_id,
-            checkpoint_ns: row.checkpoint_ns,
-            checkpoint_id: row.checkpoint_id
+        const pendingWrites: [string, string, unknown][] = []
+        try {
+          while (writesStmt.step()) {
+            const write = writesStmt.getAsObject() as unknown as WriteRow
+            const value = await this.serde.loadsTyped(write.type ?? "json", write.value ?? "")
+            pendingWrites.push([write.task_id, write.channel, value])
           }
-        },
-        checkpoint,
-        metadata: (await this.serde.loadsTyped(
-          row.type ?? "json",
-          row.metadata
-        )) as CheckpointMetadata,
-        parentConfig: row.parent_checkpoint_id
-          ? {
-              configurable: {
-                thread_id: row.thread_id,
-                checkpoint_ns: row.checkpoint_ns,
-                checkpoint_id: row.parent_checkpoint_id
-              }
-            }
-          : undefined,
-        pendingWrites
-      }
-    }
+        } finally {
+          writesStmt.free()
+        }
 
-    stmt.free()
+        const checkpoint = (await this.serde.loadsTyped(
+          row.type ?? "json",
+          row.checkpoint
+        )) as Checkpoint
+
+        yield {
+          config: {
+            configurable: {
+              thread_id: row.thread_id,
+              checkpoint_ns: row.checkpoint_ns,
+              checkpoint_id: row.checkpoint_id
+            }
+          },
+          checkpoint,
+          metadata: (await this.serde.loadsTyped(
+            row.type ?? "json",
+            row.metadata
+          )) as CheckpointMetadata,
+          parentConfig: row.parent_checkpoint_id
+            ? {
+                configurable: {
+                  thread_id: row.thread_id,
+                  checkpoint_ns: row.checkpoint_ns,
+                  checkpoint_id: row.parent_checkpoint_id
+                }
+              }
+            : undefined,
+          pendingWrites
+        }
+      }
+    } finally {
+      stmt.free()
+    }
   }
 
   async put(

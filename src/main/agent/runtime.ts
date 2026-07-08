@@ -2450,7 +2450,8 @@ async function getCheckpointerInternal(
   const bornRetireEpoch = retireEpochOf(threadId)
   const isSubThreadCheckpoint = threadId.includes("__")
   const checkpointer = new SqlJsSaver(dbPath, undefined, {
-    maxCheckpointsPerNamespace: isSubThreadCheckpoint ? 1 : 30
+    maxRootCheckpoints: isSubThreadCheckpoint ? 1 : 3,
+    maxNonRootCheckpoints: 1
   })
   await checkpointer.initialize()
   // Re-check AFTER the awaits above: a deletion landing while this instance

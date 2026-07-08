@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -220,6 +220,7 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
+let closeToTrayPromptOpen = false
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -321,6 +322,42 @@ function applyMacDockIcon(): void {
 
 // getLocalIP moved to ./net-utils — imported above
 
+function hideMainWindowToTray(window: BrowserWindow): void {
+  if (window.isDestroyed()) return
+  window.hide()
+  showPendingAppAttention()
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.hide()
+  }
+}
+
+async function confirmHideMainWindowToTray(window: BrowserWindow): Promise<void> {
+  if (closeToTrayPromptOpen) {
+    if (!window.isDestroyed()) window.focus()
+    return
+  }
+
+  closeToTrayPromptOpen = true
+  try {
+    const trayAreaName = process.platform === "darwin" ? "菜单栏" : "系统托盘"
+    const result = await dialog.showMessageBox(window, {
+      type: "question",
+      buttons: [`最小化到${trayAreaName}`, "取消"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+      title: `最小化到${trayAreaName}`,
+      message: `关闭窗口后，CMBDevClaw 将最小化到${trayAreaName}。`,
+      detail: `应用会继续在后台运行。可点击${trayAreaName}图标重新打开，或在${trayAreaName}菜单中选择“退出”完全关闭应用。`
+    })
+    if (result.response === 0) {
+      hideMainWindowToTray(window)
+    }
+  } finally {
+    closeToTrayPromptOpen = false
+  }
+}
+
 function createWindow(): void {
   const devWindowIcon = process.platform === "win32" && isDev ? getDevWindowsIconPath() : undefined
 
@@ -409,10 +446,8 @@ function createWindow(): void {
     })
     if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
       event.preventDefault()
-      mainWindow?.hide()
-      showPendingAppAttention()
-      if (process.platform === "darwin" && app.dock) {
-        app.dock.hide()
+      if (mainWindow) {
+        void confirmHideMainWindowToTray(mainWindow)
       }
     }
   })

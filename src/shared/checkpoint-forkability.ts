@@ -6,6 +6,9 @@ import {
   type CheckpointTranscriptIndex
 } from "./checkpoint-transcript"
 
+export const FORK_BOUNDARY_MARKER_VERSION = 1
+export const FORK_BOUNDARY_THREAD_METADATA_KEY = "cmbForkBoundaryVersion"
+
 export type ForkBoundarySource = "metadata_marker" | "legacy_latest_idle_fallback"
 
 export type ForkUnstableReason =
@@ -15,6 +18,34 @@ export type ForkUnstableReason =
   | "pending_approval"
   | "pending_writes"
   | "unknown"
+
+export interface ThreadForkOverrides {
+  title?: string
+  model?: string
+  workspacePath?: string | null
+  memoryEnabled?: boolean
+  agentMode?: "normal" | "coordinator" | "workflow"
+}
+
+export interface ThreadForkParams {
+  sourceThreadId: string
+  checkpointId?: string
+  messageId?: string
+  title?: string
+  overrides?: ThreadForkOverrides
+}
+
+export interface ThreadForkResponse<TThread = unknown> {
+  thread: TThread
+  sourceThreadId: string
+  sourceCheckpointId: string
+  sourceCheckpointNs: ""
+}
+
+export interface ThreadForkCheckpointForMessageParams {
+  threadId: string
+  messageId: string
+}
 
 export interface ForkabilityStatus {
   isStableTurnBoundary: boolean
@@ -39,6 +70,8 @@ export interface ForkableCheckpointSummary {
   hasInterrupt: boolean
   hasPendingWrites: boolean
 }
+
+export type ForkableCheckpoint = ForkableCheckpointSummary
 
 export function getCheckpointNamespace(tuple: CheckpointTuple): string {
   const ns = tuple.config?.configurable?.checkpoint_ns
@@ -120,6 +153,14 @@ export function describeCheckpointForkability(
       hasPendingWrites
     }
   }
+  if (options.activeRun) {
+    return {
+      isStableTurnBoundary: false,
+      unstableReason: "in_progress_turn",
+      hasInterrupt,
+      hasPendingWrites
+    }
+  }
   if (hasPendingWrites) {
     return {
       isStableTurnBoundary: false,
@@ -149,7 +190,7 @@ export function describeCheckpointForkability(
   }
   return {
     isStableTurnBoundary: false,
-    unstableReason: options.activeRun ? "in_progress_turn" : "missing_boundary_marker",
+    unstableReason: "missing_boundary_marker",
     hasInterrupt,
     hasPendingWrites
   }
@@ -219,13 +260,24 @@ export function buildVisibleForkableCheckpointList(
   const seenLastVisibleMessageIds = new Set<string>()
 
   for (const tuple of tuples) {
-    const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
-    const lastVisibleMessageId = transcript.visibleMessageIds.at(-1)
+    const initialTranscript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
+    const lastVisibleMessageId = initialTranscript.visibleMessageIds.at(-1)
     if (!lastVisibleMessageId) continue
+
+    const messageTarget = describeCheckpointMessageForkTarget(tuple.checkpoint, lastVisibleMessageId)
+    if (!messageTarget.isForkableMessageBoundary) continue
+
+    const markerLastVisibleMessageId = getForkBoundaryMarker(tuple)?.lastVisibleMessageId
+    if (
+      typeof markerLastVisibleMessageId === "string" &&
+      markerLastVisibleMessageId !== lastVisibleMessageId
+    ) {
+      continue
+    }
 
     const summary = buildForkableCheckpointSummary(tuple, {
       ...options,
-      transcript
+      transcript: messageTarget.transcript
     })
     if (!summary.isStableTurnBoundary) continue
     if (seenLastVisibleMessageIds.has(lastVisibleMessageId)) continue

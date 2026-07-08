@@ -31,6 +31,21 @@ export interface FilteredThreadValuesInput {
   internalGoalMessageTimeOrder?: unknown
 }
 
+export interface CheckpointAuthorityTranscriptMessage {
+  id: string
+  content?: unknown
+  tool_calls?: unknown[]
+  tool_call_id?: string
+  name?: string
+  status?: string
+  is_error?: boolean
+  goal_id?: string | null
+  active_window_id?: string | null
+  created_at?: unknown
+  start_at?: unknown
+  end_at?: unknown
+}
+
 export const WORKFLOW_NOTIFICATION_MARKER_PREFIX = "[[CMB_WORKFLOW_NOTIFICATION_V1:"
 /** Renderer-submitted trigger; the main process expands it into the real notification. */
 export const WORKFLOW_NOTIFICATION_TURN_TRIGGER = "[[CMB_WORKFLOW_NOTIFICATION_TURN]]"
@@ -123,6 +138,105 @@ function stringifyContent(content: unknown): string {
   return ""
 }
 
+function hasUsefulMergeContent(content: unknown): boolean {
+  if (typeof content === "string") return content.length > 0
+  if (Array.isArray(content)) return content.length > 0
+  return false
+}
+
+function shouldUseIncomingContent(baseContent: unknown, incomingContent: unknown): boolean {
+  if (!hasUsefulMergeContent(incomingContent)) return false
+  if (!hasUsefulMergeContent(baseContent)) return true
+
+  const baseText = stringifyContent(baseContent)
+  const incomingText = stringifyContent(incomingContent)
+  if (!baseText) return incomingText.length > 0
+  if (!incomingText) return false
+  return incomingText.length > baseText.length && incomingText.startsWith(baseText)
+}
+
+function mergeCheckpointAuthorityContent(baseContent: unknown, incomingContent: unknown): unknown {
+  return shouldUseIncomingContent(baseContent, incomingContent) ? incomingContent : baseContent
+}
+
+function mergeCheckpointAuthorityToolCalls(
+  baseToolCalls: unknown[] | undefined,
+  incomingToolCalls: unknown[] | undefined
+): unknown[] | undefined {
+  if (Array.isArray(baseToolCalls) && baseToolCalls.length > 0) return baseToolCalls
+  return Array.isArray(incomingToolCalls) && incomingToolCalls.length > 0
+    ? incomingToolCalls
+    : baseToolCalls
+}
+
+export function mergeCheckpointAuthorityTranscriptMessage<
+  T extends CheckpointAuthorityTranscriptMessage
+>(base: T, incoming: T): T {
+  return {
+    ...base,
+    content: mergeCheckpointAuthorityContent(base.content, incoming.content),
+    tool_calls: mergeCheckpointAuthorityToolCalls(base.tool_calls, incoming.tool_calls) as
+      | T["tool_calls"]
+      | undefined,
+    tool_call_id: base.tool_call_id ?? incoming.tool_call_id,
+    name: base.name ?? incoming.name,
+    status: base.status ?? incoming.status,
+    is_error: base.is_error ?? incoming.is_error,
+    goal_id: incoming.goal_id ?? base.goal_id,
+    active_window_id: incoming.active_window_id ?? base.active_window_id,
+    created_at: incoming.created_at ?? base.created_at,
+    start_at: incoming.start_at ?? base.start_at,
+    end_at: incoming.end_at ?? base.end_at
+  } as T
+}
+
+function transcriptMessageTimestamp(message: CheckpointAuthorityTranscriptMessage): number {
+  const candidate = message.start_at ?? message.created_at ?? message.end_at
+  const time =
+    candidate instanceof Date
+      ? candidate.getTime()
+      : typeof candidate === "number" || typeof candidate === "string"
+        ? new Date(candidate).getTime()
+        : Number.MAX_SAFE_INTEGER
+  return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER
+}
+
+export function mergeCheckpointAuthorityTranscriptMessages<
+  T extends CheckpointAuthorityTranscriptMessage
+>(
+  baseMessages: readonly T[],
+  incomingMessages: readonly T[],
+  options: { isSameMessage?: (left: T, right: T) => boolean } = {}
+): T[] {
+  if (incomingMessages.length === 0) return [...baseMessages]
+  const merged = [...baseMessages]
+  const indexById = new Map(merged.map((message, index) => [message.id, index]))
+
+  for (const incoming of [...incomingMessages].sort((left, right) => {
+    const delta = transcriptMessageTimestamp(left) - transcriptMessageTimestamp(right)
+    return delta || left.id.localeCompare(right.id)
+  })) {
+    const existingIndex = indexById.get(incoming.id)
+    if (existingIndex !== undefined) {
+      merged[existingIndex] = mergeCheckpointAuthorityTranscriptMessage(
+        merged[existingIndex],
+        incoming
+      )
+      continue
+    }
+    if (
+      options.isSameMessage &&
+      merged.some((message) => options.isSameMessage?.(message, incoming))
+    ) {
+      continue
+    }
+    merged.push(incoming)
+    indexById.set(incoming.id, merged.length - 1)
+  }
+
+  return merged
+}
+
 function getAdditionalKwargs(
   message: Record<string, unknown>
 ): Record<string, unknown> | undefined {
@@ -204,22 +318,6 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   if (!isRecord(checkpoint)) return []
   const channelValues = isRecord(checkpoint.channel_values) ? checkpoint.channel_values : undefined
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
-}
-
-function isVisibleRawTranscriptMessage(raw: unknown): boolean {
-  if (!isRecord(raw)) return false
-  const additionalKwargs = getAdditionalKwargs(raw)
-  if (additionalKwargs?.cmb_internal_coordinator_notification === true) return false
-
-  const role = getMessageRole(raw)
-  const checkpointContent = getMessageContent(raw)
-  const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
-  const effectiveContent =
-    role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
-      ? visibleUserMessage
-      : checkpointContent
-
-  return isVisibleTranscriptMessage(role, effectiveContent)
 }
 
 export function truncateCheckpointMessagesAfter(checkpoint: unknown, messageId: string): boolean {
@@ -331,9 +429,8 @@ export function describeCheckpointMessageForkTarget(
   const targetRawIndex = rawMessages.findIndex((raw, index) => {
     return isRecord(raw) && getMessageId(raw, index) === targetMessageId
   })
-  const hasVisibleMessagesAfterTarget =
-    targetRawIndex < 0 || rawMessages.slice(targetRawIndex + 1).some(isVisibleRawTranscriptMessage)
-  if (hasVisibleMessagesAfterTarget) {
+  const hasRawMessagesAfterTarget = targetRawIndex < 0 || targetRawIndex < rawMessages.length - 1
+  if (hasRawMessagesAfterTarget) {
     return {
       isForkableMessageBoundary: false,
       reason: "not_checkpoint_tail",
@@ -347,6 +444,40 @@ export function describeCheckpointMessageForkTarget(
     message: target,
     transcript
   }
+}
+
+export function filterMessagesToCheckpointVisibleIds<T extends { id?: string }>(
+  messages: readonly T[],
+  transcriptIndex: Pick<CheckpointTranscriptIndex, "visibleMessageIds"> | null | undefined
+): T[] {
+  if (!transcriptIndex) return [...messages]
+  const allowedIds = new Set(transcriptIndex.visibleMessageIds)
+  if (allowedIds.size === 0) return []
+  return messages.filter((message) => typeof message.id === "string" && allowedIds.has(message.id))
+}
+
+export function findMessagesAfterCheckpointVisibleIds<T extends { id?: string }>(
+  messages: readonly T[],
+  checkpointVisibleMessageIds: readonly string[],
+  options: { excludeMessageIds?: readonly string[] } = {}
+): T[] {
+  if (checkpointVisibleMessageIds.length === 0) return []
+  const checkpointIds = new Set(checkpointVisibleMessageIds)
+  const excluded = new Set(options.excludeMessageIds ?? [])
+  let lastCheckpointMessageIndex = -1
+
+  messages.forEach((message, index) => {
+    if (typeof message.id === "string" && checkpointIds.has(message.id)) {
+      lastCheckpointMessageIndex = index
+    }
+  })
+
+  return messages.filter((message, index) => {
+    if (typeof message.id !== "string") return false
+    if (excluded.has(message.id)) return false
+    if (checkpointIds.has(message.id)) return false
+    return lastCheckpointMessageIndex < 0 || index > lastCheckpointMessageIndex
+  })
 }
 
 function cloneJsonObject(value: Record<string, unknown>): Record<string, unknown> {
