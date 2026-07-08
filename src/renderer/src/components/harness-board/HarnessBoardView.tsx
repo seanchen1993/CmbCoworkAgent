@@ -4693,15 +4693,16 @@ function ProjectSessionPage({
               onProjectList={onBackToList}
               onProject={deleted ? undefined : onBackToProject}
             />
-            <ProjectBadgeRow project={project as HarnessProjectListItem}>
-              <ShieldAlert className="size-5 shrink-0 text-status-info" />
-              <h1 className="truncate text-xl font-semibold">{title}</h1>
-            </ProjectBadgeRow>
+            <div className="flex min-w-0 items-center gap-2">
+              <Workflow className="size-4 shrink-0 text-status-info" />
+              <h1 className="truncate text-base font-semibold">{title}</h1>
+            </div>
+            <div className="truncate text-xs text-muted-foreground">{project.name}</div>
           </div>
         </div>
       </div>
 
-      <main className="flex min-h-0 flex-1 p-4">
+      <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col overflow-hidden p-6">
         <FeatureConversationPanel
           threadId={thread?.thread_id ?? null}
           chatSurface="harness-feature-session"
@@ -4711,7 +4712,7 @@ function ProjectSessionPage({
           onDismissGitChangeNotice={onDismissGitChangeNotice}
           onThreadGitStatusChange={onThreadGitStatusChange}
         />
-      </main>
+      </div>
     </div>
   )
 }

@@ -405,6 +405,7 @@ interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
   enableTaskTool?: boolean
+  isHarnessProjectSession?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
   additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
@@ -451,19 +452,27 @@ function getHarnessAgentContext(
   metadata: Record<string, unknown>,
   options: { workspacePath?: string } = {}
 ): HarnessAgentContext {
+  const isHarnessProjectSession =
+    Boolean(metadata.harnessProjectSession) &&
+    typeof metadata.harnessProjectSession === "object" &&
+    !Array.isArray(metadata.harnessProjectSession)
+  const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
-    const disableAgentsPrompt = metadata.disableAgentsPrompt === true
     const featureContext = buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
     if (!featureContext) {
-      return disableAgentsPrompt ? { enableAgentsPrompt: false } : {}
+      return {
+        ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
+        ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
+      }
     }
 
     return {
       pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
       enableTaskTool: featureContext.enableTaskTool,
+      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
       additionalAgentsWorkspaceMappings: featureContext.additionalAgentsWorkspaceMappings,
@@ -484,7 +493,10 @@ function getHarnessAgentContext(
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
-    return {}
+    return {
+      ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
+      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
+    }
   }
 }
 

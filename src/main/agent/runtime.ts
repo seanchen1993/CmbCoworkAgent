@@ -391,11 +391,12 @@ type RuntimePromptToolPolicy = {
 
 function createRuntimePromptToolPolicy(input: {
   featureId?: string
+  isHarnessProjectSession?: boolean
   agentMode: AgentMode
   memoryEnabled: boolean
   enableTaskTool?: boolean
 }): RuntimePromptToolPolicy {
-  const isProjectMode = Boolean(input.featureId)
+  const isProjectMode = Boolean(input.featureId) || input.isHarnessProjectSession === true
   return {
     isProjectMode,
     includeCurrentTime: !isProjectMode,
@@ -3141,6 +3142,8 @@ export interface CreateAgentRuntimeOptions {
   pluginWorkspace?: string
   /** Harness feature identifier exposed to child processes as FEATURE_ID. */
   featureId?: string
+  /** Project-level Harness sessions use the same runtime prompt/tool policy as project mode. */
+  isHarnessProjectSession?: boolean
   /** Harness project stable id exposed to child processes as HARNESS_PROJECT_ID. */
   harnessProjectId?: string
   /** Bound adapter name exposed to child processes as HARNESS_ADAPTER_NAME. */
@@ -3278,6 +3281,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginName,
     pluginWorkspace,
     featureId,
+    isHarnessProjectSession,
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
@@ -3337,6 +3341,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
   const runtimePolicy = createRuntimePromptToolPolicy({
     featureId,
+    isHarnessProjectSession,
     agentMode,
     memoryEnabled: memoryEnabledForThread,
     enableTaskTool
@@ -4456,6 +4461,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       pluginName,
       pluginWorkspace,
       featureId,
+      isHarnessProjectSession,
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
