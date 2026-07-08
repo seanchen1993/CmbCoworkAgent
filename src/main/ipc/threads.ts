@@ -1,30 +1,41 @@
 import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electron"
 import { existsSync } from "fs"
+import path from "path"
 import Store from "electron-store"
 import AdmZip from "adm-zip"
 import { v4 as uuid } from "uuid"
 import {
   getAllThreads,
   getThread,
+  getThreadMessages,
+  getThreadMessagesAfterAnyId,
+  getThreadMessagesByIds,
   getThreadGoalEvents,
   getThreadGoalEventsForRestore,
+  addThreadGoalEvent,
+  flushStrict as flushDbStrict,
   createThread as dbCreateThread,
   updateThread as dbUpdateThread,
   mergeThreadValues as dbMergeThreadValues,
+  upsertThreadMessages,
   deleteThread as dbDeleteThread
 } from "../db"
 import {
   withCheckpointer,
+  clearToolConcurrencyLocksForThread,
   retireThreadCheckpointers,
-  clearToolConcurrencyLocksForThread
+  pendingApprovals
 } from "../agent/runtime"
-import { forgetCoordinatorThreadState } from "./agent"
+import { forgetCoordinatorThreadState, hasActiveAgentRun } from "./agent"
 import {
+  deleteThreadCheckpoint,
   deleteThreadWorkerCheckpoints,
   deleteThreadWorkflowCheckpoints,
+  getThreadCheckpointPath,
   getOpenworkDir,
   purgeThreadCheckpointArtifacts
 } from "../storage"
+import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import {
   commitWorkflowThreadDisposal,
@@ -34,45 +45,57 @@ import {
   rollbackWorkflowThreadDisposal
 } from "../agent/workflow/run-store"
 import {
-  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
-  WORKFLOW_NOTIFICATION_TURN_PROMPT
-} from "../agent/workflow/notification"
-
-/**
- * Workflow notification plumbing messages (the completion trigger and the
- * expanded notification) are hidden in the chat UI; they must not leak into an
- * exported session either. The model's user-facing summary does NOT start with
- * these markers, so it is still exported.
- *
- * NOTE: this intentionally does NOT filter coordinator plumbing ([[CMB_COORDINATOR_
- * ...]]). Coordinator export keeps its HEAD behavior verbatim (those messages stay
- * in the export, as they always have) so this feature does not alter the existing
- * coordinator mode. Only the new workflow markers are dropped.
- */
-function isWorkflowPlumbingContent(content: string): boolean {
-  const trimmed = content.trimStart()
-  return (
-    // FULL-match the turn prompt (mirrors the main process's full-match fix) so a
-    // user who pastes text merely STARTING with the trigger isn't dropped on export.
-    trimmed === WORKFLOW_NOTIFICATION_TURN_PROMPT ||
-    // The expanded notification carries a runId suffix, so it stays a prefix match.
-    trimmed.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
-  )
-}
-import {
   coordinatorWorkerManager,
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
+import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { disposeAgentThreadState } from "./agent"
 import { getDefaultModel } from "./models"
-import type { Thread, ThreadUpdateParams, ThreadValuesMergeParams } from "../types"
+import type {
+  ForkableCheckpoint,
+  Message,
+  Thread,
+  ThreadForkCheckpointForMessageParams,
+  ThreadForkParams,
+  ThreadForkResponse,
+  ThreadUpdateParams,
+  ThreadValuesMergeParams
+} from "../types"
 import { SqlGoalStore } from "../agent/goals/goal-store"
 import type { ThreadGoal } from "../agent/goals/types"
 import { GOAL_UI_EVENT_LIMIT } from "../../shared/goal-events"
+import {
+  buildFilteredThreadValues,
+  describeCheckpointMessageForkTarget,
+  deriveCheckpointTranscriptIndex,
+  findMessagesAfterCheckpointVisibleIds,
+  isWorkflowPlumbingTranscriptContent,
+  mergeCheckpointAuthorityTranscriptMessages,
+  truncateCheckpointMessagesAfter
+} from "../../shared/checkpoint-transcript"
+import {
+  buildForkableCheckpointSummary,
+  buildVisibleForkableCheckpointList,
+  describeCheckpointForkability,
+  FORK_BOUNDARY_MARKER_VERSION,
+  FORK_BOUNDARY_THREAD_METADATA_KEY,
+  getCheckpointId,
+  getForkBoundaryMarker,
+  getCheckpointThreadId,
+  isForkableCheckpointForMessage,
+  toForkabilityError
+} from "../../shared/checkpoint-forkability"
+import type { LegacyForkFallbackMode } from "../../shared/checkpoint-forkability"
+import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
+import {
+  copyCheckpoint,
+  type CheckpointMetadata,
+  type CheckpointTuple
+} from "@langchain/langgraph-checkpoint"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 
@@ -114,13 +137,23 @@ interface ExportPayload {
 }
 
 interface CheckpointMessage {
-  id?: string
+  id?: string | string[]
   _getType?: () => string
   type?: string
   content?: string | Array<unknown>
   tool_calls?: Array<{ id?: string; name?: string; args?: unknown }>
   tool_call_id?: string
   name?: string
+  additional_kwargs?: Record<string, unknown>
+  kwargs?: {
+    id?: string
+    type?: string
+    content?: string | Array<unknown>
+    tool_calls?: Array<{ id?: string; name?: string; args?: unknown }>
+    tool_call_id?: string
+    name?: string
+    additional_kwargs?: Record<string, unknown>
+  }
 }
 
 interface ThreadCheckpoint {
@@ -276,12 +309,711 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
   }
 }
 
+function parseThreadValues(raw: string | null | undefined): Record<string, unknown> {
+  return parseJsonObject(raw) ?? {}
+}
+
+function serializeThreadRow(row: NonNullable<ReturnType<typeof getThread>>): Thread {
+  return {
+    thread_id: row.thread_id,
+    created_at: new Date(row.created_at),
+    updated_at: new Date(row.updated_at),
+    metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    status: row.status as Thread["status"],
+    thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+    title: row.title ?? undefined
+  }
+}
+
+function mergeThreadMessageTranscripts(
+  baseMessages: Message[],
+  incomingMessages: Message[]
+): Message[] {
+  return mergeCheckpointAuthorityTranscriptMessages(baseMessages, incomingMessages)
+}
+
+function normalizeIpcThreadMessage(message: Message): Message {
+  const toDate = (value: unknown): Date | undefined => {
+    if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : undefined
+    if (typeof value === "number" || typeof value === "string") {
+      const date = new Date(value)
+      return Number.isFinite(date.getTime()) ? date : undefined
+    }
+    return undefined
+  }
+  const createdAt = toDate(message.created_at) ?? new Date()
+  const startAt = toDate(message.start_at)
+  const endAt = toDate(message.end_at)
+  return {
+    ...message,
+    created_at: createdAt,
+    ...(startAt ? { start_at: startAt } : {}),
+    ...(endAt ? { end_at: endAt } : {})
+  }
+}
+
+function copyForkedThreadMessages(input: {
+  sourceThreadId: string
+  targetThreadId: string
+  visibleMessageIds: readonly string[]
+  checkpointMessages?: CheckpointMessage[]
+}): void {
+  const allowedIds = new Set(input.visibleMessageIds)
+  if (allowedIds.size === 0) return
+  const checkpointMessages = checkpointMessagesToThreadMessages(input.checkpointMessages, {
+    visibleMessageIds: input.visibleMessageIds
+  })
+  const persistedMessages = getThreadMessagesByIds(
+    input.sourceThreadId,
+    input.visibleMessageIds
+  ).filter((message) =>
+    allowedIds.has(message.id)
+  )
+  const messages = mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
+  if (messages.length === 0) return
+  upsertThreadMessages(input.targetThreadId, messages)
+}
+
+function copyForkedGoalState(sourceThreadId: string, targetThreadId: string): void {
+  const goalStore = new SqlGoalStore()
+  const sourceGoal = goalStore.get(sourceThreadId)
+  if (sourceGoal) {
+    goalStore.upsert({
+      ...sourceGoal,
+      threadId: targetThreadId
+    })
+  }
+
+  for (const event of getThreadGoalEvents(sourceThreadId)) {
+    addThreadGoalEvent(
+      targetThreadId,
+      event.message,
+      event.goal_id,
+      event.created_at,
+      event.active_window_id
+    )
+  }
+}
+
+function stringifyThreadMessageContent(content: Message["content"]): string {
+  if (typeof content === "string") return content
+  return content
+    .map((block) => {
+      if (typeof block.text === "string") return block.text
+      if (typeof block.content === "string") return block.content
+      return ""
+    })
+    .filter(Boolean)
+    .join("\n")
+}
+
+function isForkVisiblePersistedMessage(message: Message): boolean {
+  return !isWorkflowPlumbingTranscriptContent(stringifyThreadMessageContent(message.content))
+}
+
+function findDurableForkTailMessages(
+  sourceThreadId: string,
+  visibleMessageIds: readonly string[]
+): Message[] {
+  return findMessagesAfterCheckpointVisibleIds(
+    getThreadMessagesAfterAnyId(sourceThreadId, visibleMessageIds).filter(
+      isForkVisiblePersistedMessage
+    ),
+    visibleMessageIds
+  )
+}
+
+function isAgentMode(value: unknown): value is "normal" | "coordinator" | "workflow" {
+  return value === "normal" || value === "coordinator" || value === "workflow"
+}
+
+function hasOwnProperty(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key)
+}
+
+function hasPendingApprovalForThread(threadId: string): boolean {
+  for (const approval of pendingApprovals.values()) {
+    if (approval.threadId === threadId || approval.runtimeThreadId === threadId) return true
+  }
+  return false
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+function workspacePathsMatch(left: unknown, right: unknown): boolean {
+  if (typeof left !== "string" || typeof right !== "string") return false
+  try {
+    const normalize = (value: string): string => {
+      const resolved = path.resolve(value)
+      return process.platform === "win32" ? resolved.toLowerCase() : resolved
+    }
+    return normalize(left) === normalize(right)
+  } catch {
+    return left === right
+  }
+}
+
+function cloneSanitizedGitContext(
+  sourceMetadata: Record<string, unknown>,
+  workspacePath: string
+): Record<string, unknown> | null {
+  if (!isPlainRecord(sourceMetadata.gitContext)) return null
+  const contextWorkspacePath = sourceMetadata.gitContext.workspacePath
+  if (
+    typeof contextWorkspacePath === "string" &&
+    !workspacePathsMatch(contextWorkspacePath, workspacePath)
+  ) {
+    return null
+  }
+
+  return { ...sourceMetadata.gitContext, workspacePath }
+}
+
+function copyForkGitMetadataIfWorkspaceMatches(input: {
+  sourceMetadata: Record<string, unknown>
+  targetMetadata: Record<string, unknown>
+  workspacePath: unknown
+  hasWorkspacePathOverride: boolean
+}): void {
+  const { sourceMetadata, targetMetadata, workspacePath, hasWorkspacePathOverride } = input
+  const sourceWorkspacePath =
+    typeof sourceMetadata.workspacePath === "string" ? sourceMetadata.workspacePath : null
+  if (typeof workspacePath !== "string" || !sourceWorkspacePath) return
+  if (hasWorkspacePathOverride && !workspacePathsMatch(workspacePath, sourceWorkspacePath)) return
+
+  const primitiveKeys = [
+    "gitRoot",
+    "isWorktree",
+    "worktreeBranch",
+    "worktreeBaseBranch",
+    "worktreeBaseCommit"
+  ]
+
+  for (const key of primitiveKeys) {
+    const value = sourceMetadata[key]
+    if (
+      typeof value === "string" ||
+      typeof value === "boolean" ||
+      typeof value === "number" ||
+      value === null
+    ) {
+      targetMetadata[key] = value
+    }
+  }
+
+  const cachedWorkspacePath = sourceMetadata.cachedGitContextWorkspacePath
+  if (typeof cachedWorkspacePath === "string" && workspacePathsMatch(cachedWorkspacePath, sourceWorkspacePath)) {
+    for (const key of ["cachedIsGitRepo", "cachedIsWorktreePath", "cachedGitRoot", "cachedGitContextAt"]) {
+      const value = sourceMetadata[key]
+      if (
+        typeof value === "string" ||
+        typeof value === "boolean" ||
+        typeof value === "number" ||
+        value === null
+      ) {
+        targetMetadata[key] = value
+      }
+    }
+    targetMetadata.cachedGitContextWorkspacePath = workspacePath
+  }
+
+  const gitContext = cloneSanitizedGitContext(sourceMetadata, workspacePath)
+  if (gitContext) targetMetadata.gitContext = gitContext
+}
+
+function isValidForkWorkspacePath(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0
+}
+
+function assertValidForkOverrides(
+  sourceMetadata: Record<string, unknown>,
+  overrides: ThreadForkParams["overrides"]
+): void {
+  if (overrides === undefined) return
+  if (!isPlainRecord(overrides)) throw new Error("Fork overrides 格式无效。")
+
+  const hasWorkspacePathOverride = hasOwnProperty(overrides, "workspacePath")
+  const hasAgentModeOverride = hasOwnProperty(overrides, "agentMode")
+  const workspacePath = hasWorkspacePathOverride
+    ? overrides.workspacePath
+    : sourceMetadata.workspacePath
+  const agentMode = hasAgentModeOverride
+    ? overrides.agentMode
+    : getAgentModeFromMetadata(sourceMetadata)
+
+  if (hasWorkspacePathOverride) {
+    if (workspacePath !== null && !isValidForkWorkspacePath(workspacePath)) {
+      throw new Error("Fork workspacePath override 必须是非空字符串或 null。")
+    }
+  }
+
+  if (hasAgentModeOverride && !isAgentMode(agentMode)) {
+    throw new Error("Fork agentMode override 无效。")
+  }
+
+  if (agentMode === "workflow" || agentMode === "coordinator") {
+    if (!isValidForkWorkspacePath(workspacePath)) {
+      throw new Error("Fork 到 workflow/coordinator 模式必须提供有效工作区。")
+    }
+    if (!existsSync(path.resolve(workspacePath))) {
+      throw new Error("Fork 目标工作区不存在，无法进入 workflow/coordinator 模式。")
+    }
+  }
+}
+
+interface ThreadForkBusyInput {
+  threadId: string
+  workspacePath?: string | null
+  agentMode?: "normal" | "coordinator" | "workflow"
+}
+
+async function isThreadForkBusy(input: ThreadForkBusyInput): Promise<boolean> {
+  const { threadId, workspacePath, agentMode } = input
+  if (hasActiveAgentRun(threadId)) return true
+  if (hasPendingApprovalForThread(threadId)) return true
+
+  if (workflowRunManager.isActive(threadId)) return true
+  if (workspacePath) {
+    if (workflowRunManager.isBusyForThread(threadId, workspacePath)) return true
+  } else if (agentMode === "workflow") {
+    return true
+  }
+
+  if (workspacePath) {
+    try {
+      await coordinatorWorkerManager.restoreWorkersForThread({
+        parentThreadId: threadId,
+        workspacePath,
+        mode: "active"
+      })
+    } catch (error) {
+      if (agentMode === "coordinator") {
+        console.warn("[Threads] Failed to hydrate coordinator workers before fork:", error)
+        return true
+      }
+    }
+  } else if (agentMode === "coordinator") {
+    return true
+  }
+
+  const workers = coordinatorWorkerManager.readWorkers(threadId)
+  if (coordinatorWorkerManager.hasNotifications(threadId)) return true
+  return workers.some(
+    (worker) => worker.status === "running" || worker.notification_acknowledged === false
+  )
+}
+
+function assertForkableTuple(
+  tuple: CheckpointTuple,
+  options: { allowLegacyLatestFallback: boolean; allowLegacyHistoricalFallback?: boolean }
+): void {
+  const threadId = getCheckpointThreadId(tuple)
+  const forkability = describeCheckpointForkability(tuple, {
+    allowLegacyLatestFallback: options.allowLegacyLatestFallback,
+    allowLegacyHistoricalFallback: options.allowLegacyHistoricalFallback,
+    pendingApproval: hasPendingApprovalForThread(threadId)
+  })
+  if (!forkability.isStableTurnBoundary)
+    throw new Error(toForkabilityError(forkability.unstableReason))
+}
+
+interface ForkBoundaryMarkerContext {
+  hasAnyForkBoundaryMarker: boolean
+  selectedHasNewerForkBoundaryMarker: boolean
+}
+
+function resolveLegacyForkFallbackMode(input: {
+  hasThreadForkBoundaryMarkerEra: boolean
+  hasAnyForkBoundaryMarker: boolean
+}): LegacyForkFallbackMode {
+  if (!input.hasThreadForkBoundaryMarkerEra && !input.hasAnyForkBoundaryMarker) return "all"
+  if (input.hasAnyForkBoundaryMarker) return "older_than_marker"
+  return "none"
+}
+
+function allowsLegacyHistoricalForkFallback(input: {
+  mode: LegacyForkFallbackMode
+  selectedHasNewerForkBoundaryMarker: boolean
+}): boolean {
+  return (
+    input.mode === "all" ||
+    (input.mode === "older_than_marker" && input.selectedHasNewerForkBoundaryMarker)
+  )
+}
+
+async function getForkBoundaryMarkerContext(
+  checkpointer: SqlJsSaver,
+  threadId: string,
+  selectedCheckpointId?: string
+): Promise<ForkBoundaryMarkerContext> {
+  let hasAnyForkBoundaryMarker = false
+  let seenNewerForkBoundaryMarker = false
+  let selectedHasNewerForkBoundaryMarker = false
+  for await (const tuple of checkpointer.list({
+    configurable: { thread_id: threadId, checkpoint_ns: "" }
+  })) {
+    const checkpointId = getCheckpointId(tuple)
+    if (selectedCheckpointId && checkpointId === selectedCheckpointId) {
+      selectedHasNewerForkBoundaryMarker = seenNewerForkBoundaryMarker
+    }
+    if (getForkBoundaryMarker(tuple)) {
+      hasAnyForkBoundaryMarker = true
+      seenNewerForkBoundaryMarker = true
+    }
+  }
+  return { hasAnyForkBoundaryMarker, selectedHasNewerForkBoundaryMarker }
+}
+
+function buildForkMetadata(input: {
+  sourceThreadId: string
+  sourceTitle: string
+  sourceMetadata: Record<string, unknown>
+  checkpointId: string
+  messageId?: string
+  title?: string
+  overrides?: ThreadForkParams["overrides"]
+}): Record<string, unknown> {
+  const { sourceThreadId, sourceTitle, sourceMetadata, checkpointId, messageId, title, overrides } =
+    input
+  const next: Record<string, unknown> = {}
+
+  const hasWorkspacePathOverride = overrides ? hasOwnProperty(overrides, "workspacePath") : false
+  const workspacePath = hasWorkspacePathOverride
+    ? overrides?.workspacePath
+    : sourceMetadata.workspacePath
+  if (typeof workspacePath === "string" || workspacePath === null)
+    next.workspacePath = workspacePath
+  copyForkGitMetadataIfWorkspaceMatches({
+    sourceMetadata,
+    targetMetadata: next,
+    workspacePath,
+    hasWorkspacePathOverride
+  })
+
+  const model = overrides?.model ?? sourceMetadata.model
+  if (typeof model === "string" && model.trim()) next.model = model
+
+  const agentMode = isAgentMode(overrides?.agentMode)
+    ? overrides.agentMode
+    : getAgentModeFromMetadata(sourceMetadata)
+  if (isAgentMode(agentMode)) next.agentMode = agentMode
+
+  const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
+  if (typeof memoryEnabled === "boolean") next.memoryEnabled = memoryEnabled
+
+  const nextTitle = overrides?.title?.trim() || title?.trim() || sourceTitle || sourceThreadId
+  next.title = nextTitle
+  next.forkedFromThreadId = sourceThreadId
+  next.forkedFromCheckpointId = checkpointId
+  next.forkedFromCheckpointNs = ""
+  if (messageId) next.forkedFromMessageId = messageId
+  next.forkedAt = new Date().toISOString()
+
+  return next
+}
+
+async function cleanupFailedFork(
+  targetThreadId: string,
+  options: { rowCreated: boolean }
+): Promise<void> {
+  try {
+    deleteThreadCheckpoint(targetThreadId)
+  } catch (error) {
+    console.warn("[Threads] Failed to cleanup fork checkpoint:", error)
+  }
+  if (options.rowCreated) {
+    try {
+      dbDeleteThread(targetThreadId)
+    } catch (error) {
+      console.warn("[Threads] Failed to cleanup fork thread row:", error)
+    }
+  }
+}
+
+async function verifyForkCheckpointPersisted(
+  targetThreadId: string,
+  expectedCheckpointId: string
+): Promise<void> {
+  const verifier = new SqlJsSaver(getThreadCheckpointPath(targetThreadId))
+  try {
+    const tuple = await verifier.getTuple({
+      configurable: { thread_id: targetThreadId, checkpoint_ns: "" }
+    })
+    if (!tuple || getCheckpointId(tuple) !== expectedCheckpointId) {
+      throw new Error("Fork checkpoint was not persisted.")
+    }
+  } finally {
+    await verifier.close()
+  }
+}
+
+export async function forkThread(params: ThreadForkParams): Promise<ThreadForkResponse> {
+  const sourceThreadId = assertValidCheckpointThreadId(params.sourceThreadId)
+  const explicitCheckpointId = params.checkpointId?.trim()
+  if (explicitCheckpointId) assertValidCheckpointThreadId(explicitCheckpointId)
+  const explicitMessageId = params.messageId?.trim()
+
+  return withThreadRunMutationLock(sourceThreadId, async () => {
+    const sourceRow = getThread(sourceThreadId)
+    if (!sourceRow) throw new Error("源会话不存在。")
+
+    const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
+    const hasThreadForkBoundaryMarkerEra =
+      sourceMetadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION
+    const workspacePath =
+      typeof sourceMetadata.workspacePath === "string" ? sourceMetadata.workspacePath : null
+    const agentMode = getAgentModeFromMetadata(sourceMetadata)
+    if (await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })) {
+      throw new Error("当前会话仍在运行，请停止或等待完成后再 fork。")
+    }
+
+    const forkSource = await withCheckpointer(sourceThreadId, async (sourceSaver) => {
+      const sourceTuple = await sourceSaver.getTuple({
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          ...(explicitCheckpointId ? { checkpoint_id: explicitCheckpointId } : {})
+        }
+      })
+      const markerContext = sourceTuple
+        ? await getForkBoundaryMarkerContext(
+            sourceSaver,
+            sourceThreadId,
+            getCheckpointId(sourceTuple)
+          )
+        : { hasAnyForkBoundaryMarker: false, selectedHasNewerForkBoundaryMarker: false }
+      return { tuple: sourceTuple, markerContext }
+    })
+    const tuple = forkSource.tuple
+    if (!tuple) throw new Error("当前会话还没有可 fork 的 checkpoint。")
+    const legacyFallbackMode = resolveLegacyForkFallbackMode({
+      hasThreadForkBoundaryMarkerEra,
+      hasAnyForkBoundaryMarker: forkSource.markerContext.hasAnyForkBoundaryMarker
+    })
+    assertForkableTuple(tuple, {
+      allowLegacyLatestFallback:
+        !explicitCheckpointId &&
+        !hasThreadForkBoundaryMarkerEra &&
+        !forkSource.markerContext.hasAnyForkBoundaryMarker,
+      allowLegacyHistoricalFallback:
+        !!explicitCheckpointId &&
+        !getForkBoundaryMarker(tuple) &&
+        allowsLegacyHistoricalForkFallback({
+          mode: legacyFallbackMode,
+          selectedHasNewerForkBoundaryMarker:
+            forkSource.markerContext.selectedHasNewerForkBoundaryMarker
+        })
+    })
+
+    const checkpointId = getCheckpointId(tuple)
+    if (explicitMessageId) {
+      const messageTarget = describeCheckpointMessageForkTarget(tuple.checkpoint, explicitMessageId)
+      if (
+        !messageTarget.isForkableMessageBoundary ||
+        !isForkableCheckpointForMessage(tuple, explicitMessageId)
+      ) {
+        throw new Error("该消息不是稳定完成边界上的 assistant 回复，无法从这里 fork。")
+      }
+    }
+    const forkCheckpoint = explicitMessageId ? copyCheckpoint(tuple.checkpoint) : tuple.checkpoint
+    if (explicitMessageId && !truncateCheckpointMessagesAfter(forkCheckpoint, explicitMessageId)) {
+      throw new Error("该消息不在目标 checkpoint 中，无法从这里 fork。")
+    }
+    const sourceTitle =
+      sourceRow.title || (typeof sourceMetadata.title === "string" ? sourceMetadata.title : "")
+    const targetThreadId = uuid()
+    assertValidForkOverrides(sourceMetadata, params.overrides)
+    const targetMetadata = buildForkMetadata({
+      sourceThreadId,
+      sourceTitle,
+      sourceMetadata,
+      checkpointId,
+      messageId: explicitMessageId,
+      title: params.title,
+      overrides: params.overrides
+    })
+    const transcriptIndex = deriveCheckpointTranscriptIndex(forkCheckpoint)
+    if (!explicitCheckpointId && !explicitMessageId) {
+      const durableTail = findDurableForkTailMessages(
+        sourceThreadId,
+        transcriptIndex.visibleMessageIds
+      )
+      if (durableTail.length > 0) {
+        throw new Error(
+          "当前会话有 checkpoint 之后的已恢复历史，尚未形成可 fork 的稳定 checkpoint。请先继续对话或等待会话稳定后再 fork。"
+        )
+      }
+    }
+    const filteredThreadValues = buildFilteredThreadValues(
+      parseThreadValues(sourceRow.thread_values),
+      transcriptIndex
+    )
+
+    let targetSaver: SqlJsSaver | null = null
+    let rowCreated = false
+    try {
+      const checkpointMetadata =
+        tuple.metadata ??
+        ({
+          source: "fork",
+          step: -1,
+          writes: {},
+          parents: {}
+        } as CheckpointMetadata)
+      targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId))
+      await targetSaver.put(
+        { configurable: { thread_id: targetThreadId, checkpoint_ns: "" } },
+        forkCheckpoint,
+        checkpointMetadata
+      )
+      await targetSaver.flushStrict()
+      await targetSaver.close()
+      targetSaver = null
+      await verifyForkCheckpointPersisted(targetThreadId, forkCheckpoint.id)
+
+      dbCreateThread(targetThreadId, targetMetadata)
+      rowCreated = true
+
+      const row = dbUpdateThread(targetThreadId, {
+        thread_values: JSON.stringify(filteredThreadValues)
+      })
+      if (!row) throw new Error("Forked thread row was not created.")
+      copyForkedThreadMessages({
+        sourceThreadId,
+        targetThreadId,
+        visibleMessageIds: transcriptIndex.visibleMessageIds,
+        checkpointMessages: getCheckpointChannelMessages(forkCheckpoint)
+      })
+      copyForkedGoalState(sourceThreadId, targetThreadId)
+      await flushDbStrict()
+      return {
+        thread: serializeThreadRow(row),
+        sourceThreadId,
+        sourceCheckpointId: checkpointId,
+        sourceCheckpointNs: ""
+      }
+    } catch (error) {
+      if (targetSaver) {
+        try {
+          await targetSaver.close()
+        } catch (closeError) {
+          console.warn("[Threads] Failed to close fork target saver:", closeError)
+        }
+      }
+      await cleanupFailedFork(targetThreadId, { rowCreated })
+      throw error
+    }
+  })
+}
+
+async function listForkableCheckpoints(threadId: string): Promise<ForkableCheckpoint[]> {
+  const sourceThreadId = assertValidCheckpointThreadId(threadId)
+  return withThreadRunMutationLock(sourceThreadId, async () => {
+    const sourceRow = getThread(sourceThreadId)
+    if (!sourceRow) throw new Error("源会话不存在。")
+
+    const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
+    const workspacePath =
+      typeof sourceMetadata.workspacePath === "string" ? sourceMetadata.workspacePath : null
+    const agentMode = getAgentModeFromMetadata(sourceMetadata)
+    const activeRun = await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })
+    const pendingApproval = hasPendingApprovalForThread(sourceThreadId)
+    return withCheckpointer(sourceThreadId, async (sourceSaver) => {
+      const tuples: CheckpointTuple[] = []
+      for await (const tuple of sourceSaver.list({
+        configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+      })) {
+        tuples.push(tuple)
+      }
+      const hasAnyForkBoundaryMarker = tuples.some((tuple) => Boolean(getForkBoundaryMarker(tuple)))
+      const legacyFallbackMode = resolveLegacyForkFallbackMode({
+        hasThreadForkBoundaryMarkerEra:
+          sourceMetadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION,
+        hasAnyForkBoundaryMarker
+      })
+      return buildVisibleForkableCheckpointList(tuples, {
+        activeRun,
+        pendingApproval,
+        legacyFallbackMode
+      })
+    })
+  })
+}
+
+export async function resolveForkCheckpointForMessage(
+  params: ThreadForkCheckpointForMessageParams
+): Promise<ForkableCheckpoint | null> {
+  const sourceThreadId = assertValidCheckpointThreadId(params.threadId)
+  const messageId = params.messageId.trim()
+  if (!messageId) return null
+
+  return withThreadRunMutationLock(sourceThreadId, async () => {
+    const sourceRow = getThread(sourceThreadId)
+    if (!sourceRow) throw new Error("源会话不存在。")
+
+    const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
+    const workspacePath =
+      typeof sourceMetadata.workspacePath === "string" ? sourceMetadata.workspacePath : null
+    const agentMode = getAgentModeFromMetadata(sourceMetadata)
+    const activeRun = await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })
+    const pendingApproval = hasPendingApprovalForThread(sourceThreadId)
+    return withCheckpointer(sourceThreadId, async (sourceSaver) => {
+      const tuples: CheckpointTuple[] = []
+      for await (const tuple of sourceSaver.list({
+        configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+      })) {
+        tuples.push(tuple)
+      }
+      const hasAnyForkBoundaryMarker = tuples.some((tuple) => Boolean(getForkBoundaryMarker(tuple)))
+      const legacyFallbackMode = resolveLegacyForkFallbackMode({
+        hasThreadForkBoundaryMarkerEra:
+          sourceMetadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION,
+        hasAnyForkBoundaryMarker
+      })
+      let seenNewerBoundaryMarker = false
+      for (const tuple of tuples) {
+        const marker = getForkBoundaryMarker(tuple)
+        const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
+        if (!isForkableCheckpointForMessage(tuple, messageId)) {
+          if (marker) seenNewerBoundaryMarker = true
+          continue
+        }
+
+        const summary = buildForkableCheckpointSummary(tuple, {
+          activeRun,
+          pendingApproval,
+          allowLegacyHistoricalFallback:
+            !marker &&
+            allowsLegacyHistoricalForkFallback({
+              mode: legacyFallbackMode,
+              selectedHasNewerForkBoundaryMarker: seenNewerBoundaryMarker
+            }),
+          transcript
+        })
+        if (summary.isStableTurnBoundary) {
+          return summary
+        }
+        if (marker) seenNewerBoundaryMarker = true
+      }
+      return null
+    })
+  })
+}
+
 function toIsoString(value: number | Date): string {
   return new Date(value).toISOString()
 }
 
+function getCheckpointMessageClassName(msg: CheckpointMessage): string {
+  if (!Array.isArray(msg.id)) return ""
+  const last = msg.id[msg.id.length - 1]
+  return typeof last === "string" ? last : ""
+}
+
 function getMessageRole(msg: CheckpointMessage): ExportMessageRole | null {
-  let type = msg.type
+  let type = msg.type ?? msg.kwargs?.type
   if (!type && typeof msg._getType === "function") {
     type = msg._getType()
   }
@@ -290,7 +1022,53 @@ function getMessageRole(msg: CheckpointMessage): ExportMessageRole | null {
   if (type === "ai") return "assistant"
   if (type === "system") return "system"
   if (type === "tool") return "tool"
+
+  const className = getCheckpointMessageClassName(msg)
+  if (className === "HumanMessage") return "user"
+  if (className === "AIMessage" || className === "AIMessageChunk") return "assistant"
+  if (className === "SystemMessage") return "system"
+  if (className === "ToolMessage") return "tool"
   return null
+}
+
+function getCheckpointMessageId(msg: CheckpointMessage, index: number): string {
+  return msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
+}
+
+function getCheckpointMessageContent(msg: CheckpointMessage): CheckpointMessage["content"] {
+  return msg.content ?? msg.kwargs?.content
+}
+
+function getCheckpointMessageAdditionalKwargs(
+  msg: CheckpointMessage
+): Record<string, unknown> | undefined {
+  const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
+  return additionalKwargs && typeof additionalKwargs === "object" && !Array.isArray(additionalKwargs)
+    ? additionalKwargs
+    : undefined
+}
+
+function getCheckpointMessageTranscriptContent(
+  msg: CheckpointMessage,
+  role: ExportMessageRole
+): CheckpointMessage["content"] {
+  const visibleUserMessage = getCheckpointMessageAdditionalKwargs(msg)?.cmb_visible_user_message
+  if (role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0) {
+    return visibleUserMessage
+  }
+  return getCheckpointMessageContent(msg)
+}
+
+function getCheckpointMessageToolCalls(msg: CheckpointMessage): CheckpointMessage["tool_calls"] {
+  return msg.tool_calls ?? msg.kwargs?.tool_calls
+}
+
+function getCheckpointMessageToolCallId(msg: CheckpointMessage): string | undefined {
+  return msg.tool_call_id ?? msg.kwargs?.tool_call_id
+}
+
+function getCheckpointMessageName(msg: CheckpointMessage): string | undefined {
+  return msg.name ?? msg.kwargs?.name
 }
 
 function stringifyContent(content: CheckpointMessage["content"]): string {
@@ -490,16 +1268,16 @@ function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportM
     const role = getMessageRole(msg)
     if (!role) return []
 
-    const rawContent = stringifyContent(msg.content)
+    const rawContent = stringifyContent(getCheckpointMessageTranscriptContent(msg, role))
     // Drop the new workflow notification plumbing from the export. Coordinator
     // plumbing is intentionally left as-is (HEAD behavior) — see helper note.
-    if (isWorkflowPlumbingContent(rawContent)) return []
+    if (isWorkflowPlumbingTranscriptContent(rawContent)) return []
     const { content, attachments } = sanitizeAttachmentContent(rawContent)
     const exportedContent =
       role === "tool"
         ? truncateValue(content, TOOL_RESULT_CONTENT_LIMIT)
         : { value: content, truncated: false }
-    const toolCalls = buildExportToolCalls(msg.tool_calls)
+    const toolCalls = buildExportToolCalls(getCheckpointMessageToolCalls(msg))
     const toolCallNames = toolCalls.map((toolCall) => toolCall.name)
 
     if (!exportedContent.value.trim() && attachments.length === 0 && toolCalls.length === 0) {
@@ -508,17 +1286,104 @@ function buildExportMessages(messages: CheckpointMessage[] | undefined): ExportM
 
     return [
       {
-        id: msg.id || `msg-${index}`,
+        id: getCheckpointMessageId(msg, index),
         role,
         content: exportedContent.value,
         ...(exportedContent.truncated ? { truncated: true } : {}),
         attachments,
         ...(toolCalls.length > 0 ? { toolCalls, toolCallNames } : {}),
-        ...(role === "tool" && msg.tool_call_id ? { toolCallId: msg.tool_call_id } : {}),
-        ...(role === "tool" && msg.name ? { name: msg.name } : {})
+        ...(role === "tool" && getCheckpointMessageToolCallId(msg)
+          ? { toolCallId: getCheckpointMessageToolCallId(msg) }
+          : {}),
+        ...(role === "tool" && getCheckpointMessageName(msg)
+          ? { name: getCheckpointMessageName(msg) }
+          : {})
       }
     ]
   })
+}
+
+function roleToCheckpointType(role: Message["role"]): CheckpointMessage["type"] {
+  if (role === "user") return "human"
+  if (role === "assistant") return "ai"
+  return role
+}
+
+function checkpointMessagesToThreadMessages(
+  messages: CheckpointMessage[] | undefined,
+  options: { visibleMessageIds?: readonly string[] } = {}
+): Message[] {
+  if (!Array.isArray(messages)) return []
+  const visibleMessageIds = options.visibleMessageIds
+    ? new Set(options.visibleMessageIds)
+    : undefined
+  const now = new Date()
+  return messages.flatMap((msg, index): Message | [] => {
+    const role = getMessageRole(msg)
+    if (!role) return []
+    const id = getCheckpointMessageId(msg, index)
+    if (visibleMessageIds && !visibleMessageIds.has(id)) return []
+    const content = getCheckpointMessageTranscriptContent(msg, role)
+    const rawText = stringifyContent(content)
+    if (isWorkflowPlumbingTranscriptContent(rawText)) return []
+    return {
+      id,
+      role,
+      content:
+        typeof content === "string"
+          ? content
+          : Array.isArray(content)
+            ? (content as Message["content"])
+            : "",
+      ...(getCheckpointMessageToolCalls(msg)
+        ? { tool_calls: getCheckpointMessageToolCalls(msg) as Message["tool_calls"] }
+        : {}),
+      ...(role === "tool" && getCheckpointMessageToolCallId(msg)
+        ? { tool_call_id: getCheckpointMessageToolCallId(msg) }
+        : {}),
+      ...(role === "tool" && getCheckpointMessageName(msg)
+        ? { name: getCheckpointMessageName(msg) }
+        : {}),
+      created_at: now
+    }
+  })
+}
+
+function getCheckpointChannelMessages(checkpoint: unknown): CheckpointMessage[] | undefined {
+  if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) return undefined
+  const channelValues = (checkpoint as { channel_values?: unknown }).channel_values
+  if (!channelValues || typeof channelValues !== "object" || Array.isArray(channelValues)) {
+    return undefined
+  }
+  const messages = (channelValues as { messages?: unknown }).messages
+  return Array.isArray(messages) ? (messages as CheckpointMessage[]) : undefined
+}
+
+function buildExportMessagesFromThreadMessages(messages: Message[]): ExportMessage[] {
+  return buildExportMessages(
+    messages.map((message) => ({
+      id: message.id,
+      type: roleToCheckpointType(message.role),
+      content: message.content,
+      tool_calls: message.tool_calls,
+      tool_call_id: message.tool_call_id,
+      name: message.name
+    }))
+  )
+}
+
+export function mergeCheckpointAndPersistedThreadMessagesForSession(
+  checkpoint: unknown,
+  persistedMessages: Message[]
+): Message[] {
+  const checkpointTranscriptIndex = checkpoint ? deriveCheckpointTranscriptIndex(checkpoint) : null
+  const checkpointMessages = checkpointMessagesToThreadMessages(
+    getCheckpointChannelMessages(checkpoint),
+    checkpointTranscriptIndex
+      ? { visibleMessageIds: checkpointTranscriptIndex.visibleMessageIds }
+      : {}
+  )
+  return mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
 }
 
 function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
@@ -563,6 +1428,21 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       title: row.title
     }
   })
+
+  ipcMain.handle("threads:messages", async (_event, threadId: string) => {
+    return getThreadMessages(threadId)
+  })
+
+  ipcMain.handle(
+    "threads:appendMessages",
+    async (_event, { threadId, messages }: { threadId: string; messages: Message[] }) => {
+      return withThreadRunMutationLock(threadId, async () => {
+        if (!Array.isArray(messages)) return { count: 0 }
+        const count = upsertThreadMessages(threadId, messages.map(normalizeIpcThreadMessage))
+        return { count }
+      })
+    }
+  )
 
   // Create a new thread
   ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
@@ -612,57 +1492,60 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     } as Thread
   })
 
+  ipcMain.handle("threads:fork", async (_event, params: ThreadForkParams) => {
+    return forkThread(params)
+  })
+
+  ipcMain.handle("threads:list-forkable-checkpoints", async (_event, threadId: string) => {
+    return listForkableCheckpoints(threadId)
+  })
+
+  ipcMain.handle(
+    "threads:resolve-fork-checkpoint-for-message",
+    async (_event, params: ThreadForkCheckpointForMessageParams) => {
+      return resolveForkCheckpointForMessage(params)
+    }
+  )
+
   // Update a thread
   ipcMain.handle("threads:update", async (_event, { threadId, updates }: ThreadUpdateParams) => {
-    const updateData: Parameters<typeof dbUpdateThread>[1] = {}
+    return withThreadRunMutationLock(threadId, async () => {
+      const updateData: Parameters<typeof dbUpdateThread>[1] = {}
 
-    if (updates.metadata !== undefined) {
-      const currentThread = getThread(threadId)
-      const currentMetadata = currentThread?.metadata
-        ? (JSON.parse(currentThread.metadata) as Record<string, unknown>)
-        : {}
-      await assertCanPersistExplicitNormalMode(
-        threadId,
-        currentMetadata,
-        updates.metadata as Record<string, unknown>
-      )
-    }
+      if (updates.metadata !== undefined) {
+        const currentThread = getThread(threadId)
+        const currentMetadata = currentThread?.metadata
+          ? (JSON.parse(currentThread.metadata) as Record<string, unknown>)
+          : {}
+        await assertCanPersistExplicitNormalMode(
+          threadId,
+          currentMetadata,
+          updates.metadata as Record<string, unknown>
+        )
+      }
 
-    if (updates.title !== undefined) updateData.title = updates.title
-    if (updates.status !== undefined) updateData.status = updates.status
-    if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
-    if (updates.thread_values !== undefined)
-      updateData.thread_values = JSON.stringify(updates.thread_values)
+      if (updates.title !== undefined) updateData.title = updates.title
+      if (updates.status !== undefined) updateData.status = updates.status
+      if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
+      if (updates.thread_values !== undefined)
+        updateData.thread_values = JSON.stringify(updates.thread_values)
 
-    const row = dbUpdateThread(threadId, updateData)
-    if (!row) throw new Error("Thread not found")
+      const row = dbUpdateThread(threadId, updateData)
+      if (!row) throw new Error("Thread not found")
 
-    return {
-      thread_id: row.thread_id,
-      created_at: new Date(row.created_at),
-      updated_at: new Date(row.updated_at),
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-      status: row.status as Thread["status"],
-      thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
-      title: row.title
-    }
+      return serializeThreadRow(row)
+    })
   })
 
   ipcMain.handle(
     "threads:mergeThreadValues",
     async (_event, { threadId, patch }: ThreadValuesMergeParams) => {
-      const row = dbMergeThreadValues(threadId, patch)
-      if (!row) throw new Error("Thread not found")
+      return withThreadRunMutationLock(threadId, async () => {
+        const row = dbMergeThreadValues(threadId, patch)
+        if (!row) throw new Error("Thread not found")
 
-      return {
-        thread_id: row.thread_id,
-        created_at: new Date(row.created_at),
-        updated_at: new Date(row.updated_at),
-        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-        status: row.status as Thread["status"],
-        thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
-        title: row.title
-      }
+        return serializeThreadRow(row)
+      })
     }
   )
 
@@ -852,16 +1735,18 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   }
 
   ipcMain.handle("threads:delete", async (event, threadId: string) => {
-    while (deletingThreads.has(threadId)) {
-      await deletingThreads.get(threadId)?.catch(() => undefined)
-    }
-    const deletion = performThreadDeletion(event, threadId)
-    deletingThreads.set(threadId, deletion)
-    try {
-      await deletion
-    } finally {
-      if (deletingThreads.get(threadId) === deletion) deletingThreads.delete(threadId)
-    }
+    return withThreadRunMutationLock(threadId, async () => {
+      while (deletingThreads.has(threadId)) {
+        await deletingThreads.get(threadId)?.catch(() => undefined)
+      }
+      const deletion = performThreadDeletion(event, threadId)
+      deletingThreads.set(threadId, deletion)
+      try {
+        await deletion
+      } finally {
+        if (deletingThreads.get(threadId) === deletion) deletingThreads.delete(threadId)
+      }
+    })
   })
 
   // Get thread history (checkpoints)
@@ -905,7 +1790,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       if (!row) return { success: false, error: "Thread not found" }
 
       const latestCheckpoint = await getLatestCheckpoint(threadId)
-      const messages = buildExportMessages(latestCheckpoint?.checkpoint?.channel_values?.messages)
+      const messages = buildExportMessagesFromThreadMessages(
+        mergeCheckpointAndPersistedThreadMessagesForSession(
+          latestCheckpoint?.checkpoint,
+          getThreadMessages(threadId)
+        )
+      )
 
       if (messages.length === 0) {
         return { success: false, error: "暂无可导出的消息" }
