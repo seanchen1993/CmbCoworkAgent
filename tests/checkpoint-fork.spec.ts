@@ -375,6 +375,57 @@ async function testConfigurableCheckpointRetention(dir: string): Promise<void> {
 
   assert.deepEqual(splitRootIds, ["root-4", "root-3", "root-2"])
   assert.deepEqual(splitToolIds, ["tool-3"])
+
+  const forkBoundaryRetentionPath = join(dir, "fork-boundary-retention.sqlite")
+  const forkBoundaryRetentionSaver = new SqlJsSaver(forkBoundaryRetentionPath, undefined, {
+    maxRootCheckpoints: 2,
+    maxRootForkBoundaryCheckpoints: 3,
+    maxNonRootCheckpoints: 1
+  })
+  await forkBoundaryRetentionSaver.put(
+    config("fork-retention"),
+    makeCheckpoint("boundary-1", "2026-07-03T00:00:01.000Z"),
+    makeForkBoundaryMetadata("boundary-1", 1)
+  )
+  await forkBoundaryRetentionSaver.put(
+    config("fork-retention", "boundary-1"),
+    makeCheckpoint("boundary-2", "2026-07-03T00:00:02.000Z"),
+    makeForkBoundaryMetadata("boundary-2", 2)
+  )
+  await forkBoundaryRetentionSaver.put(
+    config("fork-retention", "boundary-2"),
+    makeCheckpoint("boundary-3", "2026-07-03T00:00:03.000Z"),
+    makeForkBoundaryMetadata("boundary-3", 3)
+  )
+  await forkBoundaryRetentionSaver.put(
+    config("fork-retention", "boundary-3"),
+    makeCheckpoint("temp-4", "2026-07-03T00:00:04.000Z"),
+    makeMetadata(4)
+  )
+  await forkBoundaryRetentionSaver.put(
+    config("fork-retention", "temp-4"),
+    makeCheckpoint("temp-5", "2026-07-03T00:00:05.000Z"),
+    makeMetadata(5)
+  )
+  await forkBoundaryRetentionSaver.put(
+    config("fork-retention", "temp-5"),
+    makeCheckpoint("temp-6", "2026-07-03T00:00:06.000Z"),
+    makeMetadata(6)
+  )
+
+  const retainedForkBoundaryIds: string[] = []
+  for await (const tuple of forkBoundaryRetentionSaver.list(config("fork-retention"))) {
+    retainedForkBoundaryIds.push(tuple.checkpoint.id)
+  }
+  await forkBoundaryRetentionSaver.close()
+
+  assert.deepEqual(retainedForkBoundaryIds, [
+    "temp-6",
+    "temp-5",
+    "boundary-3",
+    "boundary-2",
+    "boundary-1"
+  ])
   console.log("PASS checkpoint retention can keep historical root checkpoints")
 }
 
@@ -791,6 +842,41 @@ function testVisibleForkableCheckpointList(): void {
     busySummaries.map((summary) => summary.checkpointId),
     [],
     "UI forkable list should hide checkpoints while the thread is busy"
+  )
+
+  const currentUnmarked = makeCheckpoint("cp-current-unmarked") as Checkpoint
+  ;(currentUnmarked.channel_values as Record<string, unknown>).messages = [
+    { id: "user-current", type: "human", content: "current" },
+    { id: "assistant-current", type: "ai", content: "current answer" }
+  ]
+  const markerEraBoundary = makeCheckpoint("cp-marker-era") as Checkpoint
+  ;(markerEraBoundary.channel_values as Record<string, unknown>).messages = [
+    { id: "user-marker", type: "human", content: "marker" },
+    { id: "assistant-marker", type: "ai", content: "marker answer" }
+  ]
+  const legacyBoundary = makeCheckpoint("cp-legacy-history") as Checkpoint
+  ;(legacyBoundary.channel_values as Record<string, unknown>).messages = [
+    { id: "user-legacy", type: "human", content: "legacy" },
+    { id: "assistant-legacy", type: "ai", content: "legacy answer" }
+  ]
+  const mixedSummaries = buildVisibleForkableCheckpointList(
+    [
+      makeTuple({ checkpoint: currentUnmarked, metadata: makeMetadata(4) }),
+      makeTuple({
+        checkpoint: markerEraBoundary,
+        metadata: makeForkBoundaryMetadata("cp-marker-era", 3, "assistant-marker")
+      }),
+      makeTuple({ checkpoint: legacyBoundary, metadata: makeMetadata(2) })
+    ],
+    { activeRun: false, pendingApproval: false, legacyFallbackMode: "older_than_marker" }
+  )
+  assert.deepEqual(
+    mixedSummaries.map((summary) => [summary.checkpointId, summary.boundarySource]),
+    [
+      ["cp-marker-era", "metadata_marker"],
+      ["cp-legacy-history", "legacy_historical_idle_fallback"]
+    ],
+    "mixed marker-era lists should keep legacy history forkable but hide newer unmarked checkpoints"
   )
   console.log("PASS visible fork checkpoint list hides internal states and hidden raw tails")
 }

@@ -10,10 +10,11 @@
  *   npx tsx tests/sqljs-saver-async-flush.spec.ts
  */
 
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import assert from "assert"
+import initSqlJs from "sql.js"
 import { SqlJsSaver } from "../src/main/checkpointer/sqljs-saver"
 import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import type { RunnableConfig } from "@langchain/core/runnables"
@@ -51,6 +52,28 @@ async function putCheckpoint(
     parents: {}
   } as CheckpointMetadata
   await saver.put(config(threadId, parentCheckpointId, checkpointNs), makeCheckpoint(id), metadata)
+}
+
+async function putForkBoundaryCheckpoint(
+  saver: SqlJsSaver,
+  threadId: string,
+  id: string,
+  parentCheckpointId?: string
+): Promise<void> {
+  const metadata = {
+    source: "loop",
+    step: 1,
+    writes: {},
+    parents: {},
+    cmb_fork_boundary: {
+      version: 1,
+      kind: "turn_complete",
+      boundaryId: `turn_complete:${threadId}:${id}`,
+      completedAt: new Date().toISOString(),
+      source: "agent_run_complete"
+    }
+  } as CheckpointMetadata
+  await saver.put(config(threadId, parentCheckpointId), makeCheckpoint(id), metadata)
 }
 
 async function readBackLatestId(
@@ -288,6 +311,40 @@ async function testListEarlyBreakLeavesSaverReusable(dir: string): Promise<void>
   console.log("PASS list early break frees statements and keeps saver reusable")
 }
 
+async function testForkBoundaryMarkerColumnBackfillsSerializedMetadata(dir: string): Promise<void> {
+  const dbPath = join(dir, "fork-marker-backfill.sqlite")
+  const original = new SqlJsSaver(dbPath, undefined, {
+    maxRootCheckpoints: 2,
+    maxRootForkBoundaryCheckpoints: 2
+  })
+  await putForkBoundaryCheckpoint(original, "t-marker-backfill", "boundary-1")
+  await putForkBoundaryCheckpoint(original, "t-marker-backfill", "boundary-2", "boundary-1")
+  await putCheckpoint(original, "t-marker-backfill", "temp-3", "", "boundary-2")
+  await putCheckpoint(original, "t-marker-backfill", "temp-4", "", "temp-3")
+  await original.flushStrict()
+  await original.close()
+
+  const SQL = await initSqlJs()
+  const raw = new SQL.Database(await readFile(dbPath))
+  raw.run(`UPDATE checkpoints SET fork_boundary_marker = 0`)
+  await writeFile(dbPath, Buffer.from(raw.export()))
+  raw.close()
+
+  const reopened = new SqlJsSaver(dbPath, undefined, {
+    maxRootCheckpoints: 2,
+    maxRootForkBoundaryCheckpoints: 2
+  })
+  await putCheckpoint(reopened, "t-marker-backfill", "temp-5", "", "temp-4")
+  const retainedIds: string[] = []
+  for await (const tuple of reopened.list(config("t-marker-backfill"))) {
+    retainedIds.push(tuple.checkpoint.id)
+  }
+  await reopened.close()
+
+  assert.deepEqual(retainedIds, ["temp-5", "temp-4", "boundary-2", "boundary-1"])
+  console.log("PASS fork boundary marker column backfills serialized metadata")
+}
+
 async function testRetirePoisonsLateWriters(dir: string): Promise<void> {
   const dbPath = join(dir, "retire.sqlite")
   const saver = new SqlJsSaver(dbPath)
@@ -336,6 +393,7 @@ async function main(): Promise<void> {
     await testOversizedLiveStillRecoversNewerTempSnapshot(dir)
     await testOversizedDatabaseCompactsInsteadOfStartingFresh(dir)
     await testListEarlyBreakLeavesSaverReusable(dir)
+    await testForkBoundaryMarkerColumnBackfillsSerializedMetadata(dir)
     await testRetirePoisonsLateWriters(dir)
     console.log("sqljs-saver async/flush tests passed")
   } finally {

@@ -2196,6 +2196,9 @@ ${shellGuidance}
 //    activeRuns registry) to avoid a circular import.
 const checkpointers = new Map<string, SqlJsSaver>()
 const MAX_CACHED_CHECKPOINTERS = 12
+const MAIN_THREAD_MAX_ROOT_CHECKPOINTS = 3
+const MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS = 30
+const MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES = 48 * 1024 * 1024
 // In-flight eviction closes, so getCheckpointer can wait one out before
 // recreating an instance for the same thread (avoids reading a half-written DB).
 const closingCheckpointers = new Map<string, Promise<void>>()
@@ -2450,7 +2453,11 @@ async function getCheckpointerInternal(
   const bornRetireEpoch = retireEpochOf(threadId)
   const isSubThreadCheckpoint = threadId.includes("__")
   const checkpointer = new SqlJsSaver(dbPath, undefined, {
-    maxRootCheckpoints: isSubThreadCheckpoint ? 1 : 3,
+    maxRootCheckpoints: isSubThreadCheckpoint ? 1 : MAIN_THREAD_MAX_ROOT_CHECKPOINTS,
+    maxRootForkBoundaryCheckpoints: isSubThreadCheckpoint
+      ? 0
+      : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
+    maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
     maxNonRootCheckpoints: 1
   })
   await checkpointer.initialize()

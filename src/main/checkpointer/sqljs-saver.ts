@@ -12,6 +12,8 @@ import {
 const CHECKPOINT_SAVE_DEBOUNCE_MS = 300
 const DEFAULT_MAX_DB_SIZE_BYTES = 100 * 1024 * 1024
 const DEFAULT_MAX_OVERSIZED_RECOVERY_BYTES = 128 * 1024 * 1024
+const DEFAULT_MAX_ROOT_FORK_BOUNDARY_CHECKPOINTS = 0
+const DEFAULT_MAX_ROOT_FORK_BOUNDARY_BYTES = 48 * 1024 * 1024
 import type { RunnableConfig } from "@langchain/core/runnables"
 import {
   BaseCheckpointSaver,
@@ -31,8 +33,15 @@ interface CheckpointRow {
   parent_checkpoint_id: string | null
   type: string | null
   checkpoint: string
-  metadata: string
+  metadata: string | Uint8Array
   checkpoint_ts?: string | null
+  fork_boundary_marker?: number | null
+}
+
+interface RootCheckpointRetentionRow {
+  checkpoint_id: string
+  fork_boundary_marker: number
+  payload_bytes: number
 }
 
 interface WriteRow {
@@ -47,6 +56,10 @@ export interface SqlJsSaverOptions {
   maxCheckpointsPerNamespace?: number
   /** Root namespace checkpoints back runtime resume and recent checkpoint fork. */
   maxRootCheckpoints?: number
+  /** Completed-turn root checkpoints retained for message fork, bounded separately. */
+  maxRootForkBoundaryCheckpoints?: number
+  /** Approximate serialized checkpoint+metadata budget for retained fork boundaries. */
+  maxRootForkBoundaryBytes?: number
   /** Non-root namespaces are LangGraph internals/tool subgraphs and can grow very large. */
   maxNonRootCheckpoints?: number
   /** Soft size guard for opening a database without emergency pruning. */
@@ -59,6 +72,18 @@ function normalizePositiveInteger(value: number | undefined, fallback: number): 
   return Number.isFinite(value) && value !== undefined && value > 0
     ? Math.max(1, Math.floor(value))
     : fallback
+}
+
+function normalizeNonNegativeInteger(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && value !== undefined && value >= 0
+    ? Math.max(0, Math.floor(value))
+    : fallback
+}
+
+function checkpointMetadataHasForkBoundaryMarker(metadata: CheckpointMetadata): boolean {
+  const value = metadata as Record<string, unknown> | null | undefined
+  const boundary = value?.cmb_fork_boundary
+  return Boolean(boundary && typeof boundary === "object" && !Array.isArray(boundary))
 }
 
 function isSqliteIntegrityOk(database: SqlJsDatabase): boolean {
@@ -99,6 +124,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * transcript history lives in the main database, so checkpoint retention can stay small.
    * Non-root namespaces are internal/tool subgraphs and balloon sql.js DBs quickly. */
   private maxRootCheckpoints = 1
+  private maxRootForkBoundaryCheckpoints = DEFAULT_MAX_ROOT_FORK_BOUNDARY_CHECKPOINTS
+  private maxRootForkBoundaryBytes = DEFAULT_MAX_ROOT_FORK_BOUNDARY_BYTES
   private maxNonRootCheckpoints = 1
   private maxDatabaseBytes = DEFAULT_MAX_DB_SIZE_BYTES
   private maxOversizedRecoveryBytes = DEFAULT_MAX_OVERSIZED_RECOVERY_BYTES
@@ -110,6 +137,14 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     this.maxRootCheckpoints = normalizePositiveInteger(
       options.maxRootCheckpoints ?? legacyMax,
       1
+    )
+    this.maxRootForkBoundaryCheckpoints = normalizeNonNegativeInteger(
+      options.maxRootForkBoundaryCheckpoints,
+      DEFAULT_MAX_ROOT_FORK_BOUNDARY_CHECKPOINTS
+    )
+    this.maxRootForkBoundaryBytes = normalizePositiveInteger(
+      options.maxRootForkBoundaryBytes,
+      DEFAULT_MAX_ROOT_FORK_BOUNDARY_BYTES
     )
     this.maxNonRootCheckpoints = normalizePositiveInteger(
       options.maxNonRootCheckpoints ?? legacyMax,
@@ -167,7 +202,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       this.db = new SQL.Database()
     }
 
-    this.setup()
+    await this.setup()
   }
 
   private retentionLimitForNamespace(checkpointNs: string): number {
@@ -185,6 +220,51 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       // Column already exists.
     }
     database.run(`UPDATE checkpoints SET checkpoint_ts = checkpoint_id WHERE checkpoint_ts IS NULL`)
+  }
+
+  private migrateCheckpointForkBoundaryColumn(database: SqlJsDatabase): void {
+    const table = database.exec(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'checkpoints'`
+    )
+    if (!table[0]?.values.length) return
+    try {
+      database.run(`ALTER TABLE checkpoints ADD COLUMN fork_boundary_marker INTEGER NOT NULL DEFAULT 0`)
+    } catch {
+      // Column already exists.
+    }
+    database.run(
+      `UPDATE checkpoints
+       SET fork_boundary_marker = 1
+       WHERE fork_boundary_marker = 0 AND metadata LIKE '%cmb_fork_boundary%'`
+    )
+  }
+
+  private async backfillCheckpointForkBoundaryMarkers(database: SqlJsDatabase): Promise<void> {
+    const result = database.exec(
+      `SELECT thread_id, checkpoint_ns, checkpoint_id, type, metadata
+       FROM checkpoints
+       WHERE fork_boundary_marker = 0`
+    )
+    const rows = result[0]?.values ?? []
+    if (rows.length === 0) return
+
+    for (const row of rows) {
+      try {
+        const metadata = (await this.serde.loadsTyped(
+          typeof row[3] === "string" ? row[3] : "json",
+          row[4] as string | Uint8Array
+        )) as CheckpointMetadata
+        if (!checkpointMetadataHasForkBoundaryMarker(metadata)) continue
+        database.run(
+          `UPDATE checkpoints
+           SET fork_boundary_marker = 1
+           WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
+          [String(row[0] ?? ""), String(row[1] ?? ""), String(row[2] ?? "")]
+        )
+      } catch (error) {
+        console.warn("[SqlJsSaver] Failed to backfill checkpoint fork marker:", error)
+      }
+    }
   }
 
   private pruneAllCheckpointNamespaces(database: SqlJsDatabase): void {
@@ -219,6 +299,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
 
       this.migrateCheckpointTimestampColumn(database)
+      this.migrateCheckpointForkBoundaryColumn(database)
+      await this.backfillCheckpointForkBoundaryMarkers(database)
       this.pruneAllCheckpointNamespaces(database)
       database.run("VACUUM")
 
@@ -261,7 +343,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
-  private setup(): void {
+  private async setup(): Promise<void> {
     if (this.isSetup || !this.db) return
 
     // Create tables
@@ -275,11 +357,14 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         checkpoint TEXT,
         metadata TEXT,
         checkpoint_ts TEXT,
+        fork_boundary_marker INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
       )
     `)
 
     this.migrateCheckpointTimestampColumn(this.db)
+    this.migrateCheckpointForkBoundaryColumn(this.db)
+    await this.backfillCheckpointForkBoundaryMarkers(this.db)
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS writes (
@@ -309,6 +394,10 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     database: SqlJsDatabase | null = this.db
   ): void {
     if (!database) return
+    if (checkpointNs === "") {
+      this.pruneRootCheckpoints(threadId, database)
+      return
+    }
 
     const limit = this.retentionLimitForNamespace(checkpointNs)
     const countResult = database.exec(
@@ -345,6 +434,76 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     } catch (e) {
       database.run("ROLLBACK")
       console.warn("[SqlJsSaver] Failed to prune old checkpoints:", e)
+    }
+  }
+
+  private pruneRootCheckpoints(threadId: string, database: SqlJsDatabase): void {
+    const result = database.exec(
+      `SELECT checkpoint_id,
+              fork_boundary_marker,
+              LENGTH(COALESCE(checkpoint, '')) + LENGTH(COALESCE(metadata, '')) AS payload_bytes
+       FROM checkpoints
+       WHERE thread_id = ? AND checkpoint_ns = ''
+       ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC`,
+      [threadId]
+    )
+    const rows = (result[0]?.values ?? []).map((row) => ({
+      checkpoint_id: typeof row[0] === "string" ? row[0] : String(row[0] ?? ""),
+      fork_boundary_marker: typeof row[1] === "number" ? row[1] : Number(row[1] ?? 0),
+      payload_bytes: typeof row[2] === "number" ? row[2] : Number(row[2] ?? 0)
+    })) as RootCheckpointRetentionRow[]
+    if (rows.length <= this.maxRootCheckpoints) return
+
+    const keepIds = new Set<string>()
+    for (const row of rows.slice(0, this.maxRootCheckpoints)) {
+      if (row.checkpoint_id) keepIds.add(row.checkpoint_id)
+    }
+
+    const hasAnyForkBoundary = rows.some((row) => row.fork_boundary_marker === 1)
+    let seenForkBoundary = false
+    let archivedCount = 0
+    let archivedBytes = 0
+
+    for (const row of rows.slice(this.maxRootCheckpoints)) {
+      const isForkBoundary = row.fork_boundary_marker === 1
+      const isLegacyCandidate = !isForkBoundary && (!hasAnyForkBoundary || seenForkBoundary)
+      if (isForkBoundary || isLegacyCandidate) {
+        const nextBytes = archivedBytes + Math.max(0, row.payload_bytes)
+        if (
+          archivedCount < this.maxRootForkBoundaryCheckpoints &&
+          nextBytes <= this.maxRootForkBoundaryBytes
+        ) {
+          keepIds.add(row.checkpoint_id)
+          archivedCount += 1
+          archivedBytes = nextBytes
+        }
+      }
+      if (isForkBoundary) seenForkBoundary = true
+    }
+
+    if (keepIds.size >= rows.length) return
+    const placeholders = Array.from(keepIds, () => "?").join(", ")
+    const params = [threadId, ...keepIds]
+
+    try {
+      database.run("BEGIN")
+
+      database.run(
+        `DELETE FROM writes
+         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id NOT IN (${placeholders})`,
+        params
+      )
+
+      database.run(
+        `DELETE FROM checkpoints
+         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id NOT IN (${placeholders})`,
+        params
+      )
+
+      database.run("COMMIT")
+    } catch (e) {
+      database.run("ROLLBACK")
+      console.warn("[SqlJsSaver] Failed to prune old root checkpoints:", e)
     }
   }
 
@@ -699,11 +858,12 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     const checkpointTs =
       typeof preparedCheckpoint.ts === "string" ? preparedCheckpoint.ts : preparedCheckpoint.id
+    const forkBoundaryMarker = checkpointMetadataHasForkBoundaryMarker(metadata) ? 1 : 0
 
     this.db.run(
       `INSERT OR REPLACE INTO checkpoints 
-       (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, checkpoint_ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata, checkpoint_ts, fork_boundary_marker)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         thread_id,
         checkpoint_ns,
@@ -712,7 +872,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         type1,
         serializedCheckpoint,
         serializedMetadata,
-        checkpointTs
+        checkpointTs,
+        forkBoundaryMarker
       ]
     )
 
@@ -789,9 +950,15 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     this.db.run(
       `UPDATE checkpoints
-       SET metadata = ?
+       SET metadata = ?, fork_boundary_marker = ?
        WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
-      [serializedMetadata, row.thread_id, row.checkpoint_ns, row.checkpoint_id]
+      [
+        serializedMetadata,
+        checkpointMetadataHasForkBoundaryMarker(nextMetadata) ? 1 : 0,
+        row.thread_id,
+        row.checkpoint_ns,
+        row.checkpoint_id
+      ]
     )
     this.saveToDisk()
     return nextMetadata

@@ -89,6 +89,7 @@ import {
   isForkableCheckpointForMessage,
   toForkabilityError
 } from "../../shared/checkpoint-forkability"
+import type { LegacyForkFallbackMode } from "../../shared/checkpoint-forkability"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import {
   copyCheckpoint,
@@ -606,27 +607,63 @@ async function isThreadForkBusy(input: ThreadForkBusyInput): Promise<boolean> {
 
 function assertForkableTuple(
   tuple: CheckpointTuple,
-  options: { allowLegacyLatestFallback: boolean }
+  options: { allowLegacyLatestFallback: boolean; allowLegacyHistoricalFallback?: boolean }
 ): void {
   const threadId = getCheckpointThreadId(tuple)
   const forkability = describeCheckpointForkability(tuple, {
     allowLegacyLatestFallback: options.allowLegacyLatestFallback,
+    allowLegacyHistoricalFallback: options.allowLegacyHistoricalFallback,
     pendingApproval: hasPendingApprovalForThread(threadId)
   })
   if (!forkability.isStableTurnBoundary)
     throw new Error(toForkabilityError(forkability.unstableReason))
 }
 
-async function hasAnyForkBoundaryMarker(
+interface ForkBoundaryMarkerContext {
+  hasAnyForkBoundaryMarker: boolean
+  selectedHasNewerForkBoundaryMarker: boolean
+}
+
+function resolveLegacyForkFallbackMode(input: {
+  hasThreadForkBoundaryMarkerEra: boolean
+  hasAnyForkBoundaryMarker: boolean
+}): LegacyForkFallbackMode {
+  if (!input.hasThreadForkBoundaryMarkerEra && !input.hasAnyForkBoundaryMarker) return "all"
+  if (input.hasAnyForkBoundaryMarker) return "older_than_marker"
+  return "none"
+}
+
+function allowsLegacyHistoricalForkFallback(input: {
+  mode: LegacyForkFallbackMode
+  selectedHasNewerForkBoundaryMarker: boolean
+}): boolean {
+  return (
+    input.mode === "all" ||
+    (input.mode === "older_than_marker" && input.selectedHasNewerForkBoundaryMarker)
+  )
+}
+
+async function getForkBoundaryMarkerContext(
   checkpointer: SqlJsSaver,
-  threadId: string
-): Promise<boolean> {
+  threadId: string,
+  selectedCheckpointId?: string
+): Promise<ForkBoundaryMarkerContext> {
+  let hasAnyForkBoundaryMarker = false
+  let seenNewerForkBoundaryMarker = false
+  let selectedHasNewerForkBoundaryMarker = false
   for await (const tuple of checkpointer.list({
     configurable: { thread_id: threadId, checkpoint_ns: "" }
   })) {
-    if (getForkBoundaryMarker(tuple)) return true
+    const checkpointId = getCheckpointId(tuple)
+    if (selectedCheckpointId && checkpointId === selectedCheckpointId) {
+      selectedHasNewerForkBoundaryMarker = seenNewerForkBoundaryMarker
+    }
+    if (getForkBoundaryMarker(tuple)) {
+      hasAnyForkBoundaryMarker = true
+      seenNewerForkBoundaryMarker = true
+    }
   }
-  return false
+  return { hasAnyForkBoundaryMarker, selectedHasNewerForkBoundaryMarker }
 }
 
 function buildForkMetadata(input: {
@@ -740,19 +777,34 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
           ...(explicitCheckpointId ? { checkpoint_id: explicitCheckpointId } : {})
         }
       })
-      const hasMarkerEraCheckpoint =
-        !explicitCheckpointId && sourceTuple
-          ? await hasAnyForkBoundaryMarker(sourceSaver, sourceThreadId)
-          : false
-      return { tuple: sourceTuple, hasMarkerEraCheckpoint }
+      const markerContext = sourceTuple
+        ? await getForkBoundaryMarkerContext(
+            sourceSaver,
+            sourceThreadId,
+            getCheckpointId(sourceTuple)
+          )
+        : { hasAnyForkBoundaryMarker: false, selectedHasNewerForkBoundaryMarker: false }
+      return { tuple: sourceTuple, markerContext }
     })
     const tuple = forkSource.tuple
     if (!tuple) throw new Error("当前会话还没有可 fork 的 checkpoint。")
+    const legacyFallbackMode = resolveLegacyForkFallbackMode({
+      hasThreadForkBoundaryMarkerEra,
+      hasAnyForkBoundaryMarker: forkSource.markerContext.hasAnyForkBoundaryMarker
+    })
     assertForkableTuple(tuple, {
       allowLegacyLatestFallback:
         !explicitCheckpointId &&
         !hasThreadForkBoundaryMarkerEra &&
-        !forkSource.hasMarkerEraCheckpoint
+        !forkSource.markerContext.hasAnyForkBoundaryMarker,
+      allowLegacyHistoricalFallback:
+        !!explicitCheckpointId &&
+        !getForkBoundaryMarker(tuple) &&
+        allowsLegacyHistoricalForkFallback({
+          mode: legacyFallbackMode,
+          selectedHasNewerForkBoundaryMarker:
+            forkSource.markerContext.selectedHasNewerForkBoundaryMarker
+        })
     })
 
     const checkpointId = getCheckpointId(tuple)
@@ -875,7 +927,17 @@ async function listForkableCheckpoints(threadId: string): Promise<ForkableCheckp
       })) {
         tuples.push(tuple)
       }
-      return buildVisibleForkableCheckpointList(tuples, { activeRun, pendingApproval })
+      const hasAnyForkBoundaryMarker = tuples.some((tuple) => Boolean(getForkBoundaryMarker(tuple)))
+      const legacyFallbackMode = resolveLegacyForkFallbackMode({
+        hasThreadForkBoundaryMarkerEra:
+          sourceMetadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION,
+        hasAnyForkBoundaryMarker
+      })
+      return buildVisibleForkableCheckpointList(tuples, {
+        activeRun,
+        pendingApproval,
+        legacyFallbackMode
+      })
     })
   })
 }
@@ -898,20 +960,42 @@ export async function resolveForkCheckpointForMessage(
     const activeRun = await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })
     const pendingApproval = hasPendingApprovalForThread(sourceThreadId)
     return withCheckpointer(sourceThreadId, async (sourceSaver) => {
+      const tuples: CheckpointTuple[] = []
       for await (const tuple of sourceSaver.list({
         configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
       })) {
+        tuples.push(tuple)
+      }
+      const hasAnyForkBoundaryMarker = tuples.some((tuple) => Boolean(getForkBoundaryMarker(tuple)))
+      const legacyFallbackMode = resolveLegacyForkFallbackMode({
+        hasThreadForkBoundaryMarkerEra:
+          sourceMetadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION,
+        hasAnyForkBoundaryMarker
+      })
+      let seenNewerBoundaryMarker = false
+      for (const tuple of tuples) {
+        const marker = getForkBoundaryMarker(tuple)
         const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
-        if (!isForkableCheckpointForMessage(tuple, messageId)) continue
+        if (!isForkableCheckpointForMessage(tuple, messageId)) {
+          if (marker) seenNewerBoundaryMarker = true
+          continue
+        }
 
         const summary = buildForkableCheckpointSummary(tuple, {
           activeRun,
           pendingApproval,
+          allowLegacyHistoricalFallback:
+            !marker &&
+            allowsLegacyHistoricalForkFallback({
+              mode: legacyFallbackMode,
+              selectedHasNewerForkBoundaryMarker: seenNewerBoundaryMarker
+            }),
           transcript
         })
         if (summary.isStableTurnBoundary) {
           return summary
         }
+        if (marker) seenNewerBoundaryMarker = true
       }
       return null
     })

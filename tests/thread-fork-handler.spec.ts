@@ -58,6 +58,22 @@ function makeCheckpoint(id: string, ts = "2026-07-08T01:00:00.000Z"): Checkpoint
   } as Checkpoint
 }
 
+function makeCheckpointWithVisiblePair(input: {
+  id: string
+  ts: string
+  userId: string
+  userText: string
+  assistantId: string
+  assistantText: string
+}): Checkpoint {
+  const checkpoint = makeCheckpoint(input.id, input.ts)
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: input.userId, type: "human", content: input.userText },
+    { id: input.assistantId, type: "ai", content: input.assistantText }
+  ]
+  return checkpoint
+}
+
 function makeHiddenTailCheckpoint(id: string): Checkpoint {
   const checkpoint = makeCheckpoint(id, "2026-07-08T01:00:02.000Z")
   ;(checkpoint.channel_values as Record<string, unknown>).messages = [
@@ -68,7 +84,10 @@ function makeHiddenTailCheckpoint(id: string): Checkpoint {
   return checkpoint
 }
 
-function makeForkBoundaryMetadata(checkpointId: string): CheckpointMetadata {
+function makeForkBoundaryMetadata(
+  checkpointId: string,
+  lastVisibleMessageId = "assistant-1"
+): CheckpointMetadata {
   return {
     source: "loop",
     step: 1,
@@ -80,7 +99,7 @@ function makeForkBoundaryMetadata(checkpointId: string): CheckpointMetadata {
       boundaryId: `turn_complete:source-thread:${checkpointId}`,
       completedAt: "2026-07-08T01:00:01.000Z",
       source: "agent_run_complete",
-      lastVisibleMessageId: "assistant-1"
+      lastVisibleMessageId
     }
   } as CheckpointMetadata
 }
@@ -221,6 +240,120 @@ async function testResolveMessageForkReturnsNewestStableCheckpoint(): Promise<vo
       "message resolver should return the newest stable checkpoint from SqlJsSaver.list()"
     )
   } finally {
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testResolveAndForkLegacyMessageBeforeFirstMarker(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, resolveForkCheckpointForMessage } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-legacy-before-marker-source"
+  const legacyCheckpointId = "fork-legacy-before-marker-old"
+  const markedCheckpointId = "fork-legacy-before-marker-marked"
+  const currentUnmarkedCheckpointId = "fork-legacy-before-marker-current"
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Legacy before marker source",
+      agentMode: "normal",
+      [FORK_BOUNDARY_THREAD_METADATA_KEY]: FORK_BOUNDARY_MARKER_VERSION
+    })
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 3
+    })
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpointWithVisiblePair({
+        id: legacyCheckpointId,
+        ts: "2026-07-08T01:00:00.000Z",
+        userId: "user-legacy",
+        userText: "legacy prompt",
+        assistantId: "assistant-legacy",
+        assistantText: "legacy answer"
+      }),
+      makePlainMetadata()
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: legacyCheckpointId
+        }
+      },
+      makeCheckpointWithVisiblePair({
+        id: markedCheckpointId,
+        ts: "2026-07-08T01:00:02.000Z",
+        userId: "user-marked",
+        userText: "marked prompt",
+        assistantId: "assistant-marked",
+        assistantText: "marked answer"
+      }),
+      makeForkBoundaryMetadata(markedCheckpointId, "assistant-marked")
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: markedCheckpointId
+        }
+      },
+      makeCheckpointWithVisiblePair({
+        id: currentUnmarkedCheckpointId,
+        ts: "2026-07-08T01:00:03.000Z",
+        userId: "user-current",
+        userText: "current prompt",
+        assistantId: "assistant-current",
+        assistantText: "current answer"
+      }),
+      makePlainMetadata()
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const legacyResolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: "assistant-legacy"
+    })
+    assert.equal(
+      legacyResolved?.checkpointId,
+      legacyCheckpointId,
+      "message resolver should allow legacy checkpoints older than the first marker"
+    )
+    assert.equal(legacyResolved?.boundarySource, "legacy_historical_idle_fallback")
+
+    const currentResolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: "assistant-current"
+    })
+    assert.equal(
+      currentResolved,
+      null,
+      "message resolver should still reject unmarked checkpoints newer than a marker"
+    )
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId: legacyCheckpointId,
+      messageId: "assistant-legacy",
+      title: "Fork legacy history"
+    })
+    targetThreadId = forked.thread.thread_id
+    assert.equal(forked.sourceCheckpointId, legacyCheckpointId)
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
     db.deleteThread(sourceThreadId)
     deleteThreadCheckpoint(sourceThreadId)
     await db.closeDatabase()
@@ -782,6 +915,7 @@ async function main(): Promise<void> {
     await testForkCopiesGoalStateAndEvents()
     await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
     await testResolveMessageForkReturnsNewestStableCheckpoint()
+    await testResolveAndForkLegacyMessageBeforeFirstMarker()
     await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
     await testForkWaitsForQueuedRendererThreadMutations()
   })
