@@ -87,12 +87,21 @@ import type {
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 
+type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
+
+interface CloseToTrayPromptRequest {
+  requestId: number
+  trayAreaName: string
+}
+
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
   closeLoginPage: () => void
+  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptRequest) => void) => () => void
+  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction) => void
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void

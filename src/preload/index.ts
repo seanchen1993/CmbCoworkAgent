@@ -139,6 +139,16 @@ type PetState =
   | "interaction"
   | "hover"
 
+type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
+
+interface CloseToTrayPromptRequest {
+  requestId: number
+  trayAreaName: string
+}
+
+const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
+const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
 }
@@ -166,6 +176,16 @@ const electronAPI = {
   closeLoginWindow: () => ipcRenderer.invoke("close-login-window"),
   openLoginPage: () => ipcRenderer.invoke("open-login-page"),
   closeLoginPage: () => ipcRenderer.invoke("close-login-page"),
+  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptRequest) => void) => {
+    const handler = (_event: unknown, payload: CloseToTrayPromptRequest): void => {
+      callback(payload)
+    }
+    ipcRenderer.on(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
+  },
+  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction): void => {
+    ipcRenderer.send(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, { requestId, action })
+  },
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
       callback(data)

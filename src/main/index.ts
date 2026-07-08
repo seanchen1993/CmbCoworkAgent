@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
+import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -30,7 +30,25 @@ import {
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
+const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
+const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
+
+type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
+
+function isCloseToTrayPromptResponse(
+  payload: unknown
+): payload is { requestId: number; action: CloseToTrayPromptAction } {
+  if (!payload || typeof payload !== "object") return false
+  const record = payload as Record<string, unknown>
+  return (
+    typeof record.requestId === "number" &&
+    (record.action === "minimize-to-tray" ||
+      record.action === "direct-close" ||
+      record.action === "cancel")
+  )
+}
 
 function getConsoleLevelName(level: number): string {
   switch (level) {
@@ -221,6 +239,8 @@ import {
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
 let closeToTrayPromptOpen = false
+let closeToTrayPromptRequestId = 0
+let closeToTrayPromptTimer: NodeJS.Timeout | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -331,31 +351,34 @@ function hideMainWindowToTray(window: BrowserWindow): void {
   }
 }
 
-async function confirmHideMainWindowToTray(window: BrowserWindow): Promise<void> {
+function clearCloseToTrayPromptState(): void {
+  closeToTrayPromptOpen = false
+  if (closeToTrayPromptTimer) {
+    clearTimeout(closeToTrayPromptTimer)
+    closeToTrayPromptTimer = null
+  }
+}
+
+function requestHideMainWindowToTray(window: BrowserWindow): void {
   if (closeToTrayPromptOpen) {
     if (!window.isDestroyed()) window.focus()
     return
   }
 
   closeToTrayPromptOpen = true
-  try {
-    const trayAreaName = process.platform === "darwin" ? "菜单栏" : "系统托盘"
-    const result = await dialog.showMessageBox(window, {
-      type: "question",
-      buttons: [`最小化到${trayAreaName}`, "取消"],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-      title: `最小化到${trayAreaName}`,
-      message: `关闭窗口后，CMBDevClaw 将最小化到${trayAreaName}。`,
-      detail: `应用会继续在后台运行。可点击${trayAreaName}图标重新打开，或在${trayAreaName}菜单中选择“退出”完全关闭应用。`
-    })
-    if (result.response === 0) {
-      hideMainWindowToTray(window)
+  closeToTrayPromptRequestId += 1
+  const requestId = closeToTrayPromptRequestId
+  closeToTrayPromptTimer = setTimeout(() => {
+    if (closeToTrayPromptRequestId === requestId) {
+      console.warn("[Main] Close-to-tray prompt timed out")
+      clearCloseToTrayPromptState()
     }
-  } finally {
-    closeToTrayPromptOpen = false
-  }
+  }, CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS)
+  window.focus()
+  window.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, {
+    requestId,
+    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘"
+  })
 }
 
 function createWindow(): void {
@@ -404,6 +427,7 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    clearCloseToTrayPromptState()
     console.error("[Main] Renderer failed to load:", {
       errorCode,
       errorDescription,
@@ -411,7 +435,12 @@ function createWindow(): void {
     })
   })
 
+  mainWindow.webContents.on("did-start-loading", () => {
+    clearCloseToTrayPromptState()
+  })
+
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    clearCloseToTrayPromptState()
     console.error("[Main] Renderer process gone:", details)
   })
 
@@ -447,7 +476,7 @@ function createWindow(): void {
     if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
       event.preventDefault()
       if (mainWindow) {
-        void confirmHideMainWindowToTray(mainWindow)
+        requestHideMainWindowToTray(mainWindow)
       }
     }
   })
@@ -457,6 +486,7 @@ function createWindow(): void {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
+    clearCloseToTrayPromptState()
     mainWindow = null
     if (process.platform !== "darwin") {
       app.quit()
@@ -623,6 +653,20 @@ if (!gotTheLock) {
       // Main-process sources own persistent state and keys. Strip renderer keys so
       // a compromised renderer cannot overwrite or resolve an approval/input entry.
       requestAppAttention({ kind: payload.kind, threadId: payload.threadId })
+    })
+
+    ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (event.sender.id !== mainWindow.webContents.id) return
+      if (!isCloseToTrayPromptResponse(payload)) return
+      if (!closeToTrayPromptOpen || payload.requestId !== closeToTrayPromptRequestId) return
+
+      clearCloseToTrayPromptState()
+      if (payload.action === "minimize-to-tray") {
+        hideMainWindowToTray(mainWindow)
+      } else if (payload.action === "direct-close") {
+        app.quit()
+      }
     })
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
