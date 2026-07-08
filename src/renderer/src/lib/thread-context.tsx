@@ -550,6 +550,8 @@ export interface ThreadActions {
   setError: (error: string | null) => void
   clearError: () => void
   clearHookInterruption: () => void
+  /** Restore the effective model for display/runtime use without touching persisted metadata. */
+  restoreCurrentModel: (modelId: string) => void
   setCurrentModel: (modelId: string) => void
   openFile: (path: string, name: string) => void
   closeFile: (path: string) => void
@@ -3106,12 +3108,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         clearHookInterruption: () => {
           updateThreadState(threadId, () => ({ hookInterruption: null }))
         },
+        restoreCurrentModel: (modelId: string) => {
+          updateThreadState(threadId, () => ({ currentModel: modelId }))
+        },
         setCurrentModel: (modelId: string) => {
           updateThreadState(threadId, () => ({ currentModel: modelId }))
-          // Persist to backend
+          // Only intentional model selection changes should touch metadata.model.
+          // Hydration and no-op writes must not refresh updated_at or overwrite routing fallback state.
           window.api.threads.get(threadId).then((thread) => {
             if (thread) {
               const metadata = thread.metadata || {}
+              if (metadata.model === modelId) return
               window.api.threads.update(threadId, {
                 metadata: { ...metadata, model: modelId }
               })

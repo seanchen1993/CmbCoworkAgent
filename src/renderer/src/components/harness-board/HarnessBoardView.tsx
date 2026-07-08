@@ -161,6 +161,8 @@ const PROJECT_DIR_MAX_CHARS = 30
 const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const SYSTEM_CONSTRAINT_UPDATE_KIND = "system-constraints-update"
+const FEATURE_SESSION_INITIAL_VISIBLE_COUNT = 5
+const FEATURE_SESSION_VISIBLE_INCREMENT = 8
 const OTHER_ADAPTER_SCENARIO = "其他类别"
 const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的插件"
 const PROJECT_STATUS_POLL_INTERVAL_MS = 60 * 1000
@@ -4416,7 +4418,7 @@ function ProjectDetailPage({
                 {creatingSystemConstraintUpdate ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
-                  <ShieldAlert className="size-4" />
+                  <RefreshCw className="size-4" />
                 )}
                 系统约束更新
               </Button>
@@ -5243,6 +5245,7 @@ function ProjectFeatureSidebar({
 }): React.JSX.Element {
   const { currentThreadId } = useAppStore()
   const highlightThreadId = isViewingSession ? currentThreadId : null
+  const [featureSessionVisibleCounts, setFeatureSessionVisibleCounts] = useState<Record<string, number>>({})
   const sessionCount = groups.reduce(
     (total, group) =>
       total +
@@ -5288,6 +5291,38 @@ function ProjectFeatureSidebar({
         onEditingTitleChange={onEditingTitleChange}
       />
     )
+  }
+
+  const getVisibleFeatureSessionCount = (featureGroup: ProjectFeatureSessionGroup): number => {
+    const configuredCount = featureSessionVisibleCounts[featureGroup.key]
+    if (typeof configuredCount !== "number") {
+      return Math.min(FEATURE_SESSION_INITIAL_VISIBLE_COUNT, featureGroup.sessions.length)
+    }
+
+    return Math.min(
+      Math.max(configuredCount, FEATURE_SESSION_INITIAL_VISIBLE_COUNT),
+      featureGroup.sessions.length
+    )
+  }
+
+  const expandFeatureSessions = (featureGroup: ProjectFeatureSessionGroup): void => {
+    setFeatureSessionVisibleCounts((current) => {
+      const currentCount = current[featureGroup.key] ?? FEATURE_SESSION_INITIAL_VISIBLE_COUNT
+      const nextCount = Math.min(
+        currentCount + FEATURE_SESSION_VISIBLE_INCREMENT,
+        featureGroup.sessions.length
+      )
+      return { ...current, [featureGroup.key]: nextCount }
+    })
+  }
+
+  const collapseFeatureSessions = (featureGroup: ProjectFeatureSessionGroup): void => {
+    setFeatureSessionVisibleCounts((current) => {
+      if (!(featureGroup.key in current)) return current
+      const next = { ...current }
+      delete next[featureGroup.key]
+      return next
+    })
   }
 
   return (
@@ -5358,7 +5393,7 @@ function ProjectFeatureSidebar({
                       {projectCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
                     </button>
                     <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                      <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                      <Workflow className="size-4 shrink-0 text-muted-foreground" />
                       <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={group.project.name}>
                         {group.project.name}
                       </span>
@@ -5407,6 +5442,11 @@ function ProjectFeatureSidebar({
                       const hasUnreadFeatureSession = featureGroup.sessions.some((session) =>
                         unreadIds.has(session.threadId)
                       )
+                      const visibleSessionCount = getVisibleFeatureSessionCount(featureGroup)
+                      const visibleSessions = featureGroup.sessions.slice(0, visibleSessionCount)
+                      const canExpandSessions = visibleSessionCount < featureGroup.sessions.length
+                      const canCollapseSessions =
+                        visibleSessionCount > FEATURE_SESSION_INITIAL_VISIBLE_COUNT
 
                       return (
                         <div key={featureGroup.key} className="space-y-1">
@@ -5427,7 +5467,7 @@ function ProjectFeatureSidebar({
                             >
                               {featureCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
                             </button>
-                            <Workflow className="size-4 shrink-0 text-muted-foreground" />
+                            <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
                             <span className="min-w-0 flex-1 truncate text-xs font-medium" title={featureGroup.title}>
                               {featureGroup.title}
                             </span>
@@ -5459,21 +5499,45 @@ function ProjectFeatureSidebar({
                               {featureGroup.sessions.length === 0 ? (
                                 <div className="px-2 py-2 text-xs text-muted-foreground">暂无关联会话</div>
                               ) : (
-                                featureGroup.sessions.map((session) => {
-                                  const thread = threadsById.get(session.threadId)
-                                  if (!thread) return null
-                                  return renderThreadItem(
-                                    thread,
-                                    `所属项目：${group.project.name} / ${featureGroup.title}`,
-                                    () =>
-                                      onSelectSession(
-                                        group.project.projectId,
-                                        session.slug,
-                                        thread.thread_id,
-                                        projectDeleted
-                                      )
-                                  )
-                                })
+                                <>
+                                  {visibleSessions.map((session) => {
+                                    const thread = threadsById.get(session.threadId)
+                                    if (!thread) return null
+                                    return renderThreadItem(
+                                      thread,
+                                      `所属项目：${group.project.name} / ${featureGroup.title}`,
+                                      () =>
+                                        onSelectSession(
+                                          group.project.projectId,
+                                          session.slug,
+                                          thread.thread_id,
+                                          projectDeleted
+                                        )
+                                    )
+                                  })}
+                                  {(canExpandSessions || canCollapseSessions) && (
+                                    <div className="flex items-center gap-4 py-1 pl-3 pr-2 text-xs font-medium text-muted-foreground">
+                                      {canExpandSessions && (
+                                        <button
+                                          type="button"
+                                          className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                          onClick={() => expandFeatureSessions(featureGroup)}
+                                        >
+                                          展开显示
+                                        </button>
+                                      )}
+                                      {canCollapseSessions && (
+                                        <button
+                                          type="button"
+                                          className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                          onClick={() => collapseFeatureSessions(featureGroup)}
+                                        >
+                                          折叠显示
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </>
                               )}
                             </div>
                           )}
@@ -7004,8 +7068,24 @@ export function HarnessBoardView({
 
   const projectSidebarGroups = useMemo<ProjectSessionProjectGroup[]>(() => {
     const groups: ProjectSessionProjectGroup[] = []
-    const activeProjectId = selectedProjectSession?.projectId ?? selectedFeature?.projectId ?? selectedProjectId
+    // Group pinning is reserved for project/feature detail pages. Session selection
+    // should only highlight/open the thread; otherwise read-only clicks and focus
+    // reloads can look like project/feature activity and unexpectedly reorder groups.
+    const pinnedFeature =
+      selectedFeature && !isViewingSession ? selectedFeature : null
+    const pinnedProjectId = pinnedFeature
+      ? pinnedFeature.projectId
+      : selectedProjectId && !selectedFeature && !selectedProjectSession && !isViewingSession
+        ? selectedProjectId
+        : null
     const knownProjectIds = new Set(projects.map((project) => project.projectId))
+    const featureOrderByProject = new Map<string, Map<string, number>>()
+    for (const [projectId, detail] of Object.entries(detailsByProjectId)) {
+      featureOrderByProject.set(
+        projectId,
+        new Map(detail.runs.map((run, index) => [run.slug, index]))
+      )
+    }
 
     const makeFeatureGroups = (
       project: ProjectFeatureSidebarProject,
@@ -7013,15 +7093,29 @@ export function HarnessBoardView({
       section: ProjectFeatureSessionGroupSection,
       deleted = false
     ): ProjectFeatureSessionGroup[] =>
-      Array.from(sessionsBySlug.entries()).map(([slug, sessions]) => ({
-        key: `feature:${project.projectId}:${slug}`,
-        project,
-        slug,
-        title: slug,
-        sessions,
-        section,
-        ...(deleted ? { deleted: true } : {})
-      }))
+      Array.from(sessionsBySlug.entries())
+        .map(([slug, sessions]) => ({
+          key: `feature:${project.projectId}:${slug}`,
+          project,
+          slug,
+          title: slug,
+          sessions,
+          section,
+          ...(deleted ? { deleted: true } : {})
+        }))
+        .sort((a, b) => {
+          const aPinned = pinnedFeature?.projectId === project.projectId && pinnedFeature.slug === a.slug
+          const bPinned = pinnedFeature?.projectId === project.projectId && pinnedFeature.slug === b.slug
+          if (aPinned !== bPinned) return aPinned ? -1 : 1
+
+          // Keep feature group order independent from session updated_at. Message sends
+          // should move the active session inside its group, not promote the whole feature.
+          const order = featureOrderByProject.get(project.projectId)
+          const aOrder = order?.get(a.slug) ?? Number.MAX_SAFE_INTEGER
+          const bOrder = order?.get(b.slug) ?? Number.MAX_SAFE_INTEGER
+          if (aOrder !== bOrder) return aOrder - bOrder
+          return a.slug.localeCompare(b.slug, "zh-CN")
+        })
 
     for (const project of projects) {
       const sessionsBySlug = new Map<string, HarnessSessionBinding[]>()
@@ -7035,7 +7129,7 @@ export function HarnessBoardView({
       if (sessionsBySlug.size === 0 && projectSessions.length === 0) continue
 
       const section: ProjectFeatureSessionGroupSection =
-        activeProjectId && project.projectId === activeProjectId ? "current" : "other"
+        pinnedProjectId && project.projectId === pinnedProjectId ? "current" : "other"
 
       groups.push({
         key: `project:${project.projectId}`,
@@ -7046,10 +7140,10 @@ export function HarnessBoardView({
       })
     }
 
-    const unknownProjectIds = new Set<string>([
+    const unknownProjectIds = Array.from(new Set<string>([
       ...Array.from(harnessSessionIndex.byProjectSlug.keys()),
       ...Array.from(harnessSessionIndex.projectSessionsByProject.keys())
-    ])
+    ])).sort((a, b) => a.localeCompare(b, "zh-CN"))
 
     for (const projectId of unknownProjectIds) {
       if (knownProjectIds.has(projectId)) continue
@@ -7065,7 +7159,7 @@ export function HarnessBoardView({
         readThreadHarnessProjectName(firstProjectSessionThread ?? firstFeatureThread)
       )
       const section: ProjectFeatureSessionGroupSection =
-        activeProjectId && projectId === activeProjectId ? "current" : "other"
+        pinnedProjectId && projectId === pinnedProjectId ? "current" : "other"
 
       groups.push({
         key: `deleted-project:${projectId}`,
@@ -7077,7 +7171,7 @@ export function HarnessBoardView({
       })
     }
 
-    if (!activeProjectId) return groups
+    if (!pinnedProjectId) return groups
 
     return groups
       .map((group, index) => {
@@ -7086,25 +7180,38 @@ export function HarnessBoardView({
       })
       .sort((a, b) => a.priority - b.priority || a.index - b.index)
       .map(({ group }) => group)
-  }, [harnessSessionIndex, projects, selectedFeature, selectedProjectId, selectedProjectSession, threadsById])
+  }, [
+    detailsByProjectId,
+    harnessSessionIndex,
+    isViewingSession,
+    projects,
+    selectedFeature,
+    selectedProjectId,
+    selectedProjectSession,
+    threadsById
+  ])
+
+  // Automatic sidebar folding follows the same rule as group pinning: only
+  // project/feature detail pages move the user's sidebar focus. Opening a
+  // session should highlight the thread without collapsing unrelated groups.
+  const autoCollapseFeature = selectedFeature && !isViewingSession ? selectedFeature : null
+  const autoCollapseProjectId = autoCollapseFeature
+    ? autoCollapseFeature.projectId
+    : selectedProjectId && !selectedFeature && !selectedProjectSession && !isViewingSession
+      ? selectedProjectId
+      : null
 
   useEffect(() => {
-    if (!selectedFeature && !selectedProjectId) return
+    if (!autoCollapseProjectId) return
 
     setCollapsedFeatureKeys((current) => {
       const next = new Set(current)
       let changed = false
 
       for (const group of projectSidebarGroups) {
-        const isCurrentProject =
-          (selectedProjectSession && group.project.projectId === selectedProjectSession.projectId) ||
-          (selectedFeature && group.project.projectId === selectedFeature.projectId) ||
-          (!selectedProjectSession &&
-            !selectedFeature &&
-            selectedProjectId &&
-            group.project.projectId === selectedProjectId)
-        const currentFeatureGroup = selectedFeature
-          ? group.featureGroups.find((featureGroup) => featureGroup.slug === selectedFeature.slug)
+        const isCurrentProject = group.project.projectId === autoCollapseProjectId
+        const currentFeatureGroup = autoCollapseFeature
+          ? group.featureGroups.find((featureGroup) => featureGroup.slug === autoCollapseFeature.slug)
           : null
 
         if (isCurrentProject) {
@@ -7119,11 +7226,10 @@ export function HarnessBoardView({
       return changed ? next : current
     })
   }, [
-    projectSidebarGroups,
-    selectedFeature?.projectId,
-    selectedFeature?.slug,
-    selectedProjectSession?.projectId,
-    selectedProjectId
+    autoCollapseFeature?.projectId,
+    autoCollapseFeature?.slug,
+    autoCollapseProjectId,
+    projectSidebarGroups
   ])
 
   const allFeatureGroupsCollapsed =
