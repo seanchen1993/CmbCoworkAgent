@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import * as PopoverPrimitive from "@radix-ui/react-popover"
 import {
@@ -175,6 +175,8 @@ const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
 const ENTERPRISE_PROJECT_SEARCH_MIN_CHARS = 2
 const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
 const ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS = 160
+type ProjectSidebarScrollIntent = "preserve" | "top" | null
+const LEAN_TOKEN_VISIBLE_PREFIX_LENGTH = 6
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -242,6 +244,11 @@ function createEmptyDeployUnitMapping(): HarnessDeployUnitMapping {
     localRepoPath: "",
     description: ""
   }
+}
+
+function maskLeanToken(value: string): string {
+  if (value.length <= LEAN_TOKEN_VISIBLE_PREFIX_LENGTH) return value
+  return `${value.slice(0, LEAN_TOKEN_VISIBLE_PREFIX_LENGTH)}${"*".repeat(value.length - LEAN_TOKEN_VISIBLE_PREFIX_LENGTH)}`
 }
 
 function buildDeployUnitMappingSavePayload(
@@ -3080,6 +3087,23 @@ function ProjectModeSettingsPanel({
   onSaveLeanToken: () => void
   onOpenLeanToken: () => void
 }): React.JSX.Element {
+  const [replacingLeanToken, setReplacingLeanToken] = useState(false)
+  const wasLeanTokenDirtyRef = useRef(leanTokenDirty)
+  const hasStoredLeanToken = leanToken.length > 0
+  const showStoredLeanTokenMask = hasStoredLeanToken && !leanTokenDirty && !replacingLeanToken
+  const leanTokenInputValue = showStoredLeanTokenMask
+    ? maskLeanToken(leanToken)
+    : replacingLeanToken && !leanTokenDirty
+      ? ""
+      : leanToken
+
+  useEffect(() => {
+    if (wasLeanTokenDirtyRef.current && !leanTokenDirty) {
+      setReplacingLeanToken(false)
+    }
+    wasLeanTokenDirtyRef.current = leanTokenDirty
+  }, [leanTokenDirty])
+
   return (
     <div className="space-y-4">
       <section className="rounded-md border border-border bg-background shadow-sm">
@@ -3236,12 +3260,35 @@ function ProjectModeSettingsPanel({
             </div>
           ) : (
             <label className="block space-y-2">
-              <Input
-                value={leanToken}
-                onChange={(event) => onLeanTokenChange(event.target.value)}
-                placeholder="请输入 sk-ai-xFu...."
-                className={harnessProjectCreateInputClassName}
-              />
+              <div className="flex items-center gap-2">
+                <Input
+                  value={leanTokenInputValue}
+                  readOnly={showStoredLeanTokenMask}
+                  onChange={(event) => onLeanTokenChange(event.target.value)}
+                  placeholder="请输入 sk-ai-xFu...."
+                  className={harnessProjectCreateInputClassName}
+                />
+                {showStoredLeanTokenMask && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="shrink-0"
+                    onClick={() => setReplacingLeanToken(true)}
+                  >
+                    重新输入
+                  </Button>
+                )}
+                {replacingLeanToken && !leanTokenDirty && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="shrink-0"
+                    onClick={() => setReplacingLeanToken(false)}
+                  >
+                    取消
+                  </Button>
+                )}
+              </div>
             </label>
           )}
         </div>
@@ -4369,7 +4416,7 @@ function ProjectReviewSummary({
           className="rounded-sm text-left font-medium text-primary/85 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           onClick={openReviewPage}
         >
-          无评审记录，点击发起评审以避免 nc
+          项目无评审记录，发起评审以避免 NC
         </button>
       ) : (
         <TooltipProvider delayDuration={120}>
@@ -4616,24 +4663,35 @@ function ProjectDetailPage({
           </div>
           <div className={harnessPageHeaderActionsClassName}>
             {detail?.systemConstraintUpdate && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className={harnessDetailSecondaryButtonClassName}
-                onClick={() => {
-                  if (detail.systemConstraintUpdate) {
-                    onOpenSystemConstraintUpdate(project, detail.systemConstraintUpdate)
-                  }
-                }}
-                disabled={creatingSystemConstraintUpdate}
-              >
-                {creatingSystemConstraintUpdate ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <RefreshCcw className="size-4" />
-                )}
-                知识库沉淀
-              </Button>
+              <TooltipProvider delayDuration={80}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={harnessDetailSecondaryButtonClassName}
+                        onClick={() => {
+                          if (detail.systemConstraintUpdate) {
+                            onOpenSystemConstraintUpdate(project, detail.systemConstraintUpdate)
+                          }
+                        }}
+                        disabled={creatingSystemConstraintUpdate}
+                      >
+                        {creatingSystemConstraintUpdate ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <RefreshCcw className="size-4" />
+                        )}
+                        知识库沉淀
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" sideOffset={6}>
+                    沉淀本项目的变更，更新知识库
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             )}
             <Button
               variant="ghost"
@@ -5419,6 +5477,8 @@ function ProjectFeatureSidebar({
   exportingThreadId,
   editingThreadId,
   editingTitle,
+  scrollTopRef,
+  scrollIntentRef,
   onToggleCollapse,
   onToggleAll,
   onCreateSession,
@@ -5447,6 +5507,8 @@ function ProjectFeatureSidebar({
   exportingThreadId: string | null
   editingThreadId: string | null
   editingTitle: string
+  scrollTopRef: MutableRefObject<number>
+  scrollIntentRef: MutableRefObject<ProjectSidebarScrollIntent>
   onToggleCollapse: (key: string) => void
   onToggleAll: () => void
   onCreateSession: (
@@ -5466,7 +5528,10 @@ function ProjectFeatureSidebar({
 }): React.JSX.Element {
   const { currentThreadId } = useAppStore()
   const highlightThreadId = isViewingSession ? currentThreadId : null
-  const [featureSessionVisibleCounts, setFeatureSessionVisibleCounts] = useState<Record<string, number>>({})
+  const scrollAreaRef = useRef<HTMLDivElement | null>(null)
+  const pendingScrollRestoreRef = useRef<number | null>(null)
+  const preserveScrollUntilRef = useRef(0)
+  const [sessionVisibleCounts, setSessionVisibleCounts] = useState<Record<string, number>>({})
   const sessionCount = groups.reduce(
     (total, group) =>
       total +
@@ -5474,6 +5539,73 @@ function ProjectFeatureSidebar({
       group.featureGroups.reduce((count, featureGroup) => count + featureGroup.sessions.length, 0),
     0
   )
+
+  const getSidebarViewport = useCallback((): HTMLDivElement | null => {
+    return scrollAreaRef.current?.querySelector(
+      "[data-radix-scroll-area-viewport]"
+    ) as HTMLDivElement | null
+  }, [])
+
+  const captureSidebarScrollTop = useCallback((): void => {
+    const viewport = getSidebarViewport()
+    if (!viewport) return
+    scrollTopRef.current = viewport.scrollTop
+    pendingScrollRestoreRef.current = viewport.scrollTop > 0 ? viewport.scrollTop : null
+    scrollIntentRef.current = "preserve"
+    preserveScrollUntilRef.current = window.performance.now() + 2000
+  }, [getSidebarViewport, scrollIntentRef, scrollTopRef])
+
+  useLayoutEffect(() => {
+    const viewport = getSidebarViewport()
+    if (!viewport) return
+
+    const scrollIntent = scrollIntentRef.current
+    if (scrollIntent === "top") {
+      viewport.scrollTop = 0
+      scrollTopRef.current = 0
+      pendingScrollRestoreRef.current = null
+      scrollIntentRef.current = null
+    } else if (scrollIntent === "preserve") {
+      const targetScrollTop = pendingScrollRestoreRef.current ?? scrollTopRef.current
+      if (targetScrollTop > 0) {
+        const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        const nextScrollTop = Math.min(targetScrollTop, maxScrollTop)
+        if (Math.abs(viewport.scrollTop - nextScrollTop) > 1) {
+          viewport.scrollTop = nextScrollTop
+        }
+      }
+      pendingScrollRestoreRef.current = null
+    }
+
+    const handleScroll = (): void => {
+      const pendingScrollTop = pendingScrollRestoreRef.current
+      if (pendingScrollTop && pendingScrollTop > 0 && viewport.scrollTop === 0) return
+      if (
+        viewport.scrollTop === 0 &&
+        scrollTopRef.current > 0 &&
+        window.performance.now() < preserveScrollUntilRef.current
+      ) {
+        return
+      }
+      scrollTopRef.current = viewport.scrollTop
+    }
+
+    handleScroll()
+    viewport.addEventListener("scroll", handleScroll, { passive: true })
+    return () => viewport.removeEventListener("scroll", handleScroll)
+  }, [
+    collapsedKeys,
+    getSidebarViewport,
+    groups,
+    isViewingSession,
+    scrollIntentRef,
+    scrollTopRef,
+    selectedFeature?.activeSessionThreadId,
+    selectedFeature?.projectId,
+    selectedFeature?.slug,
+    selectedProjectId,
+    selectedProjectSession?.threadId
+  ])
 
   const renderThreadItem = (
     thread: Thread,
@@ -5502,7 +5634,10 @@ function ProjectFeatureSidebar({
         hasPendingUserInput={hasPendingUserInput}
         editingTitle={editingTitle}
         hoverTitle={hoverTitle}
-        onSelect={onSelect}
+        onSelect={() => {
+          captureSidebarScrollTop()
+          onSelect()
+        }}
         onRunFinished={() => onRunFinished(thread.thread_id)}
         onDelete={() => onDeleteSession(thread)}
         onExport={() => void onExportSession(thread)}
@@ -5514,36 +5649,70 @@ function ProjectFeatureSidebar({
     )
   }
 
-  const getVisibleFeatureSessionCount = (featureGroup: ProjectFeatureSessionGroup): number => {
-    const configuredCount = featureSessionVisibleCounts[featureGroup.key]
+  const getVisibleSessionCount = (key: string, sessionCount: number): number => {
+    const configuredCount = sessionVisibleCounts[key]
     if (typeof configuredCount !== "number") {
-      return Math.min(FEATURE_SESSION_INITIAL_VISIBLE_COUNT, featureGroup.sessions.length)
+      return Math.min(FEATURE_SESSION_INITIAL_VISIBLE_COUNT, sessionCount)
     }
 
     return Math.min(
       Math.max(configuredCount, FEATURE_SESSION_INITIAL_VISIBLE_COUNT),
-      featureGroup.sessions.length
+      sessionCount
     )
   }
 
-  const expandFeatureSessions = (featureGroup: ProjectFeatureSessionGroup): void => {
-    setFeatureSessionVisibleCounts((current) => {
-      const currentCount = current[featureGroup.key] ?? FEATURE_SESSION_INITIAL_VISIBLE_COUNT
+  const expandSessions = (key: string, sessionCount: number): void => {
+    setSessionVisibleCounts((current) => {
+      const currentCount = current[key] ?? FEATURE_SESSION_INITIAL_VISIBLE_COUNT
       const nextCount = Math.min(
         currentCount + FEATURE_SESSION_VISIBLE_INCREMENT,
-        featureGroup.sessions.length
+        sessionCount
       )
-      return { ...current, [featureGroup.key]: nextCount }
+      return { ...current, [key]: nextCount }
     })
   }
 
-  const collapseFeatureSessions = (featureGroup: ProjectFeatureSessionGroup): void => {
-    setFeatureSessionVisibleCounts((current) => {
-      if (!(featureGroup.key in current)) return current
+  const collapseSessions = (key: string): void => {
+    setSessionVisibleCounts((current) => {
+      if (!(key in current)) return current
       const next = { ...current }
-      delete next[featureGroup.key]
+      delete next[key]
       return next
     })
+  }
+
+  const renderSessionVisibilityControls = (
+    key: string,
+    visibleSessionCount: number,
+    sessionCount: number
+  ): React.JSX.Element | null => {
+    const canExpandSessions = visibleSessionCount < sessionCount
+    const canCollapseSessions = visibleSessionCount > FEATURE_SESSION_INITIAL_VISIBLE_COUNT
+
+    if (!canExpandSessions && !canCollapseSessions) return null
+
+    return (
+      <div className="flex items-center gap-4 py-1 pl-3 pr-2 text-xs font-medium text-muted-foreground">
+        {canExpandSessions && (
+          <button
+            type="button"
+            className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            onClick={() => expandSessions(key, sessionCount)}
+          >
+            展开显示
+          </button>
+        )}
+        {canCollapseSessions && (
+          <button
+            type="button"
+            className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            onClick={() => collapseSessions(key)}
+          >
+            折叠显示
+          </button>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -5562,7 +5731,7 @@ function ProjectFeatureSidebar({
           </Button>
         )}
       </div>
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea ref={scrollAreaRef} className="min-h-0 flex-1">
         <div className="space-y-1 px-2 pb-2">
           {groups.map((group, index) => {
             const projectCollapsed = collapsedKeys.has(group.key)
@@ -5645,15 +5814,36 @@ function ProjectFeatureSidebar({
 
                 {!projectCollapsed && (
                   <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-                    {group.projectSessions.map((session) => {
-                      const thread = threadsById.get(session.threadId)
-                      if (!thread) return null
-                      return renderThreadItem(
-                        thread,
-                        `所属项目：${group.project.name}`,
-                        () => onSelectProjectSession(group.project.projectId, thread.thread_id, projectDeleted)
+                    {(() => {
+                      const projectSessionsKey = `project-sessions:${group.key}`
+                      const visibleProjectSessionCount = getVisibleSessionCount(
+                        projectSessionsKey,
+                        group.projectSessions.length
                       )
-                    })}
+                      const visibleProjectSessions = group.projectSessions.slice(
+                        0,
+                        visibleProjectSessionCount
+                      )
+
+                      return (
+                        <>
+                          {visibleProjectSessions.map((session) => {
+                            const thread = threadsById.get(session.threadId)
+                            if (!thread) return null
+                            return renderThreadItem(
+                              thread,
+                              `所属项目：${group.project.name}`,
+                              () => onSelectProjectSession(group.project.projectId, thread.thread_id, projectDeleted)
+                            )
+                          })}
+                          {renderSessionVisibilityControls(
+                            projectSessionsKey,
+                            visibleProjectSessionCount,
+                            group.projectSessions.length
+                          )}
+                        </>
+                      )
+                    })()}
                     {group.featureGroups.map((featureGroup) => {
                       const featureCollapsed = collapsedKeys.has(featureGroup.key)
                       const featureSelected =
@@ -5663,11 +5853,11 @@ function ProjectFeatureSidebar({
                       const hasUnreadFeatureSession = featureGroup.sessions.some((session) =>
                         unreadIds.has(session.threadId)
                       )
-                      const visibleSessionCount = getVisibleFeatureSessionCount(featureGroup)
+                      const visibleSessionCount = getVisibleSessionCount(
+                        featureGroup.key,
+                        featureGroup.sessions.length
+                      )
                       const visibleSessions = featureGroup.sessions.slice(0, visibleSessionCount)
-                      const canExpandSessions = visibleSessionCount < featureGroup.sessions.length
-                      const canCollapseSessions =
-                        visibleSessionCount > FEATURE_SESSION_INITIAL_VISIBLE_COUNT
 
                       return (
                         <div key={featureGroup.key} className="space-y-1">
@@ -5736,27 +5926,10 @@ function ProjectFeatureSidebar({
                                         )
                                     )
                                   })}
-                                  {(canExpandSessions || canCollapseSessions) && (
-                                    <div className="flex items-center gap-4 py-1 pl-3 pr-2 text-xs font-medium text-muted-foreground">
-                                      {canExpandSessions && (
-                                        <button
-                                          type="button"
-                                          className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                          onClick={() => expandFeatureSessions(featureGroup)}
-                                        >
-                                          展开显示
-                                        </button>
-                                      )}
-                                      {canCollapseSessions && (
-                                        <button
-                                          type="button"
-                                          className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                          onClick={() => collapseFeatureSessions(featureGroup)}
-                                        >
-                                          折叠显示
-                                        </button>
-                                      )}
-                                    </div>
+                                  {renderSessionVisibilityControls(
+                                    featureGroup.key,
+                                    visibleSessionCount,
+                                    featureGroup.sessions.length
                                   )}
                                 </>
                               )}
@@ -5897,6 +6070,8 @@ export function HarnessBoardView({
   const selectedProjectSessionRef = useRef(selectedProjectSession)
   const currentThreadIdRef = useRef(currentThreadId)
   const isViewingSessionRef = useRef(isViewingSession)
+  const projectSidebarScrollTopRef = useRef(0)
+  const projectSidebarScrollIntentRef = useRef<ProjectSidebarScrollIntent>(null)
   const projectDetailsRefreshInFlightRef = useRef(false)
   const selectedProjectRefreshInFlightRef = useRef(false)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
@@ -7054,6 +7229,7 @@ export function HarnessBoardView({
       setFeatureName("")
       setSelectedDeployUnitIds(new Set())
       await loadProjectDetail(result.projectId)
+      projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
@@ -7226,6 +7402,7 @@ export function HarnessBoardView({
 
   const openProjectDetail = useCallback(
     (projectId: string): void => {
+      projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedFeature(null)
       setSelectedProjectId(projectId)
@@ -7292,6 +7469,9 @@ export function HarnessBoardView({
 
   const openFeatureDetail = useCallback(
     (projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean): void => {
+      if (!activeSessionThreadId) {
+        projectSidebarScrollIntentRef.current = "top"
+      }
       setSelectedProjectSession(null)
       setSelectedProjectId(projectId)
       setSelectedFeature({ projectId, slug, activeSessionThreadId, deleted })
@@ -7328,6 +7508,7 @@ export function HarnessBoardView({
       selectedProjectSessionRef.current?.projectId ??
       selectedFeatureRef.current?.projectId ??
       selectedProjectIdRef.current
+    projectSidebarScrollIntentRef.current = "top"
     setSelectedProjectSession(null)
     setSelectedFeature(null)
     setIsViewingSession(false)
@@ -7705,6 +7886,9 @@ export function HarnessBoardView({
   )
 
   const handleSessionViewChange = useCallback((viewing: boolean): void => {
+    if (!viewing) {
+      projectSidebarScrollIntentRef.current = "top"
+    }
     setIsViewingSession(viewing)
   }, [])
 
@@ -7757,6 +7941,8 @@ export function HarnessBoardView({
               exportingThreadId={exportingThreadId}
               editingThreadId={editingThreadId}
               editingTitle={editingTitle}
+              scrollTopRef={projectSidebarScrollTopRef}
+              scrollIntentRef={projectSidebarScrollIntentRef}
               onToggleCollapse={(key) =>
                 setCollapsedFeatureKeys((current) => {
                   const next = new Set(current)
