@@ -58,6 +58,8 @@ import type {
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessProjectDetailViewModel,
@@ -2276,6 +2278,9 @@ interface CustomAPI {
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
+    getProjectReviews: (
+      input: HarnessProjectReviewInput
+    ) => Promise<HarnessProjectReviewResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>

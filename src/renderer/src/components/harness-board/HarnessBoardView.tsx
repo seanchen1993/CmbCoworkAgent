@@ -22,6 +22,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  RefreshCcw,
   RefreshCw,
   Search,
   Settings,
@@ -92,6 +93,8 @@ import type {
   HarnessKnowledgePreviewResult,
   HarnessProjectListItem,
   HarnessProjectMetadataUpdateInput,
+  HarnessProjectReviewItem,
+  HarnessProjectReviewResult,
   HarnessFeatureSummary,
   HarnessNodeStatus,
   HarnessRunDetailViewModel,
@@ -131,6 +134,7 @@ const NODE_STATUS_LABELS: Record<HarnessNodeStatus, string> = {
   unknown: "未知"
 }
 const harnessDetailRefreshButtonClassName = "w-[84px] gap-2"
+const harnessDetailSecondaryButtonClassName = "w-[132px] gap-2 text-sm font-medium"
 const harnessDetailPrimaryButtonClassName = "w-[112px] gap-2"
 const harnessActionOverlayClassName =
   "pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary-foreground/10 to-primary-foreground/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
@@ -327,6 +331,12 @@ interface ProjectSessionProjectGroup {
 type EnterpriseProjectDetailCacheEntry =
   | { kind: "hit"; project: HarnessEnterpriseProjectDetailItem }
   | { kind: "miss" }
+
+type ProjectReviewState =
+  | { kind: "idle" }
+  | { kind: "loading"; projectCode: string }
+  | { kind: "loaded"; projectCode: string; result: HarnessProjectReviewResult }
+  | { kind: "error"; projectCode: string; message: string }
 
 type GitChangedFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
 
@@ -4269,6 +4279,131 @@ function EnterpriseProjectDetailSummary({
   )
 }
 
+const PROJECT_REVIEW_HEADERS: Array<[keyof HarnessProjectReviewItem, string]> = [
+  ["title", "标题"],
+  ["type", "类型"],
+  ["start_time", "开始时间"],
+  ["end_time", "结束时间"],
+  ["creator", "发起人"],
+  ["members", "参与成员"]
+]
+
+function buildLeanstarProjectReviewUrl(projectCode: string): string {
+  return `https://leanstar-devops.paas.cmbchina.cn/team/426/projects/${encodeURIComponent(projectCode)}/review`
+}
+
+function ProjectReviewTooltipContent({
+  review
+}: {
+  review: HarnessProjectReviewItem
+}): React.JSX.Element {
+  return (
+    <div className="min-w-0">
+      <div className="border-b border-border/70 px-3 py-2">
+        <div className="line-clamp-2 text-sm font-semibold leading-5 text-foreground">
+          {review.title || "-"}
+        </div>
+      </div>
+      <dl className="grid gap-1.5 px-3 py-2 text-xs leading-5">
+        {PROJECT_REVIEW_HEADERS.map(([key, label]) => (
+          <div key={key} className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] gap-2">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="min-w-0 whitespace-normal break-words font-medium text-foreground [overflow-wrap:anywhere]">
+              {review[key] || "-"}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
+
+function ProjectReviewSummary({
+  projectCode,
+  reviewState,
+  onOpenLeanTokenSettings
+}: {
+  projectCode: string
+  reviewState: ProjectReviewState
+  onOpenLeanTokenSettings: () => void
+}): React.JSX.Element {
+  const normalizedProjectCode = normalizeEnterpriseProjectCode(projectCode)
+  const openReviewPage = useCallback((): void => {
+    void window.electron
+      .openExternal(buildLeanstarProjectReviewUrl(normalizedProjectCode))
+      .catch((error) => {
+        toast.error(cleanIpcError(error))
+      })
+  }, [normalizedProjectCode])
+
+  const isCurrentProject =
+    reviewState.kind === "loaded" || reviewState.kind === "loading" || reviewState.kind === "error"
+      ? reviewState.projectCode === normalizedProjectCode
+      : false
+  const result = reviewState.kind === "loaded" && isCurrentProject ? reviewState.result : null
+  const reviews = result?.reviews ?? []
+
+  return (
+    <div className="mt-4 space-y-2 text-xs">
+      <div className="font-medium text-muted-foreground">项目评审情况</div>
+      {!normalizedProjectCode ? (
+        <div className="leading-5 text-muted-foreground">-</div>
+      ) : !isCurrentProject || reviewState.kind === "loading" ? (
+        <div className="flex items-center gap-1.5 text-muted-foreground">
+          <Loader2 className="size-3 animate-spin" />
+          查询中
+        </div>
+      ) : reviewState.kind === "error" ? (
+        <div className="leading-5 text-status-warning">{reviewState.message}</div>
+      ) : result && !result.tokenConfigured ? (
+        <button
+          type="button"
+          className="rounded-sm text-left font-medium text-status-warning underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={onOpenLeanTokenSettings}
+        >
+          请配置精益平台 token
+        </button>
+      ) : reviews.length === 0 ? (
+        <button
+          type="button"
+          className="rounded-sm text-left font-medium text-primary/85 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={openReviewPage}
+        >
+          无评审记录，点击发起评审以避免 nc
+        </button>
+      ) : (
+        <TooltipProvider delayDuration={120}>
+          <ul className="space-y-1">
+            {reviews.slice(0, 3).map((review, index) => (
+              <li key={`${review.title}:${index}`} className="min-w-0">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div
+                      tabIndex={0}
+                      className="group flex min-w-0 cursor-default items-center rounded-md border border-transparent bg-muted/20 py-1.5 pr-2 transition-colors hover:border-border hover:bg-muted/45 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+                        {review.title || "-"}
+                      </span>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="right"
+                    align="start"
+                    className="z-[70] w-80 max-w-[min(20rem,calc(100vw-2rem))] p-0"
+                  >
+                    <ProjectReviewTooltipContent review={review} />
+                  </TooltipContent>
+                </Tooltip>
+              </li>
+            ))}
+          </ul>
+        </TooltipProvider>
+      )}
+    </div>
+  )
+}
+
 function ProjectConstraintSyncPanel({
   registry,
   syncingAdapterIds,
@@ -4425,6 +4560,7 @@ function ProjectDetailPage({
   project,
   detail,
   enterpriseProjectDetail,
+  projectReviewState,
   loading,
   creatingFeature,
   creatingSystemConstraintUpdate,
@@ -4433,11 +4569,13 @@ function ProjectDetailPage({
   onOpenSystemConstraintUpdate,
   onRefresh,
   onEditProject,
+  onOpenLeanTokenSettings,
   onOpenFeature
 }: {
   project: HarnessProjectListItem
   detail?: HarnessProjectDetailViewModel
   enterpriseProjectDetail?: EnterpriseProjectDetailCacheEntry
+  projectReviewState: ProjectReviewState
   loading: boolean
   creatingFeature: boolean
   creatingSystemConstraintUpdate: boolean
@@ -4449,6 +4587,7 @@ function ProjectDetailPage({
   ) => void
   onRefresh: (projectId: string) => void
   onEditProject: (project: HarnessProjectListItem) => void
+  onOpenLeanTokenSettings: () => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
   const runs = detail?.runs ?? []
@@ -4480,7 +4619,7 @@ function ProjectDetailPage({
               <Button
                 variant="ghost"
                 size="sm"
-                className="gap-2"
+                className={harnessDetailSecondaryButtonClassName}
                 onClick={() => {
                   if (detail.systemConstraintUpdate) {
                     onOpenSystemConstraintUpdate(project, detail.systemConstraintUpdate)
@@ -4491,15 +4630,15 @@ function ProjectDetailPage({
                 {creatingSystemConstraintUpdate ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
-                  <RefreshCw className="size-4" />
+                  <RefreshCcw className="size-4" />
                 )}
-                系统约束更新
+                知识库沉淀
               </Button>
             )}
             <Button
               variant="ghost"
               size="sm"
-              className="gap-2"
+              className={harnessDetailSecondaryButtonClassName}
               onClick={() => onEditProject(project)}
             >
               <Pencil className="size-4" />
@@ -4594,6 +4733,14 @@ function ProjectDetailPage({
                     </dd>
                   </div>
                 </dl>
+                <div className="mt-4 border-t border-border pt-4">
+                  <div className="text-sm font-semibold">项目度量信息</div>
+                  <ProjectReviewSummary
+                    projectCode={project.projectCode}
+                    reviewState={projectReviewState}
+                    onOpenLeanTokenSettings={onOpenLeanTokenSettings}
+                  />
+                </div>
                 <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border pt-4 text-xs text-muted-foreground">
                   <div>
                     特性数
@@ -5652,6 +5799,7 @@ export function HarnessBoardView({
   const [enterpriseProjectDetailsByCode, setEnterpriseProjectDetailsByCode] = useState<
     Record<string, EnterpriseProjectDetailCacheEntry>
   >({})
+  const [projectReviewState, setProjectReviewState] = useState<ProjectReviewState>({ kind: "idle" })
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
@@ -7033,6 +7181,34 @@ export function HarnessBoardView({
     }
   }, [selectedEnterpriseProjectDetail, selectedProjectArchived, selectedProjectCode])
 
+  useEffect(() => {
+    if (!selectedProjectCode) {
+      setProjectReviewState({ kind: "idle" })
+      return
+    }
+
+    let canceled = false
+    setProjectReviewState({ kind: "loading", projectCode: selectedProjectCode })
+    window.api.harnessBoard
+      .getProjectReviews({ projectCode: selectedProjectCode })
+      .then((result) => {
+        if (canceled) return
+        setProjectReviewState({ kind: "loaded", projectCode: selectedProjectCode, result })
+      })
+      .catch((error) => {
+        if (canceled) return
+        setProjectReviewState({
+          kind: "error",
+          projectCode: selectedProjectCode,
+          message: cleanIpcError(error)
+        })
+      })
+
+    return () => {
+      canceled = true
+    }
+  }, [selectedProjectCode])
+
   const projectPluginUpdateInfoById = useMemo(() => {
     const marketPluginByName = buildMarketPluginMap(marketPluginItems)
     const next = new Map<string, MarketPluginUpdateInfo>()
@@ -7697,6 +7873,7 @@ export function HarnessBoardView({
           project={selectedProject}
           detail={selectedProjectDetail}
           enterpriseProjectDetail={selectedEnterpriseProjectDetail}
+          projectReviewState={projectReviewState}
           loading={loadingDetailIds.has(selectedProject.projectId)}
           creatingFeature={creatingFeatureProjectId === selectedProject.projectId}
           creatingSystemConstraintUpdate={creatingProjectSessionProjectId === selectedProject.projectId}
@@ -7707,6 +7884,7 @@ export function HarnessBoardView({
           }}
           onRefresh={(projectId) => void loadProjectDetail(projectId)}
           onEditProject={handleEditProject}
+          onOpenLeanTokenSettings={handleOpenDeployUnitSettings}
           onOpenFeature={openFeatureDetail}
         />
         <FeatureCreateDialog

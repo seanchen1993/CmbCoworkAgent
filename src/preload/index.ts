@@ -58,6 +58,8 @@ import type {
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessProjectDetailViewModel,
@@ -3159,6 +3161,13 @@ const api = {
         "harnessBoard:getEnterpriseProjectDetails",
         input
       ) as Promise<HarnessEnterpriseProjectDetailResult>,
+    getProjectReviews: (
+      input: HarnessProjectReviewInput
+    ): Promise<HarnessProjectReviewResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getProjectReviews",
+        input
+      ) as Promise<HarnessProjectReviewResult>,
     createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
       ipcRenderer.invoke(
         "harnessBoard:createFeature",
