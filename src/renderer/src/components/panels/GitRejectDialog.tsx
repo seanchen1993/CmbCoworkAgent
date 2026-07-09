@@ -37,7 +37,11 @@ function getPathBaseName(filePath: string): string {
   return index >= 0 ? normalized.slice(index + 1) : normalized
 }
 
-function getStatusLabel(status?: GitPanelFileStatus): string {
+function getStatusLabel(
+  status?: GitPanelFileStatus,
+  filePath?: string,
+  previousPath?: string
+): string {
   switch (status) {
     case "added":
     case "untracked":
@@ -45,7 +49,9 @@ function getStatusLabel(status?: GitPanelFileStatus): string {
     case "deleted":
       return "删除"
     case "renamed":
-      return "改名"
+      return getPathParentDir(filePath || "") === getPathParentDir(previousPath || "")
+        ? "改名"
+        : "移动"
     case "copied":
       return "复制"
     case "modified":
@@ -333,7 +339,7 @@ export function GitRejectDialog({
                               getStatusClassName(file.status)
                             )}
                           >
-                            {getStatusLabel(file.status)}
+                            {getStatusLabel(file.status, file.path, file.previousPath)}
                           </span>
                           <span className="min-w-0 flex-1">
                             <span className="block truncate font-mono text-foreground" title={file.path}>
@@ -363,7 +369,9 @@ export function GitRejectDialog({
         <div className="border-t border-border/70 px-5 py-4">
           <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-            <span>将回退选中的文件，此操作不可撤销。</span>
+            <span>
+              回退会回退全部变更，不会回退到大模型的上一次修改，请确认是否回退。此操作不可撤销。
+            </span>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
             <Button
@@ -378,7 +386,13 @@ export function GitRejectDialog({
               type="button"
               variant="destructive"
               disabled={running || loading || noSelection || hasOmittedFiles}
-              onClick={() => onSubmit(selectedFiles.map((file) => file.path))}
+              onClick={() =>
+                onSubmit(
+                  selectedFiles.flatMap((file) =>
+                    file.previousPath ? [file.previousPath, file.path] : [file.path]
+                  )
+                )
+              }
             >
               {running ? (
                 <>
