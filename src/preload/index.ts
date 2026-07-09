@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
 import type {
   Thread,
+  Message,
   ModelConfig,
   Provider,
   StreamEvent,
@@ -38,7 +39,11 @@ import type {
   ConfigurePreferredIdeResult,
   IdeSettings,
   OpenIdeRequest,
-  PreferredIde
+  PreferredIde,
+  ForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams,
+  ThreadForkParams,
+  ThreadForkResponse
 } from "../main/types"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
@@ -138,6 +143,16 @@ type PetState =
   | "interaction"
   | "hover"
 
+type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
+
+interface CloseToTrayPromptRequest {
+  requestId: number
+  trayAreaName: string
+}
+
+const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
+const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
 }
@@ -165,6 +180,16 @@ const electronAPI = {
   closeLoginWindow: () => ipcRenderer.invoke("close-login-window"),
   openLoginPage: () => ipcRenderer.invoke("open-login-page"),
   closeLoginPage: () => ipcRenderer.invoke("close-login-page"),
+  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptRequest) => void) => {
+    const handler = (_event: unknown, payload: CloseToTrayPromptRequest): void => {
+      callback(payload)
+    }
+    ipcRenderer.on(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
+  },
+  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction): void => {
+    ipcRenderer.send(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, { requestId, action })
+  },
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
       callback(data)
@@ -513,6 +538,17 @@ const api = {
     create: (metadata?: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:create", metadata)
     },
+    fork: (params: ThreadForkParams): Promise<ThreadForkResponse> => {
+      return ipcRenderer.invoke("threads:fork", params)
+    },
+    listForkableCheckpoints: (threadId: string): Promise<ForkableCheckpoint[]> => {
+      return ipcRenderer.invoke("threads:list-forkable-checkpoints", threadId)
+    },
+    resolveForkCheckpointForMessage: (
+      params: ThreadForkCheckpointForMessageParams
+    ): Promise<ForkableCheckpoint | null> => {
+      return ipcRenderer.invoke("threads:resolve-fork-checkpoint-for-message", params)
+    },
     update: (threadId: string, updates: Partial<Thread>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:update", { threadId, updates })
     },
@@ -521,6 +557,12 @@ const api = {
     },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
+    },
+    getMessages: (threadId: string): Promise<Message[]> => {
+      return ipcRenderer.invoke("threads:messages", threadId)
+    },
+    appendMessages: (threadId: string, messages: Message[]): Promise<{ count: number }> => {
+      return ipcRenderer.invoke("threads:appendMessages", { threadId, messages })
     },
     exportSession: (
       threadId: string

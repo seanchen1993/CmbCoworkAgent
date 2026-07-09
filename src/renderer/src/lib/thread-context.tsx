@@ -61,6 +61,10 @@ import {
   type HarnessAgentmdLoadStatusItem
 } from "../../../shared/harness-board-types"
 import {
+  findMessagesAfterCheckpointVisibleIds,
+  mergeCheckpointAuthorityTranscriptMessages
+} from "../../../shared/checkpoint-transcript"
+import {
   isInternalGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
   type GoalNoticeEvent
@@ -72,10 +76,12 @@ import {
   goalNoticeEventsToGoalUiEvents,
   hasGoalResumeUserEvent,
   isGoalResumeCommandContent,
-  isVisibleCheckpointTranscriptMessage
+  isVisibleCheckpointTranscriptMessage,
+  sameGoalCommandMessage
 } from "./goal-transcript"
 import { mergeGoalUiEvents } from "./goal-ui-events"
 import {
+  latestPersistedCheckpointMessageAt,
   restoreRawCheckpointMessageTime,
   restoreVisibleCheckpointMessageTimes
 } from "./checkpoint-message-times"
@@ -232,12 +238,57 @@ const toDate = (value: string | undefined): Date | undefined => {
   return Number.isFinite(parsed.getTime()) ? parsed : undefined
 }
 
+const toMessageDate = (value: unknown, fallback?: Date): Date | undefined => {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value
+  if (typeof value === "string" || typeof value === "number") {
+    const parsed = new Date(value)
+    if (Number.isFinite(parsed.getTime())) return parsed
+  }
+  return fallback
+}
+
+const normalizePersistedThreadMessages = (messages: Message[]): Message[] => {
+  return messages.flatMap((message): Message | [] => {
+    if (!hasMessageId(message)) return []
+    const createdAt = toMessageDate(message.created_at, new Date()) ?? new Date()
+    const startAt = toMessageDate(message.start_at)
+    const endAt = toMessageDate(message.end_at)
+    return {
+      ...message,
+      content: typeof message.content === "string" || Array.isArray(message.content) ? message.content : "",
+      created_at: createdAt,
+      ...(startAt ? { start_at: startAt } : {}),
+      ...(endAt ? { end_at: endAt } : {})
+    }
+  })
+}
+
+const mergePersistedMessagesIntoTranscript = (
+  baseMessages: Message[],
+  persistedMessages: Message[]
+): Message[] => {
+  return mergeCheckpointAuthorityTranscriptMessages(baseMessages, persistedMessages, {
+    isSameMessage: sameGoalCommandMessage
+  })
+}
+
 const latestDate = (dates: Array<Date | undefined>): Date | undefined => {
   return dates.reduce<Date | undefined>((latest, date) => {
     if (!date) return latest
     if (!latest || date > latest) return date
     return latest
   }, undefined)
+}
+
+const latestPersistedVisibleMessageAt = (messages: Message[]): Date | undefined => {
+  return latestDate(
+    messages.map(
+      (message) =>
+        toMessageDate(message.start_at) ??
+        toMessageDate(message.created_at) ??
+        toMessageDate(message.end_at)
+    )
+  )
 }
 
 const getLatestTrustedCheckpointMessageAt = (
@@ -1565,6 +1616,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           threadStatesRef.current = next
           return next
         })
+        window.api.threads
+          .appendMessages(threadId, messagesToAppend)
+          .catch((error) => console.warn("[ThreadContext] Failed to save transcript:", error))
       }
 
       if (
@@ -3233,6 +3287,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let restoredGoalEvents: GoalNoticeEvent[] = []
       let skipCheckpointPendingApproval = false
       let latestTrustedCheckpointMessageAt: Date | undefined
+      let persistedThreadMessages: Message[] = []
+      let visiblePersistedThreadMessages: Message[] = []
+      let hasPersistedVisibleTailAfterCheckpoint = false
+      let checkpointMessagesLoaded = false
       updateThreadState(threadId, () => ({ historyLoading: true }))
 
       // Load workspace path and thread metadata
@@ -3335,7 +3393,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load goal events:", error)
       }
 
-      // Load thread history from checkpoints
+      try {
+        persistedThreadMessages = normalizePersistedThreadMessages(
+          await window.api.threads.getMessages(threadId)
+        )
+        visiblePersistedThreadMessages = persistedThreadMessages.filter(
+          isVisibleCheckpointTranscriptMessage
+        )
+      } catch (error) {
+        console.error("[ThreadContext] Failed to load persisted thread messages:", error)
+      }
+
+      // Load runtime state from checkpoints. Transcript restore only falls back
+      // here when the durable main-DB transcript has no messages yet.
       try {
         const history = await window.api.threads.getHistory(threadId)
         if (history.length > 0) {
@@ -3382,129 +3452,149 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
 
           if (channelValues?.messages && Array.isArray(channelValues.messages)) {
+            checkpointMessagesLoaded = true
             let internalGoalPromptIndex = 0
-            rawRestoredMessages = channelValues.messages.flatMap((msg, index): Message | [] => {
-              const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
-              if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
-                return []
-              }
+            const checkpointRawRestoredMessages = channelValues.messages.flatMap(
+              (msg, index): Message | [] => {
+                const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
+                if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
+                  return []
+                }
 
-              let role: "user" | "assistant" | "system" | "tool" = "assistant"
-              if (typeof msg._getType === "function") {
-                const type = msg._getType()
-                if (type === "human") role = "user"
-                else if (type === "ai") role = "assistant"
-                else if (type === "system") role = "system"
-                else if (type === "tool") role = "tool"
-              } else if (Array.isArray(msg.id)) {
-                const constructorName = msg.id[msg.id.length - 1]
-                if (constructorName === "HumanMessage") role = "user"
-                else if (constructorName === "SystemMessage") role = "system"
-                else if (constructorName === "ToolMessage") role = "tool"
-                else if (constructorName === "AIMessage" || constructorName === "AIMessageChunk")
-                  role = "assistant"
-              } else if (msg.type) {
-                if (msg.type === "human") role = "user"
-                else if (msg.type === "ai") role = "assistant"
-                else if (msg.type === "system") role = "system"
-                else if (msg.type === "tool") role = "tool"
-              }
+                let role: "user" | "assistant" | "system" | "tool" = "assistant"
+                if (typeof msg._getType === "function") {
+                  const type = msg._getType()
+                  if (type === "human") role = "user"
+                  else if (type === "ai") role = "assistant"
+                  else if (type === "system") role = "system"
+                  else if (type === "tool") role = "tool"
+                } else if (Array.isArray(msg.id)) {
+                  const constructorName = msg.id[msg.id.length - 1]
+                  if (constructorName === "HumanMessage") role = "user"
+                  else if (constructorName === "SystemMessage") role = "system"
+                  else if (constructorName === "ToolMessage") role = "tool"
+                  else if (constructorName === "AIMessage" || constructorName === "AIMessageChunk")
+                    role = "assistant"
+                } else if (msg.type) {
+                  if (msg.type === "human") role = "user"
+                  else if (msg.type === "ai") role = "assistant"
+                  else if (msg.type === "system") role = "system"
+                  else if (msg.type === "tool") role = "tool"
+                }
 
-              const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
-              const checkpointContent = msg.content ?? msg.kwargs?.content
-              const isRawInternalGoalPrompt =
-                role === "user" &&
-                typeof checkpointContent === "string" &&
-                isInternalGoalPromptMessage({ role, content: checkpointContent })
-              const isVisibleGoalCommand =
-                typeof visibleUserMessage === "string" &&
-                /^\/goal(?:\s|$)/i.test(visibleUserMessage.trimStart())
-              const shouldUseVisibleGoalResumeAlias =
-                isRawInternalGoalPrompt &&
-                typeof visibleUserMessage === "string" &&
-                isGoalResumeCommandContent(visibleUserMessage) &&
-                !hasGoalResumeUserEvent(
-                  restoredGoalEvents,
-                  getInternalGoalPromptIdentity(checkpointContent)
-                )
-              const shouldKeepRawInternalGoalPrompt =
-                isRawInternalGoalPrompt &&
-                (visibleUserMessage === undefined ||
-                  visibleUserMessage === "" ||
-                  (isVisibleGoalCommand && !shouldUseVisibleGoalResumeAlias))
-              const rawContent =
-                role === "user" &&
-                !shouldKeepRawInternalGoalPrompt &&
-                typeof visibleUserMessage === "string" &&
-                visibleUserMessage.length > 0
-                  ? visibleUserMessage
-                  : checkpointContent
-              let content: Message["content"] = ""
-              if (typeof rawContent === "string") content = rawContent
-              else if (Array.isArray(rawContent)) content = rawContent as Message["content"]
+                const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
+                const checkpointContent = msg.content ?? msg.kwargs?.content
+                const isRawInternalGoalPrompt =
+                  role === "user" &&
+                  typeof checkpointContent === "string" &&
+                  isInternalGoalPromptMessage({ role, content: checkpointContent })
+                const isVisibleGoalCommand =
+                  typeof visibleUserMessage === "string" &&
+                  /^\/goal(?:\s|$)/i.test(visibleUserMessage.trimStart())
+                const shouldUseVisibleGoalResumeAlias =
+                  isRawInternalGoalPrompt &&
+                  typeof visibleUserMessage === "string" &&
+                  isGoalResumeCommandContent(visibleUserMessage) &&
+                  !hasGoalResumeUserEvent(
+                    restoredGoalEvents,
+                    getInternalGoalPromptIdentity(checkpointContent)
+                  )
+                const shouldKeepRawInternalGoalPrompt =
+                  isRawInternalGoalPrompt &&
+                  (visibleUserMessage === undefined ||
+                    visibleUserMessage === "" ||
+                    (isVisibleGoalCommand && !shouldUseVisibleGoalResumeAlias))
+                const rawContent =
+                  role === "user" &&
+                  !shouldKeepRawInternalGoalPrompt &&
+                  typeof visibleUserMessage === "string" &&
+                  visibleUserMessage.length > 0
+                    ? visibleUserMessage
+                    : checkpointContent
+                let content: Message["content"] = ""
+                if (typeof rawContent === "string") content = rawContent
+                else if (Array.isArray(rawContent)) content = rawContent as Message["content"]
 
-              const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
-              const toolCallId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
-              const toolName = msg.name ?? msg.kwargs?.name
-              const messageId =
-                msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
-              const fallbackTime = new Date()
-              // Visible messages only use id-based restore here. Their order fallback
-              // is applied after hidden internal goal prompts are replaced/filtered and
-              // restored /goal user bubbles are inserted, otherwise messageTimeOrder
-              // indexes can shift across the final transcript.
-              // Internal goal prompts have a separate order list because they are hidden
-              // from the checkpoint transcript but still anchor restored /goal user bubbles.
-              const usesInternalGoalPromptTiming = isRawInternalGoalPrompt
-              const currentInternalGoalPromptIndex = usesInternalGoalPromptTiming
-                ? internalGoalPromptIndex++
-                : -1
-              const { startAt, endAt } = restoreRawCheckpointMessageTime({
-                messageId,
-                fallbackTime,
-                isInternalGoalPrompt: usesInternalGoalPromptTiming,
-                internalGoalPromptIndex: currentInternalGoalPromptIndex,
-                persistedMessageTimes,
-                persistedInternalGoalMessageTimes,
-                persistedInternalGoalMessageTimeOrder
-              })
+                const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
+                const toolCallId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
+                const toolName = msg.name ?? msg.kwargs?.name
+                const messageId =
+                  msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
+                const fallbackTime = new Date()
+                // Visible messages only use id-based restore here. Their order fallback
+                // is applied after hidden internal goal prompts are replaced/filtered and
+                // restored /goal user bubbles are inserted, otherwise messageTimeOrder
+                // indexes can shift across the final transcript.
+                // Internal goal prompts have a separate order list because they are hidden
+                // from the checkpoint transcript but still anchor restored /goal user bubbles.
+                const usesInternalGoalPromptTiming = isRawInternalGoalPrompt
+                const currentInternalGoalPromptIndex = usesInternalGoalPromptTiming
+                  ? internalGoalPromptIndex++
+                  : -1
+                const { startAt, endAt } = restoreRawCheckpointMessageTime({
+                  messageId,
+                  fallbackTime,
+                  isInternalGoalPrompt: usesInternalGoalPromptTiming,
+                  internalGoalPromptIndex: currentInternalGoalPromptIndex,
+                  persistedMessageTimes,
+                  persistedInternalGoalMessageTimes,
+                  persistedInternalGoalMessageTimeOrder
+                })
 
-              let reasoning = ""
-              if (role === "assistant") {
-                const rawReasoning =
-                  additionalKwargs?.reasoning ??
-                  additionalKwargs?.reasoning_content ??
-                  additionalKwargs?.reasoning_text
-                if (typeof rawReasoning === "string" && rawReasoning.trim()) {
-                  reasoning = rawReasoning
+                let reasoning = ""
+                if (role === "assistant") {
+                  const rawReasoning =
+                    additionalKwargs?.reasoning ??
+                    additionalKwargs?.reasoning_content ??
+                    additionalKwargs?.reasoning_text
+                  if (typeof rawReasoning === "string" && rawReasoning.trim()) {
+                    reasoning = rawReasoning
+                  }
+                }
+
+                return {
+                  id: messageId,
+                  role,
+                  content,
+                  ...(reasoning && { reasoning }),
+                  tool_calls: toolCalls as Message["tool_calls"],
+                  ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
+                  ...(role === "tool" && toolName && { name: toolName }),
+                  created_at: startAt,
+                  start_at: startAt,
+                  end_at: endAt
                 }
               }
+            )
 
-              return {
-                id: messageId,
-                role,
-                content,
-                ...(reasoning && { reasoning }),
-                tool_calls: toolCalls as Message["tool_calls"],
-                ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
-                ...(role === "tool" && toolName && { name: toolName }),
-                created_at: startAt,
-                start_at: startAt,
-                end_at: endAt
-              }
-            })
-
-            const visibleRestoredMessages = rawRestoredMessages.filter(
+            const visibleRestoredMessages = checkpointRawRestoredMessages.filter(
               isVisibleCheckpointTranscriptMessage
             )
-            latestTrustedCheckpointMessageAt = getLatestTrustedCheckpointMessageAt(
+            const checkpointLatestTrustedMessageAt = getLatestTrustedCheckpointMessageAt(
               visibleRestoredMessages,
               persistedMessageTimes,
               persistedMessageTimeOrder,
               persistedInternalGoalMessageTimes,
               persistedInternalGoalMessageTimeOrder,
-              rawRestoredMessages
+              checkpointRawRestoredMessages
             )
+            const persistedCheckpointLatestMessageAt = latestPersistedCheckpointMessageAt(
+              visibleRestoredMessages,
+              persistedThreadMessages
+            )
+            const persistedVisibleLatestMessageAt =
+              latestPersistedVisibleMessageAt(visiblePersistedThreadMessages)
+            hasPersistedVisibleTailAfterCheckpoint =
+              findMessagesAfterCheckpointVisibleIds(
+                visiblePersistedThreadMessages,
+                visibleRestoredMessages.map((message) => message.id)
+              ).length > 0
+            rawRestoredMessages = checkpointRawRestoredMessages
+            latestTrustedCheckpointMessageAt = latestDate([
+              checkpointLatestTrustedMessageAt,
+              persistedCheckpointLatestMessageAt,
+              persistedVisibleLatestMessageAt
+            ])
             restoredMessages = visibleRestoredMessages
           }
 
@@ -3518,10 +3608,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
 
           // Restore interrupt state if present
-          skipCheckpointPendingApproval = shouldSuppressCheckpointApprovalRestore(
-            restoredGoalEvents,
-            latestTrustedCheckpointMessageAt
-          )
+          skipCheckpointPendingApproval =
+            hasPersistedVisibleTailAfterCheckpoint ||
+            shouldSuppressCheckpointApprovalRestore(
+              restoredGoalEvents,
+              latestTrustedCheckpointMessageAt
+            )
           const interruptData = channelValues?.__interrupt__
           if (
             !skipCheckpointPendingApproval &&
@@ -3568,14 +3660,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
 
+      const restoredGoalUiEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
       const checkpointTranscript = buildRestoredCheckpointTranscript(
-        rawRestoredMessages,
-        restoredMessages,
-        goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+        checkpointMessagesLoaded ? rawRestoredMessages : persistedThreadMessages,
+        checkpointMessagesLoaded ? restoredMessages : visiblePersistedThreadMessages,
+        restoredGoalUiEvents
+      )
+      const restoredTranscript = mergePersistedMessagesIntoTranscript(
+        checkpointTranscript,
+        visiblePersistedThreadMessages
       )
       actions.setMessages(
         restoreVisibleCheckpointMessageTimes(
-          checkpointTranscript,
+          restoredTranscript,
           persistedMessageTimes,
           persistedMessageTimeOrder
         )
@@ -3592,27 +3689,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
       try {
         const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents: false })
-        const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
         updateThreadState(threadId, (state) => ({
           goalUi: {
             goal: goalUi.goal,
-            events: mergeGoalUiEvents(restoredEvents, state.goalUi.events),
+            events: mergeGoalUiEvents(restoredGoalUiEvents, state.goalUi.events),
             lastUpdated: new Date()
           }
         }))
       } catch (error) {
         console.warn("[ThreadContext] Failed to load goal UI state:", error)
-        const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
         updateThreadState(threadId, (state) => ({
           goalUi: {
             goal: state.goalUi.goal,
-            events: mergeGoalUiEvents(restoredEvents, state.goalUi.events),
+            events: mergeGoalUiEvents(restoredGoalUiEvents, state.goalUi.events),
             lastUpdated: new Date()
           }
         }))
       }
 
-      seedLiveStreamBaselineFromCheckpoint(threadId, rawRestoredMessages)
+      seedLiveStreamBaselineFromCheckpoint(
+        threadId,
+        checkpointMessagesLoaded
+          ? mergePersistedMessagesIntoTranscript(
+              rawRestoredMessages,
+              visiblePersistedThreadMessages
+            )
+          : restoredTranscript
+      )
       updateThreadState(threadId, () => ({ historyLoading: false }))
 
       const pendingGoalSubturnMessages =

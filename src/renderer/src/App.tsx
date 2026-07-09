@@ -16,6 +16,7 @@ import { RightPanel } from "@/components/panels/RightPanel"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { WorkflowAgentStreamPanel } from "@/components/chat/WorkflowAgentStreamPanel"
+import { CloseToTrayDialog } from "@/components/app/CloseToTrayDialog"
 const KanbanView = lazy(() =>
   import("@/components/kanban").then((m) => ({ default: m.KanbanView }))
 )
@@ -747,17 +748,23 @@ function App(): React.JSX.Element {
 
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background">
-        <div className="text-muted-foreground">Initializing...</div>
-      </div>
+      <>
+        <div className="flex h-screen items-center justify-center bg-background">
+          <div className="text-muted-foreground">Initializing...</div>
+        </div>
+        <CloseToTrayDialog />
+      </>
     )
   }
 
   if(!bus){
     return (
-      <div className="flex h-screen items-center justify-center bg-background">
-        <div className="text-muted-foreground">目前仅供零售客户经营开发团队使用，暂不对外提供服务...,有任何疑问请联系 范雄</div>
-      </div>
+      <>
+        <div className="flex h-screen items-center justify-center bg-background">
+          <div className="text-muted-foreground">目前仅供零售客户经营开发团队使用，暂不对外提供服务...,有任何疑问请联系 范雄</div>
+        </div>
+        <CloseToTrayDialog />
+      </>
     )
   }
 
@@ -1135,6 +1142,7 @@ function App(): React.JSX.Element {
         )}
       </div>
       <PetStateBridge />
+      <CloseToTrayDialog />
       <Toaster position="top-center" richColors duration={2200} />
     </ThreadProvider>
   )

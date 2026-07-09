@@ -1,6 +1,13 @@
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
-import type { Thread, ModelConfig, Provider, Message } from "@/types"
+import type {
+  Thread,
+  ModelConfig,
+  Provider,
+  Message,
+  ForkableCheckpoint,
+  ThreadForkParams
+} from "@/types"
 import { findFirstChatThread, isHarnessProjectModeThread } from "./thread-classification"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
@@ -326,6 +333,8 @@ interface AppState {
     metadata?: Record<string, unknown>,
     options?: ThreadNavigationOptions
   ) => Promise<Thread>
+  forkThread: (params: ThreadForkParams, options?: ThreadNavigationOptions) => Promise<Thread>
+  listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
   selectThread: (threadId: string, options?: ThreadNavigationOptions) => Promise<void>
   deleteThread: (threadId: string) => Promise<void>
   updateThread: (threadId: string, updates: Partial<Thread>) => Promise<void>
@@ -512,6 +521,36 @@ export const useAppStore = create<AppState>((set, get) => ({
       // in the map, so the card is naturally absent without discarding other threads' state.
     }))
     return thread
+  },
+
+  forkThread: async (params: ThreadForkParams, options?: ThreadNavigationOptions) => {
+    const response = await window.api.threads.fork(params)
+    const thread = response.thread
+    set((state) => ({
+      threads: [thread, ...state.threads.filter((item) => item.thread_id !== thread.thread_id)],
+      currentThreadId: thread.thread_id,
+      ...(options?.preserveView
+        ? {}
+        : {
+            showKanbanView: false,
+            showHarnessBoardView: false,
+            showCustomizeView: false,
+            showClaudeCodeView: false,
+            showDashboardView: false,
+            previousThreadId: null,
+            mainView: "thread" as const,
+            workerFocusView: null,
+            workerFocusMessagesThreadId: null,
+            workerFocusMessages: [],
+            subagentFocusView: null,
+            workflowAgentFocusView: null
+          })
+    }))
+    return thread
+  },
+
+  listForkableCheckpoints: async (threadId: string) => {
+    return window.api.threads.listForkableCheckpoints(threadId)
   },
 
   selectThread: async (threadId: string, options?: ThreadNavigationOptions) => {

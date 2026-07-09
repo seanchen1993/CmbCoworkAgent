@@ -18,7 +18,9 @@ import {
   Frown,
   Info,
   Flag,
-  PlayCircle
+  PlayCircle,
+  GitFork,
+  Loader2
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -563,6 +565,8 @@ interface MessageBubbleProps {
   ) => void
   onEditUserMessage?: (message: Message) => void
   onSetGoalFromMessage?: (text: string) => void
+  onForkFromMessage?: (message: Message) => void
+  forkingMessageId?: string | null
   threadId: string
   isLoading: boolean
   hasUserAfterHead?: boolean
@@ -582,6 +586,8 @@ function MessageBubbleImpl({
   onApprovalDecision,
   onEditUserMessage,
   onSetGoalFromMessage,
+  onForkFromMessage,
+  forkingMessageId = null,
   threadId,
   isLoading,
   hasUserAfterHead = false,
@@ -601,6 +607,9 @@ function MessageBubbleImpl({
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
+  const isForkingThisMessage = forkingMessageId === message.id
+  const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
+  const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
   const reasoningText =
     !isUser && typeof message.reasoning === "string" ? cleanReasoningText(message.reasoning) : ""
   const visibleAssistantContentText = useMemo(() => {
@@ -1023,7 +1032,7 @@ function MessageBubbleImpl({
             {content}
           </div>
         )}
-        {content && !hasToolCalls && showAssistantMeta && !isLoading && (
+        {content && showAssistantMeta && !isLoading && (
           <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
             {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
             <button
@@ -1039,6 +1048,27 @@ function MessageBubbleImpl({
                 <Copy className="size-3" />
               )}
             </button>
+            {canForkFromMessage ? (
+              <button
+                type="button"
+                onClick={() => onForkFromMessage?.(message)}
+                disabled={forkFromMessageDisabled}
+                className={cn(
+                  "inline-flex items-center justify-center rounded p-1 transition-all transform active:scale-95",
+                  forkFromMessageDisabled
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : "text-muted-foreground hover:text-foreground hover:bg-background-interactive hover:scale-110"
+                )}
+                title={isLoading ? "运行中，无法 fork" : "从这里 fork"}
+                aria-label="从这里 fork"
+              >
+                {isForkingThisMessage ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <GitFork className="size-3" />
+                )}
+              </button>
+            ) : null}
             {/* 点赞按钮 */}
             <button
               type="button"

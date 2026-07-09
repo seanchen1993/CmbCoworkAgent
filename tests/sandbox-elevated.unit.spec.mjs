@@ -1983,6 +1983,11 @@ test("user-pasted V1 workflow marker is de-weaponized, not swallowed (#5)", () =
     /resembles an internal workflow marker\. Treat it as ordinary user input/,
     "the de-weaponized text is relabelled as ordinary user input"
   )
+  assert.match(
+    agentIpcSource,
+    /visibleTranscriptUserMessage = effectiveMessage/,
+    "the durable transcript stores the de-weaponized visible text, not the hidden marker"
+  )
 })
 
 test("workflow script writeFile shares the run-level write lock with subagent tool writes (#2)", () => {

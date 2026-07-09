@@ -45,12 +45,24 @@ import {
   PlayCircle,
   Trash2,
   Copy,
-  Workflow, Paperclip
+  Workflow,
+  GitFork,
+  FolderOpen,
+  Paperclip
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
@@ -90,10 +102,12 @@ import {
 } from "@/components/panels/SystemConstraintsPanel"
 import type {
   GoalUiState,
+  ForkableCheckpoint,
   HITLRequest,
   Message,
   SkillMetadata,
   Thread,
+  ThreadForkOverrides,
   ToolCallState,
   ToolCallStatus,
   UserInputResponse
@@ -1273,6 +1287,39 @@ const getMessageText = (content: Message["content"]): string => {
     .join("\n")
 }
 
+type ForkDestinationMode = "local" | "workspace"
+
+interface MessageForkDialogTarget {
+  sourceThreadId: string
+  sourceWorkspacePath: string | null
+  message: Message
+  checkpoint: ForkableCheckpoint
+}
+
+function getForkWorkspacePath(thread: Thread | null): string | null {
+  const workspacePath = thread?.metadata?.workspacePath
+  return typeof workspacePath === "string" && workspacePath.trim() ? workspacePath : null
+}
+
+function getForkWorkspaceLabel(path: string | null): string {
+  if (!path) return "未关联工作区"
+  const segments = path.split(/[\\/]/).filter(Boolean)
+  return segments.at(-1) || path
+}
+
+function formatForkCheckpointTime(value?: string): string {
+  if (!value) return "未知时间"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function getForkMessagePreview(message: Message): string {
+  const text = getMessageText(message.content).replace(/\s+/g, " ").trim()
+  if (!text) return "这条消息没有可预览文本"
+  return text.length > 180 ? `${text.slice(0, 180)}...` : text
+}
+
 const getMessageBubbleText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -1666,6 +1713,8 @@ interface ChatMessageListProps {
   onApprovalDecision: (decision: ChatApprovalDecision) => void
   onEditUserMessage: (message: Message) => void
   onSetGoalFromMessage: (text: string) => void
+  onForkFromMessage: (message: Message) => void
+  forkingMessageId: string | null
   onOpenHookLogBucket: (turnId: string) => void
   threadId: string
   assistantDurationMsById: Map<string, number>
@@ -1688,6 +1737,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
   onApprovalDecision,
   onEditUserMessage,
   onSetGoalFromMessage,
+  onForkFromMessage,
+  forkingMessageId,
   onOpenHookLogBucket,
   threadId,
   assistantDurationMsById,
@@ -1737,6 +1788,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
               onApprovalDecision={onApprovalDecision}
               onEditUserMessage={onEditUserMessage}
               onSetGoalFromMessage={onSetGoalFromMessage}
+              onForkFromMessage={onForkFromMessage}
+              forkingMessageId={forkingMessageId}
               threadId={threadId}
               isLoading={isLoading}
               hasUserAfterHead={hasUserAfterHead}
@@ -2031,6 +2084,7 @@ export function ChatContainer({
     threads,
     models,
     createThread,
+    forkThread,
     updateThread,
     generateTitleForFirstMessage,
     setShowCustomizeView,
@@ -2038,10 +2092,20 @@ export function ChatContainer({
     pluginVersion,
     requestOpenRightPanelSystemConstraints
   } = useAppStore()
+  const [forkingMessageId, setForkingMessageId] = useState<string | null>(null)
   const currentThread = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
     [threadId, threads]
   )
+  const currentForkWorkspacePath = useMemo(
+    () => getForkWorkspacePath(currentThread),
+    [currentThread]
+  )
+  const [messageForkTarget, setMessageForkTarget] = useState<MessageForkDialogTarget | null>(null)
+  const [forkDestinationMode, setForkDestinationMode] =
+    useState<ForkDestinationMode>("local")
+  const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
+  const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
   const harnessFeatureBinding = useMemo(
     () => getHarnessFeatureBinding(currentThread),
     [currentThread]
@@ -5383,6 +5447,100 @@ export function ChatContainer({
     [setInput]
   )
 
+  const handleForkFromMessage = useCallback(
+    async (message: Message): Promise<void> => {
+      if (isLoading || forkingMessageId) return
+      setForkingMessageId(message.id)
+      try {
+        const checkpoint = await window.api.threads.resolveForkCheckpointForMessage({
+          threadId,
+          messageId: message.id
+        })
+        if (!checkpoint) {
+          toast.error("该消息附近没有可 fork 的稳定 checkpoint")
+          return
+        }
+        setForkDestinationMode("local")
+        setForkWorkspacePath(null)
+        setMessageForkTarget({
+          sourceThreadId: threadId,
+          sourceWorkspacePath: currentForkWorkspacePath,
+          message,
+          checkpoint
+        })
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "读取 fork checkpoint 失败")
+      } finally {
+        setForkingMessageId(null)
+      }
+    },
+    [currentForkWorkspacePath, forkingMessageId, isLoading, threadId]
+  )
+
+  const handleSelectForkWorkspace = useCallback(async (): Promise<string | null> => {
+    if (selectingForkWorkspace) return forkWorkspacePath
+    setSelectingForkWorkspace(true)
+    try {
+      const path = await window.api.workspace.select()
+      if (path) {
+        setForkDestinationMode("workspace")
+        setForkWorkspacePath(path)
+      }
+      return path
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "选择工作区失败")
+      return null
+    } finally {
+      setSelectingForkWorkspace(false)
+    }
+  }, [forkWorkspacePath, selectingForkWorkspace])
+
+  const resetMessageForkDialog = useCallback((): void => {
+    setMessageForkTarget(null)
+    setForkDestinationMode("local")
+    setForkWorkspacePath(null)
+    setSelectingForkWorkspace(false)
+  }, [])
+
+  const handleConfirmMessageFork = useCallback(async (): Promise<void> => {
+    if (!messageForkTarget || forkingMessageId) return
+
+    let selectedWorkspacePath = forkWorkspacePath
+    if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
+      selectedWorkspacePath = await handleSelectForkWorkspace()
+      if (!selectedWorkspacePath) return
+    }
+
+    const overrides: ThreadForkOverrides | undefined =
+      forkDestinationMode === "workspace"
+        ? { workspacePath: selectedWorkspacePath }
+        : undefined
+
+    setForkingMessageId(messageForkTarget.message.id)
+    try {
+      await forkThread({
+        sourceThreadId: messageForkTarget.sourceThreadId,
+        checkpointId: messageForkTarget.checkpoint.checkpointId,
+        messageId: messageForkTarget.message.id,
+        overrides
+      })
+      toast.success("已从这条消息创建新会话")
+      resetMessageForkDialog()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Fork 会话失败")
+    } finally {
+      setForkingMessageId(null)
+    }
+  }, [
+    forkDestinationMode,
+    forkThread,
+    forkWorkspacePath,
+    forkingMessageId,
+    handleSelectForkWorkspace,
+    messageForkTarget,
+    resetMessageForkDialog
+  ])
+
   const handleEditGoal = useCallback((): void => {
     const objective = goalUi.goal?.objective?.trim()
     if (!objective) return
@@ -5522,6 +5680,17 @@ export function ChatContainer({
     </div>
   )
 
+  const isMessageForkBusy =
+    Boolean(messageForkTarget && forkingMessageId === messageForkTarget.message.id) ||
+    selectingForkWorkspace
+  const messageForkPreview = messageForkTarget
+    ? getForkMessagePreview(messageForkTarget.message)
+    : ""
+  const messageForkSourceWorkspacePath =
+    messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
+  const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
+  const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
       {/* In-session keyword search (Ctrl/Cmd+F) */}
@@ -5538,6 +5707,118 @@ export function ChatContainer({
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
+
+      <Dialog
+        open={!!messageForkTarget}
+        onOpenChange={(open) => {
+          if (!open && !isMessageForkBusy) resetMessageForkDialog()
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-base">Fork 这条消息</DialogTitle>
+            <DialogDescription>
+              创建一个新会话，历史只保留到这条消息所在节点。
+            </DialogDescription>
+          </DialogHeader>
+          {messageForkTarget ? (
+            <div className="space-y-4">
+              <div className="rounded-sm border border-border bg-muted/25 px-3 py-2">
+                <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span>
+                    checkpoint {formatForkCheckpointTime(messageForkTarget.checkpoint.createdAt)}
+                  </span>
+                  <span>{messageForkTarget.checkpoint.messageCount} 条消息</span>
+                </div>
+                <div className="line-clamp-3 text-sm text-foreground">
+                  {messageForkPreview}
+                </div>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  disabled={isMessageForkBusy}
+                  onClick={() => setForkDestinationMode("local")}
+                  className={cn(
+                    "rounded-sm border px-3 py-2 text-left transition-colors",
+                    forkDestinationMode === "local"
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:bg-accent"
+                  )}
+                >
+                  <div className="text-sm font-medium">派生到本地</div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {currentForkWorkspaceLabel}
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  disabled={isMessageForkBusy}
+                  onClick={() => setForkDestinationMode("workspace")}
+                  className={cn(
+                    "rounded-sm border px-3 py-2 text-left transition-colors",
+                    forkDestinationMode === "workspace"
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:bg-accent"
+                  )}
+                >
+                  <div className="text-sm font-medium">派生到其他工作区</div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {forkWorkspacePath ? selectedForkWorkspaceLabel : "选择一个本地工作区路径"}
+                  </div>
+                </button>
+              </div>
+
+              {forkDestinationMode === "workspace" ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isMessageForkBusy}
+                  onClick={() => void handleSelectForkWorkspace()}
+                  className="w-full justify-start"
+                >
+                  {selectingForkWorkspace ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <FolderOpen className="size-4" />
+                  )}
+                  {forkWorkspacePath ? forkWorkspacePath : "选择工作区文件夹"}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isMessageForkBusy}
+              onClick={resetMessageForkDialog}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={isMessageForkBusy || !messageForkTarget}
+              onClick={() => void handleConfirmMessageFork()}
+            >
+              {isMessageForkBusy ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <GitFork className="size-4" />
+              )}
+              {isMessageForkBusy
+                ? selectingForkWorkspace
+                  ? "选择中"
+                  : "正在 fork"
+                : forkDestinationMode === "workspace" && !forkWorkspacePath
+                  ? "选择工作区并 Fork"
+                  : "Fork"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {skillIntentBanner}
       {nuxDialog}
@@ -5597,6 +5878,8 @@ export function ChatContainer({
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
                     onSetGoalFromMessage={handleSetGoalFromMessage}
+                    onForkFromMessage={handleForkFromMessage}
+                    forkingMessageId={forkingMessageId}
                     onOpenHookLogBucket={handleOpenHookLogBucket}
                     threadId={threadId}
                     assistantDurationMsById={assistantDurationMsById}

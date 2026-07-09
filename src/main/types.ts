@@ -1,4 +1,16 @@
 import type { HookConfig } from "./hooks/types"
+import type {
+  ForkableCheckpoint as SharedForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
+  ThreadForkOverrides as SharedThreadForkOverrides,
+  ThreadForkParams as SharedThreadForkParams,
+  ThreadForkResponse as SharedThreadForkResponse
+} from "../shared/checkpoint-forkability"
+
+export type {
+  ForkBoundarySource,
+  ForkUnstableReason
+} from "../shared/checkpoint-forkability"
 
 export type {
   AgentAutoCommitMessageStrategy,
@@ -61,6 +73,12 @@ export interface ThreadValuesMergeParams {
   threadId: string
   patch: Record<string, unknown>
 }
+
+export type ThreadForkOverrides = SharedThreadForkOverrides
+export type ThreadForkParams = SharedThreadForkParams
+export type ThreadForkResponse = SharedThreadForkResponse<Thread>
+export type ThreadForkCheckpointForMessageParams = SharedThreadForkCheckpointForMessageParams
+export type ForkableCheckpoint = SharedForkableCheckpoint
 
 // Workspace IPC
 export interface WorkspaceSetParams {
@@ -159,7 +177,15 @@ export interface Message {
   content: string | ContentBlock[]
   reasoning?: string
   tool_calls?: ToolCall[]
+  tool_call_id?: string
+  name?: string
+  status?: string
+  is_error?: boolean
+  goal_id?: string | null
+  active_window_id?: string | null
   created_at: Date
+  start_at?: Date
+  end_at?: Date
 }
 
 export interface ContentBlock {
