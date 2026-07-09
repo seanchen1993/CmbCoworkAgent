@@ -31,35 +31,43 @@ const MAX_CHANGED_FILES = 120
 
 // ---------- 结构化输出 schema ----------
 
+// schema 的 maxLength/maxItems 一律是"灾难兜底"(≈渲染层 clip 值的 2-3 倍),不是日常
+// 约束:引擎对 schema 违规是校验失败→重试→fresh session 重跑,弱模型又不可靠遵守紧
+// 上限,收紧只会放大结构化输出本就存在的截断/重试故障面。日常瘦身靠渲染层 clip/take。
 const CONTRACT_SCHEMA = {
   type: "object",
   properties: {
-    title: { type: "string", minLength: 1 },
-    problem: { type: "string", minLength: 1 },
-    goal: { type: "string", minLength: 1 },
+    title: { type: "string", minLength: 1, maxLength: 300 },
+    problem: { type: "string", minLength: 1, maxLength: 2000 },
+    goal: { type: "string", minLength: 1, maxLength: 2000 },
     complexity: { type: "string", enum: ["simple", "standard", "complex"] },
-    nonGoals: { type: "array", items: { type: "string" } },
-    constraints: { type: "array", items: { type: "string" } },
-    conventions: { type: "array", items: { type: "string" } },
+    nonGoals: { type: "array", maxItems: 24, items: { type: "string", maxLength: 600 } },
+    constraints: { type: "array", maxItems: 24, items: { type: "string", maxLength: 600 } },
+    conventions: { type: "array", maxItems: 24, items: { type: "string", maxLength: 600 } },
     criteria: {
       type: "array",
       minItems: 1,
+      maxItems: 40,
       items: {
         type: "object",
         properties: {
           id: { type: "string" },
-          text: { type: "string", minLength: 1 },
+          text: { type: "string", minLength: 1, maxLength: 1200 },
           verify: { type: "string", enum: ["command", "code", "test", "e2e"] },
-          hint: { type: "string" }
+          hint: { type: "string", maxLength: 500 }
         },
         required: ["id", "text", "verify", "hint"],
         additionalProperties: false
       }
     },
-    globalValidationCommands: { type: "array", items: { type: "string" } },
-    openQuestions: { type: "array", items: { type: "string" } },
+    globalValidationCommands: {
+      type: "array",
+      maxItems: 16,
+      items: { type: "string", maxLength: 300 }
+    },
+    openQuestions: { type: "array", maxItems: 16, items: { type: "string", maxLength: 400 } },
     canProceed: { type: "boolean" },
-    proceedReason: { type: "string" }
+    proceedReason: { type: "string", maxLength: 1000 }
   },
   required: [
     "title",
@@ -81,23 +89,24 @@ const CONTRACT_SCHEMA = {
 const EXPLORE_SCHEMA = {
   type: "object",
   properties: {
-    summary: { type: "string" },
+    summary: { type: "string", maxLength: 4000 },
     relevantFiles: {
       type: "array",
+      maxItems: 80,
       items: {
         type: "object",
         properties: {
-          path: { type: "string" },
-          reason: { type: "string" },
-          suggestedUse: { type: "string" }
+          path: { type: "string", maxLength: 500 },
+          reason: { type: "string", maxLength: 400 },
+          suggestedUse: { type: "string", maxLength: 300 }
         },
         required: ["path", "reason", "suggestedUse"],
         additionalProperties: false
       }
     },
-    testCommands: { type: "array", items: { type: "string" } },
-    buildCommands: { type: "array", items: { type: "string" } },
-    risks: { type: "array", items: { type: "string" } }
+    testCommands: { type: "array", maxItems: 16, items: { type: "string", maxLength: 300 } },
+    buildCommands: { type: "array", maxItems: 16, items: { type: "string", maxLength: 300 } },
+    risks: { type: "array", maxItems: 20, items: { type: "string", maxLength: 800 } }
   },
   required: ["summary", "relevantFiles", "testCommands", "buildCommands", "risks"],
   additionalProperties: false
@@ -106,20 +115,20 @@ const EXPLORE_SCHEMA = {
 const ROUND_PLAN_SCHEMA = {
   type: "object",
   properties: {
-    strategy: { type: "string" },
-    conventionsBrief: { type: "string", minLength: 1 },
+    strategy: { type: "string", maxLength: 2000 },
+    conventionsBrief: { type: "string", minLength: 1, maxLength: 5000 },
     packages: {
       type: "array",
       minItems: 1,
       items: {
         type: "object",
         properties: {
-          id: { type: "string", minLength: 1 },
-          title: { type: "string", minLength: 1 },
-          objective: { type: "string", minLength: 1 },
+          id: { type: "string", minLength: 1, maxLength: 100 },
+          title: { type: "string", minLength: 1, maxLength: 200 },
+          objective: { type: "string", minLength: 1, maxLength: 1500 },
           acIds: { type: "array", items: { type: "string" }, minItems: 1 },
-          targetFiles: { type: "array", items: { type: "string" } },
-          validationCommands: { type: "array", items: { type: "string" } },
+          targetFiles: { type: "array", items: { type: "string", maxLength: 500 } },
+          validationCommands: { type: "array", items: { type: "string", maxLength: 300 } },
           dependencies: { type: "array", items: { type: "string" } },
           riskLevel: { type: "string", enum: ["low", "medium", "high"] }
         },
@@ -147,11 +156,11 @@ const IMPLEMENTATION_SCHEMA = {
   type: "object",
   properties: {
     status: { type: "string", enum: ["changed", "no_change_needed", "blocked"] },
-    summary: { type: "string" },
-    changedFiles: { type: "array", items: { type: "string" } },
-    commandsRun: { type: "array", items: { type: "string" } },
-    blockers: { type: "array", items: { type: "string" } },
-    notes: { type: "array", items: { type: "string" } }
+    summary: { type: "string", maxLength: 3000 },
+    changedFiles: { type: "array", items: { type: "string", maxLength: 500 } },
+    commandsRun: { type: "array", maxItems: 40, items: { type: "string", maxLength: 300 } },
+    blockers: { type: "array", maxItems: 24, items: { type: "string", maxLength: 600 } },
+    notes: { type: "array", maxItems: 24, items: { type: "string", maxLength: 800 } }
   },
   required: ["status", "summary", "changedFiles", "commandsRun", "blockers", "notes"],
   additionalProperties: false
@@ -161,7 +170,7 @@ const PACKAGE_VERIFY_SCHEMA = {
   type: "object",
   properties: {
     status: { type: "string", enum: ["pass", "fail", "blocked"] },
-    summary: { type: "string" },
+    summary: { type: "string", maxLength: 2000 },
     perAc: {
       type: "array",
       items: {
@@ -169,7 +178,7 @@ const PACKAGE_VERIFY_SCHEMA = {
         properties: {
           id: { type: "string" },
           result: { type: "string", enum: ["pass", "fail", "unclear"] },
-          evidence: { type: "string" }
+          evidence: { type: "string", maxLength: 1500 }
         },
         required: ["id", "result", "evidence"],
         additionalProperties: false
@@ -180,16 +189,16 @@ const PACKAGE_VERIFY_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          command: { type: "string" },
+          command: { type: "string", maxLength: 300 },
           result: { type: "string", enum: ["pass", "fail", "not_run"] },
-          evidence: { type: "string" }
+          evidence: { type: "string", maxLength: 1500 }
         },
         required: ["command", "result", "evidence"],
         additionalProperties: false
       }
     },
-    issues: { type: "array", items: { type: "string" } },
-    recommendedFixes: { type: "array", items: { type: "string" } }
+    issues: { type: "array", maxItems: 16, items: { type: "string", maxLength: 600 } },
+    recommendedFixes: { type: "array", maxItems: 16, items: { type: "string", maxLength: 600 } }
   },
   required: ["status", "summary", "perAc", "commandChecks", "issues", "recommendedFixes"],
   additionalProperties: false
@@ -222,15 +231,16 @@ const AUDIT_SCHEMA = {
 const RUNNER_SCHEMA = {
   type: "object",
   properties: {
-    summary: { type: "string" },
+    summary: { type: "string", maxLength: 2000 },
     commands: {
       type: "array",
+      maxItems: 24,
       items: {
         type: "object",
         properties: {
-          command: { type: "string" },
+          command: { type: "string", maxLength: 300 },
           passed: { type: "boolean" },
-          evidence: { type: "string" }
+          evidence: { type: "string", maxLength: 2000 }
         },
         required: ["command", "passed", "evidence"],
         additionalProperties: false
@@ -331,8 +341,10 @@ function renderImplResult(impl) {
     `小结：${clip(r.summary, 1200)}`,
     `变更文件：\n${lines(take(r.changedFiles || [], 50))}`,
     `执行命令：\n${lines(take(r.commandsRun || [], 20))}`,
-    r.blockers && r.blockers.length ? `阻塞：\n${lines(r.blockers)}` : "",
-    r.notes && r.notes.length ? `备注：\n${lines(take(r.notes, 12))}` : ""
+    r.blockers && r.blockers.length
+      ? `阻塞：\n${lines(take(r.blockers, 12).map((b) => clip(b, 300)))}`
+      : "",
+    r.notes && r.notes.length ? `备注：\n${lines(take(r.notes, 12).map((n) => clip(n, 300)))}` : ""
   ]
     .filter(Boolean)
     .join("\n")
@@ -340,8 +352,27 @@ function renderImplResult(impl) {
 // 逐条裁决结论:id/结果/截断的证据。
 function renderPerAc(perAc) {
   return (
-    (perAc || []).map((p) => `- ${p.id}：${p.result} — ${clip(p.evidence, 500)}`).join("\n") || "- 无"
+    (perAc || []).map((p) => `- ${p.id}：${p.result} — ${clip(p.evidence, 500)}`).join("\n") ||
+    "- 无"
   )
+}
+// 工作包紧凑渲染:去掉 pretty-JSON 开销与 dependencies(编排层字段,分发前已按拓扑序
+// 解析,执行代理用不上)。targetFiles 默认只给实现代理——验证/修复/复验的定位依据是
+// 实现结果里的 changedFiles,monorepo 长路径清单对它们是纯噪音;但当 changedFiles 为空
+// (no_change_needed / 漏填)时,规划的 targetFiles 是它们仅剩的定位线索,调用方按此条件
+// 回带 withTargets。首行"覆盖标准：AC-N、AC-M"是稳定的机器可读锚点(dryrun mock 按它
+// 解析认领标准),改措辞必须同步改测试。
+function renderPackage(pkg, opts) {
+  const parts = [
+    `覆盖标准：${(pkg.acIds || []).join("、")}`,
+    `编号：${pkg.id}｜标题：${pkg.title}｜风险级：${pkg.riskLevel}`,
+    `目标：${clip(pkg.objective, 600)}`,
+    `验证命令（声明即门禁，须逐条执行）：\n${lines(pkg.validationCommands)}`
+  ]
+  if (opts && opts.withTargets && pkg.targetFiles && pkg.targetFiles.length) {
+    parts.push(`目标文件（定位提示，可自行修正）：\n${lines(pkg.targetFiles)}`)
+  }
+  return parts.join("\n")
 }
 
 // ---- 合同关键词驱动的相关性选择 ----
@@ -349,12 +380,58 @@ function renderPerAc(perAc) {
 // creatorBranchId、xsmf),用它们给候选文件/manifest 打分排序:命中越多越靠前。纯中文
 // 合同抽不出标识符时命中为空,自然回退到各模式轮流抽样——行为不劣化,只会更公平。
 const COMMON_TOKEN_STOPWORDS = Object.assign(Object.create(null), {
-  http: 1, https: 1, post: 1, get: 1, put: 1, delete: 1, json: 1, xml: 1, html: 1,
-  null: 1, true: 1, false: 1, list: 1, status: 1, update: 1, create: 1, query: 1,
-  header: 1, token: 1, string: 1, number: 1, count: 1, time: 1, date: 1, page: 1,
-  size: 1, code: 1, data: 1, info: 1, type: 1, name: 1, test: 1, tests: 1, main: 1,
-  java: 1, node: 1, src: 1, com: 1, org: 1, www: 1, item: 1, file: 1, path: 1,
-  begin: 1, end: 1, with: 1, from: 1, that: 1, this: 1, must: 1, when: 1, then: 1
+  http: 1,
+  https: 1,
+  post: 1,
+  get: 1,
+  put: 1,
+  delete: 1,
+  json: 1,
+  xml: 1,
+  html: 1,
+  null: 1,
+  true: 1,
+  false: 1,
+  list: 1,
+  status: 1,
+  update: 1,
+  create: 1,
+  query: 1,
+  header: 1,
+  token: 1,
+  string: 1,
+  number: 1,
+  count: 1,
+  time: 1,
+  date: 1,
+  page: 1,
+  size: 1,
+  code: 1,
+  data: 1,
+  info: 1,
+  type: 1,
+  name: 1,
+  test: 1,
+  tests: 1,
+  main: 1,
+  java: 1,
+  node: 1,
+  src: 1,
+  com: 1,
+  org: 1,
+  www: 1,
+  item: 1,
+  file: 1,
+  path: 1,
+  begin: 1,
+  end: 1,
+  with: 1,
+  from: 1,
+  that: 1,
+  this: 1,
+  must: 1,
+  when: 1,
+  then: 1
 })
 function contractIdentifierTokens(contract, criteria) {
   const text = [
@@ -631,6 +708,24 @@ function fallbackVerification(summary, acIds) {
     issues: [summary],
     recommendedFixes: []
   }
+}
+
+// 验证类代理故障恢复:agent() 返回 null(引擎级重试已耗尽的结构化输出彻底失败)时先
+// 原样重验一次;仍失败才落 fallback,并打 agentFailure 标记——带此标记的结果不允许
+// 触发修复轮:拿"代理没返回结果"当假失败证据去修不存在的缺陷,最坏烧两轮修复+复验、
+// 还可能改坏本来正确的代码。对应标准保持 unproven 并在账本留痕(与对抗复核 null 的
+// auditGaps 有声降级同构对齐)。
+async function verifyPackage(promptText, opts, pkg, failureReason) {
+  let raw = await agent(promptText, opts)
+  if (!raw) {
+    log(`${opts.label}：验证代理未返回结构化结果，重验一次。`)
+    raw = await agent(promptText, { ...opts, label: `${opts.label}(重验)` })
+  }
+  if (!raw) {
+    log(`${opts.label}：重验仍未返回结构化结果，本包标准保持未证实（不进入修复轮）。`)
+    return Object.assign(fallbackVerification(failureReason, pkg.acIds), { agentFailure: true })
+  }
+  return enforcePerAcCompleteness(raw, pkg)
 }
 
 // 验证结论的完整性由代码强制：包内每条 AC 必须有裁决；漏核 = fail，pass 无证据 = fail。
@@ -1114,7 +1209,9 @@ ${contract ? lines(contract.openQuestions) : "- 确定验收标准失败"}
   if (context.criteria.length === 0) {
     // schema 的 minLength:1 拦不住纯空白文本;normalize 剔除后为 0 条时必须硬性
     // 失败,否则 every() 空真会直接"可交付 0/0"。与外部合同路径的防线对齐。
-    throw new Error("确定验收标准产出的合同没有任何有效验收标准（全部为空白文本），请重试或补充需求。")
+    throw new Error(
+      "确定验收标准产出的合同没有任何有效验收标准（全部为空白文本），请重试或补充需求。"
+    )
   }
   log(`合同成立：${context.criteria.length} 条验收标准。`)
 }
@@ -1209,7 +1306,8 @@ phase("项目探索")
   const manifestSnippets = []
   for (const file of rootManifests.slice(0, MAX_ROOT_MANIFEST_PREVIEW)) {
     const content = await safeRead(file)
-    if (content) manifestSnippets.push(`--- ${file} ---\n${content.slice(0, MANIFEST_INLINE_CHARS)}`)
+    if (content)
+      manifestSnippets.push(`--- ${file} ---\n${content.slice(0, MANIFEST_INLINE_CHARS)}`)
   }
   // 候选文件两段式:合同命中的排最前(信号),再各模式轮流抽样补结构感(公平)。总量硬帽,
   // 项目再大也不膨胀;真正的全量定位靠 Explore 自己 grep/glob。
@@ -1233,7 +1331,10 @@ phase("项目探索")
               label: "架构",
               prompt: "识别项目类型、关键模块、合同标准最可能触及的文件，以及实现入口。"
             },
-            { label: "验证", prompt: "识别可用构建/测试/lint 命令、测试目录、现有验证习惯和风险。" },
+            {
+              label: "验证",
+              prompt: "识别可用构建/测试/lint 命令、测试目录、现有验证习惯和风险。"
+            },
             { label: "风险", prompt: "识别兼容性、安全、数据、配置、发布和回滚风险。" }
           ]
         : [
@@ -1258,7 +1359,7 @@ ${item.prompt}
 目标：${context.contract.goal}
 约束：${lines(context.contract.constraints)}
 验收标准：
-${context.criteria.map((c) => `- ${c.id}：${c.text}`).join("\n")}
+${context.criteria.map((c) => `- ${c.id}：${clip(c.text, 500)}`).join("\n")}
 
 项目 manifest（配置/构建文件）路径清单（根级与合同相关的在前；需要任何模块的完整依赖/配置，直接读文件）：
 ${lines(manifestList) || "- 未找到"}
@@ -1364,11 +1465,15 @@ while (roundsThisRun < maxRounds) {
 概述：${clip(context.exploration.summary, 1500)}
 构建命令：${lines(context.exploration.buildCommands)}
 测试命令：${lines(context.exploration.testCommands)}
-风险：${lines(context.exploration.risks)}
+风险：${lines(context.exploration.risks.map((r) => clip(r, 300)))}
 相关文件（路径 — 简述；完整清单与用途见画像文件）：
-${take(context.exploration.relevantFiles || [], 40).map((f) => `- ${f.path}：${clip(f.reason, 160)}`).join("\n") || "- 无"}
+${
+  take(context.exploration.relevantFiles || [], 40)
+    .map((f) => `- ${f.path}：${clip(f.reason, 160)}`)
+    .join("\n") || "- 无"
+}
 
-待证实标准（含上一轮失败/驳回原因，规划必须针对性回应）：
+${round > 1 && context.changedFiles.length > 0 ? `前几轮已改动的文件（规划 targetFiles 时参考——失败标准的修复大概率发生在这些文件附近，避免重复探索；需要细节直接读文件）：\n${lines(take(context.changedFiles, 50))}\n\n` : ""}待证实标准（含上一轮失败/驳回原因，规划必须针对性回应）：
 ${pending.map((c) => `- ${c.id}（${c.verify}）：${clip(c.text, 500)}${c.note ? `\n  · 上一轮：${clip(c.note, 400)}` : ""}`).join("\n")}
 
 ${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）：\n${clip(context.conventionsBrief, 2000)}\n` : ""}
@@ -1480,10 +1585,10 @@ ${clip(context.conventionsBrief, 2000)}
 概述：${clip(context.exploration.summary, 1500)}
 构建命令：${lines(context.exploration.buildCommands)}
 测试命令：${lines(context.exploration.testCommands)}
-风险：${lines(context.exploration.risks)}
+风险：${lines(context.exploration.risks.map((r) => clip(r, 300)))}
 
 当前工作包：
-${stringify(pkg)}
+${renderPackage(pkg, { withTargets: true })}
 （提示：如果你的可用技能里有与本工作包领域相关的技能，优先遵循其指引。）
 
 你要证实的验收标准（实现必须逐条对得上，注意每条的核查方式和失败备注）：
@@ -1491,6 +1596,7 @@ ${renderWorkCriteria(pkgCriteria)}
 
 执行要求：
 - 做最小且正确的修改；变更后尽量运行工作包的验证命令。
+- 对 verify=test 的标准：先写出（或先运行确认）会失败的测试，再实现使其通过——严禁实现完成后补测试充数。
 - 如果标准带有上一轮的失败/驳回备注，必须针对性修复。
 - 如果无法安全完成，返回 status=blocked 并列出阻塞项。`,
         {
@@ -1503,41 +1609,38 @@ ${renderWorkCriteria(pkgCriteria)}
     let verification =
       implementation.status === "blocked"
         ? fallbackVerification("实现阶段已阻塞，未运行验证。", pkg.acIds)
-        : enforcePerAcCompleteness(
-            (await agent(
-              `请独立验证当前工作包，逐条裁决验收标准。不要修改文件。
+        : await verifyPackage(
+            `请独立验证当前工作包，逐条裁决验收标准。不要修改文件。
 
 当前工作包：
-${stringify(pkg)}
+${renderPackage(pkg, { withTargets: !(implementation.changedFiles && implementation.changedFiles.length) })}
 
 逐条验收标准（perAc 必须覆盖每一条 id，pass 必须给证据：文件:行号或命令输出摘录）：
 ${renderWorkCriteria(pkgCriteria)}
 
-实现结果：
+实现结果（定位改动看 changedFiles，需要细节直接读这些文件）：
 ${renderImplResult(implementation)}
-
-建议验证命令：
-${lines(pkg.validationCommands)}
 
 请实际运行可用命令，对每条标准按其核查方式取证，并至少尝试一个边界/反例。
 工作包声明的验证命令必须逐条执行,commandChecks.command 原样填写声明的命令字符串。
 特别注意 verify=e2e 的标准：必须实际启动应用，用浏览器自动化工具导航/点击/截图取证；
 如果当前没有可用的浏览器自动化工具，如实返回 unclear 并在证据里说明——严禁用"代码看起来正确"充当 e2e 证据。`,
-              {
-                label: `验证R${round}：${pkg.title}`,
-                phase: "交付循环",
-                // 全部核验类角色(验证/复验/终审/对抗复核)统一用默认 agent:不用 verification
-                // 角色那套报告式系统提示——它偏长篇输出、尾部结构化调用在弱模型上易截断。各处
-                // prompt 已写明"不要修改文件",约束从物理强制降为提示约束(已知取舍)。
-                schema: PACKAGE_VERIFY_SCHEMA
-              }
-            )) || fallbackVerification("验证代理没有返回结构化结果。", pkg.acIds),
-            pkg
+            {
+              label: `验证R${round}：${pkg.title}`,
+              phase: "交付循环",
+              // 全部核验类角色(验证/复验/终审/对抗复核)统一用默认 agent:不用 verification
+              // 角色那套报告式系统提示——它偏长篇输出、尾部结构化调用在弱模型上易截断。各处
+              // prompt 已写明"不要修改文件",约束从物理强制降为提示约束(已知取舍)。
+              schema: PACKAGE_VERIFY_SCHEMA
+            },
+            pkg,
+            "验证代理故障（重验仍未返回结构化结果），标准未获裁决。"
           )
 
     let fix = null
     let fixRound = 0
     while (
+      !verification.agentFailure &&
       verification.perAc.some((p) => p.result !== "pass") &&
       implementation.status !== "blocked" &&
       fixRound < maxFixRounds
@@ -1553,7 +1656,7 @@ ${lines(pkg.validationCommands)}
 ${clip(context.conventionsBrief, 2000)}
 
 当前工作包：
-${stringify(pkg)}
+${renderPackage(pkg, { withTargets: !((implementation.changedFiles && implementation.changedFiles.length) || (previousFix && previousFix.changedFiles && previousFix.changedFiles.length)) })}
 
 首轮实现：
 ${renderImplResult(implementation)}
@@ -1569,17 +1672,16 @@ ${renderPerAc(failing)}
           }
         )) || fallbackImplementation("修复代理没有返回结构化结果。")
       if (fix.status === "blocked") break
-      verification = enforcePerAcCompleteness(
-        (await agent(
-          `修复后复验，逐条裁决验收标准。不要修改文件。
+      verification = await verifyPackage(
+        `修复后复验，逐条裁决验收标准。不要修改文件。
 
 当前工作包：
-${stringify(pkg)}
+${renderPackage(pkg, { withTargets: !(fix.changedFiles && fix.changedFiles.length) })}
 
 逐条验收标准：
 ${renderWorkCriteria(pkgCriteria)}
 
-修复结果：
+修复结果（定位改动看 changedFiles，需要细节直接读这些文件）：
 ${renderImplResult(fix)}
 
 上一次逐条结论：
@@ -1588,13 +1690,13 @@ ${renderPerAc(verification.perAc)}
 perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报会被判失败);
 工作包声明的验证命令必须逐条执行,commandChecks.command 原样填写声明的命令字符串。
 复验重点放在之前未通过的标准上。`,
-          {
-            label: `复验R${round}：${pkg.title} #${fixRound}`,
-            phase: "交付循环",
-            schema: PACKAGE_VERIFY_SCHEMA
-          }
-        )) || fallbackVerification("复验代理没有返回结构化结果。", pkg.acIds),
-        pkg
+        {
+          label: `复验R${round}：${pkg.title} #${fixRound}`,
+          phase: "交付循环",
+          schema: PACKAGE_VERIFY_SCHEMA
+        },
+        pkg,
+        "复验代理故障（重验仍未返回结构化结果），标准未获裁决。"
       )
     }
 
@@ -1608,7 +1710,11 @@ perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报
         entry.round = round
       } else {
         entry.status = "unproven"
-        entry.note = `第 ${round} 轮验证未通过：${per.evidence}`
+        // 代理故障≠代码失败:留痕措辞必须区分,否则下一轮规划会把"验证代理挂了"
+        // 当成实现缺陷去针对性"修复"。
+        entry.note = verification.agentFailure
+          ? `第 ${round} 轮${per.evidence}`
+          : `第 ${round} 轮验证未通过：${per.evidence}`
       }
     }
     context.changedFiles = uniq([
@@ -1641,11 +1747,14 @@ perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报
       `你是对抗复核代理。你的唯一任务是推翻下面这些"已证实"的验收标准——逐条检查证据是否真实、充分、与标准语义一致（证据可以在代码库里核实，必要时运行只读命令）。
 宁可错杀不可放过：证据模糊、以偏概全、文件行号对不上的，一律驳回。确实无懈可击的才放行。不要修改文件。
 职责边界：只核对证据与代码本身（读文件、grep、行号比对），必要时最多运行轻量只读命令；不要重跑完整构建或测试套件——那是终审命令核对的职责，重复执行只会拖慢并增加故障面。
+判例校准（先对齐尺度再逐条裁决）：
+- 该驳回：证据引用的文件:行号与代码事实对不上；声称"运行时验证/测试通过"但代码库里不存在对应测试或输出无从核对；证据只是"代码看起来正确"的复述而没有指向具体代码事实。
+- 该放行：证据引用的行号有小幅漂移（±3 行内）但语义指向的代码确实存在且与标准一致；措辞简略但每个论断都能在代码里逐点核实；引用了合同已声明的全局验证命令但本阶段未实际执行（终审负责真实执行，不得以此驳回）。
 ${
-      context.contract.globalValidationCommands && context.contract.globalValidationCommands.length
-        ? `\n本合同声明的全局验证命令（下列命令是合法声明的，终审阶段会真实执行并核对）：\n${lines(context.contract.globalValidationCommands)}\n注意：证据若引用了上列已声明的命令，不得以"命令不在合同里/无此命令/无据编造"为由驳回；这类命令的实际执行由终审阶段负责，不要求在本阶段已经跑过——只判证据与标准语义、代码事实是否一致。真正凭空捏造（引用一条未声明、代码里也不存在的命令或结果）才驳回。\n`
-        : ""
-    }
+  context.contract.globalValidationCommands && context.contract.globalValidationCommands.length
+    ? `\n本合同声明的全局验证命令（下列命令是合法声明的，终审阶段会真实执行并核对）：\n${lines(context.contract.globalValidationCommands)}\n注意：证据若引用了上列已声明的命令，不得以"命令不在合同里/无此命令/无据编造"为由驳回；这类命令的实际执行由终审阶段负责，不要求在本阶段已经跑过——只判证据与标准语义、代码事实是否一致。真正凭空捏造（引用一条未声明、代码里也不存在的命令或结果）才驳回。\n`
+    : ""
+}
 本轮新证实的标准与证据：
 ${newlyProven.map((c) => `- ${c.id}（${c.verify}）：${clip(c.text, 400)}\n  · 证据：${clip(c.evidence, 600)}`).join("\n")}
 

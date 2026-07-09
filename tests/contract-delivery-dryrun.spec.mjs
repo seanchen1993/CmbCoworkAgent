@@ -125,7 +125,7 @@ function contractOf(n, cmds, complexity) {
 }
 
 function acIdsFromPrompt(prompt) {
-  const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+  const m = prompt.match(/覆盖标准：([^\n]*)/)
   if (!m) return []
   return [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0])
 }
@@ -520,7 +520,7 @@ async function scenario7() {
           notes: []
         }
       if (label.startsWith("验证R")) {
-        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+        const m = prompt.match(/覆盖标准：([^\n]*)/)
         const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
         return {
           status: "pass",
@@ -599,7 +599,7 @@ async function scenario8() {
         return IMPL_OK
       }
       if (label.startsWith("验证R")) {
-        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+        const m = prompt.match(/覆盖标准：([^\n]*)/)
         const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
         return {
           status: "pass",
@@ -650,7 +650,7 @@ async function scenario8() {
       if (/^第\d+轮规划$/.test(label)) return planFor(pendingFromPlanPrompt(prompt))
       if (label.startsWith("实现R") || label.startsWith("修复R")) return IMPL_OK
       if (label.startsWith("验证R") || label.startsWith("复验R")) {
-        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+        const m = prompt.match(/覆盖标准：([^\n]*)/)
         const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
         return contradictoryVerify(acIds)
       }
@@ -702,7 +702,7 @@ async function scenario9() {
       if (/^第\d+轮规划$/.test(label)) return planFor(pendingFromPlanPrompt(prompt))
       if (label.startsWith("实现R")) return IMPL_OK
       if (label.startsWith("验证R")) {
-        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+        const m = prompt.match(/覆盖标准：([^\n]*)/)
         const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
         return {
           status: "pass",
@@ -800,7 +800,7 @@ async function scenario10() {
         }
       if (label.startsWith("实现R") || label.startsWith("修复R")) return IMPL_OK
       if (label.startsWith("验证R") || label.startsWith("复验R")) {
-        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+        const m = prompt.match(/覆盖标准：([^\n]*)/)
         const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
         return {
           status: "pass",
@@ -858,7 +858,7 @@ async function scenario10() {
         }
       if (label.startsWith("实现R") || label.startsWith("修复R")) return IMPL_OK
       if (label.startsWith("验证R")) {
-        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+        const m = prompt.match(/覆盖标准：([^\n]*)/)
         const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
         // 首验:AC pass 但漏报声明命令 → 应被判不予采信,进入修复
         return {
@@ -871,7 +871,7 @@ async function scenario10() {
         }
       }
       if (label.startsWith("复验R")) {
-        const m = prompt.match(/"acIds":\s*\[([^\]]*)\]/)
+        const m = prompt.match(/覆盖标准：([^\n]*)/)
         const acIds = m ? [...m[1].matchAll(/AC-\d+/g)].map((x) => x[0]) : []
         // 复验:合规回报(AC 全量 + 声明命令原样 pass)→ 必须放行
         return {
@@ -1090,6 +1090,202 @@ async function scenario15() {
   console.log("标准备注留痕:", state.includes("本轮对抗复核未执行") ? "PASS" : "FAIL")
 }
 
+// ===== 场景16：验证代理故障恢复 —— null 先重验一次;仍 null 不烧修复轮 =====
+async function scenario16() {
+  console.log("\n== 场景16 验证代理故障恢复 ==")
+  // 子例A:首验 null,重验成功 → 正常交付,不触发修复轮
+  {
+    const files = {}
+    const logs = []
+    let verifyCalls = 0
+    const behavior = (label, prompt) => {
+      if (label === "确定验收标准") return contractOf(1, ["mvn test"], "simple")
+      if (label.startsWith("探索：")) return EXPLORE
+      if (label.startsWith("实现R")) return IMPL_OK
+      if (label.startsWith("验证R")) {
+        verifyCalls += 1
+        if (verifyCalls === 1) return null // 首验结构化输出彻底失败
+        const acIds = acIdsFromPrompt(prompt)
+        return {
+          status: "pass",
+          summary: "ok",
+          perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
+          commandChecks: [{ command: "mvn test", result: "pass", evidence: "ok" }],
+          issues: [],
+          recommendedFixes: []
+        }
+      }
+      if (label.startsWith("对抗复核")) return { refutations: [] }
+      if (label === "终审命令核对")
+        return {
+          summary: "ok",
+          commands: [{ command: "mvn test", passed: true, evidence: "BUILD SUCCESS" }]
+        }
+      throw new Error("未知 label: " + label)
+    }
+    const env = makeEnv({ files, agentBehavior: behavior, logs })
+    const r = await runScript(
+      env.agent,
+      env.parallel,
+      env.phase,
+      env.log,
+      "契约测试需求验证重验恢复",
+      env.glob,
+      env.readFile,
+      env.writeFile
+    )
+    console.log("首验null触发重验:", verifyCalls === 2 ? "PASS" : "FAIL " + verifyCalls)
+    console.log(
+      "重验带(重验)标记:",
+      logs.some((l) => l.startsWith("AGENT: 验证R") && l.includes("(重验)")) ? "PASS" : "FAIL"
+    )
+    console.log("重验成功后正常交付:", r.状态 === "可交付" ? "PASS" : "FAIL " + r.状态)
+    console.log(
+      "恢复路径不烧修复轮:",
+      !logs.some((l) => l.startsWith("AGENT: 修复R")) ? "PASS" : "FAIL"
+    )
+  }
+  // 子例B:重验仍 null → 不进修复轮,标准保持未证实,账本留"代理故障"痕
+  {
+    const files = {}
+    const logs = []
+    const behavior = (label) => {
+      if (label === "确定验收标准") return contractOf(1, ["mvn test"], "simple")
+      if (label.startsWith("探索：")) return EXPLORE
+      if (label.startsWith("实现R")) return IMPL_OK
+      if (label.startsWith("验证R")) return null // 首验与重验都彻底失败
+      if (label.startsWith("修复R")) throw new Error("代理故障不得触发修复轮")
+      if (label.startsWith("对抗复核")) return { refutations: [] }
+      if (label === "终审命令核对")
+        return {
+          summary: "ok",
+          commands: [{ command: "mvn test", passed: true, evidence: "BUILD SUCCESS" }]
+        }
+      throw new Error("未知 label: " + label)
+    }
+    const env = makeEnv({ files, agentBehavior: behavior, logs })
+    const r = await runScript(
+      env.agent,
+      env.parallel,
+      env.phase,
+      env.log,
+      "契约测试需求验证彻底故障",
+      env.glob,
+      env.readFile,
+      env.writeFile
+    )
+    console.log(
+      "彻底故障不烧修复轮:",
+      !logs.some((l) => l.startsWith("AGENT: 修复R")) ? "PASS" : "FAIL"
+    )
+    console.log("有声降级进日志:", logs.some((l) => l.includes("不进入修复轮")) ? "PASS" : "FAIL")
+    console.log("如实 needs_fix:", r.状态 === "需要修复" ? "PASS" : "FAIL " + r.状态)
+    const state = files[Object.keys(files).find((k) => k.endsWith("状态.json"))] || "{}"
+    console.log(
+      "账本留'代理故障'痕(区别于代码失败):",
+      state.includes("验证代理故障") ? "PASS" : "FAIL"
+    )
+  }
+}
+
+// ===== 场景17：targetFiles 条件回带 —— 实现零变更时验证拿回规划定位线索,有变更时维持瘦身 =====
+async function scenario17() {
+  console.log("\n== 场景17 targetFiles 条件回带 ==")
+  const files = {}
+  const logs = []
+  const verifyPrompts = []
+  const behavior = (label, prompt) => {
+    if (label === "确定验收标准") return contractOf(2, ["mvn test"], "standard")
+    if (label.startsWith("探索：")) return EXPLORE
+    if (/^第\d+轮规划$/.test(label)) {
+      const pending = pendingFromPlanPrompt(prompt)
+      return {
+        strategy: "s",
+        conventionsBrief: "公约",
+        canImplement: true,
+        blockers: [],
+        packages: [
+          {
+            id: "pkg-nochange",
+            title: "零变更包",
+            objective: "确认现状已满足",
+            acIds: [pending[0]],
+            targetFiles: ["src/T.java"],
+            validationCommands: ["mvn test"],
+            dependencies: [],
+            riskLevel: "low"
+          },
+          {
+            id: "pkg-changed",
+            title: "有变更包",
+            objective: "改代码",
+            acIds: [pending[1]],
+            targetFiles: ["src/U.java"],
+            validationCommands: ["mvn test"],
+            dependencies: [],
+            riskLevel: "low"
+          }
+        ]
+      }
+    }
+    if (label.startsWith("实现R")) {
+      if (prompt.includes("零变更包"))
+        return {
+          status: "no_change_needed",
+          summary: "现状已满足",
+          changedFiles: [],
+          commandsRun: [],
+          blockers: [],
+          notes: []
+        }
+      return IMPL_OK
+    }
+    if (label.startsWith("验证R")) {
+      verifyPrompts.push(prompt)
+      const acIds = acIdsFromPrompt(prompt)
+      return {
+        status: "pass",
+        summary: "ok",
+        perAc: acIds.map((id) => ({ id, result: "pass", evidence: "x.java:1" })),
+        commandChecks: [{ command: "mvn test", result: "pass", evidence: "ok" }],
+        issues: [],
+        recommendedFixes: []
+      }
+    }
+    if (label.startsWith("对抗复核")) return { refutations: [] }
+    if (label === "终审命令核对")
+      return {
+        summary: "ok",
+        commands: [{ command: "mvn test", passed: true, evidence: "BUILD SUCCESS" }]
+      }
+    throw new Error("未知 label: " + label)
+  }
+  const env = makeEnv({ files, agentBehavior: behavior, logs })
+  const r = await runScript(
+    env.agent,
+    env.parallel,
+    env.phase,
+    env.log,
+    "契约测试需求targetFiles条件回带",
+    env.glob,
+    env.readFile,
+    env.writeFile
+  )
+  const noChangeVerify = verifyPrompts.find((p) => p.includes("pkg-nochange"))
+  const changedVerify = verifyPrompts.find((p) => p.includes("pkg-changed"))
+  console.log(
+    "零变更包验证拿回目标文件线索:",
+    noChangeVerify && noChangeVerify.includes("目标文件") && noChangeVerify.includes("src/T.java")
+      ? "PASS"
+      : "FAIL"
+  )
+  console.log(
+    "有变更包验证不带目标文件(维持瘦身):",
+    changedVerify && !changedVerify.includes("目标文件") ? "PASS" : "FAIL"
+  )
+  console.log("场景可交付:", r.状态 === "可交付" ? "PASS" : "FAIL " + r.状态)
+}
+
 ;(async () => {
   await scenario1()
   await scenario3()
@@ -1102,6 +1298,8 @@ async function scenario15() {
   await scenario10()
   await scenario14()
   await scenario15()
+  await scenario16()
+  await scenario17()
 })()
   .catch((e) => {
     console.error("DRYRUN ERROR:", e)
