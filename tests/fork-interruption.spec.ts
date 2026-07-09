@@ -130,6 +130,36 @@ async function testMessageForkStateIsScopedToActiveThread(): Promise<void> {
   )
 }
 
+async function testMessageForkThreadSwitchBoundaries(): Promise<void> {
+  const source = await readProjectFile("src/renderer/src/components/chat/ChatContainer.tsx")
+
+  assert.match(
+    source,
+    /const sourceThreadId = threadId[\s\S]*resolveForkCheckpointForMessage\(\{[\s\S]*threadId: sourceThreadId/,
+    "message fork should capture the source thread before awaiting checkpoint resolution"
+  )
+  assert.match(
+    source,
+    /finally \{[\s\S]*if \(messageForkRequestIdRef\.current === requestId\) \{[\s\S]*setForkingMessageId\(null\)/,
+    "stale message-fork requests must not clear the active thread's spinner in finally"
+  )
+  assert.match(
+    source,
+    /const resetMessageForkDialog = useCallback\(\(\): void => \{[\s\S]*messageForkRequestIdRef\.current \+= 1[\s\S]*setForkDestinationMode\("local"\)[\s\S]*setForkWorkspacePath\(null\)[\s\S]*setSelectingForkWorkspace\(false\)/,
+    "manual message-fork reset should invalidate in-flight work and clear workspace selection state"
+  )
+  assert.match(
+    source,
+    /useEffect\(\(\) => \{[\s\S]*messageForkRequestIdRef\.current \+= 1[\s\S]*setMessageForkTarget\(null\)[\s\S]*setForkingMessageId\(null\)[\s\S]*setForkDestinationMode\("local"\)[\s\S]*setForkWorkspacePath\(null\)[\s\S]*setSelectingForkWorkspace\(false\)[\s\S]*\}, \[threadId\]\)/,
+    "thread switches should invalidate fork dialogs, spinners, destination mode, and workspace picker state"
+  )
+  assert.match(
+    source,
+    /messageForkTarget\.sourceThreadId !== currentThreadIdRef\.current[\s\S]*resetMessageForkDialog\(\)[\s\S]*sourceThreadId: messageForkTarget\.sourceThreadId/,
+    "confirming fork should reject stale dialogs before using the captured source thread id"
+  )
+}
+
 async function testStoppedStreamSyncsDurableTranscript(): Promise<void> {
   const source = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
 
@@ -162,6 +192,36 @@ async function testStoppedStreamSyncsDurableTranscript(): Promise<void> {
     source,
     /if \(wasLoading \|\| options\.finalizeCachedSnapshot\) \{[\s\S]*syncPersistedThreadMessagesAfterStreamStop\(threadId, data\.messages\)/,
     "durable sync should run when a normal or cached stream stops"
+  )
+}
+
+async function testDurableSyncThreadLifecycleBoundaries(): Promise<void> {
+  const source = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
+  const lifecycleChecks = source.match(/initializedThreadsRef\.current\.has\(threadId\)/g)?.length ?? 0
+
+  assert(
+    lifecycleChecks >= 4,
+    "durable transcript sync should repeatedly verify the thread is still initialized"
+  )
+  assert.match(
+    source,
+    /for \(const delayMs of \[50, 350\]\)[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\] !== seq[\s\S]*window\.api\.threads\.getMessages\(threadId\)[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\] !== seq/,
+    "durable transcript sync should fence both before and after async DB reads"
+  )
+  assert.match(
+    source,
+    /setThreadStates\(\(prev\) => \{[\s\S]*initializedThreadsRef\.current\.has\(threadId\)[\s\S]*streamDataRef\.current\[threadId\]\?\.isLoading[\s\S]*return prev/,
+    "durable transcript sync should re-check lifecycle and loading state inside the state update"
+  )
+  assert.match(
+    source,
+    /if \(data\.isLoading && !wasLoading\) \{[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\]/,
+    "starting a new stream on the same thread should cancel stale durable transcript syncs"
+  )
+  assert.match(
+    source,
+    /delete durableTranscriptSyncSeqRef\.current\[threadId\]/,
+    "thread cleanup should drop durable transcript sync sequence state"
   )
 }
 
@@ -200,7 +260,9 @@ async function main(): Promise<void> {
   await testForkabilityAllowsInterruptedPendingWritesOnly()
   await testForkWaitsForAbortingRunToSettle()
   await testMessageForkStateIsScopedToActiveThread()
+  await testMessageForkThreadSwitchBoundaries()
   await testStoppedStreamSyncsDurableTranscript()
+  await testDurableSyncThreadLifecycleBoundaries()
   await testTerminalAndCancelledRunsFlushDurableTranscript()
   console.log("fork interruption regression tests passed")
 }
