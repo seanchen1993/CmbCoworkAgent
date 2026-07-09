@@ -66,6 +66,17 @@ function createRepo(prefix: string): string {
   return repo
 }
 
+function createNestedRepo(workspacePrefix: string, repoName: string): { workspace: string; repo: string } {
+  const workspace = mkdtempSync(join(tmpdir(), workspacePrefix))
+  roots.push(workspace)
+  const repo = join(workspace, repoName)
+  mkdirSync(repo, { recursive: true })
+  gitIn(repo, ["init", "-q"])
+  gitIn(repo, ["config", "user.email", "t@t"])
+  gitIn(repo, ["config", "user.name", "t"])
+  return { workspace, repo }
+}
+
 function commitFile(repo: string, filePath: string, content: string): void {
   const absPath = join(repo, filePath)
   mkdirSync(join(absPath, ".."), { recursive: true })
@@ -86,12 +97,24 @@ function createRejectHandler(): Handler {
   return handler
 }
 
-async function rejectChanges(repo: string, filePaths?: string[]): Promise<{ success: boolean; error?: string }> {
+async function rejectChanges(params: {
+  workspacePath: string
+  worktreePath?: string
+  filePaths?: string[]
+  metadataFilePaths?: string[]
+}): Promise<{ success: boolean; error?: string; revertedFileCount?: number }> {
+  const {
+    workspacePath,
+    worktreePath = workspacePath,
+    filePaths,
+    metadataFilePaths = filePaths
+  } = params
+  const trackedPaths = metadataFilePaths ?? ["tracked.txt", "deleted.txt", "staged-new.txt", "fresh.txt"]
   dbMock.setMetadata({
-    workspacePath: repo,
-    llmModifiedFiles: filePaths ?? ["tracked.txt", "deleted.txt", "staged-new.txt", "fresh.txt"],
+    workspacePath,
+    llmModifiedFiles: trackedPaths,
     llmFileHistory: Object.fromEntries(
-      (filePaths ?? ["tracked.txt", "deleted.txt", "staged-new.txt", "fresh.txt"]).map((filePath) => [
+      trackedPaths.map((filePath) => [
         filePath,
         [{ exists: true, content: "previous\n" }]
       ])
@@ -103,8 +126,8 @@ async function rejectChanges(repo: string, filePaths?: string[]): Promise<{ succ
   return await handler(null, {
     threadId: "thread-test",
     filePaths,
-    options: { worktreePath: repo }
-  }) as { success: boolean; error?: string }
+    options: { worktreePath }
+  }) as { success: boolean; error?: string; revertedFileCount?: number }
 }
 
 afterEach(() => {
@@ -126,12 +149,10 @@ describe("git panel reject handlers", () => {
     gitIn(repo, ["add", "staged-new.txt"])
     writeFileSync(join(repo, "fresh.txt"), "fresh\n")
 
-    const result = await rejectChanges(repo, [
-      "tracked.txt",
-      "deleted.txt",
-      "staged-new.txt",
-      "fresh.txt"
-    ])
+    const result = await rejectChanges({
+      workspacePath: repo,
+      filePaths: ["tracked.txt", "deleted.txt", "staged-new.txt", "fresh.txt"]
+    })
 
     expect(result).toMatchObject({ success: true })
     expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("base\n")
@@ -159,7 +180,10 @@ describe("git panel reject handlers", () => {
     mkdirSync(join(repo, "dst"), { recursive: true })
     gitIn(repo, ["mv", "src/old.txt", "dst/new.txt"])
 
-    const result = await rejectChanges(repo, ["src/old.txt", "dst/new.txt"])
+    const result = await rejectChanges({
+      workspacePath: repo,
+      filePaths: ["src/old.txt", "dst/new.txt"]
+    })
 
     expect(result).toMatchObject({ success: true })
     expect(readFileSync(join(repo, "src/old.txt"), "utf-8")).toBe("base\n")
@@ -173,5 +197,52 @@ describe("git panel reject handlers", () => {
       "dst/new.txt",
       "src/old.txt"
     ].sort())
+  })
+
+  it("accepts workspace-relative paths when rejecting changes inside a nested repo", async () => {
+    const { workspace, repo } = createNestedRepo("gitpanel-reject-workspace-", "OSA_Monitor")
+    commitFile(repo, "src/layout/components/Sidebar/Logo.vue", "<template>base</template>\n")
+
+    writeFileSync(
+      join(repo, "src/layout/components/Sidebar/Logo.vue"),
+      "<template>changed</template>\n"
+    )
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    try {
+      const result = await rejectChanges({
+        workspacePath: workspace,
+        worktreePath: repo,
+        filePaths: ["OSA_Monitor/src/layout/components/Sidebar/Logo.vue"],
+        metadataFilePaths: ["OSA_Monitor/src/layout/components/Sidebar/Logo.vue"]
+      })
+
+      expect(result).toMatchObject({ success: true, revertedFileCount: 1 })
+      expect(readFileSync(join(repo, "src/layout/components/Sidebar/Logo.vue"), "utf-8")).toBe(
+        "<template>base</template>\n"
+      )
+      expect(gitIn(repo, ["status", "--porcelain", "--untracked-files=all"])).toBe("")
+
+      const metadata = dbMock.getMetadata()
+      expect(metadata.llmModifiedFiles).toEqual([])
+      expect(metadata.llmFileHistory).toEqual({})
+      expect(metadata.llmRecentlyRevertedFiles).toEqual([
+        "OSA_Monitor/src/layout/components/Sidebar/Logo.vue"
+      ])
+
+      const execLogs = [
+        ...logSpy.mock.calls.flat(),
+        ...warnSpy.mock.calls.flat(),
+        ...errorSpy.mock.calls.flat()
+      ].filter((value): value is string => typeof value === "string" && value.includes("[GitPanel][exec]"))
+      expect(execLogs).toEqual([])
+    } finally {
+      logSpy.mockRestore()
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
   })
 })

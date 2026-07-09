@@ -163,6 +163,21 @@ function metadataPathToWorktreeRelativePaths(
   return Array.from(candidates)
 }
 
+function explicitPathToWorktreeRelativePaths(
+  workspacePath: string,
+  worktreePath: string,
+  rawPath: string
+): string[] {
+  const candidates = new Set<string>()
+  for (const rel of toWorktreeRelativePath(worktreePath, rawPath)) {
+    candidates.add(rel)
+  }
+  for (const rel of metadataPathToWorktreeRelativePaths(workspacePath, worktreePath, rawPath)) {
+    candidates.add(rel)
+  }
+  return Array.from(candidates)
+}
+
 function getWorkspaceRelativePathForWorktreeFile(
   workspacePath: string,
   worktreePath: string,
@@ -269,8 +284,13 @@ function formatGitCommand(worktreePath: string, args: string[]): string {
   return `git -C ${quoteArg(worktreePath)} ${args.map((arg) => quoteArg(arg)).join(" ")}`
 }
 
-async function addSafeDirectory(worktreePath: string): Promise<void> {
-  console.log(`[GitPanel][exec] git config --global --add safe.directory ${quoteArg(worktreePath)}`)
+async function addSafeDirectory(
+  worktreePath: string,
+  options?: { silent?: boolean }
+): Promise<void> {
+  if (!options?.silent) {
+    console.log(`[GitPanel][exec] git config --global --add safe.directory ${quoteArg(worktreePath)}`)
+  }
   await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath], {
     ...GIT_SPAWN_OPTIONS
   })
@@ -301,7 +321,7 @@ async function runGit(
       throw error
     }
     if (!silent) console.warn(`[GitPanel][exec][retry-safe-directory] ${command}`)
-    await addSafeDirectory(worktreePath)
+    await addSafeDirectory(worktreePath, { silent })
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
       timeout: options?.timeoutMs,
@@ -538,7 +558,8 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
     await runGitWithChunkedLiteralPathspecs(
       worktreePath,
       ["restore", "--source", "HEAD", "--staged", "--worktree"],
-      paths
+      paths,
+      { silent: true }
     )
     return
   } catch (error) {
@@ -553,16 +574,28 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
     if (!isGitRestoreUnsupportedError(error)) throw error
   }
 
-  await runGitWithChunkedLiteralPathspecs(worktreePath, ["reset", "HEAD"], paths).catch(() => {})
-  await runGitWithChunkedLiteralPathspecs(worktreePath, ["checkout"], paths).catch(async (error) => {
+  await runGitWithChunkedLiteralPathspecs(
+    worktreePath,
+    ["reset", "HEAD"],
+    paths,
+    { silent: true }
+  ).catch(() => {})
+  await runGitWithChunkedLiteralPathspecs(
+    worktreePath,
+    ["checkout"],
+    paths,
+    { silent: true }
+  ).catch(async (error) => {
     if (!isPathspecNoMatchError(error) || paths.length <= 1) {
       if (!isPathspecNoMatchError(error)) throw error
       return
     }
     for (const targetPath of paths) {
-      await runGit(worktreePath, ["checkout", "--", targetPath]).catch((singleError) => {
-        if (!isPathspecNoMatchError(singleError)) throw singleError
-      })
+      await runGit(worktreePath, ["checkout", "--", targetPath], { silent: true }).catch(
+        (singleError) => {
+          if (!isPathspecNoMatchError(singleError)) throw singleError
+        }
+      )
     }
   })
 }
@@ -570,7 +603,12 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
 async function resetPathsFromIndex(worktreePath: string, targetPaths: string[]): Promise<void> {
   const paths = normalizeGitPathspecList(targetPaths)
   if (paths.length === 0) return
-  await runGitWithChunkedLiteralPathspecs(worktreePath, ["reset", "HEAD"], paths).catch(() => {})
+  await runGitWithChunkedLiteralPathspecs(
+    worktreePath,
+    ["reset", "HEAD"],
+    paths,
+    { silent: true }
+  ).catch(() => {})
 }
 
 async function runWithConcurrency<T>(
@@ -595,7 +633,12 @@ async function cleanUntrackedPaths(worktreePath: string, targetPaths: string[]):
   const paths = normalizeGitPathspecList(targetPaths)
   if (paths.length === 0) return
   let gitCleanError: unknown = null
-  await runGitWithChunkedLiteralPathspecs(worktreePath, ["clean", "-f"], paths).catch((error) => {
+  await runGitWithChunkedLiteralPathspecs(
+    worktreePath,
+    ["clean", "-f"],
+    paths,
+    { silent: true }
+  ).catch((error) => {
     if (isPathspecNoMatchError(error)) return
     gitCleanError = error
   })
@@ -735,7 +778,9 @@ async function rejectWorktreePaths(params: {
   const targetPaths = hasExplicitSelection
     ? Array.from(
         new Set(
-          (filePaths || []).flatMap((filePath) => toWorktreeRelativePath(worktreePath, filePath))
+          (filePaths || []).flatMap((filePath) =>
+            explicitPathToWorktreeRelativePaths(context.workspacePath, worktreePath, filePath)
+          )
         )
       )
     : ["."]
