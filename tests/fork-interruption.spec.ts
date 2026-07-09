@@ -100,11 +100,108 @@ async function testForkWaitsForAbortingRunToSettle(): Promise<void> {
   )
 }
 
+async function testMessageForkStateIsScopedToActiveThread(): Promise<void> {
+  const source = await readProjectFile("src/renderer/src/components/chat/ChatContainer.tsx")
+
+  assert.match(
+    source,
+    /const currentThreadIdRef = useRef\(threadId\)[\s\S]*currentThreadIdRef\.current = threadId/,
+    "message fork confirmation should track the active rendered thread id"
+  )
+  assert.match(
+    source,
+    /const messageForkRequestIdRef = useRef\(0\)/,
+    "message fork checkpoint resolution should be cancelable when the thread changes"
+  )
+  assert.match(
+    source,
+    /useEffect\(\(\) => \{[\s\S]*messageForkRequestIdRef\.current \+= 1[\s\S]*setMessageForkTarget\(null\)[\s\S]*setForkingMessageId\(null\)[\s\S]*\}, \[threadId\]\)/,
+    "switching threads must discard stale message fork dialogs and in-flight spinners"
+  )
+  assert.match(
+    source,
+    /messageForkRequestIdRef\.current !== requestId \|\|[\s\S]*currentThreadIdRef\.current !== sourceThreadId/,
+    "stale async message-fork checkpoint responses must be ignored after navigation"
+  )
+  assert.match(
+    source,
+    /messageForkTarget\.sourceThreadId !== currentThreadIdRef\.current[\s\S]*当前会话已切换，请回到目标会话后重新点击 fork/,
+    "confirming a stale message fork dialog must not fork a previous thread"
+  )
+}
+
+async function testStoppedStreamSyncsDurableTranscript(): Promise<void> {
+  const source = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
+
+  assert.match(
+    source,
+    /syncPersistedThreadMessagesAfterStreamStop[\s\S]*window\.api\.threads\.getMessages\(threadId\)/,
+    "stopped streams should reconcile the UI transcript with durable thread_messages"
+  )
+  assert.match(
+    source,
+    /for \(const delayMs of \[50, 350\]\)/,
+    "stopped stream durable sync should retry after the main-process terminal flush window"
+  )
+  assert.match(
+    source,
+    /syncPersistedThreadMessagesAfterStreamStop[\s\S]*streamDataRef\.current\[threadId\]\?\.isLoading[\s\S]*return/,
+    "durable sync must not overwrite a new in-flight run"
+  )
+  assert.match(
+    source,
+    /if \(data\.isLoading && !wasLoading\) \{[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\]/,
+    "starting a new stream should cancel any delayed durable transcript sync from the previous turn"
+  )
+  assert.match(
+    source,
+    /reconcileMessageDisplayOrder\(merged, liveOrderHint\)/,
+    "durable sync must use the final stream snapshot to avoid appending late tool calls after final answers"
+  )
+  assert.match(
+    source,
+    /if \(wasLoading \|\| options\.finalizeCachedSnapshot\) \{[\s\S]*syncPersistedThreadMessagesAfterStreamStop\(threadId, data\.messages\)/,
+    "durable sync should run when a normal or cached stream stops"
+  )
+}
+
+async function testTerminalAndCancelledRunsFlushDurableTranscript(): Promise<void> {
+  const source = await readProjectFile("src/main/ipc/agent.ts")
+
+  assert.match(
+    source,
+    /function isTerminalStreamPayload[\s\S]*type === "done"[\s\S]*type === "error"/,
+    "terminal stream payload detection must include errors, not only normal done events"
+  )
+  assert.match(
+    source,
+    /function safeSendToWindow[\s\S]*isTerminalStreamPayload\(payload\)[\s\S]*flushPendingStreamTranscriptMessages\(threadId\)/,
+    "terminal stream events should flush pending durable transcript before renderer sync can read it"
+  )
+  assert.match(
+    source,
+    /controller\.abort\(\)[\s\S]{0,240}flushPendingStreamTranscriptMessages\(threadId\)/,
+    "user cancellation should flush already queued transcript chunks immediately after aborting"
+  )
+
+  const cleanupFlushes =
+    source.match(
+      /flushPendingStreamTranscriptMessages\(threadId\)[\s\S]{0,900}resolve(?:Active|Resume|Interrupt)RunSettled\(\)/g
+    )?.length ?? 0
+  assert(
+    cleanupFlushes >= 3,
+    "invoke, resume, and interrupt finally cleanup should flush transcript before marking the run settled"
+  )
+}
+
 async function main(): Promise<void> {
   await testAbortPathsMarkStableForkBoundary()
   await testAssistantActionsRenderAfterTools()
   await testForkabilityAllowsInterruptedPendingWritesOnly()
   await testForkWaitsForAbortingRunToSettle()
+  await testMessageForkStateIsScopedToActiveThread()
+  await testStoppedStreamSyncsDurableTranscript()
+  await testTerminalAndCancelledRunsFlushDurableTranscript()
   console.log("fork interruption regression tests passed")
 }
 

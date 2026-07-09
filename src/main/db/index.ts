@@ -21,7 +21,12 @@ let dirty = false
 let savePromise: Promise<void> | null = null
 let flushPromise: Promise<unknown | null> | null = null
 let blockAsyncWrite = false
-const threadMessageIdAliases = new Map<string, Map<string, string>>()
+type ThreadMessageRole = Message["role"]
+interface ThreadMessageIdAlias {
+  toId: string
+  role?: ThreadMessageRole
+}
+const threadMessageIdAliases = new Map<string, Map<string, ThreadMessageIdAlias>>()
 
 // Debounce window for background saves. sql.js holds the whole DB in memory and
 // db.export() snapshots it on the main thread (~1-2ms); coalescing bursts keeps
@@ -694,40 +699,51 @@ function coalesceNormalizedThreadMessages(
   return merged
 }
 
-function resolveThreadMessageIdAlias(threadId: string, messageId: string): string {
+function resolveThreadMessageIdAliasEntry(
+  threadId: string,
+  messageId: string
+): { id: string; role?: ThreadMessageRole } {
   const aliases = threadMessageIdAliases.get(threadId)
-  if (!aliases) return messageId
+  if (!aliases) return { id: messageId }
 
   let current = messageId
+  let role: ThreadMessageRole | undefined
   const visited = new Set<string>()
-  while (!visited.has(current)) {
+  while (true) {
+    if (visited.has(current)) {
+      // 检测到循环引用，记录警告以便调试
+      console.warn(
+        `[DB] Circular alias detected for thread ${threadId}: ${Array.from(visited).join(" -> ")}`
+      )
+      break
+    }
     visited.add(current)
     const next = aliases.get(current)
-    if (!next || next === current) break
-    current = next
+    if (!next || next.toId === current) break
+    role = role ?? next.role
+    current = next.toId
   }
-  if (visited.has(current) && aliases.has(current)) {
-    // 检测到循环引用，记录警告以便调试
-    console.warn(
-      `[DB] Circular alias detected for thread ${threadId}: ${Array.from(visited).join(" -> ")}`
-    )
-  }
-  return current
+  return { id: current, role }
 }
 
-function rememberThreadMessageIdAlias(threadId: string, fromId: string, toId: string): void {
+function rememberThreadMessageIdAlias(
+  threadId: string,
+  fromId: string,
+  toId: string,
+  role?: ThreadMessageRole
+): void {
   let aliases = threadMessageIdAliases.get(threadId)
   if (!aliases) {
-    aliases = new Map<string, string>()
+    aliases = new Map<string, ThreadMessageIdAlias>()
     threadMessageIdAliases.set(threadId, aliases)
   }
-  aliases.set(fromId, toId)
+  aliases.set(fromId, { toId, ...(role ? { role } : {}) })
   while (aliases.size > THREAD_MESSAGE_ALIAS_LIMIT) {
     const oldestId = aliases.keys().next().value
     if (typeof oldestId !== "string") break
     // 检查被驱逐的键是否被其他别名引用（即是否作为值出现），
     // 如果是则跳过驱逐以避免别名链断裂。
-    const isReferencedAsValue = Array.from(aliases.values()).some((v) => v === oldestId)
+    const isReferencedAsValue = Array.from(aliases.values()).some((v) => v.toId === oldestId)
     if (isReferencedAsValue) {
       // 将该条目重新插入到末尾（LRU 风格），然后继续检查下一个最旧的条目
       const value = aliases.get(oldestId)!
@@ -737,6 +753,24 @@ function rememberThreadMessageIdAlias(threadId: string, fromId: string, toId: st
     }
     aliases.delete(oldestId)
   }
+}
+
+function findAliasSourceForCanonicalCollision(
+  threadId: string,
+  targetId: string,
+  existingRole: ThreadMessageRole
+): string | null {
+  const aliases = threadMessageIdAliases.get(threadId)
+  if (!aliases) return null
+
+  for (const [fromId] of aliases) {
+    if (fromId === targetId) continue
+    const resolved = resolveThreadMessageIdAliasEntry(threadId, fromId)
+    if (resolved.id !== targetId) continue
+    if (resolved.role && resolved.role !== existingRole) continue
+    return fromId
+  }
+  return null
 }
 
 function threadMessageRowToMessage(row: ThreadMessageRow): Message {
@@ -888,11 +922,50 @@ export function upsertThreadMessages(
   const database = getDb()
   if (!getThread(threadId)) return 0
 
-  const aliasedMessages = messages.map((message) => {
+  const aliasCandidates = messages.map((message) => {
     const messageId = typeof message.id === "string" ? message.id.trim() : ""
-    if (!messageId) return message
-    const canonicalId = resolveThreadMessageIdAlias(threadId, messageId)
-    return canonicalId === messageId ? message : { ...message, id: canonicalId }
+    if (!messageId) return { message, messageId, canonicalId: "", aliasRole: undefined }
+    const resolved = resolveThreadMessageIdAliasEntry(threadId, messageId)
+    return { message, messageId, canonicalId: resolved.id, aliasRole: resolved.role }
+  })
+  const incomingRoleById = new Map<string, Message["role"]>()
+  for (const { message, messageId } of aliasCandidates) {
+    if (messageId && isMessageRole(message.role)) incomingRoleById.set(messageId, message.role)
+  }
+  const aliasTargetRows = getThreadMessageRows(
+    database,
+    threadId,
+    aliasCandidates
+      .filter((candidate) => candidate.canonicalId && candidate.canonicalId !== candidate.messageId)
+      .map((candidate) => candidate.canonicalId)
+  )
+  const aliasedMessages = aliasCandidates.map(({ message, messageId, canonicalId, aliasRole }) => {
+    if (!messageId || !canonicalId || canonicalId === messageId) return message
+    const target = aliasTargetRows.get(canonicalId)
+    const sameBatchTargetRole = incomingRoleById.get(canonicalId)
+    if (sameBatchTargetRole && isMessageRole(message.role) && sameBatchTargetRole !== message.role) {
+      console.warn(
+        `[DB] Ignoring message id alias across same-batch roles for thread ${threadId}: ` +
+          `${messageId} (${message.role}) -> ${canonicalId} (${sameBatchTargetRole})`
+      )
+      return message
+    }
+    if (target && isMessageRole(message.role) && target.role !== message.role) {
+      console.warn(
+        `[DB] Ignoring message id alias across roles for thread ${threadId}: ` +
+          `${messageId} (${message.role}) -> ${canonicalId} (${target.role})`
+      )
+      return message
+    }
+    if (!target && aliasRole && isMessageRole(message.role) && aliasRole !== message.role) {
+      console.warn(
+        `[DB] Ignoring message id alias with mismatched expected role for thread ${threadId}: ` +
+          `${messageId} (${message.role}) -> ${canonicalId} (${aliasRole})`
+      )
+      return message
+    }
+    if (!target && !aliasRole) return message
+    return { ...message, id: canonicalId }
   })
   const normalizedMessages = coalesceNormalizedThreadMessages(aliasedMessages, Date.now())
   if (normalizedMessages.length === 0) return 0
@@ -911,7 +984,33 @@ export function upsertThreadMessages(
       const createdAt = normalizeTimestamp(normalized.created_at, Date.now()) ?? Date.now()
       const startAt = normalizeTimestamp(normalized.start_at)
       const endAt = normalizeTimestamp(normalized.end_at)
-      const existing = existingRows.get(normalized.id)
+      let existing = existingRows.get(normalized.id)
+      if (existing && existing.role !== normalized.role) {
+        const aliasSourceId = findAliasSourceForCanonicalCollision(
+          threadId,
+          normalized.id,
+          existing.role
+        )
+        if (aliasSourceId) {
+          const sourceRows = getThreadMessageRows(database, threadId, [aliasSourceId])
+          if (!sourceRows.has(aliasSourceId)) {
+            database.run(
+              "UPDATE thread_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
+              [aliasSourceId, threadId, normalized.id]
+            )
+            existingRows.delete(normalized.id)
+            existing = undefined
+            changed++
+          }
+        }
+      }
+      if (existing && existing.role !== normalized.role) {
+        console.warn(
+          `[DB] Refusing to update message row across roles for thread ${threadId}: ` +
+            `${normalized.id} (${existing.role}) <- ${normalized.role}`
+        )
+        continue
+      }
 
       const existingContent = existing ? parseMessageContent(existing.content_json) : ""
       const existingToolCalls = existing ? parseToolCalls(existing.tool_calls_json) : undefined
@@ -1020,7 +1119,8 @@ export function upsertThreadMessages(
 export function replaceThreadMessageId(
   threadId: string,
   fromMessageId: string,
-  toMessageId: string
+  toMessageId: string,
+  role?: ThreadMessageRole
 ): boolean {
   // 注意：调用方传入的 ID 可能包含前后空格，此处统一 trim。
   // upsertThreadMessages 在写入时也会 trim message.id，因此数据库中存储的 ID 均为 trim 后的值。
@@ -1029,14 +1129,30 @@ export function replaceThreadMessageId(
   const requestedToId = toMessageId.trim()
   if (!requestedFromId || !requestedToId || requestedFromId === requestedToId) return false
 
-  const fromId = resolveThreadMessageIdAlias(threadId, requestedFromId)
-  const toId = resolveThreadMessageIdAlias(threadId, requestedToId)
+  const fromAlias = resolveThreadMessageIdAliasEntry(threadId, requestedFromId)
+  const toAlias = resolveThreadMessageIdAliasEntry(threadId, requestedToId)
+  const fromId = fromAlias.id
+  const toId = toAlias.id
   if (fromId === toId) return true
 
   const database = getDb()
   const rows = getThreadMessageRows(database, threadId, [fromId, toId])
   const source = rows.get(fromId)
   const target = rows.get(toId)
+  if (role && source && source.role !== role) {
+    console.warn(
+      `[DB] Refusing to remember message id alias with mismatched source role for thread ${threadId}: ` +
+        `${fromId} (${source.role}) -> ${toId} (${role})`
+    )
+    return false
+  }
+  if (role && target && target.role !== role && !source) {
+    console.warn(
+      `[DB] Refusing to remember message id alias with mismatched target role for thread ${threadId}: ` +
+        `${fromId} (${role}) -> ${toId} (${target.role})`
+    )
+    return false
+  }
   if (source && target && source.role !== target.role) {
     console.warn(
       `[DB] Refusing to merge message id alias across roles for thread ${threadId}: ` +
@@ -1045,9 +1161,10 @@ export function replaceThreadMessageId(
     return false
   }
 
-  rememberThreadMessageIdAlias(threadId, requestedFromId, toId)
+  const aliasRole = source?.role ?? target?.role ?? role ?? fromAlias.role ?? toAlias.role
+  rememberThreadMessageIdAlias(threadId, requestedFromId, toId, aliasRole)
   if (fromId !== requestedFromId) {
-    rememberThreadMessageIdAlias(threadId, fromId, toId)
+    rememberThreadMessageIdAlias(threadId, fromId, toId, aliasRole)
   }
   if (!source) return true
 

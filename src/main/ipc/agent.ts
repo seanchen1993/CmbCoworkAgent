@@ -1612,17 +1612,19 @@ function threadIdFromAgentStreamChannel(channel: string): string | null {
   return threadId || null
 }
 
-function isDonePayload(payload: unknown): boolean {
+function isTerminalStreamPayload(payload: unknown): boolean {
+  const type =
+    !!payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as { type?: unknown }).type
+      : undefined
   return (
-    !!payload &&
-    typeof payload === "object" &&
-    !Array.isArray(payload) &&
-    (payload as { type?: unknown }).type === "done"
+    type === "done" ||
+    type === "error"
   )
 }
 
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
-  if (isDonePayload(payload)) {
+  if (isTerminalStreamPayload(payload)) {
     const threadId = threadIdFromAgentStreamChannel(channel)
     if (threadId) flushPendingStreamTranscriptMessages(threadId)
   }
@@ -7162,6 +7164,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             updateThread(threadId, { metadata: JSON.stringify(metadata) })
           }
         }
+        flushPendingStreamTranscriptMessages(threadId)
         const currentController = activeRuns.get(threadId)
         const replacedByNewRun = Boolean(currentController && currentController !== abortController)
         if (currentController === abortController) {
@@ -7981,6 +7984,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             updateThread(threadId, { metadata: JSON.stringify(metadata) })
           }
         }
+        flushPendingStreamTranscriptMessages(threadId)
         const currentController = activeRuns.get(threadId)
         const replacedByNewRun = Boolean(currentController && currentController !== abortController)
         if (currentController === abortController) {
@@ -8751,6 +8755,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           updateThread(threadId, { metadata: JSON.stringify(metadata) })
         }
       }
+      flushPendingStreamTranscriptMessages(threadId)
       const currentController = activeRuns.get(threadId)
       const replacedByNewRun = Boolean(currentController && currentController !== abortController)
       if (currentController === abortController) {
@@ -8836,6 +8841,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // entrypoint with cancelWorkers=true and must not abort the foreground turn.
           LocalSandbox.cancelBackgroundTasks(threadId)
           controller.abort()
+          flushPendingStreamTranscriptMessages(threadId)
           // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
           // A user can cancel and immediately send another message; the next invoke must wait
           // for checkpoint/sandbox cleanup before opening a replacement stream.
