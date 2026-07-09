@@ -142,12 +142,16 @@ export function McpPanel(): React.JSX.Element {
     }
   }, [])
 
-  const handleMcpAddSuccess = useCallback(async () => {
+  const handleMcpAddSuccess = useCallback(async (preferredConnectorName?: string) => {
     try {
       const updated = await window.api.mcp.list()
       setMcpConnectors(updated)
       setSelectedMcpConnector((prev) => {
-        if (!prev) return null
+        if (preferredConnectorName) {
+          const preferred = updated.find((c) => c.name === preferredConnectorName)
+          if (preferred) return preferred
+        }
+        if (!prev) return updated[0] ?? null
         return updated.find((c) => c.id === prev.id) ?? null
       })
     } catch (e) {

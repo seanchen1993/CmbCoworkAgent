@@ -37,6 +37,7 @@ import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
 import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
+import { normalizeSkillSourceRefs } from "../utils/skill-source"
 import { extractShellFileOps } from "../agent/exec-policy"
 import { trackEvent } from "./event-reporter"
 import {
@@ -181,6 +182,8 @@ export interface AdoptionContext {
    * `primarySkill` field has been removed because it was merely `usedSkills[0]`).
    */
   usedSkills?: string[]
+  /** Source refs for plugin-owned usedSkills, format: "plugin:<pluginId>/<skillIdentifier>". */
+  skillSource?: string[]
   /**
    * Harness Board attribution (project-mode conversations only). Carried onto
    * the emitted code_gen/code_adopt events so the dashboard can slice adoption
@@ -568,6 +571,24 @@ function normalizeUsedSkills(skills: unknown): string[] {
   return Array.from(normalized)
 }
 
+function parseStoredSkills(value: string | null): string[] {
+  if (!value) return []
+  try {
+    return normalizeUsedSkills(JSON.parse(value) as unknown)
+  } catch {
+    return []
+  }
+}
+
+function parseStoredSkillSource(value: string | null, usedSkills: string[]): string[] {
+  if (!value) return []
+  try {
+    return normalizeSkillSourceRefs(JSON.parse(value) as unknown, usedSkills)
+  } catch {
+    return []
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // Context (set by TraceCollector during agent lifecycle)
 // ─────────────────────────────────────────────────────────
@@ -857,6 +878,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
     const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+    const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
     insertGenEvent({
       event_id: eventId,
       file_path: absPath,
@@ -869,6 +891,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       measured: 0,
       tool: input.tool,
       used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
+      skill_source: skillSource.length > 0 ? JSON.stringify(skillSource) : null,
       thread_id: input.threadId || null,
       trace_id: ctx.traceId ?? null,
       model_id: ctx.modelId ?? null,
@@ -893,6 +916,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       lineCount: reportedLineCount,
       deletedLineCount,
       usedSkills,
+      ...(skillSource.length > 0 ? { skillSource } : {}),
       modelId: ctx.modelId ?? null,
       modelName: ctx.modelName ?? null,
       harnessProjectId: ctx.harnessProjectId ?? null,
@@ -932,6 +956,7 @@ function emitSkippedLargeAtGen(args: {
   const language = extname(absPath).slice(1).toLowerCase() || null
   const deletedLineCount = deriveDeletedLineCount(input)
   const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+  const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
 
   // L1 — record that the agent generated code (metadata only, no path/content)
   trackEvent("code_gen", "code_adoption", {
@@ -945,6 +970,7 @@ function emitSkippedLargeAtGen(args: {
     lineCount,
     deletedLineCount,
     usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
@@ -977,6 +1003,7 @@ function emitSkippedLargeAtGen(args: {
     // ES can aggregate adoption rates (including the skipped_large bucket)
     // uniformly — otherwise these rows look like they have no skill.
     usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
@@ -1062,14 +1089,8 @@ async function emitSupersededAdopt(
     commitSha
   })
 
-  let usedSkills: string[] = []
-  if (pending.used_skills) {
-    try {
-      usedSkills = normalizeUsedSkills(JSON.parse(pending.used_skills) as unknown)
-    } catch {
-      // corrupt row — treat as no skill attribution
-    }
-  }
+  const usedSkills = parseStoredSkills(pending.used_skills)
+  const skillSource = parseStoredSkillSource(pending.skill_source, usedSkills)
 
   trackEvent("code_adopt", "code_adoption", {
     schemaVersion: 1,
@@ -1088,6 +1109,7 @@ async function emitSupersededAdopt(
     measuredAt: new Date(measuredAt).toISOString(),
     commitSha,
     usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: pending.model_id ?? null,
     modelName: pending.model_name ?? null,
     harnessProjectId: pending.harness_project_id ?? null,
@@ -1245,15 +1267,8 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       // Pull attribution columns that were persisted at gen time, so cloud ES
       // can aggregate adoption rates by skill / model without a two-step join
       // against code_gen via genEventId.
-      let usedSkills: string[] = []
-      if (pending.used_skills) {
-        try {
-          const parsed = JSON.parse(pending.used_skills) as unknown
-          usedSkills = normalizeUsedSkills(parsed)
-        } catch {
-          // corrupt row — treat as no skill attribution
-        }
-      }
+      const usedSkills = parseStoredSkills(pending.used_skills)
+      const skillSource = parseStoredSkillSource(pending.skill_source, usedSkills)
 
       trackEvent("code_adopt", "code_adoption", {
         schemaVersion: 1,
@@ -1271,6 +1286,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         measuredAt: new Date(measuredAt).toISOString(),
         commitSha: opts?.commitSha ?? null,
         usedSkills,
+        ...(skillSource.length > 0 ? { skillSource } : {}),
         modelId: pending.model_id ?? null,
         modelName: pending.model_name ?? null,
         harnessProjectId: pending.harness_project_id ?? null,

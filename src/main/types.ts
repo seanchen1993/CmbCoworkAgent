@@ -1,4 +1,16 @@
 import type { HookConfig } from "./hooks/types"
+import type {
+  ForkableCheckpoint as SharedForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
+  ThreadForkOverrides as SharedThreadForkOverrides,
+  ThreadForkParams as SharedThreadForkParams,
+  ThreadForkResponse as SharedThreadForkResponse
+} from "../shared/checkpoint-forkability"
+
+export type {
+  ForkBoundarySource,
+  ForkUnstableReason
+} from "../shared/checkpoint-forkability"
 
 export type {
   AgentAutoCommitMessageStrategy,
@@ -61,6 +73,12 @@ export interface ThreadValuesMergeParams {
   threadId: string
   patch: Record<string, unknown>
 }
+
+export type ThreadForkOverrides = SharedThreadForkOverrides
+export type ThreadForkParams = SharedThreadForkParams
+export type ThreadForkResponse = SharedThreadForkResponse<Thread>
+export type ThreadForkCheckpointForMessageParams = SharedThreadForkCheckpointForMessageParams
+export type ForkableCheckpoint = SharedForkableCheckpoint
 
 // Workspace IPC
 export interface WorkspaceSetParams {
@@ -157,8 +175,17 @@ export interface Message {
   id: string
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  reasoning?: string
   tool_calls?: ToolCall[]
+  tool_call_id?: string
+  name?: string
+  status?: string
+  is_error?: boolean
+  goal_id?: string | null
+  active_window_id?: string | null
   created_at: Date
+  start_at?: Date
+  end_at?: Date
 }
 
 export interface ContentBlock {
@@ -286,6 +313,45 @@ export interface McpConnectorUpsert {
   enabled?: boolean
   advanced?: McpConnectorAdvanced
   lazyLoad?: boolean // true = lazy load tools, false/undefined = load all tools
+}
+
+export type McpImportConflict = "existing" | "duplicate"
+export type McpImportConflictStrategy = "update" | "rename" | "skip"
+
+export interface McpImportPreviewConnector {
+  name: string
+  sourceName?: string
+  kind: McpConnectorKind
+  url?: string
+  command?: string
+  args?: string[]
+  hasHeaders: boolean
+  hasEnv: boolean
+  enabled: boolean
+  lazyLoad: boolean
+  conflict?: McpImportConflict
+  existingId?: string
+}
+
+export interface McpImportPreviewResult {
+  connectors: McpImportPreviewConnector[]
+  errors: string[]
+}
+
+export interface McpImportConfigRequest {
+  rawJson: string
+  autoEnable?: boolean
+}
+
+export interface McpImportConfigApplyRequest extends McpImportConfigRequest {
+  conflictStrategy?: McpImportConflictStrategy
+}
+
+export interface McpImportApplyResult {
+  created: Array<{ id: string; name: string }>
+  updated: Array<{ id: string; name: string }>
+  skipped: Array<{ name: string; reason: string }>
+  errors: string[]
 }
 
 // Scheduled Task types

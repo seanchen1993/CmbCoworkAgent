@@ -1617,8 +1617,8 @@ test("workspace-switch/resume state-consistency: leave-while-switch orphan + res
   // OLD terminal run instead of the NEW active one (the disk re-persist may still be failing).
   assert.match(
     workflowRunManagerSource,
-    /this\.flushFailedRuns\.delete\(request\.runId\)/,
-    "launch() clears any stale flush-failed snapshot for the reused runId"
+    /this\.dropFlushFailedRun\(request\.runId\)/,
+    "launch() clears any stale flush-failed snapshot (and its disposal-epoch stamp, kept in lockstep) for the reused runId"
   )
 })
 
@@ -1983,6 +1983,11 @@ test("user-pasted V1 workflow marker is de-weaponized, not swallowed (#5)", () =
     /resembles an internal workflow marker\. Treat it as ordinary user input/,
     "the de-weaponized text is relabelled as ordinary user input"
   )
+  assert.match(
+    agentIpcSource,
+    /visibleTranscriptUserMessage = effectiveMessage/,
+    "the durable transcript stores the de-weaponized visible text, not the hidden marker"
+  )
 })
 
 test("workflow script writeFile shares the run-level write lock with subagent tool writes (#2)", () => {
@@ -2113,11 +2118,13 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
     /const recovered = workflowRunManager\.getFlushFailedRun\(runId\)[\s\S]*?return stripJournalForRenderer\(recovered\)/,
     "get-run serves the in-memory terminal snapshot"
   )
-  // ack writes the true terminal state back to disk (disk may have recovered).
+  // ack writes the true terminal state back to disk (disk may have recovered),
+  // carrying the capture-time disposal epoch so a snapshot from a deleted (then
+  // revived) incarnation is dropped instead of rebuilding the swept run dir.
   assert.match(
     workflowRunManagerSource,
-    /async recoverFlushFailedRun[\s\S]*?persistRecoveredRun\(workspacePath, threadId, snapshot\)/,
-    "recoverFlushFailedRun writes the snapshot back to disk on ack"
+    /async recoverFlushFailedRun[\s\S]*?persistRecoveredRun\(\s*workspacePath,\s*threadId,\s*snapshot,\s*this\.flushFailedEpochs\.get\(runId\)\s*\)/,
+    "recoverFlushFailedRun writes the snapshot back to disk on ack, epoch-fenced"
   )
   // The snapshot keeps the FULL journal (writing an empty one would wipe the resume
   // cache); the real behavior is covered by testPersistRecoveredRunKeepsJournal.
@@ -2148,7 +2155,7 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
   )
   assert.match(
     workflowRunManagerSource,
-    /size > MAX_FLUSH_FAILED_RUNS[\s\S]*?snap\.notificationDelivered && !this\.inFlightNotifications\.has\(id\)[\s\S]*?this\.flushFailedRuns\.delete\(id\)/,
+    /size > MAX_FLUSH_FAILED_RUNS[\s\S]*?snap\.notificationDelivered && !this\.inFlightNotifications\.has\(id\)[\s\S]*?this\.dropFlushFailedRun\(id\)/,
     "cap evicts ONLY an already-delivered, not-in-flight snapshot (never drops an unreported result)"
   )
 })
@@ -2296,7 +2303,7 @@ test("deleting a thread clears its in-memory flush-failed snapshots (#3 main-pro
   // until restart after the thread is deleted. forgetThread drops it by threadId.
   assert.match(
     workflowRunManagerSource,
-    /forgetThread\(threadId: string\): void[\s\S]*?snap\.threadId === threadId[\s\S]*?this\.flushFailedRuns\.delete\(runId\)/,
+    /forgetThread\(threadId: string\): void[\s\S]*?snap\.threadId === threadId[\s\S]*?this\.dropFlushFailedRun\(runId\)/,
     "run-manager.forgetThread drops a deleted thread's in-memory flush-failed snapshots (by threadId)"
   )
   assert.match(
@@ -2315,7 +2322,7 @@ test("flush-failed snapshot gets a real write-back retry on read paths, not just
   // does NOT touch notificationDelivered (the ack owns that flag).
   assert.match(
     workflowRunManagerSource,
-    /async retryPersistFlushFailedRun\([\s\S]*?persistRecoveredRun\(workspacePath, threadId, snapshot\)[\s\S]*?this\.flushFailedRuns\.delete\(runId\)/,
+    /async retryPersistFlushFailedRun\([\s\S]*?persistRecoveredRun\(\s*workspacePath,\s*threadId,\s*snapshot,\s*this\.flushFailedEpochs\.get\(runId\)\s*\)[\s\S]*?this\.dropFlushFailedRun\(runId\)/,
     "run manager exposes a read-path write-back retry that drops the snapshot on success"
   )
   assert.match(
@@ -2409,7 +2416,7 @@ test("deleting a thread sweeps leftover workflow-subagent (__wf_) checkpoints (#
   // the __wf_ ones — add a symmetric sweep.
   assert.match(
     storageSource,
-    /export function deleteThreadWorkflowCheckpoints\([\s\S]*?const prefix = `\$\{parentThreadId\}__wf_`/,
+    /export function deleteThreadWorkflowCheckpoints\([\s\S]*?sweepCheckpointVariants\(`\$\{parentThreadId\}__wf_`\)/,
     "storage exposes a __wf_ checkpoint sweep mirroring the __worker__ one"
   )
   assert.match(
@@ -2593,13 +2600,13 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   // in workflow mode with no exit but deleting the thread.
   assert.match(
     agentIpcSource,
-    /!workflowRunManager\.isRenotifyExhausted\(pendingRun\.runId\)/,
-    "agent:invoke workflow guard releases a renotify-exhausted pending run"
+    /workflowRunManager\.hasDeliverablePendingNotification\(workspacePath, threadId\)/,
+    "agent:invoke workflow guard scans ALL pending runs (exhausted-only unlocks the exit; an older deliverable run keeps blocking)"
   )
   assert.match(
     threadsSource,
-    /!workflowRunManager\.isRenotifyExhausted\(pendingRun\.runId\)/,
-    "threads:update workflow guard releases a renotify-exhausted pending run"
+    /workflowRunManager\.hasDeliverablePendingNotification\(wsp, threadId\)/,
+    "threads:update workflow guard scans ALL pending runs (exhausted-only unlocks the exit; an older deliverable run keeps blocking)"
   )
   // #5 strand-caveat parity: the workspace-picker entry (the REAL switch path, hit
   // by "创建 Worktree 并切换" → workspace:set) must, after releasing a

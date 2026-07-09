@@ -6,6 +6,7 @@
  */
 
 import {
+  latestPersistedCheckpointMessageAt,
   restoreRawCheckpointMessageTime,
   restoreVisibleCheckpointMessageTimes
 } from "../src/renderer/src/lib/checkpoint-message-times.ts"
@@ -350,6 +351,30 @@ function testFinalTranscriptMixedIdRestoreKeepsAssistantExactTime(): void {
   )
 }
 
+function testPersistedCheckpointMessageLatestIgnoresMessagesOutsideCheckpoint(): void {
+  const latest = latestPersistedCheckpointMessageAt(
+    [{ id: "user-1" }, { id: "assistant-1" }],
+    [
+      {
+        id: "assistant-1",
+        created_at: new Date("2026-05-22T10:00:04.000Z"),
+        start_at: new Date("2026-05-22T10:00:05.000Z")
+      },
+      {
+        id: "post-checkpoint-user",
+        created_at: new Date("2026-05-22T10:10:00.000Z"),
+        start_at: new Date("2026-05-22T10:10:00.000Z")
+      }
+    ]
+  )
+
+  assertEqual(
+    latest?.toISOString(),
+    "2026-05-22T10:00:05.000Z",
+    "pending approval restore gating should ignore persisted messages outside the checkpoint"
+  )
+}
+
 function run(): void {
   testInternalGoalPromptUsesInternalTimeById()
   testInternalGoalPromptUsesInternalOrderFallback()
@@ -359,6 +384,7 @@ function run(): void {
   testVisibleInferredTimeDoesNotReuseCurrentFallbackEndTime()
   testFinalTranscriptOrderFallbackKeepsGoalUserSlot()
   testFinalTranscriptMixedIdRestoreKeepsAssistantExactTime()
+  testPersistedCheckpointMessageLatestIgnoresMessagesOutsideCheckpoint()
   console.log("checkpoint-message-times tests passed")
 }
 

@@ -56,6 +56,10 @@ import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
+  findMessagesAfterCheckpointVisibleIds,
+  mergeCheckpointAuthorityTranscriptMessages
+} from "../../../shared/checkpoint-transcript"
+import {
   isInternalGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
   type GoalNoticeEvent
@@ -67,10 +71,12 @@ import {
   goalNoticeEventsToGoalUiEvents,
   hasGoalResumeUserEvent,
   isGoalResumeCommandContent,
-  isVisibleCheckpointTranscriptMessage
+  isVisibleCheckpointTranscriptMessage,
+  sameGoalCommandMessage
 } from "./goal-transcript"
 import { mergeGoalUiEvents } from "./goal-ui-events"
 import {
+  latestPersistedCheckpointMessageAt,
   restoreRawCheckpointMessageTime,
   restoreVisibleCheckpointMessageTimes
 } from "./checkpoint-message-times"
@@ -227,12 +233,57 @@ const toDate = (value: string | undefined): Date | undefined => {
   return Number.isFinite(parsed.getTime()) ? parsed : undefined
 }
 
+const toMessageDate = (value: unknown, fallback?: Date): Date | undefined => {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value
+  if (typeof value === "string" || typeof value === "number") {
+    const parsed = new Date(value)
+    if (Number.isFinite(parsed.getTime())) return parsed
+  }
+  return fallback
+}
+
+const normalizePersistedThreadMessages = (messages: Message[]): Message[] => {
+  return messages.flatMap((message): Message | [] => {
+    if (!hasMessageId(message)) return []
+    const createdAt = toMessageDate(message.created_at, new Date()) ?? new Date()
+    const startAt = toMessageDate(message.start_at)
+    const endAt = toMessageDate(message.end_at)
+    return {
+      ...message,
+      content: typeof message.content === "string" || Array.isArray(message.content) ? message.content : "",
+      created_at: createdAt,
+      ...(startAt ? { start_at: startAt } : {}),
+      ...(endAt ? { end_at: endAt } : {})
+    }
+  })
+}
+
+const mergePersistedMessagesIntoTranscript = (
+  baseMessages: Message[],
+  persistedMessages: Message[]
+): Message[] => {
+  return mergeCheckpointAuthorityTranscriptMessages(baseMessages, persistedMessages, {
+    isSameMessage: sameGoalCommandMessage
+  })
+}
+
 const latestDate = (dates: Array<Date | undefined>): Date | undefined => {
   return dates.reduce<Date | undefined>((latest, date) => {
     if (!date) return latest
     if (!latest || date > latest) return date
     return latest
   }, undefined)
+}
+
+const latestPersistedVisibleMessageAt = (messages: Message[]): Date | undefined => {
+  return latestDate(
+    messages.map(
+      (message) =>
+        toMessageDate(message.start_at) ??
+        toMessageDate(message.created_at) ??
+        toMessageDate(message.end_at)
+    )
+  )
 }
 
 const getLatestTrustedCheckpointMessageAt = (
@@ -304,6 +355,8 @@ export interface ModelRetryState {
 /** One failover attempt shown in the error detail card. */
 export interface ApiErrorFailoverAttempt {
   modelId: string
+  modelDisplayName?: string
+  modelName?: string
   reason: string
 }
 
@@ -321,6 +374,9 @@ export interface ApiErrorDetailState {
   reason?: string
   providerMessage?: string
   rawBody?: string
+  modelId?: string
+  modelDisplayName?: string
+  modelName?: string
   model?: string
   failover?: ApiErrorFailoverAttempt[]
 }
@@ -569,6 +625,8 @@ interface ThreadContextValue {
   // Subscribe to all stream updates
   subscribeToAllStreams: (callback: () => void) => () => void
   suppressCoordinatorNotificationAutoRun: (threadId: string) => void
+  // 以主进程 isRunning 为权威,校正心跳/定时任务线程的运行锁(丢 done 自愈)
+  reconcileScheduledRunStates: () => void
 }
 
 // Default thread state
@@ -921,6 +979,10 @@ const ThreadContext = createContext<ThreadContextValue | null>(null)
 interface CustomEventData {
   type?: string
   request?: HITLRequest
+  toolName?: string
+  fingerprint?: string
+  threshold?: number
+  lastError?: string
   files?: Array<{ path: string; is_dir?: boolean; size?: number }>
   path?: string
   subagents?: Array<{
@@ -1535,6 +1597,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           threadStatesRef.current = next
           return next
         })
+        window.api.threads
+          .appendMessages(threadId, messagesToAppend)
+          .catch((error) => console.warn("[ThreadContext] Failed to save transcript:", error))
       }
 
       if (
@@ -2257,6 +2322,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   ...(typeof snapshotMessage.content === "string" && {
                     content: snapshotMessage.content
                   }),
+                  ...(typeof snapshotMessage.reasoning === "string" && {
+                    reasoning: snapshotMessage.reasoning
+                  }),
                   ...(snapshotMessage.tool_calls && { tool_calls: snapshotMessage.tool_calls })
                 }
               : committed
@@ -2284,12 +2352,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         start_at: accumulator.messageTimes[messageId]?.start_at ?? now,
         end_at: now
       }
+      const hasSnapshotContent =
+        (typeof snapshotMessage.content === "string" && snapshotMessage.content.length > 0) ||
+        (Array.isArray(snapshotMessage.content) && snapshotMessage.content.length > 0)
       accumulator.messages = mergeLiveStreamMessages(accumulator.messages, [
         {
           ...snapshotMessage,
           id: messageId,
           type: snapshotMessage.type ?? "ai",
-          content_priority: 1
+          ...(hasSnapshotContent ? { content_priority: 1 } : {})
         }
       ])
 
@@ -2651,6 +2722,55 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           toast.warning(action === "halt" ? `Hook 已停止本轮：${reason}` : `Hook 已阻断：${reason}`)
           break
         }
+        case "failure_fuse_warning": {
+          const toolName =
+            typeof data.toolName === "string" && data.toolName.trim() ? data.toolName : undefined
+          const countText =
+            typeof data.count === "number" && typeof data.threshold === "number"
+              ? `（${data.count}/${data.threshold}）`
+              : ""
+          const prefix =
+            data.action === "strong_warn" ? "工具重复失败强提醒" : "工具重复失败提醒"
+          const message =
+            typeof data.count === "number"
+              ? `同类错误已重复出现 ${data.count} 次，本轮不会停止。`
+              : "同类工具错误重复出现，本轮不会停止。"
+          toast.warning(`${prefix}${toolName ? `：${toolName}` : ""}${countText}：${message}`)
+          break
+        }
+        case "failure_fuse_tripped": {
+          const reason =
+            (typeof data.reason === "string" && data.reason.trim()) ||
+            (typeof data.message === "string" && data.message.trim()) ||
+            "同类工具错误重复出现，已停止本轮以避免继续重试"
+          const toolName =
+            typeof data.toolName === "string" && data.toolName.trim() ? data.toolName : undefined
+          const details = [
+            toolName ? `tool=${toolName}` : undefined,
+            typeof data.count === "number" && typeof data.threshold === "number"
+              ? `count=${data.count}/${data.threshold}`
+              : undefined,
+            typeof data.fingerprint === "string" && data.fingerprint.trim()
+              ? `fingerprint=${data.fingerprint}`
+              : undefined,
+            typeof data.lastError === "string" && data.lastError.trim()
+              ? `lastError=${data.lastError}`
+              : undefined
+          ].filter((item): item is string => Boolean(item))
+          updateThreadState(threadId, () => ({
+            error: null,
+            errorDetail: null,
+            hookInterruption: {
+              event: toolName ? `Failure fuse: ${toolName}` : "Failure fuse",
+              action: "halt",
+              reason,
+              systemMessage: details.length > 0 ? details.join("\n") : undefined,
+              timestamp: new Date()
+            }
+          }))
+          toast.warning(`工具失败熔断已停止本轮：${reason}`)
+          break
+        }
         case "auto_commit_result":
           if (data.result) {
             const message = formatAutoCommitText(data.result)
@@ -2889,7 +3009,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }
             if (exists) {
               return {
-                messages: state.messages.map((m) => (m.id === message.id ? message : m)),
+                messages: state.messages.map((m) =>
+                  m.id === message.id
+                    ? {
+                        ...message,
+                        ...(message.role === "assistant" &&
+                        !message.reasoning &&
+                        m.role === "assistant" &&
+                        m.reasoning
+                          ? { reasoning: m.reasoning }
+                          : {})
+                      }
+                    : m
+                ),
                 toolCallStates: nextToolCallStates,
                 hookInterruption: message.role === "user" ? null : state.hookInterruption
               }
@@ -2903,6 +3035,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setMessages: (messages: Message[]) => {
           updateThreadState(threadId, (state) => {
+            const existingReasoningById = new Map(
+              state.messages
+                .filter((message) => message.role === "assistant" && message.reasoning)
+                .map((message) => [message.id, message.reasoning] as const)
+            )
+            const messagesWithPreservedReasoning = messages.map((message) => {
+              if (message.role !== "assistant" || message.reasoning) return message
+              const existingReasoning = existingReasoningById.get(message.id)
+              return existingReasoning ? { ...message, reasoning: existingReasoning } : message
+            })
             const nextToolCallStates = messages.reduce<Record<string, ToolCallState>>(
               (acc, message) => {
                 if (Array.isArray(message.tool_calls)) {
@@ -2925,7 +3067,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               state.toolCallStates
             )
 
-            return { messages, toolCallStates: nextToolCallStates }
+            return { messages: messagesWithPreservedReasoning, toolCallStates: nextToolCallStates }
           })
         },
         setGoalUi: (goalUi: GoalUiState) => {
@@ -3098,6 +3240,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let restoredGoalEvents: GoalNoticeEvent[] = []
       let skipCheckpointPendingApproval = false
       let latestTrustedCheckpointMessageAt: Date | undefined
+      let persistedThreadMessages: Message[] = []
+      let visiblePersistedThreadMessages: Message[] = []
+      let hasPersistedVisibleTailAfterCheckpoint = false
+      let checkpointMessagesLoaded = false
       updateThreadState(threadId, () => ({ historyLoading: true }))
 
       // Load workspace path and thread metadata
@@ -3143,15 +3289,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 : {})
             }))
           }
+          // 双向水合:isRunning 是权威电平,false 也要落地——否则上次视图残留的
+          // 冻结 loading(丢 done)在重新打开时永远无人清除。刚起跑的竞争由
+          // started 边沿事件补齐,两者收敛。
           if (metadata.scheduledTaskId) {
             const taskId = metadata.scheduledTaskId as string
             updateThreadState(threadId, () => ({ scheduledTaskId: taskId }))
             window.api.scheduledTasks
               .isRunning(taskId)
               .then((running) => {
-                if (running) {
-                  updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
-                }
+                updateThreadState(threadId, (prev) =>
+                  prev.scheduledTaskLoading === running ? {} : { scheduledTaskLoading: running }
+                )
               })
               .catch(() => {})
           }
@@ -3159,9 +3308,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             window.api.heartbeat
               .isRunning()
               .then((running) => {
-                if (running) {
-                  updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
-                }
+                updateThreadState(threadId, (prev) =>
+                  prev.scheduledTaskLoading === running ? {} : { scheduledTaskLoading: running }
+                )
               })
               .catch(() => {})
           }
@@ -3197,7 +3346,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load goal events:", error)
       }
 
-      // Load thread history from checkpoints
+      try {
+        persistedThreadMessages = normalizePersistedThreadMessages(
+          await window.api.threads.getMessages(threadId)
+        )
+        visiblePersistedThreadMessages = persistedThreadMessages.filter(
+          isVisibleCheckpointTranscriptMessage
+        )
+      } catch (error) {
+        console.error("[ThreadContext] Failed to load persisted thread messages:", error)
+      }
+
+      // Load runtime state from checkpoints. Transcript restore only falls back
+      // here when the durable main-DB transcript has no messages yet.
       try {
         const history = await window.api.threads.getHistory(threadId)
         if (history.length > 0) {
@@ -3244,117 +3405,149 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
 
           if (channelValues?.messages && Array.isArray(channelValues.messages)) {
+            checkpointMessagesLoaded = true
             let internalGoalPromptIndex = 0
-            rawRestoredMessages = channelValues.messages.flatMap((msg, index): Message | [] => {
-              const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
-              if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
-                return []
+            const checkpointRawRestoredMessages = channelValues.messages.flatMap(
+              (msg, index): Message | [] => {
+                const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
+                if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
+                  return []
+                }
+
+                let role: "user" | "assistant" | "system" | "tool" = "assistant"
+                if (typeof msg._getType === "function") {
+                  const type = msg._getType()
+                  if (type === "human") role = "user"
+                  else if (type === "ai") role = "assistant"
+                  else if (type === "system") role = "system"
+                  else if (type === "tool") role = "tool"
+                } else if (Array.isArray(msg.id)) {
+                  const constructorName = msg.id[msg.id.length - 1]
+                  if (constructorName === "HumanMessage") role = "user"
+                  else if (constructorName === "SystemMessage") role = "system"
+                  else if (constructorName === "ToolMessage") role = "tool"
+                  else if (constructorName === "AIMessage" || constructorName === "AIMessageChunk")
+                    role = "assistant"
+                } else if (msg.type) {
+                  if (msg.type === "human") role = "user"
+                  else if (msg.type === "ai") role = "assistant"
+                  else if (msg.type === "system") role = "system"
+                  else if (msg.type === "tool") role = "tool"
+                }
+
+                const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
+                const checkpointContent = msg.content ?? msg.kwargs?.content
+                const isRawInternalGoalPrompt =
+                  role === "user" &&
+                  typeof checkpointContent === "string" &&
+                  isInternalGoalPromptMessage({ role, content: checkpointContent })
+                const isVisibleGoalCommand =
+                  typeof visibleUserMessage === "string" &&
+                  /^\/goal(?:\s|$)/i.test(visibleUserMessage.trimStart())
+                const shouldUseVisibleGoalResumeAlias =
+                  isRawInternalGoalPrompt &&
+                  typeof visibleUserMessage === "string" &&
+                  isGoalResumeCommandContent(visibleUserMessage) &&
+                  !hasGoalResumeUserEvent(
+                    restoredGoalEvents,
+                    getInternalGoalPromptIdentity(checkpointContent)
+                  )
+                const shouldKeepRawInternalGoalPrompt =
+                  isRawInternalGoalPrompt &&
+                  (visibleUserMessage === undefined ||
+                    visibleUserMessage === "" ||
+                    (isVisibleGoalCommand && !shouldUseVisibleGoalResumeAlias))
+                const rawContent =
+                  role === "user" &&
+                  !shouldKeepRawInternalGoalPrompt &&
+                  typeof visibleUserMessage === "string" &&
+                  visibleUserMessage.length > 0
+                    ? visibleUserMessage
+                    : checkpointContent
+                let content: Message["content"] = ""
+                if (typeof rawContent === "string") content = rawContent
+                else if (Array.isArray(rawContent)) content = rawContent as Message["content"]
+
+                const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
+                const toolCallId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
+                const toolName = msg.name ?? msg.kwargs?.name
+                const messageId =
+                  msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
+                const fallbackTime = new Date()
+                // Visible messages only use id-based restore here. Their order fallback
+                // is applied after hidden internal goal prompts are replaced/filtered and
+                // restored /goal user bubbles are inserted, otherwise messageTimeOrder
+                // indexes can shift across the final transcript.
+                // Internal goal prompts have a separate order list because they are hidden
+                // from the checkpoint transcript but still anchor restored /goal user bubbles.
+                const usesInternalGoalPromptTiming = isRawInternalGoalPrompt
+                const currentInternalGoalPromptIndex = usesInternalGoalPromptTiming
+                  ? internalGoalPromptIndex++
+                  : -1
+                const { startAt, endAt } = restoreRawCheckpointMessageTime({
+                  messageId,
+                  fallbackTime,
+                  isInternalGoalPrompt: usesInternalGoalPromptTiming,
+                  internalGoalPromptIndex: currentInternalGoalPromptIndex,
+                  persistedMessageTimes,
+                  persistedInternalGoalMessageTimes,
+                  persistedInternalGoalMessageTimeOrder
+                })
+
+                let reasoning = ""
+                if (role === "assistant") {
+                  const rawReasoning =
+                    additionalKwargs?.reasoning ??
+                    additionalKwargs?.reasoning_content ??
+                    additionalKwargs?.reasoning_text
+                  if (typeof rawReasoning === "string" && rawReasoning.trim()) {
+                    reasoning = rawReasoning
+                  }
+                }
+
+                return {
+                  id: messageId,
+                  role,
+                  content,
+                  ...(reasoning && { reasoning }),
+                  tool_calls: toolCalls as Message["tool_calls"],
+                  ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
+                  ...(role === "tool" && toolName && { name: toolName }),
+                  created_at: startAt,
+                  start_at: startAt,
+                  end_at: endAt
+                }
               }
+            )
 
-              let role: "user" | "assistant" | "system" | "tool" = "assistant"
-              if (typeof msg._getType === "function") {
-                const type = msg._getType()
-                if (type === "human") role = "user"
-                else if (type === "ai") role = "assistant"
-                else if (type === "system") role = "system"
-                else if (type === "tool") role = "tool"
-              } else if (Array.isArray(msg.id)) {
-                const constructorName = msg.id[msg.id.length - 1]
-                if (constructorName === "HumanMessage") role = "user"
-                else if (constructorName === "SystemMessage") role = "system"
-                else if (constructorName === "ToolMessage") role = "tool"
-                else if (constructorName === "AIMessage" || constructorName === "AIMessageChunk")
-                  role = "assistant"
-              } else if (msg.type) {
-                if (msg.type === "human") role = "user"
-                else if (msg.type === "ai") role = "assistant"
-                else if (msg.type === "system") role = "system"
-                else if (msg.type === "tool") role = "tool"
-              }
-
-              const visibleUserMessage = additionalKwargs?.cmb_visible_user_message
-              const checkpointContent = msg.content ?? msg.kwargs?.content
-              const isRawInternalGoalPrompt =
-                role === "user" &&
-                typeof checkpointContent === "string" &&
-                isInternalGoalPromptMessage({ role, content: checkpointContent })
-              const isVisibleGoalCommand =
-                typeof visibleUserMessage === "string" &&
-                /^\/goal(?:\s|$)/i.test(visibleUserMessage.trimStart())
-              const shouldUseVisibleGoalResumeAlias =
-                isRawInternalGoalPrompt &&
-                typeof visibleUserMessage === "string" &&
-                isGoalResumeCommandContent(visibleUserMessage) &&
-                !hasGoalResumeUserEvent(
-                  restoredGoalEvents,
-                  getInternalGoalPromptIdentity(checkpointContent)
-                )
-              const shouldKeepRawInternalGoalPrompt =
-                isRawInternalGoalPrompt &&
-                (visibleUserMessage === undefined ||
-                  visibleUserMessage === "" ||
-                  (isVisibleGoalCommand && !shouldUseVisibleGoalResumeAlias))
-              const rawContent =
-                role === "user" &&
-                !shouldKeepRawInternalGoalPrompt &&
-                typeof visibleUserMessage === "string" &&
-                visibleUserMessage.length > 0
-                  ? visibleUserMessage
-                  : checkpointContent
-              let content: Message["content"] = ""
-              if (typeof rawContent === "string") content = rawContent
-              else if (Array.isArray(rawContent)) content = rawContent as Message["content"]
-
-              const toolCalls = msg.tool_calls ?? msg.kwargs?.tool_calls
-              const toolCallId = msg.tool_call_id ?? msg.kwargs?.tool_call_id
-              const toolName = msg.name ?? msg.kwargs?.name
-              const messageId =
-                msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)
-              const fallbackTime = new Date()
-              // Visible messages only use id-based restore here. Their order fallback
-              // is applied after hidden internal goal prompts are replaced/filtered and
-              // restored /goal user bubbles are inserted, otherwise messageTimeOrder
-              // indexes can shift across the final transcript.
-              // Internal goal prompts have a separate order list because they are hidden
-              // from the checkpoint transcript but still anchor restored /goal user bubbles.
-              const usesInternalGoalPromptTiming = isRawInternalGoalPrompt
-              const currentInternalGoalPromptIndex = usesInternalGoalPromptTiming
-                ? internalGoalPromptIndex++
-                : -1
-              const { startAt, endAt } = restoreRawCheckpointMessageTime({
-                messageId,
-                fallbackTime,
-                isInternalGoalPrompt: usesInternalGoalPromptTiming,
-                internalGoalPromptIndex: currentInternalGoalPromptIndex,
-                persistedMessageTimes,
-                persistedInternalGoalMessageTimes,
-                persistedInternalGoalMessageTimeOrder
-              })
-
-              return {
-                id: messageId,
-                role,
-                content,
-                tool_calls: toolCalls as Message["tool_calls"],
-                ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
-                ...(role === "tool" && toolName && { name: toolName }),
-                created_at: startAt,
-                start_at: startAt,
-                end_at: endAt
-              }
-            })
-
-            const visibleRestoredMessages = rawRestoredMessages.filter(
+            const visibleRestoredMessages = checkpointRawRestoredMessages.filter(
               isVisibleCheckpointTranscriptMessage
             )
-            latestTrustedCheckpointMessageAt = getLatestTrustedCheckpointMessageAt(
+            const checkpointLatestTrustedMessageAt = getLatestTrustedCheckpointMessageAt(
               visibleRestoredMessages,
               persistedMessageTimes,
               persistedMessageTimeOrder,
               persistedInternalGoalMessageTimes,
               persistedInternalGoalMessageTimeOrder,
-              rawRestoredMessages
+              checkpointRawRestoredMessages
             )
+            const persistedCheckpointLatestMessageAt = latestPersistedCheckpointMessageAt(
+              visibleRestoredMessages,
+              persistedThreadMessages
+            )
+            const persistedVisibleLatestMessageAt =
+              latestPersistedVisibleMessageAt(visiblePersistedThreadMessages)
+            hasPersistedVisibleTailAfterCheckpoint =
+              findMessagesAfterCheckpointVisibleIds(
+                visiblePersistedThreadMessages,
+                visibleRestoredMessages.map((message) => message.id)
+              ).length > 0
+            rawRestoredMessages = checkpointRawRestoredMessages
+            latestTrustedCheckpointMessageAt = latestDate([
+              checkpointLatestTrustedMessageAt,
+              persistedCheckpointLatestMessageAt,
+              persistedVisibleLatestMessageAt
+            ])
             restoredMessages = visibleRestoredMessages
           }
 
@@ -3368,10 +3561,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
 
           // Restore interrupt state if present
-          skipCheckpointPendingApproval = shouldSuppressCheckpointApprovalRestore(
-            restoredGoalEvents,
-            latestTrustedCheckpointMessageAt
-          )
+          skipCheckpointPendingApproval =
+            hasPersistedVisibleTailAfterCheckpoint ||
+            shouldSuppressCheckpointApprovalRestore(
+              restoredGoalEvents,
+              latestTrustedCheckpointMessageAt
+            )
           const interruptData = channelValues?.__interrupt__
           if (
             !skipCheckpointPendingApproval &&
@@ -3418,14 +3613,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
 
+      const restoredGoalUiEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
       const checkpointTranscript = buildRestoredCheckpointTranscript(
-        rawRestoredMessages,
-        restoredMessages,
-        goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+        checkpointMessagesLoaded ? rawRestoredMessages : persistedThreadMessages,
+        checkpointMessagesLoaded ? restoredMessages : visiblePersistedThreadMessages,
+        restoredGoalUiEvents
+      )
+      const restoredTranscript = mergePersistedMessagesIntoTranscript(
+        checkpointTranscript,
+        visiblePersistedThreadMessages
       )
       actions.setMessages(
         restoreVisibleCheckpointMessageTimes(
-          checkpointTranscript,
+          restoredTranscript,
           persistedMessageTimes,
           persistedMessageTimeOrder
         )
@@ -3442,27 +3642,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
       try {
         const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents: false })
-        const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
         updateThreadState(threadId, (state) => ({
           goalUi: {
             goal: goalUi.goal,
-            events: mergeGoalUiEvents(restoredEvents, state.goalUi.events),
+            events: mergeGoalUiEvents(restoredGoalUiEvents, state.goalUi.events),
             lastUpdated: new Date()
           }
         }))
       } catch (error) {
         console.warn("[ThreadContext] Failed to load goal UI state:", error)
-        const restoredEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
         updateThreadState(threadId, (state) => ({
           goalUi: {
             goal: state.goalUi.goal,
-            events: mergeGoalUiEvents(restoredEvents, state.goalUi.events),
+            events: mergeGoalUiEvents(restoredGoalUiEvents, state.goalUi.events),
             lastUpdated: new Date()
           }
         }))
       }
 
-      seedLiveStreamBaselineFromCheckpoint(threadId, rawRestoredMessages)
+      seedLiveStreamBaselineFromCheckpoint(
+        threadId,
+        checkpointMessagesLoaded
+          ? mergePersistedMessagesIntoTranscript(
+              rawRestoredMessages,
+              visiblePersistedThreadMessages
+            )
+          : restoredTranscript
+      )
       updateThreadState(threadId, () => ({ historyLoading: false }))
 
       const pendingGoalSubturnMessages =
@@ -3515,7 +3721,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   // Track streaming AI message state per thread (for token-by-token accumulation)
   const schedulerStreamingRef = useRef<
-    Record<string, { currentMsgId: string | null; accumulatedContent: string }>
+    Record<
+      string,
+      { currentMsgId: string | null; accumulatedContent: string; accumulatedReasoning: string }
+    >
   >({})
   const clearSchedulerStreamingForThread = useCallback((threadId: string) => {
     delete schedulerStreamingRef.current[threadId]
@@ -3575,6 +3784,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             id: string
             role: string
             content: string
+            reasoning?: string
             tool_calls?: unknown[]
             tool_call_id?: string
             name?: string
@@ -3638,21 +3848,30 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "message-delta": {
           const id = event.id as string
           const content = event.content as string
+          const reasoning = typeof event.reasoning === "string" ? event.reasoning : ""
           const toolCalls = event.toolCalls as Message["tool_calls"] | undefined
           const subagentId =
             typeof event.subagentId === "string" ? (event.subagentId as string) : undefined
           const streamKey = subagentId ? `${threadId}:subagent:${subagentId}` : threadId
           const tracker = (schedulerStreamingRef.current[streamKey] ||= {
             currentMsgId: null,
-            accumulatedContent: ""
+            accumulatedContent: "",
+            accumulatedReasoning: ""
           })
           if (id !== tracker.currentMsgId) {
             tracker.currentMsgId = id
             tracker.accumulatedContent = content
+            tracker.accumulatedReasoning = reasoning
           } else {
             tracker.accumulatedContent += content
+            if (reasoning) {
+              tracker.accumulatedReasoning = reasoning.startsWith(tracker.accumulatedReasoning)
+                ? reasoning
+                : `${tracker.accumulatedReasoning}${reasoning}`
+            }
           }
           const finalContent = tracker.accumulatedContent
+          const finalReasoning = tracker.accumulatedReasoning
           if (subagentId) {
             const now = new Date()
             appendSubagentTranscriptMessages(threadId, subagentId, [
@@ -3660,6 +3879,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 id,
                 role: "assistant" as const,
                 content: finalContent,
+                ...(finalReasoning && { reasoning: finalReasoning }),
                 ...(toolCalls?.length && { tool_calls: toolCalls }),
                 created_at: now
               }
@@ -3685,6 +3905,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               updated[idx] = {
                 ...updated[idx],
                 content: finalContent,
+                ...(finalReasoning && { reasoning: finalReasoning }),
                 ...(toolCalls?.length && { tool_calls: toolCalls })
               }
               return { ...clearRetry, messages: updated, toolCallStates: nextToolCallStates }
@@ -3699,6 +3920,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   id,
                   role: "assistant" as const,
                   content: finalContent,
+                  ...(finalReasoning && { reasoning: finalReasoning }),
                   ...(toolCalls?.length && { tool_calls: toolCalls }),
                   created_at: now
                 }
@@ -4140,6 +4362,53 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [clearSchedulerStreamingForThread, saveSubagentTranscripts]
   )
 
+  // 运行态电平校正(心跳 + 定时任务线程)安全网:输入锁 scheduledTaskLoading 平时
+  // 由流事件边沿驱动(started/数据置 true,done/error 清 false),一旦 done 丢失
+  // (监听器被清、窗口错过广播)就永久冻结——此时主进程已空闲,取消按钮打过去是
+  // 无任务可停的空操作,界面表现为"卡死且点不动"。这里以主进程 isRunning 为权威,
+  // 在 changed 广播与手动取消后校正。
+  //
+  // 只清不设:isRunning 按 taskId 判定,而多个线程可共用同一 taskId(同一定时任务被
+  // 反复触发,每次新建线程)。若在此把 running=true 回写,任务再次跑进新线程时会把
+  // 旧的已完成线程一并错标成 loading——反而制造旋转。设 true 是流 "started" 事件和
+  // 打开线程时水合(读该线程自身 metadata)的职责,各自按线程精确;这个 changed 安全
+  // 网只负责清除任务已停后仍残留的 loading。写入前重读当前 store,过期快照不落地;
+  // 清除时同步清残留流气泡并重载历史,恢复干净视图。
+  // (ChatX 线程同轨但缺按线程的 isRunning 查询,暂不覆盖,见 roadmap。)
+  const reconcileScheduledRunStates = useCallback(() => {
+    const reconcileThread = (threadId: string, runningPromise: Promise<boolean>): void => {
+      runningPromise
+        .then((running) => {
+          if (running) return // 只清不设:运行中交给 started 边沿/水合,避免 taskId 别名误标
+          if (!initializedThreadsRef.current.has(threadId)) return
+          if (threadStatesRef.current[threadId]?.scheduledTaskLoading !== true) return
+          clearSchedulerStreamingForThread(threadId)
+          loadThreadHistory(threadId)
+          updateThreadState(threadId, () => ({ scheduledTaskLoading: false }))
+        })
+        .catch(() => {})
+    }
+    if (initializedThreadsRef.current.has("heartbeat")) {
+      reconcileThread("heartbeat", window.api.heartbeat.isRunning())
+    }
+    for (const [threadId, state] of Object.entries(threadStatesRef.current)) {
+      if (threadId === "heartbeat") continue
+      const taskId = state?.scheduledTaskId
+      if (!taskId || !initializedThreadsRef.current.has(threadId)) continue
+      reconcileThread(threadId, window.api.scheduledTasks.isRunning(taskId))
+    }
+  }, [clearSchedulerStreamingForThread, loadThreadHistory, updateThreadState])
+
+  useEffect(() => {
+    const offHeartbeat = window.api.heartbeat.onChanged(reconcileScheduledRunStates)
+    const offTasks = window.api.scheduledTasks.onChanged(reconcileScheduledRunStates)
+    reconcileScheduledRunStates()
+    return () => {
+      offHeartbeat()
+      offTasks()
+    }
+  }, [reconcileScheduledRunStates])
+
   const contextValue = useMemo<ThreadContextValue>(
     () => ({
       getThreadState,
@@ -4153,7 +4422,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams,
-      suppressCoordinatorNotificationAutoRun
+      suppressCoordinatorNotificationAutoRun,
+      reconcileScheduledRunStates
     }),
     [
       getThreadState,
@@ -4167,7 +4437,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getAllThreadStates,
       getAllStreamLoadingStates,
       subscribeToAllStreams,
-      suppressCoordinatorNotificationAutoRun
+      suppressCoordinatorNotificationAutoRun,
+      reconcileScheduledRunStates
     ]
   )
 

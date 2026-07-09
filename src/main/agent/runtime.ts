@@ -24,6 +24,7 @@ import {
   DEFAULT_TEMPERATURE,
   DEFAULT_TOP_P,
   DEFAULT_TOP_K,
+  DEFAULT_THINKING_EFFORT,
   getEnabledPluginSkillSourceMetadata,
   getEnabledPluginSkillMiddlewareSources,
   getPlugins,
@@ -110,6 +111,18 @@ import {
   toolFailureSignalFromThrow,
   type ToolFailureSignal
 } from "../hooks/tool-failure"
+import {
+  formatFailureFuseWarning,
+  getFailureFuseMode,
+  isFailureFuseHaltError,
+  recordToolFailure,
+  recordToolSuccess,
+  shouldAttachFailureFuseFeedback,
+  shouldSendFailureFuseNotice,
+  throwIfFailureFuseHalt,
+  type FailureFuseDecision,
+  type FailureFuseNoticeCallback
+} from "./failure-fuse"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
   createHookScope,
@@ -139,7 +152,14 @@ import {
   getGlobalMcpCapabilityService
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
-import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
+import {
+  InterleavedThinkingChatOpenAICompletions,
+  ReasoningDisplayChatOpenAICompletions
+} from "./interleaved-thinking-completions"
+import {
+  createMalformedToolCallGuardMiddleware,
+  createMalformedToolCallRecoveryMiddleware
+} from "./malformed-tool-call-recovery"
 import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
@@ -700,6 +720,7 @@ export function createScopedMcpCapabilityService(
     context: HookContext
   ) => ReturnType<typeof resolveEnabledHooksForRun>,
   onHookResult: HookResultCallback | undefined,
+  onFailureFuseNotice: FailureFuseNoticeCallback | undefined,
   baseContext: {
     workspacePath: string
     threadId: string
@@ -711,6 +732,8 @@ export function createScopedMcpCapabilityService(
     harnessProjectId?: string
     harnessAdapterName?: string
     harnessAdapterVersion?: string
+    harnessNodeName?: string
+    harnessNodeStatus?: string
     projectCode?: string
     projectDir?: string
   }
@@ -877,6 +900,39 @@ export function createScopedMcpCapabilityService(
     return parts.length > 0 ? parts.join("\n\n") : null
   }
 
+  const buildMcpFailureFuseDecision = (
+    tool: McpCapabilityTool,
+    args: Record<string, unknown>,
+    result: McpInvocationResult
+  ): FailureFuseDecision | null => {
+    const turnId = baseContext.turnId
+    if (!turnId) return null
+    if (!result.isError) {
+      recordToolSuccess({
+        threadId: baseContext.threadId,
+        turnId,
+        toolName: tool.toolId,
+        toolArgs: args
+      })
+      return null
+    }
+
+    return recordToolFailure({
+      threadId: baseContext.threadId,
+      turnId,
+      toolName: tool.toolId,
+      toolArgs: args,
+      signal: {
+        kind: "explicit-error",
+        message: result.text || `MCP tool ${tool.toolId} returned isError`,
+        errorType: "unknown",
+        isInterrupt: false,
+        isTimeout: false
+      },
+      mode: getFailureFuseMode()
+    })
+  }
+
   return {
     listTools: async () => (await getScopedToolSnapshot()).tools,
     getSnapshot: async () => {
@@ -911,6 +967,8 @@ export function createScopedMcpCapabilityService(
         harnessProjectId: baseContext.harnessProjectId,
         harnessAdapterName: baseContext.harnessAdapterName,
         harnessAdapterVersion: baseContext.harnessAdapterVersion,
+        harnessNodeName: baseContext.harnessNodeName,
+        harnessNodeStatus: baseContext.harnessNodeStatus,
         projectCode: baseContext.projectCode,
         projectDir: baseContext.projectDir,
         pluginId,
@@ -968,6 +1026,10 @@ export function createScopedMcpCapabilityService(
         postResult,
         `MCP tool ${tool.toolId} was stopped by a PostToolUse hook`
       )
+      const failureFuseDecision = buildMcpFailureFuseDecision(tool, effectiveArgs, result)
+      if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+        onFailureFuseNotice?.(failureFuseDecision)
+      }
       // PR-12 follow-up — MCP tools surface failure via `result.isError` rather
       // than a throw or a `success: false` shape, so `detectToolFailure` (which
       // looks at common ad-hoc shapes) doesn't see them. Translate isError →
@@ -989,16 +1051,21 @@ export function createScopedMcpCapabilityService(
           (e) => console.warn("[Hooks] PostToolUseFailure(MCP isError) hook error:", e)
         )
       }
+      if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
       const hookFeedback = formatPostHookFeedback(postResult)
+      const failureFuseFeedback = shouldAttachFailureFuseFeedback(failureFuseDecision)
+        ? formatFailureFuseWarning(failureFuseDecision)
+        : null
+      const feedback = [hookFeedback, failureFuseFeedback].filter(Boolean).join("\n\n")
       const isError =
         result.isError || postResult?.decision === "block" || postResult?.continue === false
       return {
         ...result,
         isError,
-        text: hookFeedback ? `${result.text}\n\n${hookFeedback}` : result.text,
+        text: feedback ? `${result.text}\n\n${feedback}` : result.text,
         contentBlocks:
-          hookFeedback && result.contentBlocks
-            ? [...result.contentBlocks, { type: "text", text: hookFeedback }]
+          feedback && result.contentBlocks
+            ? [...result.contentBlocks, { type: "text", text: feedback }]
             : result.contentBlocks
       }
     },
@@ -1051,9 +1118,10 @@ When NOT to use the task tool:
 // Skill lifecycle hooks can return guidance for the model, but that guidance
 // must not be appended to the SKILL.md file content returned by read_file.
 // Drain it into an independent system-message section on the next model call.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
 export function createSkillHookContextMiddleware(
   filesystemBackend: Partial<SkillHookContextProvider>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): any {
   return createMiddleware({
     name: "skillHookContext",
@@ -1173,6 +1241,30 @@ export function createAgentToolGuardMiddleware(
   })
 }
 
+function describeRegistrySubagentAccess(
+  disallowedTools: readonly string[],
+  shellAccess: AgentShellAccess
+): string {
+  const parts: string[] = []
+  if (disallowedTools.length > 0) parts.push(`no ${disallowedTools.join("/")}`)
+  parts.push(
+    shellAccess === "none"
+      ? "no shell"
+      : shellAccess === "read_only"
+        ? "read-only shell"
+        : "full shell"
+  )
+  return parts.join(", ")
+}
+
+function appendRegistrySubagentAccessDescription(
+  description: string,
+  disallowedTools: readonly string[],
+  shellAccess: AgentShellAccess
+): string {
+  return `${description} [${describeRegistrySubagentAccess(disallowedTools, shellAccess)}]`
+}
+
 /**
  * Stable metadata key stamped onto every subagent-interior stream chunk so the
  * renderer can attribute it to the owning `task` tool call deterministically —
@@ -1214,7 +1306,6 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       schema: (taskTool as any).schema
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ) as unknown as DynamicStructuredTool
 }
 
@@ -1285,14 +1376,16 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
     // adapter keeps createDeepAgent oblivious to that wiring.
-    onToolFailureSignal
+    onToolFailureSignal,
+    onFailureFuseNotice
   }: {
     onToolFailureSignal?: (input: {
       toolName: string | undefined
       toolCallId: string | undefined
       toolArgs: unknown
       signal: ToolFailureSignal
-    }) => void
+    }) => FailureFuseDecision | void
+    onFailureFuseNotice?: FailureFuseNoticeCallback
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [k: string]: any
   } = params
@@ -1395,6 +1488,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // Replace the default execute tool with a version that supports run_in_background.
     // Long-running commands (builds, dependency downloads) can be started in background
     // and their output retrieved later via task_output tool.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
     if (executeIdx >= 0) {
       const oldExecute = mw.tools![executeIdx]
@@ -1440,6 +1534,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
             return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
           // Delegate to original execute handler for foreground execution
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const result = await (oldExecute as any).invoke(input)
           if (typeof result === "string") return result
           try {
@@ -1450,6 +1545,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         },
         {
           name: "execute",
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           description: (oldExecute as any).description,
           schema: z.object({
             command: z.string().describe("The shell command to execute"),
@@ -1619,6 +1715,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     if (isWorkflowStructuredOutputFatalError(error)) return null
     if (isGraphBubbleUp(error) || isAbortError(error)) return null
     if (isHookHaltError(error)) return null
+    if (isFailureFuseHaltError(error)) return null
     if (isProgrammerError(error)) return null
     if (MiddlewareError.isInstance(error)) return null
 
@@ -1663,15 +1760,20 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         // failure so security/observability hooks fire on the same signal as
         // CC. Dedupe by tool_call_id so a downstream `detectToolFailure`
         // check on a recovered ToolMessage doesn't re-fire.
+        let failureFuseDecision: FailureFuseDecision | void = undefined
         if (onToolFailureSignal && toolCallId && !hasFailureFired(toolCallId)) {
           const signal = toolFailureSignalFromThrow(error, { aborted })
           markFailureFired(toolCallId)
-          onToolFailureSignal({
+          failureFuseDecision = onToolFailureSignal({
             toolName,
             toolCallId,
             toolArgs: request.toolCall?.args,
             signal
           })
+          if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+            onFailureFuseNotice?.(failureFuseDecision)
+          }
+          if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
         }
 
         if (aborted) {
@@ -1695,9 +1797,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         )
         return new ToolMessage({
           content:
-            recovered.kind === "schema"
+            (recovered.kind === "schema"
               ? `Invalid tool arguments: ${recovered.message}\nPlease fix the arguments and try again.`
-              : `Tool execution failed: ${recovered.message}\nPlease adjust your approach and try again if appropriate.`,
+              : `Tool execution failed: ${recovered.message}\nPlease adjust your approach and try again if appropriate.`) +
+            (shouldAttachFailureFuseFeedback(failureFuseDecision)
+              ? `\n\n${formatFailureFuseWarning(failureFuseDecision)}`
+              : ""),
           tool_call_id: toolCallId,
           name: toolName,
           status: "error"
@@ -1707,14 +1812,18 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   })
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   const gradedToolConcurrencyMiddleware =
     createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
   const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
     `${toolConcurrencyQueueId}:subagent`
   )
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
+    // FIRST for the same reason as the main agent: reject recovered-malformed
+    // calls before any tool lifecycle (hooks/fuse/task-mmd) can observe them.
+    createMalformedToolCallGuardMiddleware(),
     todoListMiddleware(),
     createFsMiddleware(),
     ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
@@ -1724,6 +1833,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
+    // Same malformed tool-call recovery as the main agent — task subagents call
+    // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
+    createMalformedToolCallRecoveryMiddleware(),
     createPatchToolCallsMiddleware()
   ]
 
@@ -1802,7 +1914,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       ]
       return {
         name: spec.name,
-        description: spec.description,
+        description: appendRegistrySubagentAccessDescription(spec.description, disallowed, shell),
         // write/verify (full) get AGENTS.md (project instructions); read_only AND
         // none omit it (mirrors CC omitClaudeMd dropping the claudeMd channel).
         // Same `## Project Instructions` format the general-purpose subagent uses.
@@ -1854,6 +1966,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     systemPrompt: finalSystemPrompt,
     tools,
     middleware: [
+      // FIRST (outermost wrapToolCall): reject recovered-malformed calls before
+      // ANY tool lifecycle — PreToolUse hooks must not block/rewrite them (that
+      // would replace the diagnosis with a misleading message), and the fuse/
+      // task-mmd must not observe a tool that never runs. Mirrors Claude Code's
+      // validate-before-permissions order.
+      createMalformedToolCallGuardMiddleware(),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware()] : []),
       ...postFsToolDocStripMiddleware,
@@ -1879,6 +1997,13 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         : []),
       createSummarizationMiddleware(summarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
+      // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
+      // invalid_tool_calls into normalized tool_calls (the guard middleware above
+      // rejects them with a cause-targeted error before the tool runs), and strip
+      // any already-poisoned raw tool call from the outgoing request so the
+      // OpenAI-compatible API can't 400. Complementary to patchToolCalls below
+      // (which only pairs NORMALIZED dangling calls).
+      createMalformedToolCallRecoveryMiddleware(),
       createPatchToolCallsMiddleware(),
       ...skillsMiddlewareArray,
       ...memoryMiddlewareArray,
@@ -2094,11 +2219,78 @@ ${shellGuidance}
 //    activeRuns registry) to avoid a circular import.
 const checkpointers = new Map<string, SqlJsSaver>()
 const MAX_CACHED_CHECKPOINTERS = 12
+const MAIN_THREAD_MAX_ROOT_CHECKPOINTS = 3
+const MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS = 30
+const MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES = 48 * 1024 * 1024
 // In-flight eviction closes, so getCheckpointer can wait one out before
 // recreating an instance for the same thread (avoids reading a half-written DB).
 const closingCheckpointers = new Map<string, Promise<void>>()
+// Instance mirror of closingCheckpointers: a thread retirement must be able to
+// POISON (retire()) an instance whose detached evict-close is still settling —
+// the promise alone can't reach the object, and a held reference could
+// otherwise re-initialize it after the close settles.
+const closingInstances = new Map<string, SqlJsSaver>()
+// Retires (thread deletion) get their OWN wait channel, separate from reusable
+// closes: the pinned-skip in getCheckpointerInternal exists because a reusable
+// close WAITS for pins (pin holder waiting for it would deadlock) — but a
+// retire never waits for pins, so waiting on it is deadlock-free and MANDATORY
+// even for pinned callers. Heartbeat pins before it fetches its checkpointer;
+// with retires only in closingCheckpointers, its revive-then-get skipped the
+// wait and could grab/create a saver alongside the old one's in-flight teardown.
+const retiringCheckpointers = new Map<string, Promise<void>>()
 const checkpointerPins = new Map<string, number>()
 const checkpointerPinWaiters = new Map<string, Set<() => void>>()
+
+// Threads deleted this process (tombstones). A retired thread must never get a
+// NEW checkpointer: SqlJsSaver.setup() persists an empty snapshot, so even a
+// late read path would resurrect the just-deleted .sqlite as an orphan.
+// Prefix-aware — a dead parent buries its __worker__/__wf_ sub-threads too.
+// Entries stay for the process lifetime (tiny, bounded); late writers cannot
+// survive a restart, so in-memory-only is sufficient.
+//
+// CONTRACT for reused thread ids: user threads are uuids (never reused), but
+// fixed-id service threads exist (heartbeat). Any code that legitimately
+// RE-CREATES a thread record under a previously-deleted id MUST call
+// reviveRetiredThread(threadId) first — otherwise the new incarnation is
+// refused checkpointers until the app restarts.
+const retiredThreadIds = new Set<string>()
+
+// Retire epochs (mirrors run-store's disposal epochs): a saver that began
+// initialize() BEFORE a delete is in no registry, so retire can't poison it —
+// and if a revive (fixed-id recreation) lands before initialize() returns, the
+// tombstone re-check alone passes and the PRE-DELETION-born saver would be
+// cached as the new incarnation. The epoch captured before creation changes
+// exactly when a retire happened in between, revive-immune. Prefix-aware via
+// summation over dead ancestors.
+const retiredThreadEpochs = new Map<string, number>()
+
+function retireEpochOf(threadId: string): number {
+  let epoch = 0
+  for (const [dead, count] of retiredThreadEpochs) {
+    if (threadId === dead || threadId.startsWith(`${dead}__`)) epoch += count
+  }
+  return epoch
+}
+
+/**
+ * Lift the deletion tombstone for a thread id that is being legitimately
+ * re-created (fixed-id service threads like heartbeat, or a future
+ * id-preserving restore). The tombstone's job is to kill LATE writers of the
+ * DELETED incarnation; a caller deliberately making a new DB record for the
+ * same id supersedes it. Old poisoned saver instances stay poisoned (they
+ * belong to the dead incarnation) — the revived id simply gets fresh ones.
+ */
+export function reviveRetiredThread(threadId: string): void {
+  retiredThreadIds.delete(threadId)
+}
+
+function isRetiredThreadId(threadId: string): boolean {
+  if (retiredThreadIds.has(threadId)) return true
+  for (const dead of retiredThreadIds) {
+    if (threadId.startsWith(`${dead}__`)) return true
+  }
+  return false
+}
 
 let isCheckpointerThreadBusy: (threadId: string) => boolean = () => false
 /** Wire the "is this thread mid-run" predicate (from the IPC layer's activeRuns). */
@@ -2154,6 +2346,18 @@ async function waitForCheckpointerClose(threadId: string): Promise<void> {
   }
 }
 
+async function waitForCheckpointerRetire(threadId: string): Promise<void> {
+  for (;;) {
+    const pendingRetire = retiringCheckpointers.get(threadId)
+    if (!pendingRetire) return
+    try {
+      await pendingRetire
+    } catch {
+      // best-effort; a following iteration can observe any replacement retire
+    }
+  }
+}
+
 /** Close least-recently-used checkpointers beyond the cap, skipping busy threads. */
 function evictIdleCheckpointers(): void {
   if (checkpointers.size <= MAX_CACHED_CHECKPOINTERS) return
@@ -2163,10 +2367,16 @@ function evictIdleCheckpointers(): void {
     if (checkpointers.size <= MAX_CACHED_CHECKPOINTERS) break
     if (isCheckpointerThreadBusy(threadId)) continue
     if (isCheckpointerPinned(threadId)) continue
-    // Worker checkpointers are transient and lifecycle-managed by
-    // closeWorkerCheckpointersForThread; leave them to that explicit cleanup so a
-    // running worker (not necessarily in the busy guard) is never evicted.
-    if (threadId.includes("__worker__")) continue
+    // RULE, not a name list: NO sub-thread (coordinator `__worker__`, workflow
+    // `__wf_`, any future `<parent>__<role>` id) participates in LRU. Sub-agents
+    // hold their saver instance for the whole run WITHOUT registering in the IPC
+    // busy guard, so evicting one mid-run orphans a live writer: the held
+    // instance re-initializes on its next put() and keeps writing untracked by
+    // this map — its own cleanup then closes nothing, and a late debounced save
+    // resurrects the just-deleted file. Sub-threads are transient and closed by
+    // their explicit per-run cleanup instead. (The old `__worker__`-only special
+    // case missed `__wf_` and produced exactly that bug.)
+    if (threadId.includes("__")) continue
     checkpointers.delete(threadId)
     // NOTE: only free the checkpointer here. Unlike closeCheckpointer (thread
     // deletion), eviction is pure cache management — the thread still exists, so
@@ -2179,8 +2389,10 @@ function evictIdleCheckpointers(): void {
       .catch((e) => console.warn(`[Runtime] evict checkpointer close failed for ${threadId}:`, e))
       .finally(() => {
         if (closingCheckpointers.get(threadId) === closing) closingCheckpointers.delete(threadId)
+        if (closingInstances.get(threadId) === checkpointer) closingInstances.delete(threadId)
       })
     closingCheckpointers.set(threadId, closing)
+    closingInstances.set(threadId, checkpointer)
   }
 }
 
@@ -2239,6 +2451,17 @@ async function getCheckpointerInternal(
   threadId: string,
   waitForPendingClose: boolean
 ): Promise<SqlJsSaver> {
+  // Tombstone gate: never create (or hand out) a checkpointer for a deleted
+  // thread — SqlJsSaver.setup() persists an empty snapshot, so a late caller
+  // would materialize an orphan .sqlite for a thread that no longer exists.
+  if (isRetiredThreadId(threadId)) {
+    throw new Error(`[Runtime] Thread is deleted; checkpointer refused: ${threadId}`)
+  }
+  // An in-flight retire must be waited out UNCONDITIONALLY — pinned callers
+  // included (see retiringCheckpointers: retire never waits pins, so this
+  // cannot deadlock). Only reachable for a revived id (the tombstone check
+  // above throws otherwise), i.e. heartbeat's pin-then-get sequence.
+  await waitForCheckpointerRetire(threadId)
   if (waitForPendingClose && !isCheckpointerPinned(threadId)) {
     await waitForCheckpointerClose(threadId)
   }
@@ -2250,8 +2473,51 @@ async function getCheckpointerInternal(
     return cached
   }
   const dbPath = getThreadCheckpointPath(threadId)
-  const checkpointer = new SqlJsSaver(dbPath)
+  const bornRetireEpoch = retireEpochOf(threadId)
+  const isSubThreadCheckpoint = threadId.includes("__")
+  const checkpointer = new SqlJsSaver(dbPath, undefined, {
+    maxRootCheckpoints: isSubThreadCheckpoint ? 1 : MAIN_THREAD_MAX_ROOT_CHECKPOINTS,
+    maxRootForkBoundaryCheckpoints: isSubThreadCheckpoint
+      ? 0
+      : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
+    maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
+    maxNonRootCheckpoints: 1
+  })
   await checkpointer.initialize()
+  // Re-check AFTER the awaits above: a deletion landing while this instance
+  // was initializing scans the three registries, but this instance is in none
+  // of them yet — caching it would hand a live, writable saver for a deleted
+  // thread (setup() has already queued an async persist). The tombstone check
+  // alone is NOT enough: a revive (fixed-id recreation) landing before
+  // initialize() returned clears it, yet this saver was born of the PREVIOUS
+  // incarnation — the retire epoch catches that, revive-immune.
+  if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
+    await checkpointer.retire()
+    // initialize() may itself have WRITTEN to disk before this check:
+    // openRecoveredSqliteDatabase persists a recovered .bak/.tmp back to the
+    // live .sqlite, and the deletion's purge has already swept. retire() only
+    // gates FUTURE writes — re-sweep the recovery's write here, so the dead
+    // incarnation's transcript can't bleed into a revived id across a crash.
+    //
+    // BEST-EFFORT MITIGATION, not an ownership proof (accepted residual): a
+    // cached entry does mean a revived saver owns the file (skip), but the
+    // converse is heuristic — a revived saver can itself be mid-initialize and
+    // not cached yet, and this sweep could then eat its files. That residual
+    // is bounded: during its own init the new incarnation can hold NO user
+    // data on disk (post-purge there is nothing to recover, and new content
+    // only arrives via put() after init; its in-memory db is authoritative and
+    // any next write rewrites the whole file). Strictly closing the window
+    // needs an init-in-flight lease — declined per ROI for a five-condition
+    // race with bounded, self-healing fallout.
+    if (isRetiredThreadId(threadId) || !checkpointers.has(threadId)) {
+      try {
+        deleteThreadCheckpoint(threadId)
+      } catch (e) {
+        console.warn(`[Runtime] post-refusal checkpoint re-sweep failed for ${threadId}:`, e)
+      }
+    }
+    throw new Error(`[Runtime] Thread was deleted during checkpointer init; refused: ${threadId}`)
+  }
   checkpointers.set(threadId, checkpointer)
   evictIdleCheckpointers()
   return checkpointer
@@ -2280,6 +2546,16 @@ export async function withCheckpointer<T>(
 
 export async function closeCheckpointer(threadId: string): Promise<void> {
   const previousClose = closingCheckpointers.get(threadId)
+  // Mirror the instance SYNCHRONOUSLY (like the evict path): a thread
+  // retirement arriving while this close is still waiting (previous close,
+  // pins) must be able to poison the instance — the async body only removes it
+  // from `checkpointers` after those waits, and once the close settles the
+  // mirror entry is gone again, so registering any later would leave a window
+  // where retire can reach it through neither map. The map entry cannot be
+  // swapped under us meanwhile: getCheckpointer waits out the pending close we
+  // register below before creating a replacement.
+  const instanceAtCall = checkpointers.get(threadId)
+  if (instanceAtCall) closingInstances.set(threadId, instanceAtCall)
   const closing = (async () => {
     if (previousClose) await previousClose
     await waitForCheckpointerPins(threadId)
@@ -2290,30 +2566,147 @@ export async function closeCheckpointer(threadId: string): Promise<void> {
     }
     approvalStores.delete(threadId)
   })().finally(() => {
-    if (closingCheckpointers.get(threadId) === closing) closingCheckpointers.delete(threadId)
+    const stillOwnsClose = closingCheckpointers.get(threadId) === closing
+    if (stillOwnsClose) closingCheckpointers.delete(threadId)
+    // Mirror cleanup must ALSO verify close ownership, not just the instance:
+    // two overlapping closes of the SAME saver register the same instance
+    // value, and the first to settle would otherwise remove the mirror entry
+    // the still-in-flight second close (and a concurrent retire's poisoning)
+    // depends on. Complementary case: when WE own the channel but started with
+    // instanceAtCall undefined (the predecessor had already emptied the map),
+    // the predecessor deferred its mirror cleanup to us — sweep the stale
+    // entry, or the closed saver object is retained for the process lifetime.
+    // (Only close-deferred entries can be present here: evict and retire both
+    // clean their own mirror registrations on settle.)
+    if (stillOwnsClose && (!instanceAtCall || closingInstances.get(threadId) === instanceAtCall)) {
+      closingInstances.delete(threadId)
+    }
   })
   closingCheckpointers.set(threadId, closing)
   await closing
 }
 
-export async function closeWorkerCheckpointersForThread(parentThreadId: string): Promise<void> {
-  if (parentThreadId.includes("__worker__")) {
-    console.warn(
-      `[Runtime] Skipping worker checkpoint cleanup for invalid coordinator parent thread id: ${parentThreadId}`
+/**
+ * THE deletion primitive for checkpointer lifecycle: permanently retire the
+ * thread's checkpointer AND every sub-thread's (`__worker__`, `__wf_`, any
+ * future `<parent>__<role>` id). Must run BEFORE the disk sweeps — a writer
+ * that outlived its cancellation (hung subagent past cancelAndWait's timeout)
+ * could otherwise flush a late snapshot and resurrect the just-deleted files.
+ *
+ * Unlike closeCheckpointer (reusable close for a still-existing thread), this:
+ *  - tombstones FIRST (synchronously), so no interleaved caller can create a
+ *    fresh instance while we await the teardown;
+ *  - poisons instances via retire() — a held reference (the compiled graph
+ *    keeps its saver for the whole run) can never re-initialize and write again;
+ *  - also poisons instances whose detached LRU-evict close is still settling
+ *    (closingInstances), then awaits those closes so no in-flight rename can
+ *    land after the sweep;
+ *  - deliberately does NOT wait for pins ITSELF: retire() makes a late
+ *    operation fail fast instead of resurrecting, and "error on a deleted
+ *    thread" is the correct semantics — waiting could hang deletion behind a
+ *    wedged writer. (Precise caveat: awaiting an in-flight reusable close CAN
+ *    transitively wait on that close's own pin wait — bounded by the pinned
+ *    operation's duration, and safe either way: the instance is mirrored in
+ *    closingInstances at close start, so it gets poisoned when we resume.)
+ */
+export async function retireThreadCheckpointers(threadId: string): Promise<void> {
+  retiredThreadIds.add(threadId)
+  retiredThreadEpochs.set(threadId, (retiredThreadEpochs.get(threadId) ?? 0) + 1)
+  const prefix = `${threadId}__`
+  const matches = (id: string): boolean => id === threadId || id.startsWith(prefix)
+  const ids = new Set<string>(
+    [...checkpointers.keys(), ...closingCheckpointers.keys(), ...closingInstances.keys()].filter(
+      matches
     )
-    return
-  }
-  const prefix = `${parentThreadId}__worker__`
-  const entries = Array.from(checkpointers.entries()).filter(([threadId]) =>
-    threadId.startsWith(prefix)
   )
-  await Promise.all(
-    entries.map(async ([threadId, checkpointer]) => {
-      checkpointers.delete(threadId)
-      approvalStores.delete(threadId)
-      await checkpointer.close()
+  // The exact parent id ALWAYS gets a retiring entry — even with nothing
+  // cached. A fixed-id reviver (heartbeat) synchronizes on this channel, and
+  // its post-revive getCheckpointer resumes the moment the per-id chain
+  // settles — BEFORE the caller's own continuation gets to sweep the disk. An
+  // empty registry would leave no entry at all, and a warm-wasm, sync-fs init
+  // could then load the dead incarnation's bytes from the not-yet-swept file.
+  // The chain therefore hot-sweeps the parent's durable files itself before
+  // settling (deep purge for quarantine archives still runs in threads:delete).
+  ids.add(threadId)
+  // allSettled, NOT all: one rejecting retire() must not make this resolve
+  // early while sibling teardowns are still in flight — the caller sweeps the
+  // disk right after, and an unsettled sibling's in-flight close could late-
+  // rename a file back AFTER the sweep. Every id must settle before we return.
+  const settled = await Promise.allSettled(
+    Array.from(ids).map((id) => {
+      // Grab the evict-closing instance BEFORE awaiting its close settles (the
+      // settle handler removes it from the map), so it can still be poisoned.
+      const previousClose = closingCheckpointers.get(id)
+      const closingInstance = closingInstances.get(id)
+      const retiring = (async () => {
+        // Poison FIRST — retire() sets the write-gate flag synchronously at
+        // call, so even while we wait out an in-flight close, no NEW write
+        // iteration can start on that instance. Handled at creation: a fast
+        // rejection must not become an unhandled rejection while we're still
+        // awaiting the previous close below.
+        const closingInstanceRetire = closingInstance
+          ? closingInstance
+              .retire()
+              .catch((e) => console.warn(`[Runtime] closing-instance retire failed for ${id}:`, e))
+          : null
+        // A rejected prior close must NOT skip the poisoning below — log and
+        // keep going; the sweep ordering only needs the close's in-flight
+        // WRITE to have settled, which awaiting the (settled-or-rejected)
+        // promise provides either way.
+        if (previousClose) {
+          await previousClose.catch((e) =>
+            console.warn(`[Runtime] prior close failed during retire of ${id}:`, e)
+          )
+        }
+        if (closingInstanceRetire) await closingInstanceRetire
+        const checkpointer = checkpointers.get(id)
+        if (checkpointer) {
+          checkpointers.delete(id)
+          await checkpointer.retire()
+        }
+        if (id === threadId) {
+          // Writers above are drained/poisoned — sweep the parent's durable
+          // files BEFORE this entry settles, so anyone waiting on the retiring
+          // channel resumes to a clean disk.
+          try {
+            deleteThreadCheckpoint(id)
+          } catch (e) {
+            console.warn(`[Runtime] in-retire checkpoint sweep failed for ${id}:`, e)
+          }
+        }
+      })().finally(() => {
+        if (closingCheckpointers.get(id) === retiring) closingCheckpointers.delete(id)
+        if (retiringCheckpointers.get(id) === retiring) retiringCheckpointers.delete(id)
+        // The superseded close's finally deliberately skips mirror cleanup
+        // once we took close ownership — so the mirror entry is OURS to clear,
+        // or the closed saver object leaks in closingInstances for the process
+        // lifetime.
+        if (closingInstance && closingInstances.get(id) === closingInstance) {
+          closingInstances.delete(id)
+        }
+      })
+      // Register synchronously, before any await, in BOTH channels: the
+      // closing map keeps ordinary close/getCheckpointer chaining intact, and
+      // the retiring map is the pin-immune wait a revived fixed-id caller
+      // (heartbeat pins BEFORE fetching) is required to honor.
+      closingCheckpointers.set(id, retiring)
+      retiringCheckpointers.set(id, retiring)
+      return retiring
     })
   )
+  for (const result of settled) {
+    if (result.status === "rejected") {
+      console.warn(
+        `[Runtime] a checkpointer retire failed during thread retirement:`,
+        result.reason
+      )
+    }
+  }
+  // Independent of checkpointer presence: an approval store can exist for a
+  // thread whose checkpointer was already evicted/never cached.
+  for (const id of Array.from(approvalStores.keys()).filter(matches)) {
+    approvalStores.delete(id)
+  }
 }
 
 // Get the model instance from custom model configuration
@@ -2742,6 +3135,8 @@ function getModelInstance(
     topP?: number
     topK?: number
     interleavedThinking?: boolean
+    enableThinking?: boolean
+    thinkingEffort?: "high" | "max"
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number
@@ -2760,6 +3155,7 @@ function getModelInstance(
   const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
   const topP = customConfig.topP ?? DEFAULT_TOP_P
   const topK = customConfig.topK ?? DEFAULT_TOP_K
+  const thinkingEffort = customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT
 
   const baseFields = {
     model: resolvedModel,
@@ -2774,7 +3170,12 @@ function getModelInstance(
     maxRetries: 0,
     modelKwargs: {
       parallel_tool_calls: true,
-      ...(topK > 0 ? { top_k: topK } : {})
+      ...(topK > 0 ? { top_k: topK } : {}),
+      chat_template_kwargs: {
+        enable_thinking: customConfig.enableThinking === true,
+        reasoning_effort: thinkingEffort
+      },
+      ...(customConfig.enableThinking ? { thinking: { type: "enabled" } } : {})
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -2785,14 +3186,23 @@ function getModelInstance(
     }
   }
 
-  if (!customConfig.interleavedThinking) {
-    return new ChatOpenAI(baseFields)
+  if (customConfig.enableThinking && customConfig.interleavedThinking) {
+    return new ChatOpenAI({
+      ...baseFields,
+      completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {
+        exposeReasoning: customConfig.enableThinking === true
+      })
+    } as never)
   }
 
-  return new ChatOpenAI({
-    ...baseFields,
-    completions: new InterleavedThinkingChatOpenAICompletions(baseFields)
-  } as never)
+  if (customConfig.enableThinking) {
+    return new ChatOpenAI({
+      ...baseFields,
+      completions: new ReasoningDisplayChatOpenAICompletions(baseFields)
+    } as never)
+  }
+
+  return new ChatOpenAI(baseFields)
 }
 
 export interface CreateAgentRuntimeOptions {
@@ -2828,6 +3238,10 @@ export interface CreateAgentRuntimeOptions {
   harnessAdapterName?: string
   /** Bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
   harnessAdapterVersion?: string
+  /** Current harness workflow node/stage name exposed to child processes as HARNESS_NODE_NAME. */
+  harnessNodeName?: string
+  /** Current harness workflow node/stage status exposed to child processes as HARNESS_NODE_STATUS. */
+  harnessNodeStatus?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to child processes as PROJECT_DIR. */
@@ -2875,6 +3289,8 @@ export interface CreateAgentRuntimeOptions {
   maxRetryAttempts?: number
   /** Callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Callback invoked when repeated tool failures should be shown to the user. */
+  onFailureFuseNotice?: FailureFuseNoticeCallback
   /**
    * Hook-result sink for coordinator workers. Workers run detached/async so
    * their hooks must be delivered on a durable channel rather than the spawning
@@ -2946,6 +3362,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     retryHooks,
@@ -2957,6 +3375,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode = "normal",
     disableSubagents = false,
     onHookResult,
+    onFailureFuseNotice,
     onCoordinatorWorkerHookResult,
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
@@ -2984,9 +3403,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const runtimeThreadMetadata: Record<string, unknown> = (() => {
     try {
       const threadRow = getThread(threadId)
-      return threadRow?.metadata
-        ? (JSON.parse(threadRow.metadata) as Record<string, unknown>)
-        : {}
+      return threadRow?.metadata ? (JSON.parse(threadRow.metadata) as Record<string, unknown>) : {}
     } catch {
       console.warn("[Runtime] Failed to parse thread metadata for memory settings")
       return {}
@@ -3146,6 +3563,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookResolver: resolveHooksForContext,
     hookScope,
     onHookResult,
+    onFailureFuseNotice,
     hookTurnId,
     pluginOutputDir,
     systemId,
@@ -3157,6 +3575,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     onFileMutation,
@@ -3287,6 +3707,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         harnessProjectId,
         harnessAdapterName,
         harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
         projectCode,
         projectDir,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
@@ -3473,6 +3895,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
+    onFailureFuseNotice,
     {
       workspacePath,
       threadId,
@@ -3483,6 +3906,8 @@ The workspace root is: ${workspacePath}`
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       turnId: hookTurnId
@@ -3533,7 +3958,7 @@ The workspace root is: ${workspacePath}`
     // Disable ad hoc code_exec authoring in Agent Team and project mode. Saved tools remain
     // available through the deferred-tool bridge when code exec is enabled.
     codeExecRouteEnabled =
-      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !Boolean(featureId)
+      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !featureId
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
@@ -3632,7 +4057,12 @@ The workspace root is: ${workspacePath}`
           try {
             return await Reflect.apply(originalInvoke, t, args)
           } catch (e: unknown) {
-            if (isHookHaltError(e) || isWorkflowStructuredOutputFatalError(e)) throw e
+            if (
+              isHookHaltError(e) ||
+              isFailureFuseHaltError(e) ||
+              isWorkflowStructuredOutputFatalError(e)
+            )
+              throw e
             const msg = e instanceof Error ? e.message : String(e)
             const level = e instanceof TypeError || e instanceof ReferenceError ? "error" : "warn"
             console[level](`[Runtime] Tool "${t.name}" error (non-fatal):`, msg)
@@ -3720,6 +4150,7 @@ The workspace root is: ${workspacePath}`
               maxRetryAttempts,
               hookScope: createInheritedHookScope(hookScope),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId,
               additionalTools: subagentOptions.additionalTools,
               // All subagents of this run share the parent thread's tool-
@@ -3815,6 +4246,7 @@ The workspace root is: ${workspacePath}`
     hookScope,
     resolveHooksForContext,
     onHookResult,
+    onFailureFuseNotice,
     hookTurnId,
     systemId,
     pluginWorkspace,
@@ -3822,9 +4254,32 @@ The workspace root is: ${workspacePath}`
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
-    skipToolNames: toolHookExclusions
+    skipToolNames: toolHookExclusions,
+    onToolFailureDecision: hookTurnId
+      ? ({ toolName, toolCallId, toolArgs, signal }) =>
+          recordToolFailure({
+            threadId: options.threadId,
+            turnId: hookTurnId,
+            toolName,
+            toolCallId,
+            toolArgs,
+            signal,
+            mode: getFailureFuseMode()
+          })
+      : undefined,
+    onToolSuccess: hookTurnId
+      ? ({ toolName, toolArgs }) =>
+          recordToolSuccess({
+            threadId: options.threadId,
+            turnId: hookTurnId,
+            toolName,
+            toolArgs
+          })
+      : undefined
   })
 
   const deferredToolIds = [
@@ -4006,6 +4461,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       pluginOutputDir,
@@ -4145,7 +4602,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
-            onHookResult: workerOnHookResult
+            onHookResult: workerOnHookResult,
+            onFailureFuseNotice
           })
 
           workerStream = await workerAgent.stream(
@@ -4215,7 +4673,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
-            onHookResult: workerOnHookResult
+            onHookResult: workerOnHookResult,
+            onFailureFuseNotice
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
           usedWorkerModelId = nextCandidate
@@ -4266,7 +4725,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
             ...workerHarnessContext,
-            onHookResult: workerOnHookResult
+            onHookResult: workerOnHookResult,
+            onFailureFuseNotice
           })
           const handoffStream = await handoffAgent.stream(
             {
@@ -4605,6 +5065,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     threadId: options.threadId,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
+    onFailureFuseNotice,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
     // hook chain without knowing per-thread context.
@@ -4613,11 +5074,33 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       toolCallId: string | undefined
       toolArgs: unknown
       signal: ToolFailureSignal
-    }): void => {
+    }): FailureFuseDecision | void => {
+      const failureFuseDecision = hookTurnId
+        ? recordToolFailure({
+            threadId,
+            turnId: hookTurnId,
+            toolName: input.toolName,
+            toolCallId: input.toolCallId,
+            toolArgs: input.toolArgs,
+            signal: input.signal,
+            mode: getFailureFuseMode()
+          })
+        : undefined
       const context: HookContext = {
         workspacePath,
         sessionId: threadId,
         turnId: hookTurnId,
+        pluginOutputDir,
+        systemId,
+        pluginWorkspace,
+        featureId,
+        harnessProjectId,
+        harnessAdapterName,
+        harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
+        projectCode,
+        projectDir,
         toolName: input.toolName,
         toolArgs:
           input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
@@ -4638,6 +5121,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         context,
         onHookResult
       ).catch((e) => console.warn("[Hooks] PostToolUseFailure hook error:", e))
+      return failureFuseDecision
     }
   })
 

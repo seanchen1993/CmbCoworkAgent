@@ -496,6 +496,28 @@ async function testAppDbFlushRemainsReusable(): Promise<void> {
   await db.closeDatabase()
 }
 
+async function testAppDbStrictFlushSerializesConcurrentCallers(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  await db.initializeDatabase()
+  db.createThread("thread-strict-flush-a", { title: "strict flush A" })
+
+  const firstFlush = db.flushStrict()
+  db.createThread("thread-strict-flush-b", { title: "strict flush B" })
+  await Promise.all([firstFlush, db.flushStrict()])
+  await db.closeDatabase()
+
+  await db.initializeDatabase()
+  assert(
+    db.getThread("thread-strict-flush-a"),
+    "first strict flush thread should survive concurrent strict flushes"
+  )
+  assert(
+    db.getThread("thread-strict-flush-b"),
+    "second strict flush thread should survive concurrent strict flushes"
+  )
+  await db.closeDatabase()
+}
+
 async function testGoalJudgeModelSettings(): Promise<void> {
   const storage = await import("../src/main/storage.ts")
   const evaluator = await import("../src/main/agent/goals/evaluator.ts")
@@ -616,6 +638,7 @@ async function main(): Promise<void> {
     testSqlGoalStorePausesRestoredActiveGoals,
     testLegacyBudgetLimitedStatusNormalizesToPaused,
     testAppDbFlushRemainsReusable,
+    testAppDbStrictFlushSerializesConcurrentCallers,
     testGoalJudgeModelSettings
   ]
   await withTempHome(async () => {

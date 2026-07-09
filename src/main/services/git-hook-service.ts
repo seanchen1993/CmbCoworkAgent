@@ -2,7 +2,7 @@ import { execFile } from "child_process"
 import { createHash, randomUUID } from "crypto"
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "fs/promises"
 import { homedir } from "os"
-import { dirname, join, resolve as resolvePath } from "path"
+import { dirname, isAbsolute, join, relative, resolve as resolvePath } from "path"
 import { promisify } from "util"
 import { getOpenworkDir } from "../storage"
 import { nowIsoLocal } from "../util/local-time"
@@ -46,6 +46,7 @@ export type GitHookState =
   | "partial"
   | "outdated"
   | "modified"
+  | "external_hooks_path"
   | "error"
 
 export interface GitHookFileStatus {
@@ -55,7 +56,7 @@ export interface GitHookFileStatus {
   version?: number
   hasUserHook: boolean
   userHookPath?: string
-  state: "missing" | "managed" | "outdated" | "user" | "modified" | "error"
+  state: "missing" | "managed" | "outdated" | "user" | "modified" | "external" | "error"
   error?: string
 }
 
@@ -74,6 +75,7 @@ export interface GitHookStatus {
 interface GitContext {
   gitRoot: string
   hookPaths: Record<HookName, string>
+  hasExternalHookPath: boolean
 }
 
 interface HookSnapshotFile {
@@ -334,18 +336,30 @@ function resolveGitPath(rawPath: string, cwd: string): string {
     : resolvePath(cwd, trimmed)
 }
 
-async function resolveHookPath(gitRoot: string, hook: HookName): Promise<string> {
-  try {
-    const configuredHooksPath = await runGit(gitRoot, ["config", "--get", "core.hooksPath"])
-    if (configuredHooksPath) {
-      return join(resolveGitPath(configuredHooksPath, gitRoot), hook)
-    }
-  } catch {
-    // No core.hooksPath configured; fall back to the repository's default hook path.
-  }
+function isPathInsideOrSame(parent: string, child: string): boolean {
+  const normalizedParent = resolvePath(parent)
+  const normalizedChild = resolvePath(child)
+  if (normalizePathForKey(normalizedParent) === normalizePathForKey(normalizedChild)) return true
+  const rel = relative(normalizedParent, normalizedChild)
+  return !!rel && !rel.startsWith("..") && !isAbsolute(rel)
+}
 
-  const rawPath = await runGit(gitRoot, ["rev-parse", "--git-path", `hooks/${hook}`])
+async function resolveGitCommonDir(gitRoot: string): Promise<string> {
+  const rawPath = await runGit(gitRoot, ["rev-parse", "--git-common-dir"])
   return resolveGitPath(rawPath, gitRoot)
+}
+
+async function resolveHookPath(
+  gitRoot: string,
+  gitCommonDir: string,
+  hook: HookName
+): Promise<{ path: string; isGitInternal: boolean }> {
+  const rawPath = await runGit(gitRoot, ["rev-parse", "--git-path", `hooks/${hook}`])
+  const hookPath = resolveGitPath(rawPath, gitRoot)
+  return {
+    path: hookPath,
+    isGitInternal: isPathInsideOrSame(gitCommonDir, hookPath)
+  }
 }
 
 async function resolveGitContext(workspacePath: string): Promise<GitContext | null> {
@@ -354,11 +368,15 @@ async function resolveGitContext(workspacePath: string): Promise<GitContext | nu
 
   try {
     const gitRoot = await runGit(workspace, ["rev-parse", "--show-toplevel"])
+    const gitCommonDir = await resolveGitCommonDir(gitRoot)
     const hookPaths = {} as Record<HookName, string>
+    let hasExternalHookPath = false
     for (const hook of HOOK_NAMES) {
-      hookPaths[hook] = await resolveHookPath(gitRoot, hook)
+      const resolved = await resolveHookPath(gitRoot, gitCommonDir, hook)
+      hookPaths[hook] = resolved.path
+      if (!resolved.isGitInternal) hasExternalHookPath = true
     }
-    return { gitRoot, hookPaths }
+    return { gitRoot, hookPaths, hasExternalHookPath }
   } catch {
     return null
   }
@@ -481,8 +499,24 @@ async function inspectHookFile(hook: HookName, hookPath: string): Promise<GitHoo
   }
 }
 
+async function inspectExternalHookFile(
+  hook: HookName,
+  hookPath: string
+): Promise<GitHookFileStatus> {
+  const inspected = await inspectHookFile(hook, hookPath)
+  return {
+    ...inspected,
+    installed: false,
+    state: "external",
+    error:
+      inspected.error ??
+      "core.hooksPath points outside the Git metadata directory; skipped to avoid modifying workspace files"
+  }
+}
+
 function summarizeHookState(hooks: GitHookFileStatus[]): GitHookState {
   if (hooks.some((hook) => hook.state === "error")) return "error"
+  if (hooks.some((hook) => hook.state === "external")) return "external_hooks_path"
   if (hooks.some((hook) => hook.state === "modified")) return "modified"
   if (hooks.some((hook) => hook.state === "outdated")) return "outdated"
   const managedCount = hooks.filter((hook) => hook.state === "managed").length
@@ -503,6 +537,8 @@ function hookStateMessage(state: GitHookState): string {
       return "Git Hook 需要升级"
     case "modified":
       return "Git Hook 已被修改，建议修复"
+    case "external_hooks_path":
+      return "Git Hook 路径指向工作区文件，已跳过安装"
     case "not_git":
       return "当前目录不是 Git 仓库"
     default:
@@ -525,13 +561,17 @@ export async function getGitHookStatus(workspacePath: string): Promise<GitHookSt
     }
 
     const hooks = await Promise.all(
-      HOOK_NAMES.map((hook) => inspectHookFile(hook, context.hookPaths[hook]))
+      HOOK_NAMES.map((hook) =>
+        context.hasExternalHookPath
+          ? inspectExternalHookFile(hook, context.hookPaths[hook])
+          : inspectHookFile(hook, context.hookPaths[hook])
+      )
     )
     const state = summarizeHookState(hooks)
     return {
       state,
       installed: state === "installed",
-      canInstall: state !== "error",
+      canInstall: state !== "error" && state !== "external_hooks_path",
       version: CMBDEVCLAW_GIT_HOOK_VERSION,
       gitRoot: context.gitRoot,
       hookDir: dirname(context.hookPaths["pre-commit"]),
@@ -873,6 +913,7 @@ async function installOneHook(hook: HookName, hookPath: string, helperPath: stri
 export async function installGitHooks(workspacePath: string): Promise<GitHookStatus> {
   const context = await resolveGitContext(workspacePath)
   if (!context) return getGitHookStatus(workspacePath)
+  if (context.hasExternalHookPath) return getGitHookStatus(workspacePath)
 
   const helperPath = await ensureHookHelper()
   for (const hook of HOOK_NAMES) {
@@ -883,13 +924,15 @@ export async function installGitHooks(workspacePath: string): Promise<GitHookSta
 
 async function uninstallOneHook(hookPath: string): Promise<void> {
   const userHookPath = getUserHookPath(hookPath)
+  let removedManagedHook = false
   if (await pathExists(hookPath)) {
     const content = await readFile(hookPath, "utf-8").catch(() => "")
     if (isManagedHook(content)) {
       await rm(hookPath, { force: true })
+      removedManagedHook = true
     }
   }
-  if (await pathExists(userHookPath)) {
+  if (removedManagedHook && (await pathExists(userHookPath))) {
     await rename(userHookPath, hookPath)
     await chmod(hookPath, 0o755).catch(() => undefined)
   }
@@ -926,6 +969,7 @@ async function autoInstallGitHooksForRoot(gitRoot: string): Promise<void> {
     // the reconciler's coverage set would silently re-depend on hook installation.
     if (status.state !== "not_git") {
       await registerGitHookRepo(normalizedRoot)
+      scheduleGitHookEventSync(normalizedRoot, 100)
     }
 
     if (status.installed) {

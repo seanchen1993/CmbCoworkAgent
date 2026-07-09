@@ -356,7 +356,8 @@ export function extractErrorDetail(
 ): ApiErrorDetail {
   const status = fetchDetail?.status ?? getStatusCode(error) ?? statusFromMessage(error)
   const info = getStatusInfo(status)
-  const code = info?.category ?? classifyApiError(error)
+  const code =
+    info?.category ?? (typeof status === "number" ? classifyApiError({ status }) : classifyApiError(error))
   const requestId = fetchDetail?.requestId ?? getRequestId(error)
   const providerMessage = cleanProviderMessage(error)
   // Prefer the fetch-layer raw body (schema-independent), then the SDK's parsed

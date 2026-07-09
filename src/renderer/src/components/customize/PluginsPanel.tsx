@@ -101,6 +101,7 @@ function buildPluginConsoleInfo(
 type MarketExtraJson = {
   skills?: string[]
   grayUserIds?: string[]
+  [key: string]: unknown
 }
 
 function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
@@ -139,7 +140,7 @@ function buildPluginSkillsExtraJson(skills: string[], existingExtraJson?: string
         existing.grayUserIds.filter((userId): userId is string => typeof userId === "string")
       )
     : []
-  const payload: MarketExtraJson = {}
+  const payload: MarketExtraJson = { ...existing }
 
   if (normalizedSkills.length > 0) {
     payload.skills = normalizedSkills

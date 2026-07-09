@@ -558,6 +558,25 @@ function testLevel2ToolGuard(): void {
   )
 }
 
+function testSoloTaskDescriptionsExposeAccessPolicy(): void {
+  // Claude Code shows agent access next to each subagent description
+  // (`Tools: ...`). Keep Solo Task aligned so the main agent knows, before
+  // dispatching, that Explore/Plan are read-only and cannot write.
+  assert(
+    RUNTIME_SRC.includes(
+      "appendRegistrySubagentAccessDescription(spec.description, disallowed, shell)"
+    ),
+    "Solo registry subagent descriptions include access-policy suffixes"
+  )
+  assert(
+    RUNTIME_SRC.includes('no ${disallowedTools.join("/")}') &&
+      RUNTIME_SRC.includes('"read-only shell"') &&
+      RUNTIME_SRC.includes('"no shell"') &&
+      RUNTIME_SRC.includes('"full shell"'),
+    "access-policy suffix names denied tools and shell tier"
+  )
+}
+
 function testLevel1ToolPlumbing(): void {
   // Requirement 3: agentType tool policy reaches the leaf runtime's
   // filesystemAccess (explicit denylist/shell mode), and the role prompt is set.
@@ -1989,6 +2008,7 @@ const tests = [
   testLevel2GatedToSoloMainAgent,
   testLevel2DedupAndMerge,
   testLevel2ToolGuard,
+  testSoloTaskDescriptionsExposeAccessPolicy,
   testLevel1ToolPlumbing,
   testWorkflowAgentTypeLeafConfig,
   testLevel2MemoryInjection,

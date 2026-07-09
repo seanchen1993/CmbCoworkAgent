@@ -1,5 +1,18 @@
 // Re-export types from electron for use in renderer
 
+import type {
+  ForkableCheckpoint as SharedForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
+  ThreadForkOverrides as SharedThreadForkOverrides,
+  ThreadForkParams as SharedThreadForkParams,
+  ThreadForkResponse as SharedThreadForkResponse
+} from "../../shared/checkpoint-forkability"
+
+export type {
+  ForkBoundarySource,
+  ForkUnstableReason
+} from "../../shared/checkpoint-forkability"
+
 export interface FileAttachment {
   filename: string
   filePath: string // full path for display
@@ -20,6 +33,12 @@ export interface Thread {
   thread_values?: Record<string, unknown>
   title?: string
 }
+
+export type ThreadForkOverrides = SharedThreadForkOverrides
+export type ThreadForkParams = SharedThreadForkParams
+export type ThreadForkResponse = SharedThreadForkResponse<Thread>
+export type ThreadForkCheckpointForMessageParams = SharedThreadForkCheckpointForMessageParams
+export type ForkableCheckpoint = SharedForkableCheckpoint
 
 export type RunStatus = "pending" | "running" | "error" | "success" | "interrupted"
 
@@ -57,6 +76,11 @@ import type {
   McpConnectorAdvanced,
   McpConnectorConfig,
   McpConnectorUpsert,
+  McpImportApplyResult,
+  McpImportConfigApplyRequest,
+  McpImportConfigRequest,
+  McpImportConflictStrategy,
+  McpImportPreviewResult,
   Subagent,
   ScheduledTask,
   ScheduledTaskUpsert,
@@ -134,6 +158,11 @@ export type {
   McpConnectorAdvanced,
   McpConnectorConfig,
   McpConnectorUpsert,
+  McpImportApplyResult,
+  McpImportConfigApplyRequest,
+  McpImportConfigRequest,
+  McpImportConflictStrategy,
+  McpImportPreviewResult,
   Subagent,
   ScheduledTask,
   ScheduledTaskUpsert,
@@ -219,6 +248,7 @@ export interface Message {
   id: string
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  reasoning?: string
   tool_calls?: ToolCall[]
   // For tool messages - links result to its tool call
   tool_call_id?: string

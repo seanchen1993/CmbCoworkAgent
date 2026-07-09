@@ -186,6 +186,8 @@ function buildProjectDoc(
     creatorUpperOrgLv0: project.creator?.upperOrgLv0,
     creatorUpperOrgLv1: project.creator?.upperOrgLv1,
     lifecycleStatus: project.lifecycle?.status,
+    // 项目创建时间（项目本地元数据 createAt）；用于运营项目列表按新建时间排序。
+    lifecycleCreatedAt: project.lifecycle?.createAt,
     // 生命周期最近变更时间（元数据编辑 / 归档时写入）；用于「已归档」列表按归档时间倒序。
     lifecycleUpdatedAt: project.lifecycle?.updateAt,
     compatible: project.boardCompatibility?.compatible,
