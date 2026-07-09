@@ -706,12 +706,6 @@ export function RightPanel({
   }, [moduleMode, previewPath, onPreviewFullscreenChange])
 
   useEffect(() => {
-    if (moduleMode === "preview" && previewPath && isHtmlPreviewPath(previewPath)) {
-      onRequestBrowserMode?.()
-    }
-  }, [moduleMode, onRequestBrowserMode, previewPath])
-
-  useEffect(() => {
     if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0)
       return
     if (lastRecordedBatchKeyRef.current === latestCompletedLlmBatch.batchKey) return
