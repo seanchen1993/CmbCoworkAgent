@@ -34,6 +34,7 @@ interface CustomConfig {
   topKInput: string
   interleavedThinking: boolean
   enableThinking: boolean
+  enableThinkingEffort: boolean
   thinkingEffort: ThinkingEffort
   tier: "premium" | "economy"
 }
@@ -67,6 +68,7 @@ interface CustomModelItem {
   topK: number
   interleavedThinking?: boolean
   enableThinking?: boolean
+  enableThinkingEffort?: boolean
   thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
@@ -232,6 +234,7 @@ export function CustomModelDialog({
     topKInput: String(FALLBACK_LIMITS.defaultTopK),
     interleavedThinking: false,
     enableThinking: false,
+    enableThinkingEffort: false,
     thinkingEffort: DEFAULT_THINKING_EFFORT,
     tier: "premium"
   })
@@ -302,6 +305,7 @@ export function CustomModelDialog({
                 resolvedExisting.interleavedThinking ??
                 defaultInterleavedThinkingForModel(resolvedExisting.model),
               enableThinking: resolvedExisting.enableThinking === true,
+              enableThinkingEffort: resolvedExisting.enableThinkingEffort === true,
               thinkingEffort: resolvedExisting.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
               tier: resolvedExisting.tier ?? "premium"
             })
@@ -321,6 +325,7 @@ export function CustomModelDialog({
               topKInput: String(limits.defaultTopK),
               interleavedThinking: false,
               enableThinking: false,
+              enableThinkingEffort: false,
               thinkingEffort: DEFAULT_THINKING_EFFORT,
               tier: "premium"
             })
@@ -359,6 +364,7 @@ export function CustomModelDialog({
       interleavedThinking:
         picked.interleavedThinking ?? defaultInterleavedThinkingForModel(picked.model),
       enableThinking: picked.enableThinking === true,
+      enableThinkingEffort: picked.enableThinkingEffort === true,
       thinkingEffort: picked.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
       tier: picked.tier ?? "premium"
     })
@@ -443,6 +449,7 @@ export function CustomModelDialog({
         topP: parsedTopP,
         topK: parsedTopK,
         enableThinking: config.enableThinking,
+        enableThinkingEffort: config.enableThinking && config.enableThinkingEffort,
         thinkingEffort: config.thinkingEffort
       })
       setTestResult(result)
@@ -507,6 +514,7 @@ export function CustomModelDialog({
         topP: parsedTopP,
         topK: parsedTopK,
         enableThinking: config.enableThinking,
+        enableThinkingEffort: config.enableThinking && config.enableThinkingEffort,
         thinkingEffort: config.thinkingEffort,
         interleavedThinking: config.interleavedThinking,
         tier: config.tier
@@ -542,6 +550,7 @@ export function CustomModelDialog({
           interleavedThinking:
             updated.interleavedThinking ?? defaultInterleavedThinkingForModel(updated.model),
           enableThinking: updated.enableThinking === true,
+          enableThinkingEffort: updated.enableThinkingEffort === true,
           thinkingEffort: updated.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
           tier: updated.tier ?? "premium"
         }))
@@ -599,6 +608,7 @@ export function CustomModelDialog({
           interleavedThinking:
             fallback.interleavedThinking ?? defaultInterleavedThinkingForModel(fallback.model),
           enableThinking: fallback.enableThinking === true,
+          enableThinkingEffort: fallback.enableThinkingEffort === true,
           thinkingEffort: fallback.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
           tier: fallback.tier ?? "premium"
         })
@@ -624,6 +634,7 @@ export function CustomModelDialog({
           topKInput: String(tokenLimits.defaultTopK),
           interleavedThinking: false,
           enableThinking: false,
+          enableThinkingEffort: false,
           thinkingEffort: DEFAULT_THINKING_EFFORT,
           tier: "premium"
         })
@@ -669,6 +680,7 @@ export function CustomModelDialog({
                     topKInput: String(tokenLimits.defaultTopK),
                     interleavedThinking: false,
                     enableThinking: false,
+                    enableThinkingEffort: false,
                     thinkingEffort: DEFAULT_THINKING_EFFORT,
                     tier: "premium"
                   })
@@ -918,7 +930,9 @@ export function CustomModelDialog({
                       setConfig((c) => ({
                         ...c,
                         enableThinking: !c.enableThinking,
-                        ...(c.enableThinking ? { interleavedThinking: false } : {})
+                        ...(c.enableThinking
+                          ? { interleavedThinking: false, enableThinkingEffort: false }
+                          : {})
                       }))
                     }
                     className={cn(
@@ -937,22 +951,58 @@ export function CustomModelDialog({
               </div>
 
               <div className="space-y-1">
-                <ParameterLabel explanation="仅在开启思考模式后可选择。强度越高，模型可能投入更多推理预算，耗时和消耗也可能增加；是否生效取决于模型能力，例如 deepseek-flash 支持思考开关和思考强度。">
+                <ParameterLabel explanation="部分模型或服务支持额外指定思考强度；不支持时关闭即可，只保留思考模式。开启后可选择 High 或 Max。">
                   思考强度
                 </ParameterLabel>
+                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                  <div>
+                    <div className="text-sm text-foreground">
+                      {config.enableThinking && config.enableThinkingEffort ? "已开启" : "已关闭"}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={config.enableThinking && config.enableThinkingEffort}
+                    disabled={!config.enableThinking}
+                    onClick={() => {
+                      setConfig((c) => ({ ...c, enableThinkingEffort: !c.enableThinkingEffort }))
+                      setTestResult(null)
+                    }}
+                    className={cn(
+                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                      !config.enableThinking
+                        ? "cursor-not-allowed bg-muted-foreground/20"
+                        : config.enableThinkingEffort
+                          ? "cursor-pointer bg-primary"
+                          : "cursor-pointer bg-muted-foreground/30"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        config.enableThinking && config.enableThinkingEffort
+                          ? "translate-x-4"
+                          : "translate-x-0"
+                      )}
+                    />
+                  </button>
+                </div>
                 <div className="flex gap-2">
                   {THINKING_EFFORT_OPTIONS.map((option) => (
                     <button
                       key={option.value}
                       type="button"
-                      disabled={!config.enableThinking}
+                      disabled={!config.enableThinking || !config.enableThinkingEffort}
                       onClick={() => {
                         setConfig((c) => ({ ...c, thinkingEffort: option.value }))
                         setTestResult(null)
                       }}
                       className={cn(
                         "flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45",
-                        config.enableThinking && config.thinkingEffort === option.value
+                        config.enableThinking &&
+                          config.enableThinkingEffort &&
+                          config.thinkingEffort === option.value
                           ? "border-primary bg-primary/10 text-primary"
                           : "border-border text-muted-foreground hover:bg-muted disabled:hover:bg-transparent"
                       )}

@@ -3493,6 +3493,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         maxOutputTokens?: number
         temperature?: number
         enableThinking?: boolean
+        enableThinkingEffort?: boolean
         thinkingEffort?: ThinkingEffort
       }
     ): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
@@ -3502,6 +3503,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       let maxOutputTokens: number
       let temperature: number
       let enableThinking: boolean
+      let enableThinkingEffort: boolean
       let thinkingEffort: ThinkingEffort
 
       if (params.id) {
@@ -3513,7 +3515,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         apiKey = params.apiKey || saved.apiKey || ""
         maxOutputTokens = params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
         temperature = params.temperature ?? saved.temperature ?? DEFAULT_TEMPERATURE
-        enableThinking = params.enableThinking ?? saved.enableThinking === true
+        enableThinking = params.enableThinking ?? (saved.enableThinking === true)
+        enableThinkingEffort =
+          params.enableThinkingEffort ?? (saved.enableThinkingEffort === true)
         thinkingEffort = params.thinkingEffort ?? saved.thinkingEffort ?? DEFAULT_THINKING_EFFORT
       } else {
         baseUrl = params.baseUrl || ""
@@ -3522,8 +3526,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         maxOutputTokens = params.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
         temperature = params.temperature ?? DEFAULT_TEMPERATURE
         enableThinking = params.enableThinking === true
+        enableThinkingEffort = params.enableThinkingEffort === true
         thinkingEffort = params.thinkingEffort ?? DEFAULT_THINKING_EFFORT
       }
+      enableThinkingEffort = enableThinking && enableThinkingEffort
 
       if (!baseUrl) return { success: false, error: "接口地址不能为空" }
       if (!model) return { success: false, error: "模型名称不能为空" }
@@ -3561,7 +3567,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             temperature,
             chat_template_kwargs: {
               enable_thinking: enableThinking,
-              reasoning_effort: thinkingEffort
+              ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
             },
             ...(enableThinking
               ? { thinking: { type: "enabled" } }

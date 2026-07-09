@@ -689,6 +689,7 @@ const api = {
         topK: number
         interleavedThinking?: boolean
         enableThinking?: boolean
+        enableThinkingEffort?: boolean
         thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       }>
@@ -707,6 +708,7 @@ const api = {
           topK: number
           interleavedThinking?: boolean
           enableThinking?: boolean
+          enableThinkingEffort?: boolean
           thinkingEffort?: "high" | "max"
           tier?: "premium" | "economy"
         }>
@@ -727,6 +729,7 @@ const api = {
       topK: number
       interleavedThinking?: boolean
       enableThinking?: boolean
+      enableThinkingEffort?: boolean
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null> => {
@@ -743,6 +746,7 @@ const api = {
         topK: number
         interleavedThinking?: boolean
         enableThinking?: boolean
+        enableThinkingEffort?: boolean
         thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       } | null>
@@ -760,6 +764,7 @@ const api = {
       topK?: number
       interleavedThinking?: boolean
       enableThinking?: boolean
+      enableThinkingEffort?: boolean
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }): Promise<void> => {
@@ -778,6 +783,7 @@ const api = {
       topK?: number
       interleavedThinking?: boolean
       enableThinking?: boolean
+      enableThinkingEffort?: boolean
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }): Promise<{ id: string }> => {
@@ -802,6 +808,7 @@ const api = {
       topP?: number
       topK?: number
       enableThinking?: boolean
+      enableThinkingEffort?: boolean
       thinkingEffort?: "high" | "max"
     }): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       return ipcRenderer.invoke("models:testConnection", params) as Promise<{

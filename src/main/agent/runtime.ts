@@ -2751,6 +2751,7 @@ function getModelInstance(
     topK?: number
     interleavedThinking?: boolean
     enableThinking?: boolean
+    enableThinkingEffort?: boolean
     thinkingEffort?: "high" | "max"
   },
   retryHooks?: ModelRetryHooks,
@@ -2771,6 +2772,8 @@ function getModelInstance(
   const topP = customConfig.topP ?? DEFAULT_TOP_P
   const topK = customConfig.topK ?? DEFAULT_TOP_K
   const thinkingEffort = customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT
+  const enableThinking = customConfig.enableThinking === true
+  const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
 
   const baseFields = {
     model: resolvedModel,
@@ -2787,10 +2790,10 @@ function getModelInstance(
       parallel_tool_calls: true,
       ...(topK > 0 ? { top_k: topK } : {}),
       chat_template_kwargs: {
-        enable_thinking: customConfig.enableThinking === true,
-        reasoning_effort: thinkingEffort
+        enable_thinking: enableThinking,
+        ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
       },
-      ...(customConfig.enableThinking
+      ...(enableThinking
         ? { thinking: { type: "enabled" } }
         : {})
     },
@@ -2803,16 +2806,16 @@ function getModelInstance(
     }
   }
 
-  if (customConfig.enableThinking && customConfig.interleavedThinking) {
+  if (enableThinking && customConfig.interleavedThinking) {
     return new ChatOpenAI({
       ...baseFields,
       completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {
-        exposeReasoning: customConfig.enableThinking === true
+        exposeReasoning: enableThinking
       })
     } as never)
   }
 
-  if (customConfig.enableThinking) {
+  if (enableThinking) {
     return new ChatOpenAI({
       ...baseFields,
       completions: new ReasoningDisplayChatOpenAICompletions(baseFields)
