@@ -4562,10 +4562,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         setAdoptionContext(threadId, {
           usedSkills: computeCodeGenAttributionSkills(currentRunSkills),
-          skillSource: computeCodeGenAttributionSkillSource(
-            currentRunSkills,
-            currentRunSkillSource
-          )
+          skillSource: computeCodeGenAttributionSkillSource(currentRunSkills, currentRunSkillSource)
         })
       }
 
@@ -4823,7 +4820,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // mirroring coordinator). On SUCCESS we markNotified + clear in-flight; on
       // FAILURE we just clear in-flight (delivered stays false → re-reportable).
       // Carries workspacePath because that is block-scoped inside the try.
-      let workflowNotificationToSettle: { workspacePath: string; runId: string } | undefined
+      // `startedAt` pins the run INSTANCE this notification was built from: a resume
+      // reuses the runId, so the ack must not land on a newer instance (see
+      // setWorkflowRunNotified's instance fence).
+      let workflowNotificationToSettle:
+        | { workspacePath: string; runId: string; startedAt: string }
+        | undefined
 
       try {
         // Get workspace path from thread metadata - REQUIRED
@@ -4926,7 +4928,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // and the run is rediscovered + re-reported on the next hydrate, rather
           // than being silently lost (the at-most-once crash hole).
           workflowRunManager.markNotificationInFlight(pendingWorkflowRun.runId)
-          workflowNotificationToSettle = { workspacePath, runId: pendingWorkflowRun.runId }
+          workflowNotificationToSettle = {
+            workspacePath,
+            runId: pendingWorkflowRun.runId,
+            startedAt: pendingWorkflowRun.startedAt
+          }
           // NOTE: do NOT auto-commit the run's edits against a launch-time
           // baseline. A background workflow shares the workspace with the user's
           // concurrent FOREGROUND edits, and auto-commit selects candidates by
@@ -6624,33 +6630,43 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const delivered = await workflowRunManager.markNotified(
               settle.workspacePath,
               threadId,
-              settle.runId
+              settle.runId,
+              settle.startedAt
             )
             workflowRunManager.clearRenotify(settle.runId)
             workflowRunManager.clearNotificationInFlight(settle.runId)
             // The run has been reported; if its final persist had failed, write the
             // true terminal state back to disk now (disk may have recovered) so
             // history/hydrate/resume stop reading the stale copy (#4 boundary).
-            const recovered = await workflowRunManager.recoverFlushFailedRun(
+            // startedAt fences this like markNotified: an old ack must not settle a
+            // NEWER instance's flush-failed snapshot (same runId via resume).
+            const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
               settle.workspacePath,
               threadId,
-              settle.runId
+              settle.runId,
+              settle.startedAt
             )
             // Drain any backlog: a second workflow may have completed while this
             // report was deferred (launch isn't blocked once the first run is
             // settled), and this ack only settles the one run we just reported.
             // Kick the next still-undelivered run so it isn't stranded until the
-            // next hydrate/reload — but ONLY if delivered actually hit disk. If
-            // the write failed, this run is still undelivered on disk and
-            // findPendingNotification (newest-first) would re-select it → a double
-            // report. On that rare IO failure we skip the kick and let the next
-            // hydrate re-surface it (at-least-once).
-            // Kick if EITHER the delivered flag hit disk OR a flush-failed run's true
-            // state was just written back (both mean disk is now consistent; recover
-            // overwrote the stale "running" copy markNotified left with the terminal
-            // one). On a still-failing disk neither is true → skip; the next hydrate
-            // re-surfaces it (at-least-once).
-            if (delivered || recovered) {
+            // next hydrate/reload.
+            //
+            // Two independent licences to kick — and neither one means "the disk is OK":
+            //   `delivered` — markNotified persisted delivered=true. Required for the
+            //     ORDINARY path: had that write failed, the run would still be
+            //     undelivered on disk and findPendingNotification (newest-first) would
+            //     re-select it → double report. Skip the kick; the next hydrate
+            //     re-surfaces it (at-least-once).
+            //   `shouldKickPendingDrain` — this runId had a flush-failed snapshot and
+            //     something under it still wants reporting. Deliberately true even when
+            //     the write-back failed: findPendingNotification reads flushFailedRuns
+            //     BEFORE the disk, so a memory-stranded snapshot is perfectly reportable,
+            //     and it's the SNAPSHOT's delivered flag (not the disk's) that stops the
+            //     just-acked run from being re-selected. A flush-failed run's disk copy
+            //     is pre-terminal, so markNotified always returns false for it → this is
+            //     its only licence.
+            if (delivered || shouldKickPendingDrain) {
               workflowRunManager.kickNextPendingNotification(settle.workspacePath, threadId)
             }
           }

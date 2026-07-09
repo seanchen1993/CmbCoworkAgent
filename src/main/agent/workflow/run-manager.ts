@@ -821,15 +821,75 @@ class WorkflowRunManager {
    * hydrate / resume stop reading the stale copy. Marks the snapshot delivered first
    * so it can't be re-reported; keeps it (for a later retry) only if the write-back
    * still fails — otherwise drops it.
+   *
+   * `expectedStartedAt` is the startedAt of the run snapshot the ack's notification
+   * reported — the same fence as markNotified: an old notification's ack must not
+   * settle a NEWER instance's flush-failed snapshot (same runId via resume), or that
+   * instance's completion would be marked delivered without ever being reported. On
+   * mismatch we still retry plain persistence (disk may have recovered) but leave
+   * `notificationDelivered` untouched — the new instance's own ack owns that flag.
+   *
+   * @returns whether the ack path should KICK THE PENDING DRAIN — deliberately NOT
+   * "did the write-back land". The two diverge exactly when the disk is still faulty,
+   * and that is the case that matters: findPendingNotification reads flushFailedRuns
+   * BEFORE the disk, so a snapshot stranded in memory is still perfectly reportable.
+   * Gating the kick on disk success stalls it until the next hydrate/reload. A kick can
+   * never re-report the run we just acked: on a match the snapshot is marked delivered
+   * (memory scan skips it) and its disk copy is still the pre-terminal "running" record
+   * (disk scan skips it too); on a mismatch the snapshot IS a never-reported new
+   * instance, so serving it is the whole point. When no snapshot exists this run never
+   * flush-failed — say nothing and let markNotified's `delivered` govern the kick, which
+   * is what guards the ordinary double-report case.
    */
   async recoverFlushFailedRun(
+    workspacePath: string,
+    threadId: string,
+    runId: string,
+    expectedStartedAt?: string
+  ): Promise<boolean> {
+    const snapshot = this.flushFailedRuns.get(runId)
+    if (!snapshot) return false
+    if (expectedStartedAt !== undefined && snapshot.startedAt !== expectedStartedAt) {
+      // Stale ack: never claim the NEW instance's delivered flag — that belongs to its
+      // own ack. Best-effort write-back for disk consistency, then kick regardless: an
+      // unreported instance exists under this runId, and markNotified already returned
+      // false for it (a flush-failed run's disk copy is still "running", and that check
+      // precedes markNotified's own fence), so this is its ONLY kick signal.
+      await this.retryPersistFlushFailedRun(workspacePath, threadId, runId)
+      return true
+    }
+    snapshot.notificationDelivered = true
+    if (
+      await persistRecoveredRun(
+        workspacePath,
+        threadId,
+        snapshot,
+        this.flushFailedEpochs.get(runId)
+      )
+    ) {
+      this.dropFlushFailedRun(runId)
+    }
+    // Kick even when the write-back failed: this run is settled either way (delivered in
+    // memory, drop deferred to a later retry), and the BACKLOG behind it — other
+    // flush-failed snapshots, other terminal runs — must not wait for a hydrate.
+    return true
+  }
+
+  /**
+   * Retry write-back of a flush-failed snapshot from a READ path (get-run / hydrate):
+   * the disk may have recovered since the ack-time write-back failed, so this is a
+   * real retry entry point instead of leaving it stranded in memory until restart
+   * (#3). Does NOT touch notificationDelivered (the ack owns that) — just persists the
+   * current snapshot and drops it on success. Read-path callers fire-and-forget; the
+   * stale-ack path uses the boolean to decide whether the pending drain is worth a kick.
+   */
+  async retryPersistFlushFailedRun(
     workspacePath: string,
     threadId: string,
     runId: string
   ): Promise<boolean> {
     const snapshot = this.flushFailedRuns.get(runId)
     if (!snapshot) return false
-    snapshot.notificationDelivered = true
     if (
       await persistRecoveredRun(
         workspacePath,
@@ -844,36 +904,18 @@ class WorkflowRunManager {
     return false
   }
 
-  /**
-   * Retry write-back of a flush-failed snapshot from a READ path (get-run / hydrate):
-   * the disk may have recovered since the ack-time write-back failed, so this is a
-   * real retry entry point instead of leaving it stranded in memory until restart
-   * (#3). Does NOT touch notificationDelivered (the ack owns that) — just persists the
-   * current snapshot and drops it on success. Callers fire-and-forget.
-   */
-  async retryPersistFlushFailedRun(
+  /** Persists delivered=true. Called ONLY after the notification turn SUCCEEDS, so
+   * a crash mid-turn leaves it false on disk and the run is re-reported.
+   * `expectedStartedAt` must be the startedAt of the run snapshot the notification
+   * was built from: a resume reuses the runId, so without it a late ack can mark a
+   * NEWER instance delivered and swallow that instance's own notification. */
+  markNotified(
     workspacePath: string,
     threadId: string,
-    runId: string
-  ): Promise<void> {
-    const snapshot = this.flushFailedRuns.get(runId)
-    if (!snapshot) return
-    if (
-      await persistRecoveredRun(
-        workspacePath,
-        threadId,
-        snapshot,
-        this.flushFailedEpochs.get(runId)
-      )
-    ) {
-      this.dropFlushFailedRun(runId)
-    }
-  }
-
-  /** Persists delivered=true. Called ONLY after the notification turn SUCCEEDS, so
-   * a crash mid-turn leaves it false on disk and the run is re-reported. */
-  markNotified(workspacePath: string, threadId: string, runId: string): Promise<boolean> {
-    return markWorkflowRunNotified(workspacePath, threadId, runId)
+    runId: string,
+    expectedStartedAt?: string
+  ): Promise<boolean> {
+    return markWorkflowRunNotified(workspacePath, threadId, runId, expectedStartedAt)
   }
 
   /**
