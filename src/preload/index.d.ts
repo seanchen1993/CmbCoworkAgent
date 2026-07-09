@@ -966,6 +966,7 @@ interface CustomAPI {
         topK: number
         interleavedThinking?: boolean
         enableThinking?: boolean
+        enableThinkingEffort?: boolean
         thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       }>
@@ -983,6 +984,7 @@ interface CustomAPI {
       topK: number
       interleavedThinking?: boolean
       enableThinking?: boolean
+      enableThinkingEffort?: boolean
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null>
@@ -999,6 +1001,7 @@ interface CustomAPI {
       topK?: number
       interleavedThinking?: boolean
       enableThinking?: boolean
+      enableThinkingEffort?: boolean
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<void>
@@ -1016,6 +1019,7 @@ interface CustomAPI {
       topK?: number
       interleavedThinking?: boolean
       enableThinking?: boolean
+      enableThinkingEffort?: boolean
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
@@ -1032,6 +1036,7 @@ interface CustomAPI {
       topP?: number
       topK?: number
       enableThinking?: boolean
+      enableThinkingEffort?: boolean
       thinkingEffort?: "high" | "max"
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }

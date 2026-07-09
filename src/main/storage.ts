@@ -1014,6 +1014,7 @@ export interface CustomModelConfig {
   topK?: number
   interleavedThinking?: boolean
   enableThinking?: boolean
+  enableThinkingEffort?: boolean
   thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
@@ -1064,6 +1065,7 @@ export interface CustomModelPublicConfig {
   topK: number
   interleavedThinking?: boolean
   enableThinking?: boolean
+  enableThinkingEffort?: boolean
   thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
@@ -1080,6 +1082,7 @@ interface StoredCustomModelRecord {
   topK?: number
   interleavedThinking?: boolean
   enableThinking?: boolean
+  enableThinkingEffort?: boolean
   thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
@@ -1178,6 +1181,15 @@ function resolveInterleavedThinkingSetting(
 ): boolean {
   if (enableThinking !== true) return false
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
+}
+
+function resolveEnableThinkingSetting(enableThinking: unknown, interleavedThinking: unknown): boolean {
+  if (typeof enableThinking === "boolean") return enableThinking
+  return interleavedThinking === true
+}
+
+function resolveThinkingEffortEnabled(enableThinking: unknown, value: unknown): boolean {
+  return enableThinking === true && value === true
 }
 
 function getCustomApiKeyEnvName(id: string): string {
@@ -1449,6 +1461,10 @@ function toPublicConfig(
   config: StoredCustomModelRecord,
   env?: Record<string, string>
 ): CustomModelPublicConfig {
+  const enableThinking = resolveEnableThinkingSetting(
+    config.enableThinking,
+    config.interleavedThinking
+  )
   return {
     id: config.id,
     name: config.name || config.model,
@@ -1460,11 +1476,15 @@ function toPublicConfig(
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
-    enableThinking: config.enableThinking === true,
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(
+      enableThinking,
+      config.enableThinkingEffort
+    ),
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
       config.interleavedThinking,
-      config.enableThinking
+      enableThinking
     ),
     thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
@@ -1474,32 +1494,46 @@ function toPublicConfig(
 export function getCustomModelConfigs(): CustomModelConfig[] {
   migrateLegacyCustomModel()
   const env = parseEnvFile()
-  return readCustomModelsRaw().map((item) => ({
-    id: item.id,
-    name: item.name || item.model,
-    baseUrl: item.baseUrl,
-    model: item.model,
-    apiKey: getCustomModelApiKey(item.id, env),
-    maxTokens: normalizeMaxTokens(item.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
-    temperature: normalizeTemperature(item.temperature),
-    topP: normalizeTopP(item.topP),
-    topK: normalizeTopK(item.topK),
-    enableThinking: item.enableThinking === true,
-    interleavedThinking: resolveInterleavedThinkingSetting(
-      item.model,
-      item.interleavedThinking,
-      item.enableThinking
-    ),
-    thinkingEffort: normalizeThinkingEffort(item.thinkingEffort),
-    ...(item.tier !== undefined && { tier: item.tier })
-  }))
+  return readCustomModelsRaw().map((item) => {
+    const enableThinking = resolveEnableThinkingSetting(
+      item.enableThinking,
+      item.interleavedThinking
+    )
+    return {
+      id: item.id,
+      name: item.name || item.model,
+      baseUrl: item.baseUrl,
+      model: item.model,
+      apiKey: getCustomModelApiKey(item.id, env),
+      maxTokens: normalizeMaxTokens(item.maxTokens),
+      maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
+      temperature: normalizeTemperature(item.temperature),
+      topP: normalizeTopP(item.topP),
+      topK: normalizeTopK(item.topK),
+      enableThinking,
+      enableThinkingEffort: resolveThinkingEffortEnabled(
+        enableThinking,
+        item.enableThinkingEffort
+      ),
+      interleavedThinking: resolveInterleavedThinkingSetting(
+        item.model,
+        item.interleavedThinking,
+        enableThinking
+      ),
+      thinkingEffort: normalizeThinkingEffort(item.thinkingEffort),
+      ...(item.tier !== undefined && { tier: item.tier })
+    }
+  })
 }
 
 export function getCustomModelConfigById(id: string): CustomModelConfig | null {
   migrateLegacyCustomModel()
   const record = readCustomModelsRaw().find((item) => item.id === id)
   if (!record) return null
+  const enableThinking = resolveEnableThinkingSetting(
+    record.enableThinking,
+    record.interleavedThinking
+  )
   return {
     id: record.id,
     name: record.name || record.model,
@@ -1511,11 +1545,15 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
-    enableThinking: record.enableThinking === true,
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(
+      enableThinking,
+      record.enableThinkingEffort
+    ),
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
       record.interleavedThinking,
-      record.enableThinking
+      enableThinking
     ),
     thinkingEffort: normalizeThinkingEffort(record.thinkingEffort),
     ...(record.tier !== undefined && { tier: record.tier })
@@ -1569,6 +1607,10 @@ export function upsertCustomModelConfig(
     throw new Error("显示名称不能重复，请使用不同的显示名称")
   }
 
+  const enableThinking = resolveEnableThinkingSetting(
+    config.enableThinking,
+    config.interleavedThinking
+  )
   const nextRecord: StoredCustomModelRecord = {
     id: targetId,
     name: normalizedName,
@@ -1579,11 +1621,15 @@ export function upsertCustomModelConfig(
     temperature: validatedTemperature,
     topP: validatedTopP,
     topK: validatedTopK,
-    enableThinking: config.enableThinking === true,
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(
+      enableThinking,
+      config.enableThinkingEffort
+    ),
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
       config.interleavedThinking,
-      config.enableThinking
+      enableThinking
     ),
     thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
