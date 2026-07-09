@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import * as PopoverPrimitive from "@radix-ui/react-popover"
 import {
@@ -22,6 +22,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  RefreshCcw,
   RefreshCw,
   Search,
   Settings,
@@ -92,6 +93,8 @@ import type {
   HarnessKnowledgePreviewResult,
   HarnessProjectListItem,
   HarnessProjectMetadataUpdateInput,
+  HarnessProjectReviewItem,
+  HarnessProjectReviewResult,
   HarnessFeatureSummary,
   HarnessNodeStatus,
   HarnessRunDetailViewModel,
@@ -131,6 +134,7 @@ const NODE_STATUS_LABELS: Record<HarnessNodeStatus, string> = {
   unknown: "未知"
 }
 const harnessDetailRefreshButtonClassName = "w-[84px] gap-2"
+const harnessDetailSecondaryButtonClassName = "w-[132px] gap-2 text-sm font-medium"
 const harnessDetailPrimaryButtonClassName = "w-[112px] gap-2"
 const harnessActionOverlayClassName =
   "pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-primary-foreground/10 to-primary-foreground/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
@@ -171,6 +175,8 @@ const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
 const ENTERPRISE_PROJECT_SEARCH_MIN_CHARS = 2
 const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
 const ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS = 160
+type ProjectSidebarScrollIntent = "preserve" | "top" | null
+const LEAN_TOKEN_VISIBLE_PREFIX_LENGTH = 6
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<typeof DialogContent>["onPointerDownOutside"] =
   (event) => {
@@ -238,6 +244,11 @@ function createEmptyDeployUnitMapping(): HarnessDeployUnitMapping {
     localRepoPath: "",
     description: ""
   }
+}
+
+function maskLeanToken(value: string): string {
+  if (value.length <= LEAN_TOKEN_VISIBLE_PREFIX_LENGTH) return value
+  return `${value.slice(0, LEAN_TOKEN_VISIBLE_PREFIX_LENGTH)}${"*".repeat(value.length - LEAN_TOKEN_VISIBLE_PREFIX_LENGTH)}`
 }
 
 function buildDeployUnitMappingSavePayload(
@@ -327,6 +338,12 @@ interface ProjectSessionProjectGroup {
 type EnterpriseProjectDetailCacheEntry =
   | { kind: "hit"; project: HarnessEnterpriseProjectDetailItem }
   | { kind: "miss" }
+
+type ProjectReviewState =
+  | { kind: "idle" }
+  | { kind: "loading"; projectCode: string }
+  | { kind: "loaded"; projectCode: string; result: HarnessProjectReviewResult }
+  | { kind: "error"; projectCode: string; message: string }
 
 type GitChangedFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
 
@@ -3070,6 +3087,23 @@ function ProjectModeSettingsPanel({
   onSaveLeanToken: () => void
   onOpenLeanToken: () => void
 }): React.JSX.Element {
+  const [replacingLeanToken, setReplacingLeanToken] = useState(false)
+  const wasLeanTokenDirtyRef = useRef(leanTokenDirty)
+  const hasStoredLeanToken = leanToken.length > 0
+  const showStoredLeanTokenMask = hasStoredLeanToken && !leanTokenDirty && !replacingLeanToken
+  const leanTokenInputValue = showStoredLeanTokenMask
+    ? maskLeanToken(leanToken)
+    : replacingLeanToken && !leanTokenDirty
+      ? ""
+      : leanToken
+
+  useEffect(() => {
+    if (wasLeanTokenDirtyRef.current && !leanTokenDirty) {
+      setReplacingLeanToken(false)
+    }
+    wasLeanTokenDirtyRef.current = leanTokenDirty
+  }, [leanTokenDirty])
+
   return (
     <div className="space-y-4">
       <section className="rounded-md border border-border bg-background shadow-sm">
@@ -3226,12 +3260,35 @@ function ProjectModeSettingsPanel({
             </div>
           ) : (
             <label className="block space-y-2">
-              <Input
-                value={leanToken}
-                onChange={(event) => onLeanTokenChange(event.target.value)}
-                placeholder="请输入 sk-ai-xFu...."
-                className={harnessProjectCreateInputClassName}
-              />
+              <div className="flex items-center gap-2">
+                <Input
+                  value={leanTokenInputValue}
+                  readOnly={showStoredLeanTokenMask}
+                  onChange={(event) => onLeanTokenChange(event.target.value)}
+                  placeholder="请输入 sk-ai-xFu...."
+                  className={harnessProjectCreateInputClassName}
+                />
+                {showStoredLeanTokenMask && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="shrink-0"
+                    onClick={() => setReplacingLeanToken(true)}
+                  >
+                    重新输入
+                  </Button>
+                )}
+                {replacingLeanToken && !leanTokenDirty && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="shrink-0"
+                    onClick={() => setReplacingLeanToken(false)}
+                  >
+                    取消
+                  </Button>
+                )}
+              </div>
             </label>
           )}
         </div>
@@ -4269,6 +4326,131 @@ function EnterpriseProjectDetailSummary({
   )
 }
 
+const PROJECT_REVIEW_HEADERS: Array<[keyof HarnessProjectReviewItem, string]> = [
+  ["title", "标题"],
+  ["type", "类型"],
+  ["start_time", "开始时间"],
+  ["end_time", "结束时间"],
+  ["creator", "发起人"],
+  ["members", "参与成员"]
+]
+
+function buildLeanstarProjectReviewUrl(projectCode: string): string {
+  return `https://leanstar-devops.paas.cmbchina.cn/team/426/projects/${encodeURIComponent(projectCode)}/review`
+}
+
+function ProjectReviewTooltipContent({
+  review
+}: {
+  review: HarnessProjectReviewItem
+}): React.JSX.Element {
+  return (
+    <div className="min-w-0">
+      <div className="border-b border-border/70 px-3 py-2">
+        <div className="line-clamp-2 text-sm font-semibold leading-5 text-foreground">
+          {review.title || "-"}
+        </div>
+      </div>
+      <dl className="grid gap-1.5 px-3 py-2 text-xs leading-5">
+        {PROJECT_REVIEW_HEADERS.map(([key, label]) => (
+          <div key={key} className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] gap-2">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="min-w-0 whitespace-normal break-words font-medium text-foreground [overflow-wrap:anywhere]">
+              {review[key] || "-"}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
+
+function ProjectReviewSummary({
+  projectCode,
+  reviewState,
+  onOpenLeanTokenSettings
+}: {
+  projectCode: string
+  reviewState: ProjectReviewState
+  onOpenLeanTokenSettings: () => void
+}): React.JSX.Element {
+  const normalizedProjectCode = normalizeEnterpriseProjectCode(projectCode)
+  const openReviewPage = useCallback((): void => {
+    void window.electron
+      .openExternal(buildLeanstarProjectReviewUrl(normalizedProjectCode))
+      .catch((error) => {
+        toast.error(cleanIpcError(error))
+      })
+  }, [normalizedProjectCode])
+
+  const isCurrentProject =
+    reviewState.kind === "loaded" || reviewState.kind === "loading" || reviewState.kind === "error"
+      ? reviewState.projectCode === normalizedProjectCode
+      : false
+  const result = reviewState.kind === "loaded" && isCurrentProject ? reviewState.result : null
+  const reviews = result?.reviews ?? []
+
+  return (
+    <div className="mt-4 space-y-2 text-xs">
+      <div className="font-medium text-muted-foreground">项目评审情况</div>
+      {!normalizedProjectCode ? (
+        <div className="leading-5 text-muted-foreground">-</div>
+      ) : !isCurrentProject || reviewState.kind === "loading" ? (
+        <div className="flex items-center gap-1.5 text-muted-foreground">
+          <Loader2 className="size-3 animate-spin" />
+          查询中
+        </div>
+      ) : reviewState.kind === "error" ? (
+        <div className="leading-5 text-status-warning">{reviewState.message}</div>
+      ) : result && !result.tokenConfigured ? (
+        <button
+          type="button"
+          className="rounded-sm text-left font-medium text-status-warning underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={onOpenLeanTokenSettings}
+        >
+          请配置精益平台 token
+        </button>
+      ) : reviews.length === 0 ? (
+        <button
+          type="button"
+          className="rounded-sm text-left font-medium text-primary/85 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={openReviewPage}
+        >
+          项目无评审记录，发起评审以避免 NC
+        </button>
+      ) : (
+        <TooltipProvider delayDuration={120}>
+          <ul className="space-y-1">
+            {reviews.slice(0, 3).map((review, index) => (
+              <li key={`${review.title}:${index}`} className="min-w-0">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div
+                      tabIndex={0}
+                      className="group flex min-w-0 cursor-default items-center rounded-md border border-transparent bg-muted/20 py-1.5 pr-2 transition-colors hover:border-border hover:bg-muted/45 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+                        {review.title || "-"}
+                      </span>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="right"
+                    align="start"
+                    className="z-[70] w-80 max-w-[min(20rem,calc(100vw-2rem))] p-0"
+                  >
+                    <ProjectReviewTooltipContent review={review} />
+                  </TooltipContent>
+                </Tooltip>
+              </li>
+            ))}
+          </ul>
+        </TooltipProvider>
+      )}
+    </div>
+  )
+}
+
 function ProjectConstraintSyncPanel({
   registry,
   syncingAdapterIds,
@@ -4425,6 +4607,7 @@ function ProjectDetailPage({
   project,
   detail,
   enterpriseProjectDetail,
+  projectReviewState,
   loading,
   creatingFeature,
   creatingSystemConstraintUpdate,
@@ -4433,11 +4616,13 @@ function ProjectDetailPage({
   onOpenSystemConstraintUpdate,
   onRefresh,
   onEditProject,
+  onOpenLeanTokenSettings,
   onOpenFeature
 }: {
   project: HarnessProjectListItem
   detail?: HarnessProjectDetailViewModel
   enterpriseProjectDetail?: EnterpriseProjectDetailCacheEntry
+  projectReviewState: ProjectReviewState
   loading: boolean
   creatingFeature: boolean
   creatingSystemConstraintUpdate: boolean
@@ -4449,6 +4634,7 @@ function ProjectDetailPage({
   ) => void
   onRefresh: (projectId: string) => void
   onEditProject: (project: HarnessProjectListItem) => void
+  onOpenLeanTokenSettings: () => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
   const runs = detail?.runs ?? []
@@ -4477,29 +4663,40 @@ function ProjectDetailPage({
           </div>
           <div className={harnessPageHeaderActionsClassName}>
             {detail?.systemConstraintUpdate && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="gap-2"
-                onClick={() => {
-                  if (detail.systemConstraintUpdate) {
-                    onOpenSystemConstraintUpdate(project, detail.systemConstraintUpdate)
-                  }
-                }}
-                disabled={creatingSystemConstraintUpdate}
-              >
-                {creatingSystemConstraintUpdate ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="size-4" />
-                )}
-                系统约束更新
-              </Button>
+              <TooltipProvider delayDuration={80}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={harnessDetailSecondaryButtonClassName}
+                        onClick={() => {
+                          if (detail.systemConstraintUpdate) {
+                            onOpenSystemConstraintUpdate(project, detail.systemConstraintUpdate)
+                          }
+                        }}
+                        disabled={creatingSystemConstraintUpdate}
+                      >
+                        {creatingSystemConstraintUpdate ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <RefreshCcw className="size-4" />
+                        )}
+                        知识库沉淀
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" sideOffset={6}>
+                    沉淀本项目的变更，更新知识库
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             )}
             <Button
               variant="ghost"
               size="sm"
-              className="gap-2"
+              className={harnessDetailSecondaryButtonClassName}
               onClick={() => onEditProject(project)}
             >
               <Pencil className="size-4" />
@@ -4594,6 +4791,14 @@ function ProjectDetailPage({
                     </dd>
                   </div>
                 </dl>
+                <div className="mt-4 border-t border-border pt-4">
+                  <div className="text-sm font-semibold">项目度量信息</div>
+                  <ProjectReviewSummary
+                    projectCode={project.projectCode}
+                    reviewState={projectReviewState}
+                    onOpenLeanTokenSettings={onOpenLeanTokenSettings}
+                  />
+                </div>
                 <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border pt-4 text-xs text-muted-foreground">
                   <div>
                     特性数
@@ -5272,6 +5477,8 @@ function ProjectFeatureSidebar({
   exportingThreadId,
   editingThreadId,
   editingTitle,
+  scrollTopRef,
+  scrollIntentRef,
   onToggleCollapse,
   onToggleAll,
   onCreateSession,
@@ -5300,6 +5507,8 @@ function ProjectFeatureSidebar({
   exportingThreadId: string | null
   editingThreadId: string | null
   editingTitle: string
+  scrollTopRef: MutableRefObject<number>
+  scrollIntentRef: MutableRefObject<ProjectSidebarScrollIntent>
   onToggleCollapse: (key: string) => void
   onToggleAll: () => void
   onCreateSession: (
@@ -5319,7 +5528,10 @@ function ProjectFeatureSidebar({
 }): React.JSX.Element {
   const { currentThreadId } = useAppStore()
   const highlightThreadId = isViewingSession ? currentThreadId : null
-  const [featureSessionVisibleCounts, setFeatureSessionVisibleCounts] = useState<Record<string, number>>({})
+  const scrollAreaRef = useRef<HTMLDivElement | null>(null)
+  const pendingScrollRestoreRef = useRef<number | null>(null)
+  const preserveScrollUntilRef = useRef(0)
+  const [sessionVisibleCounts, setSessionVisibleCounts] = useState<Record<string, number>>({})
   const sessionCount = groups.reduce(
     (total, group) =>
       total +
@@ -5327,6 +5539,73 @@ function ProjectFeatureSidebar({
       group.featureGroups.reduce((count, featureGroup) => count + featureGroup.sessions.length, 0),
     0
   )
+
+  const getSidebarViewport = useCallback((): HTMLDivElement | null => {
+    return scrollAreaRef.current?.querySelector(
+      "[data-radix-scroll-area-viewport]"
+    ) as HTMLDivElement | null
+  }, [])
+
+  const captureSidebarScrollTop = useCallback((): void => {
+    const viewport = getSidebarViewport()
+    if (!viewport) return
+    scrollTopRef.current = viewport.scrollTop
+    pendingScrollRestoreRef.current = viewport.scrollTop > 0 ? viewport.scrollTop : null
+    scrollIntentRef.current = "preserve"
+    preserveScrollUntilRef.current = window.performance.now() + 2000
+  }, [getSidebarViewport, scrollIntentRef, scrollTopRef])
+
+  useLayoutEffect(() => {
+    const viewport = getSidebarViewport()
+    if (!viewport) return
+
+    const scrollIntent = scrollIntentRef.current
+    if (scrollIntent === "top") {
+      viewport.scrollTop = 0
+      scrollTopRef.current = 0
+      pendingScrollRestoreRef.current = null
+      scrollIntentRef.current = null
+    } else if (scrollIntent === "preserve") {
+      const targetScrollTop = pendingScrollRestoreRef.current ?? scrollTopRef.current
+      if (targetScrollTop > 0) {
+        const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        const nextScrollTop = Math.min(targetScrollTop, maxScrollTop)
+        if (Math.abs(viewport.scrollTop - nextScrollTop) > 1) {
+          viewport.scrollTop = nextScrollTop
+        }
+      }
+      pendingScrollRestoreRef.current = null
+    }
+
+    const handleScroll = (): void => {
+      const pendingScrollTop = pendingScrollRestoreRef.current
+      if (pendingScrollTop && pendingScrollTop > 0 && viewport.scrollTop === 0) return
+      if (
+        viewport.scrollTop === 0 &&
+        scrollTopRef.current > 0 &&
+        window.performance.now() < preserveScrollUntilRef.current
+      ) {
+        return
+      }
+      scrollTopRef.current = viewport.scrollTop
+    }
+
+    handleScroll()
+    viewport.addEventListener("scroll", handleScroll, { passive: true })
+    return () => viewport.removeEventListener("scroll", handleScroll)
+  }, [
+    collapsedKeys,
+    getSidebarViewport,
+    groups,
+    isViewingSession,
+    scrollIntentRef,
+    scrollTopRef,
+    selectedFeature?.activeSessionThreadId,
+    selectedFeature?.projectId,
+    selectedFeature?.slug,
+    selectedProjectId,
+    selectedProjectSession?.threadId
+  ])
 
   const renderThreadItem = (
     thread: Thread,
@@ -5355,7 +5634,10 @@ function ProjectFeatureSidebar({
         hasPendingUserInput={hasPendingUserInput}
         editingTitle={editingTitle}
         hoverTitle={hoverTitle}
-        onSelect={onSelect}
+        onSelect={() => {
+          captureSidebarScrollTop()
+          onSelect()
+        }}
         onRunFinished={() => onRunFinished(thread.thread_id)}
         onDelete={() => onDeleteSession(thread)}
         onExport={() => void onExportSession(thread)}
@@ -5367,36 +5649,70 @@ function ProjectFeatureSidebar({
     )
   }
 
-  const getVisibleFeatureSessionCount = (featureGroup: ProjectFeatureSessionGroup): number => {
-    const configuredCount = featureSessionVisibleCounts[featureGroup.key]
+  const getVisibleSessionCount = (key: string, sessionCount: number): number => {
+    const configuredCount = sessionVisibleCounts[key]
     if (typeof configuredCount !== "number") {
-      return Math.min(FEATURE_SESSION_INITIAL_VISIBLE_COUNT, featureGroup.sessions.length)
+      return Math.min(FEATURE_SESSION_INITIAL_VISIBLE_COUNT, sessionCount)
     }
 
     return Math.min(
       Math.max(configuredCount, FEATURE_SESSION_INITIAL_VISIBLE_COUNT),
-      featureGroup.sessions.length
+      sessionCount
     )
   }
 
-  const expandFeatureSessions = (featureGroup: ProjectFeatureSessionGroup): void => {
-    setFeatureSessionVisibleCounts((current) => {
-      const currentCount = current[featureGroup.key] ?? FEATURE_SESSION_INITIAL_VISIBLE_COUNT
+  const expandSessions = (key: string, sessionCount: number): void => {
+    setSessionVisibleCounts((current) => {
+      const currentCount = current[key] ?? FEATURE_SESSION_INITIAL_VISIBLE_COUNT
       const nextCount = Math.min(
         currentCount + FEATURE_SESSION_VISIBLE_INCREMENT,
-        featureGroup.sessions.length
+        sessionCount
       )
-      return { ...current, [featureGroup.key]: nextCount }
+      return { ...current, [key]: nextCount }
     })
   }
 
-  const collapseFeatureSessions = (featureGroup: ProjectFeatureSessionGroup): void => {
-    setFeatureSessionVisibleCounts((current) => {
-      if (!(featureGroup.key in current)) return current
+  const collapseSessions = (key: string): void => {
+    setSessionVisibleCounts((current) => {
+      if (!(key in current)) return current
       const next = { ...current }
-      delete next[featureGroup.key]
+      delete next[key]
       return next
     })
+  }
+
+  const renderSessionVisibilityControls = (
+    key: string,
+    visibleSessionCount: number,
+    sessionCount: number
+  ): React.JSX.Element | null => {
+    const canExpandSessions = visibleSessionCount < sessionCount
+    const canCollapseSessions = visibleSessionCount > FEATURE_SESSION_INITIAL_VISIBLE_COUNT
+
+    if (!canExpandSessions && !canCollapseSessions) return null
+
+    return (
+      <div className="flex items-center gap-4 py-1 pl-3 pr-2 text-xs font-medium text-muted-foreground">
+        {canExpandSessions && (
+          <button
+            type="button"
+            className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            onClick={() => expandSessions(key, sessionCount)}
+          >
+            展开显示
+          </button>
+        )}
+        {canCollapseSessions && (
+          <button
+            type="button"
+            className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            onClick={() => collapseSessions(key)}
+          >
+            折叠显示
+          </button>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -5415,7 +5731,7 @@ function ProjectFeatureSidebar({
           </Button>
         )}
       </div>
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea ref={scrollAreaRef} className="min-h-0 flex-1">
         <div className="space-y-1 px-2 pb-2">
           {groups.map((group, index) => {
             const projectCollapsed = collapsedKeys.has(group.key)
@@ -5498,15 +5814,36 @@ function ProjectFeatureSidebar({
 
                 {!projectCollapsed && (
                   <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-                    {group.projectSessions.map((session) => {
-                      const thread = threadsById.get(session.threadId)
-                      if (!thread) return null
-                      return renderThreadItem(
-                        thread,
-                        `所属项目：${group.project.name}`,
-                        () => onSelectProjectSession(group.project.projectId, thread.thread_id, projectDeleted)
+                    {(() => {
+                      const projectSessionsKey = `project-sessions:${group.key}`
+                      const visibleProjectSessionCount = getVisibleSessionCount(
+                        projectSessionsKey,
+                        group.projectSessions.length
                       )
-                    })}
+                      const visibleProjectSessions = group.projectSessions.slice(
+                        0,
+                        visibleProjectSessionCount
+                      )
+
+                      return (
+                        <>
+                          {visibleProjectSessions.map((session) => {
+                            const thread = threadsById.get(session.threadId)
+                            if (!thread) return null
+                            return renderThreadItem(
+                              thread,
+                              `所属项目：${group.project.name}`,
+                              () => onSelectProjectSession(group.project.projectId, thread.thread_id, projectDeleted)
+                            )
+                          })}
+                          {renderSessionVisibilityControls(
+                            projectSessionsKey,
+                            visibleProjectSessionCount,
+                            group.projectSessions.length
+                          )}
+                        </>
+                      )
+                    })()}
                     {group.featureGroups.map((featureGroup) => {
                       const featureCollapsed = collapsedKeys.has(featureGroup.key)
                       const featureSelected =
@@ -5516,11 +5853,11 @@ function ProjectFeatureSidebar({
                       const hasUnreadFeatureSession = featureGroup.sessions.some((session) =>
                         unreadIds.has(session.threadId)
                       )
-                      const visibleSessionCount = getVisibleFeatureSessionCount(featureGroup)
+                      const visibleSessionCount = getVisibleSessionCount(
+                        featureGroup.key,
+                        featureGroup.sessions.length
+                      )
                       const visibleSessions = featureGroup.sessions.slice(0, visibleSessionCount)
-                      const canExpandSessions = visibleSessionCount < featureGroup.sessions.length
-                      const canCollapseSessions =
-                        visibleSessionCount > FEATURE_SESSION_INITIAL_VISIBLE_COUNT
 
                       return (
                         <div key={featureGroup.key} className="space-y-1">
@@ -5589,27 +5926,10 @@ function ProjectFeatureSidebar({
                                         )
                                     )
                                   })}
-                                  {(canExpandSessions || canCollapseSessions) && (
-                                    <div className="flex items-center gap-4 py-1 pl-3 pr-2 text-xs font-medium text-muted-foreground">
-                                      {canExpandSessions && (
-                                        <button
-                                          type="button"
-                                          className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                          onClick={() => expandFeatureSessions(featureGroup)}
-                                        >
-                                          展开显示
-                                        </button>
-                                      )}
-                                      {canCollapseSessions && (
-                                        <button
-                                          type="button"
-                                          className="rounded-sm text-left text-[11px] font-semibold tracking-[0.02em] text-primary/80 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                          onClick={() => collapseFeatureSessions(featureGroup)}
-                                        >
-                                          折叠显示
-                                        </button>
-                                      )}
-                                    </div>
+                                  {renderSessionVisibilityControls(
+                                    featureGroup.key,
+                                    visibleSessionCount,
+                                    featureGroup.sessions.length
                                   )}
                                 </>
                               )}
@@ -5652,6 +5972,7 @@ export function HarnessBoardView({
   const [enterpriseProjectDetailsByCode, setEnterpriseProjectDetailsByCode] = useState<
     Record<string, EnterpriseProjectDetailCacheEntry>
   >({})
+  const [projectReviewState, setProjectReviewState] = useState<ProjectReviewState>({ kind: "idle" })
   const [loadingDetailIds, setLoadingDetailIds] = useState<Set<string>>(new Set())
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
@@ -5749,6 +6070,8 @@ export function HarnessBoardView({
   const selectedProjectSessionRef = useRef(selectedProjectSession)
   const currentThreadIdRef = useRef(currentThreadId)
   const isViewingSessionRef = useRef(isViewingSession)
+  const projectSidebarScrollTopRef = useRef(0)
+  const projectSidebarScrollIntentRef = useRef<ProjectSidebarScrollIntent>(null)
   const projectDetailsRefreshInFlightRef = useRef(false)
   const selectedProjectRefreshInFlightRef = useRef(false)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
@@ -6906,6 +7229,7 @@ export function HarnessBoardView({
       setFeatureName("")
       setSelectedDeployUnitIds(new Set())
       await loadProjectDetail(result.projectId)
+      projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
@@ -7033,6 +7357,34 @@ export function HarnessBoardView({
     }
   }, [selectedEnterpriseProjectDetail, selectedProjectArchived, selectedProjectCode])
 
+  useEffect(() => {
+    if (!selectedProjectCode) {
+      setProjectReviewState({ kind: "idle" })
+      return
+    }
+
+    let canceled = false
+    setProjectReviewState({ kind: "loading", projectCode: selectedProjectCode })
+    window.api.harnessBoard
+      .getProjectReviews({ projectCode: selectedProjectCode })
+      .then((result) => {
+        if (canceled) return
+        setProjectReviewState({ kind: "loaded", projectCode: selectedProjectCode, result })
+      })
+      .catch((error) => {
+        if (canceled) return
+        setProjectReviewState({
+          kind: "error",
+          projectCode: selectedProjectCode,
+          message: cleanIpcError(error)
+        })
+      })
+
+    return () => {
+      canceled = true
+    }
+  }, [selectedProjectCode])
+
   const projectPluginUpdateInfoById = useMemo(() => {
     const marketPluginByName = buildMarketPluginMap(marketPluginItems)
     const next = new Map<string, MarketPluginUpdateInfo>()
@@ -7050,6 +7402,7 @@ export function HarnessBoardView({
 
   const openProjectDetail = useCallback(
     (projectId: string): void => {
+      projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedFeature(null)
       setSelectedProjectId(projectId)
@@ -7116,6 +7469,9 @@ export function HarnessBoardView({
 
   const openFeatureDetail = useCallback(
     (projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean): void => {
+      if (!activeSessionThreadId) {
+        projectSidebarScrollIntentRef.current = "top"
+      }
       setSelectedProjectSession(null)
       setSelectedProjectId(projectId)
       setSelectedFeature({ projectId, slug, activeSessionThreadId, deleted })
@@ -7152,6 +7508,7 @@ export function HarnessBoardView({
       selectedProjectSessionRef.current?.projectId ??
       selectedFeatureRef.current?.projectId ??
       selectedProjectIdRef.current
+    projectSidebarScrollIntentRef.current = "top"
     setSelectedProjectSession(null)
     setSelectedFeature(null)
     setIsViewingSession(false)
@@ -7529,6 +7886,9 @@ export function HarnessBoardView({
   )
 
   const handleSessionViewChange = useCallback((viewing: boolean): void => {
+    if (!viewing) {
+      projectSidebarScrollIntentRef.current = "top"
+    }
     setIsViewingSession(viewing)
   }, [])
 
@@ -7581,6 +7941,8 @@ export function HarnessBoardView({
               exportingThreadId={exportingThreadId}
               editingThreadId={editingThreadId}
               editingTitle={editingTitle}
+              scrollTopRef={projectSidebarScrollTopRef}
+              scrollIntentRef={projectSidebarScrollIntentRef}
               onToggleCollapse={(key) =>
                 setCollapsedFeatureKeys((current) => {
                   const next = new Set(current)
@@ -7697,6 +8059,7 @@ export function HarnessBoardView({
           project={selectedProject}
           detail={selectedProjectDetail}
           enterpriseProjectDetail={selectedEnterpriseProjectDetail}
+          projectReviewState={projectReviewState}
           loading={loadingDetailIds.has(selectedProject.projectId)}
           creatingFeature={creatingFeatureProjectId === selectedProject.projectId}
           creatingSystemConstraintUpdate={creatingProjectSessionProjectId === selectedProject.projectId}
@@ -7707,6 +8070,7 @@ export function HarnessBoardView({
           }}
           onRefresh={(projectId) => void loadProjectDetail(projectId)}
           onEditProject={handleEditProject}
+          onOpenLeanTokenSettings={handleOpenDeployUnitSettings}
           onOpenFeature={openFeatureDetail}
         />
         <FeatureCreateDialog

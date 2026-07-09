@@ -232,6 +232,24 @@ export interface HarnessEnterpriseProjectDetailResult {
   projects: HarnessEnterpriseProjectDetailItem[]
 }
 
+export interface HarnessProjectReviewInput {
+  projectCode: string
+}
+
+export interface HarnessProjectReviewItem {
+  title: string
+  type: string
+  start_time: string
+  end_time: string
+  creator: string
+  members: string
+}
+
+export interface HarnessProjectReviewResult {
+  tokenConfigured: boolean
+  reviews: HarnessProjectReviewItem[]
+}
+
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string

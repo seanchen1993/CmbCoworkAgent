@@ -24,6 +24,7 @@ import {
 } from "../harness-board/service"
 import {
   getEnterpriseProjectDetails,
+  getProjectReviews,
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
@@ -47,7 +48,9 @@ import type {
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
-  HarnessKnowledgePreviewResult
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
@@ -129,6 +132,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       input: HarnessEnterpriseProjectDetailInput
     ): Promise<HarnessEnterpriseProjectDetailResult> => {
       return getEnterpriseProjectDetails(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getProjectReviews",
+    async (_event, input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> => {
+      return getProjectReviews(input)
     }
   )
 
