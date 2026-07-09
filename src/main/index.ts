@@ -27,6 +27,10 @@ import {
   APP_ATTENTION_CHANNEL,
   isRendererAppAttentionPayload
 } from "../shared/app-attention"
+import type {
+  CloseToTrayPromptAction,
+  CloseToTrayPromptEvent
+} from "../shared/close-to-tray"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
@@ -34,19 +38,53 @@ const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
 const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
-
-type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
+const EVENT_CATEGORIES = new Set<EventCategory>([
+  "skill",
+  "git",
+  "code_adoption",
+  "harness",
+  "heartbeat",
+  "memory",
+  "hook",
+  "chatx",
+  "workspace"
+])
 
 function isCloseToTrayPromptResponse(
   payload: unknown
 ): payload is { requestId: number; action: CloseToTrayPromptAction } {
   if (!payload || typeof payload !== "object") return false
+  // 使用 in 操作符进行属性存在性检查，比 as 断言更安全
+  if (!("requestId" in payload) || !("action" in payload)) return false
   const record = payload as Record<string, unknown>
   return (
     typeof record.requestId === "number" &&
     (record.action === "minimize-to-tray" ||
       record.action === "direct-close" ||
       record.action === "cancel")
+  )
+}
+
+function isTrackEventPayload(payload: unknown): payload is {
+  eventName: string
+  eventCategory: EventCategory
+  properties?: Record<string, unknown>
+} {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false
+  const record = payload as Record<string, unknown>
+  if (
+    typeof record.eventName !== "string" ||
+    !record.eventName.trim() ||
+    typeof record.eventCategory !== "string" ||
+    !EVENT_CATEGORIES.has(record.eventCategory as EventCategory)
+  ) {
+    return false
+  }
+  return (
+    record.properties === undefined ||
+    (!!record.properties &&
+      typeof record.properties === "object" &&
+      !Array.isArray(record.properties))
   )
 }
 
@@ -229,6 +267,7 @@ import { startFeatureGatePrefetch, stopFeatureGatePrefetch } from "./feature-gat
 import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
+import type { EventCategory } from "./services/event-reporter"
 import {
   configurePetWindow,
   createPetWindow,
@@ -371,14 +410,24 @@ function requestHideMainWindowToTray(window: BrowserWindow): void {
   closeToTrayPromptTimer = setTimeout(() => {
     if (closeToTrayPromptRequestId === requestId) {
       console.warn("[Main] Close-to-tray prompt timed out")
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const event: CloseToTrayPromptEvent = {
+          type: "dismiss",
+          requestId,
+          reason: "timeout"
+        }
+        mainWindow.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
+      }
       clearCloseToTrayPromptState()
     }
   }, CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS)
   window.focus()
-  window.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, {
+  const event: CloseToTrayPromptEvent = {
+    type: "open",
     requestId,
     trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘"
-  })
+  }
+  window.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
 }
 
 function createWindow(): void {
@@ -665,6 +714,9 @@ if (!gotTheLock) {
       if (payload.action === "minimize-to-tray") {
         hideMainWindowToTray(mainWindow)
       } else if (payload.action === "direct-close") {
+        // app.quit() 会触发 before-quit → will-quit 事件链，
+        // 其中会执行 fireSessionEndAll（中断活跃 agent 运行）、
+        // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
         app.quit()
       }
     })
@@ -674,8 +726,11 @@ if (!gotTheLock) {
     })
 
     // Track event handler for client-side telemetry
-    ipcMain.handle("track-event", async (_event, payload: any) => {
+    ipcMain.handle("track-event", async (_event, payload: unknown) => {
       try {
+        if (!isTrackEventPayload(payload)) {
+          return { success: false }
+        }
         const { eventName, eventCategory, properties } = payload
         trackEvent(eventName, eventCategory, properties)
         return { success: true }

@@ -80,7 +80,7 @@ import {
   restoreRawCheckpointMessageTime,
   restoreVisibleCheckpointMessageTimes
 } from "./checkpoint-message-times"
-import { mergeLiveStreamMessages, type LiveStreamMessage } from "./live-stream-messages"
+import { mergeLiveStreamMessages, replaceLiveStreamMessageId, type LiveStreamMessage } from "./live-stream-messages"
 import { buildSyntheticCheckpointBaselineIds } from "./stream-message-ids"
 import {
   loadWorkspaceFilesDeduped,
@@ -1070,6 +1070,8 @@ interface CustomEventData {
   parentThreadId?: string
   messages?: LiveStreamMessage[]
   assistantMessage?: LiveStreamMessage
+  fromId?: string
+  toId?: string
   result?: AgentAutoCommitResult
 }
 
@@ -2383,6 +2385,107 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     ]
   )
 
+  const applyMessageIdAlias = useCallback(
+    (threadId: string, fromId?: string, toId?: string) => {
+      if (!fromId || !toId || fromId === toId) return
+      const committedMessages = threadStatesRef.current[threadId]?.messages ?? []
+      const sourceMessage = committedMessages.find((message) => message.id === fromId)
+      const targetMessage = committedMessages.find((message) => message.id === toId)
+      if (sourceMessage && targetMessage && sourceMessage.role !== targetMessage.role) {
+        console.error("[ThreadContext] Refusing cross-role message id alias:", {
+          threadId,
+          fromId,
+          fromRole: sourceMessage.role,
+          toId,
+          toRole: targetMessage.role
+        })
+        return
+      }
+
+      const commitLocalAlias = (): void => {
+        const accumulator = liveStreamAccumulatorsRef.current[threadId]
+        if (accumulator) {
+          accumulator.messages = replaceLiveStreamMessageId(accumulator.messages, fromId, toId)
+          const fromTime = accumulator.messageTimes[fromId]
+          if (fromTime) {
+            const targetTime = accumulator.messageTimes[toId]
+            accumulator.messageTimes[toId] = targetTime
+              ? {
+                  start_at:
+                    fromTime.start_at.getTime() <= targetTime.start_at.getTime()
+                      ? fromTime.start_at
+                      : targetTime.start_at,
+                  ...(fromTime.end_at || targetTime.end_at
+                    ? {
+                        end_at:
+                          !targetTime.end_at ||
+                          (fromTime.end_at &&
+                            fromTime.end_at.getTime() > targetTime.end_at.getTime())
+                            ? fromTime.end_at
+                            : targetTime.end_at
+                      }
+                    : {})
+                }
+              : fromTime
+            delete accumulator.messageTimes[fromId]
+          }
+          accumulator.baselineIds.delete(fromId)
+        }
+
+        updateThreadState(threadId, (state) => {
+          if (!state.messages.some((message) => message.id === fromId)) return {}
+          if (state.messages.some((message) => message.id === toId)) {
+            return { messages: state.messages.filter((message) => message.id !== fromId) }
+          }
+          return {
+            messages: state.messages.map((message) =>
+              message.id === fromId ? { ...message, id: toId } : message
+            )
+          }
+        })
+
+        const currentStreamData = streamDataRef.current[threadId]
+        if (currentStreamData) {
+          streamDataRef.current[threadId] = {
+            ...currentStreamData,
+            liveMessages: replaceLiveStreamMessageId(
+              currentStreamData.liveMessages ?? [],
+              fromId,
+              toId
+            )
+          }
+          notifyStreamSubscribers(threadId)
+        }
+      }
+
+      void (async () => {
+        let lastError: unknown
+        for (const delay of [0, 100, 300]) {
+          if (delay > 0) {
+            await new Promise((resolve) => window.setTimeout(resolve, delay))
+          }
+          try {
+            const result = await window.api.threads.replaceMessageId(threadId, fromId, toId)
+            if (!result.replaced) {
+              console.warn("[ThreadContext] Message id migration was rejected:", {
+                threadId,
+                fromId,
+                toId
+              })
+              return
+            }
+            commitLocalAlias()
+            return
+          } catch (error) {
+            lastError = error
+          }
+        }
+        console.error("[ThreadContext] Failed to persist message id migration:", lastError)
+      })()
+    },
+    [notifyStreamSubscribers, updateThreadState]
+  )
+
   // Handle custom events from ThreadStreamHolder (interrupts, workspace updates, etc.)
   const handleCustomEvent = useCallback(
     (threadId: string, data: CustomEventData) => {
@@ -2394,6 +2497,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         subagentCount: Array.isArray(data.subagents) ? data.subagents.length : undefined
       })
       switch (data.type) {
+        case "message_id_alias":
+          applyMessageIdAlias(threadId, data.fromId, data.toId)
+          break
         case "coordinator_ai_snapshot_message":
           applyCoordinatorAssistantSnapshotMessage(threadId, data.assistantMessage)
           break
@@ -2959,6 +3065,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     },
     [
       applyCoordinatorAssistantSnapshotMessage,
+      applyMessageIdAlias,
       flushGoalSubturnComplete,
       getOrCreateLiveStreamAccumulator,
       notifyHookLogSubscribers,

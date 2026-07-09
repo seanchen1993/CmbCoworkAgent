@@ -50,6 +50,21 @@ export interface ThreadForkResponse<TThread = unknown> {
 export interface ThreadForkCheckpointForMessageParams {
   threadId: string
   messageId: string
+  message?: {
+    id?: string
+    role?: string
+    content?: unknown
+    tool_calls?: Array<{ id?: string; name?: string; args?: unknown }>
+  }
+}
+
+export interface ForkBoundaryMarker {
+  kind: "turn_complete"
+  boundaryId?: unknown
+  source?: unknown
+  outcome?: unknown
+  lastVisibleMessageId?: unknown
+  [key: string]: unknown
 }
 
 export interface ForkabilityStatus {
@@ -64,6 +79,8 @@ export interface ForkabilityStatus {
 export interface ForkableCheckpointSummary {
   checkpointId: string
   checkpointNs: ""
+  resolvedMessageId?: string
+  messageForkMode?: "message" | "checkpoint"
   createdAt?: string
   messageCount: number
   lastMessagePreview: string
@@ -96,12 +113,21 @@ export function getCheckpointThreadId(tuple: CheckpointTuple): string {
   return typeof threadId === "string" ? threadId : ""
 }
 
-export function getForkBoundaryMarker(tuple: CheckpointTuple): Record<string, unknown> | null {
-  const metadata = tuple.metadata as Record<string, unknown> | undefined
-  const boundary = metadata?.cmb_fork_boundary
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+export function getForkBoundaryMarker(tuple: CheckpointTuple): ForkBoundaryMarker | null {
+  const metadata: unknown = tuple.metadata
+  if (!isRecord(metadata)) return null
+  const boundary = metadata.cmb_fork_boundary
   if (!boundary || typeof boundary !== "object" || Array.isArray(boundary)) return null
-  const marker = boundary as Record<string, unknown>
-  return marker.kind === "turn_complete" ? marker : null
+  if (!isRecord(boundary) || boundary.kind !== "turn_complete") return null
+  return boundary as ForkBoundaryMarker
+}
+
+function isUserInterruptedForkBoundary(marker: ForkBoundaryMarker | null): boolean {
+  return marker?.source === "agent_run_interrupted" || marker?.outcome === "interrupted"
 }
 
 export function isForkableCheckpointForMessage(tuple: CheckpointTuple, messageId: string): boolean {
@@ -167,7 +193,7 @@ export function describeCheckpointForkability(
       hasPendingWrites
     }
   }
-  if (hasPendingWrites) {
+  if (hasPendingWrites && !isUserInterruptedForkBoundary(marker)) {
     return {
       isStableTurnBoundary: false,
       unstableReason: "pending_writes",
@@ -233,6 +259,7 @@ export function buildForkableCheckpointSummary(
   options: {
     activeRun: boolean
     pendingApproval: boolean
+    allowLegacyLatestFallback?: boolean
     allowLegacyHistoricalFallback?: boolean
     transcript?: CheckpointTranscriptIndex
   }
@@ -244,7 +271,7 @@ export function buildForkableCheckpointSummary(
     .reverse()
     .find((message) => message.role === "user" && message.text)
   const forkability = describeCheckpointForkability(tuple, {
-    allowLegacyLatestFallback: false,
+    allowLegacyLatestFallback: options.allowLegacyLatestFallback ?? false,
     allowLegacyHistoricalFallback: options.allowLegacyHistoricalFallback,
     activeRun: options.activeRun,
     pendingApproval: options.pendingApproval
@@ -277,24 +304,51 @@ export function buildVisibleForkableCheckpointList(
   const checkpoints: ForkableCheckpointSummary[] = []
   const seenLastVisibleMessageIds = new Set<string>()
   const legacyFallbackMode = options.legacyFallbackMode ?? "none"
-  let seenNewerBoundaryMarker = false
+  const orderedTuples = Array.from(tuples)
+  const oldestForkBoundaryMarkerIndex = orderedTuples.reduce((oldestIndex, tuple, index) => {
+    return getForkBoundaryMarker(tuple) ? index : oldestIndex
+  }, -1)
 
-  for (const tuple of tuples) {
+  for (const [index, tuple] of orderedTuples.entries()) {
     const marker = getForkBoundaryMarker(tuple)
+    const isLatestCheckpoint = index === 0
+    const allowLegacyLatestFallback =
+      !marker && isLatestCheckpoint && legacyFallbackMode === "all"
     const allowLegacyHistoricalFallback =
-      !marker &&
+      !marker && !allowLegacyLatestFallback &&
       (legacyFallbackMode === "all" ||
-        (legacyFallbackMode === "older_than_marker" && seenNewerBoundaryMarker))
+        (legacyFallbackMode === "older_than_marker" &&
+          oldestForkBoundaryMarkerIndex >= 0 &&
+          index > oldestForkBoundaryMarkerIndex))
     const initialTranscript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
     const lastVisibleMessageId = initialTranscript.visibleMessageIds.at(-1)
     if (!lastVisibleMessageId) {
-      if (marker) seenNewerBoundaryMarker = true
       continue
     }
 
     const messageTarget = describeCheckpointMessageForkTarget(tuple.checkpoint, lastVisibleMessageId)
     if (!messageTarget.isForkableMessageBoundary) {
-      if (marker) seenNewerBoundaryMarker = true
+      const markerLastVisibleMessageId = marker?.lastVisibleMessageId
+      const lastVisibleMessage = initialTranscript.visibleMessages.at(-1)
+      const canForkInterruptedCheckpointTail =
+        isUserInterruptedForkBoundary(marker) &&
+        lastVisibleMessage?.role === "tool" &&
+        (typeof markerLastVisibleMessageId !== "string" ||
+          markerLastVisibleMessageId === lastVisibleMessageId)
+      if (canForkInterruptedCheckpointTail) {
+        const summary = buildForkableCheckpointSummary(tuple, {
+          ...options,
+          allowLegacyLatestFallback,
+          allowLegacyHistoricalFallback,
+          transcript: initialTranscript
+        })
+        if (!summary.isStableTurnBoundary) continue
+        if (seenLastVisibleMessageIds.has(lastVisibleMessageId)) continue
+
+        seenLastVisibleMessageIds.add(lastVisibleMessageId)
+        checkpoints.push({ ...summary, messageForkMode: "checkpoint" })
+        continue
+      }
       continue
     }
 
@@ -303,16 +357,15 @@ export function buildVisibleForkableCheckpointList(
       typeof markerLastVisibleMessageId === "string" &&
       markerLastVisibleMessageId !== lastVisibleMessageId
     ) {
-      seenNewerBoundaryMarker = true
       continue
     }
 
     const summary = buildForkableCheckpointSummary(tuple, {
       ...options,
+      allowLegacyLatestFallback,
       allowLegacyHistoricalFallback,
       transcript: messageTarget.transcript
     })
-    if (marker) seenNewerBoundaryMarker = true
     if (!summary.isStableTurnBoundary) continue
     if (seenLastVisibleMessageIds.has(lastVisibleMessageId)) continue
 

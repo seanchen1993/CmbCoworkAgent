@@ -21,6 +21,7 @@ let dirty = false
 let savePromise: Promise<void> | null = null
 let flushPromise: Promise<unknown | null> | null = null
 let blockAsyncWrite = false
+const threadMessageIdAliases = new Map<string, Map<string, string>>()
 
 // Debounce window for background saves. sql.js holds the whole DB in memory and
 // db.export() snapshots it on the main thread (~1-2ms); coalescing bursts keeps
@@ -35,6 +36,7 @@ const THREAD_MESSAGE_JSON_ARRAY_LIMIT = 100
 const THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT = 80
 const THREAD_MESSAGE_JSON_DEPTH_LIMIT = 6
 const THREAD_MESSAGE_TOOL_CALL_LIMIT = 50
+const THREAD_MESSAGE_ALIAS_LIMIT = 1_000
 
 /**
  * Atomically persist the current DB snapshot off the main thread: export()
@@ -430,6 +432,7 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
   console.log("Initializing database at:", dbPath)
   // Reset in case the DB was previously closed (flush/close set the guard).
   blockAsyncWrite = false
+  threadMessageIdAliases.clear()
 
   const SQL = await initSqlJs()
 
@@ -593,6 +596,7 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
 export async function closeDatabase(): Promise<void> {
   await flush()
   blockAsyncWrite = true
+  threadMessageIdAliases.clear()
   if (!db) return
   db.close()
   db = null
@@ -688,6 +692,51 @@ function coalesceNormalizedThreadMessages(
   }
 
   return merged
+}
+
+function resolveThreadMessageIdAlias(threadId: string, messageId: string): string {
+  const aliases = threadMessageIdAliases.get(threadId)
+  if (!aliases) return messageId
+
+  let current = messageId
+  const visited = new Set<string>()
+  while (!visited.has(current)) {
+    visited.add(current)
+    const next = aliases.get(current)
+    if (!next || next === current) break
+    current = next
+  }
+  if (visited.has(current) && aliases.has(current)) {
+    // 检测到循环引用，记录警告以便调试
+    console.warn(
+      `[DB] Circular alias detected for thread ${threadId}: ${Array.from(visited).join(" -> ")}`
+    )
+  }
+  return current
+}
+
+function rememberThreadMessageIdAlias(threadId: string, fromId: string, toId: string): void {
+  let aliases = threadMessageIdAliases.get(threadId)
+  if (!aliases) {
+    aliases = new Map<string, string>()
+    threadMessageIdAliases.set(threadId, aliases)
+  }
+  aliases.set(fromId, toId)
+  while (aliases.size > THREAD_MESSAGE_ALIAS_LIMIT) {
+    const oldestId = aliases.keys().next().value
+    if (typeof oldestId !== "string") break
+    // 检查被驱逐的键是否被其他别名引用（即是否作为值出现），
+    // 如果是则跳过驱逐以避免别名链断裂。
+    const isReferencedAsValue = Array.from(aliases.values()).some((v) => v === oldestId)
+    if (isReferencedAsValue) {
+      // 将该条目重新插入到末尾（LRU 风格），然后继续检查下一个最旧的条目
+      const value = aliases.get(oldestId)!
+      aliases.delete(oldestId)
+      aliases.set(oldestId, value)
+      continue
+    }
+    aliases.delete(oldestId)
+  }
 }
 
 function threadMessageRowToMessage(row: ThreadMessageRow): Message {
@@ -839,7 +888,13 @@ export function upsertThreadMessages(
   const database = getDb()
   if (!getThread(threadId)) return 0
 
-  const normalizedMessages = coalesceNormalizedThreadMessages(messages, Date.now())
+  const aliasedMessages = messages.map((message) => {
+    const messageId = typeof message.id === "string" ? message.id.trim() : ""
+    if (!messageId) return message
+    const canonicalId = resolveThreadMessageIdAlias(threadId, messageId)
+    return canonicalId === messageId ? message : { ...message, id: canonicalId }
+  })
+  const normalizedMessages = coalesceNormalizedThreadMessages(aliasedMessages, Date.now())
   if (normalizedMessages.length === 0) return 0
 
   let changed = 0
@@ -952,12 +1007,112 @@ export function upsertThreadMessages(
   } catch (error) {
     try {
       database.run("ROLLBACK")
-    } catch {}
+    } catch {
+      // Preserve the original transaction error.
+    }
     throw error
   }
 
   if (changed > 0) saveToDisk()
   return changed
+}
+
+export function replaceThreadMessageId(
+  threadId: string,
+  fromMessageId: string,
+  toMessageId: string
+): boolean {
+  // 注意：调用方传入的 ID 可能包含前后空格，此处统一 trim。
+  // upsertThreadMessages 在写入时也会 trim message.id，因此数据库中存储的 ID 均为 trim 后的值。
+  // 两处 trim 逻辑保持一致，确保别名解析时不会因空格导致不一致。
+  const requestedFromId = fromMessageId.trim()
+  const requestedToId = toMessageId.trim()
+  if (!requestedFromId || !requestedToId || requestedFromId === requestedToId) return false
+
+  const fromId = resolveThreadMessageIdAlias(threadId, requestedFromId)
+  const toId = resolveThreadMessageIdAlias(threadId, requestedToId)
+  if (fromId === toId) return true
+
+  const database = getDb()
+  const rows = getThreadMessageRows(database, threadId, [fromId, toId])
+  const source = rows.get(fromId)
+  const target = rows.get(toId)
+  if (source && target && source.role !== target.role) {
+    console.warn(
+      `[DB] Refusing to merge message id alias across roles for thread ${threadId}: ` +
+        `${fromId} (${source.role}) -> ${toId} (${target.role})`
+    )
+    return false
+  }
+
+  rememberThreadMessageIdAlias(threadId, requestedFromId, toId)
+  if (fromId !== requestedFromId) {
+    rememberThreadMessageIdAlias(threadId, fromId, toId)
+  }
+  if (!source) return true
+
+  database.run("BEGIN")
+  try {
+    if (!target) {
+      database.run(
+        "UPDATE thread_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
+        [toId, threadId, fromId]
+      )
+    } else {
+      const targetContent = parseMessageContent(target.content_json)
+      const sourceContent = parseMessageContent(source.content_json)
+      const mergedContent = normalizeMessageContent(
+        hasUsefulContent(targetContent) ? targetContent : sourceContent
+      )
+      const mergedToolCalls = mergeToolCalls(
+        parseToolCalls(source.tool_calls_json),
+        parseToolCalls(target.tool_calls_json)
+      )
+
+      database.run("DELETE FROM thread_messages WHERE thread_id = ? AND message_id = ?", [
+        threadId,
+        fromId
+      ])
+      database.run(
+        `UPDATE thread_messages
+         SET role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
+             is_error = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
+             end_at = ?, ordinal = ?
+         WHERE thread_id = ? AND message_id = ?`,
+        [
+          target.role ?? source.role,
+          safeJsonStringify(mergedContent),
+          Array.isArray(mergedToolCalls) ? safeJsonStringify(mergedToolCalls) : null,
+          target.tool_call_id ?? source.tool_call_id,
+          target.name ?? source.name,
+          target.status ?? source.status,
+          target.is_error ?? source.is_error,
+          target.goal_id ?? source.goal_id,
+          target.active_window_id ?? source.active_window_id,
+          Math.min(
+            Number(source.created_at) || Date.now(),
+            Number(target.created_at) || Date.now()
+          ),
+          target.start_at ?? source.start_at,
+          target.end_at ?? source.end_at,
+          Math.min(Number(source.ordinal), Number(target.ordinal)),
+          threadId,
+          toId
+        ]
+      )
+    }
+    database.run("COMMIT")
+  } catch (error) {
+    try {
+      database.run("ROLLBACK")
+    } catch {
+      // Preserve the original transaction error.
+    }
+    throw error
+  }
+
+  saveToDisk()
+  return true
 }
 
 export function getAllThreads(): ThreadRow[] {
@@ -1076,6 +1231,7 @@ export function mergeThreadValues(
 
 export function deleteThread(threadId: string): void {
   const database = getDb()
+  threadMessageIdAliases.delete(threadId)
   database.run("DELETE FROM thread_messages WHERE thread_id = ?", [threadId])
   database.run("DELETE FROM thread_goal_events WHERE thread_id = ?", [threadId])
   database.run("DELETE FROM thread_goals WHERE thread_id = ?", [threadId])

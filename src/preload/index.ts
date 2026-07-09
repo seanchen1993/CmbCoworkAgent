@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
 import type {
+  CloseToTrayPromptAction,
+  CloseToTrayPromptEvent
+} from "../shared/close-to-tray"
+import type {
   Thread,
   Message,
   ModelConfig,
@@ -139,13 +143,6 @@ type PetState =
   | "interaction"
   | "hover"
 
-type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
-
-interface CloseToTrayPromptRequest {
-  requestId: number
-  trayAreaName: string
-}
-
 const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
 const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
 
@@ -176,8 +173,8 @@ const electronAPI = {
   closeLoginWindow: () => ipcRenderer.invoke("close-login-window"),
   openLoginPage: () => ipcRenderer.invoke("open-login-page"),
   closeLoginPage: () => ipcRenderer.invoke("close-login-page"),
-  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptRequest) => void) => {
-    const handler = (_event: unknown, payload: CloseToTrayPromptRequest): void => {
+  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptEvent) => void) => {
+    const handler = (_event: unknown, payload: CloseToTrayPromptEvent): void => {
       callback(payload)
     }
     ipcRenderer.on(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
@@ -548,6 +545,13 @@ const api = {
     },
     appendMessages: (threadId: string, messages: Message[]): Promise<{ count: number }> => {
       return ipcRenderer.invoke("threads:appendMessages", { threadId, messages })
+    },
+    replaceMessageId: (
+      threadId: string,
+      fromId: string,
+      toId: string
+    ): Promise<{ replaced: boolean }> => {
+      return ipcRenderer.invoke("threads:replaceMessageId", { threadId, fromId, toId })
     },
     exportSession: (
       threadId: string

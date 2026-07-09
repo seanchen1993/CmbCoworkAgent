@@ -196,6 +196,24 @@ function makeForkBoundaryMetadata(
   } as CheckpointMetadata
 }
 
+function makeInterruptedForkBoundaryMetadata(
+  checkpointId: string,
+  step = 1,
+  lastVisibleMessageId?: string
+): CheckpointMetadata {
+  const metadata = makeForkBoundaryMetadata(checkpointId, step, lastVisibleMessageId) as Record<
+    string,
+    unknown
+  >
+  metadata.cmb_fork_boundary = {
+    ...(metadata.cmb_fork_boundary as Record<string, unknown>),
+    boundaryId: `turn_interrupted:source:${checkpointId}`,
+    source: "agent_run_interrupted",
+    outcome: "interrupted"
+  }
+  return metadata as CheckpointMetadata
+}
+
 async function testTupleCopyToNewThread(dir: string): Promise<void> {
   const sourcePath = join(dir, "source.sqlite")
   const targetPath = join(dir, "target.sqlite")
@@ -727,6 +745,29 @@ function testForkabilitySummary(): void {
   assert.equal(stableSummary.lastMessagePreview, "hi")
   assert.equal(stableSummary.lastUserMessagePreview, "hello")
 
+  const interruptedBoundaryMetadata = {
+    ...makeMetadata(2),
+    cmb_fork_boundary: {
+      version: 1,
+      kind: "turn_complete",
+      boundaryId: "turn_interrupted:source:cp-user-stopped",
+      completedAt: "2026-07-03T00:00:02.000Z",
+      source: "agent_run_interrupted",
+      outcome: "interrupted",
+      lastVisibleMessageId: "assistant-1"
+    }
+  } as CheckpointMetadata
+  const userStoppedSummary = buildForkableCheckpointSummary(
+    makeTuple({
+      checkpoint: makeCheckpoint("cp-user-stopped"),
+      metadata: interruptedBoundaryMetadata
+    }),
+    { activeRun: false, pendingApproval: false }
+  )
+  assert.equal(userStoppedSummary.isStableTurnBoundary, true)
+  assert.equal(userStoppedSummary.boundarySource, "metadata_marker")
+  assert.equal(userStoppedSummary.stableTurnId, "turn_interrupted:source:cp-user-stopped")
+
   const activeRunSummary = buildForkableCheckpointSummary(
     makeTuple({ checkpoint: makeCheckpoint("cp-active-run"), metadata: stableMetadata }),
     { activeRun: true, pendingApproval: false }
@@ -764,16 +805,28 @@ function testForkabilitySummary(): void {
   assert.equal(pendingWritesSummary.unstableReason, "pending_writes")
   assert.equal(pendingWritesSummary.hasPendingWrites, true)
 
-  const interrupted = makeCheckpoint("cp-interrupt") as Checkpoint
-  ;(interrupted.channel_values as Record<string, unknown>).__interrupt__ = [{ value: {} }]
+  const interruptedPendingWritesSummary = buildForkableCheckpointSummary(
+    makeTuple({
+      checkpoint: makeCheckpoint("cp-user-stopped-pending"),
+      metadata: interruptedBoundaryMetadata,
+      pendingWrites: [["task-1", "messages", { abandonedByUserStop: true }]]
+    }),
+    { activeRun: false, pendingApproval: false }
+  )
+  assert.equal(interruptedPendingWritesSummary.isStableTurnBoundary, true)
+  assert.equal(interruptedPendingWritesSummary.boundarySource, "metadata_marker")
+  assert.equal(interruptedPendingWritesSummary.hasPendingWrites, true)
+
+  const graphInterrupted = makeCheckpoint("cp-interrupt") as Checkpoint
+  ;(graphInterrupted.channel_values as Record<string, unknown>).__interrupt__ = [{ value: {} }]
   const interruptedSummary = buildForkableCheckpointSummary(
-    makeTuple({ checkpoint: interrupted, metadata: stableMetadata }),
+    makeTuple({ checkpoint: graphInterrupted, metadata: interruptedBoundaryMetadata }),
     { activeRun: false, pendingApproval: false }
   )
   assert.equal(interruptedSummary.isStableTurnBoundary, false)
   assert.equal(interruptedSummary.unstableReason, "interrupt")
   assert.equal(interruptedSummary.hasInterrupt, true)
-  console.log("PASS forkability summary matches stable and unstable checkpoint states")
+  console.log("PASS completed and user-stopped boundaries fork while graph interrupts remain gated")
 }
 
 function testVisibleForkableCheckpointList(): void {
@@ -791,9 +844,34 @@ function testVisibleForkableCheckpointList(): void {
     { id: "user-2", type: "human", content: "next" },
     { id: "assistant-2", type: "ai", content: "later" }
   ]
+  const interruptedToolTail = makeCheckpoint("cp-interrupted-tool-tail") as Checkpoint
+  ;(interruptedToolTail.channel_values as Record<string, unknown>).messages = [
+    { id: "user-stop", type: "human", content: "run tool" },
+    {
+      id: "assistant-stop",
+      type: "ai",
+      content: "running tool",
+      tool_calls: [{ id: "tool-stop", name: "inspect", args: {} }]
+    },
+    {
+      id: "tool-stop-result",
+      type: "tool",
+      content: "partial result before stop",
+      tool_call_id: "tool-stop",
+      name: "inspect"
+    }
+  ]
 
   const summaries = buildVisibleForkableCheckpointList(
     [
+      makeTuple({
+        checkpoint: interruptedToolTail,
+        metadata: makeInterruptedForkBoundaryMetadata(
+          "cp-interrupted-tool-tail",
+          6,
+          "tool-stop-result"
+        )
+      }),
       makeTuple({
         checkpoint: hiddenTailDupe,
         metadata: makeForkBoundaryMetadata("cp-dupe-hidden-newer", 5, "assistant-1")
@@ -825,9 +903,15 @@ function testVisibleForkableCheckpointList(): void {
 
   assert.deepEqual(
     summaries.map((summary) => summary.checkpointId),
-    ["cp-dupe-newer", "cp-unique"]
+    ["cp-interrupted-tool-tail", "cp-dupe-newer", "cp-unique"]
   )
   assert.ok(summaries.every((summary) => summary.isStableTurnBoundary))
+  assert.equal(
+    summaries.find((summary) => summary.checkpointId === "cp-interrupted-tool-tail")
+      ?.messageForkMode,
+    "checkpoint",
+    "interrupted tool-tail checkpoints should be listed for whole-checkpoint fork"
+  )
 
   const busySummaries = buildVisibleForkableCheckpointList(
     [

@@ -831,6 +831,8 @@ function MessageBubbleImpl({
   const content = renderContent()
   const displayToolCalls = message.tool_calls?.map(normalizeToolCallForDisplay)
   const hasToolCalls = displayToolCalls && displayToolCalls.length > 0
+  const shouldShowAssistantActions =
+    showAssistantMeta && !isLoading && Boolean(content || hasToolCalls)
   const canSetGoalFromMessage =
     isUser && Boolean(onSetGoalFromMessage) && !plainTextForCopy.trim().startsWith("/goal")
 
@@ -1032,87 +1034,6 @@ function MessageBubbleImpl({
             {content}
           </div>
         )}
-        {content && showAssistantMeta && !isLoading && (
-          <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
-            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
-            <button
-              type="button"
-              onClick={handleCopyMessage}
-              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-              title="复制消息"
-              aria-label="复制消息"
-            >
-              {copySuccess ? (
-                <Check className="size-3 text-status-nominal" />
-              ) : (
-                <Copy className="size-3" />
-              )}
-            </button>
-            {canForkFromMessage ? (
-              <button
-                type="button"
-                onClick={() => onForkFromMessage?.(message)}
-                disabled={forkFromMessageDisabled}
-                className={cn(
-                  "inline-flex items-center justify-center rounded p-1 transition-all transform active:scale-95",
-                  forkFromMessageDisabled
-                    ? "cursor-not-allowed text-muted-foreground/40"
-                    : "text-muted-foreground hover:text-foreground hover:bg-background-interactive hover:scale-110"
-                )}
-                title={isLoading ? "运行中，无法 fork" : "从这里 fork"}
-                aria-label="从这里 fork"
-              >
-                {isForkingThisMessage ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <GitFork className="size-3" />
-                )}
-              </button>
-            ) : null}
-            {/* 点赞按钮 */}
-            <button
-              type="button"
-              onClick={() => {
-                setLikedMessageId(message.id)
-                setDislikedMessageId(null)
-                handleFeedbackSubmit("like")
-              }}
-              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
-                likedMessageId === message.id
-                  ? "text-green-500"
-                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
-              }`}
-              title="点赞"
-              aria-label="点赞"
-            >
-              {likedMessageId === message.id ? (
-                <Smile className="size-3" />
-              ) : (
-                <ThumbsUp className="size-3" />
-              )}
-            </button>
-            {/* 点踩按钮 */}
-            <button
-              type="button"
-              onClick={() => {
-                handleOpenFeedbackDialog("dislike")
-              }}
-              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
-                dislikedMessageId === message.id
-                  ? "text-red-500"
-                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
-              }`}
-              title="点踩"
-              aria-label="点踩"
-            >
-              {dislikedMessageId === message.id ? (
-                <Frown className="size-3" />
-              ) : (
-                <ThumbsDown className="size-3" />
-              )}
-            </button>
-          </div>
-        )}
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
             {displayToolCalls!.map((toolCall, index) => {
@@ -1294,6 +1215,87 @@ function MessageBubbleImpl({
                   </div>
                 </div>
               )}
+          </div>
+        )}
+        {shouldShowAssistantActions && (
+          <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
+            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
+            <button
+              type="button"
+              onClick={handleCopyMessage}
+              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+              title="复制消息"
+              aria-label="复制消息"
+            >
+              {copySuccess ? (
+                <Check className="size-3 text-status-nominal" />
+              ) : (
+                <Copy className="size-3" />
+              )}
+            </button>
+            {canForkFromMessage ? (
+              <button
+                type="button"
+                onClick={() => onForkFromMessage?.(message)}
+                disabled={forkFromMessageDisabled}
+                className={cn(
+                  "inline-flex items-center justify-center rounded p-1 transition-all transform active:scale-95",
+                  forkFromMessageDisabled
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : "text-muted-foreground hover:text-foreground hover:bg-background-interactive hover:scale-110"
+                )}
+                title={isLoading ? "运行中，无法 fork" : "从这里 fork"}
+                aria-label="从这里 fork"
+              >
+                {isForkingThisMessage ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <GitFork className="size-3" />
+                )}
+              </button>
+            ) : null}
+            {/* 点赞按钮 */}
+            <button
+              type="button"
+              onClick={() => {
+                setLikedMessageId(message.id)
+                setDislikedMessageId(null)
+                handleFeedbackSubmit("like")
+              }}
+              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
+                likedMessageId === message.id
+                  ? "text-green-500"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
+              }`}
+              title="点赞"
+              aria-label="点赞"
+            >
+              {likedMessageId === message.id ? (
+                <Smile className="size-3" />
+              ) : (
+                <ThumbsUp className="size-3" />
+              )}
+            </button>
+            {/* 点踩按钮 */}
+            <button
+              type="button"
+              onClick={() => {
+                handleOpenFeedbackDialog("dislike")
+              }}
+              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
+                dislikedMessageId === message.id
+                  ? "text-red-500"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
+              }`}
+              title="点踩"
+              aria-label="点踩"
+            >
+              {dislikedMessageId === message.id ? (
+                <Frown className="size-3" />
+              ) : (
+                <ThumbsDown className="size-3" />
+              )}
+            </button>
           </div>
         )}
       </div>
