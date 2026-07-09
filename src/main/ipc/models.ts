@@ -1855,6 +1855,32 @@ function isMissingRemoteBranchError(error: unknown): boolean {
     text.includes("couldn't find remote branch")
 }
 
+const GIT_REBASE_CONFLICT_MESSAGE =
+  "检测到代码冲突，已自动中止本次拉取。请前往 IDE 解决冲突后重试。冲突处理功能后续会上线，敬请期待。"
+
+const GIT_PUSH_REJECTED_NEEDS_PULL_MESSAGE =
+  "推送失败：远端已有新提交，请先 Pull 最新代码后再推送。如 Pull 过程中出现冲突，请前往 IDE 解决。冲突处理功能后续会上线，敬请期待。"
+
+function isGitRebaseConflictError(error: unknown): boolean {
+  const text = getExecErrorText(error).toLowerCase()
+  return text.includes("conflict (") ||
+    text.includes("merge conflict") ||
+    text.includes("failed to merge in the changes") ||
+    text.includes("patch failed at") ||
+    text.includes("resolve all conflicts manually") ||
+    text.includes("could not apply")
+}
+
+function isGitPushRejectedNeedsPullError(error: unknown): boolean {
+  const text = getExecErrorText(error).toLowerCase()
+  return text.includes("non-fast-forward") ||
+    text.includes("fetch first") ||
+    text.includes("failed to push some refs") ||
+    text.includes("updates were rejected") ||
+    text.includes("tip of your current branch is behind") ||
+    text.includes("remote contains work that you do not have locally")
+}
+
 async function resolveThreadWorkspaceContext(threadId: string): Promise<{
   metadata: Record<string, unknown>
   workspacePath: string | null
@@ -4620,6 +4646,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
               steps
             }
           }
+          if (isGitPushRejectedNeedsPullError(pushError)) {
+            steps.push({ step: "push", status: "failed", detail: "远端已有新提交，需要先 Pull" })
+            steps.push({ step: "final", status: "failed", detail: "流程结束：push 被远端拒绝" })
+            return {
+              success: false,
+              error: GIT_PUSH_REJECTED_NEEDS_PULL_MESSAGE,
+              steps
+            }
+          }
           steps.push({ step: "push", status: "failed", detail: detail || "push 失败" })
           steps.push({ step: "final", status: "failed", detail: "流程结束：push 失败" })
           return { success: false, error: detail || "推送失败", steps }
@@ -4720,6 +4755,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             await runGit(worktreePath, ["rebase", "--abort"])
           } catch {
             // ignore
+          }
+          if (isGitRebaseConflictError(pullError)) {
+            logGitStep(threadId, "pull", `[${label}] 检测到代码冲突，已执行 rebase --abort`)
+            return { success: false, detail: `${label}: ${GIT_REBASE_CONFLICT_MESSAGE}` }
           }
           const detail = getExecErrorText(pullError) || "拉取失败"
           logGitStep(threadId, "pull", `[${label}] 失败：${detail}`)
