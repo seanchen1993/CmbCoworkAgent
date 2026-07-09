@@ -54,7 +54,6 @@ interface CodeViewerProps {
 const VIRTUAL_SCROLL_LINE_THRESHOLD = 100
 const CODE_LINE_HEIGHT = 22
 const CODE_OVERSCAN_LINES = 16
-const CODE_MAX_VISIBLE_HEIGHT = 700
 
 // Map file extensions to Shiki language identifiers (only languages we've loaded)
 const SUPPORTED_LANGS = new Set([
@@ -149,7 +148,7 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
   }, [content, language, shouldVirtualize])
 
   return (
-    <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+    <div className="flex h-full flex-1 flex-col min-h-0 overflow-hidden">
       {/* File path header */}
       <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-background/50 text-xs text-muted-foreground shrink-0">
         <span className="truncate">{filePath}</span>
@@ -165,7 +164,7 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
           className="bg-background font-mono text-sm leading-[22px]"
           itemHeight={CODE_LINE_HEIGHT}
           items={lines}
-          maxHeight={CODE_MAX_VISIBLE_HEIGHT}
+          maxHeight="100%"
           overscanCount={CODE_OVERSCAN_LINES}
           renderItem={(line, index) => (
             <div className="flex min-w-max hover:bg-background-interactive">

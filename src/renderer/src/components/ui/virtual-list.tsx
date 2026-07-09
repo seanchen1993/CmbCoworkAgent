@@ -8,7 +8,7 @@ export interface VirtualListProps<Item> {
   renderItem: (item: Item, index: number) => React.ReactNode
   className?: string
   listClassName?: string
-  maxHeight?: number
+  maxHeight?: number | "100%"
   overscanCount?: number
 }
 
@@ -29,7 +29,9 @@ export function VirtualList<Item>({
   maxHeight = DEFAULT_MAX_HEIGHT,
   overscanCount = DEFAULT_OVERSCAN_COUNT
 }: VirtualListProps<Item>): React.JSX.Element {
-  const listHeight = Math.min(items.length * itemHeight, maxHeight)
+  const intrinsicHeight = items.length * itemHeight
+  const fillHeight = maxHeight === "100%"
+  const listHeight = fillHeight ? intrinsicHeight : Math.min(intrinsicHeight, maxHeight)
   const rowProps = useMemo(() => ({ items, renderItem }), [items, renderItem])
 
   function Row({
@@ -47,7 +49,7 @@ export function VirtualList<Item>({
   }
 
   return (
-    <div className={cn("flex-1 min-h-0", className)}>
+    <div className={cn("flex-1 min-h-0", fillHeight && "h-full", className)}>
       <List
         className={listClassName}
         defaultHeight={listHeight}
@@ -56,7 +58,7 @@ export function VirtualList<Item>({
         rowCount={items.length}
         rowHeight={itemHeight}
         rowProps={rowProps}
-        style={{ height: listHeight, width: "100%", maxHeight: "100%" }}
+        style={{ height: fillHeight ? "100%" : listHeight, width: "100%", maxHeight: "100%" }}
       />
     </div>
   )
