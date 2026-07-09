@@ -9,7 +9,7 @@ import assert from "assert"
 import { mkdtemp, rm } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
-import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
+import type { Checkpoint, CheckpointMetadata, PendingWrite } from "@langchain/langgraph-checkpoint"
 import type { Message } from "../src/main/types.ts"
 import { WORKFLOW_NOTIFICATION_TURN_PROMPT } from "../src/shared/checkpoint-transcript.ts"
 import {
@@ -74,12 +74,43 @@ function makeCheckpointWithVisiblePair(input: {
   return checkpoint
 }
 
+function makeCheckpointWithVisibleMessages(
+  id: string,
+  ts: string,
+  messages: Array<{ id: string; type: "human" | "ai" | "tool"; content: string }>
+): Checkpoint {
+  const checkpoint = makeCheckpoint(id, ts)
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = messages
+  return checkpoint
+}
+
 function makeHiddenTailCheckpoint(id: string): Checkpoint {
   const checkpoint = makeCheckpoint(id, "2026-07-08T01:00:02.000Z")
   ;(checkpoint.channel_values as Record<string, unknown>).messages = [
     { id: "user-1", type: "human", content: "fork source prompt" },
     { id: "assistant-1", type: "ai", content: "checkpoint final answer" },
     { id: "wf-trigger", type: "human", content: WORKFLOW_NOTIFICATION_TURN_PROMPT }
+  ]
+  return checkpoint
+}
+
+function makeInterruptedToolTailCheckpoint(id: string): Checkpoint {
+  const checkpoint = makeCheckpoint(id, "2026-07-08T01:00:02.000Z")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: "user-1", type: "human", content: "fork source prompt" },
+    {
+      id: "assistant-1",
+      type: "ai",
+      content: "I will inspect the workspace.",
+      tool_calls: [{ id: "tool-1", name: "inspect", args: { target: "fork" } }]
+    },
+    {
+      id: "tool-result-1",
+      type: "tool",
+      content: "partial inspect output before user interrupted",
+      tool_call_id: "tool-1",
+      name: "inspect"
+    }
   ]
   return checkpoint
 }
@@ -102,6 +133,23 @@ function makeForkBoundaryMetadata(
       lastVisibleMessageId
     }
   } as CheckpointMetadata
+}
+
+function makeInterruptedForkBoundaryMetadata(
+  checkpointId: string,
+  lastVisibleMessageId = "assistant-1"
+): CheckpointMetadata {
+  const metadata = makeForkBoundaryMetadata(checkpointId, lastVisibleMessageId) as Record<
+    string,
+    unknown
+  >
+  metadata.cmb_fork_boundary = {
+    ...(metadata.cmb_fork_boundary as Record<string, unknown>),
+    boundaryId: `turn_interrupted:source-thread:${checkpointId}`,
+    source: "agent_run_interrupted",
+    outcome: "interrupted"
+  }
+  return metadata as CheckpointMetadata
 }
 
 function makePlainMetadata(): CheckpointMetadata {
@@ -246,6 +294,245 @@ async function testResolveMessageForkReturnsNewestStableCheckpoint(): Promise<vo
   }
 }
 
+async function testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, resolveForkCheckpointForMessage } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-live-id-snapshot-source"
+  const checkpointId = "fork-live-id-snapshot-cp"
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Live id snapshot source",
+      agentMode: "normal"
+    })
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpoint(checkpointId),
+      makeForkBoundaryMetadata(checkpointId)
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: "live-assistant-id",
+      message: {
+        id: "live-assistant-id",
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "inspect", args: { target: "fork" } }]
+      }
+    })
+    assert.equal(
+      resolved?.checkpointId,
+      checkpointId,
+      "message resolver should use the snapshot when the live UI id differs from checkpoint id"
+    )
+    assert.equal(
+      resolved?.resolvedMessageId,
+      "assistant-1",
+      "message resolver should return the checkpoint message id for the final fork call"
+    )
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId: resolved!.checkpointId,
+      messageId: resolved!.resolvedMessageId,
+      title: "Fork from resolved live id"
+    })
+    targetThreadId = forked.thread.thread_id
+    assert.equal(forked.sourceCheckpointId, checkpointId)
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testResolveMessageForkMatchesSparseToolAssistantSnapshot(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { registerThreadHandlers, resolveForkCheckpointForMessage } = await import(
+    "../src/main/ipc/threads.ts"
+  )
+
+  const sourceThreadId = "fork-sparse-tool-assistant-source"
+  const checkpointId = "fork-sparse-tool-assistant-cp"
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Sparse tool assistant source",
+      agentMode: "normal"
+    })
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpoint(checkpointId),
+      makeForkBoundaryMetadata(checkpointId)
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const listForkableCheckpoints = handlers.get("threads:list-forkable-checkpoints")
+    assert(listForkableCheckpoints, "listForkableCheckpoints handler should be registered")
+    const listed = (await listForkableCheckpoints(null, sourceThreadId)) as Array<{
+      checkpointId: string
+    }>
+    assert.deepEqual(
+      listed.map((checkpoint) => checkpoint.checkpointId),
+      [checkpointId],
+      "right-click checkpoint list should include the sparse tool assistant checkpoint"
+    )
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: "live-sparse-tool-assistant",
+      message: {
+        id: "live-sparse-tool-assistant",
+        role: "assistant",
+        content: ""
+      }
+    })
+    assert.equal(
+      resolved?.checkpointId,
+      checkpointId,
+      "message resolver should align sparse live assistant snapshots with listed tool checkpoints"
+    )
+    assert.equal(resolved?.resolvedMessageId, "assistant-1")
+  } finally {
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testResolveMessageForkUsesCheckpointModeForInterruptedToolTail(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, registerThreadHandlers, resolveForkCheckpointForMessage } = await import(
+    "../src/main/ipc/threads.ts"
+  )
+
+  const sourceThreadId = "fork-interrupted-tool-tail-source"
+  const checkpointId = "fork-interrupted-tool-tail-cp"
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Interrupted tool tail source",
+      agentMode: "normal"
+    })
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeInterruptedToolTailCheckpoint(checkpointId),
+      makeInterruptedForkBoundaryMetadata(checkpointId, "tool-result-1")
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const listForkableCheckpoints = handlers.get("threads:list-forkable-checkpoints")
+    assert(listForkableCheckpoints, "listForkableCheckpoints handler should be registered")
+    const listed = (await listForkableCheckpoints(null, sourceThreadId)) as Array<{
+      checkpointId: string
+      messageForkMode?: string
+    }>
+    assert.deepEqual(
+      listed.map((checkpoint) => checkpoint.checkpointId),
+      [checkpointId],
+      "right-click checkpoint list should include the interrupted tool-tail checkpoint"
+    )
+    assert.equal(
+      listed[0].messageForkMode,
+      "checkpoint",
+      "right-click checkpoint list should mark interrupted tool-tail fork as whole-checkpoint mode"
+    )
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: "assistant-1",
+      message: {
+        id: "assistant-1",
+        role: "assistant",
+        content: "I will inspect the workspace.",
+        tool_calls: [{ id: "tool-1", name: "inspect", args: { target: "fork" } }]
+      }
+    })
+    assert.equal(
+      resolved?.checkpointId,
+      checkpointId,
+      "message resolver should find the interrupted checkpoint for an assistant tool cluster"
+    )
+    assert.equal(
+      resolved?.messageForkMode,
+      "checkpoint",
+      "interrupted assistant tool clusters should fork the whole checkpoint instead of truncating"
+    )
+    assert.equal(
+      resolved?.resolvedMessageId,
+      undefined,
+      "checkpoint-mode message fork should not pass a truncate message id"
+    )
+
+    const sparseLiveResolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: "live-tool-only-assistant",
+      message: {
+        id: "live-tool-only-assistant",
+        role: "assistant",
+        content: ""
+      }
+    })
+    assert.equal(
+      sparseLiveResolved?.checkpointId,
+      checkpointId,
+      "message resolver should align sparse tool-only live assistant snapshots with the interrupted checkpoint"
+    )
+    assert.equal(sparseLiveResolved?.messageForkMode, "checkpoint")
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId: resolved!.checkpointId,
+      title: "Fork interrupted tool cluster"
+    })
+    targetThreadId = forked.thread.thread_id
+
+    const targetMessages = db.getThreadMessages(targetThreadId)
+    assert.deepEqual(
+      targetMessages.map((message) => message.id),
+      ["user-1", "assistant-1", "tool-result-1"],
+      "checkpoint-mode interrupted fork should preserve the assistant tool cluster"
+    )
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
 async function testResolveAndForkLegacyMessageBeforeFirstMarker(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
@@ -354,6 +641,125 @@ async function testResolveAndForkLegacyMessageBeforeFirstMarker(): Promise<void>
       db.deleteThread(targetThreadId)
       deleteThreadCheckpoint(targetThreadId)
     }
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testUnmarkedCheckpointBetweenMarkersIsNotForkable(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, registerThreadHandlers, resolveForkCheckpointForMessage } = await import(
+    "../src/main/ipc/threads.ts"
+  )
+
+  const sourceThreadId = "fork-unmarked-between-markers-source"
+  const olderMarkedCheckpointId = "fork-between-markers-old"
+  const unmarkedCheckpointId = "fork-between-markers-unmarked"
+  const newerMarkedCheckpointId = "fork-between-markers-new"
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Unmarked between markers source",
+      agentMode: "normal"
+    })
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 4
+    })
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpointWithVisiblePair({
+        id: olderMarkedCheckpointId,
+        ts: "2026-07-08T01:00:00.000Z",
+        userId: "user-old-marker",
+        userText: "old marked prompt",
+        assistantId: "assistant-old-marker",
+        assistantText: "old marked answer"
+      }),
+      makeForkBoundaryMetadata(olderMarkedCheckpointId, "assistant-old-marker")
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: olderMarkedCheckpointId
+        }
+      },
+      makeCheckpointWithVisiblePair({
+        id: unmarkedCheckpointId,
+        ts: "2026-07-08T01:00:01.000Z",
+        userId: "user-unmarked",
+        userText: "unmarked prompt",
+        assistantId: "assistant-unmarked",
+        assistantText: "unmarked answer"
+      }),
+      makePlainMetadata()
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: unmarkedCheckpointId
+        }
+      },
+      makeCheckpointWithVisiblePair({
+        id: newerMarkedCheckpointId,
+        ts: "2026-07-08T01:00:02.000Z",
+        userId: "user-new-marker",
+        userText: "new marked prompt",
+        assistantId: "assistant-new-marker",
+        assistantText: "new marked answer"
+      }),
+      makeForkBoundaryMetadata(newerMarkedCheckpointId, "assistant-new-marker")
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const listForkableCheckpoints = handlers.get("threads:list-forkable-checkpoints")
+    assert(listForkableCheckpoints, "listForkableCheckpoints handler should be registered")
+    const listed = (await listForkableCheckpoints(null, sourceThreadId)) as Array<{
+      checkpointId: string
+    }>
+    assert.deepEqual(
+      listed.map((checkpoint) => checkpoint.checkpointId),
+      [newerMarkedCheckpointId, olderMarkedCheckpointId],
+      "right-click checkpoint list should not expose unmarked checkpoints between markers"
+    )
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: "assistant-unmarked",
+      message: {
+        id: "assistant-unmarked",
+        role: "assistant",
+        content: "unmarked answer"
+      }
+    })
+    assert.equal(
+      resolved,
+      null,
+      "message resolver should not expose unmarked checkpoints between markers"
+    )
+
+    await assert.rejects(
+      () =>
+        forkThread({
+          sourceThreadId,
+          checkpointId: unmarkedCheckpointId,
+          messageId: "assistant-unmarked",
+          title: "Unmarked between markers fork"
+        }),
+      /稳定完成边界/,
+      "direct fork should reject unmarked checkpoints between stable markers"
+    )
+  } finally {
     db.deleteThread(sourceThreadId)
     deleteThreadCheckpoint(sourceThreadId)
     await db.closeDatabase()
@@ -570,14 +976,175 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
   }
 }
 
-async function testForkLatestRejectsDurableTailBeyondCheckpoint(): Promise<void> {
+async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
   const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
-  const { forkThread } = await import("../src/main/ipc/threads.ts")
+  const { forkThread, registerThreadHandlers, resolveForkCheckpointForMessage } = await import(
+    "../src/main/ipc/threads.ts"
+  )
+
+  const sourceThreadId = "fork-history-source"
+  const olderCheckpointId = "fork-history-old"
+  const unstableMiddleCheckpointId = "fork-history-unstable-middle"
+  const newerCheckpointId = "fork-history-new"
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "History source",
+      agentMode: "normal"
+    })
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 4
+    })
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpointWithVisiblePair({
+        id: olderCheckpointId,
+        ts: "2026-07-08T01:00:00.000Z",
+        userId: "user-old",
+        userText: "old prompt",
+        assistantId: "assistant-old",
+        assistantText: "old answer"
+      }),
+      makeForkBoundaryMetadata(olderCheckpointId, "assistant-old")
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: olderCheckpointId
+        }
+      },
+      makeCheckpointWithVisibleMessages(
+        unstableMiddleCheckpointId,
+        "2026-07-08T01:00:01.000Z",
+        [
+          { id: "user-old", type: "human", content: "old prompt" },
+          { id: "assistant-old", type: "ai", content: "old answer" },
+          { id: "user-middle", type: "human", content: "middle prompt" },
+          { id: "assistant-middle", type: "ai", content: "middle answer" }
+        ]
+      ),
+      makePlainMetadata()
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: unstableMiddleCheckpointId
+        }
+      },
+      makeCheckpointWithVisibleMessages(newerCheckpointId, "2026-07-08T01:00:02.000Z", [
+        { id: "user-old", type: "human", content: "old prompt" },
+        { id: "assistant-old", type: "ai", content: "old answer" },
+        { id: "user-middle", type: "human", content: "middle prompt" },
+        { id: "assistant-middle", type: "ai", content: "middle answer" },
+        { id: "user-new", type: "human", content: "new prompt" },
+        { id: "assistant-new", type: "ai", content: "new answer" }
+      ]),
+      makeForkBoundaryMetadata(newerCheckpointId, "assistant-new")
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const forked = await forkThread({ sourceThreadId, title: "History fork" })
+    targetThreadId = forked.thread.thread_id
+
+    const targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId))
+    const targetCheckpoints: Array<{ id: string; parentId?: string }> = []
+    for await (const tuple of targetSaver.list({
+      configurable: { thread_id: targetThreadId, checkpoint_ns: "" }
+    })) {
+      targetCheckpoints.push({
+        id: tuple.checkpoint.id,
+        parentId: tuple.parentConfig?.configurable?.checkpoint_id
+      })
+    }
+    await targetSaver.close()
+    assert.deepEqual(
+      targetCheckpoints.map((checkpoint) => checkpoint.id),
+      [newerCheckpointId, olderCheckpointId],
+      "fork target should retain only stable historical root checkpoints up to the selected checkpoint"
+    )
+    const targetCheckpointIds = new Set(targetCheckpoints.map((checkpoint) => checkpoint.id))
+    assert.equal(
+      targetCheckpoints.every(
+        (checkpoint) => !checkpoint.parentId || targetCheckpointIds.has(checkpoint.parentId)
+      ),
+      true,
+      "copied checkpoint history must not contain dangling parent references"
+    )
+
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const listForkableCheckpoints = handlers.get("threads:list-forkable-checkpoints")
+    assert(listForkableCheckpoints, "listForkableCheckpoints handler should be registered")
+    const listed = (await listForkableCheckpoints(null, targetThreadId)) as Array<{
+      checkpointId: string
+    }>
+    assert.deepEqual(
+      listed.map((checkpoint) => checkpoint.checkpointId),
+      [newerCheckpointId, olderCheckpointId],
+      "forked thread right-click checkpoint list should keep previous checkpoints"
+    )
+
+    const resolvedOld = await resolveForkCheckpointForMessage({
+      threadId: targetThreadId,
+      messageId: "assistant-old",
+      message: {
+        id: "assistant-old",
+        role: "assistant",
+        content: "old answer"
+      }
+    })
+    assert.equal(
+      resolvedOld?.checkpointId,
+      olderCheckpointId,
+      "message fork in a forked thread should resolve historical assistant checkpoints"
+    )
+
+    const resolvedUnstableMiddle = await resolveForkCheckpointForMessage({
+      threadId: targetThreadId,
+      messageId: "assistant-middle",
+      message: {
+        id: "assistant-middle",
+        role: "assistant",
+        content: "middle answer"
+      }
+    })
+    assert.equal(
+      resolvedUnstableMiddle,
+      null,
+      "message fork in a forked thread should not resurrect copied unstable checkpoints"
+    )
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testInterruptedDurableTailForkIsConsistentAndComplete(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { getDurableRuntimeTail } = await import("../src/main/ipc/thread-runtime-tail.ts")
+  const { forkThread, registerThreadHandlers, resolveForkCheckpointForMessage } = await import(
+    "../src/main/ipc/threads.ts"
+  )
 
   const sourceThreadId = "fork-durable-tail-source"
   const checkpointId = "fork-durable-tail-cp"
+  let targetThreadId: string | undefined
 
   await db.initializeDatabase()
   try {
@@ -593,34 +1160,285 @@ async function testForkLatestRejectsDurableTailBeyondCheckpoint(): Promise<void>
         created_at: new Date("2026-07-08T01:00:00.000Z")
       },
       {
-        id: "assistant-1",
+        id: "assistant-tail",
         role: "assistant",
-        content: "checkpoint final answer",
+        content: "I will inspect the durable tail.",
+        tool_calls: [{ id: "tail-tool-1", name: "inspect", args: { target: "tail" } }],
         created_at: new Date("2026-07-08T01:00:01.000Z")
       },
       {
-        id: "user-2",
-        role: "user",
-        content: "durable tail question after checkpoint",
-        created_at: new Date("2026-07-08T01:01:00.000Z")
+        id: "tool-tail",
+        role: "tool",
+        content: "partial output persisted before interruption",
+        tool_call_id: "tail-tool-1",
+        name: "inspect",
+        created_at: new Date("2026-07-08T01:00:02.000Z")
       }
     ])
 
+    const checkpoint = makeCheckpointWithVisibleMessages(
+      checkpointId,
+      "2026-07-08T01:00:00.000Z",
+      [{ id: "user-1", type: "human", content: "fork source prompt" }]
+    )
     const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
     await sourceSaver.put(
       { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
-      makeCheckpoint(checkpointId),
-      makeForkBoundaryMetadata(checkpointId)
+      checkpoint,
+      makeInterruptedForkBoundaryMetadata(checkpointId, "user-1")
     )
     await sourceSaver.flushStrict()
     await sourceSaver.close()
 
-    await assert.rejects(
-      () => forkThread({ sourceThreadId, title: "Fork should wait for checkpoint" }),
-      /checkpoint 之后的已恢复历史/,
-      "latest fork should not silently drop durable tail messages beyond checkpoint"
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const listForkableCheckpoints = handlers.get("threads:list-forkable-checkpoints")
+    assert(listForkableCheckpoints, "listForkableCheckpoints handler should be registered")
+    const listed = (await listForkableCheckpoints(null, sourceThreadId)) as Array<{
+      checkpointId: string
+      messageCount: number
+      messageForkMode?: string
+    }>
+    assert.deepEqual(
+      listed.map((entry) => entry.checkpointId),
+      [checkpointId],
+      "right-click fork should expose the materialized interrupted checkpoint"
+    )
+    assert.equal(listed[0]?.messageCount, 3, "right-click summary should include the durable tail")
+    assert.equal(listed[0]?.messageForkMode, "checkpoint")
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: "assistant-tail",
+      message: {
+        id: "assistant-tail",
+        role: "assistant",
+        content: "I will inspect the durable tail.",
+        tool_calls: [{ id: "tail-tool-1", name: "inspect", args: { target: "tail" } }]
+      }
+    })
+    assert.equal(
+      resolved?.checkpointId,
+      checkpointId,
+      "message fork and right-click fork should resolve the same checkpoint"
+    )
+    assert.equal(resolved?.messageForkMode, "checkpoint")
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId,
+      title: "Fork complete interrupted tail"
+    })
+    targetThreadId = forked.thread.thread_id
+    assert.deepEqual(
+      db.getThreadMessages(targetThreadId).map((message) => message.id),
+      ["user-1", "assistant-tail", "tool-tail"],
+      "right-click checkpoint fork must not drop durable tail messages"
+    )
+
+    const targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId))
+    const targetTuple = await targetSaver.getTuple({
+      configurable: { thread_id: targetThreadId, checkpoint_ns: "" }
+    })
+    await targetSaver.close()
+    const targetMessages = (
+      targetTuple?.checkpoint.channel_values as { messages?: Array<{ id?: string }> } | undefined
+    )?.messages
+    assert.deepEqual(
+      targetMessages?.map((message) => message.id),
+      ["user-1", "assistant-tail", "tool-tail"],
+      "fork runtime checkpoint must contain the complete transcript"
+    )
+    const targetRuntimeTail = await getDurableRuntimeTail(targetThreadId)
+    assert.equal(
+      targetRuntimeTail.persistedMessages.length,
+      0,
+      "materialized fork messages must not be replayed a second time as runtime tail"
+    )
+    const targetListed = (await listForkableCheckpoints(null, targetThreadId)) as Array<{
+      checkpointId: string
+      messageCount: number
+    }>
+    assert.deepEqual(
+      targetListed.map((entry) => [entry.checkpointId, entry.messageCount]),
+      [[checkpointId, 3]],
+      "a forked thread should preserve the materialized boundary for subsequent forks"
     )
   } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testUnsafeLatestDurableTailDoesNotHideHistoricalForks(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, registerThreadHandlers } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-unsafe-tail-source"
+  const olderCheckpointId = "fork-unsafe-tail-old"
+  const latestCheckpointId = "fork-unsafe-tail-latest"
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Unsafe durable tail source",
+      agentMode: "normal"
+    })
+    db.upsertThreadMessages(sourceThreadId, [
+      {
+        id: "user-old",
+        role: "user",
+        content: "old prompt",
+        created_at: new Date("2026-07-08T01:00:00.000Z")
+      },
+      {
+        id: "assistant-old",
+        role: "assistant",
+        content: "old answer",
+        created_at: new Date("2026-07-08T01:00:01.000Z")
+      },
+      {
+        id: "user-new",
+        role: "user",
+        content: "new prompt",
+        created_at: new Date("2026-07-08T01:01:00.000Z")
+      },
+      {
+        id: "assistant-new",
+        role: "assistant",
+        content: "new answer",
+        created_at: new Date("2026-07-08T01:01:01.000Z")
+      },
+      {
+        id: "unsafe-tool-tail",
+        role: "tool",
+        content: "tool result without tool_call_id",
+        created_at: new Date("2026-07-08T01:01:02.000Z")
+      }
+    ])
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 3
+    })
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpointWithVisiblePair({
+        id: olderCheckpointId,
+        ts: "2026-07-08T01:00:00.000Z",
+        userId: "user-old",
+        userText: "old prompt",
+        assistantId: "assistant-old",
+        assistantText: "old answer"
+      }),
+      makeForkBoundaryMetadata(olderCheckpointId, "assistant-old")
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: olderCheckpointId
+        }
+      },
+      makeCheckpointWithVisibleMessages(latestCheckpointId, "2026-07-08T01:01:01.000Z", [
+        { id: "user-old", type: "human", content: "old prompt" },
+        { id: "assistant-old", type: "ai", content: "old answer" },
+        { id: "user-new", type: "human", content: "new prompt" },
+        { id: "assistant-new", type: "ai", content: "new answer" }
+      ]),
+      makeInterruptedForkBoundaryMetadata(latestCheckpointId, "assistant-new")
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const listForkableCheckpoints = handlers.get("threads:list-forkable-checkpoints")
+    assert(listForkableCheckpoints, "listForkableCheckpoints handler should be registered")
+    const listed = (await listForkableCheckpoints(null, sourceThreadId)) as Array<{
+      checkpointId: string
+    }>
+    assert.deepEqual(
+      listed.map((entry) => entry.checkpointId),
+      [olderCheckpointId],
+      "an unsafe latest tail should not hide older stable checkpoints"
+    )
+    await assert.rejects(
+      () =>
+        forkThread({
+          sourceThreadId,
+          checkpointId: latestCheckpointId,
+          title: "Unsafe latest should reject"
+        }),
+      /无法安全恢复/,
+      "direct API calls must not silently fork an unsafe latest durable tail"
+    )
+  } finally {
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testForkLatestAllowsUserInterruptedPendingWritesBoundary(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-interrupted-pending-writes-source"
+  const checkpointId = "fork-interrupted-pending-writes-cp"
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Interrupted pending writes source",
+      agentMode: "normal"
+    })
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    const savedConfig = await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpoint(checkpointId),
+      makeInterruptedForkBoundaryMetadata(checkpointId)
+    )
+    const abandonedWrites: PendingWrite[] = [["messages", { abandonedToolResult: true }]]
+    await sourceSaver.putWrites(savedConfig, abandonedWrites, "tools-task-1")
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const forked = await forkThread({
+      sourceThreadId,
+      title: "Fork interrupted pending writes"
+    })
+    targetThreadId = forked.thread.thread_id
+    assert.equal(
+      forked.sourceCheckpointId,
+      checkpointId,
+      "latest fork should accept a user-interrupted boundary with abandoned pending writes"
+    )
+
+    const targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId))
+    const targetTuple = await targetSaver.getTuple({
+      configurable: { thread_id: targetThreadId, checkpoint_ns: "" }
+    })
+    await targetSaver.close()
+    assert.equal(
+      targetTuple?.pendingWrites?.length ?? 0,
+      0,
+      "fork target must not copy abandoned source pending writes"
+    )
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
     db.deleteThread(sourceThreadId)
     deleteThreadCheckpoint(sourceThreadId)
     await db.closeDatabase()
@@ -754,7 +1572,9 @@ async function testForkOverrideValidationRejectsInconsistentTargetMetadata(): Pr
       () =>
         forkThread({
           sourceThreadId,
-          overrides: { workspacePath: "   " } as any
+          overrides: { workspacePath: "   " } as unknown as NonNullable<
+            Parameters<typeof forkThread>[0]["overrides"]
+          >
         }),
       /workspacePath override/,
       "workspacePath override must be a non-empty string or null"
@@ -763,7 +1583,9 @@ async function testForkOverrideValidationRejectsInconsistentTargetMetadata(): Pr
       () =>
         forkThread({
           sourceThreadId,
-          overrides: { agentMode: "invalid-mode" } as any
+          overrides: { agentMode: "invalid-mode" } as unknown as NonNullable<
+            Parameters<typeof forkThread>[0]["overrides"]
+          >
         }),
       /agentMode override 无效/,
       "agentMode override must be one of the supported modes"
@@ -908,16 +1730,23 @@ async function testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint(): Pro
 async function main(): Promise<void> {
   await withTempHome(async () => {
     await testForkThreadCopiesCheckpointThreadRowAndTranscript()
-    await testForkLatestRejectsDurableTailBeyondCheckpoint()
+    await testInterruptedDurableTailForkIsConsistentAndComplete()
+    await testUnsafeLatestDurableTailDoesNotHideHistoricalForks()
+    await testForkLatestAllowsUserInterruptedPendingWritesBoundary()
     await testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra()
     await testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker()
     await testForkOverrideValidationRejectsInconsistentTargetMetadata()
     await testForkCopiesGoalStateAndEvents()
     await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
     await testResolveMessageForkReturnsNewestStableCheckpoint()
+    await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
+    await testResolveMessageForkMatchesSparseToolAssistantSnapshot()
+    await testResolveMessageForkUsesCheckpointModeForInterruptedToolTail()
     await testResolveAndForkLegacyMessageBeforeFirstMarker()
+    await testUnmarkedCheckpointBetweenMarkersIsNotForkable()
     await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
     await testForkWaitsForQueuedRendererThreadMutations()
+    await testForkThreadCopiesHistoricalForkableCheckpoints()
   })
   console.log("thread-fork-handler.spec.ts passed")
 }

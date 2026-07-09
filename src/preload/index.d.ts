@@ -92,13 +92,10 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
-
-type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
-
-interface CloseToTrayPromptRequest {
-  requestId: number
-  trayAreaName: string
-}
+import type {
+  CloseToTrayPromptAction,
+  CloseToTrayPromptEvent
+} from "../shared/close-to-tray"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -106,7 +103,7 @@ interface ElectronAPI {
   closeLoginWindow: () => void
   openLoginPage: () => void
   closeLoginPage: () => void
-  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptRequest) => void) => () => void
+  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptEvent) => void) => () => void
   respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction) => void
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
@@ -871,6 +868,11 @@ interface CustomAPI {
     delete: (threadId: string) => Promise<void>
     getMessages: (threadId: string) => Promise<Message[]>
     appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
+    replaceMessageId: (
+      threadId: string,
+      fromId: string,
+      toId: string
+    ) => Promise<{ replaced: boolean }>
     exportSession: (
       threadId: string
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>

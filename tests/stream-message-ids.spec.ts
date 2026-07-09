@@ -329,6 +329,458 @@ function testCoordinatorCurrentTurnValuesUpdatesGrowingAssistantContent(): void 
   )
 }
 
+function testNormalValuesSnapshotAliasesChangedProviderMessageId(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-ai-id", content: "final answer" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { content: "question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-ai-id", content: "final answer" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const alias = events.find(
+    (event) =>
+      event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+  )?.data as { fromId?: string; toId?: string } | undefined
+  assertEqual(alias?.fromId, "live-ai-id", "normal values should identify the live message id")
+  assertEqual(alias?.toId, "final-ai-id", "normal values should adopt the final provider id")
+}
+
+function testNormalValuesSnapshotsCollapseRepeatedProviderIdChanges(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-ai-id", content: "final answer" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const valuesEvent = (id: string): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "values",
+        data: {
+          messages: [
+            {
+              id: ["langchain_core", "messages", "HumanMessage"],
+              kwargs: { content: "question" }
+            },
+            {
+              id: ["langchain_core", "messages", "AIMessage"],
+              kwargs: { id, content: "final answer" }
+            }
+          ]
+        }
+      },
+      "thread-1",
+      "normal"
+    )
+
+  const firstEvents = valuesEvent("final-ai-id-1")
+  const secondEvents = valuesEvent("final-ai-id-2")
+  const thirdEvents = valuesEvent("final-ai-id-3")
+  const aliases = [firstEvents, secondEvents, thirdEvents].map(
+    (events) =>
+      events.find(
+        (event) =>
+          event.event === "custom" &&
+          (event.data as { type?: string }).type === "message_id_alias"
+      )?.data as { fromId?: string; toId?: string } | undefined
+  )
+
+  assertEqual(aliases[0]?.fromId, "live-ai-id", "first snapshot should replace the live id")
+  assertEqual(aliases[0]?.toId, "final-ai-id-1", "first snapshot should adopt its provider id")
+  assertEqual(
+    aliases[1]?.fromId,
+    "final-ai-id-1",
+    "second snapshot should migrate the already adopted id"
+  )
+  assertEqual(aliases[1]?.toId, "final-ai-id-2", "second snapshot should adopt its provider id")
+  assertEqual(
+    aliases[2]?.fromId,
+    "final-ai-id-2",
+    "third snapshot should continue the alias chain"
+  )
+  assertEqual(aliases[2]?.toId, "final-ai-id-3", "third snapshot should adopt its provider id")
+
+  const finalValues = thirdEvents.find((event) => event.event === "values")?.data as
+    | { messages?: Array<{ id?: string }> }
+    | undefined
+  assertEqual(
+    finalValues?.messages?.at(-1)?.id,
+    "final-ai-id-3",
+    "the emitted values snapshot should use the latest canonical id"
+  )
+
+  const lateChunkEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-ai-id", content: "final answer!" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+  const lateChunk = lateChunkEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string }]
+    | undefined
+  assertEqual(
+    lateChunk?.[0]?.id,
+    "final-ai-id-3",
+    "late chunks using an old provider id should resolve to the latest canonical id"
+  )
+}
+
+function testNormalValuesSnapshotAliasesFullyRewrittenAnswerByLogicalSlot(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "draft-ai-id", content: "A tentative streamed draft." }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { content: "question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: "rewritten-ai-id",
+              content: "The provider replaced every word in the final answer."
+            }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const alias = events.find(
+    (event) =>
+      event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+  )?.data as { fromId?: string; toId?: string } | undefined
+  assertEqual(alias?.fromId, "draft-ai-id", "the streamed logical slot should be migrated")
+  assertEqual(
+    alias?.toId,
+    "rewritten-ai-id",
+    "a full text rewrite should still retain the same logical message"
+  )
+}
+
+function testNormalStreamingProviderIdChangesStayInOneLogicalSlot(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  const emitChunk = (id: string, content: string): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: { id, content }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+
+  const firstEvents = emitChunk("chunk-ai-id-1", "hello")
+  const secondEvents = emitChunk("chunk-ai-id-2", " world")
+  const firstMessage = firstEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string }]
+    | undefined
+  const secondMessage = secondEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string }]
+    | undefined
+
+  assertEqual(firstMessage?.[0]?.id, "chunk-ai-id-1", "the first chunk should establish the slot id")
+  assertEqual(
+    secondMessage?.[0]?.id,
+    "chunk-ai-id-1",
+    "later chunks must reuse the slot even when their provider id changes"
+  )
+}
+
+function testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  const emitMessage = (message: unknown, node: string): void => {
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [message, { langgraph_node: node }]
+      },
+      "thread-1",
+      "normal"
+    )
+  }
+
+  emitMessage(
+    {
+      id: ["langchain_core", "messages", "AIMessageChunk"],
+      kwargs: {
+        id: "live-ai-before-tool",
+        content: "calling a tool",
+        tool_calls: [{ id: "call-1", name: "read_file", args: { path: "a.ts" } }]
+      }
+    },
+    "agent"
+  )
+  emitMessage(
+    {
+      id: ["langchain_core", "messages", "ToolMessage"],
+      kwargs: {
+        id: "live-tool-id",
+        content: "file contents",
+        tool_call_id: "call-1",
+        name: "read_file"
+      }
+    },
+    "tools"
+  )
+  emitMessage(
+    {
+      id: ["langchain_core", "messages", "AIMessageChunk"],
+      kwargs: { id: "live-ai-after-tool", content: "final streamed answer" }
+    },
+    "agent"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { content: "question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: "final-ai-before-tool",
+              content: "rewritten tool request",
+              tool_calls: [{ id: "call-1", name: "read_file", args: { path: "a.ts" } }]
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "ToolMessage"],
+            kwargs: {
+              id: "final-tool-id",
+              content: "file contents",
+              tool_call_id: "call-1",
+              name: "read_file"
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-ai-after-tool", content: "rewritten final response" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const aliases = events
+    .filter(
+      (event) =>
+        event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+    )
+    .map((event) => event.data as { fromId?: string; toId?: string })
+  assertEqual(aliases.length, 2, "both assistant slots should be reconciled independently")
+  assertEqual(
+    aliases[0]?.fromId,
+    "live-ai-before-tool",
+    "the pre-tool answer should keep its own logical slot"
+  )
+  assertEqual(aliases[0]?.toId, "final-ai-before-tool", "the pre-tool slot should adopt its id")
+  assertEqual(
+    aliases[1]?.fromId,
+    "live-ai-after-tool",
+    "the post-tool answer should keep a separate logical slot"
+  )
+  assertEqual(aliases[1]?.toId, "final-ai-after-tool", "the post-tool slot should adopt its id")
+}
+
+function testNormalValuesSnapshotDoesNotAliasToLaterAssistantThatQuotesLiveText(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-ai-id", content: "final answer" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { content: "question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-ai-id", content: "final answer" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "later-ai-id", content: "Quoting: final answer. New response." }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const alias = events.find(
+    (event) =>
+      event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+  )?.data as { fromId?: string; toId?: string } | undefined
+  assertEqual(alias?.toId, "final-ai-id", "quoted live text should not steal the message alias")
+}
+
 function testGoalSubturnCompleteResetsAssistantFallbackId(): void {
   const transport = new ElectronIPCTransport()
   const processStreamEvent = (
@@ -526,6 +978,71 @@ function testMessagesFallbackIdsContinueAfterExistingThreadMessages(): void {
   )
 }
 
+function testNormalValuesLogicalSlotAlignsAfterExistingHistory(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-current-id", content: "current streamed answer" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "history-ai-id", content: "an older answer" }
+          },
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { id: "current-user-id", content: "current question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-current-id", content: "completely rewritten current answer" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const aliases = events
+    .filter(
+      (event) =>
+        event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+    )
+    .map((event) => event.data as { fromId?: string; toId?: string })
+
+  assertEqual(aliases.length, 1, "history slots should not be mistaken for the current answer")
+  assertEqual(aliases[0]?.fromId, "live-current-id", "the current streamed slot should be selected")
+  assertEqual(aliases[0]?.toId, "final-current-id", "the matching current snapshot should be adopted")
+}
+
 function testSystemFallbackIdsContinueAfterHiddenCheckpointArtifacts(): void {
   const transport = new ElectronIPCTransport()
   transport.setFallbackIndexBaselines({ ai: 0, tool: 0, system: 1, human: 0 })
@@ -651,6 +1168,30 @@ const tests: Array<[string, () => void]> = [
     testCoordinatorCurrentTurnValuesUpdatesGrowingAssistantContent
   ],
   [
+    "testNormalValuesSnapshotAliasesChangedProviderMessageId",
+    testNormalValuesSnapshotAliasesChangedProviderMessageId
+  ],
+  [
+    "testNormalValuesSnapshotsCollapseRepeatedProviderIdChanges",
+    testNormalValuesSnapshotsCollapseRepeatedProviderIdChanges
+  ],
+  [
+    "testNormalValuesSnapshotAliasesFullyRewrittenAnswerByLogicalSlot",
+    testNormalValuesSnapshotAliasesFullyRewrittenAnswerByLogicalSlot
+  ],
+  [
+    "testNormalStreamingProviderIdChangesStayInOneLogicalSlot",
+    testNormalStreamingProviderIdChangesStayInOneLogicalSlot
+  ],
+  [
+    "testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary",
+    testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary
+  ],
+  [
+    "testNormalValuesSnapshotDoesNotAliasToLaterAssistantThatQuotesLiveText",
+    testNormalValuesSnapshotDoesNotAliasToLaterAssistantThatQuotesLiveText
+  ],
+  [
     "testGoalSubturnCompleteResetsAssistantFallbackId",
     testGoalSubturnCompleteResetsAssistantFallbackId
   ],
@@ -665,6 +1206,10 @@ const tests: Array<[string, () => void]> = [
   [
     "testMessagesFallbackIdsContinueAfterExistingThreadMessages",
     testMessagesFallbackIdsContinueAfterExistingThreadMessages
+  ],
+  [
+    "testNormalValuesLogicalSlotAlignsAfterExistingHistory",
+    testNormalValuesLogicalSlotAlignsAfterExistingHistory
   ],
   [
     "testSystemFallbackIdsContinueAfterHiddenCheckpointArtifacts",

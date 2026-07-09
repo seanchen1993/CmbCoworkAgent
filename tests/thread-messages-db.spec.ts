@@ -378,6 +378,156 @@ async function testDurableTailFeedsRuntimeContext(): Promise<void> {
   await db.closeDatabase()
 }
 
+async function testReplaceThreadMessageIdKeepsSingleCanonicalRow(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-message-id-alias"
+
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Message alias" })
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "live-ai-id",
+      role: "assistant",
+      content: "final answer",
+      created_at: new Date("2026-07-09T00:00:00.000Z")
+    }
+  ])
+
+  assertEqual(
+    db.replaceThreadMessageId(threadId, "live-ai-id", "final-ai-id"),
+    true,
+    "message alias should migrate an existing streamed row"
+  )
+  const messages = db.getThreadMessages(threadId)
+  assertEqual(messages.length, 1, "message alias migration should not leave a duplicate row")
+  assertEqual(messages[0]?.id, "final-ai-id", "final provider id should be persisted")
+  assertEqual(messages[0]?.content, "final answer", "message content should survive id migration")
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "rewrite-live-id",
+      role: "assistant",
+      content: "draft answer",
+      created_at: new Date("2026-07-09T00:00:01.000Z")
+    },
+    {
+      id: "rewrite-final-id",
+      role: "assistant",
+      content: "final rewritten answer",
+      created_at: new Date("2026-07-09T00:00:02.000Z")
+    }
+  ])
+  db.replaceThreadMessageId(threadId, "rewrite-live-id", "rewrite-final-id")
+  const rewrittenMessages = db.getThreadMessages(threadId)
+  assertEqual(
+    rewrittenMessages.some((message) => message.id === "rewrite-live-id"),
+    false,
+    "an existing streamed row should collapse into an existing final row"
+  )
+  assertEqual(
+    rewrittenMessages.find((message) => message.id === "rewrite-final-id")?.content,
+    "final rewritten answer",
+    "the final provider row should remain authoritative when both ids already exist"
+  )
+
+  assertEqual(
+    db.replaceThreadMessageId(threadId, "late-live-id", "late-final-id"),
+    true,
+    "message alias should be remembered before the streamed row arrives"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "late-live-id",
+      role: "assistant",
+      content: "late final answer",
+      created_at: new Date("2026-07-09T00:00:01.000Z")
+    }
+  ])
+  const messagesAfterLateWrite = db.getThreadMessages(threadId)
+  assertEqual(
+    messagesAfterLateWrite.length,
+    3,
+    "late streamed writes should not create an old-id row"
+  )
+  assertEqual(
+    messagesAfterLateWrite.some((message) => message.id === "late-live-id"),
+    false,
+    "late streamed writes should resolve the remembered alias"
+  )
+  assertEqual(
+    messagesAfterLateWrite.some((message) => message.id === "late-final-id"),
+    true,
+    "late streamed writes should use the final provider id"
+  )
+
+  db.replaceThreadMessageId(threadId, "chain-live-id", "chain-final-id-1")
+  db.replaceThreadMessageId(threadId, "chain-final-id-1", "chain-final-id-2")
+  db.replaceThreadMessageId(threadId, "chain-final-id-2", "chain-final-id-3")
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "chain-live-id",
+      role: "assistant",
+      content: "answer after repeated snapshot ids",
+      created_at: new Date("2026-07-09T00:00:03.000Z")
+    }
+  ])
+  const messagesAfterAliasChain = db.getThreadMessages(threadId)
+  assertEqual(
+    messagesAfterAliasChain.some((message) => message.id === "chain-live-id"),
+    false,
+    "the original streamed id should not survive a repeated alias chain"
+  )
+  assertEqual(
+    messagesAfterAliasChain.some((message) => message.id === "chain-final-id-1"),
+    false,
+    "intermediate provider ids should not survive a repeated alias chain"
+  )
+  assertEqual(
+    messagesAfterAliasChain.some((message) => message.id === "chain-final-id-3"),
+    true,
+    "late writes should resolve through the full alias chain"
+  )
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "cross-role-source",
+      role: "assistant",
+      content: "assistant row",
+      created_at: new Date("2026-07-09T00:00:04.000Z")
+    },
+    {
+      id: "cross-role-target",
+      role: "tool",
+      content: "tool row",
+      tool_call_id: "cross-role-call",
+      created_at: new Date("2026-07-09T00:00:05.000Z")
+    }
+  ])
+  assertEqual(
+    db.replaceThreadMessageId(threadId, "cross-role-source", "cross-role-target"),
+    false,
+    "message id aliases must not merge rows with different roles"
+  )
+  const messagesAfterCrossRoleCollision = db.getThreadMessages(threadId)
+  assertEqual(
+    messagesAfterCrossRoleCollision.some(
+      (message) => message.id === "cross-role-source" && message.role === "assistant"
+    ),
+    true,
+    "a rejected cross-role alias must preserve the source row"
+  )
+  assertEqual(
+    messagesAfterCrossRoleCollision.some(
+      (message) => message.id === "cross-role-target" && message.role === "tool"
+    ),
+    true,
+    "a rejected cross-role alias must preserve the target row"
+  )
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
 async function main(): Promise<void> {
   await withTempHome(async () => {
     await testMessagesPersistAcrossReopen()
@@ -387,6 +537,7 @@ async function main(): Promise<void> {
     await testTranscriptContentIsBounded()
     await testMessageLookupHelpersStayBoundedToRequestedRange()
     await testDurableTailFeedsRuntimeContext()
+    await testReplaceThreadMessageIdKeepsSingleCanonicalRow()
   })
   console.log("thread-messages-db.spec.ts passed")
 }

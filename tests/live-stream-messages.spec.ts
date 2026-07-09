@@ -9,6 +9,7 @@ import {
   liveStreamMessageRole,
   mergeLiveStreamMessages,
   normalizeLiveStreamMessageContent,
+  replaceLiveStreamMessageId,
   stringifyMessageContentForReport
 } from "../src/renderer/src/lib/live-stream-messages.ts"
 import {
@@ -244,6 +245,60 @@ function testCompleteSnapshotCanInsertLateMessageInSnapshotOrder(): void {
   )
 }
 
+function testReplacingLiveMessageIdMergesFinalSnapshotWithoutDuplicate(): void {
+  const firstReplacement = replaceLiveStreamMessageId(
+    [
+      { id: "live-id", type: "ai", content: "final answer" },
+      { id: "final-id", type: "ai", content: "final answer", content_priority: 1 }
+    ],
+    "live-id",
+    "final-id"
+  )
+  const replaced = replaceLiveStreamMessageId(firstReplacement, "final-id", "later-final-id")
+
+  assertEqual(replaced.length, 1, "message id aliases should collapse into one live message")
+  assertEqual(
+    replaced[0]?.id,
+    "later-final-id",
+    "repeated provider id replacements should retain one canonical message"
+  )
+  assertEqual(replaced[0]?.content, "final answer", "canonical message should preserve content")
+}
+
+function testReplacingLiveMessageIdHandlesBoundariesDeterministically(): void {
+  const messages = [
+    { id: "before", type: "human", content: "before" },
+    { id: "live-id", type: "ai", content: "draft", tool_calls: [{ id: "tool-1" }] },
+    { id: "final-id", type: "ai", content: "final", content_priority: 1 },
+    { id: "after", type: "tool", content: "after" }
+  ]
+
+  assertEqual(replaceLiveStreamMessageId(messages, "", "final-id"), messages, "empty source id")
+  assertEqual(
+    replaceLiveStreamMessageId(messages, "live-id", "live-id"),
+    messages,
+    "identical ids"
+  )
+  assertEqual(
+    replaceLiveStreamMessageId(messages, "missing", "final-id"),
+    messages,
+    "missing source id"
+  )
+
+  const replaced = replaceLiveStreamMessageId(messages, "live-id", "final-id")
+  assertEqual(
+    replaced.map((message) => message.id).join(","),
+    "before,final-id,after",
+    "replacement should keep the earliest logical position and remove both old rows"
+  )
+  assertEqual(replaced[1]?.content, "final", "canonical target content should remain authoritative")
+  assertEqual(
+    replaced[1]?.tool_calls?.[0]?.id,
+    "tool-1",
+    "fields absent from the canonical target should be preserved from the live source"
+  )
+}
+
 function testNormalizeContentBlocksDropsInvalidBlocks(): void {
   const normalized = normalizeLiveStreamMessageContent([
     { type: "text", text: "hello" },
@@ -433,6 +488,14 @@ const tests: Array<[string, () => void]> = [
   [
     "testCompleteSnapshotCanInsertLateMessageInSnapshotOrder",
     testCompleteSnapshotCanInsertLateMessageInSnapshotOrder
+  ],
+  [
+    "testReplacingLiveMessageIdMergesFinalSnapshotWithoutDuplicate",
+    testReplacingLiveMessageIdMergesFinalSnapshotWithoutDuplicate
+  ],
+  [
+    "testReplacingLiveMessageIdHandlesBoundariesDeterministically",
+    testReplacingLiveMessageIdHandlesBoundariesDeterministically
   ],
   ["testNormalizeContentBlocksDropsInvalidBlocks", testNormalizeContentBlocksDropsInvalidBlocks],
   [

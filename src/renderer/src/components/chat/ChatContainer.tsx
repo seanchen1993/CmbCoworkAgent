@@ -86,6 +86,7 @@ import {
   filterCoordinatorNoiseMessages,
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
+import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
 import { isCoordinatorModeMetadata, isWorkflowModeMetadata } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
@@ -1241,38 +1242,6 @@ const messageTimeOrderEntries = (
   return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
 }
 
-const toDate = (value: Date | string | undefined): Date | undefined => {
-  if (!value) return undefined
-  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : undefined
-  const parsed = new Date(value)
-  return Number.isFinite(parsed.getTime()) ? parsed : undefined
-}
-
-const toTime = (value: Date | string | undefined): number | null => {
-  const date = toDate(value)
-  return date ? date.getTime() : null
-}
-
-const getMessageDisplayTime = (message: Message): number | null => {
-  return toTime(message.start_at) ?? toTime(message.created_at) ?? toTime(message.end_at)
-}
-
-const sortMessagesForDisplay = (messages: Message[]): Message[] => {
-  return messages
-    .map((message, index) => ({
-      message,
-      index,
-      time: getMessageDisplayTime(message)
-    }))
-    .sort((a, b) => {
-      if (a.time !== null && b.time !== null && a.time !== b.time) {
-        return a.time - b.time
-      }
-      return a.index - b.index
-    })
-    .map((entry) => entry.message)
-}
-
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -1318,6 +1287,15 @@ function getForkMessagePreview(message: Message): string {
   const text = getMessageText(message.content).replace(/\s+/g, " ").trim()
   if (!text) return "这条消息没有可预览文本"
   return text.length > 180 ? `${text.slice(0, 180)}...` : text
+}
+
+const MESSAGE_FORK_CHECKPOINT_HINT =
+  "可在左侧会话列表右键该会话，选择“从 checkpoint fork”。"
+
+function getMessageForkCheckpointHint(errorMessage?: string): string {
+  const message = errorMessage?.trim()
+  if (!message) return `该消息附近没有可精确 fork 的稳定 checkpoint。${MESSAGE_FORK_CHECKPOINT_HINT}`
+  return `${message} ${MESSAGE_FORK_CHECKPOINT_HINT}`
 }
 
 const getMessageBubbleText = (content: Message["content"]): string => {
@@ -3230,17 +3208,20 @@ export function ChatContainer({
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
           ...(role === "tool" &&
             streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
-          created_at: new Date(),
+          created_at: streamMsg.start_at ?? streamMsg.end_at ?? new Date(),
           ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
           ...(streamMsg.end_at && { end_at: streamMsg.end_at })
         }
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
-      isVisibleCheckpointTranscriptMessage
+    const allMessages = reconcileMessageDisplayOrder(
+      [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
+        isVisibleCheckpointTranscriptMessage
+      ),
+      streamData.messages
     )
-    const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {
+    const cleanedMessages = allMessages.map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
@@ -3268,7 +3249,7 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.liveMessages])
+  }, [threadMessages, streamData.liveMessages, streamData.messages])
 
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
@@ -5454,10 +5435,16 @@ export function ChatContainer({
       try {
         const checkpoint = await window.api.threads.resolveForkCheckpointForMessage({
           threadId,
-          messageId: message.id
+          messageId: message.id,
+          message: {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            tool_calls: message.tool_calls
+          }
         })
         if (!checkpoint) {
-          toast.error("该消息附近没有可 fork 的稳定 checkpoint")
+          toast.error(getMessageForkCheckpointHint())
           return
         }
         setForkDestinationMode("local")
@@ -5469,7 +5456,11 @@ export function ChatContainer({
           checkpoint
         })
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "读取 fork checkpoint 失败")
+        toast.error(
+          getMessageForkCheckpointHint(
+            error instanceof Error ? error.message : "读取 fork checkpoint 失败"
+          )
+        )
       } finally {
         setForkingMessageId(null)
       }
@@ -5516,18 +5507,24 @@ export function ChatContainer({
         ? { workspacePath: selectedWorkspacePath }
         : undefined
 
+    const resolvedMessageId =
+      messageForkTarget.checkpoint.messageForkMode === "checkpoint"
+        ? undefined
+        : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
     setForkingMessageId(messageForkTarget.message.id)
     try {
       await forkThread({
         sourceThreadId: messageForkTarget.sourceThreadId,
         checkpointId: messageForkTarget.checkpoint.checkpointId,
-        messageId: messageForkTarget.message.id,
+        ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
         overrides
       })
       toast.success("已从这条消息创建新会话")
       resetMessageForkDialog()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Fork 会话失败")
+      toast.error(
+        getMessageForkCheckpointHint(error instanceof Error ? error.message : "Fork 会话失败")
+      )
     } finally {
       setForkingMessageId(null)
     }
@@ -5686,6 +5683,8 @@ export function ChatContainer({
   const messageForkPreview = messageForkTarget
     ? getForkMessagePreview(messageForkTarget.message)
     : ""
+  const messageForkUsesCheckpointBoundary =
+    messageForkTarget?.checkpoint.messageForkMode === "checkpoint"
   const messageForkSourceWorkspacePath =
     messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
   const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
@@ -5716,9 +5715,13 @@ export function ChatContainer({
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle className="text-base">Fork 这条消息</DialogTitle>
+            <DialogTitle className="text-base">
+              {messageForkUsesCheckpointBoundary ? "从 checkpoint fork" : "Fork 这条消息"}
+            </DialogTitle>
             <DialogDescription>
-              创建一个新会话，历史只保留到这条消息所在节点。
+              {messageForkUsesCheckpointBoundary
+                ? "创建一个新会话，历史保留到最近的稳定 checkpoint。"
+                : "创建一个新会话，历史只保留到这条消息所在节点。"}
             </DialogDescription>
           </DialogHeader>
           {messageForkTarget ? (

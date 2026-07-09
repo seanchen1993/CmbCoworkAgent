@@ -3,42 +3,39 @@ import { flushSync } from "react-dom"
 import { Minimize2, Power } from "lucide-react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
-
-type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
-
-interface CloseToTrayPromptRequest {
-  requestId: number
-  trayAreaName: string
-}
+import {
+  reduceCloseToTrayPrompt,
+  type CloseToTrayPromptAction,
+  type CloseToTrayPromptOpenEvent
+} from "../../../../shared/close-to-tray"
 
 function waitForNextPaint(): Promise<void> {
   return new Promise((resolve) => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeout)
+      resolve()
+    }
+    const timeout = window.setTimeout(finish, 250)
     window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => resolve())
+      window.requestAnimationFrame(finish)
     })
   })
 }
 
 export function CloseToTrayDialog(): React.JSX.Element | null {
-  const [request, setRequest] = useState<CloseToTrayPromptRequest | null>(null)
-  const requestRef = useRef<CloseToTrayPromptRequest | null>(null)
+  const [request, setRequest] = useState<CloseToTrayPromptOpenEvent | null>(null)
+  const requestRef = useRef<CloseToTrayPromptOpenEvent | null>(null)
 
   useEffect(() => {
-    requestRef.current = request
-  }, [request])
-
-  useEffect(() => {
-    const unsubscribe = window.electron.onCloseToTrayPrompt((nextRequest) => {
+    return window.electron.onCloseToTrayPrompt((event) => {
+      const nextRequest = reduceCloseToTrayPrompt(requestRef.current, event)
+      if (nextRequest === requestRef.current) return
       requestRef.current = nextRequest
       setRequest(nextRequest)
     })
-    return () => {
-      unsubscribe()
-      const activeRequest = requestRef.current
-      if (!activeRequest) return
-      requestRef.current = null
-      window.electron.respondCloseToTrayPrompt(activeRequest.requestId, "cancel")
-    }
   }, [])
 
   const respond = useCallback((action: CloseToTrayPromptAction) => {

@@ -143,7 +143,16 @@ HITL resume 语义更严格：如果 checkpoint 后已经存在 durable tail，�
 
 fork 时仍以 checkpoint 判定稳定边界，并使用 `deriveCheckpointTranscriptIndex()` 得到可见 message id 列表。创建目标线程后，会先从 fork checkpoint 转换出边界内的可见消息，再用源线程 `thread_messages` 中同 ID 消息覆盖。checkpoint 里的 `cmb_visible_user_message` 会优先作为用户可见内容，避免把内部 goal prompt 原文写进目标线程。这样源线程即使只有部分新表消息，目标线程也不会因为新表非空而丢失 checkpoint 中的旧历史。
 
-默认 fork 最新会话时还有一个额外保护：如果源线程 `thread_messages` 中已经存在 checkpoint 可见边界之后的 durable tail，说明 UI/恢复运行能看到的历史比 fork checkpoint 更新。此时 fork 会拒绝并提示“尚未形成可 fork 的稳定 checkpoint”，避免目标线程静默丢尾部消息。显式从某个 checkpoint 或 message fork 仍按用户选择的边界截断历史。
+最新 checkpoint 后存在 durable tail 时，右键 checkpoint fork、消息级 fork 和最终 `forkThread()` 会先构造同一份只读“物化 fork tuple”：
+
+1. 按 checkpoint 可见 message id 和主库 `ordinal` 找出真正的 durable tail。
+2. 使用 runtime continuation 相同的 `HumanMessage/AIMessage/SystemMessage/ToolMessage` 转换逻辑，把尾部追加进 fork checkpoint 的 `messages` channel。
+3. 更新物化 tuple 中 fork boundary 的 `lastVisibleMessageId`，但不回写、不修改源 checkpoint。
+4. 右键列表、消息 resolver 和最终 fork 都从这份物化 tuple 建立稳定边界，目标 checkpoint 与目标 `thread_messages` 因而包含完全相同的 transcript。
+
+如果尾部存在缺少 `tool_call_id` 等无法安全转换的数据，或追加后仍不是完整的 assistant/中断 tool 边界，三个入口都会统一拒绝。物化还限制为最多 1000 条、UTF-8 序列化后最多 8MB；超过上限时排除不安全的 latest、保留历史 checkpoint，避免重新制造超大 checkpoint。历史 checkpoint 不追加当前 durable tail，仍严格按用户选择的历史边界截断。
+
+fork 复制历史 checkpoint 时按有序 `visibleMessageIds` 去重；消息集合相同但顺序不同不会误判为同一 transcript。去重或稳定性过滤移除父 checkpoint 后，子 checkpoint 的 parent 会沿原复制链重映射到最近仍被复制的祖先；找不到祖先时转为目标根节点，不会留下指向源库或已删除 checkpoint 的悬空引用。写入历史前通过 saver 公共 `getTuple()` 检查目标是否已存在，重复调用不会再次触发 prune。
 
 默认 latest fork 的 legacy fallback 只用于真正的旧会话：只要线程 metadata 已带 `cmbForkBoundaryVersion`，或任一 root checkpoint 已出现 `cmb_fork_boundary`，未标记的 latest checkpoint 就不会被当成稳定边界。agent invoke/resume/interrupt 在创建运行 checkpoint 前会幂等写入该线程级 marker-era 标记，避免当前版本运行取消或 marker 写入失败时误走 legacy fallback。
 
@@ -152,6 +161,12 @@ fork overrides 会做一致性校验：`agentMode` 只能是 `normal/coordinator
 fork 会复制源线程的 goal state 和 goal events 到目标线程，保证 checkpoint 中隐藏的 goal runtime prompt、UI goal 面板和 goal 命令去重使用同一套状态。复制后的 goal 归属目标线程，但保留 `goal_id/active_window_id` 以维持去重身份。
 
 导出会话时同样先按 checkpoint 的可见 message id 转成 transcript，再与 `thread_messages` 合并。checkpoint 不可用时才只导出 `thread_messages`。
+
+## Message ID 与关闭托盘一致性
+
+流式 assistant ID 被 provider 最终 ID 替换时，主库先在事务内完成别名迁移，renderer 收到成功结果后才更新 committed messages、live accumulator 和 stream snapshot。目标 ID 已存在时使用确定性合并：目标 ID 的最终字段优先，源消息只补充目标缺失字段，逻辑位置保持两条记录中更早的位置。跨 role 的 ID 碰撞会同时在 renderer 和主库拒绝，不删除任一行；开始时间取两者最早值、结束时间取最晚值。alias 与逻辑索引 Map/Set 均有容量上限，alias 重写使用 entries 快照，不在 Map 活跃迭代器上修改。
+
+关闭托盘提示使用共享的 `open/dismiss` 联合事件协议。超时由主进程发送匹配 `requestId` 的 `dismiss`，renderer 只关闭同一请求；组件卸载仅注销监听，不再伪造 `cancel`。监听组件固定挂载在 renderer root，不随 `App` 的 loading/权限/正常视图分支切换而卸载。关闭或最小化前等待下一次绘制仍保留，同时增加 250ms 兜底，后台窗口不会无限等待 `requestAnimationFrame`。
 
 ## Checkpoint 体积控制
 
@@ -176,7 +191,8 @@ fork 会复制源线程的 goal state 和 goal events 到目标线程，保证 c
 
 - transcript 和 checkpoint 恢复顺序：checkpoint 只提供运行时基线，主库 transcript 始终会补齐 checkpoint 后续新消息。
 - fork 截断：目标线程只复制 checkpoint 可见边界内的 message id。
-- fork durable tail：默认 latest fork 会拒绝 checkpoint 后已有可见 DB tail 的状态，不静默丢失 UI 已展示历史。
+- fork durable tail：latest fork 会把可安全转换的 DB tail 物化进目标 runtime checkpoint；右键列表、消息 resolver、最终 fork 和目标 transcript 使用同一物化结果，无法安全转换时统一拒绝。
+- fork 历史链：transcript 去重保持消息顺序语义，父 checkpoint 被过滤后会重映射到最近保留祖先，不产生悬空 parent id；重复历史写入会跳过已存在 checkpoint。
 - fork marker-era：当前版本线程或已经出现 marker 的线程不会把未标记 latest checkpoint 当成稳定边界。
 - fork override：目标模式和 workspacePath 会在创建目标线程前校验，避免创建不一致线程。
 - fork goal：目标线程会复制 goal state/events，避免 checkpoint 内部 goal prompt 与 UI goal 状态分裂。
@@ -203,6 +219,11 @@ fork 会复制源线程的 goal state 和 goal events 到目标线程，保证 c
 
 - `npm run typecheck`
 - `npx tsx tests/thread-messages-db.spec.ts`
+- `npx tsx tests/live-stream-messages.spec.ts`
+- `npx tsx tests/stream-message-ids.spec.ts`
+- `npx tsx tests/thread-fork-handler.spec.ts`
+- `npx tsx tests/fork-interruption.spec.ts`
+- `npx tsx tests/close-to-tray.spec.ts`
 - `npx tsx tests/goal-transcript.spec.ts`
 - `npx tsx tests/checkpoint-fork.spec.ts`
 - `npx tsx tests/sqljs-saver-async-flush.spec.ts`
