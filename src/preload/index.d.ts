@@ -861,7 +861,8 @@ interface CustomAPI {
     replaceMessageId: (
       threadId: string,
       fromId: string,
-      toId: string
+      toId: string,
+      role?: Message["role"]
     ) => Promise<{ replaced: boolean }>
     exportSession: (
       threadId: string

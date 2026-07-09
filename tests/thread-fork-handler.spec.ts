@@ -425,6 +425,7 @@ async function testResolveMessageForkUsesCheckpointModeForInterruptedToolTail():
   const db = await import("../src/main/db/index.ts")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
   const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
   const { forkThread, registerThreadHandlers, resolveForkCheckpointForMessage } = await import(
     "../src/main/ipc/threads.ts"
   )
@@ -524,9 +525,11 @@ async function testResolveMessageForkUsesCheckpointModeForInterruptedToolTail():
     )
   } finally {
     if (targetThreadId) {
+      await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
       deleteThreadCheckpoint(targetThreadId)
     }
+    await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
     deleteThreadCheckpoint(sourceThreadId)
     await db.closeDatabase()
@@ -980,6 +983,7 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
   const db = await import("../src/main/db/index.ts")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
   const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
   const { forkThread, registerThreadHandlers, resolveForkCheckpointForMessage } = await import(
     "../src/main/ipc/threads.ts"
   )
@@ -1124,11 +1128,171 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
     )
   } finally {
     if (targetThreadId) {
+      await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
       deleteThreadCheckpoint(targetThreadId)
     }
+    await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
     deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testForkedBranchesRemainIndependentWhenForkedAgain(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-branch-source"
+  const rootCheckpointId = "fork-branch-root"
+  const sourceCheckpointId = "fork-branch-source-latest"
+  const branchCheckpointId = "fork-branch-child-latest"
+  let branchThreadId: string | undefined
+  let sourceForkThreadId: string | undefined
+  let branchForkThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Fork branch source",
+      agentMode: "normal"
+    })
+    db.upsertThreadMessages(sourceThreadId, [
+      {
+        id: "user-root",
+        role: "user",
+        content: "root prompt",
+        created_at: new Date("2026-07-08T01:00:00.000Z")
+      },
+      {
+        id: "assistant-root",
+        role: "assistant",
+        content: "root answer",
+        created_at: new Date("2026-07-08T01:00:01.000Z")
+      }
+    ])
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 3
+    })
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpointWithVisibleMessages(rootCheckpointId, "2026-07-08T01:00:01.000Z", [
+        { id: "user-root", type: "human", content: "root prompt" },
+        { id: "assistant-root", type: "ai", content: "root answer" }
+      ]),
+      makeForkBoundaryMetadata(rootCheckpointId, "assistant-root")
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const branch = await forkThread({ sourceThreadId, title: "Fork branch child" })
+    branchThreadId = branch.thread.thread_id
+
+    db.upsertThreadMessages(sourceThreadId, [
+      {
+        id: "user-source-only",
+        role: "user",
+        content: "source branch prompt",
+        created_at: new Date("2026-07-08T01:01:00.000Z")
+      },
+      {
+        id: "assistant-source-only",
+        role: "assistant",
+        content: "source branch answer",
+        created_at: new Date("2026-07-08T01:01:01.000Z")
+      }
+    ])
+    const continuedSourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    await continuedSourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: rootCheckpointId
+        }
+      },
+      makeCheckpointWithVisibleMessages(sourceCheckpointId, "2026-07-08T01:01:01.000Z", [
+        { id: "user-root", type: "human", content: "root prompt" },
+        { id: "assistant-root", type: "ai", content: "root answer" },
+        { id: "user-source-only", type: "human", content: "source branch prompt" },
+        { id: "assistant-source-only", type: "ai", content: "source branch answer" }
+      ]),
+      makeForkBoundaryMetadata(sourceCheckpointId, "assistant-source-only")
+    )
+    await continuedSourceSaver.flushStrict()
+    await continuedSourceSaver.close()
+
+    db.upsertThreadMessages(branchThreadId, [
+      {
+        id: "user-child-only",
+        role: "user",
+        content: "child branch prompt",
+        created_at: new Date("2026-07-08T01:02:00.000Z")
+      },
+      {
+        id: "assistant-child-only",
+        role: "assistant",
+        content: "child branch answer",
+        created_at: new Date("2026-07-08T01:02:01.000Z")
+      }
+    ])
+    const branchSaver = new SqlJsSaver(getThreadCheckpointPath(branchThreadId))
+    await branchSaver.put(
+      {
+        configurable: {
+          thread_id: branchThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: rootCheckpointId
+        }
+      },
+      makeCheckpointWithVisibleMessages(branchCheckpointId, "2026-07-08T01:02:01.000Z", [
+        { id: "user-root", type: "human", content: "root prompt" },
+        { id: "assistant-root", type: "ai", content: "root answer" },
+        { id: "user-child-only", type: "human", content: "child branch prompt" },
+        { id: "assistant-child-only", type: "ai", content: "child branch answer" }
+      ]),
+      makeForkBoundaryMetadata(branchCheckpointId, "assistant-child-only")
+    )
+    await branchSaver.flushStrict()
+    await branchSaver.close()
+
+    const sourceFork = await forkThread({ sourceThreadId, title: "Fork source branch again" })
+    sourceForkThreadId = sourceFork.thread.thread_id
+    const branchFork = await forkThread({
+      sourceThreadId: branchThreadId,
+      title: "Fork child branch again"
+    })
+    branchForkThreadId = branchFork.thread.thread_id
+
+    assert.equal(
+      sourceFork.thread.metadata?.forkedFromThreadId,
+      sourceThreadId,
+      "source branch fork metadata must point to the source branch"
+    )
+    assert.equal(
+      branchFork.thread.metadata?.forkedFromThreadId,
+      branchThreadId,
+      "child branch fork metadata must point to the child branch"
+    )
+    assert.deepEqual(
+      db.getThreadMessages(sourceForkThreadId).map((message) => message.id),
+      ["user-root", "assistant-root", "user-source-only", "assistant-source-only"],
+      "forking the source branch must not include child branch messages"
+    )
+    assert.deepEqual(
+      db.getThreadMessages(branchForkThreadId).map((message) => message.id),
+      ["user-root", "assistant-root", "user-child-only", "assistant-child-only"],
+      "forking the child branch must not include source branch messages"
+    )
+  } finally {
+    for (const threadId of [branchForkThreadId, sourceForkThreadId, branchThreadId, sourceThreadId]) {
+      if (!threadId) continue
+      db.deleteThread(threadId)
+      deleteThreadCheckpoint(threadId)
+    }
     await db.closeDatabase()
   }
 }
@@ -1283,6 +1447,7 @@ async function testUnsafeLatestDurableTailDoesNotHideHistoricalForks(): Promise<
   const sourceThreadId = "fork-unsafe-tail-source"
   const olderCheckpointId = "fork-unsafe-tail-old"
   const latestCheckpointId = "fork-unsafe-tail-latest"
+  let targetThreadId: string | undefined
 
   await db.initializeDatabase()
   try {
@@ -1378,7 +1543,23 @@ async function testUnsafeLatestDurableTailDoesNotHideHistoricalForks(): Promise<
       /无法安全恢复/,
       "direct API calls must not silently fork an unsafe latest durable tail"
     )
+
+    const forkedOlder = await forkThread({
+      sourceThreadId,
+      checkpointId: olderCheckpointId,
+      title: "Fork older despite unsafe latest"
+    })
+    targetThreadId = forkedOlder.thread.thread_id
+    assert.deepEqual(
+      db.getThreadMessages(targetThreadId).map((message) => message.id),
+      ["user-old", "assistant-old"],
+      "forking a listed historical checkpoint must not be blocked by an unsafe latest tail"
+    )
   } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
     db.deleteThread(sourceThreadId)
     deleteThreadCheckpoint(sourceThreadId)
     await db.closeDatabase()
@@ -1687,6 +1868,122 @@ async function testForkCopiesGoalStateAndEvents(): Promise<void> {
   }
 }
 
+async function testHistoricalForkDoesNotCopyFutureGoalStateAndEvents(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { createNewGoal, SqlGoalStore } = await import("../src/main/agent/goals/goal-store.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
+  const { forkThread } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-goal-history-source"
+  const olderCheckpointId = "fork-goal-history-old"
+  const newerCheckpointId = "fork-goal-history-new"
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Historical goal fork source",
+      agentMode: "normal"
+    })
+    const goalStore = new SqlGoalStore()
+    const goal = createNewGoal({
+      threadId: sourceThreadId,
+      text: "历史 fork 不带入未来 goal 状态",
+      maxTurns: 6,
+      now: new Date("2026-07-08T01:00:00.000Z").getTime()
+    })
+    goalStore.upsert({
+      ...goal,
+      turnsUsed: 3,
+      ledger: {
+        progress: ["old progress", "future progress"],
+        evidence: ["future evidence"],
+        blockers: []
+      },
+      updatedAt: new Date("2026-07-08T01:05:00.000Z").getTime()
+    })
+    db.addThreadGoalEvent(
+      sourceThreadId,
+      "[Goal user message] /goal 历史 fork 不带入未来 goal 状态",
+      goal.goalId,
+      new Date("2026-07-08T01:00:00.000Z").getTime(),
+      goal.activeWindowId
+    )
+    db.addThreadGoalEvent(
+      sourceThreadId,
+      "未来 checkpoint 之后的 goal 进展",
+      goal.goalId,
+      new Date("2026-07-08T01:06:00.000Z").getTime(),
+      goal.activeWindowId
+    )
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 2
+    })
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      makeCheckpointWithVisiblePair({
+        id: olderCheckpointId,
+        ts: "2026-07-08T01:02:00.000Z",
+        userId: "user-old-goal",
+        userText: "old goal prompt",
+        assistantId: "assistant-old-goal",
+        assistantText: "old goal answer"
+      }),
+      makeForkBoundaryMetadata(olderCheckpointId, "assistant-old-goal")
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: olderCheckpointId
+        }
+      },
+      makeCheckpointWithVisibleMessages(newerCheckpointId, "2026-07-08T01:07:00.000Z", [
+        { id: "user-old-goal", type: "human", content: "old goal prompt" },
+        { id: "assistant-old-goal", type: "ai", content: "old goal answer" },
+        { id: "user-new-goal", type: "human", content: "new goal prompt" },
+        { id: "assistant-new-goal", type: "ai", content: "new goal answer" }
+      ]),
+      makeForkBoundaryMetadata(newerCheckpointId, "assistant-new-goal")
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId: olderCheckpointId,
+      title: "Historical goal fork"
+    })
+    targetThreadId = forked.thread.thread_id
+
+    assert.equal(
+      goalStore.get(targetThreadId),
+      null,
+      "historical fork must not copy a goal state updated after the selected checkpoint"
+    )
+    const targetEvents = db.getThreadGoalEvents(targetThreadId)
+    assert.deepEqual(
+      targetEvents.map((event) => event.message),
+      ["[Goal user message] /goal 历史 fork 不带入未来 goal 状态"],
+      "historical fork should copy only goal events at or before the selected checkpoint"
+    )
+  } finally {
+    if (targetThreadId) {
+      await closeCheckpointer(targetThreadId)
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
+    await closeCheckpointer(sourceThreadId)
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
 async function testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint(): Promise<void> {
   const { mergeCheckpointAndPersistedThreadMessagesForSession } = await import(
     "../src/main/ipc/threads.ts"
@@ -1737,6 +2034,7 @@ async function main(): Promise<void> {
     await testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker()
     await testForkOverrideValidationRejectsInconsistentTargetMetadata()
     await testForkCopiesGoalStateAndEvents()
+    await testHistoricalForkDoesNotCopyFutureGoalStateAndEvents()
     await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
     await testResolveMessageForkReturnsNewestStableCheckpoint()
     await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
@@ -1747,6 +2045,7 @@ async function main(): Promise<void> {
     await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
     await testForkWaitsForQueuedRendererThreadMutations()
     await testForkThreadCopiesHistoricalForkableCheckpoints()
+    await testForkedBranchesRemainIndependentWhenForkedAgain()
   })
   console.log("thread-fork-handler.spec.ts passed")
 }

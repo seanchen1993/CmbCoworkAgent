@@ -99,6 +99,27 @@ function testPersistedTranscriptOrderWinsWithoutLiveSnapshot(): void {
   )
 }
 
+function testDurableSyncMissingToolTailUsesFinalSnapshotOrder(): void {
+  const mergedAfterDurableSync: TestMessage[] = [
+    { id: "user", role: "user", startAt: 0 },
+    { id: "assistant-final", role: "assistant", startAt: 1 },
+    { id: "assistant-call", role: "assistant", startAt: 2 },
+    { id: "tool-result", role: "tool", startAt: 3 }
+  ]
+
+  const reconciled = reconcileMessageDisplayOrder(mergedAfterDurableSync, [
+    { id: "assistant-call" },
+    { id: "tool-result" },
+    { id: "assistant-final" }
+  ])
+
+  assertEqual(
+    ids(reconciled),
+    "user,assistant-call,tool-result,assistant-final",
+    "durable transcript sync should not append a missing tool call after the final answer"
+  )
+}
+
 const tests: Array<[string, () => void]> = [
   [
     "testLateToolResultUsesSnapshotOrderInsteadOfArrivalTime",
@@ -112,6 +133,10 @@ const tests: Array<[string, () => void]> = [
   [
     "testPersistedTranscriptOrderWinsWithoutLiveSnapshot",
     testPersistedTranscriptOrderWinsWithoutLiveSnapshot
+  ],
+  [
+    "testDurableSyncMissingToolTailUsesFinalSnapshotOrder",
+    testDurableSyncMissingToolTailUsesFinalSnapshotOrder
   ]
 ]
 

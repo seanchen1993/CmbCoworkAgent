@@ -1598,7 +1598,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
               data: {
                 type: "message_id_alias",
                 fromId: alias.fromId,
-                toId: alias.toId
+                toId: alias.toId,
+                role: "assistant"
               }
             })
           }

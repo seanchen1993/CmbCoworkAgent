@@ -361,6 +361,12 @@ function normalizeIpcThreadMessage(message: Message): Message {
   }
 }
 
+function normalizeIpcMessageRole(role: unknown): Message["role"] | undefined {
+  return role === "user" || role === "assistant" || role === "system" || role === "tool"
+    ? role
+    : undefined
+}
+
 function copyForkedThreadMessages(input: {
   sourceThreadId: string
   targetThreadId: string
@@ -383,17 +389,42 @@ function copyForkedThreadMessages(input: {
   upsertThreadMessages(input.targetThreadId, messages)
 }
 
-function copyForkedGoalState(sourceThreadId: string, targetThreadId: string): void {
+function toCheckpointTimeMs(checkpoint: Checkpoint): number | null {
+  if (typeof checkpoint.ts !== "string") return null
+  const time = new Date(checkpoint.ts).getTime()
+  return Number.isFinite(time) ? time : null
+}
+
+function copyForkedGoalStateForCheckpoint(input: {
+  sourceThreadId: string
+  targetThreadId: string
+  forkCheckpoint: Checkpoint
+  isLatestCheckpointFork: boolean
+}): void {
+  const { sourceThreadId, targetThreadId, forkCheckpoint, isLatestCheckpointFork } = input
   const goalStore = new SqlGoalStore()
   const sourceGoal = goalStore.get(sourceThreadId)
+  const checkpointTimeMs = toCheckpointTimeMs(forkCheckpoint)
+
   if (sourceGoal) {
-    goalStore.upsert({
-      ...sourceGoal,
-      threadId: targetThreadId
-    })
+    const canCopyGoalState =
+      isLatestCheckpointFork ||
+      (checkpointTimeMs !== null &&
+        sourceGoal.createdAt <= checkpointTimeMs &&
+        sourceGoal.updatedAt <= checkpointTimeMs)
+    if (canCopyGoalState) {
+      goalStore.upsert({
+        ...sourceGoal,
+        threadId: targetThreadId
+      })
+    }
   }
 
   for (const event of getThreadGoalEvents(sourceThreadId)) {
+    if (!isLatestCheckpointFork && checkpointTimeMs !== null && event.created_at > checkpointTimeMs) {
+      continue
+    }
+    if (!isLatestCheckpointFork && checkpointTimeMs === null) continue
     addThreadGoalEvent(
       targetThreadId,
       event.message,
@@ -477,6 +508,29 @@ function updateForkBoundaryTailMetadata(
       lastVisibleMessageId,
       durableTailReplayed: true,
       durableTailMessageCount
+    }
+  } as CheckpointMetadata
+}
+
+function normalizeForkBoundaryMetadataForCheckpoint(
+  metadata: CheckpointMetadata,
+  checkpoint: Checkpoint
+): CheckpointMetadata {
+  if (!isPlainRecord(metadata)) return metadata
+  const metadataRecord = metadata as Record<string, unknown>
+  const boundary = metadataRecord.cmb_fork_boundary
+  if (!isPlainRecord(boundary)) return metadata
+
+  const lastVisibleMessageId = deriveCheckpointTranscriptIndex(checkpoint).visibleMessageIds.at(-1)
+  if (!lastVisibleMessageId || boundary.lastVisibleMessageId === lastVisibleMessageId) {
+    return metadata
+  }
+
+  return {
+    ...metadata,
+    cmb_fork_boundary: {
+      ...boundary,
+      lastVisibleMessageId
     }
   } as CheckpointMetadata
 }
@@ -1045,11 +1099,17 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
     })
     const sourceTuple = forkSource.tuple
     if (!sourceTuple) throw new Error("当前会话还没有可 fork 的 checkpoint。")
+    const selectedCheckpointId = getCheckpointId(sourceTuple)
+    const rawListedTuples = forkSource.listedTuples.length > 0 ? forkSource.listedTuples : [sourceTuple]
+    const selectedIsLatestCheckpoint =
+      rawListedTuples.length > 0 && getCheckpointId(rawListedTuples[0]) === selectedCheckpointId
     const listedTuples = materializeLatestForkTuple(
       sourceThreadId,
-      forkSource.listedTuples.length > 0 ? forkSource.listedTuples : [sourceTuple]
+      rawListedTuples,
+      {
+        omitUnsafeLatest: Boolean(explicitCheckpointId && !selectedIsLatestCheckpoint)
+      }
     )
-    const selectedCheckpointId = getCheckpointId(sourceTuple)
     const tuple =
       listedTuples.find((candidate) => getCheckpointId(candidate) === selectedCheckpointId) ??
       sourceTuple
@@ -1116,9 +1176,10 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
     let targetSaver: SqlJsSaver | null = null
     let rowCreated = false
     try {
-      const checkpointMetadata =
-        tuple.metadata ??
-        fallbackForkCheckpointMetadata()
+      const checkpointMetadata = normalizeForkBoundaryMetadataForCheckpoint(
+        tuple.metadata ?? fallbackForkCheckpointMetadata(),
+        forkCheckpoint
+      )
       const sourceHistoryTuples = selectForkCheckpointHistoryTuples({
         listedTuples,
         selectedCheckpointId: checkpointId,
@@ -1157,7 +1218,12 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
         visibleMessageIds: transcriptIndex.visibleMessageIds,
         checkpointMessages: getCheckpointChannelMessages(forkCheckpoint)
       })
-      copyForkedGoalState(sourceThreadId, targetThreadId)
+      copyForkedGoalStateForCheckpoint({
+        sourceThreadId,
+        targetThreadId,
+        forkCheckpoint,
+        isLatestCheckpointFork: selectedIsLatestCheckpoint
+      })
       await flushDbStrict()
       return {
         thread: serializeThreadRow(row),
@@ -2025,14 +2091,21 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     "threads:replaceMessageId",
     async (
       _event,
-      { threadId, fromId, toId }: { threadId: string; fromId: string; toId: string }
+      {
+        threadId,
+        fromId,
+        toId,
+        role
+      }: { threadId: string; fromId: string; toId: string; role?: Message["role"] }
     ) => {
       return withThreadRunMutationLock(threadId, async () => {
         // withThreadRunMutationLock 是应用层互斥锁，防止同一 thread 的多个 IPC
         // handler 并发执行；replaceThreadMessageId 内部使用 SQLite 事务保证数据库
         // 原子性。两层锁定层级不同（应用层互斥 + 数据库事务），不会导致死锁，
         // 但在高并发场景下互斥锁可能成为性能瓶颈。
-        return { replaced: replaceThreadMessageId(threadId, fromId, toId) }
+        return {
+          replaced: replaceThreadMessageId(threadId, fromId, toId, normalizeIpcMessageRole(role))
+        }
       })
     }
   )

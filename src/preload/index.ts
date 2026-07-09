@@ -549,9 +549,10 @@ const api = {
     replaceMessageId: (
       threadId: string,
       fromId: string,
-      toId: string
+      toId: string,
+      role?: Message["role"]
     ): Promise<{ replaced: boolean }> => {
-      return ipcRenderer.invoke("threads:replaceMessageId", { threadId, fromId, toId })
+      return ipcRenderer.invoke("threads:replaceMessageId", { threadId, fromId, toId, role })
     },
     exportSession: (
       threadId: string

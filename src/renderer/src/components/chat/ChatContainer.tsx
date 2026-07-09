@@ -1962,6 +1962,9 @@ export function ChatContainer({
     [currentThread]
   )
   const [messageForkTarget, setMessageForkTarget] = useState<MessageForkDialogTarget | null>(null)
+  const currentThreadIdRef = useRef(threadId)
+  const messageForkRequestIdRef = useRef(0)
+  currentThreadIdRef.current = threadId
   const [forkDestinationMode, setForkDestinationMode] =
     useState<ForkDestinationMode>("local")
   const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
@@ -5262,10 +5265,13 @@ export function ChatContainer({
   const handleForkFromMessage = useCallback(
     async (message: Message): Promise<void> => {
       if (isLoading || forkingMessageId) return
+      const sourceThreadId = threadId
+      const requestId = messageForkRequestIdRef.current + 1
+      messageForkRequestIdRef.current = requestId
       setForkingMessageId(message.id)
       try {
         const checkpoint = await window.api.threads.resolveForkCheckpointForMessage({
-          threadId,
+          threadId: sourceThreadId,
           messageId: message.id,
           message: {
             id: message.id,
@@ -5274,6 +5280,12 @@ export function ChatContainer({
             tool_calls: message.tool_calls
           }
         })
+        if (
+          messageForkRequestIdRef.current !== requestId ||
+          currentThreadIdRef.current !== sourceThreadId
+        ) {
+          return
+        }
         if (!checkpoint) {
           toast.error(getMessageForkCheckpointHint())
           return
@@ -5281,19 +5293,27 @@ export function ChatContainer({
         setForkDestinationMode("local")
         setForkWorkspacePath(null)
         setMessageForkTarget({
-          sourceThreadId: threadId,
+          sourceThreadId,
           sourceWorkspacePath: currentForkWorkspacePath,
           message,
           checkpoint
         })
       } catch (error) {
+        if (
+          messageForkRequestIdRef.current !== requestId ||
+          currentThreadIdRef.current !== sourceThreadId
+        ) {
+          return
+        }
         toast.error(
           getMessageForkCheckpointHint(
             error instanceof Error ? error.message : "读取 fork checkpoint 失败"
           )
         )
       } finally {
-        setForkingMessageId(null)
+        if (messageForkRequestIdRef.current === requestId) {
+          setForkingMessageId(null)
+        }
       }
     },
     [currentForkWorkspacePath, forkingMessageId, isLoading, threadId]
@@ -5318,14 +5338,29 @@ export function ChatContainer({
   }, [forkWorkspacePath, selectingForkWorkspace])
 
   const resetMessageForkDialog = useCallback((): void => {
+    messageForkRequestIdRef.current += 1
     setMessageForkTarget(null)
     setForkDestinationMode("local")
     setForkWorkspacePath(null)
     setSelectingForkWorkspace(false)
   }, [])
 
+  useEffect(() => {
+    messageForkRequestIdRef.current += 1
+    setMessageForkTarget(null)
+    setForkingMessageId(null)
+    setForkDestinationMode("local")
+    setForkWorkspacePath(null)
+    setSelectingForkWorkspace(false)
+  }, [threadId])
+
   const handleConfirmMessageFork = useCallback(async (): Promise<void> => {
     if (!messageForkTarget || forkingMessageId) return
+    if (messageForkTarget.sourceThreadId !== currentThreadIdRef.current) {
+      toast.error("当前会话已切换，请回到目标会话后重新点击 fork。")
+      resetMessageForkDialog()
+      return
+    }
 
     let selectedWorkspacePath = forkWorkspacePath
     if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
@@ -6420,7 +6455,7 @@ export function ChatContainer({
                                     </button>
                                   </TooltipTrigger>
                                   <TooltipContent side="top" sideOffset={6}>
-                                    点击自动发送"继续"2字
+                                    点击自动发送“继续”2字
                                   </TooltipContent>
                                 </Tooltip>
                               </TooltipProvider>

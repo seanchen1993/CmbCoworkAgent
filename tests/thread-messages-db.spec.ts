@@ -431,7 +431,7 @@ async function testReplaceThreadMessageIdKeepsSingleCanonicalRow(): Promise<void
   )
 
   assertEqual(
-    db.replaceThreadMessageId(threadId, "late-live-id", "late-final-id"),
+    db.replaceThreadMessageId(threadId, "late-live-id", "late-final-id", "assistant"),
     true,
     "message alias should be remembered before the streamed row arrives"
   )
@@ -460,9 +460,9 @@ async function testReplaceThreadMessageIdKeepsSingleCanonicalRow(): Promise<void
     "late streamed writes should use the final provider id"
   )
 
-  db.replaceThreadMessageId(threadId, "chain-live-id", "chain-final-id-1")
-  db.replaceThreadMessageId(threadId, "chain-final-id-1", "chain-final-id-2")
-  db.replaceThreadMessageId(threadId, "chain-final-id-2", "chain-final-id-3")
+  db.replaceThreadMessageId(threadId, "chain-live-id", "chain-final-id-1", "assistant")
+  db.replaceThreadMessageId(threadId, "chain-final-id-1", "chain-final-id-2", "assistant")
+  db.replaceThreadMessageId(threadId, "chain-final-id-2", "chain-final-id-3", "assistant")
   db.upsertThreadMessages(threadId, [
     {
       id: "chain-live-id",
@@ -522,6 +522,194 @@ async function testReplaceThreadMessageIdKeepsSingleCanonicalRow(): Promise<void
     ),
     true,
     "a rejected cross-role alias must preserve the target row"
+  )
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "late-cross-role-target",
+      role: "tool",
+      content: "existing tool target",
+      tool_call_id: "late-cross-role-call",
+      created_at: new Date("2026-07-09T00:00:06.000Z")
+    }
+  ])
+  assertEqual(
+    db.replaceThreadMessageId(threadId, "late-cross-role-source", "late-cross-role-target"),
+    true,
+    "message alias may be remembered before a future source row arrives"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "late-cross-role-source",
+      role: "assistant",
+      content: "late assistant source",
+      created_at: new Date("2026-07-09T00:00:07.000Z")
+    }
+  ])
+  const messagesAfterLateCrossRoleCollision = db.getThreadMessages(threadId)
+  assertEqual(
+    messagesAfterLateCrossRoleCollision.some(
+      (message) => message.id === "late-cross-role-source" && message.role === "assistant"
+    ),
+    true,
+    "a late cross-role alias must keep the source row under its original id"
+  )
+  assertEqual(
+    messagesAfterLateCrossRoleCollision.some(
+      (message) => message.id === "late-cross-role-target" && message.role === "tool"
+    ),
+    true,
+    "a late cross-role alias must not overwrite the target row role"
+  )
+
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "early-role-source",
+      "early-role-final",
+      "assistant"
+    ),
+    true,
+    "message aliases remembered before any row arrives should carry an expected role"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "early-role-source",
+      role: "tool",
+      content: "tool row should not be rewritten to an assistant alias",
+      tool_call_id: "early-role-call",
+      created_at: new Date("2026-07-09T00:00:08.000Z")
+    }
+  ])
+  const messagesAfterEarlyRoleMismatch = db.getThreadMessages(threadId)
+  assertEqual(
+    messagesAfterEarlyRoleMismatch.some(
+      (message) => message.id === "early-role-source" && message.role === "tool"
+    ),
+    true,
+    "a remembered assistant alias must not rewrite a later tool message"
+  )
+  assertEqual(
+    messagesAfterEarlyRoleMismatch.some((message) => message.id === "early-role-final"),
+    false,
+    "a role-mismatched early alias must not create the canonical target row"
+  )
+
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "early-collision-source",
+      "early-collision-target",
+      "assistant"
+    ),
+    true,
+    "an early alias with a known role may canonicalize the first matching source row"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "early-collision-source",
+      role: "assistant",
+      content: "assistant source that arrives before the target id",
+      created_at: new Date("2026-07-09T00:00:09.000Z")
+    }
+  ])
+  assertEqual(
+    db.getThreadMessages(threadId).some(
+      (message) =>
+        message.id === "early-collision-target" &&
+        message.role === "assistant" &&
+        message.content === "assistant source that arrives before the target id"
+    ),
+    true,
+    "a role-matched early source should still use the canonical id while no collision exists"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "early-collision-target",
+      role: "tool",
+      content: "actual tool target that arrives later",
+      tool_call_id: "early-collision-call",
+      created_at: new Date("2026-07-09T00:00:10.000Z")
+    }
+  ])
+  const messagesAfterEarlyCanonicalCollision = db.getThreadMessages(threadId)
+  assertEqual(
+    messagesAfterEarlyCanonicalCollision.some(
+      (message) =>
+        message.id === "early-collision-source" &&
+        message.role === "assistant" &&
+        message.content === "assistant source that arrives before the target id"
+    ),
+    true,
+    "a later cross-role target should move the aliased source back to its original id"
+  )
+  assertEqual(
+    messagesAfterEarlyCanonicalCollision.some(
+      (message) =>
+        message.id === "early-collision-target" &&
+        message.role === "tool" &&
+        message.content === "actual tool target that arrives later"
+    ),
+    true,
+    "a later cross-role target must be inserted instead of being skipped"
+  )
+
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "same-batch-collision-source",
+      "same-batch-collision-target",
+      "assistant"
+    ),
+    true,
+    "same-batch aliases should still be remembered with an expected role"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "same-batch-collision-source",
+      role: "assistant",
+      content: "same-batch assistant source",
+      created_at: new Date("2026-07-09T00:00:11.000Z")
+    },
+    {
+      id: "same-batch-collision-target",
+      role: "tool",
+      content: "same-batch tool target",
+      tool_call_id: "same-batch-collision-call",
+      created_at: new Date("2026-07-09T00:00:12.000Z")
+    }
+  ])
+  const messagesAfterSameBatchCanonicalCollision = db.getThreadMessages(threadId)
+  assertEqual(
+    messagesAfterSameBatchCanonicalCollision.some(
+      (message) =>
+        message.id === "same-batch-collision-source" &&
+        message.role === "assistant" &&
+        message.content === "same-batch assistant source"
+    ),
+    true,
+    "same-batch cross-role aliases must keep the source row under its original id"
+  )
+  assertEqual(
+    messagesAfterSameBatchCanonicalCollision.some(
+      (message) =>
+        message.id === "same-batch-collision-target" &&
+        message.role === "tool" &&
+        message.content === "same-batch tool target"
+    ),
+    true,
+    "same-batch cross-role aliases must keep the target row under its original id"
+  )
+
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "late-cross-role-source-with-role",
+      "late-cross-role-target",
+      "assistant"
+    ),
+    false,
+    "message aliases with a known role must reject an existing target row with a different role"
   )
 
   db.deleteThread(threadId)
