@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto"
+import { createHash, randomUUID } from "crypto"
 import { AIMessage, ToolMessage, type BaseMessage, type ToolCall } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 
@@ -306,6 +306,77 @@ function redactRecoveryMarkersForRequest(message: AIMessage): AIMessage {
   return clone
 }
 
+const LARGE_FILE_TOOL_ARGUMENT_BYTES = 32 * 1024
+const LARGE_FILE_TOOL_ARGUMENT_PREVIEW_LENGTH = 160
+const LARGE_FILE_TOOL_NAMES = new Set(["write_file", "edit_file"])
+
+function fileToolPath(args: Record<string, unknown>): string | undefined {
+  for (const key of ["file_path", "filePath", "path"]) {
+    if (typeof args[key] === "string") return args[key] as string
+  }
+  return undefined
+}
+
+function largeArgumentPlaceholder(
+  toolName: string,
+  field: string,
+  value: string,
+  filePath: string | undefined
+): string {
+  const length = Buffer.byteLength(value, "utf8")
+  const sha256 = createHash("sha256").update(value).digest("hex")
+  const previewLength = Math.floor(LARGE_FILE_TOOL_ARGUMENT_PREVIEW_LENGTH / 2)
+  const preview =
+    value.length > LARGE_FILE_TOOL_ARGUMENT_PREVIEW_LENGTH
+      ? `${value.slice(0, previewLength)}...${value.slice(-previewLength)}`
+      : value
+  const path = filePath ? `; file_path=${filePath}` : ""
+  return `[large ${toolName}.${field} omitted after successful execution${path}; bytes=${length}; sha256=${sha256}; preview=${JSON.stringify(preview)}]`
+}
+
+/**
+ * Clone only completed large file-edit arguments needed to keep future model
+ * requests small. The persisted transcript retains the exact original values.
+ */
+function elideLargeFileToolArgsForRequest(message: AIMessage): AIMessage {
+  const calls = message.tool_calls
+  if (!Array.isArray(calls) || calls.length === 0) return message
+
+  let changed = false
+  const nextCalls = calls.map((call) => {
+    if (!LARGE_FILE_TOOL_NAMES.has(call.name) || !isPlainRecord(call.args)) return call
+
+    const args = call.args as Record<string, unknown>
+    const fields =
+      call.name === "write_file"
+        ? ["content"]
+        : ["old_string", "new_string", "oldString", "newString"]
+    const filePath = fileToolPath(args)
+    let nextArgs: Record<string, unknown> | null = null
+
+    for (const field of fields) {
+      const value = args[field]
+      if (
+        typeof value !== "string" ||
+        Buffer.byteLength(value, "utf8") <= LARGE_FILE_TOOL_ARGUMENT_BYTES
+      ) {
+        continue
+      }
+      nextArgs ??= { ...args }
+      nextArgs[field] = largeArgumentPlaceholder(call.name, field, value, filePath)
+    }
+
+    if (!nextArgs) return call
+    changed = true
+    return { ...call, args: nextArgs }
+  })
+
+  if (!changed) return message
+  const clone = Object.assign(Object.create(Object.getPrototypeOf(message)), message) as AIMessage
+  clone.tool_calls = nextCalls
+  return clone
+}
+
 /** Accumulated RAW streamed args per tool_call id, read from the aggregated
  * message's `tool_call_chunks` (each surviving entry holds the full concatenated
  * args string; concat again by id to be safe, mirroring collapseToolCallChunks'
@@ -447,10 +518,9 @@ export function recoverEmittedMalformedToolCalls(message: AIMessage): boolean {
  * keeping the request consistent. Non-empty normalized turns are patchToolCalls'
  * job, not ours. Returns the original array (same reference) when unchanged.
  *
- * We ALSO blank the `__cmbRecoveredMalformedToolCall__` marker from any normalized
- * call before it reaches the model, so the model never sees the internal sentinel
- * in its own history (the marker stays on disk for the guard / restart-recovery;
- * only this request clone is scrubbed).
+ * We ALSO blank the `__cmbRecoveredMalformedToolCall__` marker and elide completed
+ * large write/edit arguments before they reach the model. Both are request-only:
+ * the history/checkpoint message remains unchanged.
  */
 export function sanitizeModelRequestMessages(messages: BaseMessage[]): BaseMessage[] {
   let changed = false
@@ -460,18 +530,19 @@ export function sanitizeModelRequestMessages(messages: BaseMessage[]): BaseMessa
       out.push(message)
       continue
     }
-    // Blank our internal recovery marker so the model never reads it from history.
+    // Blank internal markers and large completed file arguments from model history.
     const deMarked = redactRecoveryMarkersForRequest(message)
-    if (deMarked !== message) changed = true
-    const normalized = Array.isArray(deMarked.tool_calls) ? deMarked.tool_calls : []
-    const rawToolCalls = rawAdditionalKwargsToolCalls(deMarked)
+    const sanitized = elideLargeFileToolArgsForRequest(deMarked)
+    if (sanitized !== message) changed = true
+    const normalized = Array.isArray(sanitized.tool_calls) ? sanitized.tool_calls : []
+    const rawToolCalls = rawAdditionalKwargsToolCalls(sanitized)
     if (normalized.length > 0 || rawToolCalls.length === 0) {
-      out.push(deMarked)
+      out.push(sanitized)
       continue
     }
 
     changed = true
-    const cleaned = cloneWithoutRawToolCalls(deMarked)
+    const cleaned = cloneWithoutRawToolCalls(sanitized)
     // Keep the assistant's visible text (e.g. its <think> block); drop a turn
     // that was nothing but the broken tool call — Claude Code's
     // filterUnresolvedToolUses parity.

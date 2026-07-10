@@ -136,6 +136,7 @@ import {
 } from "../agent/coordinator-worker-manager"
 import {
   isRetryableApiError,
+  isStreamDisconnectLikeError,
   buildOrderedChain,
   extractErrorDetail,
   type FailoverAttempt,
@@ -3309,6 +3310,79 @@ function buildModelRetryHooks(window: BrowserWindow, channel: string): ModelRetr
   }
 }
 
+const STREAM_DISCONNECT_MAX_RETRIES = 2
+
+function streamDisconnectRetryDelay(attempt: number): number {
+  return attempt === 1 ? 500 : 1500
+}
+
+function notifyStreamDisconnectRetry(
+  window: BrowserWindow,
+  channel: string,
+  attempt: number
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "model_retry",
+      attempt,
+      maxRetries: STREAM_DISCONNECT_MAX_RETRIES,
+      reason: "流连接中断，正在重连当前模型",
+      delayMs: streamDisconnectRetryDelay(attempt)
+    }
+  })
+}
+
+function clearStreamDisconnectRetry(window: BrowserWindow, channel: string): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: { type: "model_retry_clear" }
+  })
+}
+
+interface StreamDisconnectRetryResult<T> {
+  error: unknown
+  retries: number
+  stream?: AsyncIterable<T>
+}
+
+async function retryStreamAfterDisconnect<T>(
+  error: unknown,
+  retries: number,
+  window: BrowserWindow,
+  channel: string,
+  abortSignal: AbortSignal,
+  label: string,
+  modelId: string | undefined,
+  resume: () => Promise<AsyncIterable<T>>
+): Promise<StreamDisconnectRetryResult<T>> {
+  let retryError = error
+  let nextRetries = retries
+
+  while (isStreamDisconnectLikeError(retryError) && nextRetries < STREAM_DISCONNECT_MAX_RETRIES) {
+    if (abortSignal.aborted) throw retryError
+
+    nextRetries += 1
+    const delayMs = streamDisconnectRetryDelay(nextRetries)
+    console.warn(
+      `[Agent][Retry] ${label} ${modelId ?? "unknown"} stream disconnected; retry ${nextRetries}/${STREAM_DISCONNECT_MAX_RETRIES}`
+    )
+    notifyStreamDisconnectRetry(window, channel, nextRetries)
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    if (abortSignal.aborted) throw retryError
+
+    try {
+      const stream = await resume()
+      clearStreamDisconnectRetry(window, channel)
+      return { error: retryError, retries: nextRetries, stream }
+    } catch (retryErr) {
+      retryError = retryErr
+    }
+  }
+
+  return { error: retryError, retries: nextRetries }
+}
+
 /**
  * Build the structured error detail for a failed turn and push it to the
  * renderer as an `error_detail` custom event (sent right before the existing
@@ -6198,6 +6272,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           usedModelId ? orderedChain.indexOf(usedModelId) + 1 : orderedChain.length
         )
         let activeStream: AsyncIterable<unknown> = stream
+        let streamDisconnectRetries = 0
 
         const acknowledgeDeliveredCoordinatorNotificationsIfNeeded = async (): Promise<void> => {
           if (
@@ -6359,19 +6434,38 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeStreamWithSideEffects(activeStream)
             break // Stream completed successfully
           } catch (midStreamErr) {
-            if (!isRetryableApiError(midStreamErr) || remainingCandidates.length === 0) {
-              throw midStreamErr
+            const currentAgent = agent
+            if (!currentAgent) throw midStreamErr
+            const retry = await retryStreamAfterDisconnect(
+              midStreamErr,
+              streamDisconnectRetries,
+              window,
+              channel,
+              abortController.signal,
+              "Mid-stream",
+              usedModelId,
+              () => currentAgent.stream(null, streamConfig)
+            )
+            streamDisconnectRetries = retry.retries
+            if (retry.stream) {
+              activeStream = retry.stream
+              continue
             }
-            if (abortController.signal.aborted) throw midStreamErr
+            clearStreamDisconnectRetry(window, channel)
+            const error = retry.error
+            if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
+              throw error
+            }
+            if (abortController.signal.aborted) throw error
 
             const failedModelId = usedModelId ?? "unknown"
             failoverAttempts.push({
               modelId: failedModelId,
-              error: String(midStreamErr),
+              error: String(error),
               timestamp: Date.now()
             })
             console.warn(
-              `[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`
+              `[Agent][Failover] Mid-stream ${failedModelId} failed: ${error}, trying next...`
             )
 
             if (!abortController.signal.aborted) {
@@ -7669,6 +7763,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             : resumeOrderedChain.length
         )
         let activeResumeStream: AsyncIterable<unknown> = resumeStream
+        let resumeStreamDisconnectRetries = 0
         const resumeSubagentStopFired = new Set<string>()
 
         const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
@@ -7709,16 +7804,34 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeResumeStream(activeResumeStream)
             break
           } catch (midErr) {
-            if (!isRetryableApiError(midErr) || resumeRemainingCandidates.length === 0) throw midErr
-            if (abortController.signal.aborted) throw midErr
+            const retry = await retryStreamAfterDisconnect(
+              midErr,
+              resumeStreamDisconnectRetries,
+              window,
+              channel,
+              abortController.signal,
+              "Resume mid-stream",
+              resumeUsedModelId,
+              () =>
+                resumeAgentRuntime!.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
+            )
+            resumeStreamDisconnectRetries = retry.retries
+            if (retry.stream) {
+              activeResumeStream = retry.stream
+              continue
+            }
+            clearStreamDisconnectRetry(window, channel)
+            const error = retry.error
+            if (!isRetryableApiError(error) || resumeRemainingCandidates.length === 0) throw error
+            if (abortController.signal.aborted) throw error
 
             resumeFailoverAttempts.push({
               modelId: resumeUsedModelId ?? "unknown",
-              error: String(midErr),
+              error: String(error),
               timestamp: Date.now()
             })
             console.warn(
-              `[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${midErr}, trying next...`
+              `[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${error}, trying next...`
             )
             if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
@@ -8422,6 +8535,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           intUsedModelId ? intOrderedChain.indexOf(intUsedModelId) + 1 : intOrderedChain.length
         )
         let activeIntStream: AsyncIterable<unknown> = intStream
+        let intStreamDisconnectRetries = 0
         const interruptSubagentStopFired = new Set<string>()
 
         const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
@@ -8462,16 +8576,33 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeInterruptStream(activeIntStream)
             break
           } catch (midErr) {
-            if (!isRetryableApiError(midErr) || intRemainingCandidates.length === 0) throw midErr
-            if (abortController.signal.aborted) throw midErr
+            const retry = await retryStreamAfterDisconnect(
+              midErr,
+              intStreamDisconnectRetries,
+              window,
+              channel,
+              abortController.signal,
+              "Interrupt mid-stream",
+              intUsedModelId,
+              () => intAgentRuntime!.stream(null, interruptStreamConfig)
+            )
+            intStreamDisconnectRetries = retry.retries
+            if (retry.stream) {
+              activeIntStream = retry.stream
+              continue
+            }
+            clearStreamDisconnectRetry(window, channel)
+            const error = retry.error
+            if (!isRetryableApiError(error) || intRemainingCandidates.length === 0) throw error
+            if (abortController.signal.aborted) throw error
 
             intFailoverAttempts.push({
               modelId: intUsedModelId ?? "unknown",
-              error: String(midErr),
+              error: String(error),
               timestamp: Date.now()
             })
             console.warn(
-              `[Agent][Failover][Interrupt] Mid-stream ${intUsedModelId} failed: ${midErr}, trying next...`
+              `[Agent][Failover][Interrupt] Mid-stream ${intUsedModelId} failed: ${error}, trying next...`
             )
             if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 

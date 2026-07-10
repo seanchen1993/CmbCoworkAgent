@@ -437,6 +437,66 @@ describe("sanitizeModelRequestMessages (input sanitize)", () => {
     expect(sanitizeModelRequestMessages(messages)).toBe(messages)
   })
 
+  it("elides a completed large write_file argument only in the outgoing request", () => {
+    const content = "x".repeat(32 * 1024 + 1)
+    const assistant = new AIMessage({
+      content: "Wrote the report.",
+      tool_calls: [
+        {
+          id: "call_large_write",
+          name: "write_file",
+          args: { file_path: "/tmp/report.md", content },
+          type: "tool_call"
+        }
+      ]
+    })
+    const result = new ToolMessage({
+      content: "Wrote /tmp/report.md",
+      tool_call_id: "call_large_write",
+      name: "write_file"
+    })
+    const messages = [assistant, result, new HumanMessage("continue")]
+
+    const out = sanitizeModelRequestMessages(messages)
+
+    const sent = out[0] as AIMessage
+    const sentArgs = sent.tool_calls![0].args as Record<string, unknown>
+    expect(out).not.toBe(messages)
+    expect(sent.tool_calls![0].id).toBe("call_large_write")
+    expect(sentArgs.file_path).toBe("/tmp/report.md")
+    expect(String(sentArgs.content)).toContain("bytes=32769")
+    expect(String(sentArgs.content)).toMatch(/sha256=[a-f0-9]{64}/)
+    expect(sentArgs.content).not.toBe(content)
+    expect((assistant.tool_calls![0].args as Record<string, unknown>).content).toBe(content)
+    expect(out[1]).toBe(result)
+  })
+
+  it("elides both large edit_file strings while retaining the tool-call pairing", () => {
+    const oldString = "o".repeat(32 * 1024 + 1)
+    const newString = "n".repeat(32 * 1024 + 1)
+    const assistant = new AIMessage({
+      content: "Updated the report.",
+      tool_calls: [
+        {
+          id: "call_large_edit",
+          name: "edit_file",
+          args: { filePath: "/tmp/report.md", oldString, newString },
+          type: "tool_call"
+        }
+      ]
+    })
+    const messages = [assistant, new HumanMessage("continue")]
+
+    const out = sanitizeModelRequestMessages(messages)
+
+    const sentArgs = (out[0] as AIMessage).tool_calls![0].args as Record<string, unknown>
+    expect(String(sentArgs.oldString)).toContain("large edit_file.oldString omitted")
+    expect(String(sentArgs.newString)).toContain("large edit_file.newString omitted")
+    expect(String(sentArgs.oldString)).toContain("file_path=/tmp/report.md")
+    expect((assistant.tool_calls![0].args as Record<string, unknown>).oldString).toBe(oldString)
+    expect((assistant.tool_calls![0].args as Record<string, unknown>).newString).toBe(newString)
+  })
+
   it("returns the same array reference when nothing is poisoned", () => {
     const messages = [new HumanMessage("hi"), new AIMessage({ content: "hello" })]
     expect(sanitizeModelRequestMessages(messages)).toBe(messages)

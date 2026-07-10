@@ -12,7 +12,12 @@ import {
   getTimeoutBounds,
   SUPPORTED_HOOK_EVENTS
 } from "../src/main/hooks/types.ts"
-import { classifyApiError, extractErrorDetail } from "../src/main/agent/failover.ts"
+import {
+  classifyApiError,
+  extractErrorDetail,
+  isRetryableApiError,
+  isStreamDisconnectLikeError
+} from "../src/main/agent/failover.ts"
 import {
   detectToolFailure,
   toolFailureSignalFromThrow,
@@ -93,6 +98,32 @@ assertEqual(
   "P12f message 'rate limit' → rate_limit"
 )
 assertEqual(classifyApiError(new Error("something else")), "unknown", "P12g fallback → unknown")
+const terminatedStreamError = new TypeError("terminated")
+assertEqual(
+  classifyApiError(terminatedStreamError),
+  "network_error",
+  "P12g-1 terminated stream → network_error"
+)
+assert(isRetryableApiError(terminatedStreamError), "P12g-2 terminated stream → retryable")
+assertEqual(
+  isStreamDisconnectLikeError("terminated"),
+  false,
+  "P12g-3 plain tool text must not become a stream error"
+)
+assertEqual(
+  isRetryableApiError(Object.assign(new Error("aborted"), { name: "AbortError" })),
+  false,
+  "P12g-4 user abort → not retryable"
+)
+const undiciSocketError = Object.assign(new Error("socket closed"), { code: "UND_ERR_SOCKET" })
+const wrappedUndiciError = Object.assign(new Error("model stream failed"), {
+  cause: undiciSocketError
+})
+assertEqual(
+  classifyApiError(wrappedUndiciError),
+  "network_error",
+  "P12g-5 nested UND_ERR_SOCKET → network_error"
+)
 
 const fetchStatusDetail = extractErrorDetail(new Error("proxy returned a non-OpenAI body"), {
   status: 502,
