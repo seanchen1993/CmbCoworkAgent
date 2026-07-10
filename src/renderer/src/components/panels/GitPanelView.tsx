@@ -269,6 +269,20 @@ function createInitialMetaState(
   }
 }
 
+function formatGitPanelErrorMessage(message: string): string {
+  const normalized = message.toLowerCase()
+  if (
+    normalized.includes("cannot pull with rebase") &&
+    normalized.includes("unstaged changes")
+  ) {
+    const repositoryMatch = message.match(/(?:^|\n)([^:\n]+):\s*error:\s*cannot pull with rebase/i)
+    const repositoryName = repositoryMatch?.[1]?.trim()
+    const target = repositoryName && repositoryName !== "error" ? `「${repositoryName}」` : "当前仓库"
+    return `${target}存在未提交的本地改动，无法拉取远端代码。请先提交改动，或手动暂存（stash）后再 Pull。`
+  }
+  return message
+}
+
 export function GitPanelView({
   threadId,
   workspacePath,
@@ -362,11 +376,12 @@ export function GitPanelView({
   }, [threadId, initialMetaState])
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
+    const displayText = variant === "error" ? formatGitPanelErrorMessage(text) : text
     if (variant === "success") {
-      toast.success(text)
+      toast.success(displayText)
       return
     }
-    toast.error(text)
+    toast.error(displayText)
   }, [])
 
   const refresh = useCallback(
