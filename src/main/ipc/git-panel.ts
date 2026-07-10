@@ -612,34 +612,20 @@ async function runGitWithChunkedLiteralPathspecs(
 }
 
 async function checkoutPathsFromHead(worktreePath: string, paths: string[]): Promise<void> {
+  const executablePaths = await normalizeExecutablePathspecs(worktreePath, paths)
+  if (executablePaths.length === 0) return
   await runGitWithChunkedLiteralPathspecs(
     worktreePath,
     ["reset", "HEAD"],
-    paths,
+    executablePaths,
     { silent: true }
   ).catch(() => {})
   await runGitWithChunkedLiteralPathspecs(
     worktreePath,
     ["checkout"],
-    paths,
+    executablePaths,
     { silent: true }
-  ).catch(async (error) => {
-    if (!isPathspecNoMatchError(error) || paths.length <= 1) {
-      throw error
-    }
-    const missingPaths: string[] = []
-    for (const targetPath of paths) {
-      await runGit(worktreePath, ["checkout", "--", targetPath], { silent: true }).catch(
-        (singleError) => {
-          if (!isPathspecNoMatchError(singleError)) throw singleError
-          missingPaths.push(targetPath)
-        }
-      )
-    }
-    if (missingPaths.length > 0) {
-      throw createPathspecNoMatchError("checkout", missingPaths, error)
-    }
-  })
+  )
 }
 
 async function runStatusPorcelainForPathspecs(
@@ -757,8 +743,29 @@ async function isKnownWorktreePath(worktreePath: string, relPath: string): Promi
   }
 }
 
+async function normalizeExecutablePathspecs(worktreePath: string, pathspecs: string[]): Promise<string[]> {
+  const normalizedPathspecs = normalizeGitPathspecList(pathspecs)
+  const result: string[] = []
+
+  for (const pathspec of normalizedPathspecs) {
+    const fallbackPath = worktreeBasenamePrefixedPathToRelativePath(worktreePath, pathspec)
+    if (
+      fallbackPath &&
+      normalizeGitRelativePath(fallbackPath) !== normalizeGitRelativePath(pathspec) &&
+      !(await isKnownWorktreePath(worktreePath, pathspec)) &&
+      (await isKnownWorktreePath(worktreePath, fallbackPath))
+    ) {
+      result.push(fallbackPath)
+      continue
+    }
+    result.push(pathspec)
+  }
+
+  return normalizeGitPathspecList(result)
+}
+
 async function restorePathsToHead(worktreePath: string, targetPaths: string[]): Promise<void> {
-  const paths = normalizeGitPathspecList(targetPaths)
+  const paths = await normalizeExecutablePathspecs(worktreePath, targetPaths)
   if (paths.length === 0) return
 
   const restoreSupport = await detectGitRestoreSupport()
@@ -800,7 +807,7 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
 }
 
 async function resetPathsFromIndex(worktreePath: string, targetPaths: string[]): Promise<void> {
-  const paths = normalizeGitPathspecList(targetPaths)
+  const paths = await normalizeExecutablePathspecs(worktreePath, targetPaths)
   if (paths.length === 0) return
   await runGitWithChunkedLiteralPathspecs(
     worktreePath,
@@ -829,7 +836,7 @@ async function runWithConcurrency<T>(
 }
 
 async function cleanUntrackedPaths(worktreePath: string, targetPaths: string[]): Promise<void> {
-  const paths = normalizeGitPathspecList(targetPaths)
+  const paths = await normalizeExecutablePathspecs(worktreePath, targetPaths)
   if (paths.length === 0) return
   let gitCleanError: unknown = null
   await runGitWithChunkedLiteralPathspecs(
