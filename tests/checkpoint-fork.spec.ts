@@ -29,6 +29,7 @@ import {
   deriveCheckpointTranscriptIndex,
   filterMessagesToCheckpointVisibleIds,
   findMessagesAfterCheckpointVisibleIds,
+  isCheckpointEmptyAssistantToolCallMessage,
   isWorkflowPlumbingTranscriptContent,
   mergeCheckpointAuthorityTranscriptMessage,
   mergeCheckpointAuthorityTranscriptMessages,
@@ -103,6 +104,31 @@ function testCheckpointAuthorityMergeKeepsCompleteCheckpointContent(): void {
     }
   )
   assert.equal(upgraded.content, "partial answer completed")
+
+  const clearedToolCallDraft = mergeCheckpointAuthorityTranscriptMessage(
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }]
+    },
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "final answer accidentally persisted on the tool call",
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }]
+    }
+  )
+  assert.equal(
+    clearedToolCallDraft.content,
+    "",
+    "an empty checkpoint tool-call message must not resurrect persisted streamed content"
+  )
+  assert.equal(
+    isCheckpointEmptyAssistantToolCallMessage(clearedToolCallDraft),
+    true,
+    "the restore path should identify a checkpoint-confirmed empty tool-call message for repair"
+  )
   console.log("PASS DB transcript cannot overwrite complete checkpoint content")
 }
 

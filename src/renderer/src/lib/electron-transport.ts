@@ -113,6 +113,7 @@ export type TransformedValuesMessage = {
   tool_calls?: ToolCall[]
   tool_call_id?: string
   name?: string
+  content_priority?: number
 }
 
 type MainAssistantSnapshotUpdate =
@@ -442,6 +443,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // the chat card does not get stuck showing an early `{}` placeholder.
   private completedToolCallsByMessageId: Map<string, Map<string, CompletedToolCall>> = new Map()
 
+  // Message identity boundaries depend on whether a tool call was observed, not
+  // whether its args are non-empty. Zero-argument tools are valid and stay here.
+  private observedMainToolCallIdsByMessageId: Map<string, Set<string>> = new Map()
+
   setFallbackIndexBaselines(baselines: StreamFallbackIndexBaselines): void {
     this.fallbackIndexBaselines = baselines
     this.applyFallbackIndexBaselines()
@@ -479,6 +484,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.toolCallChunkIndexToId.clear()
     this.completedToolCallsByName.clear()
     this.completedToolCallsByMessageId.clear()
+    this.observedMainToolCallIdsByMessageId.clear()
     const threadId = payload.config?.configurable?.thread_id
     const modelId = payload.config?.configurable?.model_id as string | undefined
     const agentMode = payload.config?.configurable?.agent_mode as
@@ -1211,18 +1217,44 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // Main agent message
           const content = this.extractContent(kwargs.content)
           const reasoning = extractReasoningFromKwargs(kwargs)
-          const observedProviderMessageId =
-            typeof kwargs.id === "string" ? kwargs.id : undefined
-          const observedMessageIndex = !isCoordinatorMode && observedProviderMessageId
-            ? this.mainAssistantIndexByObservedId.get(observedProviderMessageId)
-            : undefined
+          const observedProviderMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
+          const observedMessageIndex =
+            !isCoordinatorMode && observedProviderMessageId
+              ? this.mainAssistantIndexByObservedId.get(observedProviderMessageId)
+              : undefined
+          const currentToolCallIds =
+            !isCoordinatorMode && this.currentMessageId !== null
+              ? this.observedMainToolCallIdsByMessageId.get(
+                  this.resolveMainAssistantMessageIdAlias(this.currentMessageId)
+                )
+              : undefined
+          const currentMessageHasToolCalls = (currentToolCallIds?.size ?? 0) > 0
+          const incomingToolCallParts: unknown[] = [
+            ...(Array.isArray(kwargs.tool_calls) ? kwargs.tool_calls : []),
+            ...(Array.isArray(kwargs.tool_call_chunks) ? kwargs.tool_call_chunks : [])
+          ]
+          const incomingToolCallIds = incomingToolCallParts.flatMap((toolCall) => {
+            if (!toolCall || typeof toolCall !== "object" || Array.isArray(toolCall)) return []
+            const id = (toolCall as { id?: unknown }).id
+            return typeof id === "string" && id ? [id] : []
+          })
+          const incomingContinuesCurrentToolCall =
+            incomingToolCallIds.length > 0
+              ? incomingToolCallIds.some((toolCallId) => currentToolCallIds?.has(toolCallId))
+              : incomingToolCallParts.length > 0
+          // A ToolMessage can arrive after the next AI chunk. Treat a new provider ID
+          // after a completed tool call as the next logical assistant in that window.
           const messageIndex =
             observedMessageIndex ??
-            this.currentMessageIndex ??
-            this.nextMessageFallbackIndex("ai")
-          const providerMessageId = !isCoordinatorMode && observedProviderMessageId
-            ? this.resolveMainAssistantMessageIdAlias(observedProviderMessageId)
-            : observedProviderMessageId
+            (observedProviderMessageId &&
+            currentMessageHasToolCalls &&
+            !incomingContinuesCurrentToolCall
+              ? this.nextMessageFallbackIndex("ai")
+              : (this.currentMessageIndex ?? this.nextMessageFallbackIndex("ai")))
+          const providerMessageId =
+            !isCoordinatorMode && observedProviderMessageId
+              ? this.resolveMainAssistantMessageIdAlias(observedProviderMessageId)
+              : observedProviderMessageId
           const msgId =
             (!isCoordinatorMode
               ? this.mainAssistantMessageIdByIndex.get(messageIndex)
@@ -1265,6 +1297,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
             kwargs.tool_call_chunks,
             isCoordinatorMode
           )
+          if (!isCoordinatorMode) {
+            this.rememberObservedMainToolCallIds(msgId, [
+              ...visibleToolCalls,
+              ...visibleToolCallChunks
+            ])
+          }
           const contentDelta = this.prepareMainAssistantChunkContent(msgId, content)
           const reasoningUpdate = this.prepareMainAssistantReasoning(msgId, reasoning)
 
@@ -1603,7 +1641,16 @@ export class ElectronIPCTransport implements UseStreamTransport {
               }
             })
           }
-          transformedMessages = reconciled.messages
+          transformedMessages = reconciled.messages.map((message) => {
+            // Sparse empty snapshots stay non-authoritative; an empty assistant tool-call
+            // message is complete state and must be able to clear speculative live text.
+            const hasAuthoritativeContent =
+              message.content.length > 0 ||
+              (message.type === "ai" &&
+                Array.isArray(message.tool_calls) &&
+                message.tool_calls.length > 0)
+            return hasAuthoritativeContent ? { ...message, content_priority: 1 } : message
+          })
           valuesData.messages = transformedMessages
           this.advanceFallbackIndexesFromValuesMessages(transformedMessages)
         }
@@ -2142,6 +2189,17 @@ export class ElectronIPCTransport implements UseStreamTransport {
           : completedToolCalls
       )
       this.completedToolCallsByMessageId.delete(canonicalFromId)
+    }
+    const observedToolCallIds = this.observedMainToolCallIdsByMessageId.get(canonicalFromId)
+    if (observedToolCallIds) {
+      const targetToolCallIds = this.observedMainToolCallIdsByMessageId.get(canonicalToId)
+      this.observedMainToolCallIdsByMessageId.set(
+        canonicalToId,
+        targetToolCallIds
+          ? new Set([...observedToolCallIds, ...targetToolCallIds])
+          : observedToolCallIds
+      )
+      this.observedMainToolCallIdsByMessageId.delete(canonicalFromId)
     }
 
     if (this.currentMessageId === canonicalFromId) this.currentMessageId = canonicalToId
@@ -2794,6 +2852,27 @@ export class ElectronIPCTransport implements UseStreamTransport {
       })
     }
     pruneMapToLimit(this.completedToolCallsByMessageId, MAX_TRACKED_MESSAGE_TOOL_CALLS)
+  }
+
+  private rememberObservedMainToolCallIds(
+    messageId: string,
+    toolCalls: ReadonlyArray<unknown>
+  ): void {
+    const observedIds = toolCalls.flatMap((toolCall) => {
+      if (!toolCall || typeof toolCall !== "object" || Array.isArray(toolCall)) return []
+      const id = (toolCall as { id?: unknown }).id
+      return typeof id === "string" && id ? [id] : []
+    })
+    if (observedIds.length === 0) return
+
+    let byToolId = this.observedMainToolCallIdsByMessageId.get(messageId)
+    if (!byToolId) {
+      byToolId = new Set()
+      this.observedMainToolCallIdsByMessageId.set(messageId, byToolId)
+    }
+    for (const toolCallId of observedIds) byToolId.add(toolCallId)
+    pruneSetToLimit(byToolId, MAX_TRACKED_TOOL_CALLS)
+    pruneMapToLimit(this.observedMainToolCallIdsByMessageId, MAX_TRACKED_MESSAGE_TOOL_CALLS)
   }
 
   private getCompletedToolCallsForMessage(messageId: string): CompletedToolCall[] {

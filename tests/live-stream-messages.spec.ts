@@ -111,6 +111,59 @@ function testSameMessageClearsToolCallsWhenSnapshotExplicitlyHasNone(): void {
   )
 }
 
+function testAuthoritativeEmptySnapshotClearsStaleAssistantContent(): void {
+  const merged = mergeLiveStreamMessages(
+    [
+      {
+        id: "assistant-tool-call",
+        type: "ai",
+        content: "final answer accidentally attached to the tool call",
+        tool_calls: [{ id: "call-1", name: "read_file", args: {}, type: "tool_call" }]
+      }
+    ],
+    [
+      {
+        id: "assistant-tool-call",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "call-1", name: "read_file", args: {}, type: "tool_call" }],
+        content_priority: 1
+      }
+    ]
+  )
+
+  assertEqual(merged[0]?.content, "", "an authoritative values snapshot should clear stale content")
+}
+
+function testLatestAuthoritativeEmptySnapshotWinsAtSamePriority(): void {
+  const merged = mergeLiveStreamMessages(
+    [
+      {
+        id: "assistant-tool-call",
+        type: "ai",
+        content: "earlier authoritative content",
+        tool_calls: [{ id: "call-1", name: "get_status", args: {}, type: "tool_call" }],
+        content_priority: 1
+      }
+    ],
+    [
+      {
+        id: "assistant-tool-call",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "call-1", name: "get_status", args: {}, type: "tool_call" }],
+        content_priority: 1
+      }
+    ]
+  )
+
+  assertEqual(
+    merged[0]?.content,
+    "",
+    "the latest authoritative snapshot should replace equal-priority content"
+  )
+}
+
 function testHigherPrioritySnapshotContentSurvivesLaterReplay(): void {
   const merged = mergeLiveStreamMessages(
     [
@@ -472,6 +525,14 @@ const tests: Array<[string, () => void]> = [
   [
     "testSameMessageClearsToolCallsWhenSnapshotExplicitlyHasNone",
     testSameMessageClearsToolCallsWhenSnapshotExplicitlyHasNone
+  ],
+  [
+    "testAuthoritativeEmptySnapshotClearsStaleAssistantContent",
+    testAuthoritativeEmptySnapshotClearsStaleAssistantContent
+  ],
+  [
+    "testLatestAuthoritativeEmptySnapshotWinsAtSamePriority",
+    testLatestAuthoritativeEmptySnapshotWinsAtSamePriority
   ],
   [
     "testHigherPrioritySnapshotContentSurvivesLaterReplay",

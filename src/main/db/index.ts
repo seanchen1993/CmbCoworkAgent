@@ -369,6 +369,10 @@ function mergeToolCalls(
 function mergeNormalizedThreadMessages(existing: Message, incoming: Message): Message {
   const existingCreatedAt = normalizeTimestamp(existing.created_at)
   const incomingCreatedAt = normalizeTimestamp(incoming.created_at)
+  const existingContentPriority = existing.content_priority ?? 0
+  const incomingContentPriority = incoming.content_priority ?? 0
+  const hasAuthoritativeIncomingContent =
+    incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
   const createdAt =
     existingCreatedAt !== null && incomingCreatedAt !== null
       ? new Date(Math.min(existingCreatedAt, incomingCreatedAt))
@@ -377,7 +381,12 @@ function mergeNormalizedThreadMessages(existing: Message, incoming: Message): Me
   return {
     ...existing,
     ...incoming,
-    content: mergeMessageContent(existing.content, incoming.content),
+    content:
+      hasAuthoritativeIncomingContent
+        ? normalizeMessageContent(incoming.content)
+        : existingContentPriority > incomingContentPriority
+          ? normalizeMessageContent(existing.content)
+          : mergeMessageContent(existing.content, incoming.content),
     tool_calls: mergeToolCalls(existing.tool_calls, incoming.tool_calls),
     tool_call_id: incoming.tool_call_id ?? existing.tool_call_id,
     name: incoming.name ?? existing.name,
@@ -668,6 +677,9 @@ function normalizeThreadMessageInput(message: Message, fallbackTime: number): Me
     ...(typeof message.goal_id === "string" && message.goal_id ? { goal_id: message.goal_id } : {}),
     ...(typeof message.active_window_id === "string" && message.active_window_id
       ? { active_window_id: message.active_window_id }
+      : {}),
+    ...(typeof message.content_priority === "number" && message.content_priority > 0
+      ? { content_priority: message.content_priority }
       : {}),
     created_at: new Date(createdAt),
     ...(startAt !== null ? { start_at: new Date(startAt) } : {}),
@@ -1015,7 +1027,10 @@ export function upsertThreadMessages(
       const existingContent = existing ? parseMessageContent(existing.content_json) : ""
       const existingToolCalls = existing ? parseToolCalls(existing.tool_calls_json) : undefined
       const nextContent = normalizeMessageContent(
-        existing ? mergeMessageContent(existingContent, normalized.content) : normalized.content
+        existing &&
+          !(typeof normalized.content_priority === "number" && normalized.content_priority > 0)
+          ? mergeMessageContent(existingContent, normalized.content)
+          : normalized.content
       )
       const nextToolCalls = existing
         ? mergeToolCalls(existingToolCalls, normalized.tool_calls)

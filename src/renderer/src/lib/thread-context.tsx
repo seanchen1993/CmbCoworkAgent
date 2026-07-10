@@ -62,6 +62,7 @@ import {
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
+  isCheckpointEmptyAssistantToolCallMessage,
   mergeCheckpointAuthorityTranscriptMessages
 } from "../../../shared/checkpoint-transcript"
 import { reconcileMessageDisplayOrder } from "./message-display-order"
@@ -3887,6 +3888,28 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
 
       const restoredGoalUiEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+      if (checkpointMessagesLoaded) {
+        const persistedMessagesById = new Map(
+          persistedThreadMessages.map((message) => [message.id, message])
+        )
+        const contentRepairs = rawRestoredMessages.flatMap((message): Message | [] => {
+          if (!isCheckpointEmptyAssistantToolCallMessage(message)) return []
+          const persistedMessage = persistedMessagesById.get(message.id)
+          const hasPersistedContent =
+            typeof persistedMessage?.content === "string"
+              ? persistedMessage.content.length > 0
+              : Array.isArray(persistedMessage?.content) && persistedMessage.content.length > 0
+          if (!hasPersistedContent) return []
+          return { ...message, content_priority: 1 }
+        })
+        if (contentRepairs.length > 0) {
+          try {
+            await window.api.threads.appendMessages(threadId, contentRepairs)
+          } catch (error) {
+            console.warn("[ThreadContext] Failed to repair checkpoint transcript content:", error)
+          }
+        }
+      }
       const checkpointTranscript = buildRestoredCheckpointTranscript(
         checkpointMessagesLoaded ? rawRestoredMessages : persistedThreadMessages,
         checkpointMessagesLoaded ? restoredMessages : visiblePersistedThreadMessages,

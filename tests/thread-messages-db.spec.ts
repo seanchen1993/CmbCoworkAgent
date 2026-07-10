@@ -716,6 +716,88 @@ async function testReplaceThreadMessageIdKeepsSingleCanonicalRow(): Promise<void
   await db.closeDatabase()
 }
 
+async function testAuthoritativeSnapshotCanClearPersistedAssistantContent(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-authoritative-empty-snapshot"
+
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Authoritative empty snapshot" })
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "final answer accidentally attached to the tool call",
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: new Date("2026-07-10T00:00:00.000Z")
+    }
+  ])
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "",
+      content_priority: 1,
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: new Date("2026-07-10T00:00:01.000Z")
+    }
+  ])
+
+  const messages = db.getThreadMessages(threadId)
+  assertEqual(messages[0]?.content, "", "an authoritative snapshot should clear persisted content")
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "",
+      content_priority: 1,
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: new Date("2026-07-10T00:00:02.000Z")
+    },
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "late lower-priority replay",
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: new Date("2026-07-10T00:00:03.000Z")
+    }
+  ])
+  assertEqual(
+    db.getThreadMessages(threadId)[0]?.content,
+    "",
+    "a lower-priority replay in the same batch must not undo an authoritative clear"
+  )
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-equal-priority-tool-call",
+      role: "assistant",
+      content: "earlier authoritative content",
+      content_priority: 1,
+      tool_calls: [{ id: "call-2", name: "get_status", args: {} }],
+      created_at: new Date("2026-07-10T00:00:04.000Z")
+    },
+    {
+      id: "assistant-equal-priority-tool-call",
+      role: "assistant",
+      content: "",
+      content_priority: 1,
+      tool_calls: [{ id: "call-2", name: "get_status", args: {} }],
+      created_at: new Date("2026-07-10T00:00:05.000Z")
+    }
+  ])
+  assertEqual(
+    db
+      .getThreadMessages(threadId)
+      .find((message) => message.id === "assistant-equal-priority-tool-call")?.content,
+    "",
+    "the latest authoritative DB snapshot should replace equal-priority content"
+  )
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
 async function main(): Promise<void> {
   await withTempHome(async () => {
     await testMessagesPersistAcrossReopen()
@@ -726,6 +808,7 @@ async function main(): Promise<void> {
     await testMessageLookupHelpersStayBoundedToRequestedRange()
     await testDurableTailFeedsRuntimeContext()
     await testReplaceThreadMessageIdKeepsSingleCanonicalRow()
+    await testAuthoritativeSnapshotCanClearPersistedAssistantContent()
   })
   console.log("thread-messages-db.spec.ts passed")
 }

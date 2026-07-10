@@ -32,9 +32,12 @@ export function mergeLiveStreamMessages(
     const existingContentPriority = existing?.content_priority ?? 0
     const incomingContentPriority = message.content_priority ?? 0
     const hasToolCallsField = Object.prototype.hasOwnProperty.call(message, "tool_calls")
+    const hasAuthoritativeIncomingContent =
+      incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
     const shouldUseIncomingContent =
-      hasUsefulStreamContent(message.content) &&
-      incomingContentPriority >= existingContentPriority
+      hasAuthoritativeIncomingContent ||
+      (hasUsefulStreamContent(message.content) &&
+        incomingContentPriority >= existingContentPriority)
     merged.set(message.id, {
       ...existing,
       ...message,
