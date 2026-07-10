@@ -18,6 +18,7 @@ const GIT_EXEC_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 const GIT_PANEL_REJECT_PATHSPEC_CHUNK_MAX_CHARS = 24_000
 const GIT_PANEL_REJECT_PATHSPEC_CHUNK_MAX_COUNT = 100
 const GIT_PANEL_REJECT_FS_CONCURRENCY = 8
+const GIT_RESTORE_MIN_VERSION = { major: 2, minor: 23 }
 
 const GIT_BASE_ENV: NodeJS.ProcessEnv = {
   ...process.env,
@@ -50,6 +51,7 @@ interface GitCommitHistoryInput {
 }
 
 let historyMutationQueue: Promise<void> = Promise.resolve()
+let gitRestoreSupportCache: boolean | null | undefined
 
 function enqueueHistoryMutation<T>(task: () => Promise<T>): Promise<T> {
   const next = historyMutationQueue.then(task, task)
@@ -285,7 +287,12 @@ function isPathspecNoMatchError(error: unknown): boolean {
 
 function isGitRestoreUnsupportedError(error: unknown): boolean {
   const text = getExecErrorText(error).toLowerCase()
-  return text.includes("not a git command") && text.includes("restore")
+  return (
+    text.includes("restore") &&
+    (text.includes("not a git command") ||
+      text.includes("unknown subcommand") ||
+      text.includes("unknown command"))
+  )
 }
 
 function quoteArg(value: string): string {
@@ -297,16 +304,64 @@ function formatGitCommand(worktreePath: string, args: string[]): string {
   return `git -C ${quoteArg(worktreePath)} ${args.map((arg) => quoteArg(arg)).join(" ")}`
 }
 
-async function addSafeDirectory(
-  worktreePath: string,
-  options?: { silent?: boolean }
-): Promise<void> {
-  if (!options?.silent) {
-    console.log(`[GitPanel][exec] git config --global --add safe.directory ${quoteArg(worktreePath)}`)
+function parseGitVersion(output: string): { major: number; minor: number; patch: number } | null {
+  const match = output.match(/\bgit version\s+(\d+)\.(\d+)(?:\.(\d+))?/i)
+  if (!match) return null
+  return {
+    major: Number.parseInt(match[1], 10),
+    minor: Number.parseInt(match[2], 10),
+    patch: Number.parseInt(match[3] || "0", 10)
   }
-  await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath], {
-    ...GIT_SPAWN_OPTIONS
-  })
+}
+
+function isGitRestoreSupportedVersion(version: { major: number; minor: number }): boolean {
+  return (
+    version.major > GIT_RESTORE_MIN_VERSION.major ||
+    (version.major === GIT_RESTORE_MIN_VERSION.major &&
+      version.minor >= GIT_RESTORE_MIN_VERSION.minor)
+  )
+}
+
+async function detectGitRestoreSupport(): Promise<boolean | null> {
+  if (gitRestoreSupportCache !== undefined) return gitRestoreSupportCache
+
+  const command = "git --version"
+  console.log(`[GitPanel][exec] ${command}`)
+  try {
+    const { stdout } = await execFileAsync("git", ["--version"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+      ...GIT_SPAWN_OPTIONS
+    })
+    const versionText = String(stdout || "").trim()
+    console.log(`[GitPanel][exec][ok] ${command}${versionText ? ` -> ${versionText}` : ""}`)
+    const version = parseGitVersion(versionText)
+    gitRestoreSupportCache = version ? isGitRestoreSupportedVersion(version) : null
+    if (gitRestoreSupportCache === false) {
+      console.warn(
+        `[GitPanel][exec][fallback] git restore requires Git ${GIT_RESTORE_MIN_VERSION.major}.${GIT_RESTORE_MIN_VERSION.minor}+; detected ${versionText || "unknown"}`
+      )
+    }
+    return gitRestoreSupportCache
+  } catch (error) {
+    console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
+    gitRestoreSupportCache = null
+    return gitRestoreSupportCache
+  }
+}
+
+async function addSafeDirectory(worktreePath: string): Promise<void> {
+  const command = `git config --global --add safe.directory ${quoteArg(worktreePath)}`
+  console.log(`[GitPanel][exec] ${command}`)
+  try {
+    await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath], {
+      ...GIT_SPAWN_OPTIONS
+    })
+    console.log(`[GitPanel][exec][ok] ${command}`)
+  } catch (error) {
+    console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
+    throw error
+  }
 }
 
 async function runGit(
@@ -314,11 +369,10 @@ async function runGit(
   args: string[],
   options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
 ): Promise<string> {
-  const silent = Boolean(options?.silent)
   const maxBufferBytes = options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
   const baseArgs = ["-C", worktreePath, ...args]
   const command = formatGitCommand(worktreePath, args)
-  if (!silent) console.log(`[GitPanel][exec] ${command}`)
+  console.log(`[GitPanel][exec] ${command}`)
   try {
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
@@ -326,22 +380,22 @@ async function runGit(
       maxBuffer: maxBufferBytes,
       ...GIT_SPAWN_OPTIONS
     })
-    if (!silent) console.log(`[GitPanel][exec][ok] ${command}`)
+    console.log(`[GitPanel][exec][ok] ${command}`)
     return stdout
   } catch (error) {
     if (!isDubiousOwnershipError(error)) {
-      if (!silent) console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
+      console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
       throw error
     }
-    if (!silent) console.warn(`[GitPanel][exec][retry-safe-directory] ${command}`)
-    await addSafeDirectory(worktreePath, { silent })
+    console.warn(`[GitPanel][exec][retry-safe-directory] ${command}`)
+    await addSafeDirectory(worktreePath)
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: GIT_BASE_ENV,
       timeout: options?.timeoutMs,
       maxBuffer: maxBufferBytes,
       ...GIT_SPAWN_OPTIONS
     })
-    if (!silent) console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
+    console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
   }
 }
@@ -507,6 +561,33 @@ async function runGitWithChunkedLiteralPathspecs(
   return results
 }
 
+async function checkoutPathsFromHead(worktreePath: string, paths: string[]): Promise<void> {
+  await runGitWithChunkedLiteralPathspecs(
+    worktreePath,
+    ["reset", "HEAD"],
+    paths,
+    { silent: true }
+  ).catch(() => {})
+  await runGitWithChunkedLiteralPathspecs(
+    worktreePath,
+    ["checkout"],
+    paths,
+    { silent: true }
+  ).catch(async (error) => {
+    if (!isPathspecNoMatchError(error) || paths.length <= 1) {
+      if (!isPathspecNoMatchError(error)) throw error
+      return
+    }
+    for (const targetPath of paths) {
+      await runGit(worktreePath, ["checkout", "--", targetPath], { silent: true }).catch(
+        (singleError) => {
+          if (!isPathspecNoMatchError(singleError)) throw singleError
+        }
+      )
+    }
+  })
+}
+
 async function runStatusPorcelainForPathspecs(
   worktreePath: string,
   pathspecs: string[]
@@ -567,6 +648,12 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
   const paths = normalizeGitPathspecList(targetPaths)
   if (paths.length === 0) return
 
+  const restoreSupport = await detectGitRestoreSupport()
+  if (restoreSupport === false) {
+    await checkoutPathsFromHead(worktreePath, paths)
+    return
+  }
+
   try {
     await runGitWithChunkedLiteralPathspecs(
       worktreePath,
@@ -585,32 +672,13 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
       return
     }
     if (!isGitRestoreUnsupportedError(error)) throw error
+    console.warn(
+      `[GitPanel][exec][fallback] git restore unsupported; falling back to reset/checkout for ${paths.length} pathspec(s)\n${getExecErrorText(error)}`
+    )
+    gitRestoreSupportCache = false
   }
 
-  await runGitWithChunkedLiteralPathspecs(
-    worktreePath,
-    ["reset", "HEAD"],
-    paths,
-    { silent: true }
-  ).catch(() => {})
-  await runGitWithChunkedLiteralPathspecs(
-    worktreePath,
-    ["checkout"],
-    paths,
-    { silent: true }
-  ).catch(async (error) => {
-    if (!isPathspecNoMatchError(error) || paths.length <= 1) {
-      if (!isPathspecNoMatchError(error)) throw error
-      return
-    }
-    for (const targetPath of paths) {
-      await runGit(worktreePath, ["checkout", "--", targetPath], { silent: true }).catch(
-        (singleError) => {
-          if (!isPathspecNoMatchError(singleError)) throw singleError
-        }
-      )
-    }
-  })
+  await checkoutPathsFromHead(worktreePath, paths)
 }
 
 async function resetPathsFromIndex(worktreePath: string, targetPaths: string[]): Promise<void> {
@@ -788,8 +856,9 @@ async function rejectWorktreePaths(params: {
   if (!context.workspacePath) {
     return { success: false, error: "当前任务不在 Git 仓库中" }
   }
+  const workspacePath = context.workspacePath
 
-  const target = await resolveGitOperationPath(context.workspacePath, options?.worktreePath)
+  const target = await resolveGitOperationPath(workspacePath, options?.worktreePath)
   if ("error" in target) return { success: false, error: target.error }
 
   const worktreePath = target.worktreePath
@@ -798,7 +867,7 @@ async function rejectWorktreePaths(params: {
         new Set(
           (filePaths || [])
             .map((filePath) =>
-              explicitPathToWorktreeRelativePath(context.workspacePath, worktreePath, filePath)
+              explicitPathToWorktreeRelativePath(workspacePath, worktreePath, filePath)
             )
             .filter((filePath): filePath is string => Boolean(filePath))
         )
@@ -855,12 +924,12 @@ async function rejectWorktreePaths(params: {
   )
 
   const touchedTargets = plan.touchedTargets.length > 0 ? plan.touchedTargets : targetPaths
-  cleanupRejectedFileMetadata(context.metadata, context.workspacePath, worktreePath, touchedTargets)
+  cleanupRejectedFileMetadata(context.metadata, workspacePath, worktreePath, touchedTargets)
   updateThread(threadId, { metadata: JSON.stringify(context.metadata) })
 
   notifyWorkspaceFilesChanged(threadId, worktreePath)
-  if (path.resolve(context.workspacePath) !== path.resolve(worktreePath)) {
-    notifyWorkspaceFilesChanged(threadId, context.workspacePath)
+  if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
+    notifyWorkspaceFilesChanged(threadId, workspacePath)
   }
 
   logGitStep(threadId, "reject_all", `回退总耗时 ${formatDurationMs(startedAt)}`)
@@ -879,6 +948,8 @@ function normalizeCommitHistoryProjectKey(projectPath: string): string {
 }
 
 async function getGitRoot(workspacePath: string): Promise<string | null> {
+  const command = formatGitCommand(workspacePath, ["rev-parse", "--show-toplevel"])
+  console.log(`[GitPanel][exec] ${command}`)
   try {
     const { stdout } = await execFileAsync(
       "git",
@@ -891,13 +962,17 @@ async function getGitRoot(workspacePath: string): Promise<string | null> {
         env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
       }
     )
+    console.log(`[GitPanel][exec][ok] ${command}`)
     return String(stdout || "").trim() || null
-  } catch {
+  } catch (error) {
+    console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
     return null
   }
 }
 
 async function getOptionalGitOutput(workspacePath: string, args: string[]): Promise<string | null> {
+  const command = formatGitCommand(workspacePath, args)
+  console.log(`[GitPanel][exec] ${command}`)
   try {
     const { stdout } = await execFileAsync("git", ["-C", workspacePath, ...args], {
       encoding: "utf-8",
@@ -906,8 +981,10 @@ async function getOptionalGitOutput(workspacePath: string, args: string[]): Prom
       windowsHide: true,
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
     })
+    console.log(`[GitPanel][exec][ok] ${command}`)
     return String(stdout || "").trim() || null
-  } catch {
+  } catch (error) {
+    console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
     return null
   }
 }

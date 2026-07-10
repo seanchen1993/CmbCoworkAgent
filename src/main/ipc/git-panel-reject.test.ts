@@ -149,27 +149,48 @@ describe("git panel reject handlers", () => {
     gitIn(repo, ["add", "staged-new.txt"])
     writeFileSync(join(repo, "fresh.txt"), "fresh\n")
 
-    const result = await rejectChanges({
-      workspacePath: repo,
-      filePaths: ["tracked.txt", "deleted.txt", "staged-new.txt", "fresh.txt"]
-    })
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 
-    expect(result).toMatchObject({ success: true })
-    expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("base\n")
-    expect(readFileSync(join(repo, "deleted.txt"), "utf-8")).toBe("delete-me\n")
-    expect(existsSync(join(repo, "staged-new.txt"))).toBe(false)
-    expect(existsSync(join(repo, "fresh.txt"))).toBe(false)
-    expect(gitIn(repo, ["status", "--porcelain", "--untracked-files=all"])).toBe("")
+    try {
+      const result = await rejectChanges({
+        workspacePath: repo,
+        filePaths: ["tracked.txt", "deleted.txt", "staged-new.txt", "fresh.txt"]
+      })
 
-    const metadata = dbMock.getMetadata()
-    expect(metadata.llmModifiedFiles).toEqual([])
-    expect(metadata.llmFileHistory).toEqual({})
-    expect((metadata.llmRecentlyRevertedFiles as string[]).slice().sort()).toEqual([
-      "tracked.txt",
-      "deleted.txt",
-      "staged-new.txt",
-      "fresh.txt"
-    ].sort())
+      expect(result).toMatchObject({ success: true })
+      expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("base\n")
+      expect(readFileSync(join(repo, "deleted.txt"), "utf-8")).toBe("delete-me\n")
+      expect(existsSync(join(repo, "staged-new.txt"))).toBe(false)
+      expect(existsSync(join(repo, "fresh.txt"))).toBe(false)
+      expect(gitIn(repo, ["status", "--porcelain", "--untracked-files=all"])).toBe("")
+
+      const metadata = dbMock.getMetadata()
+      expect(metadata.llmModifiedFiles).toEqual([])
+      expect(metadata.llmFileHistory).toEqual({})
+      expect((metadata.llmRecentlyRevertedFiles as string[]).slice().sort()).toEqual([
+        "tracked.txt",
+        "deleted.txt",
+        "staged-new.txt",
+        "fresh.txt"
+      ].sort())
+
+      const execLogs = [
+        ...logSpy.mock.calls.flat(),
+        ...warnSpy.mock.calls.flat(),
+        ...errorSpy.mock.calls.flat()
+      ].filter((value): value is string => typeof value === "string" && value.includes("[GitPanel][exec]"))
+      expect(execLogs.some((line) => line.includes(" status --porcelain"))).toBe(true)
+      expect(execLogs.some((line) => line.includes(" restore --source HEAD --staged --worktree"))).toBe(true)
+      expect(execLogs.some((line) => line.includes(" reset HEAD"))).toBe(true)
+      expect(execLogs.some((line) => line.includes(" clean -f"))).toBe(true)
+      expect(execLogs.some((line) => line.includes("[GitPanel][exec][ok]"))).toBe(true)
+    } finally {
+      logSpy.mockRestore()
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
   })
 
   it("reverts a moved file by restoring the previous path and cleaning the new path", async () => {
@@ -238,7 +259,8 @@ describe("git panel reject handlers", () => {
         ...warnSpy.mock.calls.flat(),
         ...errorSpy.mock.calls.flat()
       ].filter((value): value is string => typeof value === "string" && value.includes("[GitPanel][exec]"))
-      expect(execLogs).toEqual([])
+      expect(execLogs.some((line) => line.includes(" status --porcelain"))).toBe(true)
+      expect(execLogs.some((line) => line.includes(" restore --source HEAD --staged --worktree"))).toBe(true)
 
       const stageLogs = logSpy.mock.calls
         .flat()
