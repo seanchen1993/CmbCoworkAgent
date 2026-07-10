@@ -135,7 +135,6 @@ function stripRepositoryPrefix(filePath: string, repo: GitRepositoryInfo): strin
   if (normalizedFile.startsWith(`${prefix}/`)) {
     return normalizedFile.slice(prefix.length + 1)
   }
-  console.log(`[GitPanel] stripRepositoryPrefix: filePath "${filePath}" does not match repository prefix "${prefix}"`)
   return normalizedFile
 }
 
@@ -833,9 +832,7 @@ export function GitPanelView({
       showToast("请先在“操作仓库”中选择一个子仓库再回退", "error")
       return
     }
-    console.log("gitpanel runReject filePaths", filePaths)
     const requestFilePaths = toRepositoryRelativePaths(filePaths, actionRepository)
-    console.log("gitpanel runReject toRepositoryRelativePaths requestFilePaths ", requestFilePaths)
 
     setRunning("reject")
     setError(null)

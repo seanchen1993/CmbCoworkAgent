@@ -220,7 +220,15 @@ function explicitPathToWorktreeRelativePath(
   if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
     return workspaceRelativeCandidate ?? basenamePrefixedCandidate ?? directCandidate
   }
-  return basenamePrefixedCandidate ?? directCandidate ?? workspaceRelativeCandidate
+  return directCandidate ?? workspaceRelativeCandidate ?? basenamePrefixedCandidate
+}
+
+function getBasenameFallbackPath(worktreePath: string, rawPath: string, primaryPath: string): string | null {
+  const fallbackPath = worktreeBasenamePrefixedPathToRelativePath(worktreePath, rawPath)
+  if (!fallbackPath || normalizeGitRelativePath(fallbackPath) === normalizeGitRelativePath(primaryPath)) {
+    return null
+  }
+  return fallbackPath
 }
 
 function getWorkspaceRelativePathForWorktreeFile(
@@ -690,6 +698,65 @@ async function runStatusPorcelainForPathspecs(
   return Array.from(new Set(byPath.values()))
 }
 
+function changedEntryMatchesPathspec(entry: GitPanelChangedFile, pathspec: string): boolean {
+  const normalizedPathspec = normalizeGitRelativePath(pathspec)
+  if (!normalizedPathspec) return false
+  if (normalizedPathspec === ".") return true
+  const entryPaths = [entry.path, entry.previousPath]
+    .map((entryPath) => normalizeGitRelativePath(entryPath || ""))
+    .filter(Boolean)
+  return entryPaths.some(
+    (entryPath) =>
+      entryPath === normalizedPathspec ||
+      entryPath.startsWith(`${normalizedPathspec}/`)
+  )
+}
+
+function mergeChangedEntries(
+  first: GitPanelChangedFile[],
+  second: GitPanelChangedFile[]
+): GitPanelChangedFile[] {
+  const byKey = new Map<string, GitPanelChangedFile>()
+  for (const entry of [...first, ...second]) {
+    byKey.set(
+      [
+        normalizeGitRelativePath(entry.path),
+        normalizeGitRelativePath(entry.previousPath || ""),
+        entry.status
+      ].join("\0"),
+      entry
+    )
+  }
+  return Array.from(byKey.values())
+}
+
+async function isKnownWorktreePath(worktreePath: string, relPath: string): Promise<boolean> {
+  const normalized = normalizeGitRelativePath(relPath)
+  if (!normalized || normalized === ".") return true
+  try {
+    await stat(path.join(worktreePath, normalized))
+    return true
+  } catch {
+    // Deleted tracked files are still known to Git even when absent on disk.
+  }
+
+  try {
+    await execFileAsync(
+      "git",
+      ["-C", worktreePath, "--literal-pathspecs", "ls-files", "--error-unmatch", "--", normalized],
+      {
+        env: GIT_BASE_ENV,
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024,
+        ...GIT_SPAWN_OPTIONS
+      }
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function restorePathsToHead(worktreePath: string, targetPaths: string[]): Promise<void> {
   const paths = normalizeGitPathspecList(targetPaths)
   if (paths.length === 0) return
@@ -913,16 +980,25 @@ async function rejectWorktreePaths(params: {
   if ("error" in target) return { success: false, error: target.error }
 
   const worktreePath = target.worktreePath
-  const targetPaths = hasExplicitSelection
-    ? Array.from(
-        new Set(
-          (filePaths || [])
-            .map((filePath) =>
-              explicitPathToWorktreeRelativePath(workspacePath, worktreePath, filePath)
-            )
-            .filter((filePath): filePath is string => Boolean(filePath))
-        )
-      )
+  const explicitSelections = hasExplicitSelection
+    ? (filePaths || [])
+        .map((rawPath) => {
+          const primaryPath = explicitPathToWorktreeRelativePath(workspacePath, worktreePath, rawPath)
+          if (!primaryPath) return null
+          return {
+            rawPath,
+            primaryPath,
+            basenameFallbackPath: getBasenameFallbackPath(worktreePath, rawPath, primaryPath)
+          }
+        })
+        .filter((entry): entry is {
+          rawPath: string
+          primaryPath: string
+          basenameFallbackPath: string | null
+        } => Boolean(entry))
+    : []
+  let targetPaths = hasExplicitSelection
+    ? Array.from(new Set(explicitSelections.map((entry) => entry.primaryPath)))
     : ["."]
   if (hasExplicitSelection && targetPaths.length === 0) {
     return { success: false, error: "未选择可回退文件" }
@@ -938,7 +1014,37 @@ async function rejectWorktreePaths(params: {
   }
 
   const statusStartedAt = Date.now()
-  const changedEntries = await runStatusPorcelainForPathspecs(worktreePath, targetPaths)
+  let changedEntries = await runStatusPorcelainForPathspecs(worktreePath, targetPaths)
+  if (hasExplicitSelection && explicitSelections.length > 0) {
+    const basenameFallbackPaths: string[] = []
+    for (const selection of explicitSelections) {
+      if (!selection.basenameFallbackPath) continue
+      if (changedEntries.some((entry) => changedEntryMatchesPathspec(entry, selection.primaryPath))) {
+        continue
+      }
+      if (await isKnownWorktreePath(worktreePath, selection.primaryPath)) {
+        continue
+      }
+      basenameFallbackPaths.push(selection.basenameFallbackPath)
+    }
+
+    const fallbackTargets = normalizeGitPathspecList(basenameFallbackPaths)
+    if (fallbackTargets.length > 0) {
+      for (const fallbackTarget of fallbackTargets) {
+        await assertRejectPathSafe(worktreePath, fallbackTarget)
+      }
+      const fallbackEntries = await runStatusPorcelainForPathspecs(worktreePath, fallbackTargets)
+      if (fallbackEntries.length > 0) {
+        changedEntries = mergeChangedEntries(changedEntries, fallbackEntries)
+        targetPaths = normalizeGitPathspecList([...targetPaths, ...fallbackTargets])
+        logGitStep(
+          threadId,
+          "reject_all",
+          `路径前缀兜底命中：${fallbackTargets.length} 个 pathspec`
+        )
+      }
+    }
+  }
   logGitStep(
     threadId,
     "reject_all",

@@ -301,12 +301,32 @@ describe("git panel reject handlers", () => {
         ...warnSpy.mock.calls.flat(),
         ...errorSpy.mock.calls.flat()
       ].filter((value): value is string => typeof value === "string" && value.includes("[GitPanel][exec]"))
+      const mutatingLogs = execLogs.filter(
+        (line) => line.includes(" restore ") || line.includes(" checkout ")
+      )
       expect(execLogs.some((line) => line.includes("-- src/App.vue"))).toBe(true)
-      expect(execLogs.some((line) => line.includes("-- OSA_Monitor/src/App.vue"))).toBe(false)
+      expect(mutatingLogs.some((line) => line.includes("-- OSA_Monitor/src/App.vue"))).toBe(false)
     } finally {
       logSpy.mockRestore()
       warnSpy.mockRestore()
       errorSpy.mockRestore()
     }
+  })
+
+  it("does not strip a real top-level directory that matches the repository name", async () => {
+    const { repo } = createNestedRepo("gitpanel-reject-real-prefix-", "OSA_Monitor")
+    commitFile(repo, "OSA_Monitor/src/App.vue", "base\n")
+    writeFileSync(join(repo, "OSA_Monitor/src/App.vue"), "changed\n")
+
+    const result = await rejectChanges({
+      workspacePath: repo,
+      worktreePath: repo,
+      filePaths: ["OSA_Monitor/src/App.vue"],
+      metadataFilePaths: ["OSA_Monitor/src/App.vue"]
+    })
+
+    expect(result).toMatchObject({ success: true, revertedFileCount: 1 })
+    expect(readFileSync(join(repo, "OSA_Monitor/src/App.vue"), "utf-8")).toBe("base\n")
+    expect(gitIn(repo, ["status", "--porcelain", "--untracked-files=all"])).toBe("")
   })
 })
