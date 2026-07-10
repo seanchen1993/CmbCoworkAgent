@@ -274,4 +274,39 @@ describe("git panel reject handlers", () => {
       errorSpy.mockRestore()
     }
   })
+
+  it("strips a duplicated repository-name prefix when the workspace is the repo root", async () => {
+    const { repo } = createNestedRepo("gitpanel-reject-root-", "OSA_Monitor")
+    commitFile(repo, "src/App.vue", "base\n")
+    writeFileSync(join(repo, "src/App.vue"), "changed\n")
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    try {
+      const result = await rejectChanges({
+        workspacePath: repo,
+        worktreePath: repo,
+        filePaths: ["OSA_Monitor/src/App.vue"],
+        metadataFilePaths: ["OSA_Monitor/src/App.vue"]
+      })
+
+      expect(result).toMatchObject({ success: true, revertedFileCount: 1 })
+      expect(readFileSync(join(repo, "src/App.vue"), "utf-8")).toBe("base\n")
+      expect(gitIn(repo, ["status", "--porcelain", "--untracked-files=all"])).toBe("")
+
+      const execLogs = [
+        ...logSpy.mock.calls.flat(),
+        ...warnSpy.mock.calls.flat(),
+        ...errorSpy.mock.calls.flat()
+      ].filter((value): value is string => typeof value === "string" && value.includes("[GitPanel][exec]"))
+      expect(execLogs.some((line) => line.includes("-- src/App.vue"))).toBe(true)
+      expect(execLogs.some((line) => line.includes("-- OSA_Monitor/src/App.vue"))).toBe(false)
+    } finally {
+      logSpy.mockRestore()
+      warnSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
 })

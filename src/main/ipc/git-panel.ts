@@ -138,6 +138,22 @@ function toWorktreeRelativePath(worktreePath: string, rawPath: string): string[]
   return Array.from(result).filter(Boolean)
 }
 
+function worktreeBasenamePrefixedPathToRelativePath(worktreePath: string, rawPath: string): string | null {
+  const normalized = normalizeGitRelativePath(rawPath)
+  if (!normalized || isAbsoluteLikePath(rawPath)) return null
+
+  const worktreeName = normalizeGitRelativePath(path.basename(path.resolve(worktreePath)))
+  if (!worktreeName || worktreeName === ".") return null
+
+  const normalizedKey = process.platform === "win32" ? normalized.toLowerCase() : normalized
+  const worktreeNameKey = process.platform === "win32" ? worktreeName.toLowerCase() : worktreeName
+  if (normalizedKey === worktreeNameKey) return "."
+  if (!normalizedKey.startsWith(`${worktreeNameKey}/`)) return null
+
+  const stripped = normalized.slice(worktreeName.length + 1)
+  return resolveWorktreeRelativeCandidate(worktreePath, stripped)
+}
+
 function metadataPathToWorktreeRelativePaths(
   workspacePath: string,
   worktreePath: string,
@@ -154,6 +170,14 @@ function metadataPathToWorktreeRelativePaths(
     : path.resolve(workspaceAbs, normalized)
   for (const rel of toWorktreeRelativePath(worktreeAbs, workspaceCandidate)) {
     candidates.add(rel)
+  }
+
+  const basenamePrefixedCandidate = worktreeBasenamePrefixedPathToRelativePath(
+    worktreeAbs,
+    normalized
+  )
+  if (basenamePrefixedCandidate) {
+    candidates.add(basenamePrefixedCandidate)
   }
 
   if (workspaceAbs === worktreeAbs && !isAbsoluteLikePath(normalized)) {
@@ -178,6 +202,12 @@ function explicitPathToWorktreeRelativePath(
   worktreePath: string,
   rawPath: string
 ): string | null {
+  const basenamePrefixedCandidate = pickBestWorktreeRelativePath(
+    worktreePath,
+    [worktreeBasenamePrefixedPathToRelativePath(worktreePath, rawPath)].filter(
+      (candidate): candidate is string => Boolean(candidate)
+    )
+  )
   const directCandidate = pickBestWorktreeRelativePath(
     worktreePath,
     toWorktreeRelativePath(worktreePath, rawPath)
@@ -188,9 +218,9 @@ function explicitPathToWorktreeRelativePath(
   )
 
   if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
-    return workspaceRelativeCandidate ?? directCandidate
+    return workspaceRelativeCandidate ?? basenamePrefixedCandidate ?? directCandidate
   }
-  return directCandidate ?? workspaceRelativeCandidate
+  return basenamePrefixedCandidate ?? directCandidate ?? workspaceRelativeCandidate
 }
 
 function getWorkspaceRelativePathForWorktreeFile(
@@ -545,6 +575,18 @@ function chunkGitPathspecs(baseArgs: string[], pathspecs: string[]): string[][] 
   return chunks
 }
 
+function createPathspecNoMatchError(operation: string, paths: string[], cause: unknown): Error {
+  const sample = paths.slice(0, 8).join(", ")
+  const omitted = paths.length > 8 ? ` 等 ${paths.length} 个路径` : ""
+  const detail = getExecErrorText(cause)
+  return new Error(
+    [
+      `Git ${operation} 路径不匹配：${sample}${omitted}`,
+      detail
+    ].filter(Boolean).join("\n")
+  )
+}
+
 async function runGitWithChunkedLiteralPathspecs(
   worktreePath: string,
   args: string[],
@@ -575,15 +617,19 @@ async function checkoutPathsFromHead(worktreePath: string, paths: string[]): Pro
     { silent: true }
   ).catch(async (error) => {
     if (!isPathspecNoMatchError(error) || paths.length <= 1) {
-      if (!isPathspecNoMatchError(error)) throw error
-      return
+      throw error
     }
+    const missingPaths: string[] = []
     for (const targetPath of paths) {
       await runGit(worktreePath, ["checkout", "--", targetPath], { silent: true }).catch(
         (singleError) => {
           if (!isPathspecNoMatchError(singleError)) throw singleError
+          missingPaths.push(targetPath)
         }
       )
+    }
+    if (missingPaths.length > 0) {
+      throw createPathspecNoMatchError("checkout", missingPaths, error)
     }
   })
 }
@@ -664,10 +710,15 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
     return
   } catch (error) {
     if (isPathspecNoMatchError(error) && paths.length > 1) {
+      const missingPaths: string[] = []
       for (const targetPath of paths) {
         await restorePathsToHead(worktreePath, [targetPath]).catch((singleError) => {
           if (!isPathspecNoMatchError(singleError)) throw singleError
+          missingPaths.push(targetPath)
         })
+      }
+      if (missingPaths.length > 0) {
+        throw createPathspecNoMatchError("restore", missingPaths, error)
       }
       return
     }

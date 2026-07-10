@@ -386,12 +386,14 @@ export function GitRejectDialog({
               type="button"
               variant="destructive"
               disabled={running || loading || noSelection || hasOmittedFiles}
-              onClick={() =>
+              onClick={() => {
+                console.log(selectedFiles, "selectedFiles///")
                 onSubmit(
                   selectedFiles.flatMap((file) =>
                     file.previousPath ? [file.previousPath, file.path] : [file.path]
                   )
                 )
+              }
               }
             >
               {running ? (
