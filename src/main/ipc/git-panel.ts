@@ -163,19 +163,32 @@ function metadataPathToWorktreeRelativePaths(
   return Array.from(candidates)
 }
 
-function explicitPathToWorktreeRelativePaths(
+function pickBestWorktreeRelativePath(worktreePath: string, candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    const safe = resolveWorktreeRelativeCandidate(worktreePath, candidate)
+    if (safe) return safe
+  }
+  return null
+}
+
+function explicitPathToWorktreeRelativePath(
   workspacePath: string,
   worktreePath: string,
   rawPath: string
-): string[] {
-  const candidates = new Set<string>()
-  for (const rel of toWorktreeRelativePath(worktreePath, rawPath)) {
-    candidates.add(rel)
+): string | null {
+  const directCandidate = pickBestWorktreeRelativePath(
+    worktreePath,
+    toWorktreeRelativePath(worktreePath, rawPath)
+  )
+  const workspaceRelativeCandidate = pickBestWorktreeRelativePath(
+    worktreePath,
+    metadataPathToWorktreeRelativePaths(workspacePath, worktreePath, rawPath)
+  )
+
+  if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
+    return workspaceRelativeCandidate ?? directCandidate
   }
-  for (const rel of metadataPathToWorktreeRelativePaths(workspacePath, worktreePath, rawPath)) {
-    candidates.add(rel)
-  }
-  return Array.from(candidates)
+  return directCandidate ?? workspaceRelativeCandidate
 }
 
 function getWorkspaceRelativePathForWorktreeFile(
@@ -759,12 +772,17 @@ function logGitStep(threadId: string, action: string, detail: string): void {
   console.log(`[GitPanel][${threadId}][${action}] ${detail}`)
 }
 
+function formatDurationMs(startMs: number): string {
+  return `${Date.now() - startMs}ms`
+}
+
 async function rejectWorktreePaths(params: {
   threadId: string
   filePaths?: string[]
   options?: { worktreePath?: string }
 }): Promise<{ success: boolean; revertedFileCount?: number; error?: string }> {
   const { threadId, filePaths, options } = params
+  const startedAt = Date.now()
   const hasExplicitSelection = Array.isArray(filePaths)
   const context = await getThreadWorkspaceContext(threadId)
   if (!context.workspacePath) {
@@ -778,32 +796,63 @@ async function rejectWorktreePaths(params: {
   const targetPaths = hasExplicitSelection
     ? Array.from(
         new Set(
-          (filePaths || []).flatMap((filePath) =>
-            explicitPathToWorktreeRelativePaths(context.workspacePath, worktreePath, filePath)
-          )
+          (filePaths || [])
+            .map((filePath) =>
+              explicitPathToWorktreeRelativePath(context.workspacePath, worktreePath, filePath)
+            )
+            .filter((filePath): filePath is string => Boolean(filePath))
         )
       )
     : ["."]
   if (hasExplicitSelection && targetPaths.length === 0) {
     return { success: false, error: "未选择可回退文件" }
   }
+  logGitStep(
+    threadId,
+    "reject_all",
+    `路径解析完成：${targetPaths.length} 个 pathspec，仓库=${worktreePath}`
+  )
 
   for (const targetPath of targetPaths) {
     await assertRejectPathSafe(worktreePath, targetPath)
   }
 
+  const statusStartedAt = Date.now()
   const changedEntries = await runStatusPorcelainForPathspecs(worktreePath, targetPaths)
+  logGitStep(
+    threadId,
+    "reject_all",
+    `状态扫描完成：${changedEntries.length} 个改动，耗时 ${formatDurationMs(statusStartedAt)}`
+  )
   if (changedEntries.length === 0) {
+    logGitStep(threadId, "reject_all", `无可回退改动，总耗时 ${formatDurationMs(startedAt)}`)
     return { success: true, revertedFileCount: 0 }
   }
 
   const plan = buildRejectPlan(changedEntries)
+  logGitStep(
+    threadId,
+    "reject_all",
+    `回退计划：restore=${plan.restoreTargets.length}，clean=${plan.cleanTargets.length}`
+  )
   for (const targetPath of [...plan.restoreTargets, ...plan.cleanTargets]) {
     await assertRejectPathSafe(worktreePath, targetPath)
   }
+  const restoreStartedAt = Date.now()
   await restorePathsToHead(worktreePath, plan.restoreTargets)
+  logGitStep(
+    threadId,
+    "reject_all",
+    `restore 完成：${plan.restoreTargets.length} 个文件，耗时 ${formatDurationMs(restoreStartedAt)}`
+  )
+  const cleanStartedAt = Date.now()
   await resetPathsFromIndex(worktreePath, plan.cleanTargets)
   await cleanUntrackedPaths(worktreePath, plan.cleanTargets)
+  logGitStep(
+    threadId,
+    "reject_all",
+    `clean 完成：${plan.cleanTargets.length} 个文件，耗时 ${formatDurationMs(cleanStartedAt)}`
+  )
 
   const touchedTargets = plan.touchedTargets.length > 0 ? plan.touchedTargets : targetPaths
   cleanupRejectedFileMetadata(context.metadata, context.workspacePath, worktreePath, touchedTargets)
@@ -814,6 +863,7 @@ async function rejectWorktreePaths(params: {
     notifyWorkspaceFilesChanged(threadId, context.workspacePath)
   }
 
+  logGitStep(threadId, "reject_all", `回退总耗时 ${formatDurationMs(startedAt)}`)
   return { success: true, revertedFileCount: changedEntries.length }
 }
 

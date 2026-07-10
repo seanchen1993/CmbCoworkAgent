@@ -199,7 +199,7 @@ describe("git panel reject handlers", () => {
     ].sort())
   })
 
-  it("accepts workspace-relative paths when rejecting changes inside a nested repo", async () => {
+  it("prefers the nested-repo relative path and keeps stage-level diagnostics", async () => {
     const { workspace, repo } = createNestedRepo("gitpanel-reject-workspace-", "OSA_Monitor")
     commitFile(repo, "src/layout/components/Sidebar/Logo.vue", "<template>base</template>\n")
 
@@ -239,6 +239,13 @@ describe("git panel reject handlers", () => {
         ...errorSpy.mock.calls.flat()
       ].filter((value): value is string => typeof value === "string" && value.includes("[GitPanel][exec]"))
       expect(execLogs).toEqual([])
+
+      const stageLogs = logSpy.mock.calls
+        .flat()
+        .filter((value): value is string => typeof value === "string" && value.includes("[GitPanel][thread-test][reject_all]"))
+      expect(stageLogs.some((line) => line.includes("路径解析完成：1 个 pathspec"))).toBe(true)
+      expect(stageLogs.some((line) => line.includes("状态扫描完成：1 个改动"))).toBe(true)
+      expect(stageLogs.some((line) => line.includes("回退计划：restore=1，clean=0"))).toBe(true)
     } finally {
       logSpy.mockRestore()
       warnSpy.mockRestore()
