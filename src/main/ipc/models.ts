@@ -2506,6 +2506,24 @@ function normalizeSelectedChangedFileEntries(
   return Array.from(selectedSet)
 }
 
+function getChangedFilesFromEntries(changedEntries: GitPanelChangedFile[]): string[] {
+  return Array.from(
+    new Set(
+      changedEntries.flatMap((entry) => entry.previousPath ? [entry.previousPath, entry.path] : [entry.path])
+    )
+  )
+}
+
+async function getPostCommitChangedFilesForMetadata(
+  worktreePath: string,
+  trackedFiles: string[]
+): Promise<string[]> {
+  const changedEntries = await getChangedFileEntriesForGitOps(worktreePath, trackedFiles, {
+    includeAllWhenNoTracked: true
+  })
+  return getChangedFilesFromEntries(changedEntries)
+}
+
 async function getHeadCommitStats(
   worktreePath: string,
   options?: { silent?: boolean }
@@ -4241,10 +4259,24 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
         const worktreePath = target.worktreePath
         const tracked = getTrackedLlmFiles(context.metadata)
-        const changedEntries = await getChangedFileEntriesForGitOps(worktreePath, tracked, {
-          includeAllWhenNoTracked: true
-        })
-        const filesToCommit = normalizeSelectedChangedFileEntries(worktreePath, changedEntries, filePaths)
+        const explicitFilePaths = Array.isArray(filePaths)
+          ? filePaths.filter(
+              (filePath): filePath is string =>
+                typeof filePath === "string" && filePath.trim().length > 0
+            )
+          : null
+        const changedEntries = explicitFilePaths?.length === 0
+          ? []
+          : await getChangedFileEntriesForGitOps(
+              worktreePath,
+              explicitFilePaths ?? tracked,
+              { includeAllWhenNoTracked: explicitFilePaths === null }
+            )
+        const filesToCommit = normalizeSelectedChangedFileEntries(
+          worktreePath,
+          changedEntries,
+          explicitFilePaths ?? undefined
+        )
         logGitStep(
           threadId,
           "commit",
@@ -4293,25 +4325,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         if (adoptionSnapshots.length > 0) {
           measureForCommit(adoptionSnapshots, commitSha, adoptionCaptureTimeMs)
         }
-        const postState = await buildGitPanelState(worktreePath, tracked, {
-          includeAllWhenNoTracked: true,
-          includeDiffs: false,
-          includeChangedFiles: true,
-          statusUntrackedMode: "all"
-        }).catch(() => ({
-          files: [],
-          changedFiles: [],
-          changedFilesTotal: 0,
-          omittedFileCount: 0,
-          totals: { additions: 0, deletions: 0, fileCount: 0 }
-        }))
+        const postChangedFiles = await getPostCommitChangedFilesForMetadata(worktreePath, tracked)
+          .catch(() => [])
         const { getThread, updateThread } = await import("../db")
         const thread = getThread(threadId)
         if (thread) {
           let metadata: Record<string, unknown> = {}
           try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
           replaceWorktreeLlmMetadata(metadata, context.workspacePath, worktreePath, {
-            changedFiles: postState.changedFiles,
+            changedFiles: postChangedFiles,
             fileHistory: {},
             recentlyRevertedFiles: []
           })
@@ -4324,22 +4346,24 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         logGitStep(threadId, "commit", "提交成功")
 
         // Operational telemetry (fire-and-forget, never blocks return)
-        {
-          // commit 统计 + 当前分支并行读取，减少主流程等待。
-          const [commitStats, branch] = await Promise.all([
-            getHeadCommitStats(worktreePath, { silent: true }),
-            getCurrentBranchCached(worktreePath, { silent: true })
-          ])
-          trackGitEventWithSkills("git.commit.created", threadId, {
-            repoPath:     worktreePath,
-            branch: branch || "",
-            commitSha: commitSha ?? "",
-            filesChanged: commitStats.fileCount || filesToCommit.length,
-            insertions: commitStats.additions,
-            deletions: commitStats.deletions,
-            triggeredBy:  "manual"
+        void Promise.all([
+          getHeadCommitStats(worktreePath, { silent: true }),
+          getCurrentBranchCached(worktreePath, { silent: true })
+        ])
+          .then(([commitStats, branch]) => {
+            trackGitEventWithSkills("git.commit.created", threadId, {
+              repoPath: worktreePath,
+              branch: branch || "",
+              commitSha: commitSha ?? "",
+              filesChanged: commitStats.fileCount || filesToCommit.length,
+              insertions: commitStats.additions,
+              deletions: commitStats.deletions,
+              triggeredBy: "manual"
+            })
           })
-        }
+          .catch((telemetryError) => {
+            console.warn("[GitPanel] failed to emit commit telemetry:", telemetryError)
+          })
 
         return { success: true }
       } catch (e) {

@@ -964,6 +964,9 @@ export function GitPanelView({
           ? `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
           : undefined
 
+      if (action === "commit") {
+        suppressFileChangeRefreshUntilRef.current = Number.POSITIVE_INFINITY
+      }
       setRunning(action)
       setError(null)
       try {
@@ -998,13 +1001,20 @@ export function GitPanelView({
         if (action === "push") {
           void refresh({ meta: true, diff: true })
         } else {
-          await refresh({ meta: true, diff: true })
+          suppressFileChangeRefreshUntilRef.current = Date.now() + 1200
+          void refresh({ meta: true, diff: true })
         }
       } catch (e) {
         const err = e instanceof Error ? e.message : "操作失败"
         setError(err)
         showToast(err, "error")
       } finally {
+        if (
+          action === "commit" &&
+          suppressFileChangeRefreshUntilRef.current === Number.POSITIVE_INFINITY
+        ) {
+          suppressFileChangeRefreshUntilRef.current = Date.now() + 1200
+        }
         setRunning(null)
       }
     },
