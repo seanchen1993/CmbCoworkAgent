@@ -14,17 +14,33 @@ function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
 }
 
+function assertStringArray(actual: string[], expected: string[], label: string): void {
+  const a = JSON.stringify(actual)
+  const e = JSON.stringify(expected)
+  assert(a === e, `${label}: expected ${e}, got ${a}`)
+}
+
 function assertCounts(
-  actual: { generatedLineCount: number; effectiveGeneratedLineCount: number; adoptedLineCount: number },
+  actual: {
+    generatedLineCount: number
+    effectiveGeneratedLineCount: number
+    adoptedLineCount: number
+  },
   expected: { generated: number; effective: number; adopted: number },
   label: string
 ): void {
-  assert(actual.generatedLineCount === expected.generated, `${label}: generated expected ${expected.generated}, got ${actual.generatedLineCount}`)
+  assert(
+    actual.generatedLineCount === expected.generated,
+    `${label}: generated expected ${expected.generated}, got ${actual.generatedLineCount}`
+  )
   assert(
     actual.effectiveGeneratedLineCount === expected.effective,
     `${label}: effective expected ${expected.effective}, got ${actual.effectiveGeneratedLineCount}`
   )
-  assert(actual.adoptedLineCount === expected.adopted, `${label}: adopted expected ${expected.adopted}, got ${actual.adoptedLineCount}`)
+  assert(
+    actual.adoptedLineCount === expected.adopted,
+    `${label}: adopted expected ${expected.adopted}, got ${actual.adoptedLineCount}`
+  )
 }
 
 function editBaseline(oldString: string, newString: string, occurrences = 1) {
@@ -45,12 +61,7 @@ function writeBaseline(content: string) {
 
 function testEditContextIsNotGenerated(): void {
   const baseline = editBaseline(
-    [
-      "class User {",
-      "  private String name;",
-      "  private String phone;",
-      "}"
-    ].join("\n"),
+    ["class User {", "  private String name;", "  private String phone;", "}"].join("\n"),
     [
       "class User {",
       "  private String name;",
@@ -61,16 +72,38 @@ function testEditContextIsNotGenerated(): void {
   )
 
   assert(baseline.rawGeneratedLineCount === 5, "raw newString should include unchanged context")
-  assert(baseline.generatedLineHashes.length === 1, "only inserted email line should count as generated")
-  assert(baseline.supersededLineHashes.length === 0, "unchanged context should not supersede older rows")
+  assert(
+    baseline.generatedLineHashes.length === 1,
+    "only inserted email line should count as generated"
+  )
+  assert(
+    baseline.supersededLineHashes.length === 0,
+    "unchanged context should not supersede older rows"
+  )
+  assertStringArray(
+    baseline.generatedLineTexts,
+    ["  private String email;"],
+    "generated line text should exclude unchanged context"
+  )
 }
 
 function testEditReplacementProducesNewAndSupersededLines(): void {
   const baseline = editBaseline("private String phone;", "private String email;")
 
   assert(baseline.rawGeneratedLineCount === 1, "replacement raw line count should be one")
-  assert(baseline.generatedLineHashes.length === 1, "replacement new line should count as generated")
-  assert(baseline.supersededLineHashes.length === 1, "replacement old line should supersede older rows")
+  assert(
+    baseline.generatedLineHashes.length === 1,
+    "replacement new line should count as generated"
+  )
+  assert(
+    baseline.supersededLineHashes.length === 1,
+    "replacement old line should supersede older rows"
+  )
+  assertStringArray(
+    baseline.generatedLineTexts,
+    ["private String email;"],
+    "replacement generated text"
+  )
 }
 
 function testReplaceAllOccurrencesAreExpanded(): void {
@@ -79,6 +112,11 @@ function testReplaceAllOccurrencesAreExpanded(): void {
   assert(baseline.rawGeneratedLineCount === 3, "replaceAll should expand raw generated count")
   assert(baseline.generatedLineHashes.length === 3, "replaceAll should expand generated hashes")
   assert(baseline.supersededLineHashes.length === 3, "replaceAll should expand superseded hashes")
+  assertStringArray(
+    baseline.generatedLineTexts,
+    ["status = NEW;", "status = NEW;", "status = NEW;"],
+    "replaceAll generated text expansion"
+  )
 }
 
 function testAgentAppendDoesNotSupersedePreviousGeneration(): void {

@@ -70,6 +70,8 @@ export interface GenIndexRow {
   shard_offset: number
   line_hashes: Uint8Array | null
   old_line_hashes: Uint8Array | null
+  /** gzip(JSON string[]) of net generated lines, local-only for trace/debug UI. */
+  generated_lines_blob: Uint8Array | null
   created_at: number
   measured: number
   /** JSON-encoded string[] of skill names active at gen time, or null. */
@@ -90,6 +92,41 @@ export interface GenIndexRow {
   /** Adapter plugin bound to the project at gen time, so adoption can be sliced by plugin version. */
   harness_adapter_name: string | null
   harness_adapter_version: string | null
+}
+
+export interface AdoptLineDetailsRow {
+  commit_sha: string
+  gen_event_id: string
+  file_path: string | null
+  rel_path: string | null
+  details_blob: Uint8Array
+  measured_at: number
+}
+
+export type AdoptLineDetailsInput = Omit<AdoptLineDetailsRow, "gen_event_id">
+
+export interface AdoptLineDetailsLimits {
+  maxRows: number
+  maxBytes: number
+}
+
+function readBlobStats(sql: string): { count: number; bytes: number } | null {
+  if (!db) return null
+  let stmt: ReturnType<SqlJsDatabase["prepare"]> | null = null
+  try {
+    stmt = db.prepare(sql)
+    if (!stmt.step()) return { count: 0, bytes: 0 }
+    const row = stmt.getAsObject() as unknown as { count: number; bytes: number }
+    return {
+      count: Number(row.count) || 0,
+      bytes: Number(row.bytes) || 0
+    }
+  } catch (e) {
+    console.warn("[AdoptionIndex] readBlobStats failed:", e)
+    return null
+  } finally {
+    stmt?.free()
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -122,6 +159,7 @@ export async function initializeAdoptionIndex(): Promise<void> {
         shard_offset INTEGER NOT NULL,
         line_hashes BLOB,
         old_line_hashes BLOB,
+        generated_lines_blob BLOB,
         created_at INTEGER NOT NULL,
         measured INTEGER NOT NULL DEFAULT 0,
         used_skills TEXT,
@@ -139,6 +177,18 @@ export async function initializeAdoptionIndex(): Promise<void> {
       )
     `)
 
+    db.run(`
+      CREATE TABLE IF NOT EXISTS adopt_line_details (
+        commit_sha TEXT NOT NULL,
+        gen_event_id TEXT NOT NULL,
+        file_path TEXT,
+        rel_path TEXT,
+        details_blob BLOB NOT NULL,
+        measured_at INTEGER NOT NULL,
+        PRIMARY KEY (commit_sha, gen_event_id)
+      )
+    `)
+
     // Migrate older DBs that pre-date the attribution columns. sql.js does not
     // support "ADD COLUMN IF NOT EXISTS", so we swallow the "duplicate column"
     // error each ALTER may throw on an already-migrated DB.
@@ -151,6 +201,7 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "model_id TEXT",
       "model_name TEXT",
       "old_line_hashes BLOB",
+      "generated_lines_blob BLOB",
       "harness_project_id TEXT",
       "harness_feature_slug TEXT",
       "harness_node_name TEXT",
@@ -170,6 +221,9 @@ export async function initializeAdoptionIndex(): Promise<void> {
        ON gen_events(file_path, measured, created_at DESC)`
     )
     db.run(`CREATE INDEX IF NOT EXISTS idx_gen_created_at ON gen_events(created_at)`)
+    db.run(
+      `CREATE INDEX IF NOT EXISTS idx_adopt_line_details_measured_at ON adopt_line_details(measured_at)`
+    )
 
     console.log("[AdoptionIndex] initialized at", dbPath)
   } catch (e) {
@@ -211,10 +265,11 @@ export function insertGenEvent(row: GenIndexRow): void {
   try {
     db.run(
       `INSERT OR REPLACE INTO gen_events
-       (event_id, file_path, tool, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes, created_at, measured,
+       (event_id, file_path, tool, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes,
+        generated_lines_blob, created_at, measured,
         used_skills, skill_source, thread_id, trace_id, model_id, model_name,
         harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -224,6 +279,7 @@ export function insertGenEvent(row: GenIndexRow): void {
         row.shard_offset,
         row.line_hashes ?? null,
         row.old_line_hashes ?? null,
+        row.generated_lines_blob ?? null,
         row.created_at,
         row.measured,
         row.used_skills,
@@ -268,7 +324,7 @@ export function findPendingGensForFile(
   const hasMax = typeof maxCreatedAt === "number" && Number.isFinite(maxCreatedAt)
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
-            line_hashes, old_line_hashes, created_at, measured,
+            line_hashes, old_line_hashes, generated_lines_blob, created_at, measured,
             used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
             tool
@@ -299,7 +355,7 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
   if (!db || !eventId) return null
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
-            line_hashes, old_line_hashes, created_at, measured,
+            line_hashes, old_line_hashes, generated_lines_blob, created_at, measured,
             used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
             tool
@@ -355,13 +411,71 @@ export function updateGenFilePath(eventId: string, newFilePath: string): void {
   }
 }
 
-export function markMeasured(eventId: string): void {
-  if (!db) return
+function insertAdoptLineDetailsRow(eventId: string, row: AdoptLineDetailsInput): void {
+  if (!db) throw new Error("adoption index is not initialized")
+  db.run(
+    `INSERT OR REPLACE INTO adopt_line_details
+     (commit_sha, gen_event_id, file_path, rel_path, details_blob, measured_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [row.commit_sha, eventId, row.file_path, row.rel_path, row.details_blob, row.measured_at]
+  )
+}
+
+/**
+ * Atomically finish one generation measurement. When line details are
+ * available they are stored in the same transaction that marks the generation
+ * measured and clears its temporary source-text payload.
+ */
+export function finalizeGenMeasurement(
+  eventId: string,
+  details: AdoptLineDetailsInput | null = null,
+  limits?: AdoptLineDetailsLimits
+): boolean {
+  if (!db || !eventId) return false
   try {
-    db.run(`UPDATE gen_events SET measured = 1 WHERE event_id = ?`, [eventId])
+    db.run("BEGIN")
+    if (details) insertAdoptLineDetailsRow(eventId, details)
+    db.run(
+      `UPDATE gen_events
+          SET measured = 1,
+              generated_lines_blob = NULL
+        WHERE event_id = ?`,
+      [eventId]
+    )
+    if (db.getRowsModified() === 0) {
+      throw new Error(`generation not found: ${eventId}`)
+    }
+    db.run("COMMIT")
+    if (details && limits) trimAdoptLineDetails(limits.maxRows, limits.maxBytes)
     scheduleSave()
+    return true
   } catch (e) {
-    console.warn("[AdoptionIndex] markMeasured failed:", e)
+    try {
+      db.run("ROLLBACK")
+    } catch {
+      // best effort
+    }
+    console.warn("[AdoptionIndex] finalizeGenMeasurement failed:", e)
+    return false
+  }
+}
+
+export function getAdoptLineDetails(
+  commitSha: string,
+  genEventId: string
+): AdoptLineDetailsRow | null {
+  if (!db || !commitSha || !genEventId) return null
+  const stmt = db.prepare(
+    `SELECT commit_sha, gen_event_id, file_path, rel_path, details_blob, measured_at
+       FROM adopt_line_details
+      WHERE commit_sha = ? AND gen_event_id = ?`
+  )
+  stmt.bind([commitSha, genEventId])
+  try {
+    if (!stmt.step()) return null
+    return stmt.getAsObject() as unknown as AdoptLineDetailsRow
+  } finally {
+    stmt.free()
   }
 }
 
@@ -393,6 +507,136 @@ export function deleteMeasuredOlderThan(cutoff: number): void {
     scheduleSave()
   } catch (e) {
     console.warn("[AdoptionIndex] deleteMeasuredOlderThan failed:", e)
+  }
+}
+
+export function deleteAdoptLineDetailsOlderThan(cutoff: number): void {
+  if (!db) return
+  try {
+    db.run(`DELETE FROM adopt_line_details WHERE measured_at < ?`, [cutoff])
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] deleteAdoptLineDetailsOlderThan failed:", e)
+  }
+}
+
+/**
+ * Bound pending generated source text without deleting its attribution hashes.
+ * Oldest source payloads degrade to the hash-only trace path first.
+ */
+export function trimGeneratedSourceTextToByteCap(maxBytes: number): void {
+  if (!db || !Number.isFinite(maxBytes) || maxBytes < 0) return
+  const stats = readBlobStats(
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(length(generated_lines_blob)), 0) AS bytes
+       FROM gen_events
+      WHERE generated_lines_blob IS NOT NULL`
+  )
+  if (!stats) return
+  if (stats.bytes <= maxBytes) return
+  let stmt: ReturnType<SqlJsDatabase["prepare"]> | null = null
+  try {
+    stmt = db.prepare(
+      `SELECT length(generated_lines_blob) AS bytes
+         FROM gen_events
+        WHERE generated_lines_blob IS NOT NULL
+        ORDER BY created_at ASC, event_id ASC`
+    )
+    const sizes: number[] = []
+    let totalBytes = 0
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as unknown as { bytes: number }
+      const bytes = Number(row.bytes) || 0
+      sizes.push(bytes)
+      totalBytes += bytes
+    }
+    if (totalBytes <= maxBytes) return
+
+    let trimCount = 0
+    while (trimCount < sizes.length && totalBytes > maxBytes) {
+      totalBytes -= sizes[trimCount]
+      trimCount++
+    }
+    if (trimCount === 0) return
+    db.run(
+      `UPDATE gen_events
+          SET generated_lines_blob = NULL
+        WHERE event_id IN (
+          SELECT event_id
+            FROM gen_events
+           WHERE generated_lines_blob IS NOT NULL
+           ORDER BY created_at ASC, event_id ASC
+           LIMIT ?
+        )`,
+      [trimCount]
+    )
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] trimGeneratedSourceTextToByteCap failed:", e)
+  } finally {
+    stmt?.free()
+  }
+}
+
+/** Bound completed line details by both row count and compressed BLOB bytes. */
+export function trimAdoptLineDetails(maxRows: number, maxBytes: number): void {
+  if (
+    !db ||
+    !Number.isFinite(maxRows) ||
+    maxRows < 0 ||
+    !Number.isFinite(maxBytes) ||
+    maxBytes < 0
+  ) {
+    return
+  }
+  const normalizedMaxRows = Math.floor(maxRows)
+  const stats = readBlobStats(
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(length(details_blob)), 0) AS bytes
+       FROM adopt_line_details`
+  )
+  if (!stats) return
+  if (stats.count <= normalizedMaxRows && stats.bytes <= maxBytes) return
+  let stmt: ReturnType<SqlJsDatabase["prepare"]> | null = null
+  try {
+    stmt = db.prepare(
+      `SELECT length(details_blob) AS bytes
+         FROM adopt_line_details
+        ORDER BY measured_at ASC, rowid ASC`
+    )
+    const sizes: number[] = []
+    let totalBytes = 0
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as unknown as { bytes: number }
+      const bytes = Number(row.bytes) || 0
+      sizes.push(bytes)
+      totalBytes += bytes
+    }
+
+    let trimCount = Math.max(0, sizes.length - normalizedMaxRows)
+    let remainingBytes = totalBytes
+    for (let i = 0; i < trimCount; i++) remainingBytes -= sizes[i]
+    while (trimCount < sizes.length && remainingBytes > maxBytes) {
+      remainingBytes -= sizes[trimCount]
+      trimCount++
+    }
+    if (trimCount === 0) return
+
+    db.run(
+      `DELETE FROM adopt_line_details
+        WHERE rowid IN (
+          SELECT rowid
+            FROM adopt_line_details
+           ORDER BY measured_at ASC, rowid ASC
+           LIMIT ?
+        )`,
+      [trimCount]
+    )
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] trimAdoptLineDetails failed:", e)
+  } finally {
+    stmt?.free()
   }
 }
 

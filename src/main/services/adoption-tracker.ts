@@ -33,29 +33,44 @@ import { basename, dirname, extname, join, relative, resolve as resolvePath, sep
 import { randomUUID } from "crypto"
 import { execFile, execFileSync } from "child_process"
 import { promisify } from "util"
+import { gzipSync, gunzipSync } from "zlib"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
 import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
 import { normalizeSkillSourceRefs } from "../utils/skill-source"
 import { extractShellFileOps } from "../agent/exec-policy"
+import type {
+  LocalAdoptionLine,
+  LocalGeneratedLineDetail,
+  LocalGeneratedLineStatus,
+  LocalGenAdoptionLines
+} from "../../shared/adoption-trace-types"
 import { trackEvent } from "./event-reporter"
+import { getGitRootForPath } from "./git-repository-discovery"
 import {
   closeAdoptionIndex,
+  deleteAdoptLineDetailsOlderThan,
+  finalizeGenMeasurement,
   findPendingGensForFile,
+  getAdoptLineDetails,
   flushAdoptionIndex,
   getGenRowByEventId,
   initializeAdoptionIndex,
   insertGenEvent,
   listPendingGenPaths,
-  markMeasured,
+  trimAdoptLineDetails,
+  trimGeneratedSourceTextToByteCap,
   updateGenFilePath,
   deleteOlderThan,
   deleteMeasuredOlderThan,
   trimToRowCap,
   vacuumAdoptionIndex,
+  type AdoptLineDetailsInput,
   type GenIndexRow
 } from "./adoption-index"
+
+const execFileAsync = promisify(execFile)
 
 // ─────────────────────────────────────────────────────────
 // Constants
@@ -81,6 +96,10 @@ const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB
 const MAX_LINES_FOR_MEASURE = 20000 // skip giant files (applied symmetrically at gen + measure)
 const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
+const LOCAL_SOURCE_TEXT_MAX_BYTES = 2 * 1024 * 1024 // per-gen local-only source payload cap
+const LOCAL_PENDING_SOURCE_MAX_BYTES = 50 * 1024 * 1024
+const LOCAL_ADOPT_DETAILS_MAX_BYTES = 50 * 1024 * 1024
+const LOCAL_ADOPT_DETAILS_MAX_ROWS = 10000
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
 // Already-measured rows are kept for the full attribution window (14 days) so the
@@ -256,6 +275,7 @@ interface JsonlGenEntry {
 export interface AdoptionLineBaseline {
   generatedLineHashes: Uint32Array
   supersededLineHashes: Uint32Array
+  generatedLineTexts: string[]
   rawGeneratedLineCount: number
 }
 
@@ -426,6 +446,22 @@ function computeLineHashes(content: string): Uint32Array {
   return new Uint32Array(hashes)
 }
 
+interface LineEntry {
+  hash: number
+  text: string
+}
+
+function computeLineEntries(content: string): LineEntry[] {
+  const lines = content.split(/\r?\n/)
+  const entries: LineEntry[] = []
+  for (const raw of lines) {
+    const norm = normalizeLine(raw)
+    if (norm.length === 0) continue
+    entries.push({ hash: fnv1a32(norm), text: raw })
+  }
+  return entries
+}
+
 function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occurrences">): number {
   if (input.tool !== "edit_file") return 1
   if (typeof input.occurrences !== "number" || !Number.isFinite(input.occurrences)) return 1
@@ -435,57 +471,69 @@ function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occu
   return occurrences > 0 ? occurrences : 1
 }
 
-function repeatLineHashes(hashes: Uint32Array, occurrences: number): Uint32Array {
-  if (occurrences <= 1) return hashes
-  const repeated = new Uint32Array(hashes.length * occurrences)
-  for (let i = 0; i < occurrences; i++) {
-    repeated.set(hashes, i * hashes.length)
-  }
+function repeatLineEntries(entries: LineEntry[], occurrences: number): LineEntry[] {
+  if (occurrences <= 1) return entries
+  const repeated: LineEntry[] = []
+  for (let i = 0; i < occurrences; i++) repeated.push(...entries)
   return repeated
 }
 
-function subtractLineHashMultiset(source: Uint32Array, subtract: Uint32Array): Uint32Array {
+function lineEntriesToHashes(entries: LineEntry[]): Uint32Array {
+  return new Uint32Array(entries.map((entry) => entry.hash))
+}
+
+function lineEntriesToTexts(entries: LineEntry[]): string[] {
+  return entries.map((entry) => entry.text)
+}
+
+function subtractLineEntryMultiset(source: LineEntry[], subtract: LineEntry[]): LineEntry[] {
   if (source.length === 0) return source
   if (subtract.length === 0) return source
 
-  const subtractCounts = buildLineHashCounts(subtract)
-  const kept: number[] = []
-  for (let i = 0; i < source.length; i++) {
-    const h = source[i]
-    const count = subtractCounts.get(h)
+  const subtractCounts = new Map<number, number>()
+  for (const entry of subtract) {
+    subtractCounts.set(entry.hash, (subtractCounts.get(entry.hash) ?? 0) + 1)
+  }
+  const kept: LineEntry[] = []
+  for (const entry of source) {
+    const count = subtractCounts.get(entry.hash)
     if (count && count > 0) {
-      subtractCounts.set(h, count - 1)
+      subtractCounts.set(entry.hash, count - 1)
     } else {
-      kept.push(h)
+      kept.push(entry)
     }
   }
-  return new Uint32Array(kept)
+  return kept
 }
 
 export function buildAdoptionLineBaseline(
   input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
 ): AdoptionLineBaseline {
   const generationOccurrences = getGenerationOccurrenceCount(input)
-  const rawGeneratedLineHashes = repeatLineHashes(
-    computeLineHashes(input.generatedContent),
+  const rawGeneratedLineEntries = repeatLineEntries(
+    computeLineEntries(input.generatedContent),
     generationOccurrences
   )
   if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
     return {
-      generatedLineHashes: rawGeneratedLineHashes,
+      generatedLineHashes: lineEntriesToHashes(rawGeneratedLineEntries),
       supersededLineHashes: new Uint32Array(0),
-      rawGeneratedLineCount: rawGeneratedLineHashes.length
+      generatedLineTexts: lineEntriesToTexts(rawGeneratedLineEntries),
+      rawGeneratedLineCount: rawGeneratedLineEntries.length
     }
   }
 
-  const oldLineHashes = repeatLineHashes(
-    computeLineHashes(input.oldString),
+  const oldLineEntries = repeatLineEntries(
+    computeLineEntries(input.oldString),
     getDeletionOccurrenceCount(input)
   )
+  const generatedLineEntries = subtractLineEntryMultiset(rawGeneratedLineEntries, oldLineEntries)
+  const supersededLineEntries = subtractLineEntryMultiset(oldLineEntries, rawGeneratedLineEntries)
   return {
-    generatedLineHashes: subtractLineHashMultiset(rawGeneratedLineHashes, oldLineHashes),
-    supersededLineHashes: subtractLineHashMultiset(oldLineHashes, rawGeneratedLineHashes),
-    rawGeneratedLineCount: rawGeneratedLineHashes.length
+    generatedLineHashes: lineEntriesToHashes(generatedLineEntries),
+    supersededLineHashes: lineEntriesToHashes(supersededLineEntries),
+    generatedLineTexts: lineEntriesToTexts(generatedLineEntries),
+    rawGeneratedLineCount: rawGeneratedLineEntries.length
   }
 }
 
@@ -497,6 +545,43 @@ function unpackLineHashes(bytes: Uint8Array): Uint32Array {
   const copy = new Uint8Array(bytes.length)
   copy.set(bytes)
   return new Uint32Array(copy.buffer)
+}
+
+function shouldStoreLocalSourceText(): boolean {
+  return process.env.CMB_ADOPTION_STORE_CODE !== "false"
+}
+
+function packLocalJson(value: unknown): Uint8Array | null {
+  if (!shouldStoreLocalSourceText()) return null
+  try {
+    const json = JSON.stringify(value)
+    if (Buffer.byteLength(json, "utf-8") > LOCAL_SOURCE_TEXT_MAX_BYTES) return null
+    return gzipSync(Buffer.from(json, "utf-8"))
+  } catch {
+    return null
+  }
+}
+
+function unpackLocalJson<T>(bytes: Uint8Array | null | undefined): T | null {
+  if (!bytes) return null
+  try {
+    const json = gunzipSync(Buffer.from(bytes)).toString("utf-8")
+    return JSON.parse(json) as T
+  } catch {
+    return null
+  }
+}
+
+function packLocalLineTexts(lines: string[]): Uint8Array | null {
+  if (lines.length === 0) return null
+  return packLocalJson(lines)
+}
+
+function unpackLocalLineTexts(bytes: Uint8Array | null | undefined): string[] | null {
+  const value = unpackLocalJson<unknown>(bytes)
+  if (!Array.isArray(value)) return null
+  const lines = value.filter((line): line is string => typeof line === "string")
+  return lines.length === value.length ? lines : null
 }
 
 function contentFingerprint(content: string): string {
@@ -706,7 +791,20 @@ async function enforceRetention(): Promise<void> {
   } catch {
     // ignore
   }
-  // 3. Belt-and-suspenders row cap — protects against a single-day generation
+  // 3. Drop local-only generated source details on the same 14-day trace window.
+  try {
+    deleteAdoptLineDetailsOlderThan(Date.now() - INDEX_MEASURED_RETENTION_MS)
+  } catch {
+    // ignore
+  }
+  // 4. Keep the two local-only source payload pools within a shared 100 MB budget.
+  try {
+    trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
+    trimAdoptLineDetails(LOCAL_ADOPT_DETAILS_MAX_ROWS, LOCAL_ADOPT_DETAILS_MAX_BYTES)
+  } catch {
+    // ignore
+  }
+  // 5. Belt-and-suspenders row cap — protects against a single-day generation
   //    spree blowing up the sqlite file.
   try {
     trimToRowCap(INDEX_MAX_ROWS)
@@ -887,6 +985,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       shard_offset: offset,
       line_hashes: packLineHashes(hashes),
       old_line_hashes: oldLineHashes.length > 0 ? packLineHashes(oldLineHashes) : null,
+      generated_lines_blob: packLocalLineTexts(baseline.generatedLineTexts),
       created_at: createdAt,
       measured: 0,
       tool: input.tool,
@@ -903,6 +1002,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       harness_adapter_name: ctx.harnessAdapterName ?? null,
       harness_adapter_version: ctx.harnessAdapterVersion ?? null
     })
+    trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
 
     // ── Cloud event (metadata only) ─────────────────────
     trackEvent("code_gen", "code_adoption", {
@@ -1072,7 +1172,7 @@ async function emitSupersededAdopt(
   commitSha: string | null,
   reason: SupersedeReason,
   measureSource: "git_commit" | "agent_file_op" = "git_commit"
-): Promise<void> {
+): Promise<number> {
   const adoptEventId = `a_${randomUUID()}`
   const measuredAt = Date.now()
   await appendJsonl({
@@ -1123,6 +1223,68 @@ async function emitSupersededAdopt(
   console.log(
     `[AdoptionTracker] measure verdict=superseded reason=${reason} genEventId=${pending.event_id} generatedLines=${generatedLineCount} commitSha=${commitSha ?? "none"}`
   )
+  return measuredAt
+}
+
+async function resolveLocalTraceRelPath(absPath: string): Promise<string | null> {
+  const gitRoot = await getGitRootForPath(dirname(absPath))
+  return gitRoot ? relative(gitRoot, absPath).replace(/\\/g, "/") : null
+}
+
+function getStoredGeneratedLineTexts(
+  pending: GenIndexRow,
+  generatedLineCount: number
+): string[] | null {
+  const lines = unpackLocalLineTexts(pending.generated_lines_blob)
+  return lines && lines.length === generatedLineCount ? lines : null
+}
+
+function buildLocalGeneratedLineDetails(
+  texts: string[] | null,
+  statuses: LocalGeneratedLineStatus[]
+): LocalGeneratedLineDetail[] | null {
+  if (!texts || texts.length !== statuses.length) return null
+  return texts.map((text, index) => ({
+    lineNumber: index + 1,
+    text,
+    status: statuses[index]
+  }))
+}
+
+function buildLocalAdoptLineDetailsRow(args: {
+  commitSha: string | null | undefined
+  pending: GenIndexRow
+  details: LocalGeneratedLineDetail[] | null
+  measuredAt: number
+  relPath: string | null
+}): AdoptLineDetailsInput | null {
+  const commitSha = args.commitSha?.trim()
+  if (!commitSha || !args.details || args.details.length === 0) return null
+  const detailsBlob = packLocalJson(args.details)
+  if (!detailsBlob) return null
+  return {
+    commit_sha: commitSha,
+    file_path: args.pending.file_path,
+    rel_path: args.relPath,
+    details_blob: detailsBlob,
+    measured_at: args.measuredAt
+  }
+}
+
+function finalizeLocalGenMeasurement(
+  eventId: string,
+  details: AdoptLineDetailsInput | null = null
+): void {
+  if (
+    !finalizeGenMeasurement(eventId, details, {
+      maxRows: LOCAL_ADOPT_DETAILS_MAX_ROWS,
+      maxBytes: LOCAL_ADOPT_DETAILS_MAX_BYTES
+    })
+  ) {
+    // Measurement telemetry has already been written. Preserve the historical
+    // graceful-degradation behaviour if the optional detail transaction fails.
+    finalizeGenMeasurement(eventId)
+  }
 }
 
 /**
@@ -1170,6 +1332,7 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
     let currentHashCounts: Map<number, number> | null = null
     let missingCurrentContent = false
     const supersededHashCounts = new Map<number, number>()
+    const localTraceRelPath = opts?.commitSha ? await resolveLocalTraceRelPath(absPath) : null
 
     if (!opts?.stagedDeleted) {
       let current = opts?.currentContent
@@ -1199,14 +1362,29 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       // not later miscounted as "generated but never committed".
       if (sawFullRewrite) {
         if (storedHashes && storedHashes.length > 0) {
-          await emitSupersededAdopt(
+          const generatedLineCount = storedHashes.length
+          const measuredAt = await emitSupersededAdopt(
             pending,
-            storedHashes.length,
+            generatedLineCount,
             opts?.commitSha ?? null,
             "same_path_rewrite"
           )
+          finalizeLocalGenMeasurement(
+            pending.event_id,
+            buildLocalAdoptLineDetailsRow({
+              commitSha: opts?.commitSha,
+              pending,
+              details: buildLocalGeneratedLineDetails(
+                getStoredGeneratedLineTexts(pending, generatedLineCount),
+                Array<LocalGeneratedLineStatus>(generatedLineCount).fill("superseded_by_agent")
+              ),
+              measuredAt,
+              relPath: localTraceRelPath
+            })
+          )
+        } else {
+          finalizeLocalGenMeasurement(pending.event_id)
         }
-        markMeasured(pending.event_id)
         continue
       }
 
@@ -1223,16 +1401,24 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
             // corrupt row — keep measuring older rows without supersession hints
           }
         }
-        markMeasured(pending.event_id)
+        finalizeLocalGenMeasurement(pending.event_id)
         continue
       }
       const generatedLineCount = storedHashes.length
       const oversizedBaseline = storedHashes.length > MAX_LINES_FOR_MEASURE
-      const { effectiveLineCount, adoptedFromEffective } = consumeEffectiveAdoptionLines(
-        storedHashes,
-        supersededHashCounts,
-        oversizedBaseline ? null : currentHashCounts
-      )
+      const unavailableStatus: LocalGeneratedLineStatus =
+        opts?.stagedDeleted || missingCurrentContent
+          ? "deleted"
+          : oversizedBaseline
+            ? "unknown"
+            : "not_adopted"
+      const { effectiveLineCount, adoptedFromEffective, statuses } =
+        consumeEffectiveAdoptionLineDetails(
+          storedHashes,
+          supersededHashCounts,
+          oversizedBaseline ? null : currentHashCounts,
+          unavailableStatus
+        )
       let adoptedLineCount: number | null = null
 
       if (opts?.stagedDeleted || missingCurrentContent) {
@@ -1262,7 +1448,19 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         commitSha: opts?.commitSha ?? null
       })
 
-      markMeasured(pending.event_id)
+      finalizeLocalGenMeasurement(
+        pending.event_id,
+        buildLocalAdoptLineDetailsRow({
+          commitSha: opts?.commitSha,
+          pending,
+          details: buildLocalGeneratedLineDetails(
+            getStoredGeneratedLineTexts(pending, generatedLineCount),
+            statuses
+          ),
+          measuredAt,
+          relPath: localTraceRelPath
+        })
+      )
 
       // Pull attribution columns that were persisted at gen time, so cloud ES
       // can aggregate adoption rates by skill / model without a two-step join
@@ -1343,29 +1541,59 @@ function consumeEffectiveAdoptionLines(
   supersededCounts: Map<number, number>,
   availableCounts: Map<number, number> | null
 ): { effectiveLineCount: number; adoptedFromEffective: number } {
+  const result = consumeEffectiveAdoptionLineDetails(
+    baseline,
+    supersededCounts,
+    availableCounts,
+    "unknown"
+  )
+  return {
+    effectiveLineCount: result.effectiveLineCount,
+    adoptedFromEffective: result.adoptedFromEffective
+  }
+}
+
+function consumeEffectiveAdoptionLineDetails(
+  baseline: Uint32Array,
+  supersededCounts: Map<number, number>,
+  availableCounts: Map<number, number> | null,
+  unavailableStatus: LocalGeneratedLineStatus
+): {
+  effectiveLineCount: number
+  adoptedFromEffective: number
+  statuses: LocalGeneratedLineStatus[]
+} {
   if (baseline.length === 0) {
-    return { effectiveLineCount: 0, adoptedFromEffective: 0 }
+    return { effectiveLineCount: 0, adoptedFromEffective: 0, statuses: [] }
   }
 
   let effectiveLineCount = 0
   let adoptedFromEffective = 0
+  const statuses: LocalGeneratedLineStatus[] = []
   for (let i = 0; i < baseline.length; i++) {
     const h = baseline[i]
     const superseded = supersededCounts.get(h)
     if (superseded && superseded > 0) {
       supersededCounts.set(h, superseded - 1)
+      statuses.push("superseded_by_agent")
       continue
     }
 
     effectiveLineCount++
-    if (!availableCounts) continue
+    if (!availableCounts) {
+      statuses.push(unavailableStatus)
+      continue
+    }
     const c = availableCounts.get(h)
     if (c && c > 0) {
       adoptedFromEffective++
       availableCounts.set(h, c - 1)
+      statuses.push("adopted")
+    } else {
+      statuses.push("not_adopted")
     }
   }
-  return { effectiveLineCount, adoptedFromEffective }
+  return { effectiveLineCount, adoptedFromEffective, statuses }
 }
 
 export function evaluateAdoptionLineBaselines(
@@ -1412,8 +1640,6 @@ export interface StagedSnapshot {
    */
   stagedContent: Buffer | null
 }
-
-const execFileAsync = promisify(execFile)
 
 // Bound how many `git show` blob reads run at once so a large staged set can't
 // spawn dozens of git processes simultaneously.
@@ -1733,7 +1959,7 @@ async function voidPendingGensUnderPath(prefixAbs: string): Promise<void> {
     if (generatedLineCount > 0) {
       await emitSupersededAdopt(row, generatedLineCount, null, "agent_rm", "agent_file_op")
     }
-    markMeasured(event_id)
+    finalizeGenMeasurement(event_id)
     console.log(
       `[AdoptionTracker] agent rm voided pending gen: eventId=${event_id} file=${file_path} generatedLines=${generatedLineCount}`
     )
@@ -1764,37 +1990,11 @@ function transferPendingGensUnderPath(srcAbs: string, finalBase: string): void {
 // ─────────────────────────────────────────────────────────
 // Local line-level 溯源 (read-only)
 //
-// Reconstructs, on demand, which committed lines a past generation was credited
-// for. Content was never stored — only per-line FNV hashes (sqlite) — so we
-// re-read the committed blob via `git show <sha>:<path>` and intersect its line
-// hashes with the stored generation hashes. This recovers the *committed* text
-// of adopted lines; lines the agent generated but that never reached the commit
-// have no retrievable text (only a count). Only works for the current machine's
-// own recent (≤7d) commits whose sqlite row survives.
+// New rows store local-only generated source details at measurement time, so
+// the UI can show adopted / not-adopted / superseded generated lines directly.
+// Older rows degrade to the historical hash-only path: re-read the committed
+// blob via `git show <sha>:<path>` and highlight committed lines that matched.
 // ─────────────────────────────────────────────────────────
-
-export interface LocalAdoptionLine {
-  lineNumber: number
-  text: string
-  /** True when this committed line matched a stored generated-line hash. */
-  adopted: boolean
-}
-
-export interface LocalGenAdoptionLines {
-  genEventId: string
-  available: boolean
-  /** Populated when available=false to explain the degradation. */
-  reason?: string
-  /** Repo-relative path of the committed file (best-effort). */
-  relPath?: string
-  /** Number of generated (net-new) lines recorded at gen time. */
-  generatedLineCount?: number
-  /** Committed lines that matched a stored generated-line hash. */
-  matchedLineCount?: number
-  /** True when the committed file exceeded the display cap and was truncated. */
-  truncated?: boolean
-  lines?: LocalAdoptionLine[]
-}
 
 const LOCAL_TRACE_MAX_GENS = 50
 const LOCAL_TRACE_MAX_LINES = 4000
@@ -1832,6 +2032,69 @@ function matchCommittedLinesAgainstHashes(
   return { lines, matchedLineCount, truncated: physical.length > limit }
 }
 
+function parseStoredGeneratedLineDetails(
+  blob: Uint8Array | null | undefined
+): LocalGeneratedLineDetail[] | null {
+  const value = unpackLocalJson<unknown>(blob)
+  if (!Array.isArray(value)) return null
+  const details: LocalGeneratedLineDetail[] = []
+  for (const item of value) {
+    if (!item || typeof item !== "object") return null
+    const record = item as Partial<LocalGeneratedLineDetail>
+    if (
+      typeof record.lineNumber !== "number" ||
+      typeof record.text !== "string" ||
+      !isLocalGeneratedLineStatus(record.status)
+    ) {
+      return null
+    }
+    details.push({
+      lineNumber: record.lineNumber,
+      text: record.text,
+      status: record.status
+    })
+  }
+  return details
+}
+
+function isLocalGeneratedLineStatus(value: unknown): value is LocalGeneratedLineStatus {
+  return (
+    value === "adopted" ||
+    value === "not_adopted" ||
+    value === "superseded_by_agent" ||
+    value === "deleted" ||
+    value === "unknown"
+  )
+}
+
+function summarizeGeneratedLineDetails(details: LocalGeneratedLineDetail[]): {
+  matchedLineCount: number
+  effectiveLineCount: number
+  notAdoptedLineCount: number
+  supersededLineCount: number
+} {
+  let matchedLineCount = 0
+  let effectiveLineCount = 0
+  let notAdoptedLineCount = 0
+  let supersededLineCount = 0
+  for (const line of details) {
+    if (line.status === "adopted") {
+      matchedLineCount++
+      effectiveLineCount++
+    } else if (line.status === "superseded_by_agent") {
+      supersededLineCount++
+    } else if (line.status === "not_adopted" || line.status === "deleted") {
+      effectiveLineCount++
+      notAdoptedLineCount++
+    } else {
+      // Unknown lines remain effective, but must not be presented as confirmed
+      // non-adoption because no committed-file comparison was available.
+      effectiveLineCount++
+    }
+  }
+  return { matchedLineCount, effectiveLineCount, notAdoptedLineCount, supersededLineCount }
+}
+
 /**
  * Reconstruct local line-level adoption for specific generations of a commit.
  * Never throws — each gen degrades independently to `available: false` with a
@@ -1852,6 +2115,27 @@ export async function readLocalCommitAdoptionLines(
   const results: LocalGenAdoptionLines[] = []
   for (const genEventId of ids) {
     try {
+      const storedDetailsRow = getAdoptLineDetails(sha, genEventId)
+      const storedDetails = parseStoredGeneratedLineDetails(storedDetailsRow?.details_blob)
+      if (storedDetailsRow && storedDetails) {
+        const summary = summarizeGeneratedLineDetails(storedDetails)
+        const truncated = storedDetails.length > LOCAL_TRACE_MAX_LINES
+        results.push({
+          genEventId,
+          available: true,
+          source: "stored_gen",
+          relPath: storedDetailsRow.rel_path ?? undefined,
+          generatedLineCount: storedDetails.length,
+          effectiveLineCount: summary.effectiveLineCount,
+          matchedLineCount: summary.matchedLineCount,
+          notAdoptedLineCount: summary.notAdoptedLineCount,
+          supersededLineCount: summary.supersededLineCount,
+          truncated,
+          generatedLines: truncated ? storedDetails.slice(0, LOCAL_TRACE_MAX_LINES) : storedDetails
+        })
+        continue
+      }
+
       const row = getGenRowByEventId(genEventId)
       if (!row || !row.line_hashes || !row.file_path) {
         results.push({
@@ -1908,6 +2192,7 @@ export async function readLocalCommitAdoptionLines(
       results.push({
         genEventId,
         available: true,
+        source: "commit_match",
         relPath,
         generatedLineCount: storedHashes.length,
         matchedLineCount,
@@ -1966,6 +2251,11 @@ export async function initializeAdoptionTracker(): Promise<void> {
   try {
     getAdoptionDir() // ensure dir exists
     await initializeAdoptionIndex()
+    // Apply the new payload limits immediately to databases created by older
+    // builds instead of waiting for the first periodic sweep.
+    trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
+    trimAdoptLineDetails(LOCAL_ADOPT_DETAILS_MAX_ROWS, LOCAL_ADOPT_DETAILS_MAX_BYTES)
+    flushAdoptionIndex()
     initialized = true
 
     sweepTimer = setInterval(() => {

@@ -3,6 +3,12 @@
  */
 import { useState, useEffect, useCallback, useRef } from "react"
 import type { SkillAdoptionRankingItem } from "./skill-adoption-ranking"
+import type {
+  LocalAdoptionLine,
+  LocalGeneratedLineDetail,
+  LocalGeneratedLineStatus,
+  LocalGenAdoptionLines
+} from "../../../../shared/adoption-trace-types"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -274,23 +280,11 @@ export interface DashboardCommitAdoptionEvents {
 }
 
 /** 本地逐行溯源中的一行（提交版文本 + 是否命中生成行哈希）。 */
-export interface DashboardLocalAdoptionLine {
-  lineNumber: number
-  text: string
-  adopted: boolean
-}
-
+export type DashboardLocalAdoptionLine = LocalAdoptionLine
+export type DashboardLocalGeneratedLineStatus = LocalGeneratedLineStatus
+export type DashboardLocalGeneratedLineDetail = LocalGeneratedLineDetail
 /** 单条 gen 的本地逐行结果；available=false 时附降级原因。 */
-export interface DashboardLocalGenAdoptionLines {
-  genEventId: string
-  available: boolean
-  reason?: string
-  relPath?: string
-  generatedLineCount?: number
-  matchedLineCount?: number
-  truncated?: boolean
-  lines?: DashboardLocalAdoptionLine[]
-}
+export type DashboardLocalGenAdoptionLines = LocalGenAdoptionLines
 
 export interface DashboardCodeStats {
   generatedLines: number

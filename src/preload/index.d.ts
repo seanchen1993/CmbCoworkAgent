@@ -92,6 +92,7 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
 
 type CloseToTrayPromptAction = "minimize-to-tray" | "direct-close" | "cancel"
 
@@ -326,23 +327,6 @@ interface DashboardCommitAdoptionEvents {
     sumAdopted: number
     rate: number | null
   }
-}
-
-interface LocalAdoptionLine {
-  lineNumber: number
-  text: string
-  adopted: boolean
-}
-
-interface LocalGenAdoptionLines {
-  genEventId: string
-  available: boolean
-  reason?: string
-  relPath?: string
-  generatedLineCount?: number
-  matchedLineCount?: number
-  truncated?: boolean
-  lines?: LocalAdoptionLine[]
 }
 
 interface DashboardSkillEvalOptions {
