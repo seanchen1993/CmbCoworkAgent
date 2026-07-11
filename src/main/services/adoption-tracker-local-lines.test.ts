@@ -73,7 +73,30 @@ describe("stored local adoption details", () => {
       harness_node_name: null,
       harness_node_status: null,
       harness_adapter_name: null,
-      harness_adapter_version: null
+      harness_adapter_version: null,
+      observability_schema_version: null,
+      trace_kind: null,
+      execution_mode: null,
+      root_trace_id: null,
+      root_thread_id: null,
+      parent_trace_id: null,
+      parent_thread_id: null,
+      parent_span_id: null,
+      link_type: null,
+      subagent_kind: null,
+      subagent_run_id: null,
+      subagent_thread_id: null,
+      handoff_action: null,
+      handoff_source_agent: null,
+      handoff_target_agent: null,
+      coordinator_worker_id: null,
+      coordinator_worker_turn: null,
+      coordinator_worker_role: null,
+      coordinator_worker_workload: null,
+      workflow_run_id: null,
+      workflow_agent_index: null,
+      workflow_phase: null,
+      workflow_agent_label: null
     }
     insertGenEvent(genRow)
     expect(

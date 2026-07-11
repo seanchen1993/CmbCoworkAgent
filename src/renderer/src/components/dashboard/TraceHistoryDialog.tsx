@@ -405,6 +405,58 @@ function outcomeClass(outcome: string): string {
   return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400 border-zinc-500/20"
 }
 
+function shortTraceId(value?: string): string {
+  return value ? value.slice(0, 10) : ""
+}
+
+function isSubagentTrace(trace: DashboardTraceDetail): boolean {
+  return trace.traceKind === "subagent" || Boolean(trace.parentTraceId || trace.subagentKind)
+}
+
+function traceThreadGroupKey(trace: DashboardTraceDetail): string {
+  return trace.rootThreadId || trace.threadId || "unknown-thread"
+}
+
+function traceDisplayLabel(trace: DashboardTraceDetail): string {
+  if (trace.subagentKind === "coordinator_worker") {
+    const role = trace.coordinatorWorkerRole === "verifier" ? "Verifier" : "Worker"
+    return trace.coordinatorWorkerId ? `${role} ${trace.coordinatorWorkerId}` : role
+  }
+  if (trace.subagentKind === "workflow_agent") {
+    return trace.workflowAgentLabel || `Workflow Agent ${trace.workflowAgentIndex ?? ""}`.trim()
+  }
+  if (trace.subagentKind === "task") return "Task Agent"
+  if (trace.traceKind === "subagent") return "子 Agent"
+  if (trace.executionMode === "coordinator") return "Agent Team"
+  if (trace.executionMode === "workflow") return "Ultra Workflow"
+  return "主 Agent"
+}
+
+function traceDisplayClass(trace: DashboardTraceDetail): string {
+  if (isSubagentTrace(trace)) {
+    if (trace.subagentKind === "workflow_agent") {
+      return "border-violet-500/25 bg-violet-500/10 text-violet-700 dark:text-violet-300"
+    }
+    return "border-blue-500/25 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+  }
+  if (trace.executionMode === "workflow") {
+    return "border-violet-500/25 bg-violet-500/10 text-violet-700 dark:text-violet-300"
+  }
+  if (trace.executionMode === "coordinator") {
+    return "border-cyan-500/25 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
+  }
+  return "border-border bg-background text-muted-foreground"
+}
+
+function inferredToolCount(trace: DashboardTraceDetail): number {
+  if (trace.totalToolCalls > 0) return trace.totalToolCalls
+  const metadataToolCount = (trace.nodes ?? []).reduce((count, node) => {
+    const names = node.metadata?.toolNames
+    return count + (Array.isArray(names) ? names.filter((name) => typeof name === "string").length : 0)
+  }, 0)
+  return metadataToolCount || trace.totalToolCalls
+}
+
 function TraceCard({
   trace,
   selected,
@@ -415,22 +467,32 @@ function TraceCard({
   onClick: () => void
 }): React.JSX.Element {
   const conversation = buildTraceConversation(trace)
+  const isChild = isSubagentTrace(trace)
   return (
     <button
       type="button"
       className={cn(
         "w-full rounded-lg border bg-card p-3 text-left transition-colors hover:bg-muted/30",
-        selected ? "border-primary shadow-sm" : "border-border"
+        selected ? "border-primary shadow-sm" : "border-border",
+        isChild && "ml-3 w-[calc(100%-0.75rem)] border-l-4 border-l-blue-400/50"
       )}
       onClick={onClick}
     >
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         <Badge className={cn("border px-1.5 py-0 text-[10px]", outcomeClass(trace.outcome))}>
           {outcomeLabel(trace.outcome)}
         </Badge>
+        <Badge className={cn("border px-1.5 py-0 text-[10px]", traceDisplayClass(trace))}>
+          {traceDisplayLabel(trace)}
+        </Badge>
         <span className="truncate text-[10px] font-mono text-muted-foreground/60">
-          {trace.traceId.slice(0, 10)}
+          {shortTraceId(trace.traceId)}
         </span>
+        {isChild && trace.parentTraceId && (
+          <span className="text-[10px] font-mono text-muted-foreground/50">
+            parent {shortTraceId(trace.parentTraceId)}
+          </span>
+        )}
       </div>
       <p className="line-clamp-3 text-xs leading-5 text-foreground/80">
         {trace.userMessage || "无用户输入记录"}
@@ -448,7 +510,7 @@ function TraceCard({
         </span>
         <span className="inline-flex items-center gap-0.5">
           <Wrench className="size-3" />
-          {trace.totalToolCalls}
+          {inferredToolCount(trace)}
         </span>
         {trace.totalTokens > 0 && (
           <span className="inline-flex items-center gap-1">
@@ -465,8 +527,10 @@ function TraceCard({
 
 interface TraceThreadGroup {
   threadId: string
+  rootTraceId?: string
   traces: DashboardTraceDetail[]
   latestStartedAt: string
+  subagentCount: number
   successCount: number
   errorCount: number
   totalToolCalls: number
@@ -490,13 +554,16 @@ function summarizeThreadGroup(
     (latest, trace) => (trace.startedAt > latest ? trace.startedAt : latest),
     sorted[0]?.startedAt ?? ""
   )
+  const rootTrace = sorted.find((trace) => !isSubagentTrace(trace)) ?? sorted[0]
   return {
     threadId,
+    rootTraceId: rootTrace?.rootTraceId || rootTrace?.traceId,
     traces: sorted,
     latestStartedAt,
+    subagentCount: sorted.filter(isSubagentTrace).length,
     successCount: sorted.filter((trace) => trace.outcome === "success").length,
     errorCount: sorted.filter((trace) => trace.outcome === "error").length,
-    totalToolCalls: sorted.reduce((sum, trace) => sum + trace.totalToolCalls, 0),
+    totalToolCalls: sorted.reduce((sum, trace) => sum + inferredToolCount(trace), 0),
     totalModelCalls: sorted.reduce((sum, trace) => sum + (trace.modelCallCount ?? 0), 0),
     totalUserInputRequests: sorted.reduce(
       (sum, trace) => sum + (trace.userInputRequestCount ?? 0),
@@ -519,7 +586,7 @@ function summarizeThreadGroup(
 function buildTraceThreadGroups(traces: DashboardTraceDetail[]): TraceThreadGroup[] {
   const grouped = new Map<string, DashboardTraceDetail[]>()
   for (const trace of traces) {
-    const threadId = trace.threadId || "unknown-thread"
+    const threadId = traceThreadGroupKey(trace)
     const list = grouped.get(threadId) ?? []
     list.push(trace)
     grouped.set(threadId, list)
@@ -579,11 +646,21 @@ function TraceThreadGroupCard({
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <span className="truncate text-[11px] font-semibold text-foreground">
-              Thread {group.threadId.slice(0, 10)}
+              Root Thread {group.threadId.slice(0, 10)}
             </span>
             <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
               {group.traces.length} 条
             </Badge>
+            {group.subagentCount > 0 && (
+              <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
+                子 {group.subagentCount}
+              </Badge>
+            )}
+            {group.rootTraceId && (
+              <span className="truncate text-[10px] font-mono text-muted-foreground/50">
+                root {shortTraceId(group.rootTraceId)}
+              </span>
+            )}
           </div>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground/60">
             <span>{formatTime(group.latestStartedAt)}</span>

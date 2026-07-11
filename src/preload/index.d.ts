@@ -185,6 +185,29 @@ interface DashboardTraceDetail {
   userIp?: string
   modelId?: string
   modelName?: string
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number
@@ -1848,6 +1871,29 @@ interface CustomAPI {
       Array<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         durationMs: number
         userMessage: string
@@ -1867,6 +1913,29 @@ interface CustomAPI {
     getTraceDetail: (traceId: string) => Promise<{
       traceId: string
       threadId: string
+      observabilitySchemaVersion?: number
+      traceKind?: string
+      executionMode?: string
+      rootTraceId?: string
+      rootThreadId?: string
+      parentTraceId?: string
+      parentThreadId?: string
+      parentSpanId?: string
+      linkType?: string
+      subagentKind?: string
+      subagentRunId?: string
+      subagentThreadId?: string
+      handoffAction?: string
+      handoffSourceAgent?: string
+      handoffTargetAgent?: string
+      coordinatorWorkerId?: string
+      coordinatorWorkerTurn?: number
+      coordinatorWorkerRole?: string
+      coordinatorWorkerWorkload?: string
+      workflowRunId?: string
+      workflowAgentIndex?: number
+      workflowPhase?: string
+      workflowAgentLabel?: string
       startedAt: string
       endedAt: string
       durationMs: number

@@ -180,6 +180,29 @@ interface DashboardTraceDetail {
   userIp?: string
   modelId?: string
   modelName?: string
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number
@@ -1571,9 +1594,61 @@ function asNumber(value: unknown, fallback = 0): number {
   return fallback
 }
 
+function asOptionalNumber(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined
+  const parsed = asNumber(value, Number.NaN)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === "string")
+}
+
+function traceObservabilityDetailFields(
+  trace: Partial<AgentTrace> | undefined,
+  source: Record<string, unknown> = {}
+): Partial<DashboardTraceDetail> {
+  const field = <K extends keyof AgentTrace>(key: K): unknown =>
+    trace?.[key] ?? source[key as string]
+  const result: Partial<DashboardTraceDetail> = {}
+  const observabilitySchemaVersion = asOptionalNumber(field("observabilitySchemaVersion"))
+  if (observabilitySchemaVersion !== undefined) {
+    result.observabilitySchemaVersion = observabilitySchemaVersion
+  }
+
+  const stringFields: Array<[keyof DashboardTraceDetail, keyof AgentTrace]> = [
+    ["traceKind", "traceKind"],
+    ["executionMode", "executionMode"],
+    ["rootTraceId", "rootTraceId"],
+    ["rootThreadId", "rootThreadId"],
+    ["parentTraceId", "parentTraceId"],
+    ["parentThreadId", "parentThreadId"],
+    ["parentSpanId", "parentSpanId"],
+    ["linkType", "linkType"],
+    ["subagentKind", "subagentKind"],
+    ["subagentRunId", "subagentRunId"],
+    ["subagentThreadId", "subagentThreadId"],
+    ["handoffAction", "handoffAction"],
+    ["handoffSourceAgent", "handoffSourceAgent"],
+    ["handoffTargetAgent", "handoffTargetAgent"],
+    ["coordinatorWorkerId", "coordinatorWorkerId"],
+    ["coordinatorWorkerRole", "coordinatorWorkerRole"],
+    ["coordinatorWorkerWorkload", "coordinatorWorkerWorkload"],
+    ["workflowRunId", "workflowRunId"],
+    ["workflowPhase", "workflowPhase"],
+    ["workflowAgentLabel", "workflowAgentLabel"]
+  ]
+  for (const [outKey, inKey] of stringFields) {
+    const value = asOptionalString(field(inKey))
+    if (value) (result as Record<string, unknown>)[outKey] = value
+  }
+
+  const coordinatorWorkerTurn = asOptionalNumber(field("coordinatorWorkerTurn"))
+  if (coordinatorWorkerTurn !== undefined) result.coordinatorWorkerTurn = coordinatorWorkerTurn
+  const workflowAgentIndex = asOptionalNumber(field("workflowAgentIndex"))
+  if (workflowAgentIndex !== undefined) result.workflowAgentIndex = workflowAgentIndex
+  return result
 }
 
 interface PluginSkillSourceBucket {
@@ -1850,6 +1925,29 @@ function dashboardTraceSourceIncludes(): string[] {
     "userIp",
     "modelId",
     "modelName",
+    "observabilitySchemaVersion",
+    "traceKind",
+    "executionMode",
+    "rootTraceId",
+    "rootThreadId",
+    "parentTraceId",
+    "parentThreadId",
+    "parentSpanId",
+    "linkType",
+    "subagentKind",
+    "subagentRunId",
+    "subagentThreadId",
+    "handoffAction",
+    "handoffSourceAgent",
+    "handoffTargetAgent",
+    "coordinatorWorkerId",
+    "coordinatorWorkerTurn",
+    "coordinatorWorkerRole",
+    "coordinatorWorkerWorkload",
+    "workflowRunId",
+    "workflowAgentIndex",
+    "workflowPhase",
+    "workflowAgentLabel",
     "outcome",
     "totalToolCalls",
     "totalInputTokens",
@@ -2029,6 +2127,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       userIp: asOptionalString(source.userIp),
       modelId: trace.modelId || asOptionalString(source.modelId),
       modelName: trace.modelName || asOptionalString(source.modelName),
+      ...traceObservabilityDetailFields(trace, source),
       outcome: trace.outcome || asString(source.outcome, "unknown"),
       totalToolCalls: asNumber(trace.totalToolCalls, asNumber(source.totalToolCalls)),
       modelCallCount: Array.isArray(trace.modelCalls)
@@ -2070,6 +2169,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     userIp: asOptionalString(source.userIp),
     modelId: asOptionalString(source.modelId),
     modelName: asOptionalString(source.modelName),
+    ...traceObservabilityDetailFields(undefined, source),
     outcome: asString(source.outcome, "unknown"),
     totalToolCalls: asNumber(source.totalToolCalls),
     modelCallCount: asNumber(source.modelCallCount),
@@ -2105,6 +2205,7 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     userMessage: trace.userMessage,
     modelId: trace.modelId,
     ...(trace.modelName ? { modelName: trace.modelName } : {}),
+    ...traceObservabilityDetailFields(trace),
     outcome: trace.outcome,
     totalToolCalls: asNumber(trace.totalToolCalls),
     modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
@@ -2160,6 +2261,10 @@ function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
   }
 }
 
+function eventRootThreadId(properties: Record<string, unknown>): string | undefined {
+  return asOptionalString(properties.rootThreadId) ?? asOptionalString(properties.threadId)
+}
+
 function normalizeSkillList(skills: string[]): string[] {
   return Array.from(new Set(skills.map((skill) => skill.trim()).filter(Boolean)))
 }
@@ -2197,8 +2302,8 @@ async function fetchCommitAdoptionMap(
         terms: { field: "properties.commitSha", size: normalizedCommitShas.length },
         aggs: {
           by_skill: { terms: { field: "properties.usedSkills", size: 50 } },
-          // 该 commit 的代码可能来自多个会话，保留全部关联会话。
-          by_thread: { terms: { field: "properties.threadId", size: 50 } },
+          // 该 commit 的代码可能来自多个子 Agent thread；会话历史按 rootThreadId 收束。
+          by_thread: { terms: { field: "properties.rootThreadId", size: 50 } },
           generated_lines: { sum: { field: "properties.generatedLineCount" } },
           effective_generated_lines: effectiveGeneratedLinesSumAgg(),
           adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
@@ -2311,6 +2416,7 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
         "properties.measureSource",
         "properties.pushed",
         "properties.measuredAt",
+        "properties.rootThreadId",
         "properties.threadId"
       ]
     }
@@ -2355,6 +2461,7 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
             // code_adopt's threadId is just a copy of its gen's, so reading it
             // from gen lets producers (e.g. external reporters) carry it on
             // code_gen only. Falls back to the adopt row for unpaired gens.
+            "properties.rootThreadId",
             "properties.threadId"
           ]
         }
@@ -2408,13 +2515,11 @@ async function fetchCommitAdoptionEvents(commitSha: string): Promise<CommitAdopt
       measureSource: asOptionalString(adopt.measureSource) ?? null,
       pushed: adopt.pushed === true,
       measuredAt: asOptionalString(adopt.measuredAt) ?? null,
-      // Prefer the paired gen's threadId (it is the source of truth — adopt
-      // merely copies it); fall back to the adopt row when there is no paired
-      // gen (e.g. the "无配对 gen 事件" row) so its 会话 still renders.
+      // Prefer the paired gen's rootThreadId (source of truth for root session
+      // display); fall back to the adopt row when there is no paired gen (e.g.
+      // the "无配对 gen 事件" row) so its 会话 still renders.
       threadId:
-        (gen ? asOptionalString(gen.threadId) : undefined) ??
-        asOptionalString(adopt.threadId) ??
-        null
+        (gen ? eventRootThreadId(gen) : undefined) ?? eventRootThreadId(adopt) ?? null
     }
   })
 
@@ -3266,6 +3371,7 @@ async function fetchUncommittedDetail(
         "properties.tool",
         "properties.language",
         "properties.lineCount",
+        "properties.rootThreadId",
         "properties.threadId",
         "properties.harnessProjectId",
         "properties.harnessFeatureSlug",
@@ -3308,7 +3414,7 @@ async function fetchUncommittedDetail(
       tool: asOptionalString(props.tool),
       language: asOptionalString(props.language),
       lineCount: asNumber(props.lineCount),
-      threadId: asOptionalString(props.threadId),
+      threadId: eventRootThreadId(props),
       harnessProjectId: asOptionalString(props.harnessProjectId),
       harnessFeatureSlug: asOptionalString(props.harnessFeatureSlug),
       modelName: asOptionalString(props.modelName),
@@ -3421,16 +3527,16 @@ function threadListBucketsNeeded(page: number, pageSize: number): number {
 }
 
 /**
- * 「按会话分页」的聚合定义：按 threadId 分桶（按最近活跃倒序）、每桶回带该会话
+ * 「按会话分页」的聚合定义：按 rootThreadId 分桶（按最近活跃倒序）、每桶回带该会话
  * 的 trace（升序、最多 THREAD_LIST_TRACES_PER_THREAD 条）。用户页与技能页 thread
- * 视图共用，保证两边口径完全一致。
+ * 视图共用，保证两边口径完全一致。历史数据需要回填 rootThreadId=threadId。
  */
 function threadListAgg(bucketsNeeded: number): Record<string, unknown> {
   return {
-    total_threads: { cardinality: { field: "threadId" } },
+    total_threads: { cardinality: { field: "rootThreadId" } },
     by_thread: {
       terms: {
-        field: "threadId",
+        field: "rootThreadId",
         size: bucketsNeeded,
         order: { latest_started_at: "desc" }
       },
@@ -5990,9 +6096,10 @@ async function fetchSkillRecentTraces(
   }
 }
 
-// 单个 thread 的完整 trace 列表，用于「Thread 对话还原」抽屉展开时还原完整会话。
+// 单个 root thread 的完整 trace 列表，用于「Thread 对话还原」抽屉展开时还原完整会话。
 // 与 fetchSkillRecentTraces 的 thread 概览不同，这里：
-// - 仅按 threadId 精确匹配，不做时间窗裁剪（避免丢掉 thread 开头早于所选时间范围的 trace）；
+// - 按 threadId / rootThreadId / parentThreadId 精确匹配，不做时间窗裁剪
+//   （避免丢掉 thread 开头早于所选时间范围的 trace，以及异步子 Agent trace）；
 // - 不做 skill / 主动触发过滤（还原真实完整会话）；
 // - 仍保留组织级数据权限过滤；
 // - 按 startedAt 升序返回（从首条到末条），上限 MAX_THREAD_TRACES 防止单 thread 过大撑爆查询。
@@ -6010,7 +6117,18 @@ async function fetchThreadTraces(
   const access = projectScoped ? requireDashboardProjectModeAccess() : requireDashboardAccess()
   const trimmed = threadId?.trim?.() ?? ""
   if (!trimmed) return []
-  const filters: Record<string, unknown>[] = [{ term: { threadId: trimmed } }]
+  const filters: Record<string, unknown>[] = [
+    {
+      bool: {
+        should: [
+          { term: { threadId: trimmed } },
+          { term: { rootThreadId: trimmed } },
+          { term: { parentThreadId: trimmed } }
+        ],
+        minimum_should_match: 1
+      }
+    }
+  ]
   appendOptionalFilter(
     filters,
     projectScoped ? buildProjectModeAccessFilter(access) : buildTraceAccessFilter(access)
@@ -6023,7 +6141,15 @@ async function fetchThreadTraces(
     _source: { includes: dashboardTraceSourceIncludes() }
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
-  return (raw.hits?.hits ?? []).map(normalizeTraceDetail)
+  const seen = new Set<string>()
+  return (raw.hits?.hits ?? [])
+    .map(normalizeTraceDetail)
+    .filter((trace) => {
+      const key = trace.traceId || `${trace.threadId}:${trace.startedAt}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
 }
 
 async function fetchSkillCodeStats(skill: string, range: TimeRange): Promise<DashboardCodeStats> {

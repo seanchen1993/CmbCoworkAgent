@@ -555,6 +555,7 @@ class WorkflowRunManager {
               model: subRequest.model,
               agentIndex: subRequest.agentIndex,
               label: subRequest.label,
+              phase: subRequest.phase,
               runId: request.runId,
               signal: subRequest.signal,
               roleSystemPrompt: subRequest.roleSystemPrompt,

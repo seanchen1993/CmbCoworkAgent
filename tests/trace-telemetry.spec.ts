@@ -241,6 +241,108 @@ async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
   }
 }
 
+async function testTraceCollectorObservabilityContext(): Promise<void> {
+  const tracesDir = await mkdtemp(join(tmpdir(), "trace-observability-"))
+  const previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
+  process.env.CMB_COWORK_TRACES_DIR = tracesDir
+  setTraceReporter({
+    async report(trace) {
+      void trace
+    }
+  })
+
+  try {
+    const rootTracer = new TraceCollector("root-thread", "Run a workflow", "model-root")
+    rootTracer.setExecutionMode("workflow")
+    const rootContext = rootTracer.getTraceContext()
+    const rootTrace = await rootTracer.finish("success")
+
+    assert(rootTrace.traceKind === "root", "root trace should default to traceKind=root")
+    assert(rootTrace.executionMode === "workflow", "setExecutionMode should update root trace")
+    assert(rootTrace.rootTraceId === rootTrace.traceId, "root trace should point rootTraceId to itself")
+    assert(rootTrace.rootThreadId === rootTrace.threadId, "root trace should point rootThreadId to itself")
+    assert(rootContext.rootNodeId === `trace:${rootTrace.traceId}`, "root context should expose root node id")
+
+    const childTracer = new TraceCollector("worker-thread", "Implement worker task", "model-child", {
+      traceKind: "subagent",
+      executionMode: "coordinator",
+      rootTraceId: rootContext.rootTraceId,
+      rootThreadId: rootContext.rootThreadId,
+      parentTraceId: rootContext.traceId,
+      parentThreadId: rootContext.threadId,
+      parentSpanId: rootContext.rootNodeId,
+      linkType: "async_span_link",
+      subagentKind: "coordinator_worker",
+      subagentRunId: "worker-1:turn:1",
+      subagentThreadId: "worker-thread",
+      handoffAction: "start_worker",
+      coordinatorWorkerId: "worker-1",
+      coordinatorWorkerTurn: 1,
+      coordinatorWorkerRole: "implementer",
+      coordinatorWorkerWorkload: "write",
+      includeSkillEval: false
+    })
+    const childTrace = await childTracer.finish("success")
+
+    assert(childTrace.traceKind === "subagent", "child trace should keep traceKind=subagent")
+    assert(childTrace.executionMode === "coordinator", "child trace should keep execution mode")
+    assert(childTrace.rootTraceId === rootTrace.traceId, "child trace should link to root trace")
+    assert(childTrace.rootThreadId === rootTrace.threadId, "child trace should link to root thread")
+    assert(childTrace.parentTraceId === rootTrace.traceId, "child trace should link direct parent trace")
+    assert(childTrace.parentSpanId === rootContext.rootNodeId, "child trace should link parent span")
+    assert(childTrace.linkType === "async_span_link", "child trace should mark async link type")
+    assert(childTrace.subagentKind === "coordinator_worker", "child trace should keep subagent kind")
+    assert(childTrace.coordinatorWorkerId === "worker-1", "child trace should keep worker id")
+    assert(childTrace.coordinatorWorkerTurn === 1, "child trace should keep worker turn")
+    assert(childTrace.skillEval === undefined, "child trace should skip skill eval by default option")
+  } finally {
+    restoreTraceEnv(previousTracesDir)
+    await rm(tracesDir, { recursive: true, force: true })
+  }
+}
+
+async function testTraceCollectorCountsSubagentMetadataTools(): Promise<void> {
+  const tracesDir = await mkdtemp(join(tmpdir(), "trace-subagent-tools-"))
+  const previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
+  process.env.CMB_COWORK_TRACES_DIR = tracesDir
+  setTraceReporter({
+    async report(trace) {
+      void trace
+    }
+  })
+
+  try {
+    const tracer = new TraceCollector("worker-thread", "Summarize worker", "model-child", {
+      traceKind: "subagent",
+      executionMode: "coordinator",
+      rootTraceId: "root-trace",
+      rootThreadId: "root-thread",
+      parentTraceId: "root-trace",
+      parentThreadId: "root-thread",
+      linkType: "async_span_link",
+      subagentKind: "coordinator_worker",
+      includeSkillEval: false
+    })
+    tracer.addTerminalNode({
+      type: "message",
+      output: "Worker summary",
+      metadata: {
+        toolNames: ["read_file"],
+        toolCallCount: 3
+      }
+    })
+    const trace = await tracer.finish("success")
+    const root = trace.nodes.find((node) => node.type === "trace")
+    const rootOutput = root?.output as { totalToolCalls?: number } | undefined
+
+    assert(trace.totalToolCalls === 3, "subagent metadata toolCallCount should count repeated tool calls")
+    assert(rootOutput?.totalToolCalls === 3, "root trace node output should expose inferred tool count")
+  } finally {
+    restoreTraceEnv(previousTracesDir)
+    await rm(tracesDir, { recursive: true, force: true })
+  }
+}
+
 async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
   const tracesDir = await mkdtemp(join(tmpdir(), "trace-sanitize-"))
   const previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
@@ -474,6 +576,10 @@ async function run(): Promise<void> {
   console.log("PASS Skill usage detector direct SKILL.md metadata lookup")
   await testTraceCollectorReportsVersionedSkills()
   console.log("PASS trace collector telemetry usedSkills normalization")
+  await testTraceCollectorObservabilityContext()
+  console.log("PASS trace collector observability context")
+  await testTraceCollectorCountsSubagentMetadataTools()
+  console.log("PASS trace collector subagent metadata tool count")
   await testTraceCollectorSanitizesLargeFields()
   console.log("PASS trace collector trace field sanitization")
   await testTraceCollectorPreservesUnknownOutcomeNodes()
