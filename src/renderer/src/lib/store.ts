@@ -113,6 +113,104 @@ function isSameWorkerAssistantText(a: Message, b: Message): boolean {
   return first.includes(second) || second.includes(first)
 }
 
+function areWorkerContentsCompatible(
+  a: Message["content"] | undefined,
+  b: Message["content"] | undefined
+): boolean {
+  const first = contentSignatureKey(a).trim()
+  const second = contentSignatureKey(b).trim()
+  if (!first || !second) return true
+  return first === second || first.includes(second) || second.includes(first)
+}
+
+type WorkerToolCall = NonNullable<Message["tool_calls"]>[number]
+
+function hasWorkerToolArgs(args: WorkerToolCall["args"] | undefined): boolean {
+  return !!args && Object.keys(args).length > 0
+}
+
+function isSameWorkerToolCallIdentity(
+  left: WorkerToolCall,
+  right: WorkerToolCall,
+  index: number
+): boolean {
+  if (left.id || right.id) return !!left.id && left.id === right.id
+  return left.name === right.name && index >= 0
+}
+
+function findWorkerToolCallMatch(
+  toolCalls: WorkerToolCall[],
+  target: WorkerToolCall,
+  fallbackIndex: number,
+  usedIndexes?: Set<number>
+): { call: WorkerToolCall; index: number } | undefined {
+  if (target.id) {
+    const index = toolCalls.findIndex(
+      (toolCall, candidateIndex) =>
+        !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
+    )
+    return index >= 0 ? { call: toolCalls[index], index } : undefined
+  }
+
+  if (
+    fallbackIndex >= 0 &&
+    fallbackIndex < toolCalls.length &&
+    !usedIndexes?.has(fallbackIndex) &&
+    isSameWorkerToolCallIdentity(toolCalls[fallbackIndex], target, fallbackIndex)
+  ) {
+    return { call: toolCalls[fallbackIndex], index: fallbackIndex }
+  }
+
+  const index = toolCalls.findIndex(
+    (toolCall, candidateIndex) =>
+      !usedIndexes?.has(candidateIndex) &&
+      !toolCall.id &&
+      toolCall.name === target.name
+  )
+  return index >= 0 ? { call: toolCalls[index], index } : undefined
+}
+
+function areWorkerToolCallsCompatible(
+  left: Message["tool_calls"] | undefined,
+  right: Message["tool_calls"] | undefined
+): boolean {
+  if (!left?.length || !right?.length || left.length !== right.length) return false
+  const usedIndexes = new Set<number>()
+  for (let index = 0; index < right.length; index += 1) {
+    const match = findWorkerToolCallMatch(left, right[index], index, usedIndexes)
+    if (!match) return false
+    usedIndexes.add(match.index)
+  }
+  return true
+}
+
+function isCompatibleWorkerAssistantToolReplay(a: Message, b: Message): boolean {
+  if (a.role !== "assistant" || b.role !== "assistant") return false
+  if (!isWorkerSnapshotPair(a, b)) return false
+  if (!areWorkerToolCallsCompatible(a.tool_calls, b.tool_calls)) return false
+  return areWorkerContentsCompatible(a.content, b.content)
+}
+
+function isCompatibleWorkerToolResultReplay(a: Message, b: Message): boolean {
+  if (a.role !== "tool" || b.role !== "tool") return false
+  if (!isWorkerSnapshotPair(a, b)) return false
+  if (!a.tool_call_id || a.tool_call_id !== b.tool_call_id) return false
+  if (a.name && b.name && a.name !== b.name) return false
+  return areWorkerContentsCompatible(a.content, b.content)
+}
+
+function findCompatibleWorkerReplayIndex(
+  messages: Message[],
+  message: Message
+): number | undefined {
+  const index = messages.findIndex(
+    (item) =>
+      isCompatibleWorkerAssistantToolReplay(item, message) ||
+      isCompatibleWorkerToolResultReplay(item, message)
+  )
+  return index >= 0 ? index : undefined
+}
+
 function findSameWorkerAssistantTextIndex(
   messages: Message[],
   message: Message
@@ -149,6 +247,53 @@ function pruneWorkerFocusMessages(messages: Message[]): Message[] {
   return messages.slice(-MAX_WORKER_FOCUS_MESSAGES)
 }
 
+function reorderWorkerFocusMessagesByIncomingOrder(
+  messages: Message[],
+  incomingIndexes: number[]
+): Message[] {
+  const incomingIndexSet = new Set<number>()
+  const incomingOrderedMessages: Message[] = []
+  for (const index of incomingIndexes) {
+    if (index < 0 || index >= messages.length || incomingIndexSet.has(index)) continue
+    incomingIndexSet.add(index)
+    incomingOrderedMessages.push(messages[index])
+  }
+  if (incomingOrderedMessages.length <= 1) return messages
+
+  const firstIncomingIndex = Math.min(...incomingIndexSet)
+  const prefix: Message[] = []
+  const suffix: Message[] = []
+  messages.forEach((message, index) => {
+    if (incomingIndexSet.has(index)) return
+    if (index < firstIncomingIndex) prefix.push(message)
+    else suffix.push(message)
+  })
+  return [...prefix, ...incomingOrderedMessages, ...suffix]
+}
+
+function mergeWorkerToolCalls(
+  existing: Message["tool_calls"] | undefined,
+  incoming: Message["tool_calls"] | undefined
+): Message["tool_calls"] | undefined {
+  if (!incoming?.length) return existing
+  if (!existing?.length) return incoming
+  if (!areWorkerToolCallsCompatible(existing, incoming)) return incoming
+
+  const usedIndexes = new Set<number>()
+  return incoming.map((incomingToolCall, index) => {
+    const match = findWorkerToolCallMatch(existing, incomingToolCall, index, usedIndexes)
+    if (match) usedIndexes.add(match.index)
+    const existingToolCall = match?.call
+    return {
+      ...(existingToolCall ?? incomingToolCall),
+      ...incomingToolCall,
+      args: hasWorkerToolArgs(incomingToolCall.args)
+        ? incomingToolCall.args
+        : (existingToolCall?.args ?? incomingToolCall.args)
+    }
+  })
+}
+
 function resolveWorkerFocusContent(
   existingMessage: Message,
   incomingMessage: Message
@@ -181,6 +326,10 @@ function preferIncomingContent(
   if (existingLength > incomingLength) return existing ?? ""
 
   return incoming ?? ""
+}
+
+type WorkerFocusAppendOptions = {
+  orderedSnapshot?: boolean
 }
 
 type EvolutionTab = "candidates" | "traces" | "review"
@@ -280,7 +429,11 @@ interface AppState {
   openWorkerFocusView: (view: WorkerFocusView) => void
   closeWorkerFocusView: () => void
   appendWorkerFocusMessage: (workerThreadId: string, message: Message) => void
-  appendWorkerFocusMessages: (workerThreadId: string, messages: Message[]) => void
+  appendWorkerFocusMessages: (
+    workerThreadId: string,
+    messages: Message[],
+    options?: WorkerFocusAppendOptions
+  ) => void
 
   // Split view for inspecting a short-lived task subagent transcript.
   subagentFocusView: SubagentFocusView | null
@@ -757,7 +910,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().appendWorkerFocusMessages(workerThreadId, [message])
   },
 
-  appendWorkerFocusMessages: (workerThreadId, messages) => {
+  appendWorkerFocusMessages: (workerThreadId, messages, options) => {
     if (messages.length === 0) return
     set((state) => {
       if (state.workerFocusView?.workerThreadId !== workerThreadId) return {}
@@ -765,6 +918,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         state.workerFocusMessagesThreadId === workerThreadId ? state.workerFocusMessages : []
 
       const next = [...existingMessages]
+      const incomingResolvedIndexes: number[] = []
       const indexById = new Map(next.map((item, index) => [item.id, index]))
       const liveIndexesBySignature = new Map<string, number[]>()
       const snapshotIndexesBySignature = new Map<string, number[]>()
@@ -811,6 +965,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 signature
               )
             : undefined) ??
+          findCompatibleWorkerReplayIndex(next, message) ??
           findSameWorkerAssistantTextIndex(next, message)
         if (existingIndex === undefined) {
           indexById.set(message.id, next.length)
@@ -824,6 +979,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             indexes.push(next.length)
             snapshotIndexesBySignature.set(signature, indexes)
           }
+          incomingResolvedIndexes.push(next.length)
           next.push(message)
           continue
         }
@@ -835,17 +991,18 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...message,
           id,
           content: resolveWorkerFocusContent(existing, message),
-          tool_calls:
-            message.tool_calls && message.tool_calls.length > 0
-              ? message.tool_calls
-              : existing.tool_calls,
+          tool_calls: mergeWorkerToolCalls(existing.tool_calls, message.tool_calls),
           status: message.status ?? existing.status,
           is_error: message.is_error ?? existing.is_error
         }
         indexById.set(id, existingIndex)
         indexById.set(message.id, existingIndex)
+        incomingResolvedIndexes.push(existingIndex)
       }
-      const prunedMessages = pruneWorkerFocusMessages(next)
+      const orderedMessages = options?.orderedSnapshot
+        ? reorderWorkerFocusMessagesByIncomingOrder(next, incomingResolvedIndexes)
+        : next
+      const prunedMessages = pruneWorkerFocusMessages(orderedMessages)
       return {
         workerFocusMessagesThreadId: workerThreadId,
         workerFocusMessages: prunedMessages

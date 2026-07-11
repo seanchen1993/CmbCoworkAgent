@@ -129,6 +129,26 @@ function testCheckpointAuthorityMergeKeepsCompleteCheckpointContent(): void {
     true,
     "the restore path should identify a checkpoint-confirmed empty tool-call message for repair"
   )
+
+  const cleanedFinalAnswer = mergeCheckpointAuthorityTranscriptMessage(
+    {
+      id: "assistant-final-answer",
+      role: "assistant",
+      content: "DUP_TEST_A_20260711 只应该出现一次。",
+      tool_calls: []
+    },
+    {
+      id: "assistant-final-answer",
+      role: "assistant",
+      content: "DUP_TEST_A_20260711 只应该出现一次。",
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }]
+    }
+  )
+  assert.deepEqual(
+    cleanedFinalAnswer.tool_calls,
+    [],
+    "checkpoint-confirmed text answers must not resurrect polluted persisted tool calls"
+  )
   console.log("PASS DB transcript cannot overwrite complete checkpoint content")
 }
 

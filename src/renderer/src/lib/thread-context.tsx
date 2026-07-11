@@ -3892,21 +3892,31 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         const persistedMessagesById = new Map(
           persistedThreadMessages.map((message) => [message.id, message])
         )
-        const contentRepairs = rawRestoredMessages.flatMap((message): Message | [] => {
-          if (!isCheckpointEmptyAssistantToolCallMessage(message)) return []
+        const transcriptRepairs = rawRestoredMessages.flatMap((message): Message | [] => {
           const persistedMessage = persistedMessagesById.get(message.id)
           const hasPersistedContent =
             typeof persistedMessage?.content === "string"
               ? persistedMessage.content.length > 0
               : Array.isArray(persistedMessage?.content) && persistedMessage.content.length > 0
-          if (!hasPersistedContent) return []
+          const checkpointClearsToolCalls =
+            message.role === "assistant" &&
+            Array.isArray(message.tool_calls) &&
+            message.tool_calls.length === 0 &&
+            Array.isArray(persistedMessage?.tool_calls) &&
+            persistedMessage.tool_calls.length > 0
+          if (
+            !(isCheckpointEmptyAssistantToolCallMessage(message) && hasPersistedContent) &&
+            !checkpointClearsToolCalls
+          ) {
+            return []
+          }
           return { ...message, content_priority: 1 }
         })
-        if (contentRepairs.length > 0) {
+        if (transcriptRepairs.length > 0) {
           try {
-            await window.api.threads.appendMessages(threadId, contentRepairs)
+            await window.api.threads.appendMessages(threadId, transcriptRepairs)
           } catch (error) {
-            console.warn("[ThreadContext] Failed to repair checkpoint transcript content:", error)
+            console.warn("[ThreadContext] Failed to repair checkpoint transcript:", error)
           }
         }
       }

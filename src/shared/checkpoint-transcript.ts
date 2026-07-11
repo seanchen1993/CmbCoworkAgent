@@ -180,7 +180,7 @@ function mergeCheckpointAuthorityToolCalls(
   baseToolCalls: unknown[] | undefined,
   incomingToolCalls: unknown[] | undefined
 ): unknown[] | undefined {
-  if (Array.isArray(baseToolCalls) && baseToolCalls.length > 0) return baseToolCalls
+  if (Array.isArray(baseToolCalls)) return baseToolCalls
   return Array.isArray(incomingToolCalls) && incomingToolCalls.length > 0
     ? incomingToolCalls
     : baseToolCalls

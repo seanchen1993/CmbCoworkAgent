@@ -977,6 +977,9 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
         idLessLiveToolResultKey === idLessLiveToolMessageKey,
       "id-less live worker tool results should resolve against the same turn-scoped lookup key"
     )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__worker-1", liveToolResultMessages)
     const valuesAfterTool = liveThenValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
       streamValuesEvent([
         {
@@ -1001,13 +1004,101 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
     )
     useAppStore
       .getState()
-      .appendWorkerFocusMessages("thread-123__worker__worker-1", valuesAfterTool)
+      .appendWorkerFocusMessages("thread-123__worker__worker-1", valuesAfterTool, {
+        orderedSnapshot: true
+      })
     const mergedAssistants = useAppStore
       .getState()
       .workerFocusMessages.filter((message) => message.role === "assistant")
     assert(
       mergedAssistants.length === 1 && mergedAssistants[0]?.id === liveAiId,
       "worker focus store should merge snapshot replay into the existing live assistant message"
+    )
+    const mergedLiveThenValues = useAppStore.getState().workerFocusMessages
+    const mergedLiveThenValuesTools = mergedLiveThenValues.filter(
+      (message) => message.role === "tool"
+    )
+    assert(
+      mergedLiveThenValues.map((message) => message.role).join(">") === "user>assistant>tool" &&
+        mergedLiveThenValuesTools.length === 1 &&
+        mergedLiveThenValuesTools[0]?.id === liveToolResultId,
+      "worker focus store should reorder a late values snapshot and dedupe the live tool result"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-live-thread-123__worker__worker-1-args",
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "worker-args-call", name: "execute", args: { command: "git status" } }],
+        created_at: new Date()
+      }
+    ])
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__worker-1",
+      [
+        {
+          id: "worker-snapshot-1",
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "worker-args-call", name: "execute", args: {} }],
+          created_at: new Date()
+        }
+      ],
+      { orderedSnapshot: true }
+    )
+    const mergedArgAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      mergedArgAssistants.length === 1 &&
+        mergedArgAssistants[0]?.tool_calls?.[0]?.args?.command === "git status",
+      "worker focus store should merge snapshot/live tool calls without downgrading streamed args"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "worker-1",
+      workerThreadId: "thread-123__worker__worker-1"
+    })
+    useAppStore.getState().appendWorkerFocusMessages("thread-123__worker__worker-1", [
+      {
+        id: "worker-live-tool-result-partial",
+        role: "tool",
+        name: "execute",
+        tool_call_id: "worker-partial-tool",
+        content: "partial output",
+        created_at: new Date()
+      }
+    ])
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__worker-1",
+      [
+        {
+          id: "worker-snapshot-2",
+          role: "tool",
+          name: "execute",
+          tool_call_id: "worker-partial-tool",
+          content: "partial output with final tail",
+          created_at: new Date()
+        }
+      ],
+      { orderedSnapshot: true }
+    )
+    const mergedPartialTools = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "tool")
+    assert(
+      mergedPartialTools.length === 1 &&
+        mergedPartialTools[0]?.content === "partial output with final tail",
+      "worker focus store should merge partial live tool results with fuller snapshot results"
     )
 
     const turnBoundaryTransport = new ElectronIPCTransport()

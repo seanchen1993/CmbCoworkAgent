@@ -2232,6 +2232,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       const canonicalCurrentId = this.resolveMainAssistantMessageIdAlias(currentId)
       if (canonicalCurrentId !== snapshotId) {
+        const currentHasToolCalls =
+          (this.observedMainToolCallIdsByMessageId.get(canonicalCurrentId)?.size ?? 0) > 0 ||
+          (this.completedToolCallsByMessageId.get(canonicalCurrentId)?.size ?? 0) > 0
+        const snapshotHasToolCalls =
+          Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+        if (currentHasToolCalls && !snapshotHasToolCalls) {
+          return message
+        }
         this.adoptMainAssistantMessageIdAlias(canonicalCurrentId, snapshotId)
         aliases.push({ fromId: canonicalCurrentId, toId: snapshotId })
       }

@@ -263,7 +263,11 @@ function App(): React.JSX.Element {
       if (workerFocusTransportRef.current !== transport) return
       const messages = transport.convertFocusedCoordinatorWorkerIPCEvent(event, threadId)
       if (messages.length > 0) {
-        useAppStore.getState().appendWorkerFocusMessages(workerThreadId, messages)
+        useAppStore
+          .getState()
+          .appendWorkerFocusMessages(workerThreadId, messages, {
+            orderedSnapshot: event.mode === "values"
+          })
       }
     })
 

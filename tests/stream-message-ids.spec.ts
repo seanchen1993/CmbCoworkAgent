@@ -1065,6 +1065,278 @@ function testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary(): void {
   assertEqual(aliases[1]?.toId, "final-ai-after-tool", "the post-tool slot should adopt its id")
 }
 
+function testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundaryAfterHistory(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: {
+            id: "live-tool-call-ai-id",
+            content: "",
+            tool_calls: [
+              {
+                id: "call-1",
+                name: "execute",
+                args: { command: "git status --short" }
+              }
+            ]
+          }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "ToolMessage"],
+          kwargs: {
+            id: "tool-result-id",
+            content: " M src/renderer/src/App.tsx",
+            tool_call_id: "call-1",
+            name: "execute"
+          }
+        },
+        { langgraph_node: "tools" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-final-ai-id", content: "DUP_TEST_A_20260711 only once" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "history-ai-id", content: "hello history" }
+          },
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { id: "current-user-id", content: "current question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: "final-tool-call-ai-id",
+              content: "",
+              tool_calls: [
+                {
+                  id: "call-1",
+                  name: "execute",
+                  args: { command: "git status --short" }
+                }
+              ]
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "ToolMessage"],
+            kwargs: {
+              id: "tool-result-id",
+              content: " M src/renderer/src/App.tsx",
+              tool_call_id: "call-1",
+              name: "execute"
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-answer-ai-id", content: "DUP_TEST_A_20260711 only once" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const aliases = events
+    .filter(
+      (event) =>
+        event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+    )
+    .map((event) => event.data as { fromId?: string; toId?: string })
+
+  assertEqual(aliases.length, 2, "current turn assistant slots should both reconcile")
+  assertEqual(
+    aliases[0]?.fromId,
+    "live-tool-call-ai-id",
+    "the tool-call slot should keep its own live id"
+  )
+  assertEqual(
+    aliases[0]?.toId,
+    "final-tool-call-ai-id",
+    "the tool-call slot should adopt the checkpoint id"
+  )
+  assertEqual(
+    aliases[1]?.fromId,
+    "live-final-ai-id",
+    "the final-answer slot should keep its own live id"
+  )
+  assertEqual(
+    aliases[1]?.toId,
+    "final-answer-ai-id",
+    "the final-answer slot should adopt the checkpoint id"
+  )
+}
+
+function testNormalValuesSnapshotMissingToolCallAssistantDoesNotStealToolSlot(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: {
+            id: "live-tool-call-ai-id",
+            content: "",
+            tool_calls: [
+              {
+                id: "call-1",
+                name: "execute",
+                args: { command: "git status --short" }
+              }
+            ]
+          }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "ToolMessage"],
+          kwargs: {
+            id: "tool-result-id",
+            content: " M src/renderer/src/App.tsx",
+            tool_call_id: "call-1",
+            name: "execute"
+          }
+        },
+        { langgraph_node: "tools" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-final-ai-id", content: "DUP_TEST_A_20260711 only once" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "history-ai-id", content: "hello history" }
+          },
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { id: "current-user-id", content: "current question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-answer-ai-id", content: "DUP_TEST_A_20260711 only once" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const aliases = events
+    .filter(
+      (event) =>
+        event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+    )
+    .map((event) => event.data as { fromId?: string; toId?: string })
+
+  assertEqual(
+    aliases.some(
+      (alias) =>
+        alias.fromId === "live-tool-call-ai-id" && alias.toId === "final-answer-ai-id"
+    ),
+    false,
+    "a text-only final snapshot must not alias the earlier tool-call assistant slot"
+  )
+}
+
 function testNormalValuesSnapshotDoesNotAliasToLaterAssistantThatQuotesLiveText(): void {
   const transport = new ElectronIPCTransport()
   const convertToSDKEvents = (
@@ -1550,6 +1822,14 @@ const tests: Array<[string, () => void]> = [
   [
     "testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary",
     testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary
+  ],
+  [
+    "testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundaryAfterHistory",
+    testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundaryAfterHistory
+  ],
+  [
+    "testNormalValuesSnapshotMissingToolCallAssistantDoesNotStealToolSlot",
+    testNormalValuesSnapshotMissingToolCallAssistantDoesNotStealToolSlot
   ],
   [
     "testNormalValuesSnapshotDoesNotAliasToLaterAssistantThatQuotesLiveText",
