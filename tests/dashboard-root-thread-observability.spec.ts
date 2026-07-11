@@ -65,6 +65,28 @@ function testUncommittedDetailUsesRootThreadId(): void {
   assertIncludes(source, "threadId: eventRootThreadId(props)", "uncommitted samples should prefer rootThreadId")
 }
 
+function testDevMockContainsWorkflowAndTaskSubagents(): void {
+  const source = section(dashboardSource, "function makeMockSubagentSessionTraces", "function makeMockAgentTrace")
+  assertIncludes(source, 'subagentKind: "workflow_agent"', "mock should include workflow agent sub traces")
+  assertIncludes(source, 'subagentKind: "task"', "mock should include task agent sub traces")
+  assertIncludes(source, "rootThreadId: workflowRootThreadId", "workflow sub traces should link root thread")
+  assertIncludes(source, "rootThreadId: taskRootThreadId", "task sub traces should link root thread")
+}
+
+function testDevMockThreadTracesResolveNamespacedRootThread(): void {
+  const source = section(dashboardSource, "function makeMockThreadTraces", "function makeMockSkillCodeStats")
+  assertIncludes(
+    source,
+    "findMockThreadGroupForThreadId(groups, threadId)",
+    "threadTraces mock should resolve namespaced root thread ids"
+  )
+  assertIncludes(
+    source,
+    "namespaceMockThreadGroupForRequest(exactGroup.traces, threadId)",
+    "threadTraces mock should return full namespaced mock groups"
+  )
+}
+
 function run(): void {
   testThreadListAggUsesRootThreadId()
   console.log("PASS dashboard thread list rootThreadId aggregation")
@@ -74,6 +96,10 @@ function run(): void {
   console.log("PASS dashboard commit pair rootThreadId detail")
   testUncommittedDetailUsesRootThreadId()
   console.log("PASS dashboard uncommitted rootThreadId detail")
+  testDevMockContainsWorkflowAndTaskSubagents()
+  console.log("PASS dashboard dev mock workflow/task subagents")
+  testDevMockThreadTracesResolveNamespacedRootThread()
+  console.log("PASS dashboard dev mock namespaced threadTraces")
 }
 
 run()
