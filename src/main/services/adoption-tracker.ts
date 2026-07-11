@@ -83,7 +83,11 @@ const SHARD_SIZE_LIMIT_BYTES = 10 * 1024 * 1024 // 10 MB per shard
 const SHARD_MAX_AGE_MS = 30 * 60 * 1000 // rotate every 30 min
 const DISK_HARD_CAP_BYTES = 100 * 1024 * 1024 // 100 MB
 const MAX_LINES_FOR_MEASURE = 20000 // skip giant files (applied symmetrically at gen + measure)
-const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
+// One live entry per active TraceCollector. Multi-agent runs (coordinator
+// workers + workflow subagents) can keep dozens alive at once, and eviction is
+// insertion-ordered — the root thread goes first — so leave ample headroom.
+// Entries are ~KB-sized; 256 stays well under 1 MB.
+const MAX_CONTEXT_ENTRIES = 256 // bound in-memory context size
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
@@ -668,7 +672,10 @@ function buildObservabilityEventProperties(
   ctx: AdoptionContext,
   threadId: string | null | undefined
 ): AdoptionObservabilityEventProperties {
-  if (!hasObservabilityContext(ctx)) return {}
+  // Even without a trace context (evicted entry, write outside a traced run),
+  // a known threadId must still yield rootThreadId: dashboard aggregations key
+  // on properties.rootThreadId and ES terms aggs silently drop docs missing it.
+  if (!hasObservabilityContext(ctx) && !threadId) return {}
   return {
     observabilitySchemaVersion:
       ctx.observabilitySchemaVersion ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,
@@ -746,7 +753,9 @@ function hasPendingObservabilityContext(pending: GenIndexRow): boolean {
 function buildPendingObservabilityEventProperties(
   pending: GenIndexRow
 ): AdoptionObservabilityEventProperties {
-  if (!hasPendingObservabilityContext(pending)) return {}
+  // Same rootThreadId guarantee as buildObservabilityEventProperties: adopt
+  // events from gens recorded without a trace context must stay aggregable.
+  if (!hasPendingObservabilityContext(pending) && !pending.thread_id) return {}
   return {
     observabilitySchemaVersion:
       pending.observability_schema_version ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,

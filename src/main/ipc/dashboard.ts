@@ -12,6 +12,7 @@ import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
+import { TRACE_OBSERVABILITY_SCHEMA_VERSION } from "../agent/trace/types"
 import type {
   AgentTrace,
   TraceNode,
@@ -6478,7 +6479,7 @@ function parseTeamBenchmarkTraceBucket(bucket: Record<string, unknown>): {
 
 /** 组织桶 join key：室 或 室␀组。 */
 function teamOrgKey(shi: string, group?: string): string {
-  return group ? `${shi} ${group}` : shi
+  return group ? `${shi}\u0000${group}` : shi
 }
 
 const TEAM_BENCHMARK_SHI_LIMIT = 200
@@ -8130,6 +8131,7 @@ function makeMockUserDetail(
   const tracePageSize = clampLimit(options?.tracePageSize ?? options?.traceLimit, 10, 50)
   const tracePage = clampLimit(options?.tracePage, 1, 1000)
   const baseTraces = makeMockSkillRecentTraces("代码审查", range, 10)
+  const baseTraceGroups = groupMockTraceDetailsByThread(baseTraces)
   // 列表按会话（thread）分页：每页 tracePageSize 个完整会话，每个会话内含若干 trace。
   const tracesPerThread = 3
   const totalThreads = Math.min(
@@ -8147,19 +8149,15 @@ function makeMockUserDetail(
       (_, traceIndex) => {
         const mockIndex = startIndex + traceIndex
         const trace = baseTraces[mockIndex % baseTraces.length]
-        return {
-          ...trace,
-          traceId: `mock-trace-${sapId}-${mockIndex}`,
-          threadId: `mock-thread-${sapId}-${Math.floor(mockIndex / tracesPerThread)}`,
+        return namespaceMockTraceDetails([trace], `mock-trace-${sapId}-${mockIndex}`, {
           sapId,
           ystId: user.ystId,
           userName: user.userName,
           orgName: user.orgName,
           userIp: `10.0.1.${20 + (mockIndex % 200)}`,
-          startedAt: new Date(
-            new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000
-          ).toISOString()
-        }
+          startedAt: () =>
+            new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+        })[0]
       }
     )
   } else {
@@ -8170,19 +8168,14 @@ function makeMockUserDetail(
       const threadOrdinal = startThread + threadIndex
       const threadId = `mock-thread-${sapId}-${threadOrdinal}`
       const threadStartMs = new Date(range.to).getTime() - threadOrdinal * 3 * 60 * 60 * 1000
-      return Array.from({ length: tracesPerThread }, (_, traceIndex) => {
-        const trace = baseTraces[(threadOrdinal + traceIndex) % baseTraces.length]
-        return {
-          ...trace,
-          traceId: `${threadId}-${traceIndex}`,
-          threadId,
+      const sourceGroup = baseTraceGroups[threadOrdinal % baseTraceGroups.length]?.traces ?? []
+      return namespaceMockTraceDetails(sourceGroup, threadId, {
           sapId,
           ystId: user.ystId,
           userName: user.userName,
           orgName: user.orgName,
           userIp: `10.0.1.${20 + (threadOrdinal % 200)}`,
-          startedAt: new Date(threadStartMs + traceIndex * 8 * 60 * 1000).toISOString()
-        }
+          startedAt: (traceIndex) => new Date(threadStartMs + traceIndex * 8 * 60 * 1000).toISOString()
       })
     })
   }
@@ -8773,10 +8766,7 @@ function makeMockProjectModeTraces(
   )
   const tracePage = clampLimit(options?.tracePage ?? options?.page, 1, 1000)
   const traceTriggerScope = normalizeTraceTriggerScope(options?.triggerScope)
-  const traces = makeMockSkillRecentTraces("项目模式", range, 10).map((trace, index) => ({
-    ...trace,
-    traceId: `${projectId}-${trace.traceId}-${index}`
-  }))
+  const traces = namespaceMockTraceDetails(makeMockSkillRecentTraces("项目模式", range, 10), projectId)
 
   if (traceViewMode === "trace") {
     const from = (tracePage - 1) * tracePageSize
@@ -8790,21 +8780,7 @@ function makeMockProjectModeTraces(
     }
   }
 
-  const grouped = new Map<string, DashboardTraceDetail[]>()
-  for (const trace of traces) {
-    const threadId = trace.threadId || "unknown-thread"
-    grouped.set(threadId, [...(grouped.get(threadId) ?? []), trace])
-  }
-  const groups = [...grouped.entries()]
-    .map(([threadId, threadTraces]) => {
-      const sorted = [...threadTraces].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
-      const latestStartedAt = sorted.reduce(
-        (latest, trace) => (trace.startedAt > latest ? trace.startedAt : latest),
-        sorted[0]?.startedAt ?? ""
-      )
-      return { threadId, latestStartedAt, traces: sorted }
-    })
-    .sort((a, b) => b.latestStartedAt.localeCompare(a.latestStartedAt))
+  const groups = groupMockTraceDetailsByThread(traces)
   const from = (tracePage - 1) * tracePageSize
 
   return {
@@ -8973,6 +8949,557 @@ function makeMockFeedback(
     },
     opts
   )
+}
+
+type MockTraceToolCall = AgentTrace["steps"][number]["toolCalls"][number]
+
+function makeMockTraceWithConversation(args: {
+  traceId: string
+  threadId: string
+  startedAt: Date
+  durationMs: number
+  userMessage: string
+  assistantSummary: string
+  toolCalls: MockTraceToolCall[]
+  skill: string
+  userIndex: number
+  outcome?: AgentTrace["outcome"]
+  errorMessage?: string
+  observability?: Partial<
+    Pick<
+      AgentTrace,
+      | "observabilitySchemaVersion"
+      | "traceKind"
+      | "executionMode"
+      | "rootTraceId"
+      | "rootThreadId"
+      | "parentTraceId"
+      | "parentThreadId"
+      | "parentSpanId"
+      | "linkType"
+      | "subagentKind"
+      | "subagentRunId"
+      | "subagentThreadId"
+      | "handoffAction"
+      | "handoffSourceAgent"
+      | "handoffTargetAgent"
+      | "coordinatorWorkerId"
+      | "coordinatorWorkerTurn"
+      | "coordinatorWorkerRole"
+      | "coordinatorWorkerWorkload"
+      | "workflowRunId"
+      | "workflowAgentIndex"
+      | "workflowPhase"
+      | "workflowAgentLabel"
+    >
+  >
+}): AgentTrace {
+  const endedAt = new Date(args.startedAt.getTime() + args.durationMs)
+  const midpoint = Math.ceil(args.toolCalls.length / 2)
+  const outcome = args.outcome ?? "success"
+
+  return {
+    traceId: args.traceId,
+    threadId: args.threadId,
+    observabilitySchemaVersion: TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind: "root",
+    executionMode: "normal",
+    rootTraceId: args.traceId,
+    rootThreadId: args.threadId,
+    ...(args.observability ?? {}),
+    startedAt: args.startedAt.toISOString(),
+    endedAt: endedAt.toISOString(),
+    durationMs: args.durationMs,
+    userMessage: args.userMessage,
+    modelId: "custom:minmax2.7",
+    modelName: "MiniMax-M2.7",
+    userName: ["张三", "李四", "王五"][args.userIndex % 3] ?? "张三",
+    sapId: `1001000${(args.userIndex % 8) + 1}`,
+    ystId: `27435${(args.userIndex % 8) + 1}`,
+    orgName: ["科技部", "零售一部", "风险管理部"][args.userIndex % 3] ?? "科技部",
+    userIp: `10.0.0.${20 + args.userIndex}`,
+    steps: [
+      {
+        index: 0,
+        startedAt: args.startedAt.toISOString(),
+        assistantText: isSubagentMockTrace(args.observability)
+          ? "我会按父 Agent 交付的子任务独立完成工具调用，并在结束时回传结果。"
+          : "我会先拆解任务，再把需要交给子 Agent 的部分分派出去。",
+        toolCalls: args.toolCalls.slice(0, midpoint)
+      },
+      {
+        index: 1,
+        startedAt: new Date(args.startedAt.getTime() + Math.min(12_000, args.durationMs)).toISOString(),
+        assistantText: args.assistantSummary,
+        toolCalls: args.toolCalls.slice(midpoint)
+      }
+    ],
+    modelCalls: [
+      {
+        messageId: `mock-message-${args.traceId}`,
+        startedAt: args.startedAt.toISOString(),
+        inputMessages: [{ role: "user", content: args.userMessage }],
+        outputMessage: {
+          role: "assistant",
+          content: args.assistantSummary
+        },
+        toolCalls: [],
+        tokenUsage: {
+          inputTokens: 3200 + args.userIndex * 420,
+          outputTokens: 900 + args.userIndex * 130,
+          totalTokens: 4100 + args.userIndex * 550
+        }
+      }
+    ],
+    totalToolCalls: args.toolCalls.length,
+    outcome,
+    ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
+    appVersion: ["1.4.5", "1.4.4"][args.userIndex % 2] ?? "1.4.5",
+    usedSkills: [args.skill],
+    evolvedSkills: args.userIndex % 2 === 0 ? [args.skill] : [],
+    triggerSource: "chat",
+    metadata: {
+      workspacePath: "/Users/demo/projects/cmbCowork"
+    }
+  }
+}
+
+function isSubagentMockTrace(
+  observability: Partial<AgentTrace> | undefined
+): boolean {
+  return observability?.traceKind === "subagent" || Boolean(observability?.subagentKind)
+}
+
+function makeMockDashboardTraceDetail(trace: AgentTrace, index: number): DashboardTraceDetail {
+  return {
+    ...traceToDashboardTraceDetail(trace),
+    sapId: trace.sapId ?? `100100${String(index + 1).padStart(2, "0")}`,
+    ystId: trace.ystId ?? `2743${String(50 + index).padStart(2, "0")}`,
+    userName: trace.userName ?? ["张三", "李四", "王五"][index % 3],
+    orgName: trace.orgName ?? ["测试 1 组", "测试 2 组", "开发三组"][index % 3],
+    userIp: trace.userIp ?? `10.0.0.${20 + index}`
+  }
+}
+
+function mockTraceGroupKey(trace: Pick<DashboardTraceDetail, "rootThreadId" | "threadId">): string {
+  return trace.rootThreadId || trace.threadId || "unknown-thread"
+}
+
+function namespaceMockTraceDetails(
+  traces: DashboardTraceDetail[],
+  namespace: string,
+  overrides?: Partial<Pick<DashboardTraceDetail, "sapId" | "ystId" | "userName" | "orgName">> & {
+    userIp?: string | ((index: number, trace: DashboardTraceDetail) => string)
+    startedAt?: (index: number, trace: DashboardTraceDetail) => string
+  }
+): DashboardTraceDetail[] {
+  const traceIds = new Map<string, string>()
+  const threadIds = new Map<string, string>()
+  const mapTraceId = (id: string): string => {
+    const existing = traceIds.get(id)
+    if (existing) return existing
+    const next = `${namespace}-${traceIds.size}-${id}`
+    traceIds.set(id, next)
+    return next
+  }
+  const mapThreadId = (id: string): string => {
+    const existing = threadIds.get(id)
+    if (existing) return existing
+    const next = `${namespace}-${id}`
+    threadIds.set(id, next)
+    return next
+  }
+
+  for (const trace of traces) {
+    mapTraceId(trace.traceId)
+    mapThreadId(trace.threadId)
+    if (trace.rootTraceId) mapTraceId(trace.rootTraceId)
+    if (trace.parentTraceId) mapTraceId(trace.parentTraceId)
+    if (trace.rootThreadId) mapThreadId(trace.rootThreadId)
+    if (trace.parentThreadId) mapThreadId(trace.parentThreadId)
+    if (trace.subagentThreadId) mapThreadId(trace.subagentThreadId)
+  }
+
+  return traces.map((trace, index) => ({
+    ...trace,
+    traceId: mapTraceId(trace.traceId),
+    threadId: mapThreadId(trace.threadId),
+    ...(trace.rootTraceId ? { rootTraceId: mapTraceId(trace.rootTraceId) } : {}),
+    ...(trace.parentTraceId ? { parentTraceId: mapTraceId(trace.parentTraceId) } : {}),
+    ...(trace.rootThreadId ? { rootThreadId: mapThreadId(trace.rootThreadId) } : {}),
+    ...(trace.parentThreadId ? { parentThreadId: mapThreadId(trace.parentThreadId) } : {}),
+    ...(trace.subagentThreadId ? { subagentThreadId: mapThreadId(trace.subagentThreadId) } : {}),
+    ...(overrides?.startedAt ? { startedAt: overrides.startedAt(index, trace) } : {}),
+    ...(overrides?.sapId ? { sapId: overrides.sapId } : {}),
+    ...(overrides?.ystId ? { ystId: overrides.ystId } : {}),
+    ...(overrides?.userName ? { userName: overrides.userName } : {}),
+    ...(overrides?.orgName ? { orgName: overrides.orgName } : {}),
+    ...(typeof overrides?.userIp === "function"
+      ? { userIp: overrides.userIp(index, trace) }
+      : overrides?.userIp
+        ? { userIp: overrides.userIp }
+        : {})
+  }))
+}
+
+function groupMockTraceDetailsByThread(
+  traces: DashboardTraceDetail[]
+): Array<{ threadId: string; latestStartedAt: string; traces: DashboardTraceDetail[] }> {
+  const grouped = new Map<string, DashboardTraceDetail[]>()
+  for (const trace of traces) {
+    const threadId = mockTraceGroupKey(trace)
+    grouped.set(threadId, [...(grouped.get(threadId) ?? []), trace])
+  }
+  return [...grouped.entries()]
+    .map(([threadId, threadTraces]) => {
+      const sorted = [...threadTraces].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+      const latestStartedAt = sorted.reduce(
+        (latest, trace) => (trace.startedAt > latest ? trace.startedAt : latest),
+        sorted[0]?.startedAt ?? ""
+      )
+      return { threadId, latestStartedAt, traces: sorted }
+    })
+    .sort((a, b) => b.latestStartedAt.localeCompare(a.latestStartedAt))
+}
+
+function findMockThreadGroupForThreadId(
+  groups: Array<{ threadId: string; traces: DashboardTraceDetail[] }>,
+  threadId: string
+): { threadId: string; traces: DashboardTraceDetail[] } | undefined {
+  return groups.find((group) => threadId === group.threadId || threadId.endsWith(group.threadId))
+}
+
+function namespaceMockThreadGroupForRequest(
+  traces: DashboardTraceDetail[],
+  requestedRootThreadId: string
+): DashboardTraceDetail[] {
+  return namespaceMockTraceDetails(traces, requestedRootThreadId).map((trace) => {
+    const isRootTrace = trace.traceKind !== "subagent" && !trace.parentTraceId
+    return {
+      ...trace,
+      rootThreadId: requestedRootThreadId,
+      ...(isRootTrace ? { threadId: requestedRootThreadId } : {}),
+      ...(trace.parentThreadId ? { parentThreadId: requestedRootThreadId } : {}),
+      ...(trace.subagentThreadId ? { subagentThreadId: trace.threadId } : {})
+    }
+  })
+}
+
+function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTrace[] {
+  const to = new Date(range.to)
+  const baseStart = to.getTime() - 18 * 60 * 1000
+  const isoStart = (offsetMs: number): Date => new Date(baseStart + offsetMs)
+
+  const teamRootTraceId = "mock-root-agent-team-trace"
+  const teamRootThreadId = "mock-root-agent-team-thread"
+  const workflowRootTraceId = "mock-root-ultra-workflow-trace"
+  const workflowRootThreadId = "mock-root-ultra-workflow-thread"
+  const taskRootTraceId = "mock-root-task-agent-trace"
+  const taskRootThreadId = "mock-root-task-agent-thread"
+
+  return [
+    makeMockTraceWithConversation({
+      traceId: teamRootTraceId,
+      threadId: teamRootThreadId,
+      startedAt: isoStart(0),
+      durationMs: 96_000,
+      skill,
+      userIndex: 0,
+      userMessage: "用 Agent Team 模式优化运营面板 trace 会话展示，并让 worker 写一个最小改动。",
+      assistantSummary:
+        "我已启动实现 Worker 和校验 Verifier：实现 Worker 负责补展示字段，Verifier 检查 thread 聚合和工具调用统计。",
+      toolCalls: [
+        {
+          name: "start_worker",
+          args: { role: "implementer", workload: "write", workerId: "frontend" },
+          result: "worker frontend 已启动",
+          durationMs: 420
+        },
+        {
+          name: "start_worker",
+          args: { role: "verifier", workload: "verify", workerId: "reviewer" },
+          result: "worker reviewer 已启动",
+          durationMs: 390
+        }
+      ],
+      observability: {
+        traceKind: "root",
+        executionMode: "coordinator",
+        rootTraceId: teamRootTraceId,
+        rootThreadId: teamRootThreadId
+      }
+    }),
+    makeMockTraceWithConversation({
+      traceId: "mock-agent-team-worker-frontend-trace",
+      threadId: "mock-agent-team-worker-frontend-thread",
+      startedAt: isoStart(2 * 60 * 1000),
+      durationMs: 122_000,
+      skill,
+      userIndex: 1,
+      userMessage: "实现 Worker：补齐 TraceHistoryDialog 中子 Agent 展示 mock，并保持主会话收束。",
+      assistantSummary:
+        "实现完成：子 Agent trace 会以 Worker frontend 标签出现，并通过 rootThreadId 回到主会话。",
+      toolCalls: [
+        {
+          name: "read_file",
+          args: { path: "src/renderer/src/components/dashboard/TraceHistoryDialog.tsx" },
+          result: "读取子 Agent 标签和 thread 分组逻辑",
+          durationMs: 260
+        },
+        {
+          name: "edit_file",
+          args: { path: "src/main/ipc/dashboard.ts", summary: "补 mock 子 Agent trace 字段" },
+          result: "写入 rootTraceId/rootThreadId/parentTraceId/subagentKind",
+          durationMs: 980
+        },
+        {
+          name: "execute",
+          args: { command: "npm run typecheck:node" },
+          result: "typecheck:node passed",
+          durationMs: 3600
+        }
+      ],
+      observability: {
+        traceKind: "subagent",
+        executionMode: "coordinator",
+        rootTraceId: teamRootTraceId,
+        rootThreadId: teamRootThreadId,
+        parentTraceId: teamRootTraceId,
+        parentThreadId: teamRootThreadId,
+        parentSpanId: "trace:root",
+        linkType: "async_span_link",
+        subagentKind: "coordinator_worker",
+        subagentRunId: "frontend:turn:1",
+        subagentThreadId: "mock-agent-team-worker-frontend-thread",
+        handoffAction: "start_worker",
+        handoffSourceAgent: "coordinator",
+        handoffTargetAgent: "frontend",
+        coordinatorWorkerId: "frontend",
+        coordinatorWorkerTurn: 1,
+        coordinatorWorkerRole: "implementer",
+        coordinatorWorkerWorkload: "write"
+      }
+    }),
+    makeMockTraceWithConversation({
+      traceId: "mock-agent-team-worker-reviewer-trace",
+      threadId: "mock-agent-team-worker-reviewer-thread",
+      startedAt: isoStart(5 * 60 * 1000),
+      durationMs: 78_000,
+      skill,
+      userIndex: 2,
+      userMessage: "Verifier Worker：复核实现 Worker 的改动是否会破坏旧 mock 和 thread 分页。",
+      assistantSummary:
+        "复核通过：主会话左侧显示子 2，工具调用汇总包含两个 worker，未发现分页口径回退。",
+      toolCalls: [
+        {
+          name: "rg",
+          args: { pattern: "rootThreadId|subagentKind", path: "src/main/ipc/dashboard.ts" },
+          result: "命中 mock 与真实归一化路径",
+          durationMs: 180
+        },
+        {
+          name: "execute",
+          args: { command: "npx tsx tests/dashboard-root-thread-observability.spec.ts" },
+          result: "PASS dashboard root-thread mock observability",
+          durationMs: 1200
+        }
+      ],
+      observability: {
+        traceKind: "subagent",
+        executionMode: "coordinator",
+        rootTraceId: teamRootTraceId,
+        rootThreadId: teamRootThreadId,
+        parentTraceId: teamRootTraceId,
+        parentThreadId: teamRootThreadId,
+        parentSpanId: "trace:root",
+        linkType: "async_span_link",
+        subagentKind: "coordinator_worker",
+        subagentRunId: "reviewer:turn:1",
+        subagentThreadId: "mock-agent-team-worker-reviewer-thread",
+        handoffAction: "start_worker",
+        handoffSourceAgent: "coordinator",
+        handoffTargetAgent: "reviewer",
+        coordinatorWorkerId: "reviewer",
+        coordinatorWorkerTurn: 1,
+        coordinatorWorkerRole: "verifier",
+        coordinatorWorkerWorkload: "verify"
+      }
+    }),
+    makeMockTraceWithConversation({
+      traceId: workflowRootTraceId,
+      threadId: workflowRootThreadId,
+      startedAt: isoStart(9 * 60 * 1000),
+      durationMs: 72_000,
+      skill,
+      userIndex: 3,
+      userMessage: "用 Ultra Workflow 模式走一遍需求拆解、实现和验证，并展示 workflow agent trace。",
+      assistantSummary:
+        "Ultra Workflow 已启动：规划、实现、验证三个阶段会以 workflow agent 子 trace 回挂到同一个 root thread。",
+      toolCalls: [
+        {
+          name: "launch_workflow",
+          args: { workflowRunId: "wf-smoke-001", phases: ["Plan", "Dev", "Verify"] },
+          result: "workflow run wf-smoke-001 started",
+          durationMs: 640
+        }
+      ],
+      observability: {
+        traceKind: "root",
+        executionMode: "workflow",
+        rootTraceId: workflowRootTraceId,
+        rootThreadId: workflowRootThreadId,
+        workflowRunId: "wf-smoke-001"
+      }
+    }),
+    makeMockTraceWithConversation({
+      traceId: "mock-ultra-workflow-dev-agent-trace",
+      threadId: "mock-ultra-workflow-dev-agent-thread",
+      startedAt: isoStart(11 * 60 * 1000),
+      durationMs: 134_000,
+      skill,
+      userIndex: 4,
+      userMessage: "Workflow Agent：在 Dev-代码实现 阶段补 trace mock 数据。",
+      assistantSummary:
+        "Dev Agent 已完成实现：写入 mock trace 组，展示为 Workflow Agent Dev-代码实现，并保留 phase 标签。",
+      toolCalls: [
+        {
+          name: "read_file",
+          args: { path: "src/main/ipc/dashboard.ts" },
+          result: "定位 makeMockProjectModeTraces 和 makeMockSkillRecentTraces",
+          durationMs: 300
+        },
+        {
+          name: "edit_file",
+          args: { path: "src/main/ipc/dashboard.ts", summary: "新增 workflow agent mock trace" },
+          result: "写入 workflowRunId/workflowPhase/workflowAgentLabel",
+          durationMs: 1140
+        },
+        {
+          name: "execute",
+          args: { command: "npm run typecheck:web" },
+          result: "typecheck:web passed",
+          durationMs: 4100
+        }
+      ],
+      observability: {
+        traceKind: "subagent",
+        executionMode: "workflow",
+        rootTraceId: workflowRootTraceId,
+        rootThreadId: workflowRootThreadId,
+        parentTraceId: workflowRootTraceId,
+        parentThreadId: workflowRootThreadId,
+        parentSpanId: "workflow:launch",
+        linkType: "async_span_link",
+        subagentKind: "workflow_agent",
+        subagentRunId: "wf-smoke-001:a1",
+        subagentThreadId: "mock-ultra-workflow-dev-agent-thread",
+        handoffAction: "workflow_agent",
+        handoffSourceAgent: "ultra_workflow",
+        handoffTargetAgent: "Dev-代码实现",
+        workflowRunId: "wf-smoke-001",
+        workflowAgentIndex: 1,
+        workflowPhase: "Dev-代码实现",
+        workflowAgentLabel: "Dev 实现 Agent"
+      }
+    }),
+    makeMockTraceWithConversation({
+      traceId: "mock-ultra-workflow-verify-agent-trace",
+      threadId: "mock-ultra-workflow-verify-agent-thread",
+      startedAt: isoStart(14 * 60 * 1000),
+      durationMs: 64_000,
+      skill,
+      userIndex: 5,
+      userMessage: "Workflow Agent：在 Verify-质量门禁 阶段检查展示效果。",
+      assistantSummary:
+        "Verify Agent 已确认：Thread 对话还原显示主 1 / 子 2，工具调用总数来自 root + workflow agents。",
+      toolCalls: [
+        {
+          name: "execute",
+          args: { command: "npx tsx tests/subagent-tool-call-count-observability.spec.ts" },
+          result: "PASS workflow subagent toolCallCount wiring",
+          durationMs: 980
+        }
+      ],
+      observability: {
+        traceKind: "subagent",
+        executionMode: "workflow",
+        rootTraceId: workflowRootTraceId,
+        rootThreadId: workflowRootThreadId,
+        parentTraceId: workflowRootTraceId,
+        parentThreadId: workflowRootThreadId,
+        parentSpanId: "workflow:launch",
+        linkType: "async_span_link",
+        subagentKind: "workflow_agent",
+        subagentRunId: "wf-smoke-001:a2",
+        subagentThreadId: "mock-ultra-workflow-verify-agent-thread",
+        handoffAction: "workflow_agent",
+        handoffSourceAgent: "ultra_workflow",
+        handoffTargetAgent: "Verify-质量门禁",
+        workflowRunId: "wf-smoke-001",
+        workflowAgentIndex: 2,
+        workflowPhase: "Verify-质量门禁",
+        workflowAgentLabel: "Verify 校验 Agent"
+      }
+    }),
+    makeMockTraceWithConversation({
+      traceId: taskRootTraceId,
+      threadId: taskRootThreadId,
+      startedAt: isoStart(17 * 60 * 1000),
+      durationMs: 52_000,
+      skill,
+      userIndex: 6,
+      userMessage: "用 deepagents task 子 Agent 读取代码并给出一句摘要。",
+      assistantSummary: "Task 子 Agent 已完成读取和摘要，结果会作为 Task Agent 子 trace 展示。",
+      toolCalls: [
+        {
+          name: "task",
+          args: { description: "读取 TraceConversation 并摘要" },
+          result: "task agent completed",
+          durationMs: 560
+        }
+      ],
+      observability: {
+        traceKind: "root",
+        executionMode: "normal",
+        rootTraceId: taskRootTraceId,
+        rootThreadId: taskRootThreadId
+      }
+    }),
+    makeMockTraceWithConversation({
+      traceId: "mock-task-agent-child-trace",
+      threadId: "mock-task-agent-child-thread",
+      startedAt: isoStart(18 * 60 * 1000),
+      durationMs: 45_000,
+      skill,
+      userIndex: 7,
+      userMessage: "Task Agent：读取 TraceConversation 并返回摘要。",
+      assistantSummary: "已读取组件：对话还原会按角色展示用户、助手和工具调用，并显示 parent/root 标签。",
+      toolCalls: [
+        {
+          name: "read_file",
+          args: { path: "src/renderer/src/components/trace/TraceConversation.tsx" },
+          result: "读取到 TraceThreadConversation 和 TraceContextPills",
+          durationMs: 300
+        }
+      ],
+      observability: {
+        traceKind: "subagent",
+        executionMode: "normal",
+        rootTraceId: taskRootTraceId,
+        rootThreadId: taskRootThreadId,
+        parentTraceId: taskRootTraceId,
+        parentThreadId: taskRootThreadId,
+        parentSpanId: "tool:task",
+        linkType: "parent_child",
+        subagentKind: "task",
+        subagentRunId: "task:trace-summary",
+        subagentThreadId: "mock-task-agent-child-thread",
+        handoffAction: "task",
+        handoffSourceAgent: "main",
+        handoffTargetAgent: "task"
+      }
+    })
+  ]
 }
 
 function makeMockAgentTrace(skill: string, range: TimeRange, index: number): AgentTrace {
@@ -9159,39 +9686,15 @@ function makeMockSkillRecentTraces(
   range: TimeRange,
   limit = 10
 ): DashboardTraceDetail[] {
-  return Array.from({ length: clampLimit(limit, 10, 10) }, (_, index) => {
-    const trace = makeMockAgentTrace(skill, range, index)
-    const usage = summarizeTraceTokenUsage(trace.modelCalls)
-    const nodes = buildTraceTree(trace)
-    return {
-      traceId: trace.traceId,
-      threadId: trace.threadId,
-      startedAt: trace.startedAt,
-      endedAt: trace.endedAt,
-      durationMs: trace.durationMs,
-      userMessage: trace.userMessage,
-      sapId: `100100${String(index + 1).padStart(2, "0")}`,
-      ystId: `2743${String(50 + index).padStart(2, "0")}`,
-      userName: ["张三", "李四", "王五"][index % 3],
-      orgName: ["测试 1 组", "测试 2 组", "开发三组"][index % 3],
-      userIp: `10.0.0.${20 + index}`,
-      modelId: trace.modelId,
-      modelName: trace.modelName,
-      outcome: trace.outcome,
-      totalToolCalls: trace.totalToolCalls,
-      modelCallCount: Array.isArray(trace.modelCalls) ? trace.modelCalls.length : 0,
-      userInputRequestCount: countUserInputRequests(nodes),
-      totalInputTokens: usage.totalInputTokens,
-      totalOutputTokens: usage.totalOutputTokens,
-      totalTokens: usage.totalTokens,
-      ...(trace.appVersion ? { appVersion: trace.appVersion } : {}),
-      usedSkills: trace.usedSkills,
-      evolvedSkills: trace.evolvedSkills,
-      triggerSource: trace.triggerSource,
-      nodes,
-      rawAvailable: true
-    }
-  })
+  const count = clampLimit(limit, 10, 10)
+  const linkedTraces = makeMockSubagentSessionTraces(skill, range)
+  const ordinaryTraces = Array.from(
+    { length: Math.max(0, count - linkedTraces.length) },
+    (_, index) => makeMockAgentTrace(skill, range, index + linkedTraces.length)
+  )
+  return [...linkedTraces, ...ordinaryTraces]
+    .slice(0, count)
+    .map((trace, index) => makeMockDashboardTraceDetail(trace, index))
 }
 
 function makeMockThreadTraces(threadId: string): DashboardTraceDetail[] {
@@ -9201,16 +9704,21 @@ function makeMockThreadTraces(threadId: string): DashboardTraceDetail[] {
     to: new Date(now).toISOString()
   }
   const base = makeMockSkillRecentTraces("auto-code-workflow-v1.0.0", range, 10)
+  const groups = groupMockTraceDetailsByThread(base)
+  const exactGroup = findMockThreadGroupForThreadId(groups, threadId)
+  if (exactGroup) {
+    return exactGroup.threadId === threadId
+      ? exactGroup.traces
+      : namespaceMockThreadGroupForRequest(exactGroup.traces, threadId)
+  }
+
   // 真实环境 threadTraces(id) 只返回该会话的 trace；mock 同样把若干条 trace 归到
-  // 同一个 threadId，保证按 threadId 分组时恰好是「单个会话」。
+  // 同一个 rootThreadId，保证按 thread 视图时恰好是「单个完整会话」。
   const seed = Array.from(threadId).reduce((acc, char) => acc + char.charCodeAt(0), 0)
   const count = Math.min(base.length, 2 + (seed % 3))
-  return base.slice(0, count).map((trace, index) => ({
-    ...trace,
-    threadId,
-    traceId: `${threadId}-${index}`,
-    startedAt: new Date(now - (count - index) * 12 * 60 * 1000).toISOString()
-  }))
+  return namespaceMockTraceDetails(base.slice(0, count), threadId, {
+    startedAt: (index) => new Date(now - (count - index) * 12 * 60 * 1000).toISOString()
+  })
 }
 
 function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
@@ -9319,18 +9827,35 @@ function makeMockSkillDetail(
   const totalTraces = traceViewMode === "thread" ? 30 : 64
   const startIndex = (tracePage - 1) * tracePageSize
   const baseTraces = makeMockSkillRecentTraces(skill, range, 10)
-  const traces = Array.from(
-    { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
-    (_, traceIndex) => {
-      const trace = baseTraces[traceIndex % baseTraces.length]
-      const mockIndex = startIndex + traceIndex
-      return {
-        ...trace,
-        traceId: `${trace.traceId}-skill-page-${tracePage}-${traceIndex}`,
-        startedAt: new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
-      }
-    }
-  )
+  const baseTraceGroups = groupMockTraceDetailsByThread(baseTraces)
+  const traces =
+    traceViewMode === "thread"
+      ? Array.from(
+          { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
+          (_, threadIndex) => {
+            const mockIndex = startIndex + threadIndex
+            const sourceGroup = baseTraceGroups[mockIndex % baseTraceGroups.length]?.traces ?? []
+            return namespaceMockTraceDetails(sourceGroup, `skill-page-${tracePage}-${threadIndex}`, {
+              startedAt: (traceIndex) =>
+                new Date(
+                  new Date(range.to).getTime() -
+                    mockIndex * 35 * 60 * 1000 +
+                    traceIndex * 5 * 60 * 1000
+                ).toISOString()
+            })
+          }
+        ).flat()
+      : Array.from(
+          { length: Math.max(0, Math.min(tracePageSize, totalTraces - startIndex)) },
+          (_, traceIndex) => {
+            const mockIndex = startIndex + traceIndex
+            const trace = baseTraces[mockIndex % baseTraces.length]
+            return namespaceMockTraceDetails([trace], `skill-trace-page-${tracePage}-${traceIndex}`, {
+              startedAt: () =>
+                new Date(new Date(range.to).getTime() - mockIndex * 35 * 60 * 1000).toISOString()
+            })[0]
+          }
+        )
   return {
     stats: makeMockSkillCodeStats(skill),
     traces,
