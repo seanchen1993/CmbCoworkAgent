@@ -3457,6 +3457,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const checkpointRawRestoredMessages = channelValues.messages.flatMap(
               (msg, index): Message | [] => {
                 const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
+                const lcSource = additionalKwargs?.lc_source
+                if (lcSource === "summarization") {
+                  return []
+                }
                 if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
                   return []
                 }
