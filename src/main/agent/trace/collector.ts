@@ -32,6 +32,7 @@ import type {
   AgentTrace,
   TraceContext,
   TraceExecutionMode,
+  TraceHarnessFeatureContext,
   TraceKind,
   TraceObservabilityContext,
   TraceSkillEvalExtension,
@@ -221,7 +222,7 @@ function buildSkillAuthorByRawName(
 export interface TraceCollectorOptions extends Partial<TraceObservabilityContext> {
   traceId?: string
   triggerSource?: TraceTriggerSource
-  harnessFeature?: { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
+  harnessFeature?: TraceHarnessFeatureContext
   includeSkillEval?: boolean
 }
 
@@ -279,9 +280,7 @@ export class TraceCollector {
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
   private readonly triggerSource: TraceTriggerSource
-  private readonly harnessFeature:
-    | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
-    | undefined
+  private readonly harnessFeature: TraceHarnessFeatureContext | undefined
   private observability: TraceObservabilityContext
   private readonly includeSkillEval: boolean
 
@@ -347,6 +346,11 @@ export class TraceCollector {
           // best-effort: leave adapter fields absent on resolution failure
         }
       }
+      // setAdoptionContext intentionally merges incremental updates. A new
+      // trace is a new ownership epoch, though, so reset the prior turn first;
+      // otherwise a background-finishing child could leave stale Skill/model/
+      // project fields for a fast continuation on the same thread.
+      clearAdoptionContext(this.threadId)
       setAdoptionContext(this.threadId, {
         traceId: this.traceId,
         modelId: this.modelId,
@@ -376,7 +380,8 @@ export class TraceCollector {
       traceId: this.traceId,
       threadId: this.threadId,
       rootNodeId: this.rootNodeId,
-      ...this.observability
+      ...this.observability,
+      ...(this.harnessFeature ? { harnessFeature: { ...this.harnessFeature } } : {})
     }
   }
 
@@ -875,22 +880,25 @@ export class TraceCollector {
     }
     const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
 
-    writeTraceFile(traceWithEval)
-
-    // Fire-and-forget: trace upload is a side-channel operation and must
-    // never block the main agent flow. Errors are logged and swallowed.
-    void Promise.resolve()
-      .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
-      .catch((e) => {
-        console.warn("[Tracer] Reporter.report() threw:", e)
-      })
-
-    // Clear adoption context — subsequent write_file calls on this thread
-    // will no longer carry this trace's attribution.
     try {
-      clearAdoptionContext(this.threadId)
-    } catch {
-      // ignore
+      writeTraceFile(traceWithEval)
+
+      // Fire-and-forget: trace upload is a side-channel operation and must
+      // never block the main agent flow. Errors are logged and swallowed.
+      void Promise.resolve()
+        .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
+        .catch((e) => {
+          console.warn("[Tracer] Reporter.report() threw:", e)
+        })
+    } finally {
+      // A child trace may finish in the background after a continuation has
+      // installed a newer context on the same worker thread. Only clear the
+      // context still owned by this trace, even when persistence fails.
+      try {
+        clearAdoptionContext(this.threadId, this.traceId)
+      } catch {
+        // ignore
+      }
     }
 
     return traceWithEval
@@ -997,6 +1005,52 @@ export class TraceCollector {
     node.status = status
     node.endedAt = nowIsoLocal()
   }
+}
+
+/** Construct optional child-run telemetry behind a hard failure boundary. */
+export function createTraceCollectorSafely(
+  threadId: string,
+  userMessage: string,
+  modelId: string,
+  options: TraceCollectorOptions = {},
+  scope = "Tracer"
+): TraceCollector | undefined {
+  try {
+    return new TraceCollector(threadId, userMessage, modelId, options)
+  } catch (error) {
+    console.warn(`[${scope}] trace creation failed; continuing without telemetry:`, error)
+    return undefined
+  }
+}
+
+/** Run a synchronous trace mutation without allowing telemetry to affect the run. */
+export function runTraceSideEffect(scope: string, effect: () => void): void {
+  try {
+    effect()
+  } catch (error) {
+    console.warn(`[${scope}] trace update failed; continuing without this telemetry:`, error)
+  }
+}
+
+/** Complete and persist a child trace without delaying the worker/workflow result. */
+export function finishTraceInBackground(
+  tracer: TraceCollector,
+  outcome: TraceOutcome,
+  errorMessage?: string,
+  scope = "Tracer"
+): void {
+  // Defer the whole finish call, not just its returned promise. Async functions
+  // execute synchronously until their first await, so calling finish inline
+  // would still add telemetry work to the child-run completion path.
+  setImmediate(() => {
+    try {
+      void tracer.finish(outcome, errorMessage).catch((error) => {
+        console.warn(`[${scope}] background trace finish failed:`, error)
+      })
+    } catch (error) {
+      console.warn(`[${scope}] background trace finish failed:`, error)
+    }
+  })
 }
 
 // ─────────────────────────────────────────────────────────

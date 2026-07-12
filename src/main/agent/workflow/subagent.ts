@@ -2,9 +2,19 @@ import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
-import { extractTextFromUnknownContent } from "../coordinator-worker-stream"
-import { TraceCollector } from "../trace/collector"
+import {
+  extractTextFromUnknownContent,
+  observeSkillUsageFromStream
+} from "../coordinator-worker-stream"
+import { SkillUsageDetector } from "../skill-evolution/usage-detector"
+import {
+  createTraceCollectorSafely,
+  finishTraceInBackground,
+  runTraceSideEffect,
+  type TraceCollector
+} from "../trace/collector"
 import type { TraceContext, TraceOutcome } from "../trace/types"
+import { setAdoptionContext } from "../../services/adoption-tracker"
 import { validateJsonSchemaValue } from "./json-schema"
 import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
@@ -254,29 +264,37 @@ function createWorkflowSubagentTrace(
 ): TraceCollector | undefined {
   const parent = deps.traceContext
   if (!parent) return undefined
-  const requestedModelId = normalizeWorkflowModelId(request.model) ?? deps.defaultModelId ?? "unknown"
+  const requestedModelId =
+    normalizeWorkflowModelId(request.model) ?? deps.defaultModelId ?? "unknown"
   const workflowPhase = request.phase ?? undefined
-  return new TraceCollector(threadId, request.prompt, requestedModelId, {
-    traceKind: "subagent",
-    executionMode: "workflow",
-    rootTraceId: parent.rootTraceId,
-    rootThreadId: parent.rootThreadId,
-    parentTraceId: parent.traceId,
-    parentThreadId: parent.threadId,
-    parentSpanId: parent.rootNodeId,
-    linkType: "async_span_link",
-    subagentKind: "workflow_agent",
-    subagentRunId: `${request.runId}:agent:${request.agentIndex}`,
-    subagentThreadId: threadId,
-    handoffAction: "workflow_agent",
-    handoffSourceAgent: "workflow",
-    handoffTargetAgent: request.label,
-    workflowRunId: request.runId,
-    workflowAgentIndex: request.agentIndex,
-    workflowPhase,
-    workflowAgentLabel: request.label,
-    includeSkillEval: false
-  })
+  return createTraceCollectorSafely(
+    threadId,
+    request.prompt,
+    requestedModelId,
+    {
+      traceKind: "subagent",
+      executionMode: "workflow",
+      rootTraceId: parent.rootTraceId,
+      rootThreadId: parent.rootThreadId,
+      parentTraceId: parent.traceId,
+      parentThreadId: parent.threadId,
+      parentSpanId: parent.rootNodeId,
+      linkType: "async_span_link",
+      subagentKind: "workflow_agent",
+      subagentRunId: `${request.runId}:agent:${request.agentIndex}`,
+      subagentThreadId: threadId,
+      handoffAction: "workflow_agent",
+      handoffSourceAgent: "workflow",
+      handoffTargetAgent: request.label,
+      workflowRunId: request.runId,
+      workflowAgentIndex: request.agentIndex,
+      workflowPhase,
+      workflowAgentLabel: request.label,
+      harnessFeature: parent.harnessFeature,
+      includeSkillEval: false
+    },
+    "Workflow"
+  )
 }
 
 async function runOnce(
@@ -305,8 +323,31 @@ async function runOnce(
   let traceTerminalRecorded = false
   let traceOutcome: TraceOutcome = "success"
   let traceError: string | undefined
+  const skillUsageDetector = new SkillUsageDetector()
+  const syncSkillAttribution = (): void => {
+    if (!tracer) return
+    const usedSkills = skillUsageDetector.getUsedSkillNames()
+    const skillSource = skillUsageDetector.getUsedSkillSourceRefs()
+    tracer.setUsedSkills(usedSkills)
+    tracer.setSkillSource(skillSource)
+    tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
+    setAdoptionContext(threadId, { usedSkills, skillSource })
+  }
   const recordValuesSnapshot = (snapshot: unknown): void => {
     latestSnapshot = snapshot
+    runTraceSideEffect("Workflow Skill observer", () => {
+      if (
+        observeSkillUsageFromStream(
+          "values",
+          snapshot,
+          skillUsageDetector,
+          undefined,
+          request.prompt
+        )
+      ) {
+        syncSkillAttribution()
+      }
+    })
     request.onValues?.(snapshot)
   }
 
@@ -351,11 +392,13 @@ async function runOnce(
       disallowedTools: request.disallowedTools,
       shellAccess: request.shellAccess
     })
-    tracer?.setModelId(
-      modelFellBack
-        ? (deps.defaultModelId ?? "unknown")
-        : (normalizeWorkflowModelId(request.model) ?? deps.defaultModelId ?? "unknown")
-    )
+    runTraceSideEffect("Workflow", () => {
+      tracer?.setModelId(
+        modelFellBack
+          ? (deps.defaultModelId ?? "unknown")
+          : (normalizeWorkflowModelId(request.model) ?? deps.defaultModelId ?? "unknown")
+      )
+    })
 
     const streamConfig = {
       configurable: { thread_id: threadId },
@@ -475,34 +518,40 @@ async function runOnce(
             : "subagent completed without calling the structured_output tool"
         )
       }
-      tracer?.addTerminalNode({
-        type: "message",
-        output: text.trim() ? text : structured.value,
-        metadata: {
-          outputTokens,
-          toolCallCount,
-          modelFellBack,
-          structuredOutput: true
-        }
+      runTraceSideEffect("Workflow", () => {
+        if (!tracer) return
+        tracer.addTerminalNode({
+          type: "message",
+          output: text.trim() ? text : structured.value,
+          metadata: {
+            outputTokens,
+            toolCallCount,
+            modelFellBack,
+            structuredOutput: true
+          }
+        })
+        traceTerminalRecorded = true
       })
-      traceTerminalRecorded = true
       return { text, structured: structured.value, outputTokens, modelFellBack }
     }
 
     if (!text.trim()) {
       throw new Error("subagent produced no assistant output")
     }
-    tracer?.addTerminalNode({
-      type: "message",
-      output: text,
-      metadata: {
-        outputTokens,
-        toolCallCount,
-        modelFellBack,
-        structuredOutput: false
-      }
+    runTraceSideEffect("Workflow", () => {
+      if (!tracer) return
+      tracer.addTerminalNode({
+        type: "message",
+        output: text,
+        metadata: {
+          outputTokens,
+          toolCallCount,
+          modelFellBack,
+          structuredOutput: false
+        }
+      })
+      traceTerminalRecorded = true
     })
-    traceTerminalRecorded = true
     return { text, structured: undefined, outputTokens, modelFellBack }
   } catch (error) {
     if (isWorkflowAbortError(error)) {
@@ -522,10 +571,11 @@ async function runOnce(
     throw error
   } finally {
     if (tracer) {
-      try {
+      const tracerToFinish = tracer
+      runTraceSideEffect("Workflow", () => {
         const toolCallCount = extractWorkflowToolCallCount(latestSnapshot)
         if (!traceTerminalRecorded && toolCallCount > 0) {
-          tracer.addTerminalNode({
+          tracerToFinish.addTerminalNode({
             type: traceOutcome === "cancelled" ? "cancel" : "error",
             output: traceError,
             metadata: {
@@ -534,10 +584,8 @@ async function runOnce(
           })
           traceTerminalRecorded = true
         }
-        await tracer.finish(traceOutcome, traceError)
-      } catch (traceFinishError) {
-        console.warn("[Workflow] Subagent trace finish failed:", traceFinishError)
-      }
+      })
+      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow")
     }
     if (timeoutTimer) clearTimeout(timeoutTimer)
     request.signal.removeEventListener("abort", onParentAbort)

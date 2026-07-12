@@ -145,10 +145,21 @@ export interface TraceObservabilityContext {
   workflowAgentLabel?: string
 }
 
+/** Project-mode binding inherited by child traces so code adoption emitted from
+ * coordinator/workflow subagents keeps the same project/feature/stage scope as
+ * the root turn. */
+export interface TraceHarnessFeatureContext {
+  projectId: string
+  slug: string
+  nodeName?: string
+  nodeStatus?: string
+}
+
 export interface TraceContext extends TraceObservabilityContext {
   traceId: string
   threadId: string
   rootNodeId?: string
+  harnessFeature?: TraceHarnessFeatureContext
 }
 
 // ─────────────────────────────────────────────────────────

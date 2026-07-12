@@ -214,11 +214,13 @@ import {
   extractWorkerFinalText,
   extractWorkerUsage,
   isWorkerFinalTextDelta,
+  observeSkillUsageFromStream,
   shouldClearWorkerFinalText,
   observeWorkerProgress,
   summarizeWorkerText,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
+import { setAdoptionContext } from "../services/adoption-tracker"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
@@ -235,7 +237,12 @@ import {
   type WorkflowSubagentRuntime
 } from "./workflow/subagent"
 import { isWorkflowSubagentThreadOf } from "./workflow/types"
-import { TraceCollector } from "./trace/collector"
+import {
+  createTraceCollectorSafely,
+  finishTraceInBackground,
+  runTraceSideEffect,
+  type TraceCollector
+} from "./trace/collector"
 import type { TraceContext, TraceOutcome } from "./trace/types"
 
 function isAbortError(error: unknown): boolean {
@@ -3209,58 +3216,13 @@ async function applyWorkerPromptSubmitHooks({
   return effectivePrompt
 }
 
-function getWorkerStreamObject(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : null
-}
-
 function observeWorkerSkillUsage(
   mode: string,
   payload: unknown,
   detector: SkillUsageDetector,
   valuesContext?: WorkerValuesSnapshotContext
-): void {
-  const observeMessage = (message: unknown): void => {
-    const data = getWorkerStreamObject(message)
-    if (!data) return
-    const kwargs = getWorkerStreamObject(data.kwargs) ?? {}
-    const toolCalls = Array.isArray(kwargs.tool_calls)
-      ? kwargs.tool_calls
-      : Array.isArray(data.tool_calls)
-        ? data.tool_calls
-        : []
-    for (const rawToolCall of toolCalls) {
-      const toolCall = getWorkerStreamObject(rawToolCall)
-      if (!toolCall || toolCall.name !== "read_file") continue
-      const args = getWorkerStreamObject(toolCall.args) ?? {}
-      const readPathRaw =
-        (typeof args.path === "string" && args.path) ||
-        (typeof args.file_path === "string" && args.file_path) ||
-        ""
-      if (readPathRaw) {
-        detector.onReadFilePath(readPathRaw)
-      }
-    }
-  }
-
-  if (mode === "messages") {
-    if (!Array.isArray(payload)) return
-    const [message] = payload as [unknown]
-    observeMessage(message)
-    return
-  }
-
-  if (mode !== "values") return
-  const resolvedValuesContext = valuesContext ?? createWorkerValuesSnapshotContext(mode, payload)
-  if (!resolvedValuesContext) return
-  if (resolvedValuesContext.skillsMetadata.length > 0) {
-    detector.onSkillsMetadata(
-      resolvedValuesContext.skillsMetadata as Array<{
-        name?: string
-        path?: string
-      }>
-    )
-  }
-  resolvedValuesContext.messages.forEach((message) => observeMessage(message))
+): boolean {
+  return observeSkillUsageFromStream(mode, payload, detector, valuesContext)
 }
 
 async function runWorkerStopHooksWithRevision({
@@ -4772,6 +4734,15 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let workerTraceTerminalRecorded = false
     let workerTraceOutcome: TraceOutcome = "success"
     let workerTraceError: string | undefined
+    const syncWorkerSkillAttribution = (): void => {
+      if (!workerTracer) return
+      const usedSkills = workerSkillUsageDetector.getUsedSkillNames()
+      const skillSource = workerSkillUsageDetector.getUsedSkillSourceRefs()
+      workerTracer.setUsedSkills(usedSkills)
+      workerTracer.setSkillSource(skillSource)
+      workerTracer.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
+      setAdoptionContext(workerInput.workerThreadId, { usedSkills, skillSource })
+    }
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
     }
@@ -4850,7 +4821,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         workerRoutingResult?.layer !== "pinned"
       )
       if (traceContext) {
-        workerTracer = new TraceCollector(
+        workerTracer = createTraceCollectorSafely(
           workerInput.workerThreadId,
           effectiveWorkerPrompt,
           workerRoutingResult?.resolvedModelId ?? modelId ?? "unknown",
@@ -4873,8 +4844,10 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             coordinatorWorkerTurn: workerInput.workerTurn,
             coordinatorWorkerRole: workerInput.role,
             coordinatorWorkerWorkload: workerInput.workload,
+            harnessFeature: traceContext.harnessFeature,
             includeSkillEval: false
-          }
+          },
+          "CoordinatorWorker"
         )
       }
       const streamConfig = {
@@ -4895,7 +4868,11 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             })
           }
           const valuesContext = createWorkerValuesSnapshotContext(mode, data, effectiveWorkerPrompt)
-          observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)
+          runTraceSideEffect("CoordinatorWorker Skill observer", () => {
+            if (observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)) {
+              syncWorkerSkillAttribution()
+            }
+          })
           observeWorkerProgress(
             mode,
             data,
@@ -4994,7 +4971,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             streamConfig
           )
           usedWorkerModelId = candidateId
-          workerTracer?.setModelId(candidateId)
+          runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(candidateId))
           break
         } catch (error) {
           if (!isRetryableApiError(error)) throw error
@@ -5062,7 +5039,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
           usedWorkerModelId = nextCandidate
-          workerTracer?.setModelId(nextCandidate)
+          runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(nextCandidate))
         }
       }
 
@@ -5169,16 +5146,19 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       }
 
       const summary = summarizeWorkerText(finalText)
-      workerTracer?.addTerminalNode({
-        type: "message",
-        output: summary,
-        metadata: {
-          tokenUsage,
-          toolNames: Array.from(workerToolNames),
-          toolCallCount: workerToolCallCount
-        }
+      runTraceSideEffect("CoordinatorWorker", () => {
+        if (!workerTracer) return
+        workerTracer.addTerminalNode({
+          type: "message",
+          output: summary,
+          metadata: {
+            tokenUsage,
+            toolNames: Array.from(workerToolNames),
+            toolCallCount: workerToolCallCount
+          }
+        })
+        workerTraceTerminalRecorded = true
       })
-      workerTraceTerminalRecorded = true
       return {
         summary,
         rawText: finalText,
@@ -5190,9 +5170,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       throw error
     } finally {
       if (workerTracer) {
-        try {
+        const tracerToFinish = workerTracer
+        runTraceSideEffect("CoordinatorWorker", () => {
           if (!workerTraceTerminalRecorded && workerToolCallCount > 0) {
-            workerTracer.addTerminalNode({
+            tracerToFinish.addTerminalNode({
               type: workerTraceOutcome === "cancelled" ? "cancel" : "error",
               output: workerTraceError,
               metadata: {
@@ -5203,10 +5184,13 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             })
             workerTraceTerminalRecorded = true
           }
-          await workerTracer.finish(workerTraceOutcome, workerTraceError)
-        } catch (traceFinishError) {
-          console.warn("[CoordinatorWorker] trace finish failed:", traceFinishError)
-        }
+        })
+        finishTraceInBackground(
+          tracerToFinish,
+          workerTraceOutcome,
+          workerTraceError,
+          "CoordinatorWorker"
+        )
       }
       workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)
       const cleanupResults = await Promise.allSettled([

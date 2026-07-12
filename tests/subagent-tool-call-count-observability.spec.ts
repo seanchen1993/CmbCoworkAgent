@@ -23,7 +23,14 @@ const workflowSubagentSource = readFileSync(
   join(__dirname, "../src/main/agent/workflow/subagent.ts"),
   "utf8"
 )
-const traceCollectorSource = readFileSync(join(__dirname, "../src/main/agent/trace/collector.ts"), "utf8")
+const traceCollectorSource = readFileSync(
+  join(__dirname, "../src/main/agent/trace/collector.ts"),
+  "utf8"
+)
+const adoptionTrackerSource = readFileSync(
+  join(__dirname, "../src/main/services/adoption-tracker.ts"),
+  "utf8"
+)
 
 function testCoordinatorWorkerWritesToolCallCount(): void {
   assertIncludes(
@@ -89,6 +96,90 @@ function testTraceCollectorUsesToolCallCountMetadata(): void {
   )
 }
 
+function testSubagentAdoptionAttributionWiring(): void {
+  assertIncludes(
+    runtimeSource,
+    "harnessFeature: traceContext.harnessFeature",
+    "coordinator worker should inherit project-mode context from the root trace"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    "harnessFeature: parent.harnessFeature",
+    "workflow subagent should inherit project-mode context from the root trace"
+  )
+  assertIncludes(
+    runtimeSource,
+    "setAdoptionContext(workerInput.workerThreadId, { usedSkills, skillSource })",
+    "coordinator worker should publish observed Skills to adoption context"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    "setAdoptionContext(threadId, { usedSkills, skillSource })",
+    "workflow subagent should publish observed Skills to adoption context"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    "observeSkillUsageFromStream(",
+    "workflow subagent should observe Skill reads from cumulative values snapshots"
+  )
+}
+
+function testSubagentTraceSidecarIsolation(): void {
+  assertIncludes(
+    runtimeSource,
+    "workerTracer = createTraceCollectorSafely(",
+    "coordinator worker should tolerate trace construction failure"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    "return createTraceCollectorSafely(",
+    "workflow subagent should tolerate trace construction failure"
+  )
+  assertIncludes(
+    runtimeSource,
+    'runTraceSideEffect("CoordinatorWorker Skill observer"',
+    "coordinator Skill observation should not affect worker execution"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    'runTraceSideEffect("Workflow Skill observer"',
+    "workflow Skill observation should not affect subagent execution"
+  )
+  assertIncludes(
+    runtimeSource,
+    "finishTraceInBackground(",
+    "coordinator trace completion should run in the background"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    'finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow")',
+    "workflow trace completion should run in the background"
+  )
+  assert(
+    !runtimeSource.includes("await workerTracer.finish("),
+    "coordinator completion must not await child trace persistence"
+  )
+  assert(
+    !workflowSubagentSource.includes("await tracer.finish("),
+    "workflow completion must not await child trace persistence"
+  )
+  assertIncludes(
+    traceCollectorSource,
+    "clearAdoptionContext(this.threadId, this.traceId)",
+    "background trace completion should conditionally clear only its own context"
+  )
+  assertIncludes(
+    traceCollectorSource,
+    "clearAdoptionContext(this.threadId)\n      setAdoptionContext(this.threadId",
+    "a new trace should replace stale adoption context before publishing its own fields"
+  )
+  assertIncludes(
+    adoptionTrackerSource,
+    "threadContexts.get(threadId)?.traceId !== expectedTraceId",
+    "a stale child trace must not clear a newer continuation context"
+  )
+}
+
 function run(): void {
   testCoordinatorWorkerWritesToolCallCount()
   console.log("PASS coordinator worker toolCallCount wiring")
@@ -96,6 +187,10 @@ function run(): void {
   console.log("PASS workflow subagent toolCallCount wiring")
   testTraceCollectorUsesToolCallCountMetadata()
   console.log("PASS trace collector toolCallCount metadata aggregation")
+  testSubagentAdoptionAttributionWiring()
+  console.log("PASS subagent adoption attribution wiring")
+  testSubagentTraceSidecarIsolation()
+  console.log("PASS subagent trace sidecar isolation")
 }
 
 run()

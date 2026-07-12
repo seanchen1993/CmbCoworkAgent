@@ -881,7 +881,8 @@ export function setAdoptionContext(threadId: string, ctx: AdoptionContext): void
   threadContexts.set(threadId, { ...(prior ?? {}), ...ctx })
 }
 
-export function clearAdoptionContext(threadId: string): void {
+export function clearAdoptionContext(threadId: string, expectedTraceId?: string): void {
+  if (expectedTraceId && threadContexts.get(threadId)?.traceId !== expectedTraceId) return
   threadContexts.delete(threadId)
 }
 
