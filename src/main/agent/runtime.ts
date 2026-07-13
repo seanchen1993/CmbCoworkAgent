@@ -24,6 +24,7 @@ import {
   DEFAULT_TEMPERATURE,
   DEFAULT_TOP_P,
   DEFAULT_TOP_K,
+  DEFAULT_THINKING_EFFORT,
   getEnabledPluginSkillSourceMetadata,
   getEnabledPluginSkillMiddlewareSources,
   getPlugins,
@@ -45,6 +46,10 @@ import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
+import type {
+  HarnessAgentmdLoadStatusItem,
+  HarnessDeployUnitMapping
+} from "../../shared/harness-board-types"
 import {
   createAgent,
   createMiddleware,
@@ -151,13 +156,23 @@ import {
   getGlobalMcpCapabilityService
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
-import { InterleavedThinkingChatOpenAICompletions } from "./interleaved-thinking-completions"
+import {
+  InterleavedThinkingChatOpenAICompletions,
+  ReasoningDisplayChatOpenAICompletions
+} from "./interleaved-thinking-completions"
+import {
+  createMalformedToolCallGuardMiddleware,
+  createMalformedToolCallRecoveryMiddleware
+} from "./malformed-tool-call-recovery"
 import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
+  buildAgentsPromptLoadStatusItems,
   DEFAULT_AGENTS_MAX_BYTES,
   DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-  loadAgentsPromptForWorkspace
+  loadAgentsPromptForWorkspaces,
+  loadAgentsPromptForWorkspace,
+  type AgentsPromptRuntimeResult
 } from "./agents-md"
 import {
   buildCoordinatorSystemPrompt,
@@ -210,6 +225,11 @@ import { patchRuntimeReadFileTool } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
 import { workflowRunManager } from "./workflow/run-manager"
 import { WORKFLOW_MODE_SYSTEM_PROMPT } from "./workflow/prompts"
+import {
+  PROJECT_MODE_MEMORY_ENV,
+  isMemoryAllowedForProjectMode,
+  isProjectModeMemoryEnabled
+} from "../project-mode-memory"
 import {
   isWorkflowStructuredOutputFatalError,
   type WorkflowSubagentRuntime
@@ -351,6 +371,52 @@ const SHARED_TOOL_NAMES = new Set([
 ])
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
+const PROJECT_MODE_SUBAGENTS_ENV = "VITE_PROJECT_MODE_SUBAGENTS_ENABLED"
+const PROJECT_MODE_SUBAGENTS_DISABLED_VALUES = new Set(["0", "false", "off", "no", "disabled"])
+
+function isProjectModeSubagentsEnabled(): boolean {
+  const raw = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined)
+    ?.trim()
+    .toLowerCase()
+  return raw ? !PROJECT_MODE_SUBAGENTS_DISABLED_VALUES.has(raw) : true
+}
+
+function resolveProjectModeTaskToolEnabled(enableTaskTool?: boolean): boolean {
+  return enableTaskTool ?? isProjectModeSubagentsEnabled()
+}
+
+type RuntimePromptToolPolicy = {
+  isProjectMode: boolean
+  includeCurrentTime: boolean
+  includeTimestampRule: boolean
+  includeMemory: boolean
+  includeSubagents: boolean
+  includeCodeExecRoute: boolean
+  includeSavedCodeExecTools: boolean
+  includeInjectedToolUsagePrompt: boolean
+  includeDeferredToolInventoryPrompt: boolean
+}
+
+function createRuntimePromptToolPolicy(input: {
+  featureId?: string
+  isHarnessProjectSession?: boolean
+  agentMode: AgentMode
+  memoryEnabled: boolean
+  enableTaskTool?: boolean
+}): RuntimePromptToolPolicy {
+  const isProjectMode = Boolean(input.featureId) || input.isHarnessProjectSession === true
+  return {
+    isProjectMode,
+    includeCurrentTime: !isProjectMode,
+    includeTimestampRule: !isProjectMode,
+    includeMemory: input.memoryEnabled && isMemoryAllowedForProjectMode(input.featureId),
+    includeSubagents: !isProjectMode || resolveProjectModeTaskToolEnabled(input.enableTaskTool),
+    includeCodeExecRoute: !isProjectMode && input.agentMode !== "coordinator",
+    includeSavedCodeExecTools: true,
+    includeInjectedToolUsagePrompt: true,
+    includeDeferredToolInventoryPrompt: true
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -615,6 +681,59 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
+export interface CapturedSystemPromptPreview {
+  threadId: string
+  prompt: string
+  updatedAt: number
+}
+
+const systemPromptPreviewByThread = new Map<string, CapturedSystemPromptPreview>()
+const MAX_SYSTEM_PROMPT_PREVIEW_ENTRIES = 10
+
+function setCapturedSystemPromptPreview(preview: CapturedSystemPromptPreview): void {
+  systemPromptPreviewByThread.delete(preview.threadId)
+  systemPromptPreviewByThread.set(preview.threadId, preview)
+
+  while (systemPromptPreviewByThread.size > MAX_SYSTEM_PROMPT_PREVIEW_ENTRIES) {
+    const oldestThreadId = systemPromptPreviewByThread.keys().next().value
+    if (!oldestThreadId) break
+    systemPromptPreviewByThread.delete(oldestThreadId)
+  }
+}
+
+function stringifySystemPromptForPreview(systemMessage: unknown): string {
+  if (typeof systemMessage === "string") return systemMessage
+  if (!systemMessage || typeof systemMessage !== "object") return String(systemMessage ?? "")
+
+  const content = (systemMessage as { content?: unknown }).content
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => {
+        if (typeof block === "string") return block
+        if (block && typeof block === "object") {
+          const text = (block as { text?: unknown }).text
+          if (typeof text === "string") return text
+        }
+        return ""
+      })
+      .filter(Boolean)
+      .join("\n\n")
+  }
+
+  try {
+    return JSON.stringify(systemMessage, null, 2)
+  } catch {
+    return String(systemMessage)
+  }
+}
+
+export function getCapturedSystemPromptPreview(
+  threadId: string
+): CapturedSystemPromptPreview | null {
+  return systemPromptPreviewByThread.get(threadId) ?? null
+}
+
 const SUMMARY_KEEP_RATIO = 0.1
 const SUMMARY_INPUT_RATIO = 0.65
 const SUMMARY_INPUT_TOKEN_CAP = 700_000
@@ -724,6 +843,8 @@ export function createScopedMcpCapabilityService(
     harnessProjectId?: string
     harnessAdapterName?: string
     harnessAdapterVersion?: string
+    harnessNodeName?: string
+    harnessNodeStatus?: string
     projectCode?: string
     projectDir?: string
   }
@@ -957,6 +1078,8 @@ export function createScopedMcpCapabilityService(
         harnessProjectId: baseContext.harnessProjectId,
         harnessAdapterName: baseContext.harnessAdapterName,
         harnessAdapterVersion: baseContext.harnessAdapterVersion,
+        harnessNodeName: baseContext.harnessNodeName,
+        harnessNodeStatus: baseContext.harnessNodeStatus,
         projectCode: baseContext.projectCode,
         projectDir: baseContext.projectDir,
         pluginId,
@@ -1091,6 +1214,7 @@ When NOT to use the task tool:
 - If the task is trivial (a few tool calls or simple lookup)
 - If delegating does not reduce token usage, complexity, or context switching
 - If splitting would add latency without benefit
+- If the user or Skills explicitly instruct not to use the task tool or subagents.
 
 ## Important Task Tool Usage Notes to Remember
 - You can call up to 3 \`task\` tools in a single response. When delegated tasks have no dependencies, launch independent subagents in parallel instead of serializing work that can run simultaneously.
@@ -1320,7 +1444,7 @@ function stampSubagentOwnerMetadata<T>(middleware: T): T {
  *     don't trim old edit/write tool args after a fixed 20 messages.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
+export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   const {
     model = "claude-sonnet-4-5-20250929",
     tools = [],
@@ -1365,8 +1489,10 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
     // adapter keeps createDeepAgent oblivious to that wiring.
     onToolFailureSignal,
+    onFinalSystemPrompt,
     onFailureFuseNotice
   }: {
+    onFinalSystemPrompt?: (prompt: string) => void
     onToolFailureSignal?: (input: {
       toolName: string | undefined
       toolCallId: string | undefined
@@ -1391,6 +1517,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
           ]
         })
     : BASE_PROMPT
+  if (typeof finalSystemPrompt === "string") {
+    onFinalSystemPrompt?.(finalSystemPrompt)
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
@@ -1436,7 +1565,7 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const createFsMiddleware = (): any => {
+  const createFsMiddleware = (fsSystemPrompt = filesystemSystemPrompt): any => {
     // For any restricted leaf runtime — coordinator worker (workload) OR registry
     // workflow agent (explicit denylist/shell) — strip the blocked tools' docs
     // from the injected fs system prompt so a removed tool's description doesn't
@@ -1444,12 +1573,12 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     // only cleans the prompt; it changes no tool permissions or behaviour. The
     // unrestricted main agent (filesystemAccess undefined) keeps the full docs.
     const effectiveFsPrompt =
-      filesystemSystemPrompt && filesystemAccess
+      fsSystemPrompt && filesystemAccess
         ? (stripBlockedToolDocs(
-            filesystemSystemPrompt,
+            fsSystemPrompt,
             blockedToolNamesForAccess(filesystemAccess)
           ) as string)
-        : filesystemSystemPrompt
+        : fsSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
@@ -1809,6 +1938,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
+    // FIRST for the same reason as the main agent: reject recovered-malformed
+    // calls before any tool lifecycle (hooks/fuse/task-mmd) can observe them.
+    createMalformedToolCallGuardMiddleware(),
     todoListMiddleware(),
     createFsMiddleware(),
     ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
@@ -1818,6 +1950,9 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
     toolErrorMiddleware,
     createSummarizationMiddleware(summarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
+    // Same malformed tool-call recovery as the main agent — task subagents call
+    // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
+    createMalformedToolCallRecoveryMiddleware(),
     createPatchToolCallsMiddleware()
   ]
 
@@ -1942,14 +2077,37 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
       })
     ]
   }
+  const systemPromptPreviewCaptureMiddleware =
+    threadId && typeof threadId === "string"
+      ? [
+          createMiddleware({
+            name: "systemPromptPreviewCapture",
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            wrapModelCall: (request: any, handler: any) => {
+              setCapturedSystemPromptPreview({
+                threadId,
+                prompt: stringifySystemPromptForPreview(request.systemMessage),
+                updatedAt: Date.now()
+              })
+              return handler(request)
+            }
+          })
+        ]
+      : []
 
   return createAgent({
     model,
     systemPrompt: finalSystemPrompt,
     tools,
     middleware: [
+      // FIRST (outermost wrapToolCall): reject recovered-malformed calls before
+      // ANY tool lifecycle — PreToolUse hooks must not block/rewrite them (that
+      // would replace the diagnosis with a misleading message), and the fuse/
+      // task-mmd must not observe a tool that never runs. Mirrors Claude Code's
+      // validate-before-permissions order.
+      createMalformedToolCallGuardMiddleware(),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled ? [createFsMiddleware()] : []),
+      ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
       ...postFsToolDocStripMiddleware,
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
@@ -1973,11 +2131,19 @@ function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
         : []),
       createSummarizationMiddleware(summarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
+      // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
+      // invalid_tool_calls into normalized tool_calls (the guard middleware above
+      // rejects them with a cause-targeted error before the tool runs), and strip
+      // any already-poisoned raw tool call from the outgoing request so the
+      // OpenAI-compatible API can't 400. Complementary to patchToolCalls below
+      // (which only pairs NORMALIZED dangling calls).
+      createMalformedToolCallRecoveryMiddleware(),
       createPatchToolCallsMiddleware(),
       ...skillsMiddlewareArray,
       ...memoryMiddlewareArray,
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
-      ...customMiddleware
+      ...customMiddleware,
+      ...systemPromptPreviewCaptureMiddleware
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
@@ -2055,14 +2221,80 @@ function getRuntimeTimeContext(date: Date = new Date()): {
   }
 }
 
-function getSystemPrompt(
+function renderRuntimeTimeContextLines(
+  timeContext: ReturnType<typeof getRuntimeTimeContext>,
+  options: { includeCurrentTime?: boolean; includeTimestampRule?: boolean } = {}
+): string {
+  const includeCurrentTime = options.includeCurrentTime ?? true
+  const includeTimestampRule = includeCurrentTime && options.includeTimestampRule === true
+  return [
+    `- Timezone: ${timeContext.timezone}`,
+    ...(includeCurrentTime ? [`- Current time: ${timeContext.currentTime}`] : []),
+    ...(includeTimestampRule
+      ? [
+          "- Timestamp rule: Do not invent dates or timestamps. If a timestamp is useful, use the current time above; otherwise omit it."
+        ]
+      : [])
+  ].join("\n")
+}
+
+function normalizeInjectedMarkdownHeadings(content: string, minLevel = 3): string {
+  let inFence = false
+  let fenceChar: "`" | "~" | null = null
+  let fenceLength = 0
+
+  return content
+    .split("\n")
+    .map((line) => {
+      const fenceMatch = line.match(/^( {0,3})(`{3,}|~{3,})/)
+      if (fenceMatch) {
+        const marker = fenceMatch[2]
+        const markerChar = marker[0] as "`" | "~"
+        if (!inFence) {
+          inFence = true
+          fenceChar = markerChar
+          fenceLength = marker.length
+        } else if (markerChar === fenceChar && marker.length >= fenceLength) {
+          inFence = false
+          fenceChar = null
+          fenceLength = 0
+        }
+        return line
+      }
+
+      if (inFence) return line
+
+      return line.replace(
+        /^( {0,3})(#{1,6})([ \t]+.+)$/,
+        (_match: string, indent: string, hashes: string, rest: string) => {
+          const normalizedLevel = Math.max(hashes.length, minLevel)
+          return `${indent}${"#".repeat(normalizedLevel)}${rest}`
+        }
+      )
+    })
+    .join("\n")
+}
+
+function renderAgentsInstructionsPrompt(content: string): string {
+  const normalizedContent = normalizeInjectedMarkdownHeadings(content).trim()
+  if (!normalizedContent) return ""
+  return `## AGENTS.md instructions\n\n<AGENTS_INSTRUCTIONS>\n${normalizedContent}\n</AGENTS_INSTRUCTIONS>`
+}
+
+function renderPluginPromptInject(content?: string): string | undefined {
+  const normalizedContent = content?.trim()
+  if (!normalizedContent) return undefined
+  return `## Skills Runtime Context\n\n${normalizedContent}`
+}
+
+export function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
-  workingDirPromptAppendix?: string,
   options: {
     includeBackgroundExec?: boolean
     includeSubagents?: boolean
-    memoryEnabled?: boolean
+    includeMemory?: boolean
+    includeCurrentTime?: boolean
   } = {}
 ): string {
   const includeBackgroundExec = options.includeBackgroundExec ?? true
@@ -2089,12 +2321,14 @@ function getSystemPrompt(
       : "- Use cmd.exe syntax for shell commands (e.g., dir instead of ls, type instead of cat)\n- Use && to chain commands, use ^ for line continuation, use %VAR% for environment variables"
 
   const timeContext = getRuntimeTimeContext()
+  const timeContextLines = renderRuntimeTimeContextLines(timeContext, {
+    includeCurrentTime: options.includeCurrentTime
+  })
   const workingDirSection = `
 ### System Environment
 - Operating system: ${platform} (${process.arch})
 - Default shell: ${shell}
-- Timezone: ${timeContext.timezone}
-- Current time: ${timeContext.currentTime}
+${timeContextLines}
 ${shellGuidance}
 
 ### File System and Paths
@@ -2157,13 +2391,10 @@ ${shellGuidance}
 `
         : ""
 
-  const memorySection = options.memoryEnabled ? MEMORY_SYSTEM_PROMPT : ""
-  const workingDirAppendix = workingDirPromptAppendix?.trim()
-    ? `${workingDirPromptAppendix.trim()}\n`
-    : ""
+  const memorySection =
+    options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
   return (
     workingDirSection +
-    workingDirAppendix +
     backgroundExecSection +
     sandboxSection +
     renderBaseSystemPrompt({ includeSubagents: options.includeSubagents }) +
@@ -2188,6 +2419,9 @@ ${shellGuidance}
 //    activeRuns registry) to avoid a circular import.
 const checkpointers = new Map<string, SqlJsSaver>()
 const MAX_CACHED_CHECKPOINTERS = 12
+const MAIN_THREAD_MAX_ROOT_CHECKPOINTS = 3
+const MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS = 30
+const MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES = 48 * 1024 * 1024
 // In-flight eviction closes, so getCheckpointer can wait one out before
 // recreating an instance for the same thread (avoids reading a half-written DB).
 const closingCheckpointers = new Map<string, Promise<void>>()
@@ -2440,7 +2674,15 @@ async function getCheckpointerInternal(
   }
   const dbPath = getThreadCheckpointPath(threadId)
   const bornRetireEpoch = retireEpochOf(threadId)
-  const checkpointer = new SqlJsSaver(dbPath)
+  const isSubThreadCheckpoint = threadId.includes("__")
+  const checkpointer = new SqlJsSaver(dbPath, undefined, {
+    maxRootCheckpoints: isSubThreadCheckpoint ? 1 : MAIN_THREAD_MAX_ROOT_CHECKPOINTS,
+    maxRootForkBoundaryCheckpoints: isSubThreadCheckpoint
+      ? 0
+      : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
+    maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
+    maxNonRootCheckpoints: 1
+  })
   await checkpointer.initialize()
   // Re-check AFTER the awaits above: a deletion landing while this instance
   // was initializing scans the three registries, but this instance is in none
@@ -3093,6 +3335,9 @@ function getModelInstance(
     topP?: number
     topK?: number
     interleavedThinking?: boolean
+    enableThinking?: boolean
+    enableThinkingEffort?: boolean
+    thinkingEffort?: "high" | "max"
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number
@@ -3111,6 +3356,9 @@ function getModelInstance(
   const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
   const topP = customConfig.topP ?? DEFAULT_TOP_P
   const topK = customConfig.topK ?? DEFAULT_TOP_K
+  const thinkingEffort = customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT
+  const enableThinking = customConfig.enableThinking === true
+  const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
 
   const baseFields = {
     model: resolvedModel,
@@ -3125,7 +3373,12 @@ function getModelInstance(
     maxRetries: 0,
     modelKwargs: {
       parallel_tool_calls: true,
-      ...(topK > 0 ? { top_k: topK } : {})
+      ...(topK > 0 ? { top_k: topK } : {}),
+      chat_template_kwargs: {
+        enable_thinking: enableThinking,
+        ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
+      },
+      ...(enableThinking ? { thinking: { type: "enabled" } } : {})
     },
     configuration: {
       baseURL: customConfig.baseUrl,
@@ -3136,14 +3389,53 @@ function getModelInstance(
     }
   }
 
-  if (!customConfig.interleavedThinking) {
-    return new ChatOpenAI(baseFields)
+  if (enableThinking && customConfig.interleavedThinking) {
+    return new ChatOpenAI({
+      ...baseFields,
+      completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {
+        exposeReasoning: enableThinking
+      })
+    } as never)
   }
 
-  return new ChatOpenAI({
-    ...baseFields,
-    completions: new InterleavedThinkingChatOpenAICompletions(baseFields)
-  } as never)
+  if (enableThinking) {
+    return new ChatOpenAI({
+      ...baseFields,
+      completions: new ReasoningDisplayChatOpenAICompletions(baseFields)
+    } as never)
+  }
+
+  return new ChatOpenAI(baseFields)
+}
+
+type AgentsPromptLoader = "plugin" | "cmbdevclaw"
+
+interface AgentsPromptLoadStatusPayload {
+  items: HarnessAgentmdLoadStatusItem[]
+  loader: AgentsPromptLoader
+  promptPreview?: string
+}
+
+function applyDeployUnitMappingsToAgentmdLoadStatus(
+  items: HarnessAgentmdLoadStatusItem[],
+  mappings: HarnessDeployUnitMapping[] | undefined
+): HarnessAgentmdLoadStatusItem[] {
+  if (!Array.isArray(mappings) || mappings.length === 0) return items
+
+  const deployUnitByRepoPath = new Map<string, string>()
+  for (const mapping of mappings) {
+    const localRepoPath = mapping.localRepoPath.trim()
+    const deployUnitId = mapping.deployUnitId.trim()
+    if (!localRepoPath || !deployUnitId) continue
+    deployUnitByRepoPath.set(resolve(localRepoPath), deployUnitId)
+  }
+  if (deployUnitByRepoPath.size === 0) return items
+
+  return items.map((item) => {
+    if (!path.isAbsolute(item.deployUnitId)) return item
+    const deployUnitId = deployUnitByRepoPath.get(resolve(item.deployUnitId))
+    return deployUnitId ? { ...item, deployUnitId: deployUnitId } : item
+  })
 }
 
 export interface CreateAgentRuntimeOptions {
@@ -3157,8 +3449,8 @@ export interface CreateAgentRuntimeOptions {
   workspacePath: string
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
-  /** Extra content appended immediately after the working directory section. */
-  workingDirPromptAppendix?: string
+  /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
+  pluginPromptInject?: string
   /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
   pluginOutputDir?: string
   /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
@@ -3173,12 +3465,18 @@ export interface CreateAgentRuntimeOptions {
   pluginWorkspace?: string
   /** Harness feature identifier exposed to child processes as FEATURE_ID. */
   featureId?: string
+  /** Project-level Harness sessions use the same runtime prompt/tool policy as project mode. */
+  isHarnessProjectSession?: boolean
   /** Harness project stable id exposed to child processes as HARNESS_PROJECT_ID. */
   harnessProjectId?: string
   /** Bound adapter name exposed to child processes as HARNESS_ADAPTER_NAME. */
   harnessAdapterName?: string
   /** Bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
   harnessAdapterVersion?: string
+  /** Current harness workflow node/stage name exposed to child processes as HARNESS_NODE_NAME. */
+  harnessNodeName?: string
+  /** Current harness workflow node/stage status exposed to child processes as HARNESS_NODE_STATUS. */
+  harnessNodeStatus?: string
   /** Harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to child processes as PROJECT_DIR. */
@@ -3191,6 +3489,20 @@ export interface CreateAgentRuntimeOptions {
   enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
+  /** Project-mode plugin switch for the inline task tool. Undefined keeps legacy env behavior. */
+  enableTaskTool?: boolean
+  /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
+  harnessAgentsPrompt?: string
+  /** Optional Harness project AGENTS.md load status returned by the plugin. */
+  agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
+  /** Additional project-mode workspace roots whose AGENTS.md files should be loaded by framework fallback. */
+  additionalAgentsWorkspacePaths?: string[]
+  /** Project-mode deploy unit metadata for additional workspace AGENTS.md load status display. */
+  additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
+  /** Project-mode callback for reporting final AGENTS.md load status and preview. */
+  onAgentsPromptLoadStatus?: (payload: AgentsPromptLoadStatusPayload) => void
+  /** Test/debug hook: captures the final system prompt passed to LangChain. */
+  onFinalSystemPrompt?: (prompt: string) => void
   /** Skip injecting MEMORY.md into the system prompt (the memory_search/memory_get
    * tools stay available). Used by read-only agentType leaves (Explore/Plan) —
    * mirrors Claude Code, whose Explore/Plan omitClaudeMd and whose built-in agents
@@ -3288,7 +3600,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     modelId,
     extraSystemPrompt,
     coordinatorTurnPrompt,
-    workingDirPromptAppendix,
+    pluginPromptInject,
     pluginOutputDir,
     systemId,
     pluginRoot,
@@ -3296,15 +3608,25 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     pluginName,
     pluginWorkspace,
     featureId,
+    isHarnessProjectSession,
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     retryHooks,
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
+    enableTaskTool,
+    harnessAgentsPrompt,
+    agentmdLoadStatus,
+    additionalAgentsWorkspacePaths,
+    additionalAgentsWorkspaceMappings,
+    onAgentsPromptLoadStatus,
+    onFinalSystemPrompt,
     disableMemoryInjection = false,
     memoryEnabled: inheritedMemoryEnabled,
     agentMode = "normal",
@@ -3346,11 +3668,28 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   })()
   const memoryEnabledForThread =
     inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
+  const runtimePolicy = createRuntimePromptToolPolicy({
+    featureId,
+    isHarnessProjectSession,
+    agentMode,
+    memoryEnabled: memoryEnabledForThread,
+    enableTaskTool
+  })
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
+  if (runtimePolicy.isProjectMode) {
+    const envValue = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
+    console.log(
+      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"}, ${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
+    )
+    const memoryEnvValue = (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
+    console.log(
+      `[Runtime] Project mode memory enabled: ${isProjectModeMemoryEnabled()} (${PROJECT_MODE_MEMORY_ENV}=${memoryEnvValue})`
+    )
+  }
   const hookScope = providedHookScope ?? createHookScope()
   // Coordinator mode: the coordinator never "uses" a skill itself (it has no
   // filesystem/tools and only delegates to workers), so a user's explicit
@@ -3510,6 +3849,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     onFileMutation,
@@ -3640,6 +3981,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         harnessProjectId,
         harnessAdapterName,
         harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
         projectCode,
         projectDir,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
@@ -3696,36 +4039,99 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const isReadOnlyRuntime =
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, workingDirPromptAppendix, {
-    includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-    includeSubagents: !featureId,
-    memoryEnabled: memoryEnabledForThread
-  })
-  let agentsPrompt: Awaited<ReturnType<typeof loadAgentsPromptForWorkspace>> = {
+  let systemPrompt = getSystemPrompt(
+    workspacePath,
+    windowsSandbox,
+    {
+      includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
+      includeSubagents: runtimePolicy.includeSubagents,
+      includeMemory: runtimePolicy.includeMemory,
+      includeCurrentTime: runtimePolicy.includeCurrentTime
+    }
+  )
+  let agentsPrompt: AgentsPromptRuntimeResult = {
+    type: "workspace",
     prompt: null,
     projectRoot: workspacePath,
     loadedPaths: [],
     truncated: false
   }
-  if (enableAgentsPrompt) {
-    agentsPrompt = await loadAgentsPromptForWorkspace(workspacePath, {
-      globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-      projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
-    })
+  const normalizedHarnessAgentsPrompt = harnessAgentsPrompt?.trim()
+  const normalizedHarnessAgentmdLoadStatus = Array.isArray(agentmdLoadStatus)
+    ? agentmdLoadStatus
+    : []
+  const shouldLoadWorkspaceAgentsPrompt = enableAgentsPrompt && !normalizedHarnessAgentsPrompt
+  let agentsPromptLoader: AgentsPromptLoader | undefined
+  let agentsPromptLoadStatusItems: HarnessAgentmdLoadStatusItem[] = []
+  if (shouldLoadWorkspaceAgentsPrompt) {
+    const frameworkAdditionalAgentsWorkspacePaths = additionalAgentsWorkspacePaths ?? []
+    agentsPrompt =
+      frameworkAdditionalAgentsWorkspacePaths.length > 0 || onAgentsPromptLoadStatus
+        ? await loadAgentsPromptForWorkspaces(
+            {
+              primaryWorkspacePath: workspacePath,
+              additionalWorkspacePaths: frameworkAdditionalAgentsWorkspacePaths,
+              includeGlobal: true
+            },
+            {
+              globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+              projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES,
+              totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+            }
+          )
+        : await loadAgentsPromptForWorkspace(workspacePath, {
+            globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+            projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES,
+            totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+          })
+    agentsPromptLoader = "cmbdevclaw"
+    agentsPromptLoadStatusItems = applyDeployUnitMappingsToAgentmdLoadStatus(
+      buildAgentsPromptLoadStatusItems(agentsPrompt),
+      additionalAgentsWorkspaceMappings
+    )
     if (agentsPrompt.prompt) {
-      systemPrompt += "\n\n" + agentsPrompt.prompt
       console.log("[Runtime] Loaded AGENTS.md files:", agentsPrompt.loadedPaths)
       if (agentsPrompt.truncated) {
         console.warn("[Runtime] AGENTS.md content exceeded prompt budget and was truncated:", {
           globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
-          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+          projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES,
+          totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
         })
       }
     } else {
       console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
     }
+  } else if (enableAgentsPrompt && normalizedHarnessAgentsPrompt) {
+    console.log("[Runtime] Workspace AGENTS.md prompt injection suppressed by Harness AGENTS.md prompt")
   } else {
     console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
+  }
+  if (normalizedHarnessAgentsPrompt) {
+    agentsPromptLoader = "plugin"
+    agentsPromptLoadStatusItems = normalizedHarnessAgentmdLoadStatus
+    console.log("[Runtime] Loaded Harness AGENTS.md prompt")
+  }
+  const rawCombinedAgentsPrompt =
+    [agentsPrompt.prompt, normalizedHarnessAgentsPrompt].filter(Boolean).join("\n\n") || undefined
+  const renderedPluginPromptInject = renderPluginPromptInject(pluginPromptInject)
+  const combinedAgentsPrompt = rawCombinedAgentsPrompt
+    ? renderAgentsInstructionsPrompt(rawCombinedAgentsPrompt)
+    : undefined
+  if (renderedPluginPromptInject) {
+    systemPrompt += "\n\n" + renderedPluginPromptInject
+  }
+  if (combinedAgentsPrompt) {
+    systemPrompt += "\n\n" + combinedAgentsPrompt
+  }
+  const combinedAgentsPromptPreview =
+    [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") ||
+    undefined
+  if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
+    onAgentsPromptLoadStatus({
+      items: agentsPromptLoadStatusItems,
+      loader: agentsPromptLoader,
+      promptPreview: combinedAgentsPromptPreview
+    })
   }
   if (extraSystemPrompt) {
     systemPrompt += "\n\n" + extraSystemPrompt
@@ -3736,28 +4142,28 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
   const timeContext = getRuntimeTimeContext()
   const userInfo = getUserInfo()
+  const userInfoPrompt = `## Current user's employee identity information
+- sap编号、员工编号:${userInfo?.sapId}
+- yst编号、一事通编号: ${userInfo?.ystId}
+- userName、员工姓名: ${userInfo?.userName}
+- originOrgId、员工机构号: ${userInfo?.originOrgId}
+- orgName、员机构号名称: ${userInfo?.orgName}
+- ystCode、一事通code: ${userInfo?.ystCode}`
+  const filesystemTimeContextLines = renderRuntimeTimeContextLines(timeContext, {
+    includeCurrentTime: runtimePolicy.includeCurrentTime,
+    includeTimestampRule: runtimePolicy.includeTimestampRule
+  })
   const subagentShellGuidance = isBashLike
     ? "- Use Unix/bash commands for shell operations (ls, cat, grep, etc.)"
     : isPowerShell
       ? `- **CRITICAL: Commands run in PowerShell (not bash).** Use \`; \` instead of \`&&\`, \`$env:VAR\` instead of \`$VAR\`, \`-and\`/\`-or\` instead of \`&&\`/\`||\`. NEVER use bash syntax.`
       : "- Use cmd.exe syntax for shell commands (e.g., dir instead of ls, type instead of cat)\n- Use && to chain commands, use ^ for line continuation, use %VAR% for environment variables"
 
-  const filesystemSystemPrompt = `You have access to a filesystem. All file paths use fully qualified absolute system paths.
-### userinfo
-- sap编号、员工编号:${userInfo?.sapId}
-- yst编号、一事通编号: ${userInfo?.ystId}
-- userName、员工姓名: ${userInfo?.userName}
-- originOrgId、员工机构号: ${userInfo?.originOrgId}
-- orgName、员机构号名称: ${userInfo?.orgName}
-- ystRefreshToken、刷新token: ${userInfo?.ystRefreshToken}
-- ystCode、一事通code: ${userInfo?.ystCode}
-
+  const filesystemSystemPrompt = `\n\nYou have access to a filesystem. All file paths use fully qualified absolute system paths.
 ### System Environment
 - Operating system: ${platform} (${process.arch})
 - Default shell: ${shell}
-- Timezone: ${timeContext.timezone}
-- Current time: ${timeContext.currentTime}
-- Timestamp rule: Do not invent dates or timestamps. If a timestamp is useful, use the current time above; otherwise omit it.
+${filesystemTimeContextLines}
 ${subagentShellGuidance}
 
 ### Available Tools
@@ -3767,7 +4173,6 @@ ${subagentShellGuidance}
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern (e.g., "**/*.py")
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
-- request_user_input: Only use in Plan mode, or when explicitly requested by the user or an active Skill/Plugin. Otherwise do not call this tool.
 The workspace root is: ${workspacePath}`
 
   const skillLifecycleRootSources = await getEnabledSkillsSources()
@@ -3802,7 +4207,7 @@ The workspace root is: ${workspacePath}`
   // Initialize memory system (gated by global setting + current thread opt-in)
   let memoryTools: ReturnType<typeof createMemorySearchTool | typeof createMemoryGetTool>[] = []
   let memorySources: string[] | undefined
-  if (memoryEnabledForThread) {
+  if (runtimePolicy.includeMemory) {
     const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
     const globalStore = await getMemoryStore(memoryDirs.global.dir)
     const projectStore = memoryDirs.project ? await getMemoryStore(memoryDirs.project.dir) : null
@@ -3817,6 +4222,8 @@ The workspace root is: ${workspacePath}`
       projectDir: memoryDirs.project?.dir ?? null,
       projectId: memoryDirs.project?.projectId ?? null
     })
+  } else if (runtimePolicy.isProjectMode) {
+    console.log("[Runtime] Memory disabled for project mode feature:", featureId)
   } else {
     console.log("[Runtime] Memory disabled for this session")
   }
@@ -3837,6 +4244,8 @@ The workspace root is: ${workspacePath}`
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       turnId: hookTurnId
@@ -3862,7 +4271,9 @@ The workspace root is: ${workspacePath}`
   let eagerMcpMetadata: McpCapabilityTool[] = []
   let lazyMcpMetadata: McpCapabilityTool[] = []
   const deferredSavedTools =
-    !isConstrainedCoordinatorWorker && codeExecEnabled ? listSavedCodeExecTools() : []
+    !isConstrainedCoordinatorWorker && codeExecEnabled && runtimePolicy.includeSavedCodeExecTools
+      ? listSavedCodeExecTools()
+      : []
   let mcpTools: ReturnType<typeof createEagerMcpTools> = []
   let toolSearchTools: unknown[] = []
 
@@ -3887,7 +4298,7 @@ The workspace root is: ${workspacePath}`
     // Disable ad hoc code_exec authoring in Agent Team and project mode. Saved tools remain
     // available through the deferred-tool bridge when code exec is enabled.
     codeExecRouteEnabled =
-      codeExecEnabled && allMcpTools.length > 0 && !isCoordinatorMode && !featureId
+      codeExecEnabled && allMcpTools.length > 0 && runtimePolicy.includeCodeExecRoute
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
     mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
@@ -3926,7 +4337,7 @@ The workspace root is: ${workspacePath}`
       })
     )
   }
-  if (!options.noSchedulerTool) {
+  if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
       try {
@@ -4183,6 +4594,8 @@ The workspace root is: ${workspacePath}`
     harnessProjectId,
     harnessAdapterName,
     harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
     projectDir,
     skipToolNames: toolHookExclusions,
@@ -4235,14 +4648,14 @@ The workspace root is: ${workspacePath}`
     console.log("[Runtime] Added code_exec prompt")
   }
 
-  const coordinatorWorkingDirAppendix = workingDirPromptAppendix?.trim()
-  const coordinatorProjectInstructions = [agentsPrompt.prompt, extraSystemPrompt]
+  const coordinatorPluginPromptInject = pluginPromptInject?.trim()
+  const coordinatorProjectInstructions = [combinedAgentsPrompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
   const coordinatorWorkerProjectInstructions = [
-    agentsPrompt.prompt,
-    coordinatorWorkingDirAppendix
-      ? `### Project Mode Adapter Instructions\n\n${coordinatorWorkingDirAppendix}`
+    combinedAgentsPrompt,
+    coordinatorPluginPromptInject
+      ? `### Skills Runtime Context\n\n${coordinatorPluginPromptInject}`
       : "",
     extraSystemPrompt
   ]
@@ -4385,9 +4798,12 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       pluginName,
       pluginWorkspace,
       featureId,
+      isHarnessProjectSession,
       harnessProjectId,
       harnessAdapterName,
       harnessAdapterVersion,
+      harnessNodeName,
+      harnessNodeStatus,
       projectCode,
       projectDir,
       pluginOutputDir,
@@ -4851,32 +5267,37 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       shell,
       timezone: timeContext.timezone,
       currentTime: timeContext.currentTime,
-      projectModeAdapterInstructions: coordinatorWorkingDirAppendix,
+      includeCurrentTime: runtimePolicy.includeCurrentTime,
+      includeTimestampRule: runtimePolicy.includeTimestampRule,
+      projectModeAdapterInstructions: coordinatorPluginPromptInject,
       projectInstructions: coordinatorProjectInstructions,
       turnContext: coordinatorTurnPrompt,
       hasCodeExecTool,
       deferredToolIds
     })
   } else {
-    systemPrompt += renderInjectedToolUsagePrompt({
-      hasSearchTool,
-      hasInspectTool,
-      hasInvokeDeferredTool,
-      hasCodeExecTool
-    })
+    if (runtimePolicy.includeInjectedToolUsagePrompt) {
+      systemPrompt += renderInjectedToolUsagePrompt({
+        hasSearchTool,
+        hasInspectTool,
+        hasInvokeDeferredTool,
+        hasCodeExecTool
+      })
+    }
     // Only advertise the deferred-tool inventory when the invoke bridge is
     // actually present. A restricted leaf (read_only/none registry agent — e.g. a
     // workflow Explore/Plan) has search/inspect/invoke_deferred removed, yet it is
     // NOT an isConstrainedCoordinatorWorker, so lazy MCP / saved tools still fill
     // deferredToolIds. Listing IDs it can't invoke is misleading noise, so gate on
     // the invoke capability (the bridge tools are cut as a set for read_only/none).
-    if (hasInvokeDeferredTool) {
+    if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {
       systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)
     }
     if (isWorkflowMode) {
       systemPrompt += WORKFLOW_MODE_SYSTEM_PROMPT
     }
   }
+  systemPrompt += "\n\n" + userInfoPrompt
   console.log("[Runtime] System prompt summary:", {
     chars: systemPrompt.length,
     hasAgentsPrompt: Boolean(agentsPrompt.prompt),
@@ -4957,11 +5378,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     checkpointer,
     backend,
     systemPrompt,
+    onFinalSystemPrompt,
     filesystemSystemPrompt,
-    subagentExtraSystemPrompt: agentsPrompt.prompt ?? undefined,
+    subagentExtraSystemPrompt: combinedAgentsPrompt,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
-    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && !featureId,
+    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && runtimePolicy.includeSubagents,
     filesystemAccess: options.filesystemAccess,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
@@ -5015,6 +5437,17 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         workspacePath,
         sessionId: threadId,
         turnId: hookTurnId,
+        pluginOutputDir,
+        systemId,
+        pluginWorkspace,
+        featureId,
+        harnessProjectId,
+        harnessAdapterName,
+        harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
+        projectCode,
+        projectDir,
         toolName: input.toolName,
         toolArgs:
           input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)

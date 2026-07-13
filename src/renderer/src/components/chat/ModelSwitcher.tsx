@@ -28,7 +28,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   const [routingMode, setRoutingMode] = useState<"auto" | "pinned">("pinned")
 
   const { models, loadModels, loadProviders } = useAppStore()
-  const { currentModel, setCurrentModel, routingResult } = useCurrentThread(threadId)
+  const { currentModel, restoreCurrentModel, setCurrentModel, routingResult } = useCurrentThread(threadId)
 
   // Load global routing mode on mount
   useEffect(() => {
@@ -68,12 +68,14 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
         | undefined
       const effectiveModel = routingState?.lastResolvedModelId || (metadata.model as string) || ""
       if (effectiveModel) {
-        setCurrentModel(effectiveModel)
+        // Hydration only restores the model used by the current view. Persisting here
+        // would turn a read-only session open into an updated_at change.
+        restoreCurrentModel(effectiveModel)
       }
       setMetadataLoaded(true)
     })
     return () => { cancelled = true }
-  }, [threadId, setCurrentModel])
+  }, [threadId, restoreCurrentModel])
 
   useEffect(() => {
     if (models.length === 0 || !metadataLoaded) return

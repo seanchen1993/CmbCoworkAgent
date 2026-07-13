@@ -24,6 +24,7 @@ import {
   normalizeSkillQueryName,
   parseSkillNameVersionIdentifier
 } from "../utils/skill-identifiers"
+import { parsePluginSkillSourceRef } from "../utils/skill-source"
 import {
   effectiveGeneratedLinesSumAgg,
   makeDashboardCodeStats,
@@ -816,9 +817,9 @@ const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
 const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
-// 评奖辅助看板当前仅开放给这三个 ystId；env 可覆盖，留空则回退到此默认名单，
-// 保证即使未配置环境变量也严格只对这三人可见。
-const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855"
+// 评奖辅助看板当前仅开放给这四个 ystId；env 可覆盖，留空则回退到此默认名单，
+// 保证即使未配置环境变量也严格只对这四人可见。
+const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855,231858"
 
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
@@ -901,7 +902,7 @@ function requireDashboardProjectModeAccess(): DashboardAccessContext {
 }
 
 // 评奖辅助看板（技能贡献奖 / 技能应用奖）的访问门禁：仅 DASHBOARD_AWARDS_ADMIN
-// 名单内的 ystId 可见（默认仅三人）。DEV 直接放行便于本地预览。
+// 名单内的 ystId 可见（默认仅四人）。DEV 直接放行便于本地预览。
 function isDashboardAwardsAdmin(
   access: DashboardAccessContext = getDashboardAccessContext()
 ): boolean {
@@ -1312,6 +1313,19 @@ function buildSkillUsageWildcardFilter(skillName: string): Record<string, unknow
   }
 }
 
+function buildVersionedSkillUsagePrefixFilter(skillName: string): Record<string, unknown> {
+  const versionPrefix = buildVersionPrefix(skillName)
+  return {
+    bool: {
+      should: [
+        { prefix: { usedSkills: versionPrefix } },
+        { prefix: { "usedSkills.keyword": versionPrefix } }
+      ],
+      minimum_should_match: 1
+    }
+  }
+}
+
 function buildVersionPrefix(skillName: string): string {
   return `${skillName}-v`
 }
@@ -1562,6 +1576,222 @@ function asStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string")
 }
 
+interface PluginSkillSourceBucket {
+  id: string
+  sourceRef: string
+  skill: string
+  pluginName: string
+  count: number
+}
+
+function pluginSkillSourceId(pluginId: string, skill: string): string {
+  return `plugin:${encodeURIComponent(pluginId)}/${encodeURIComponent(skill)}`
+}
+
+function parsePluginSkillSourceBuckets(raw: unknown): PluginSkillSourceBucket[] {
+  const result = new Map<string, PluginSkillSourceBucket>()
+  if (!Array.isArray(raw)) return []
+  for (const bucket of raw) {
+    const record = asRecord(bucket)
+    const sourceRef = asString(record.key)
+    const parsed = parsePluginSkillSourceRef(sourceRef)
+    if (!parsed?.skill || !parsed.pluginId) continue
+    const id = pluginSkillSourceId(parsed.pluginId, parsed.skill)
+    const count = asNumber(record.doc_count)
+    const existing = result.get(id)
+    if (existing) {
+      existing.count += count
+    } else {
+      result.set(id, {
+        id,
+        sourceRef,
+        skill: parsed.skill,
+        pluginName: parsed.pluginName || parsed.pluginId,
+        count
+      })
+    }
+  }
+  return Array.from(result.values())
+}
+
+function subtractPluginSkillCountsBySkill(sourceBuckets: PluginSkillSourceBucket[]): Map<string, number> {
+  const result = new Map<string, number>()
+  for (const bucket of sourceBuckets) {
+    result.set(bucket.skill, (result.get(bucket.skill) ?? 0) + bucket.count)
+  }
+  return result
+}
+
+function combineSkillCountBuckets(
+  usedSkillBuckets: unknown,
+  sourceBucketsRaw: unknown,
+  limit = Number.POSITIVE_INFINITY
+): ProjectModeSkillCount[] {
+  const pluginBuckets = parsePluginSkillSourceBuckets(sourceBucketsRaw)
+  const pluginCountsBySkill = subtractPluginSkillCountsBySkill(pluginBuckets)
+  const result: ProjectModeSkillCount[] = pluginBuckets.map((bucket) => ({
+    id: bucket.id,
+    sourceRef: bucket.sourceRef,
+    skill: bucket.skill,
+    count: bucket.count,
+    isPlugin: true,
+    pluginName: bucket.pluginName
+  }))
+
+  if (Array.isArray(usedSkillBuckets)) {
+    for (const bucket of usedSkillBuckets) {
+      const b = asRecord(bucket)
+      const skill = asString(b.key)
+      if (!skill) continue
+      const count = Math.max(0, asNumber(b.doc_count) - (pluginCountsBySkill.get(skill) ?? 0))
+      if (count > 0) result.push({ id: skill, skill, count })
+    }
+  }
+
+  result.sort((a, b) => b.count - a.count || a.skill.localeCompare(b.skill, "zh-CN"))
+  return result.slice(0, Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : result.length)
+}
+
+function makeSkillAdoptionStatsBucket(item: DashboardSkillCodeAdoptionStats): Record<string, unknown> {
+  return {
+    key: item.skill,
+    ...(item.id ? { id: { value: item.id } } : {}),
+    ...(item.sourceRef ? { source_ref: { value: item.sourceRef } } : {}),
+    is_plugin: { value: item.isPlugin === true },
+    plugin_name: { value: item.pluginName ?? null },
+    generated_lines: { value: item.generatedLines },
+    measured_generated_lines: { value: item.measuredGeneratedLines },
+    effective_generated_lines: { value: item.effectiveGeneratedLines },
+    unmeasured_generated_lines: { value: item.unmeasuredGeneratedLines },
+    inclusive_effective_generated_lines: { value: item.inclusiveEffectiveGeneratedLines },
+    adopted_lines: { value: item.adoptedLines },
+    measured_adoption_rate: { value: item.measuredAdoptionRate },
+    inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
+    commit_count: { value: item.commitCount },
+    pushed_measured_generated_lines: { value: item.pushedMeasuredGeneratedLines },
+    pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
+    pushed_adopted_lines: { value: item.pushedAdoptedLines },
+    pushed_adoption_rate: { value: item.pushedAdoptionRate },
+    inclusive_pushed_adoption_rate: { value: item.inclusivePushedAdoptionRate },
+    pushed_commit_count: { value: item.pushedCommitCount }
+  }
+}
+
+function subtractSkillCodeStats(
+  item: DashboardSkillCodeAdoptionStats,
+  subtract: DashboardSkillCodeAdoptionStats
+): DashboardSkillCodeAdoptionStats {
+  return {
+    ...makeDashboardCodeStats({
+      generatedLines: item.generatedLines - subtract.generatedLines,
+      deletedLines: item.deletedLines - subtract.deletedLines,
+      measuredGeneratedLines: item.measuredGeneratedLines - subtract.measuredGeneratedLines,
+      effectiveGeneratedLines: item.effectiveGeneratedLines - subtract.effectiveGeneratedLines,
+      adoptedLines: item.adoptedLines - subtract.adoptedLines,
+      pushedMeasuredGeneratedLines:
+        item.pushedMeasuredGeneratedLines - subtract.pushedMeasuredGeneratedLines,
+      pushedEffectiveGeneratedLines:
+        item.pushedEffectiveGeneratedLines - subtract.pushedEffectiveGeneratedLines,
+      pushedAdoptedLines: item.pushedAdoptedLines - subtract.pushedAdoptedLines,
+      pushedCommitCount: item.pushedCommitCount - subtract.pushedCommitCount
+    }),
+    id: item.id ?? item.skill,
+    skill: item.skill,
+    commitCount: Math.max(0, item.commitCount - subtract.commitCount)
+  }
+}
+
+function addSkillCodeStats(
+  item: DashboardSkillCodeAdoptionStats,
+  add: DashboardSkillCodeAdoptionStats
+): DashboardSkillCodeAdoptionStats {
+  return {
+    ...makeDashboardCodeStats({
+      generatedLines: item.generatedLines + add.generatedLines,
+      deletedLines: item.deletedLines + add.deletedLines,
+      measuredGeneratedLines: item.measuredGeneratedLines + add.measuredGeneratedLines,
+      effectiveGeneratedLines: item.effectiveGeneratedLines + add.effectiveGeneratedLines,
+      adoptedLines: item.adoptedLines + add.adoptedLines,
+      pushedMeasuredGeneratedLines: item.pushedMeasuredGeneratedLines + add.pushedMeasuredGeneratedLines,
+      pushedEffectiveGeneratedLines:
+        item.pushedEffectiveGeneratedLines + add.pushedEffectiveGeneratedLines,
+      pushedAdoptedLines: item.pushedAdoptedLines + add.pushedAdoptedLines,
+      pushedCommitCount: item.pushedCommitCount + add.pushedCommitCount
+    }),
+    id: item.id ?? item.skill,
+    skill: item.skill,
+    commitCount: item.commitCount + add.commitCount
+  }
+}
+
+function hasPositiveCodeStats(item: DashboardSkillCodeAdoptionStats): boolean {
+  return (
+    item.generatedLines > 0 ||
+    item.effectiveGeneratedLines > 0 ||
+    item.adoptedLines > 0 ||
+    item.pushedAdoptedLines > 0 ||
+    item.commitCount > 0 ||
+    item.pushedCommitCount > 0
+  )
+}
+
+function combineSkillCodeAdoptionStats(
+  usedSkillItems: DashboardSkillCodeAdoptionStats[],
+  sourceItems: DashboardSkillCodeAdoptionStats[]
+): DashboardSkillCodeAdoptionStats[] {
+  const pluginItems = new Map<string, DashboardSkillCodeAdoptionStats>()
+  const pluginStatsBySkill = new Map<string, DashboardSkillCodeAdoptionStats>()
+
+  for (const sourceItem of sourceItems) {
+    const parsed = parsePluginSkillSourceRef(sourceItem.skill)
+    if (!parsed?.skill || !parsed.pluginId) continue
+    const id = pluginSkillSourceId(parsed.pluginId, parsed.skill)
+    const pluginItem: DashboardSkillCodeAdoptionStats = {
+      ...sourceItem,
+      id,
+      sourceRef: sourceItem.skill,
+      skill: parsed.skill,
+      isPlugin: true,
+      pluginName: parsed.pluginName || parsed.pluginId
+    }
+    const existingPlugin = pluginItems.get(id)
+    if (existingPlugin) {
+      const merged = addSkillCodeStats(existingPlugin, pluginItem)
+      pluginItems.set(id, {
+        ...merged,
+        id,
+        sourceRef: existingPlugin.sourceRef ?? pluginItem.sourceRef,
+        skill: parsed.skill,
+        isPlugin: true,
+        pluginName: existingPlugin.pluginName ?? pluginItem.pluginName
+      })
+    } else {
+      pluginItems.set(id, pluginItem)
+    }
+    const existingSkillStats = pluginStatsBySkill.get(parsed.skill)
+    pluginStatsBySkill.set(
+      parsed.skill,
+      existingSkillStats ? addSkillCodeStats(existingSkillStats, pluginItem) : pluginItem
+    )
+  }
+
+  const result = Array.from(pluginItems.values())
+  for (const item of usedSkillItems) {
+    const remaining = pluginStatsBySkill.has(item.skill)
+      ? subtractSkillCodeStats(item, pluginStatsBySkill.get(item.skill)!)
+      : { ...item, id: item.id ?? item.skill }
+    if (hasPositiveCodeStats(remaining)) result.push(remaining)
+  }
+
+  result.sort(
+    (a, b) =>
+      b.adoptedLines - a.adoptedLines ||
+      b.generatedLines - a.generatedLines ||
+      a.skill.localeCompare(b.skill, "zh-CN")
+  )
+  return result
+}
+
 function skillVersionKey(skillName: string, skillVersion?: string): string {
   return `${skillName}:${skillVersion ?? ""}`
 }
@@ -1639,6 +1869,35 @@ function codeAdoptPushedAggs(): Record<string, unknown> {
     pushed_effective_generated_lines: effectiveGeneratedLinesSumAgg(),
     pushed_adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
     pushed_commit_count: { cardinality: { field: "properties.commitSha" } }
+  }
+}
+
+function codeSkillAdoptionBucketAggs(
+  codeGenFilters: Record<string, unknown>[],
+  codeAdoptFilters: Record<string, unknown>[],
+  codeAdoptPushedFilters: Record<string, unknown>[]
+): Record<string, unknown> {
+  return {
+    code_gen: {
+      filter: { bool: { filter: codeGenFilters } },
+      aggs: {
+        generated_lines: { sum: { field: "properties.lineCount" } },
+        deleted_lines: { sum: { field: "properties.deletedLineCount" } }
+      }
+    },
+    code_adopt_measured: {
+      filter: { bool: { filter: codeAdoptFilters } },
+      aggs: {
+        measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
+        effective_generated_lines: effectiveGeneratedLinesSumAgg(),
+        adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
+        commit_count: { cardinality: { field: "properties.commitSha" } }
+      }
+    },
+    code_adopt_pushed: {
+      filter: { bool: { filter: codeAdoptPushedFilters } },
+      aggs: codeAdoptPushedAggs()
+    }
   }
 }
 
@@ -2212,6 +2471,7 @@ async function fetchOverview(
       total_tool_calls: { value_count: { field: "toolNames" } },
       by_skill: { terms: { field: "usedSkills", size: rankingTopSize } },
       by_skill_all: { terms: { field: "usedSkills", size: rankingSearchSize } },
+      skill_source: { terms: { field: "skillSource", size: rankingSearchSize } },
       by_tool: {
         terms: {
           field: "toolNames",
@@ -2291,29 +2551,13 @@ async function fetchOverview(
       },
       by_skill_adoption: {
         terms: { field: "properties.usedSkills", size: rankingSearchSize },
-        aggs: {
-          code_gen: {
-            filter: { bool: { filter: codeGenFilters } },
-            aggs: {
-              generated_lines: { sum: { field: "properties.lineCount" } },
-              deleted_lines: { sum: { field: "properties.deletedLineCount" } }
-            }
-          },
-          code_adopt_measured: {
-            filter: { bool: { filter: codeAdoptFilters } },
-            aggs: {
-              measured_generated_lines: { sum: { field: "properties.generatedLineCount" } },
-              effective_generated_lines: effectiveGeneratedLinesSumAgg(),
-              adopted_lines: { sum: { field: "properties.adoptedLineCount" } },
-              commit_count: { cardinality: { field: "properties.commitSha" } }
-            }
-          },
-          code_adopt_pushed: {
-            filter: { bool: { filter: codeAdoptPushedFilters } },
-            aggs: codeAdoptPushedAggs()
-          }
-        }
-      }
+        aggs: codeSkillAdoptionBucketAggs(codeGenFilters, codeAdoptFilters, codeAdoptPushedFilters)
+      },
+      by_skill_source_adoption: {
+        terms: { field: "properties.skillSource", size: rankingSearchSize },
+        aggs: codeSkillAdoptionBucketAggs(codeGenFilters, codeAdoptFilters, codeAdoptPushedFilters)
+      },
+      skill_source: { terms: { field: "properties.skillSource", size: rankingSearchSize } }
     }
   }
 
@@ -2322,7 +2566,10 @@ async function fetchOverview(
     esQuery(getEsIndex("event"), codeBody)
   ])
   const codeStats = normalizeCodeStatsFromAggs(codeRaw)
-  const skillCodeAdoption = normalizeSkillCodeAdoptionBuckets(codeRaw)
+  const skillCodeAdoption = combineSkillCodeAdoptionStats(
+    normalizeSkillCodeAdoptionBuckets(codeRaw),
+    normalizeSkillCodeAdoptionBuckets(codeRaw, "by_skill_source_adoption")
+  )
   const traceRecord = asRecord(traceRaw)
   return {
     ...traceRecord,
@@ -2341,25 +2588,9 @@ async function fetchOverview(
       code_pushed_effective_generated_lines: { value: codeStats.pushedEffectiveGeneratedLines },
       code_pushed_adopted_lines: { value: codeStats.pushedAdoptedLines },
       code_pushed_commit_count: { value: codeStats.pushedCommitCount },
+      code_skill_source: asRecord(asRecord(codeRaw).aggregations).skill_source,
       code_by_skill_adoption: {
-        buckets: skillCodeAdoption.map((item) => ({
-          key: item.skill,
-          generated_lines: { value: item.generatedLines },
-          measured_generated_lines: { value: item.measuredGeneratedLines },
-          effective_generated_lines: { value: item.effectiveGeneratedLines },
-          unmeasured_generated_lines: { value: item.unmeasuredGeneratedLines },
-          inclusive_effective_generated_lines: { value: item.inclusiveEffectiveGeneratedLines },
-          adopted_lines: { value: item.adoptedLines },
-          measured_adoption_rate: { value: item.measuredAdoptionRate },
-          inclusive_adoption_rate: { value: item.inclusiveAdoptionRate },
-          commit_count: { value: item.commitCount },
-          pushed_measured_generated_lines: { value: item.pushedMeasuredGeneratedLines },
-          pushed_effective_generated_lines: { value: item.pushedEffectiveGeneratedLines },
-          pushed_adopted_lines: { value: item.pushedAdoptedLines },
-          pushed_adoption_rate: { value: item.pushedAdoptionRate },
-          inclusive_pushed_adoption_rate: { value: item.inclusivePushedAdoptionRate },
-          pushed_commit_count: { value: item.pushedCommitCount }
-        }))
+        buckets: skillCodeAdoption.map((item) => makeSkillAdoptionStatsBucket(item))
       }
     }
   }
@@ -4903,9 +5134,7 @@ async function fetchSkillUserStats(
   // 统计指标不做组织级数据权限过滤。
   const traceAccessFilter = null
   void granularity
-  const escapedSkillName = escapeWildcard(skillName)
-  const wildcardPattern = `${escapedSkillName}**`
-  const skillFilter = buildSkillUsageWildcardFilter(skillName)
+  const skillFilter = buildVersionedSkillUsagePrefixFilter(skillName)
   const body = {
     size: 0,
     // 统计口径计入全部触发来源；triggerSource 仅用于 trace 分析页切换，不在此过滤。
@@ -4915,13 +5144,9 @@ async function fetchSkillUserStats(
           timeRangeFilter("startedAt", range),
           ...(traceAccessFilter ? [traceAccessFilter] : []),
           { exists: { field: "ystId" } },
-          { bool: { must_not: { term: { ystId: "" } } } }
+          { bool: { must_not: { term: { ystId: "" } } } },
+          skillFilter
         ],
-        should: [
-          { wildcard: { usedSkills: wildcardPattern } },
-          { wildcard: { "usedSkills.keyword": wildcardPattern } }
-        ],
-        minimum_should_match: 1
       }
     },
     aggs: {
@@ -5335,10 +5560,10 @@ async function fetchFeedback(
 // ─────────────────────────────────────────────────────────
 // Advanced features (operations) — replaces the like/dislike feedback module.
 //
-// Two-tier model (core usage + value result) for 8 advanced capabilities.
+// Two-tier model (core usage + value result) for advanced capabilities.
 // Event-side metrics come from the `event` index by `eventName`
 // (heartbeat.run.completed / memory.write.applied / skill.evolution.* /
-// chatx.message.processed / hook.executed / git.auto_commit.attempted).
+// chatx.message.processed / hook.executed).
 // Tool-call-based metrics (memory_search/get, java_lsp, code_exec, deferred
 // tools) and post-evolution skill usage are REUSED from the `trace` index
 // (`toolNames`, `evolvedSkills`) instead of double-emitting events for things
@@ -5394,11 +5619,7 @@ interface AdvFeatureMetrics {
   hookBlocked: number
   codeExec: number
   savedTool: number
-  acCommitted: number
-  acSkipped: number
-  acCancelled: number
-  acFailed: number
-  acNeedsConfirm: number
+  claudeCodeLaunches: number
 }
 
 function advAggDocCount(agg: unknown): number {
@@ -5435,7 +5656,6 @@ function assembleAdvancedFeatureCards(
   const memTotal = m.memSearch + m.memGet + m.memWrite
   const chatxTotal = m.chatxReplied + m.chatxCancelled + m.chatxError
   const progTotal = m.codeExec + m.savedTool
-  const acTotal = m.acCommitted + m.acSkipped + m.acCancelled + m.acFailed + m.acNeedsConfirm
 
   return {
     source,
@@ -5519,16 +5739,13 @@ function assembleAdvancedFeatureCards(
         ]
       },
       {
-        key: "autoCommit",
-        label: "自动提交",
-        value: acTotal,
-        valueLabel: "提交尝试次数",
-        hint: `成功 ${m.acCommitted} · 失败 ${m.acFailed}`,
+        key: "claudeCode",
+        label: "Claude Code",
+        value: m.claudeCodeLaunches,
+        valueLabel: "启动次数",
+        hint: `选择目录启动会话 ${m.claudeCodeLaunches} 次`,
         items: [
-          { label: "成功", count: m.acCommitted, tone: "good" },
-          { label: "跳过", count: m.acSkipped, tone: "neutral" },
-          { label: "取消", count: m.acCancelled, tone: "warn" },
-          { label: "失败", count: m.acFailed, tone: "bad" }
+          { label: "目录启动", count: m.claudeCodeLaunches, tone: "good" }
         ]
       }
     ]
@@ -5573,9 +5790,15 @@ async function fetchAdvancedFeatures(
         filter: { term: { eventName: "hook.executed" } },
         aggs: { blocked: { filter: { term: { "properties.blocked": true } } } }
       },
-      auto_commit: {
-        filter: { term: { eventName: "git.auto_commit.attempted" } },
-        aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
+      claude_code_launches: {
+        filter: {
+          bool: {
+            filter: [
+              { term: { eventName: "workspace.launch.started" } },
+              { term: { "properties.surface": "claude_code" } }
+            ]
+          }
+        }
       }
     }
   }
@@ -5617,9 +5840,6 @@ async function fetchAdvancedFeatures(
   const chatxOutcome = advTermBuckets(
     (eAggs.chatx as Record<string, unknown> | undefined)?.by_outcome
   )
-  const acOutcome = advTermBuckets(
-    (eAggs.auto_commit as Record<string, unknown> | undefined)?.by_outcome
-  )
   const toolBuckets = advTermBuckets(tAggs.by_tool)
 
   const metrics: AdvFeatureMetrics = {
@@ -5649,11 +5869,7 @@ async function fetchAdvancedFeatures(
     hookBlocked: advAggDocCount((eAggs.hooks as Record<string, unknown> | undefined)?.blocked),
     codeExec: advBucketCount(toolBuckets, "code_exec"),
     savedTool: advBucketCount(toolBuckets, "save_code_exec_tool"),
-    acCommitted: advBucketCount(acOutcome, "committed"),
-    acSkipped: advBucketCount(acOutcome, "skipped"),
-    acCancelled: advBucketCount(acOutcome, "cancelled"),
-    acFailed: advBucketCount(acOutcome, "failed"),
-    acNeedsConfirm: advBucketCount(acOutcome, "needs_confirmation")
+    claudeCodeLaunches: advAggDocCount(eAggs.claude_code_launches)
   }
 
   return assembleAdvancedFeatureCards(metrics, "es")
@@ -5695,11 +5911,7 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     hookBlocked: k(12),
     codeExec: k(9),
     savedTool: k(6),
-    acCommitted: k(11),
-    acSkipped: k(7),
-    acCancelled: k(2),
-    acFailed: k(1),
-    acNeedsConfirm: 0
+    claudeCodeLaunches: k(11)
   }
 
   return assembleAdvancedFeatureCards(metrics, "mock")
@@ -6834,6 +7046,14 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             { key: "灰度检查", doc_count: 4 }
           ]
         },
+        skill_source: {
+          buckets: [
+            {
+              key: "plugin:demo-plugin/plugin-release-note-v1.0.0?name=Demo%20Plugin",
+              doc_count: 156
+            }
+          ]
+        },
         code_by_skill_adoption: {
           buckets: [
             {
@@ -6892,6 +7112,12 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
             },
             {
               key: "plugin-release-note-v1.0.0",
+              id: { value: "plugin:demo-plugin/plugin-release-note-v1.0.0" },
+              source_ref: {
+                value: "plugin:demo-plugin/plugin-release-note-v1.0.0?name=Demo%20Plugin"
+              },
+              is_plugin: { value: true },
+              plugin_name: { value: "Demo Plugin" },
               generated_lines: { value: 410 },
               measured_generated_lines: { value: 360 },
               effective_generated_lines: { value: 340 },
@@ -6925,6 +7151,14 @@ function makeMockOverview(range: TimeRange, opts?: OrgFilterOptions): unknown {
               inclusive_pushed_adoption_rate: { value: 0 },
               pushed_commit_count: { value: 0 },
               commit_count: { value: 0 }
+            }
+          ]
+        },
+        code_skill_source: {
+          buckets: [
+            {
+              key: "plugin:demo-plugin/plugin-release-note-v1.0.0?name=Demo%20Plugin",
+              doc_count: 9
             }
           ]
         },
@@ -7926,7 +8160,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       topSkills: [
         { skill: "代码审查", count: 40 },
         { skill: "单元测试", count: 25 },
-        { skill: "SQL优化", count: 12 }
+        { skill: "SQL优化", count: 12, isPlugin: true, pluginName: "SQL Copilot" }
       ],
       codeStats: makeDashboardCodeStats({
         generatedLines: 5200,
@@ -7982,7 +8216,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       hasError: false,
       topSkills: [
         { skill: "代码审查", count: 18 },
-        { skill: "重构助手", count: 9 }
+        { skill: "重构助手", count: 9, isPlugin: true, pluginName: "Refactor Kit" }
       ],
       codeStats: makeDashboardCodeStats({
         generatedLines: 2100,
@@ -8087,7 +8321,13 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       featureCount: (i % 3) + 1,
       conversationCount: (i * 7) % 90,
       hasError: false,
-      topSkills: [{ skill: "代码审查", count: (i * 3) % 20 }],
+      topSkills: [
+        {
+          skill: i % 2 === 0 ? "重构助手" : "代码审查",
+          count: (i * 3) % 20,
+          ...(i % 2 === 0 ? { isPlugin: true, pluginName: "Refactor Kit" } : {})
+        }
+      ],
       codeStats: null,
       features: [
         {
@@ -8150,8 +8390,11 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     Object.assign(project, mockCreators[index % mockCreators.length])
   })
   // 由各项目自身的代码/对话总量派生 stage×skill 三桶（DEV 演示用）。
-  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project) => ({
+  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => ({
     ...project,
+    lifecycleCreatedAt:
+      project.lifecycleCreatedAt ??
+      new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
     stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
   }))
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
@@ -8178,7 +8421,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     page: 1,
     pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
     keyword: "",
-    sortBy: "conversationCount",
+    sortBy: "createdAt",
     sortOrder: "desc"
   })
   const summaryCodeStats = makeDashboardCodeStats({
@@ -8276,8 +8519,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       [
         { skill: "代码审查", count: 58 },
         { skill: "单元测试", count: 31 },
-        { skill: "重构助手", count: 22 },
-        { skill: "SQL优化", count: 15 }
+        { skill: "重构助手", count: 22, isPlugin: true, pluginName: "Refactor Kit" },
+        { skill: "SQL优化", count: 15, isPlugin: true, pluginName: "SQL Copilot" }
       ],
       aggScale
     ),
@@ -8349,6 +8592,8 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
         },
         {
           skill: "重构助手",
+          isPlugin: true,
+          pluginName: "Refactor Kit",
           commitCount: 7,
           ...makeDashboardCodeStats({
             generatedLines: 1100,
@@ -9424,8 +9669,12 @@ interface ProjectModeFeatureView {
 }
 
 interface ProjectModeSkillCount {
+  id?: string
   skill: string
+  sourceRef?: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 interface ProjectModeToolCount {
@@ -9483,6 +9732,8 @@ interface ProjectModeProjectView {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  /** 项目创建时间（快照 properties.lifecycleCreatedAt）；ISO 字符串。 */
+  lifecycleCreatedAt?: string
   /** 生命周期最近变更时间（归档时间用此排序）；ISO 字符串。 */
   lifecycleUpdatedAt?: string
   compatible?: boolean
@@ -9500,15 +9751,16 @@ type ProjectModeProjectStatus = "active" | "archived"
 
 /**
  * Sortable project-list columns.
- * - `featureCount` / `archivedAt` are snapshot-doc fields → sorted cheaply in
- *   the paginated snapshot query. `archivedAt` (= lifecycle updateAt) is only
- *   meaningful on the「已归档」tab and is its default ordering.
+ * - `featureCount` / `createdAt` / `archivedAt` are snapshot-doc fields → sorted
+ *   cheaply in the paginated snapshot query. `archivedAt` (= lifecycle updateAt)
+ *   is only meaningful on the「已归档」tab.
  * - `conversationCount` / `generatedLines` are per-range metrics on the trace /
  *   code indices → require the heavier metric-sort path, which is only enabled
  *   for the「进行中」(active) tab (archived projects accumulate; active are few).
  */
 type ProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -9817,8 +10069,8 @@ function normalizeProjectModeProjectStatus(value?: string | null): ProjectModePr
 
 /**
  * Resolve the requested sort. `featureCount` is always honoured; the per-range
- * metric sorts are dropped (→ default name-asc) on the archived tab, so callers
- * can blindly forward the user's choice without leaking the active-only rule.
+ * metric sorts are dropped (→ default createdAt-desc) on the archived tab, so
+ * callers can blindly forward the user's choice without leaking the active-only rule.
  */
 function normalizeProjectModeProjectSort(
   options: ProjectModeProjectPageOptions | undefined,
@@ -9827,11 +10079,12 @@ function normalizeProjectModeProjectSort(
   const sortOrder: ProjectModeProjectSortOrder = options?.sortOrder === "asc" ? "asc" : "desc"
   const key = options?.sortBy
   if (key === "featureCount") return { sortBy: "featureCount", sortOrder }
+  if (key === "createdAt") return { sortBy: "createdAt", sortOrder }
   if (key === "archivedAt" && status === "archived") return { sortBy: "archivedAt", sortOrder }
   if ((key === "conversationCount" || key === "generatedLines") && status !== "archived") {
     return { sortBy: key, sortOrder }
   }
-  return { sortBy: null, sortOrder }
+  return { sortBy: "createdAt", sortOrder: "desc" }
 }
 
 function normalizeProjectModeKeyword(value?: string | null): string {
@@ -10028,6 +10281,10 @@ function projectModeProjectSortValue(
 ): number {
   if (sortBy === "conversationCount") return project.conversationCount
   if (sortBy === "generatedLines") return project.codeStats?.generatedLines ?? 0
+  if (sortBy === "createdAt") {
+    const t = project.lifecycleCreatedAt ? Date.parse(project.lifecycleCreatedAt) : NaN
+    return Number.isNaN(t) ? 0 : t
+  }
   if (sortBy === "archivedAt") {
     const t = project.lifecycleUpdatedAt ? Date.parse(project.lifecycleUpdatedAt) : NaN
     return Number.isNaN(t) ? 0 : t
@@ -10118,6 +10375,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     creatorUpperOrgLv1:
       asOptionalString(props.creatorUpperOrgLv1) ?? asOptionalString(source.upperOrgLv1),
     lifecycleStatus: asOptionalString(props.lifecycleStatus),
+    lifecycleCreatedAt: asOptionalString(props.lifecycleCreatedAt),
     lifecycleUpdatedAt: asOptionalString(props.lifecycleUpdatedAt),
     compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
     compatibilityStatus: asOptionalString(props.compatibilityStatus),
@@ -10318,7 +10576,6 @@ async function fetchProjectModeSnapshotAggs(
       }
     }
   }
-
   return {
     projectCount,
     featureCount,
@@ -10489,7 +10746,7 @@ async function fetchProjectModeProjectPageHits(
   const page = clampLimit(options?.page, 1, maxPage)
   const { sortBy, sortOrder } = normalizeProjectModeProjectSort(options, status)
 
-  // `featureCount` / `archivedAt` live in the snapshot doc and sort here; the
+  // `featureCount` / `createdAt` / `archivedAt` live in the snapshot doc and sort here; the
   // metric sorts are handled upstream by the metric-sort path.
   const sort =
     sortBy === "featureCount"
@@ -10497,6 +10754,11 @@ async function fetchProjectModeProjectPageHits(
           { "properties.featureCount": { order: sortOrder } },
           { "properties.projectId": { order: "asc" } }
         ]
+      : sortBy === "createdAt"
+        ? [
+            { "properties.lifecycleCreatedAt": { order: sortOrder, missing: "_last" } },
+            { "properties.projectId": { order: "asc" } }
+          ]
       : sortBy === "archivedAt"
         ? [
             { "properties.lifecycleUpdatedAt": { order: sortOrder, missing: "_last" } },
@@ -10729,18 +10991,6 @@ function projectFeatureKey(projectId: string, featureSlug: string): string {
   return JSON.stringify([projectId, featureSlug])
 }
 
-/** Convert a `terms usedSkills` bucket list into a {skill,count}[] ranking. */
-function parseSkillCountBuckets(raw: unknown): ProjectModeSkillCount[] {
-  if (!Array.isArray(raw)) return []
-  const result: ProjectModeSkillCount[] = []
-  for (const bucket of raw) {
-    const b = asRecord(bucket)
-    const skill = asString(b.key)
-    if (skill) result.push({ skill, count: asNumber(b.doc_count) })
-  }
-  return result
-}
-
 /** Convert a `terms toolNames` bucket list into a {tool,count}[] ranking. */
 function parseToolCountBuckets(raw: unknown): ProjectModeToolCount[] {
   if (!Array.isArray(raw)) return []
@@ -10823,7 +11073,8 @@ async function fetchProjectModeUsage(
       total_tokens: { sum: { field: "totalTokens" } },
       total_skill_calls: { value_count: { field: "usedSkills" } },
       distinct_skills: { cardinality: { field: "usedSkills" } },
-      top_skills: { terms: { field: "usedSkills", size: 20 } },
+      top_skills: { terms: { field: "usedSkills", size: 1000 } },
+      skill_source: { terms: { field: "skillSource", size: 1000 } },
       top_users: {
         terms: { field: "sapId", size: 10 },
         aggs: {
@@ -10904,6 +11155,11 @@ async function fetchProjectModeUsage(
       }
     }
   }
+  const topSkills = combineSkillCountBuckets(
+    asRecord(aggs.top_skills).buckets,
+    asRecord(aggs.skill_source).buckets,
+    1000
+  )
 
   return {
     conversationCount: asNumber(asRecord(aggs.conversation_count).value),
@@ -10913,8 +11169,8 @@ async function fetchProjectModeUsage(
     totalOutputTokens,
     totalTokens,
     skillCallCount: asNumber(asRecord(aggs.total_skill_calls).value),
-    distinctSkillCount: asNumber(asRecord(aggs.distinct_skills).value),
-    topSkills: parseSkillCountBuckets(asRecord(aggs.top_skills).buckets),
+    distinctSkillCount: topSkills.length || asNumber(asRecord(aggs.distinct_skills).value),
+    topSkills,
     topUsers: parseProjectModeTopUserBuckets(asRecord(aggs.top_users).buckets),
     tools: {
       byTool: parseToolCountBuckets(asRecord(aggs.by_tool).buckets),
@@ -10958,7 +11214,8 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
-          skills: { terms: { field: "usedSkills", size: 10 } },
+          skills: { terms: { field: "usedSkills", size: 100 } },
+          skill_source: { terms: { field: "skillSource", size: 100 } },
           ...stageBucketTraceAggs()
         }
       }
@@ -10973,7 +11230,14 @@ async function fetchProjectModePageUsage(
     const key = asString(b.key)
     if (!key) continue
     perProject.set(key, asNumber(b.doc_count))
-    perProjectSkills.set(key, parseSkillCountBuckets(asRecord(b.skills).buckets))
+    perProjectSkills.set(
+      key,
+      combineSkillCountBuckets(
+        asRecord(b.skills).buckets,
+        asRecord(b.skill_source).buckets,
+        10
+      )
+    )
     perProjectStageConversations.set(key, parseStageBucketConversations(b))
   }
 
@@ -11250,7 +11514,12 @@ async function fetchProjectModeAggregateCodeStats(
         by_skill: {
           terms: { field: "properties.usedSkills", size: 1000 },
           aggs: perBucketAggs
-        }
+        },
+        by_skill_source: {
+          terms: { field: "properties.skillSource", size: 1000 },
+          aggs: perBucketAggs
+        },
+        skill_source: { terms: { field: "properties.skillSource", size: 1000 } }
       }),
       statExtraFilters
     )
@@ -11264,7 +11533,10 @@ async function fetchProjectModeAggregateCodeStats(
     byProject: new Map<string, DashboardCodeStats>(),
     byAdapter: parseAdapterCodeStatsBuckets(asRecord(adapterAggs.by_adapter).buckets),
     byAdapterStage: parseAdapterStageBucketsBuckets(asRecord(adapterAggs.by_adapter).buckets),
-    bySkill: normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill"),
+    bySkill: combineSkillCodeAdoptionStats(
+      normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill"),
+      normalizeSkillCodeAdoptionBuckets({ aggregations: skillAggs }, "by_skill_source")
+    ),
     availableSources: enumerateSources ? parseAvailableCodeSources(overallRaw) : []
   }
 }
@@ -11591,8 +11863,8 @@ async function fetchProjectMode(
         page: 1,
         pageSize: PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE,
         keyword: "",
-        // 列表默认按对话数降序；与渲染层初始排序态一致，避免首屏二次请求。
-        sortBy: "conversationCount",
+        // 列表默认按创建时间降序；与渲染层初始排序态一致，避免首屏二次请求。
+        sortBy: "createdAt",
         sortOrder: "desc"
       },
       access

@@ -22,6 +22,7 @@ import {
 import { cn } from "@/lib/utils"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { OpenInIdeButton } from "@/components/ui/open-in-ide-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -268,6 +269,20 @@ function createInitialMetaState(
   }
 }
 
+function formatGitPanelErrorMessage(message: string): string {
+  const normalized = message.toLowerCase()
+  if (
+    normalized.includes("cannot pull with rebase") &&
+    normalized.includes("unstaged changes")
+  ) {
+    const repositoryMatch = message.match(/(?:^|\n)([^:\n]+):\s*error:\s*cannot pull with rebase/i)
+    const repositoryName = repositoryMatch?.[1]?.trim()
+    const target = repositoryName && repositoryName !== "error" ? `「${repositoryName}」` : "当前仓库"
+    return `${target}存在未提交的本地改动，无法拉取远端代码。请先提交改动，或手动暂存（stash）后再 Pull。`
+  }
+  return message
+}
+
 export function GitPanelView({
   threadId,
   workspacePath,
@@ -314,6 +329,7 @@ export function GitPanelView({
   const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
   const [fileDiffErrors, setFileDiffErrors] = useState<Record<string, string>>({})
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
+  const [pendingRevertFile, setPendingRevertFile] = useState<GitPanelDiffFile | null>(null)
   const [pulling, setPulling] = useState(false)
   const selectionScopeRef = useRef(ALL_REPOSITORIES_VALUE)
   const initialMetaState = useMemo(
@@ -354,16 +370,18 @@ export function GitPanelView({
     selectionScopeRef.current = ALL_REPOSITORIES_VALUE
     setFileDiffLoadingPaths(new Set())
     setFileDiffErrors({})
+    setPendingRevertFile(null)
     setPushMetaState(null)
     setPushMetaLoading(false)
   }, [threadId, initialMetaState])
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
+    const displayText = variant === "error" ? formatGitPanelErrorMessage(text) : text
     if (variant === "success") {
-      toast.success(text)
+      toast.success(displayText)
       return
     }
-    toast.error(text)
+    toast.error(displayText)
   }, [])
 
   const refresh = useCallback(
@@ -830,6 +848,7 @@ export function GitPanelView({
       return
     }
     const requestFilePaths = toRepositoryRelativePaths(filePaths, actionRepository)
+
     setRunning("reject")
     setError(null)
     rejectInFlightRef.current = true
@@ -960,6 +979,9 @@ export function GitPanelView({
           ? `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
           : undefined
 
+      if (action === "commit") {
+        suppressFileChangeRefreshUntilRef.current = Number.POSITIVE_INFINITY
+      }
       setRunning(action)
       setError(null)
       try {
@@ -994,13 +1016,20 @@ export function GitPanelView({
         if (action === "push") {
           void refresh({ meta: true, diff: true })
         } else {
-          await refresh({ meta: true, diff: true })
+          suppressFileChangeRefreshUntilRef.current = Date.now() + 1200
+          void refresh({ meta: true, diff: true })
         }
       } catch (e) {
         const err = e instanceof Error ? e.message : "操作失败"
         setError(err)
         showToast(err, "error")
       } finally {
+        if (
+          action === "commit" &&
+          suppressFileChangeRefreshUntilRef.current === Number.POSITIVE_INFINITY
+        ) {
+          suppressFileChangeRefreshUntilRef.current = Date.now() + 1200
+        }
         setRunning(null)
       }
     },
@@ -1023,18 +1052,23 @@ export function GitPanelView({
   )
 
   const handleRevertFile = useCallback(
-    async (filePath: string) => {
+    async (file: GitPanelDiffFile) => {
       if (!threadId) return
+      const filePath = file.path
+      setPendingRevertFile(null)
       setRevertingFilePath(filePath)
       setError(null)
       try {
         const actionRepository = getFileRepository(filePath, repositories)
-        const requestFilePath = actionRepository
-          ? stripRepositoryPrefix(filePath, actionRepository)
-          : filePath
-        const result = await window.api.workspace.rejectWorktreeFile(
+        const requestFilePaths = [
+          ...(file.previousPath ? [file.previousPath] : []),
+          filePath
+        ].map((path) =>
+          actionRepository ? stripRepositoryPrefix(path, actionRepository) : path
+        )
+        const result = await window.api.workspace.rejectWorktreeChanges(
           threadId,
-          requestFilePath,
+          requestFilePaths,
           actionRepository ? { worktreePath: actionRepository.path } : undefined
         )
         if (!result.success) throw new Error(result.error || "文件回退失败")
@@ -1050,6 +1084,11 @@ export function GitPanelView({
     },
     [threadId, refresh, repositories, showToast]
   )
+
+  const confirmPendingRevertFile = useCallback(() => {
+    if (!pendingRevertFile || revertingFilePath) return
+    void handleRevertFile(pendingRevertFile)
+  }, [handleRevertFile, pendingRevertFile, revertingFilePath])
 
   const runPull = useCallback(async () => {
     if (!threadId) return
@@ -1154,8 +1193,6 @@ export function GitPanelView({
     const fileDiffError = fileDiffErrors[file.path]
     const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
     const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
-    const revertHint =
-      revertingFilePath === file.path ? "回退中..." : "回退（大模型改动的上一个版本）"
     const fullDisplayPath = getRepositoryFileDisplayPath(file.path, repo)
     const displayPath = treeRow?.name ?? fullDisplayPath
     const previousDisplayPath = file.previousPath
@@ -1236,25 +1273,105 @@ export function GitPanelView({
               stopPropagation
               onClick={() => onOpenFileFolder?.(file.path)}
             />
-            <IconPopoverButton
-              icon={
-                <Undo2
-                  className={cn(
-                    "size-3",
-                    revertingFilePath === file.path && "animate-spin"
-                  )}
-                />
-              }
-              popoverContent={revertHint}
-              disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
-              aria-label={revertHint}
-              align="end"
-              stopPropagation
-              className={cn(revertingFilePath === file.path && "opacity-80")}
-              onClick={() => {
-                if (!revertingFilePath) void handleRevertFile(file.path)
+            <Popover
+              open={pendingRevertFile?.path === file.path}
+              onOpenChange={(open) => {
+                if (revertingFilePath) return
+                setPendingRevertFile(open ? file : null)
               }}
-            />
+            >
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
+                  aria-label={revertingFilePath === file.path ? "回退中" : "回退文件"}
+                  className={cn(
+                    "cursor-pointer inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    revertingFilePath === file.path && "opacity-80",
+                    revertingFilePath &&
+                      revertingFilePath !== file.path &&
+                      "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground"
+                  )}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                  }}
+                >
+                  <Undo2
+                    className={cn(
+                      "size-3",
+                      revertingFilePath === file.path && "animate-spin"
+                    )}
+                  />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="end"
+                sideOffset={6}
+                className="w-72 p-3"
+                onClick={(event) => event.stopPropagation()}
+                onOpenAutoFocus={(event) => event.preventDefault()}
+                onCloseAutoFocus={(event) => event.preventDefault()}
+              >
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold text-foreground">确认回退文件</div>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      回退会回退全部变更，不会回退到大模型的上一次修改，请确认是否回退。
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-border/70 bg-muted/20 px-2.5 py-2 text-[11px]">
+                    <div className="mb-1 text-muted-foreground">目标文件</div>
+                    <div className="truncate font-mono text-foreground" title={fullDisplayPath}>
+                      {fullDisplayPath}
+                    </div>
+                    {previousDisplayPath && (
+                      <div
+                        className="mt-1 truncate font-mono text-muted-foreground"
+                        title={previousDisplayPath}
+                      >
+                        {previousDisplayPath}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={Boolean(revertingFilePath)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setPendingRevertFile(null)
+                      }}
+                    >
+                      取消
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={Boolean(revertingFilePath)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        confirmPendingRevertFile()
+                      }}
+                    >
+                      {revertingFilePath === file.path ? (
+                        <>
+                          <Loader2 className="size-3.5 animate-spin" />
+                          回退中...
+                        </>
+                      ) : (
+                        <>
+                          <Undo2 className="size-3.5" />
+                          确认回退
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </PopoverContent>
+            </Popover>
           </span>
         </div>
         {isExpanded && (

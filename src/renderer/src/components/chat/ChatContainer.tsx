@@ -45,13 +45,26 @@ import {
   PlayCircle,
   Trash2,
   Copy,
-  Workflow, Paperclip
+  Workflow,
+  GitFork,
+  FolderOpen,
+  Paperclip
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { useAppStore } from "@/lib/store"
 import {
@@ -73,6 +86,7 @@ import {
   filterCoordinatorNoiseMessages,
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
+import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
 import { isCoordinatorModeMetadata, isWorkflowModeMetadata } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
@@ -82,12 +96,19 @@ import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
+import {
+  getSystemConstraintsLoadCounts,
+  hasNoLoadedSystemConstraints,
+  SystemConstraintsPreviewPopover
+} from "@/components/panels/SystemConstraintsPanel"
 import type {
   GoalUiState,
+  ForkableCheckpoint,
   HITLRequest,
   Message,
   SkillMetadata,
   Thread,
+  ThreadForkOverrides,
   ToolCallState,
   ToolCallStatus,
   UserInputResponse
@@ -169,6 +190,9 @@ import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
+
+const PROJECT_MODE_AGENT_TEAM_ENABLED =
+  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
 
 const MARKET_SKILLS_CACHE_TTL_MS = 10 * 60 * 1000
 
@@ -1218,38 +1242,6 @@ const messageTimeOrderEntries = (
   return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
 }
 
-const toDate = (value: Date | string | undefined): Date | undefined => {
-  if (!value) return undefined
-  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : undefined
-  const parsed = new Date(value)
-  return Number.isFinite(parsed.getTime()) ? parsed : undefined
-}
-
-const toTime = (value: Date | string | undefined): number | null => {
-  const date = toDate(value)
-  return date ? date.getTime() : null
-}
-
-const getMessageDisplayTime = (message: Message): number | null => {
-  return toTime(message.start_at) ?? toTime(message.created_at) ?? toTime(message.end_at)
-}
-
-const sortMessagesForDisplay = (messages: Message[]): Message[] => {
-  return messages
-    .map((message, index) => ({
-      message,
-      index,
-      time: getMessageDisplayTime(message)
-    }))
-    .sort((a, b) => {
-      if (a.time !== null && b.time !== null && a.time !== b.time) {
-        return a.time - b.time
-      }
-      return a.index - b.index
-    })
-    .map((entry) => entry.message)
-}
-
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -1264,6 +1256,48 @@ const getMessageText = (content: Message["content"]): string => {
     .join("\n")
 }
 
+type ForkDestinationMode = "local" | "workspace"
+
+interface MessageForkDialogTarget {
+  sourceThreadId: string
+  sourceWorkspacePath: string | null
+  message: Message
+  checkpoint: ForkableCheckpoint
+}
+
+function getForkWorkspacePath(thread: Thread | null): string | null {
+  const workspacePath = thread?.metadata?.workspacePath
+  return typeof workspacePath === "string" && workspacePath.trim() ? workspacePath : null
+}
+
+function getForkWorkspaceLabel(path: string | null): string {
+  if (!path) return "未关联工作区"
+  const segments = path.split(/[\\/]/).filter(Boolean)
+  return segments.at(-1) || path
+}
+
+function formatForkCheckpointTime(value?: string): string {
+  if (!value) return "未知时间"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function getForkMessagePreview(message: Message): string {
+  const text = getMessageText(message.content).replace(/\s+/g, " ").trim()
+  if (!text) return "这条消息没有可预览文本"
+  return text.length > 180 ? `${text.slice(0, 180)}...` : text
+}
+
+const MESSAGE_FORK_CHECKPOINT_HINT =
+  "可在左侧会话列表右键该会话，选择“从 checkpoint fork”。"
+
+function getMessageForkCheckpointHint(errorMessage?: string): string {
+  const message = errorMessage?.trim()
+  if (!message) return `该消息附近没有可精确 fork 的稳定 checkpoint。${MESSAGE_FORK_CHECKPOINT_HINT}`
+  return `${message} ${MESSAGE_FORK_CHECKPOINT_HINT}`
+}
+
 const getMessageBubbleText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -1276,7 +1310,7 @@ const getMessageBubbleText = (content: Message["content"]): string => {
 
 // MessageBubble renders `null` for messages with no visible content: tool-result
 // messages, empty system notices, and assistant/user messages whose text is empty
-// and that carry no tool calls. Such empty wrappers must NOT get content-visibility
+// and that carry no tool calls or reasoning. Such empty wrappers must NOT get content-visibility
 // containment — when scrolled off-screen the intrinsic-size fallback would reserve
 // phantom height (stacking across many empty tool results into a large blank gap
 // between tools and text). Detection is intentionally generous: a false positive
@@ -1292,6 +1326,12 @@ const messageRendersNothing = (message: Message): boolean => {
   if (message.role === "tool") return true
   const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
   if (hasToolCalls) return false
+  if (message.role === "assistant" && typeof message.reasoning === "string") {
+    return (
+      message.reasoning.trim().length === 0 &&
+      getMessageBubbleText(message.content).trim().length === 0
+    )
+  }
   const visibleText =
     message.role === "system"
       ? getMessageText(message.content)
@@ -1651,6 +1691,8 @@ interface ChatMessageListProps {
   onApprovalDecision: (decision: ChatApprovalDecision) => void
   onEditUserMessage: (message: Message) => void
   onSetGoalFromMessage: (text: string) => void
+  onForkFromMessage: (message: Message) => void
+  forkingMessageId: string | null
   onOpenHookLogBucket: (turnId: string) => void
   threadId: string
   assistantDurationMsById: Map<string, number>
@@ -1673,6 +1715,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
   onApprovalDecision,
   onEditUserMessage,
   onSetGoalFromMessage,
+  onForkFromMessage,
+  forkingMessageId,
   onOpenHookLogBucket,
   threadId,
   assistantDurationMsById,
@@ -1722,6 +1766,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
               onApprovalDecision={onApprovalDecision}
               onEditUserMessage={onEditUserMessage}
               onSetGoalFromMessage={onSetGoalFromMessage}
+              onForkFromMessage={onForkFromMessage}
+              forkingMessageId={forkingMessageId}
               threadId={threadId}
               isLoading={isLoading}
               hasUserAfterHead={hasUserAfterHead}
@@ -1754,6 +1800,114 @@ const ChatMessageList = React.memo(function ChatMessageList({
     </>
   )
 })
+
+function SystemPromptPreviewButton({ threadId }: { threadId?: string | null }): React.JSX.Element | null {
+  const [allowed, setAllowed] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [prompt, setPrompt] = useState<string | null>(null)
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null)
+  const closeTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.agent
+      .canPreviewSystemPrompt()
+      .then((nextAllowed) => {
+        if (!cancelled) setAllowed(nextAllowed)
+      })
+      .catch(() => {
+        if (!cancelled) setAllowed(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const loadPreview = useCallback(async () => {
+    if (!threadId || loading) return
+    setLoading(true)
+    try {
+      const preview = await window.api.agent.getSystemPromptPreview(threadId)
+      setPrompt(preview.prompt)
+      setUpdatedAt(preview.updatedAt)
+    } catch {
+      setPrompt(null)
+      setUpdatedAt(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [loading, threadId])
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer()
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpen(false)
+      closeTimerRef.current = null
+    }, 120)
+  }, [clearCloseTimer])
+
+  useEffect(() => {
+    return () => clearCloseTimer()
+  }, [clearCloseTimer])
+
+  useEffect(() => {
+    setOpen(false)
+    setPrompt(null)
+    setUpdatedAt(null)
+  }, [threadId])
+
+  if (!allowed || !threadId) return null
+
+  const updatedAtLabel = updatedAt ? new Date(updatedAt).toLocaleString() : "暂无"
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onMouseEnter={() => {
+            clearCloseTimer()
+            setOpen(true)
+            void loadPreview()
+          }}
+          onMouseLeave={scheduleClose}
+          className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          title="系统提示词预览"
+          aria-label="系统提示词预览"
+        >
+          <FileText className="size-3.5" />
+          <span>系统提示词预览</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        side="top"
+        sideOffset={8}
+        onMouseEnter={() => {
+          clearCloseTimer()
+          setOpen(true)
+        }}
+        onMouseLeave={scheduleClose}
+        className="w-[720px] max-w-[calc(100vw-2rem)] p-0"
+      >
+        <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground">
+          {loading ? "加载中..." : `更新时间：${updatedAtLabel}`}
+        </div>
+        <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5">
+          {prompt || "暂无系统提示词；请先运行一次当前会话。"}
+        </pre>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 export function ChatContainer({
   threadId,
@@ -1908,24 +2062,42 @@ export function ChatContainer({
     threads,
     models,
     createThread,
+    forkThread,
     updateThread,
     generateTitleForFirstMessage,
     setShowCustomizeView,
     rightPanelCollapsed,
-    pluginVersion
+    pluginVersion,
+    requestOpenRightPanelSystemConstraints
   } = useAppStore()
+  const [forkingMessageId, setForkingMessageId] = useState<string | null>(null)
   const currentThread = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
     [threadId, threads]
   )
+  const currentForkWorkspacePath = useMemo(
+    () => getForkWorkspacePath(currentThread),
+    [currentThread]
+  )
+  const [messageForkTarget, setMessageForkTarget] = useState<MessageForkDialogTarget | null>(null)
+  const currentThreadIdRef = useRef(threadId)
+  const messageForkRequestIdRef = useRef(0)
+  currentThreadIdRef.current = threadId
+  const [forkDestinationMode, setForkDestinationMode] =
+    useState<ForkDestinationMode>("local")
+  const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
+  const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
   const harnessFeatureBinding = useMemo(
     () => getHarnessFeatureBinding(currentThread),
     [currentThread]
   )
-  const disableCoordinatorModeOption =
+  const isProjectModeAgentContext =
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
+  const disableCoordinatorModeOption =
+    isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
+  const disableWorkflowModeOption = isProjectModeAgentContext
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -1939,7 +2111,10 @@ export function ChatContainer({
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
-      if (disableCoordinatorModeOption) {
+      if (
+        (disableCoordinatorModeOption && isCoordinatorModeMetadata(metadata)) ||
+        (disableWorkflowModeOption && isWorkflowModeMetadata(metadata))
+      ) {
         return "normal"
       }
       if (isWorkflowModeMetadata(metadata)) {
@@ -1954,9 +2129,11 @@ export function ChatContainer({
           console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
           return false
         })
-      return environmentForcedCoordinator ? "coordinator" : "normal"
+      return environmentForcedCoordinator && !disableCoordinatorModeOption
+        ? "coordinator"
+        : "normal"
     },
-    [disableCoordinatorModeOption]
+    [disableCoordinatorModeOption, disableWorkflowModeOption]
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
@@ -1973,13 +2150,16 @@ export function ChatContainer({
   useEffect(() => {
     let cancelled = false
     const currentThread = threads.find((thread) => thread.thread_id === threadId)
-    const metadataDerivedMode: ChatAgentMode = disableCoordinatorModeOption
-      ? "normal"
-      : isWorkflowModeMetadata(currentThread?.metadata)
-        ? "workflow"
-        : isCoordinatorModeMetadata(currentThread?.metadata)
-          ? "coordinator"
-          : "normal"
+    const metadataDerivedMode: ChatAgentMode =
+      disableCoordinatorModeOption && isCoordinatorModeMetadata(currentThread?.metadata)
+        ? "normal"
+        : disableWorkflowModeOption && isWorkflowModeMetadata(currentThread?.metadata)
+          ? "normal"
+          : isWorkflowModeMetadata(currentThread?.metadata)
+            ? "workflow"
+            : isCoordinatorModeMetadata(currentThread?.metadata)
+              ? "coordinator"
+              : "normal"
     setAgentMode(metadataDerivedMode)
     agentModeHydratedRef.current = metadataDerivedMode !== "normal"
 
@@ -1995,7 +2175,13 @@ export function ChatContainer({
     return () => {
       cancelled = true
     }
-  }, [threadId, threads, loadResolvedAgentMode, disableCoordinatorModeOption])
+  }, [
+    threadId,
+    threads,
+    loadResolvedAgentMode,
+    disableCoordinatorModeOption,
+    disableWorkflowModeOption
+  ])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -2036,9 +2222,8 @@ export function ChatContainer({
         (s) => s.source === "project" || s.source === "user"
       )
 
-      // In harness mode, resolve the project's bound plugin name so same-name
-      // plugin rows can prefer the project's own plugin. Standalone-vs-plugin
-      // duplicates remain visible and are disambiguated in the slash popover.
+      // In harness mode, resolve the project's bound plugin so slash surfaces
+      // only expose standalone skills and skills owned by that plugin.
       let preferredPlugin: { id?: string; name?: string } | null = null
       if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
         try {
@@ -2055,8 +2240,8 @@ export function ChatContainer({
         }
       }
 
-      // Keep same-name standalone/plugin rows visible; in harness mode only
-      // same-name plugin rows are collapsed toward the bound plugin.
+      // Keep same-name standalone/plugin rows visible outside harness mode; in
+      // harness mode, plugin skills are restricted to the bound plugin.
       const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
       setSkillsHarnessProjectId(targetProjectId)
@@ -2113,6 +2298,7 @@ export function ChatContainer({
     workspacePath,
     tokenUsage,
     contextReminder,
+    harnessAgentmdLoadStatus,
     currentModel,
     draftInput: input,
     harnessNextActionDialogTips,
@@ -2145,6 +2331,27 @@ export function ChatContainer({
   } = useCurrentThread(threadId)
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
+  const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
+  const shouldShowNextActionDialogTips = Boolean(nextActionDialogTips) && !readOnly
+  const systemConstraintCounts = getSystemConstraintsLoadCounts(harnessAgentmdLoadStatus)
+  const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
+  const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
+  const showSystemConstraintsButton = surface === "harness-project"
+  const systemConstraintsTitle =
+    systemConstraintsLoadFailed
+      ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+      : systemConstraintCounts.total > 0
+      ? `系统约束已加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+      : "系统约束，点击查看详情"
+  const systemConstraintsLabel =
+    systemConstraintsLoadFailed
+      ? "系统约束未全部加载"
+      : systemConstraintCounts.loaded > 0
+        ? "系统约束已加载"
+        : "系统约束"
+  const handleOpenSystemConstraints = useCallback((): void => {
+    requestOpenRightPanelSystemConstraints(threadId)
+  }, [requestOpenRightPanelSystemConstraints, threadId])
   const harnessDialogTipsProjectId = harnessFeatureBinding?.projectId ?? null
   const harnessDialogTipsSlug = harnessFeatureBinding?.slug ?? null
   const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
@@ -2155,14 +2362,13 @@ export function ChatContainer({
   }, [pendingHarnessDialogTips, setHarnessNextActionDialogTips])
 
   useEffect(() => {
-    if (!shouldShowHarnessDialogTips || !harnessDialogTipsProjectId || !harnessDialogTipsSlug) {
-      setHarnessDialogTips(null)
+    if (shouldShowNextActionDialogTips && nextActionDialogTips) {
+      setHarnessDialogTips(nextActionDialogTips)
       return
     }
 
-    const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
-    if (nextActionDialogTips) {
-      setHarnessDialogTips(nextActionDialogTips)
+    if (!shouldShowHarnessDialogTips || !harnessDialogTipsProjectId || !harnessDialogTipsSlug) {
+      setHarnessDialogTips(null)
       return
     }
 
@@ -2184,9 +2390,9 @@ export function ChatContainer({
   }, [
     harnessDialogTipsProjectId,
     harnessDialogTipsSlug,
-    pendingHarnessDialogTips,
+    nextActionDialogTips,
     shouldShowHarnessDialogTips,
-    storedHarnessNextActionDialogTips
+    shouldShowNextActionDialogTips
   ])
 
   // Hook logs live in an external store so updates don't re-render the full provider tree.
@@ -2254,22 +2460,24 @@ export function ChatContainer({
   const isLoading = streamData.isLoading || scheduledTaskLoading
   const isHarnessContextReminderEnabled =
     surface === "harness-project" && Boolean(harnessFeatureBinding) && !readOnly
-  const agentModeSwitchDisabledReason = disableCoordinatorModeOption
-    ? "项目模式暂不支持子代理协同模式，只能使用 Solo Agent。"
-    : !canChangeAgentMode
-      ? historyLoading
-        ? "会话历史加载中，暂时不能切换执行模式。"
-        : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
-      : isLoading
-        ? "当前请求执行中，结束后才能切换执行模式。"
-        : undefined
+  const agentModeSwitchDisabledReason = !canChangeAgentMode
+    ? historyLoading
+      ? "会话历史加载中，暂时不能切换执行模式。"
+      : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
+    : isLoading
+      ? "当前请求执行中，结束后才能切换执行模式。"
+      : undefined
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
       const previousMode = agentMode
       void (async () => {
-        if (disableCoordinatorModeOption && nextMode !== "normal") {
-          toast.error("项目模式暂不支持子代理协同/工作流模式，只能使用 Solo Agent。")
+        if (disableCoordinatorModeOption && nextMode === "coordinator") {
+          toast.error("项目模式暂不支持子代理协同，只能使用 Solo Agent。")
+          return
+        }
+        if (disableWorkflowModeOption && nextMode === "workflow") {
+          toast.error("项目模式暂不支持 Workflow，只能使用 Solo Agent。")
           return
         }
         if (historyLoading) {
@@ -2324,6 +2532,7 @@ export function ChatContainer({
     [
       agentMode,
       disableCoordinatorModeOption,
+      disableWorkflowModeOption,
       historyLoading,
       threadId,
       threadMessages,
@@ -2969,6 +3178,22 @@ export function ChatContainer({
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
+    const liveReasoningById = new Map<string, string>()
+    for (const liveMessage of streamData.liveMessages || []) {
+      if (
+        liveMessage.id &&
+        liveStreamMessageRole(liveMessage.type) === "assistant" &&
+        typeof liveMessage.reasoning === "string" &&
+        liveMessage.reasoning.trim()
+      ) {
+        liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
+      }
+    }
+    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
+      if (message.role !== "assistant" || message.reasoning) return message
+      const liveReasoning = liveReasoningById.get(message.id)
+      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
+    })
     const streamingMsgs: Message[] = (streamData.liveMessages || [])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
@@ -2979,23 +3204,27 @@ export function ChatContainer({
           id: streamMsg.id,
           role,
           content: normalizeLiveStreamMessageContent(streamMsg.content),
+          ...(role === "assistant" && streamMsg.reasoning ? { reasoning: streamMsg.reasoning } : {}),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
           ...(role === "tool" &&
             streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
-          created_at: new Date(),
+          created_at: streamMsg.start_at ?? streamMsg.end_at ?? new Date(),
           ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
           ...(streamMsg.end_at && { end_at: streamMsg.end_at })
         }
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs].filter(
-      isVisibleCheckpointTranscriptMessage
+    const allMessages = reconcileMessageDisplayOrder(
+      [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
+        isVisibleCheckpointTranscriptMessage
+      ),
+      streamData.messages
     )
-    const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {
+    const cleanedMessages = allMessages.map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
@@ -3023,7 +3252,7 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.liveMessages])
+  }, [threadMessages, streamData.liveMessages, streamData.messages])
 
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
@@ -3271,8 +3500,9 @@ export function ChatContainer({
     const nextAction = pendingHarnessNextAction
     const userMessage = nextAction?.userMessage?.trim() ?? ""
     const slashSkill = nextAction?.slashSkill?.trim() ?? ""
+    const pendingPreferredPlugin = nextAction?.preferredPlugin ?? null
 
-    if (!harnessFeatureBinding) return
+    if (!harnessFeatureBinding && !pendingPreferredPlugin) return
     if (!userMessage && !slashSkill) {
       if (nextAction?.dialogTips) consumePendingHarnessNextAction(threadId)
       return
@@ -3286,14 +3516,14 @@ export function ChatContainer({
     let nextSkill: SkillMetadata | null = null
     if (slashSkill) {
       if (skillsLoading) return
-      if (skillsLoadTargetProjectId !== harnessFeatureBinding.projectId) return
-      if (skillsHarnessProjectId === harnessFeatureBinding.projectId) {
-        nextSkill = selectSkillForSlashName(
-          enabledSkillsForSlash,
-          slashSkill,
-          skillsHarnessPreferredPlugin
-        )
-      }
+      const expectedProjectId = harnessFeatureBinding?.projectId ?? null
+      if (skillsLoadTargetProjectId !== expectedProjectId) return
+      if (skillsHarnessProjectId !== expectedProjectId) return
+      nextSkill = selectSkillForSlashName(
+        enabledSkillsForSlash,
+        slashSkill,
+        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin
+      )
     }
 
     if (userMessage) setInput(userMessage)
@@ -3987,17 +4217,26 @@ export function ChatContainer({
         : coordinatorPrefixed
           ? "coordinator"
           : agentMode
+      if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+        submitAgentMode = "normal"
+      }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
         submitAgentMode = await loadResolvedAgentMode().catch((error) => {
           console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
           return agentMode
         })
+        if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+          submitAgentMode = "normal"
+        }
         agentModeHydratedRef.current = true
         if (submitAgentMode !== agentMode) {
           setAgentMode(submitAgentMode)
         }
       }
-      if (disableCoordinatorModeOption && agentMode !== "normal") {
+      if (
+        (disableCoordinatorModeOption && agentMode === "coordinator") ||
+        (disableWorkflowModeOption && agentMode === "workflow")
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
       } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
@@ -4852,7 +5091,7 @@ export function ChatContainer({
 
     return (
       <div className="pt-6 pb-8">
-        {shouldShowHarnessDialogTips && harnessDialogTips ? (
+        {(shouldShowHarnessDialogTips || shouldShowNextActionDialogTips) && harnessDialogTips ? (
           <DialogTipsMarkdown content={harnessDialogTips} />
         ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
           <RotatingHeadline />
@@ -5105,6 +5344,7 @@ export function ChatContainer({
     programmingSkillCards,
     programmingSkills.length,
     shouldShowHarnessDialogTips,
+    shouldShowNextActionDialogTips,
     shouldShowWelcomeHeadline,
     shouldShowWelcomeSkillTabs,
     showAllCustomSkills,
@@ -5190,6 +5430,148 @@ export function ChatContainer({
     },
     [setInput]
   )
+
+  const handleForkFromMessage = useCallback(
+    async (message: Message): Promise<void> => {
+      if (isLoading || forkingMessageId) return
+      const sourceThreadId = threadId
+      const requestId = messageForkRequestIdRef.current + 1
+      messageForkRequestIdRef.current = requestId
+      setForkingMessageId(message.id)
+      try {
+        const checkpoint = await window.api.threads.resolveForkCheckpointForMessage({
+          threadId: sourceThreadId,
+          messageId: message.id,
+          message: {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            tool_calls: message.tool_calls
+          }
+        })
+        if (
+          messageForkRequestIdRef.current !== requestId ||
+          currentThreadIdRef.current !== sourceThreadId
+        ) {
+          return
+        }
+        if (!checkpoint) {
+          toast.error(getMessageForkCheckpointHint())
+          return
+        }
+        setForkDestinationMode("local")
+        setForkWorkspacePath(null)
+        setMessageForkTarget({
+          sourceThreadId,
+          sourceWorkspacePath: currentForkWorkspacePath,
+          message,
+          checkpoint
+        })
+      } catch (error) {
+        if (
+          messageForkRequestIdRef.current !== requestId ||
+          currentThreadIdRef.current !== sourceThreadId
+        ) {
+          return
+        }
+        toast.error(
+          getMessageForkCheckpointHint(
+            error instanceof Error ? error.message : "读取 fork checkpoint 失败"
+          )
+        )
+      } finally {
+        if (messageForkRequestIdRef.current === requestId) {
+          setForkingMessageId(null)
+        }
+      }
+    },
+    [currentForkWorkspacePath, forkingMessageId, isLoading, threadId]
+  )
+
+  const handleSelectForkWorkspace = useCallback(async (): Promise<string | null> => {
+    if (selectingForkWorkspace) return forkWorkspacePath
+    setSelectingForkWorkspace(true)
+    try {
+      const path = await window.api.workspace.select()
+      if (path) {
+        setForkDestinationMode("workspace")
+        setForkWorkspacePath(path)
+      }
+      return path
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "选择工作区失败")
+      return null
+    } finally {
+      setSelectingForkWorkspace(false)
+    }
+  }, [forkWorkspacePath, selectingForkWorkspace])
+
+  const resetMessageForkDialog = useCallback((): void => {
+    messageForkRequestIdRef.current += 1
+    setMessageForkTarget(null)
+    setForkDestinationMode("local")
+    setForkWorkspacePath(null)
+    setSelectingForkWorkspace(false)
+  }, [])
+
+  useEffect(() => {
+    messageForkRequestIdRef.current += 1
+    setMessageForkTarget(null)
+    setForkingMessageId(null)
+    setForkDestinationMode("local")
+    setForkWorkspacePath(null)
+    setSelectingForkWorkspace(false)
+  }, [threadId])
+
+  const handleConfirmMessageFork = useCallback(async (): Promise<void> => {
+    if (!messageForkTarget || forkingMessageId) return
+    if (messageForkTarget.sourceThreadId !== currentThreadIdRef.current) {
+      toast.error("当前会话已切换，请回到目标会话后重新点击 fork。")
+      resetMessageForkDialog()
+      return
+    }
+
+    let selectedWorkspacePath = forkWorkspacePath
+    if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
+      selectedWorkspacePath = await handleSelectForkWorkspace()
+      if (!selectedWorkspacePath) return
+    }
+
+    const overrides: ThreadForkOverrides | undefined =
+      forkDestinationMode === "workspace"
+        ? { workspacePath: selectedWorkspacePath }
+        : undefined
+
+    const resolvedMessageId =
+      messageForkTarget.checkpoint.messageForkMode === "checkpoint"
+        ? undefined
+        : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
+    setForkingMessageId(messageForkTarget.message.id)
+    try {
+      await forkThread({
+        sourceThreadId: messageForkTarget.sourceThreadId,
+        checkpointId: messageForkTarget.checkpoint.checkpointId,
+        ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
+        overrides
+      })
+      toast.success("已从这条消息创建新会话")
+      resetMessageForkDialog()
+    } catch (error) {
+      toast.error(
+        getMessageForkCheckpointHint(error instanceof Error ? error.message : "Fork 会话失败")
+      )
+    } finally {
+      setForkingMessageId(null)
+    }
+  }, [
+    forkDestinationMode,
+    forkThread,
+    forkWorkspacePath,
+    forkingMessageId,
+    handleSelectForkWorkspace,
+    messageForkTarget,
+    resetMessageForkDialog
+  ])
 
   const handleEditGoal = useCallback((): void => {
     const objective = goalUi.goal?.objective?.trim()
@@ -5330,6 +5712,19 @@ export function ChatContainer({
     </div>
   )
 
+  const isMessageForkBusy =
+    Boolean(messageForkTarget && forkingMessageId === messageForkTarget.message.id) ||
+    selectingForkWorkspace
+  const messageForkPreview = messageForkTarget
+    ? getForkMessagePreview(messageForkTarget.message)
+    : ""
+  const messageForkUsesCheckpointBoundary =
+    messageForkTarget?.checkpoint.messageForkMode === "checkpoint"
+  const messageForkSourceWorkspacePath =
+    messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
+  const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
+  const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
       {/* In-session keyword search (Ctrl/Cmd+F) */}
@@ -5346,6 +5741,122 @@ export function ChatContainer({
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
+
+      <Dialog
+        open={!!messageForkTarget}
+        onOpenChange={(open) => {
+          if (!open && !isMessageForkBusy) resetMessageForkDialog()
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-base">
+              {messageForkUsesCheckpointBoundary ? "从 checkpoint fork" : "Fork 这条消息"}
+            </DialogTitle>
+            <DialogDescription>
+              {messageForkUsesCheckpointBoundary
+                ? "创建一个新会话，历史保留到最近的稳定 checkpoint。"
+                : "创建一个新会话，历史只保留到这条消息所在节点。"}
+            </DialogDescription>
+          </DialogHeader>
+          {messageForkTarget ? (
+            <div className="space-y-4">
+              <div className="rounded-sm border border-border bg-muted/25 px-3 py-2">
+                <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span>
+                    checkpoint {formatForkCheckpointTime(messageForkTarget.checkpoint.createdAt)}
+                  </span>
+                  <span>{messageForkTarget.checkpoint.messageCount} 条消息</span>
+                </div>
+                <div className="line-clamp-3 text-sm text-foreground">
+                  {messageForkPreview}
+                </div>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  disabled={isMessageForkBusy}
+                  onClick={() => setForkDestinationMode("local")}
+                  className={cn(
+                    "rounded-sm border px-3 py-2 text-left transition-colors",
+                    forkDestinationMode === "local"
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:bg-accent"
+                  )}
+                >
+                  <div className="text-sm font-medium">派生到本地</div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {currentForkWorkspaceLabel}
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  disabled={isMessageForkBusy}
+                  onClick={() => setForkDestinationMode("workspace")}
+                  className={cn(
+                    "rounded-sm border px-3 py-2 text-left transition-colors",
+                    forkDestinationMode === "workspace"
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:bg-accent"
+                  )}
+                >
+                  <div className="text-sm font-medium">派生到其他工作区</div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {forkWorkspacePath ? selectedForkWorkspaceLabel : "选择一个本地工作区路径"}
+                  </div>
+                </button>
+              </div>
+
+              {forkDestinationMode === "workspace" ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isMessageForkBusy}
+                  onClick={() => void handleSelectForkWorkspace()}
+                  className="w-full justify-start"
+                >
+                  {selectingForkWorkspace ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <FolderOpen className="size-4" />
+                  )}
+                  {forkWorkspacePath ? forkWorkspacePath : "选择工作区文件夹"}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isMessageForkBusy}
+              onClick={resetMessageForkDialog}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={isMessageForkBusy || !messageForkTarget}
+              onClick={() => void handleConfirmMessageFork()}
+            >
+              {isMessageForkBusy ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <GitFork className="size-4" />
+              )}
+              {isMessageForkBusy
+                ? selectingForkWorkspace
+                  ? "选择中"
+                  : "正在 fork"
+                : forkDestinationMode === "workspace" && !forkWorkspacePath
+                  ? "选择工作区并 Fork"
+                  : "Fork"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {skillIntentBanner}
       {nuxDialog}
@@ -5405,6 +5916,8 @@ export function ChatContainer({
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
                     onSetGoalFromMessage={handleSetGoalFromMessage}
+                    onForkFromMessage={handleForkFromMessage}
+                    forkingMessageId={forkingMessageId}
                     onOpenHookLogBucket={handleOpenHookLogBucket}
                     threadId={threadId}
                     assistantDurationMsById={assistantDurationMsById}
@@ -6013,11 +6526,24 @@ export function ChatContainer({
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
-                            mode={disableCoordinatorModeOption ? "normal" : agentMode}
+                            mode={
+                              (disableCoordinatorModeOption && agentMode === "coordinator") ||
+                              (disableWorkflowModeOption && agentMode === "workflow")
+                                ? "normal"
+                                : agentMode
+                            }
                             locked={
-                              disableCoordinatorModeOption || isLoading || !canChangeAgentMode
+                              isLoading || !canChangeAgentMode
                             }
                             lockedReason={agentModeSwitchDisabledReason}
+                            disabledModes={
+                              disableCoordinatorModeOption || disableWorkflowModeOption
+                                ? {
+                                    coordinator: disableCoordinatorModeOption,
+                                    workflow: disableWorkflowModeOption
+                                  }
+                                : undefined
+                            }
                             onChange={handleAgentModeChange}
                           />
                           <div className="w-px h-4 bg-border mx-1" />
@@ -6111,7 +6637,7 @@ export function ChatContainer({
                                     </button>
                                   </TooltipTrigger>
                                   <TooltipContent side="top" sideOffset={6}>
-                                    点击自动发送"继续"2字
+                                    点击自动发送“继续”2字
                                   </TooltipContent>
                                 </Tooltip>
                               </TooltipProvider>
@@ -6169,6 +6695,7 @@ export function ChatContainer({
                         </button>
                       )}
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                      <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (
                         <ContextUsageIndicator
@@ -6176,6 +6703,30 @@ export function ChatContainer({
                           modelId={currentModel}
                           contextLimit={modelContextLimit}
                         />
+                      )}
+                      {showSystemConstraintsButton && (
+                        <SystemConstraintsPreviewPopover
+                          preview={systemConstraintsPromptPreview}
+                          align="start"
+                          side="top"
+                          sideOffset={8}
+                        >
+                          <button
+                            type="button"
+                            className={cn(
+                              "flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs transition-colors hover:opacity-80",
+                              systemConstraintsLoadFailed
+                                ? "bg-amber-500/20 text-amber-600 dark:text-amber-300"
+                                : "bg-emerald-500/20 text-emerald-600 dark:text-emerald-300"
+                            )}
+                            title={systemConstraintsTitle}
+                            aria-label={systemConstraintsTitle}
+                            onClick={handleOpenSystemConstraints}
+                          >
+                            <ShieldCheck className="size-3.5" />
+                            <span>{systemConstraintsLabel}</span>
+                          </button>
+                        </SystemConstraintsPreviewPopover>
                       )}
                     </div>
                     <div className="flex min-w-0 items-center gap-2">

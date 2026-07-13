@@ -74,6 +74,8 @@ export interface GenIndexRow {
   measured: number
   /** JSON-encoded string[] of skill names active at gen time, or null. */
   used_skills: string | null
+  /** JSON-encoded source map keyed by used_skills entries, or null. */
+  skill_source: string | null
   thread_id: string | null
   trace_id: string | null
   model_id: string | null
@@ -123,6 +125,7 @@ export async function initializeAdoptionIndex(): Promise<void> {
         created_at INTEGER NOT NULL,
         measured INTEGER NOT NULL DEFAULT 0,
         used_skills TEXT,
+        skill_source TEXT,
         thread_id TEXT,
         trace_id TEXT,
         model_id TEXT,
@@ -142,6 +145,7 @@ export async function initializeAdoptionIndex(): Promise<void> {
     for (const col of [
       "tool TEXT",
       "used_skills TEXT",
+      "skill_source TEXT",
       "thread_id TEXT",
       "trace_id TEXT",
       "model_id TEXT",
@@ -208,9 +212,9 @@ export function insertGenEvent(row: GenIndexRow): void {
     db.run(
       `INSERT OR REPLACE INTO gen_events
        (event_id, file_path, tool, content_fingerprint, shard_file, shard_offset, line_hashes, old_line_hashes, created_at, measured,
-        used_skills, thread_id, trace_id, model_id, model_name,
+        used_skills, skill_source, thread_id, trace_id, model_id, model_name,
         harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -223,6 +227,7 @@ export function insertGenEvent(row: GenIndexRow): void {
         row.created_at,
         row.measured,
         row.used_skills,
+        row.skill_source,
         row.thread_id,
         row.trace_id,
         row.model_id,
@@ -264,7 +269,7 @@ export function findPendingGensForFile(
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
             line_hashes, old_line_hashes, created_at, measured,
-            used_skills, thread_id, trace_id, model_id, model_name,
+            used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
             tool
        FROM gen_events
@@ -295,7 +300,7 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
   const stmt = db.prepare(
     `SELECT event_id, file_path, content_fingerprint, shard_file, shard_offset,
             line_hashes, old_line_hashes, created_at, measured,
-            used_skills, thread_id, trace_id, model_id, model_name,
+            used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
             tool
        FROM gen_events

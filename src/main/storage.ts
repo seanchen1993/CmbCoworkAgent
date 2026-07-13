@@ -1013,6 +1013,9 @@ export interface CustomModelConfig {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1046,6 +1049,8 @@ export const MAX_TOP_P = 1
 export const DEFAULT_TOP_K = 40
 export const MIN_TOP_K = 0
 export const MAX_TOP_K = 1_000
+export type ThinkingEffort = "high" | "max"
+export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 
 export interface CustomModelPublicConfig {
   id: string
@@ -1059,6 +1064,9 @@ export interface CustomModelPublicConfig {
   topP: number
   topK: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1073,6 +1081,9 @@ interface StoredCustomModelRecord {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -1155,12 +1166,30 @@ function normalizeTopK(value: unknown): number {
   return Math.min(MAX_TOP_K, Math.max(MIN_TOP_K, Math.floor(value)))
 }
 
+function normalizeThinkingEffort(value: unknown): ThinkingEffort {
+  return value === "max" ? "max" : DEFAULT_THINKING_EFFORT
+}
+
 function defaultInterleavedThinkingForModel(model: string): boolean {
   return /minimax/i.test(model)
 }
 
-function resolveInterleavedThinkingSetting(model: string, value: unknown): boolean {
+function resolveInterleavedThinkingSetting(
+  model: string,
+  value: unknown,
+  enableThinking: unknown
+): boolean {
+  if (enableThinking !== true) return false
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
+}
+
+function resolveEnableThinkingSetting(enableThinking: unknown, interleavedThinking: unknown): boolean {
+  if (typeof enableThinking === "boolean") return enableThinking
+  return interleavedThinking === true
+}
+
+function resolveThinkingEffortEnabled(enableThinking: unknown, value: unknown): boolean {
+  return enableThinking === true && value === true
 }
 
 function getCustomApiKeyEnvName(id: string): string {
@@ -1432,6 +1461,10 @@ function toPublicConfig(
   config: StoredCustomModelRecord,
   env?: Record<string, string>
 ): CustomModelPublicConfig {
+  const enableThinking = resolveEnableThinkingSetting(
+    config.enableThinking,
+    config.interleavedThinking
+  )
   return {
     id: config.id,
     name: config.name || config.model,
@@ -1443,10 +1476,17 @@ function toPublicConfig(
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(
+      enableThinking,
+      config.enableThinkingEffort
+    ),
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
-      config.interleavedThinking
+      config.interleavedThinking,
+      enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 }
@@ -1454,26 +1494,46 @@ function toPublicConfig(
 export function getCustomModelConfigs(): CustomModelConfig[] {
   migrateLegacyCustomModel()
   const env = parseEnvFile()
-  return readCustomModelsRaw().map((item) => ({
-    id: item.id,
-    name: item.name || item.model,
-    baseUrl: item.baseUrl,
-    model: item.model,
-    apiKey: getCustomModelApiKey(item.id, env),
-    maxTokens: normalizeMaxTokens(item.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
-    temperature: normalizeTemperature(item.temperature),
-    topP: normalizeTopP(item.topP),
-    topK: normalizeTopK(item.topK),
-    interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
-    ...(item.tier !== undefined && { tier: item.tier })
-  }))
+  return readCustomModelsRaw().map((item) => {
+    const enableThinking = resolveEnableThinkingSetting(
+      item.enableThinking,
+      item.interleavedThinking
+    )
+    return {
+      id: item.id,
+      name: item.name || item.model,
+      baseUrl: item.baseUrl,
+      model: item.model,
+      apiKey: getCustomModelApiKey(item.id, env),
+      maxTokens: normalizeMaxTokens(item.maxTokens),
+      maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
+      temperature: normalizeTemperature(item.temperature),
+      topP: normalizeTopP(item.topP),
+      topK: normalizeTopK(item.topK),
+      enableThinking,
+      enableThinkingEffort: resolveThinkingEffortEnabled(
+        enableThinking,
+        item.enableThinkingEffort
+      ),
+      interleavedThinking: resolveInterleavedThinkingSetting(
+        item.model,
+        item.interleavedThinking,
+        enableThinking
+      ),
+      thinkingEffort: normalizeThinkingEffort(item.thinkingEffort),
+      ...(item.tier !== undefined && { tier: item.tier })
+    }
+  })
 }
 
 export function getCustomModelConfigById(id: string): CustomModelConfig | null {
   migrateLegacyCustomModel()
   const record = readCustomModelsRaw().find((item) => item.id === id)
   if (!record) return null
+  const enableThinking = resolveEnableThinkingSetting(
+    record.enableThinking,
+    record.interleavedThinking
+  )
   return {
     id: record.id,
     name: record.name || record.model,
@@ -1485,10 +1545,17 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(
+      enableThinking,
+      record.enableThinkingEffort
+    ),
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
-      record.interleavedThinking
+      record.interleavedThinking,
+      enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(record.thinkingEffort),
     ...(record.tier !== undefined && { tier: record.tier })
   }
 }
@@ -1540,6 +1607,10 @@ export function upsertCustomModelConfig(
     throw new Error("显示名称不能重复，请使用不同的显示名称")
   }
 
+  const enableThinking = resolveEnableThinkingSetting(
+    config.enableThinking,
+    config.interleavedThinking
+  )
   const nextRecord: StoredCustomModelRecord = {
     id: targetId,
     name: normalizedName,
@@ -1550,10 +1621,17 @@ export function upsertCustomModelConfig(
     temperature: validatedTemperature,
     topP: validatedTopP,
     topK: validatedTopK,
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(
+      enableThinking,
+      config.enableThinkingEffort
+    ),
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
-      config.interleavedThinking
+      config.interleavedThinking,
+      enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 

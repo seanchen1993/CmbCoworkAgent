@@ -71,6 +71,9 @@ ${SUBAGENT_SYSTEM_PROMPT_SECTION}## Tools
 
 All file paths should use fully qualified absolute system paths.
 
+### request_user_input
+Only call this tool when explicitly requested by the user or when an active Skill explicitly requires it. Otherwise do not call this tool.
+
 ### Shell Tool
 - execute: Run shell commands in the workspace directory, or in execute.cwd when provided
 

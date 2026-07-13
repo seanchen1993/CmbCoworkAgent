@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useRef } from "react"
 import { Loader2, AlertCircle, FileCode } from "lucide-react"
-import { useCurrentThread } from "@/lib/thread-context"
+import { useThreadState } from "@/lib/thread-context"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
 import { CodeViewer } from "./CodeViewer"
 import { ImageViewer } from "./ImageViewer"
@@ -11,7 +11,7 @@ import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 
 interface FileViewerProps {
   filePath: string
-  threadId: string
+  threadId?: string
   externalFullPath?: string
   reloadToken?: number
   previewMode?: "preview" | "source"
@@ -57,13 +57,17 @@ export function FileViewer({
   reloadToken,
   previewMode
 }: FileViewerProps): React.JSX.Element | null {
-  const { fileContents, setFileContents } = useCurrentThread(threadId)
+  const threadState = useThreadState(threadId ?? null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [binaryContent, setBinaryContent] = useState<string | null>(null)
+  const [externalTextContent, setExternalTextContent] = useState<string | undefined>()
   const [fileSize, setFileSize] = useState<number | undefined>()
   const cacheKey = externalFullPath || filePath
   const displayPath = externalFullPath || filePath
+  const fileContents = threadState?.fileContents ?? {}
+  const setThreadFileContents = threadState?.setFileContents
+  const content = externalFullPath ? externalTextContent : fileContents[cacheKey]
 
   // Get file type info
   const fileName = displayPath.split("/").pop() || displayPath
@@ -80,6 +84,7 @@ export function FileViewer({
   useEffect(() => {
     setError(null)
     setBinaryContent(null)
+    setExternalTextContent(undefined)
     setFileSize(undefined)
   }, [cacheKey, reloadToken])
 
@@ -98,11 +103,18 @@ export function FileViewer({
       setError(null)
 
       try {
+        if (!externalFullPath && !threadId) {
+          setError("Missing thread id for workspace file preview")
+          return
+        }
+
         if (isBinary) {
           // Read as binary file (base64)
           const result = externalFullPath
             ? await window.api.workspace.readExternalBinaryFile(externalFullPath)
-            : await window.api.workspace.readBinaryFile(threadId, filePath)
+            : threadId
+              ? await window.api.workspace.readBinaryFile(threadId, filePath)
+              : { success: false, error: "Missing thread id for workspace file preview" }
           if (result.success && result.content !== undefined) {
             setBinaryContent(result.content)
             setFileSize(result.size)
@@ -114,9 +126,15 @@ export function FileViewer({
           // Read as text file
           const result = externalFullPath
             ? await window.api.workspace.readExternalFile(externalFullPath)
-            : await window.api.workspace.readFile(threadId, filePath)
+            : threadId
+              ? await window.api.workspace.readFile(threadId, filePath)
+              : { success: false, error: "Missing thread id for workspace file preview" }
           if (result.success && result.content !== undefined) {
-            setFileContents(cacheKey, result.content)
+            if (externalFullPath) {
+              setExternalTextContent(result.content)
+            } else {
+              setThreadFileContents?.(cacheKey, result.content)
+            }
             setFileSize(result.size)
             lastLoadedReloadTokenRef.current = reloadToken
           } else {
@@ -136,7 +154,7 @@ export function FileViewer({
     filePath,
     content,
     binaryContent,
-    setFileContents,
+    setThreadFileContents,
     isBinary,
     externalFullPath,
     cacheKey,

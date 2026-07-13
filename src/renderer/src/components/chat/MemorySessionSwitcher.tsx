@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useAppStore } from "@/lib/store"
+import { isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { cn } from "@/lib/utils"
 
 interface MemorySessionSwitcherProps {
@@ -27,6 +28,7 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
   const updateThread = useAppStore((state) => state.updateThread)
   const [open, setOpen] = useState(false)
   const [globalEnabled, setGlobalEnabled] = useState(false)
+  const [projectModeMemoryEnabled, setProjectModeMemoryEnabled] = useState(false)
   const [loadingGlobal, setLoadingGlobal] = useState(true)
   const [pending, setPending] = useState(false)
   const mountedRef = useRef(true)
@@ -36,8 +38,11 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
     [currentThreadId, threads]
   )
   const sessionEnabled = isSessionMemoryEnabled(currentThread?.metadata)
-  const effectiveEnabled = sessionEnabled && globalEnabled
-  const pausedByGlobal = sessionEnabled && !globalEnabled
+  const projectModeMemoryBlocked =
+    isHarnessProjectModeThread(currentThread) && !projectModeMemoryEnabled
+  const effectiveEnabled = sessionEnabled && globalEnabled && !projectModeMemoryBlocked
+  const pausedByGlobal = sessionEnabled && !globalEnabled && !projectModeMemoryBlocked
+  const enabledOptionSelected = sessionEnabled && !projectModeMemoryBlocked
 
   const triggerLabel = pending
     ? "记忆"
@@ -59,8 +64,14 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
 
   const loadGlobalEnabled = useCallback(async () => {
     try {
-      const enabled = await window.api.memory.getEnabled()
-      if (mountedRef.current) setGlobalEnabled(enabled)
+      const [enabled, projectModeEnabled] = await Promise.all([
+        window.api.memory.getEnabled(),
+        window.api.memory.getProjectModeEnabled()
+      ])
+      if (mountedRef.current) {
+        setGlobalEnabled(enabled)
+        setProjectModeMemoryEnabled(projectModeEnabled)
+      }
     } catch (error) {
       console.error("[MemorySessionSwitcher] Failed to load memory setting:", error)
     } finally {
@@ -112,7 +123,13 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
         if (mountedRef.current) setPending(false)
       }
     },
-    [currentThread?.metadata, currentThreadId, globalEnabled, pending, updateThread]
+    [
+      currentThread?.metadata,
+      currentThreadId,
+      globalEnabled,
+      pending,
+      updateThread
+    ]
   )
 
   return (
@@ -159,20 +176,21 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
         <div className="space-y-1 p-2">
           <button
             type="button"
-            disabled={pending || loadingGlobal}
+            disabled={pending || loadingGlobal || projectModeMemoryBlocked}
             onClick={() => {
               void setSessionMemoryEnabled(true)
             }}
             className={cn(
               "flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-colors",
-              sessionEnabled
+              enabledOptionSelected
                 ? "border-teal-200 bg-teal-50/80 text-foreground dark:border-teal-500/30 dark:bg-teal-500/10"
                 : "border-transparent text-muted-foreground hover:border-border hover:bg-muted/50 hover:text-foreground",
-              (pending || loadingGlobal) && "cursor-not-allowed opacity-60"
+              (pending || loadingGlobal || projectModeMemoryBlocked) &&
+                "cursor-not-allowed opacity-60"
             )}
           >
             <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-teal-100 text-teal-600 dark:bg-teal-500/15 dark:text-teal-300">
-              {pending && !sessionEnabled ? (
+              {pending && !enabledOptionSelected ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : (
                 <Brain className="size-3.5" />
@@ -184,7 +202,7 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
                 本会话后续运行可检索记忆，并在成功结束后保存值得记住的信息。
               </span>
             </span>
-            {sessionEnabled && (
+            {enabledOptionSelected && (
               <span className="mt-1 grid size-5 shrink-0 place-items-center rounded-full bg-foreground text-background">
                 <Check className="size-3.5" />
               </span>
@@ -199,7 +217,7 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
             }}
             className={cn(
               "flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-colors",
-              !sessionEnabled
+              !enabledOptionSelected
                 ? "border-border bg-muted/60 text-foreground"
                 : "border-transparent text-muted-foreground hover:border-border hover:bg-muted/50 hover:text-foreground",
               (pending || loadingGlobal) && "cursor-not-allowed opacity-60"
@@ -214,7 +232,7 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
                 本会话后续运行不会读取记忆，也不会在结束后自动写入记忆。
               </span>
             </span>
-            {!sessionEnabled && (
+            {!enabledOptionSelected && (
               <span className="mt-1 grid size-5 shrink-0 place-items-center rounded-full bg-foreground text-background">
                 <Check className="size-3.5" />
               </span>

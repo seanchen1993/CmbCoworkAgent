@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
-import { isHarnessFeatureThread } from "@/lib/thread-classification"
+import { isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { useAllStreamLoadingStates, useAllThreadStates } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 
@@ -10,7 +10,7 @@ export function KanbanHeader({ className }: { className?: string }): React.JSX.E
   const allThreadStates = useAllThreadStates()
 
   const activeCount = threads.filter((t) => {
-    if (isHarnessFeatureThread(t)) return false
+    if (isHarnessProjectModeThread(t)) return false
     const isLoading = loadingStates[t.thread_id] ?? false
     const hasPendingApproval = Boolean(allThreadStates[t.thread_id]?.pendingApproval)
     return isLoading || hasPendingApproval || t.status === "busy" || t.status === "interrupted"

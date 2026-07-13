@@ -8,7 +8,11 @@ export type SkillAdoptionSortKey =
   | "pushedCommitCount"
 
 export interface SkillAdoptionRankingItem {
+  id?: string
   skill: string
+  sourceRef?: string
+  isPlugin?: boolean
+  pluginName?: string
   generatedLines: number
   measuredGeneratedLines: number
   effectiveGeneratedLines: number
@@ -57,7 +61,10 @@ export function sortSkillAdoptionItems(
     if (aValue !== null && bValue === null) return -1
     if (aValue !== null && bValue !== null && aValue !== bValue) return bValue - aValue
     if (a.adoptedLines !== b.adoptedLines) return b.adoptedLines - a.adoptedLines
-    return a.skill.localeCompare(b.skill, "zh-CN")
+    return `${a.skill}${a.pluginName ?? ""}`.localeCompare(
+      `${b.skill}${b.pluginName ?? ""}`,
+      "zh-CN"
+    )
   })
 }
 
@@ -82,5 +89,10 @@ export function filterSkillAdoptionItems(
 ): SkillAdoptionRankingItem[] {
   const trimmed = query.trim()
   if (!trimmed) return items
-  return items.filter((item) => matchesSkillAdoptionQuery(item.skill, trimmed))
+  return items.filter((item) =>
+    matchesSkillAdoptionQuery(
+      item.pluginName ? `${item.skill} ${item.pluginName}` : item.skill,
+      trimmed
+    )
+  )
 }

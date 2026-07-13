@@ -10,6 +10,7 @@ import path from "path"
 import { app } from "electron"
 import { getCustomModelConfigById, syncSkillsToClaudeDir } from "../storage"
 import { getGlobalMemoryDir, getProjectMemoryDir } from "../memory/paths"
+import { trackEvent } from "../services/event-reporter"
 
 function isFullBackupPath(candidate: string): boolean {
   const appDir = path.dirname(app.getPath("exe"))
@@ -425,7 +426,8 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
         rows: initRows,
         claudeModelId,
         syncSkills = false,
-        syncMemory = false
+        syncMemory = false,
+        launchSource
       }: {
         workDir?: string
         args?: string[]
@@ -434,6 +436,7 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
         claudeModelId?: string
         syncSkills?: boolean
         syncMemory?: boolean
+        launchSource?: "select_dir" | "restart"
       }
     ) => {
       const id = `term-${++idCounter}`
@@ -542,6 +545,18 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
         ptyCreated = true
         ensureStillAlive("after created")
         console.log(`[Terminal] Created PTY ${id} via Pty Host, running: ${claudePath}`)
+        if (launchSource === "select_dir") {
+          trackEvent("workspace.launch.started", "workspace", {
+            surface: "claude_code",
+            source: "terminal_create",
+            workspacePath: effectiveWorkDir,
+            workspaceName: path.basename(effectiveWorkDir),
+            terminalId: id,
+            syncSkills,
+            syncMemory,
+            hasModelOverride: Boolean(claudeModelId)
+          })
+        }
         return id
       } catch (err) {
         // 创建失败：幂等清理主进程状态，通知子进程销毁可能已创建的 PTY。

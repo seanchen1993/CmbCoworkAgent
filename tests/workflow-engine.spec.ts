@@ -1961,6 +1961,102 @@ async function testPendingNotificationBacklogDrain(workspace: string): Promise<v
   assert(reAck === true, "re-acking an already-delivered run returns true (no resurrect)")
 }
 
+async function testResumeAckInstanceFence(workspace: string): Promise<void> {
+  // A resume REUSES the runId, and the error notification is what TELLS the model to
+  // resume — so the resume is launched INSIDE the very turn that will later ack that
+  // error notification. A sub-second resumed run reaches terminal BEFORE the stale ack
+  // lands, so the `status !== "running"` guard alone lets it through and it marks the
+  // NEW instance delivered, permanently swallowing that instance's own completion
+  // notification. `startedAt` is minted fresh on every launch → it identifies the run
+  // INSTANCE the notification was built from, and fences the ack to it.
+  //
+  // This is a BEHAVIOURAL test on purpose: the fence is a silent race guard (when it
+  // breaks, a notification just vanishes — no throw, no log), and a source-regex guard
+  // stays green if `!==` is ever typo'd to `===`.
+  const threadId = "thread-resume-fence"
+  const runId = generateWorkflowRunId()
+  const persistInstance = async (startedAt: string, status: "error" | "completed") => {
+    const store = createWorkflowRunStore({
+      workspacePath: workspace,
+      threadId,
+      initial: {
+        version: 1,
+        runId, // resume reuses the id — the SECOND call overwrites the first's record
+        threadId,
+        workflowName: "fence",
+        script: "x",
+        scriptSha256: "s",
+        status,
+        phases: [],
+        currentPhase: null,
+        agents: [],
+        logs: [],
+        journal: [],
+        stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+        startedAt,
+        updatedAt: startedAt
+      }
+    })
+    assert((await store.flush()) === true, `instance ${startedAt} must persist`)
+  }
+
+  const firstStartedAt = new Date(Date.now() - 60_000).toISOString()
+  const resumedStartedAt = new Date().toISOString()
+  assert(firstStartedAt !== resumedStartedAt, "the two instances must be distinguishable")
+
+  // Instance 1 fails; its notification is built from THIS snapshot (startedAt=first).
+  await persistInstance(firstStartedAt, "error")
+  // The model resumes inside that notification's turn: same runId, fresh startedAt,
+  // and it completes in milliseconds — the record on disk is now instance 2.
+  await persistInstance(resumedStartedAt, "completed")
+  const onDisk = loadWorkflowRun(workspace, threadId, runId)!
+  assert(onDisk.startedAt === resumedStartedAt, "disk must hold the RESUMED instance")
+  assert(onDisk.status === "completed", "resumed instance is terminal")
+
+  // …and only NOW does instance 1's ack land. It must be a no-op.
+  const staleAck = await markWorkflowRunNotified(workspace, threadId, runId, firstStartedAt)
+  assert(staleAck === true, "a stale ack reports settled (nothing to persist, no retry)")
+  const afterStale = loadWorkflowRun(workspace, threadId, runId)!
+  assert(
+    !afterStale.notificationDelivered,
+    "REGRESSION: stale ack marked the RESUMED instance delivered — its completion " +
+      "notification would be swallowed forever"
+  )
+  const stillPending = findUndeliveredTerminalRun(workspace, threadId)
+  assert(
+    stillPending?.runId === runId,
+    "the resumed instance must still surface as pending after the stale ack"
+  )
+
+  // The resumed instance's OWN ack (matching startedAt) settles it for real.
+  const liveAck = await markWorkflowRunNotified(workspace, threadId, runId, resumedStartedAt)
+  assert(liveAck === true, "the matching ack persists delivered")
+  assert(
+    loadWorkflowRun(workspace, threadId, runId)!.notificationDelivered === true,
+    "matching ack must mark the run delivered"
+  )
+  assert(
+    findUndeliveredTerminalRun(workspace, threadId) === null,
+    "backlog drains once the resumed instance is genuinely reported"
+  )
+
+  // Back-compat: the cancel path acks WITHOUT an instance (the run being marked IS the
+  // one being cancelled), so an omitted fence must still write through.
+  await rollbackWorkflowRunNotified(workspace, threadId, runId)
+  assert(
+    !loadWorkflowRun(workspace, threadId, runId)!.notificationDelivered,
+    "rollback clears the flag"
+  )
+  assert(
+    (await markWorkflowRunNotified(workspace, threadId, runId)) === true,
+    "an unfenced ack (cancel path) still persists delivered"
+  )
+  assert(
+    loadWorkflowRun(workspace, threadId, runId)!.notificationDelivered === true,
+    "unfenced ack must mark delivered"
+  )
+}
+
 async function testPipelineConcurrentResume(workspace: string): Promise<void> {
   // Two-stage pipeline. stage1 for "A" is SLOWER than for "B", so in the ORIGINAL
   // run stage2 fires in completion order [B, A]; on resume (cache replays
@@ -4120,6 +4216,7 @@ async function main(): Promise<void> {
     await testInitialStatePersistedImmediately(workspace)
     await testInitialPersistFailureReported()
     await testPendingNotificationBacklogDrain(workspace)
+    await testResumeAckInstanceFence(workspace)
     await testGuestReadFileRejectsNonRegular()
     await testListWorkflowRunsSummarySidecar(workspace)
     await testJournalSidecarSplit(workspace)
@@ -4141,7 +4238,7 @@ async function main(): Promise<void> {
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (71 tests)")
+    console.log("PASS workflow-engine (82 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome

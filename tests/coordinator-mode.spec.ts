@@ -245,7 +245,7 @@ async function testPromptContracts(): Promise<void> {
   assertIncludes(prompt, "concrete evidence", "coordinator prompt")
   assertIncludes(prompt, "Current time: 2026-04-28T16:30:00+08:00", "coordinator prompt")
   assertIncludes(prompt, "Do not invent dates or timestamps", "coordinator prompt")
-  assertIncludes(prompt, "## Project Mode Adapter Instructions", "coordinator prompt")
+  assertIncludes(prompt, "## Skills Runtime Context", "coordinator prompt")
   assertIncludes(prompt, "ADAPTER_RULE", "coordinator prompt")
   assert(
     prompt.indexOf("ADAPTER_RULE") > prompt.indexOf("System environment:"),

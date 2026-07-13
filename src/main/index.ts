@@ -27,10 +27,66 @@ import {
   APP_ATTENTION_CHANNEL,
   isRendererAppAttentionPayload
 } from "../shared/app-attention"
+import type {
+  CloseToTrayPromptAction,
+  CloseToTrayPromptEvent
+} from "../shared/close-to-tray"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
+const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
+const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
+const EVENT_CATEGORIES = new Set<EventCategory>([
+  "skill",
+  "git",
+  "code_adoption",
+  "harness",
+  "heartbeat",
+  "memory",
+  "hook",
+  "chatx",
+  "workspace"
+])
+
+function isCloseToTrayPromptResponse(
+  payload: unknown
+): payload is { requestId: number; action: CloseToTrayPromptAction } {
+  if (!payload || typeof payload !== "object") return false
+  // 使用 in 操作符进行属性存在性检查，比 as 断言更安全
+  if (!("requestId" in payload) || !("action" in payload)) return false
+  const record = payload as Record<string, unknown>
+  return (
+    typeof record.requestId === "number" &&
+    (record.action === "minimize-to-tray" ||
+      record.action === "direct-close" ||
+      record.action === "cancel")
+  )
+}
+
+function isTrackEventPayload(payload: unknown): payload is {
+  eventName: string
+  eventCategory: EventCategory
+  properties?: Record<string, unknown>
+} {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false
+  const record = payload as Record<string, unknown>
+  if (
+    typeof record.eventName !== "string" ||
+    !record.eventName.trim() ||
+    typeof record.eventCategory !== "string" ||
+    !EVENT_CATEGORIES.has(record.eventCategory as EventCategory)
+  ) {
+    return false
+  }
+  return (
+    record.properties === undefined ||
+    (!!record.properties &&
+      typeof record.properties === "object" &&
+      !Array.isArray(record.properties))
+  )
+}
 
 function getConsoleLevelName(level: number): string {
   switch (level) {
@@ -208,10 +264,10 @@ import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { startFeatureGatePrefetch, stopFeatureGatePrefetch } from "./feature-gates"
 import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
+import type { EventCategory } from "./services/event-reporter"
 import {
   configurePetWindow,
   createPetWindow,
@@ -222,6 +278,9 @@ import {
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
 let browserService: ReturnType<typeof registerBrowserHandlers> | null = null
+let closeToTrayPromptOpen = false
+let closeToTrayPromptRequestId = 0
+let closeToTrayPromptTimer: NodeJS.Timeout | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -323,6 +382,55 @@ function applyMacDockIcon(): void {
 
 // getLocalIP moved to ./net-utils — imported above
 
+function hideMainWindowToTray(window: BrowserWindow): void {
+  if (window.isDestroyed()) return
+  window.hide()
+  showPendingAppAttention()
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.hide()
+  }
+}
+
+function clearCloseToTrayPromptState(): void {
+  closeToTrayPromptOpen = false
+  if (closeToTrayPromptTimer) {
+    clearTimeout(closeToTrayPromptTimer)
+    closeToTrayPromptTimer = null
+  }
+}
+
+function requestHideMainWindowToTray(window: BrowserWindow): void {
+  if (closeToTrayPromptOpen) {
+    if (!window.isDestroyed()) window.focus()
+    return
+  }
+
+  closeToTrayPromptOpen = true
+  closeToTrayPromptRequestId += 1
+  const requestId = closeToTrayPromptRequestId
+  closeToTrayPromptTimer = setTimeout(() => {
+    if (closeToTrayPromptRequestId === requestId) {
+      console.warn("[Main] Close-to-tray prompt timed out")
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const event: CloseToTrayPromptEvent = {
+          type: "dismiss",
+          requestId,
+          reason: "timeout"
+        }
+        mainWindow.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
+      }
+      clearCloseToTrayPromptState()
+    }
+  }, CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS)
+  window.focus()
+  const event: CloseToTrayPromptEvent = {
+    type: "open",
+    requestId,
+    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘"
+  }
+  window.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
+}
+
 function createWindow(): void {
   const devWindowIcon = process.platform === "win32" && isDev ? getDevWindowsIconPath() : undefined
 
@@ -369,6 +477,7 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    clearCloseToTrayPromptState()
     console.error("[Main] Renderer failed to load:", {
       errorCode,
       errorDescription,
@@ -376,7 +485,12 @@ function createWindow(): void {
     })
   })
 
+  mainWindow.webContents.on("did-start-loading", () => {
+    clearCloseToTrayPromptState()
+  })
+
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    clearCloseToTrayPromptState()
     console.error("[Main] Renderer process gone:", details)
   })
 
@@ -411,10 +525,8 @@ function createWindow(): void {
     })
     if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
       event.preventDefault()
-      mainWindow?.hide()
-      showPendingAppAttention()
-      if (process.platform === "darwin" && app.dock) {
-        app.dock.hide()
+      if (mainWindow) {
+        requestHideMainWindowToTray(mainWindow)
       }
     }
   })
@@ -424,6 +536,7 @@ function createWindow(): void {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
+    clearCloseToTrayPromptState()
     mainWindow = null
     if (process.platform !== "darwin") {
       app.quit()
@@ -593,13 +706,33 @@ if (!gotTheLock) {
       requestAppAttention({ kind: payload.kind, threadId: payload.threadId })
     })
 
+    ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (event.sender.id !== mainWindow.webContents.id) return
+      if (!isCloseToTrayPromptResponse(payload)) return
+      if (!closeToTrayPromptOpen || payload.requestId !== closeToTrayPromptRequestId) return
+
+      clearCloseToTrayPromptState()
+      if (payload.action === "minimize-to-tray") {
+        hideMainWindowToTray(mainWindow)
+      } else if (payload.action === "direct-close") {
+        // app.quit() 会触发 before-quit → will-quit 事件链，
+        // 其中会执行 fireSessionEndAll（中断活跃 agent 运行）、
+        // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
+        app.quit()
+      }
+    })
+
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)
     })
 
     // Track event handler for client-side telemetry
-    ipcMain.handle("track-event", async (_event, payload: any) => {
+    ipcMain.handle("track-event", async (_event, payload: unknown) => {
       try {
+        if (!isTrackEventPayload(payload)) {
+          return { success: false }
+        }
         const { eventName, eventCategory, properties } = payload
         trackEvent(eventName, eventCategory, properties)
         return { success: true }
@@ -691,7 +824,6 @@ if (!gotTheLock) {
     startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
-    startFeatureGatePrefetch(3000)
     markFullBackupCleanupReady(selfCheckResult)
 
     // ── Keep Awake ──
@@ -773,7 +905,6 @@ if (!gotTheLock) {
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
     stopUpdateChecker()
-    stopFeatureGatePrefetch()
     try {
       shutdownAdoptionTracker()
     } catch (err) {

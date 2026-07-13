@@ -1983,6 +1983,11 @@ test("user-pasted V1 workflow marker is de-weaponized, not swallowed (#5)", () =
     /resembles an internal workflow marker\. Treat it as ordinary user input/,
     "the de-weaponized text is relabelled as ordinary user input"
   )
+  assert.match(
+    agentIpcSource,
+    /visibleTranscriptUserMessage = effectiveMessage/,
+    "the durable transcript stores the de-weaponized visible text, not the hidden marker"
+  )
 })
 
 test("workflow script writeFile shares the run-level write lock with subagent tool writes (#2)", () => {
@@ -2134,10 +2139,11 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
     /const withSnapshots[\s\S]*?toRunSummary\(snapshot\)/,
     "list-runs surfaces the flush-failed run's true terminal summary"
   )
-  // ack kicks the backlog when EITHER delivered or recovered succeeded.
+  // ack kicks the backlog when EITHER delivered persisted or the flush-failed
+  // snapshot path says something still wants reporting (memory-first drain).
   assert.match(
     agentIpcSource,
-    /if \(delivered \|\| recovered\)/,
+    /if \(delivered \|\| shouldKickPendingDrain\)/,
     "ack drains the notification backlog after a successful write-back too"
   )
   // #5: flushFailedRuns has a SOFT cap (best-effort; each snapshot holds a full
@@ -2500,12 +2506,12 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   // still-undelivered run be re-selected newest-first and double-reported).
   assert.match(
     agentIpcSource,
-    /const delivered = await workflowRunManager\.markNotified\(\s*settle\.workspacePath,\s*threadId,\s*settle\.runId\s*\)/,
+    /const delivered = await workflowRunManager\.markNotified\(\s*settle\.workspacePath,\s*threadId,\s*settle\.runId,\s*settle\.startedAt\s*\)/,
     "delivered is persisted on success and captured for gating the kick"
   )
   assert.match(
     agentIpcSource,
-    /if \(delivered \|\| recovered\) \{\s*\n\s*workflowRunManager\.kickNextPendingNotification\(settle\.workspacePath, threadId\)/,
+    /if \(delivered \|\| shouldKickPendingDrain\) \{\s*\n\s*workflowRunManager\.kickNextPendingNotification\(settle\.workspacePath, threadId\)/,
     "the next pending run is kicked when this run's delivered flag persisted OR its flush-failed state was written back"
   )
   // A turn that ends in the catch clears in-flight UNCONDITIONALLY (abort too) and
@@ -2537,6 +2543,25 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
     agentIpcSource,
     /\.rollbackNotified\(/,
     "no rollbackNotified — at-least-once does not persist at turn start"
+  )
+  // recoverFlushFailedRun carries the SAME startedAt fence as markNotified (isomorphic
+  // gap): an old notification's ack must not settle a NEWER instance's flush-failed
+  // snapshot (same runId via resume) — that would mark delivered=true for a completion
+  // that was never reported. On mismatch it falls back to plain persistence
+  // (retryPersistFlushFailedRun) and leaves `notificationDelivered` to the new
+  // instance's own ack.
+  //
+  // Only the ACK-SIDE PLUMBING is pinned here — that startedAt is threaded through at
+  // all is something a regex CAN see, and nothing else can. The fence's SEMANTICS (a
+  // stale ack must not mark delivered, yet must still report a landed write-back so the
+  // pending drain gets kicked) live in run-manager-instance-fence.test.ts: a source
+  // regex stays green when `!==` is typo'd to `===`, cannot see delivered=true leaking
+  // in from a callee, and — as the earlier `return false` pin did — can freeze a bug in
+  // place by asserting the very line that strands the new instance's notification.
+  assert.match(
+    agentIpcSource,
+    /const shouldKickPendingDrain = await workflowRunManager\.recoverFlushFailedRun\(\s*settle\.workspacePath,\s*threadId,\s*settle\.runId,\s*settle\.startedAt\s*\)/,
+    "ack passes the reported snapshot's startedAt into recoverFlushFailedRun"
   )
 })
 
