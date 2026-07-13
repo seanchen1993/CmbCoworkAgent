@@ -611,15 +611,23 @@ async function runGitWithChunkedLiteralPathspecs(
   return results
 }
 
-async function checkoutPathsFromHead(worktreePath: string, paths: string[]): Promise<void> {
+async function checkoutPathsFromHead(
+  worktreePath: string,
+  paths: string[],
+  options?: { threadId?: string }
+): Promise<void> {
+  if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化开始")
   const executablePaths = await normalizeExecutablePathspecs(worktreePath, paths)
+  if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化完成")
   if (executablePaths.length === 0) return
+  if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback 执行开始")
   await runGitWithChunkedLiteralPathspecs(
     worktreePath,
     ["checkout", "HEAD"],
     executablePaths,
     { silent: true }
   )
+  if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback 执行完成")
 }
 
 async function runStatusPorcelainForPathspecs(
@@ -758,29 +766,41 @@ async function normalizeExecutablePathspecs(worktreePath: string, pathspecs: str
   return normalizeGitPathspecList(result)
 }
 
-async function restorePathsToHead(worktreePath: string, targetPaths: string[]): Promise<void> {
+async function restorePathsToHead(
+  worktreePath: string,
+  targetPaths: string[],
+  options?: { threadId?: string }
+): Promise<void> {
+  if (options?.threadId) logGitTimestamp(options.threadId, "restore pathspec 规范化开始")
   const paths = await normalizeExecutablePathspecs(worktreePath, targetPaths)
+  if (options?.threadId) logGitTimestamp(options.threadId, "restore pathspec 规范化完成")
   if (paths.length === 0) return
 
+  if (options?.threadId) logGitTimestamp(options.threadId, "restore 支持检测开始")
   const restoreSupport = await detectGitRestoreSupport()
+  if (options?.threadId) logGitTimestamp(options.threadId, "restore 支持检测完成")
   if (restoreSupport === false) {
-    await checkoutPathsFromHead(worktreePath, paths)
+    if (options?.threadId) logGitTimestamp(options.threadId, "进入 checkout fallback 开始")
+    await checkoutPathsFromHead(worktreePath, paths, options)
+    if (options?.threadId) logGitTimestamp(options.threadId, "进入 checkout fallback 完成")
     return
   }
 
   try {
+    if (options?.threadId) logGitTimestamp(options.threadId, "restore 执行开始")
     await runGitWithChunkedLiteralPathspecs(
       worktreePath,
       ["restore", "--source", "HEAD", "--staged", "--worktree"],
       paths,
       { silent: true }
     )
+    if (options?.threadId) logGitTimestamp(options.threadId, "restore 执行完成")
     return
   } catch (error) {
     if (isPathspecNoMatchError(error) && paths.length > 1) {
       const missingPaths: string[] = []
       for (const targetPath of paths) {
-        await restorePathsToHead(worktreePath, [targetPath]).catch((singleError) => {
+        await restorePathsToHead(worktreePath, [targetPath], options).catch((singleError) => {
           if (!isPathspecNoMatchError(singleError)) throw singleError
           missingPaths.push(targetPath)
         })
@@ -797,7 +817,9 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
     gitRestoreSupportCache = false
   }
 
-  await checkoutPathsFromHead(worktreePath, paths)
+  if (options?.threadId) logGitTimestamp(options.threadId, "进入 checkout fallback 开始")
+  await checkoutPathsFromHead(worktreePath, paths, options)
+  if (options?.threadId) logGitTimestamp(options.threadId, "进入 checkout fallback 完成")
 }
 
 async function resetPathsFromIndex(worktreePath: string, targetPaths: string[]): Promise<void> {
@@ -959,6 +981,10 @@ function logGitStep(threadId: string, action: string, detail: string): void {
   console.log(`[GitPanel][${threadId}][${action}] ${detail}`)
 }
 
+function logGitTimestamp(threadId: string, detail: string): void {
+  logGitStep(threadId, "reject_all", `${detail}：${Date.now()}`)
+}
+
 function formatDurationMs(startMs: number): string {
   return `${Date.now() - startMs}ms`
 }
@@ -1062,11 +1088,13 @@ async function rejectWorktreePaths(params: {
     "reject_all",
     `回退计划：restore=${plan.restoreTargets.length}，clean=${plan.cleanTargets.length}`
   )
+  logGitTimestamp(threadId, "安全检查开始")
   for (const targetPath of [...plan.restoreTargets, ...plan.cleanTargets]) {
     await assertRejectPathSafe(worktreePath, targetPath)
   }
+  logGitTimestamp(threadId, "安全检查完成")
   const restoreStartedAt = Date.now()
-  await restorePathsToHead(worktreePath, plan.restoreTargets)
+  await restorePathsToHead(worktreePath, plan.restoreTargets, { threadId })
   logGitStep(
     threadId,
     "reject_all",
