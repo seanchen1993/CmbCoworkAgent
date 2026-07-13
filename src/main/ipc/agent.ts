@@ -57,9 +57,10 @@ import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
-import type {
-  HarnessAgentmdLoadStatusItem,
-  HarnessDeployUnitMapping
+import {
+  didHarnessSystemConstraintsLoadSuccessfully,
+  type HarnessAgentmdLoadStatusItem,
+  type HarnessDeployUnitMapping
 } from "../../shared/harness-board-types"
 import {
   checkpointHasInterrupt,
@@ -222,9 +223,11 @@ import {
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
   buildHarnessFeatureAgentContext,
+  markHarnessProjectSystemConstraintsLoaded,
   readHarnessFeatureMetadata,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
+import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -1701,6 +1704,23 @@ function createHarnessAgentmdLoadStatusHandler(
       loader,
       promptPreview
     )
+
+    const projectId = context.harnessProjectId?.trim()
+    if (!projectId || !didHarnessSystemConstraintsLoadSuccessfully(items)) return
+    try {
+      const firstSuccess = markHarnessProjectSystemConstraintsLoaded(projectId)
+      if (firstSuccess) {
+        // reportProjectSnapshotNow performs a synchronous project inspect before
+        // its first await; defer it so telemetry never delays runtime creation.
+        setImmediate(() => void reportProjectSnapshotNow(projectId))
+      }
+    } catch (error) {
+      // Telemetry must never block or fail the agent run.
+      console.warn("[HarnessBoard] Failed to persist system-constraint load success:", {
+        projectId,
+        error
+      })
+    }
   }
 }
 

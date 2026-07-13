@@ -119,6 +119,13 @@ export interface HarnessAgentmdLoadStatusItem {
   message: string
 }
 
+/** A session succeeds only when it reported at least one constraint and all reported constraints loaded. */
+export function didHarnessSystemConstraintsLoadSuccessfully(
+  items: readonly HarnessAgentmdLoadStatusItem[]
+): boolean {
+  return items.length > 0 && items.every((item) => item.loaded)
+}
+
 export interface HarnessFeatureDeployUnitBinding {
   projectId: string
   featureId: string
@@ -176,6 +183,8 @@ export interface HarnessProjectMetadata {
   systemName: string
   workspacePath: string
   sessionWorkspacePath?: string
+  /** First feature-session run whose complete system-constraint set loaded successfully. */
+  systemConstraintFirstLoadedAt?: string
   "harness-adapter": HarnessAdapterSnapshot
   creator?: HarnessProjectCreatorMetadata
   lifecycle: {
@@ -304,6 +313,7 @@ export interface HarnessProjectListItem {
   systemName: string
   workspacePath: string
   sessionWorkspacePath?: string
+  systemConstraintFirstLoadedAt?: string
   harnessAdapter: {
     id: string
     name: string

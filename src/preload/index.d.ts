@@ -598,6 +598,7 @@ interface DashboardProjectModeProject {
   lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
+  systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
   hasError: boolean

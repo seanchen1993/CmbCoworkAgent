@@ -8273,6 +8273,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       lifecycleStatus: "active",
       compatible: true,
       compatibilityStatus: "compatible",
+      systemConstraintEverLoadedSuccessfully: true,
       featureCount: 3,
       conversationCount: 128,
       hasError: false,
@@ -8330,6 +8331,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       lifecycleStatus: "active",
       compatible: false,
       compatibilityStatus: "outdated",
+      systemConstraintEverLoadedSuccessfully: false,
       featureCount: 2,
       conversationCount: 47,
       hasError: false,
@@ -8374,6 +8376,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       lifecycleStatus: "paused",
       compatible: true,
       compatibilityStatus: "compatible",
+      systemConstraintEverLoadedSuccessfully: false,
       featureCount: 1,
       conversationCount: 0,
       hasError: true,
@@ -8399,6 +8402,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       lifecycleStatus: "archived",
       compatible: true,
       compatibilityStatus: "compatible",
+      systemConstraintEverLoadedSuccessfully: true,
       featureCount: 1,
       conversationCount: 12,
       hasError: false,
@@ -8437,6 +8441,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
       lifecycleStatus: "active",
       compatible: true,
       compatibilityStatus: "compatible",
+      systemConstraintEverLoadedSuccessfully: i % 2 === 0,
       featureCount: (i % 3) + 1,
       conversationCount: (i * 7) % 90,
       hasError: false,
@@ -10389,6 +10394,8 @@ interface ProjectModeProjectView {
   lifecycleUpdatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
+  /** Whether at least one feature session has loaded its complete system-constraint set. */
+  systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
   hasError: boolean
@@ -11030,6 +11037,10 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     lifecycleUpdatedAt: asOptionalString(props.lifecycleUpdatedAt),
     compatible: typeof props.compatible === "boolean" ? props.compatible : undefined,
     compatibilityStatus: asOptionalString(props.compatibilityStatus),
+    systemConstraintEverLoadedSuccessfully:
+      typeof props.systemConstraintEverLoadedSuccessfully === "boolean"
+        ? props.systemConstraintEverLoadedSuccessfully
+        : undefined,
     featureCount: asNumber(props.featureCount, features.length),
     conversationCount: 0,
     hasError: typeof props.error === "string" && props.error.length > 0,

@@ -1972,6 +1972,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   const adapterName = normalizeText(harnessAdapter.name)
   const projectCode = normalizeText(value.projectCode)
   const projectDir = normalizeText(value.projectDir) || projectCode
+  const systemConstraintFirstLoadedAt = normalizeText(value.systemConstraintFirstLoadedAt).trim()
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
   const now = new Date().toISOString()
 
@@ -1986,6 +1987,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     systemName: normalizeText(value.systemName),
     workspacePath: normalizeText(value.workspacePath) || normalizeText(oldWorkspace.path),
     sessionWorkspacePath: normalizeText(value.sessionWorkspacePath) || undefined,
+    ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -2311,6 +2313,7 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     systemName: project.systemName,
     workspacePath: project.workspacePath,
     sessionWorkspacePath: project.sessionWorkspacePath,
+    systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
     harnessAdapter: {
       id: harnessAdapter.id,
       name: harnessAdapter.name,
@@ -3107,6 +3110,35 @@ export function getHarnessDynamicWorkflowConfig(
 ): HarnessDynamicWorkflowConfig | null {
   const project = requireProject(projectId)
   return getHarnessDynamicWorkflowConfigForProject(project)
+}
+
+/**
+ * Persist the first observed feature-session run whose complete system-constraint
+ * set loaded successfully. The marker is monotonic and deliberately does not
+ * touch lifecycle.updateAt, so telemetry does not reorder the project list.
+ * Returns true only when the project was changed for the first time.
+ */
+export function markHarnessProjectSystemConstraintsLoaded(
+  projectId: string,
+  loadedAt = new Date().toISOString()
+): boolean {
+  const id = normalizeText(projectId).trim()
+  if (!id) return false
+
+  const store = readProjectStore()
+  const index = store.projects.findIndex((item) => item.projectId === id)
+  if (index === -1 || store.projects[index].systemConstraintFirstLoadedAt) return false
+
+  const parsedLoadedAt = new Date(loadedAt)
+  const firstLoadedAt = Number.isNaN(parsedLoadedAt.getTime())
+    ? new Date().toISOString()
+    : parsedLoadedAt.toISOString()
+  store.projects[index] = {
+    ...store.projects[index],
+    systemConstraintFirstLoadedAt: firstLoadedAt
+  }
+  writeProjectStore(store)
+  return true
 }
 
 export function updateHarnessProjectMetadata(

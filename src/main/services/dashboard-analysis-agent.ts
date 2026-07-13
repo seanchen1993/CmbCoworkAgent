@@ -267,6 +267,7 @@ function buildSystemPrompt(context?: DashboardAnalysisContext): string {
     "- event 顶层常用字段：eventName、eventTime、sapId、ystId、userName、orgName、upperOrgLv0、upperOrgLv1。",
     "- code_gen properties 常用字段：eventId/genEventId、lineCount、deletedLineCount、usedSkills、modelId/modelName、threadId、harnessProjectId、harnessFeatureSlug、harnessAdapterName、harnessAdapterVersion。",
     "- code_adopt properties 常用字段：genEventId、generatedAt、commitSha、pushed、generatedLineCount、effectiveGeneratedLineCount、adoptedLineCount、verdict、usedSkills、threadId、harnessProjectId、harnessFeatureSlug、harnessAdapterName、harnessAdapterVersion。",
+    "- harness.project.snapshot 是项目当前状态快照；properties.systemConstraintEverLoadedSuccessfully 表示项目是否至少有一次会话完整加载系统约束。",
     "- 分析生成漏斗时优先按生成时间过滤：code_gen 使用 eventTime；code_adopt 使用 properties.generatedAt。",
     "- 项目模式字段：event index 使用 properties.harnessProjectId/properties.harnessFeatureSlug；trace index 使用顶层 harnessProjectId/harnessFeatureSlug。",
     "- 不确定字段是否存在时，先用 mapping 或 field_caps 查询；不要编造字段。",
