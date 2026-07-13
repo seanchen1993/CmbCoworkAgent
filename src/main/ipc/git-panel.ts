@@ -616,13 +616,7 @@ async function checkoutPathsFromHead(worktreePath: string, paths: string[]): Pro
   if (executablePaths.length === 0) return
   await runGitWithChunkedLiteralPathspecs(
     worktreePath,
-    ["reset", "HEAD"],
-    executablePaths,
-    { silent: true }
-  ).catch(() => {})
-  await runGitWithChunkedLiteralPathspecs(
-    worktreePath,
-    ["checkout"],
+    ["checkout", "HEAD"],
     executablePaths,
     { silent: true }
   )
@@ -798,7 +792,7 @@ async function restorePathsToHead(worktreePath: string, targetPaths: string[]): 
     }
     if (!isGitRestoreUnsupportedError(error)) throw error
     console.warn(
-      `[GitPanel][exec][fallback] git restore unsupported; falling back to reset/checkout for ${paths.length} pathspec(s)\n${getExecErrorText(error)}`
+      `[GitPanel][exec][fallback] git restore unsupported; falling back to checkout HEAD for ${paths.length} pathspec(s)\n${getExecErrorText(error)}`
     )
     gitRestoreSupportCache = false
   }
