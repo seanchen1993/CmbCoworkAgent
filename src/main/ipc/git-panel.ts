@@ -244,6 +244,27 @@ function getWorkspaceRelativePathForWorktreeFile(
   return normalizeGitRelativePath(path.join(worktreePrefix, normalizedRel))
 }
 
+function gitRootRelativePathToWorktreeRelativePath(
+  gitRoot: string,
+  worktreePath: string,
+  relPath: string
+): string | null {
+  const normalized = normalizeGitRelativePath(relPath)
+  if (!normalized || normalized === ".") return normalized || null
+  const absPath = path.resolve(gitRoot, normalized)
+  const relativeToWorktree = path.relative(path.resolve(worktreePath), absPath)
+  if (
+    !relativeToWorktree ||
+    relativeToWorktree === ".." ||
+    relativeToWorktree.startsWith("../") ||
+    relativeToWorktree.startsWith("..\\") ||
+    path.isAbsolute(relativeToWorktree)
+  ) {
+    return null
+  }
+  return normalizeGitRelativePath(relativeToWorktree)
+}
+
 function isMetadataPathInTargetSet(
   workspacePath: string,
   worktreePath: string,
@@ -614,11 +635,16 @@ async function runGitWithChunkedLiteralPathspecs(
 async function checkoutPathsFromHead(
   worktreePath: string,
   paths: string[],
-  options?: { threadId?: string }
+  options?: { threadId?: string; skipNormalize?: boolean }
 ): Promise<void> {
-  if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化开始")
-  const executablePaths = await normalizeExecutablePathspecs(worktreePath, paths)
-  if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化完成")
+  let executablePaths: string[]
+  if (options?.skipNormalize) {
+    executablePaths = normalizeGitPathspecList(paths)
+  } else {
+    if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化开始")
+    executablePaths = await normalizeExecutablePathspecs(worktreePath, paths)
+    if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback pathspec 规范化完成")
+  }
   if (executablePaths.length === 0) return
   if (options?.threadId) logGitTimestamp(options.threadId, "checkout fallback 执行开始")
   await runGitWithChunkedLiteralPathspecs(
@@ -829,11 +855,16 @@ async function normalizeExecutablePathspecs(worktreePath: string, pathspecs: str
 async function restorePathsToHead(
   worktreePath: string,
   targetPaths: string[],
-  options?: { threadId?: string }
+  options?: { threadId?: string; skipNormalize?: boolean }
 ): Promise<void> {
-  if (options?.threadId) logGitTimestamp(options.threadId, "restore pathspec 规范化开始")
-  const paths = await normalizeExecutablePathspecs(worktreePath, targetPaths)
-  if (options?.threadId) logGitTimestamp(options.threadId, "restore pathspec 规范化完成")
+  let paths: string[]
+  if (options?.skipNormalize) {
+    paths = normalizeGitPathspecList(targetPaths)
+  } else {
+    if (options?.threadId) logGitTimestamp(options.threadId, "restore pathspec 规范化开始")
+    paths = await normalizeExecutablePathspecs(worktreePath, targetPaths)
+    if (options?.threadId) logGitTimestamp(options.threadId, "restore pathspec 规范化完成")
+  }
   if (paths.length === 0) return
 
   if (options?.threadId) logGitTimestamp(options.threadId, "restore 支持检测开始")
@@ -882,8 +913,14 @@ async function restorePathsToHead(
   if (options?.threadId) logGitTimestamp(options.threadId, "进入 checkout fallback 完成")
 }
 
-async function resetPathsFromIndex(worktreePath: string, targetPaths: string[]): Promise<void> {
-  const paths = await normalizeExecutablePathspecs(worktreePath, targetPaths)
+async function resetPathsFromIndex(
+  worktreePath: string,
+  targetPaths: string[],
+  options?: { skipNormalize?: boolean }
+): Promise<void> {
+  const paths = options?.skipNormalize
+    ? normalizeGitPathspecList(targetPaths)
+    : await normalizeExecutablePathspecs(worktreePath, targetPaths)
   if (paths.length === 0) return
   await runGitWithChunkedLiteralPathspecs(
     worktreePath,
@@ -911,8 +948,14 @@ async function runWithConcurrency<T>(
   )
 }
 
-async function cleanUntrackedPaths(worktreePath: string, targetPaths: string[]): Promise<void> {
-  const paths = await normalizeExecutablePathspecs(worktreePath, targetPaths)
+async function cleanUntrackedPaths(
+  worktreePath: string,
+  targetPaths: string[],
+  options?: { skipNormalize?: boolean }
+): Promise<void> {
+  const paths = options?.skipNormalize
+    ? normalizeGitPathspecList(targetPaths)
+    : await normalizeExecutablePathspecs(worktreePath, targetPaths)
   if (paths.length === 0) return
   let gitCleanError: unknown = null
   await runGitWithChunkedLiteralPathspecs(
@@ -1067,6 +1110,7 @@ async function rejectWorktreePaths(params: {
   if ("error" in target) return { success: false, error: target.error }
 
   const worktreePath = target.worktreePath
+  const gitRoot = target.gitRoot
   const explicitSelections = hasExplicitSelection
     ? (filePaths || [])
         .map((rawPath) => {
@@ -1093,7 +1137,7 @@ async function rejectWorktreePaths(params: {
   logGitStep(
     threadId,
     "reject_all",
-    `路径解析完成：${targetPaths.length} 个 pathspec，仓库=${worktreePath}`
+    `路径解析完成：${targetPaths.length} 个 pathspec，仓库=${worktreePath}，Git根=${gitRoot}`
   )
 
   for (const targetPath of targetPaths) {
@@ -1150,19 +1194,19 @@ async function rejectWorktreePaths(params: {
   )
   logGitTimestamp(threadId, "安全检查开始")
   for (const targetPath of [...plan.restoreTargets, ...plan.cleanTargets]) {
-    await assertRejectPathSafe(worktreePath, targetPath)
+    await assertRejectPathSafe(gitRoot, targetPath)
   }
   logGitTimestamp(threadId, "安全检查完成")
   const restoreStartedAt = Date.now()
-  await restorePathsToHead(worktreePath, plan.restoreTargets, { threadId })
+  await restorePathsToHead(gitRoot, plan.restoreTargets, { threadId, skipNormalize: true })
   logGitStep(
     threadId,
     "reject_all",
     `restore 完成：${plan.restoreTargets.length} 个文件，耗时 ${formatDurationMs(restoreStartedAt)}`
   )
   const cleanStartedAt = Date.now()
-  await resetPathsFromIndex(worktreePath, plan.cleanTargets)
-  await cleanUntrackedPaths(worktreePath, plan.cleanTargets)
+  await resetPathsFromIndex(gitRoot, plan.cleanTargets, { skipNormalize: true })
+  await cleanUntrackedPaths(gitRoot, plan.cleanTargets, { skipNormalize: true })
   logGitStep(
     threadId,
     "reject_all",
@@ -1170,7 +1214,17 @@ async function rejectWorktreePaths(params: {
   )
 
   const touchedTargets = plan.touchedTargets.length > 0 ? plan.touchedTargets : targetPaths
-  cleanupRejectedFileMetadata(context.metadata, workspacePath, worktreePath, touchedTargets)
+  const convertedTouchedTargets = path.resolve(gitRoot) === path.resolve(worktreePath)
+    ? touchedTargets
+    : touchedTargets
+        .map((targetPath) =>
+          gitRootRelativePathToWorktreeRelativePath(gitRoot, worktreePath, targetPath)
+        )
+        .filter((targetPath): targetPath is string => Boolean(targetPath))
+  const metadataTouchedTargets = convertedTouchedTargets.length > 0
+    ? convertedTouchedTargets
+    : touchedTargets
+  cleanupRejectedFileMetadata(context.metadata, workspacePath, worktreePath, metadataTouchedTargets)
   updateThread(threadId, { metadata: JSON.stringify(context.metadata) })
 
   notifyWorkspaceFilesChanged(threadId, worktreePath)
