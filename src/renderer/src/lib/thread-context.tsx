@@ -1085,6 +1085,7 @@ interface CustomEventData {
   workerTurn?: number
   parentThreadId?: string
   messages?: LiveStreamMessage[]
+  discardedMessageIds?: string[]
   assistantMessage?: LiveStreamMessage
   result?: AgentAutoCommitResult
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
@@ -2413,6 +2414,28 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         subagentCount: Array.isArray(data.subagents) ? data.subagents.length : undefined
       })
       switch (data.type) {
+        case "stream_retry_reset": {
+          const discardedMessageIds = new Set(
+            Array.isArray(data.discardedMessageIds) ? data.discardedMessageIds : []
+          )
+          const stableMessages = Array.isArray(data.messages) ? data.messages : []
+          const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+          accumulator.messages = []
+          accumulator.messageTimes = {}
+          accumulator.lastStartedAtMs = undefined
+          for (const messageId of discardedMessageIds) {
+            accumulator.baselineIds.delete(messageId)
+          }
+
+          const current = streamDataRef.current[threadId] ?? defaultStreamData
+          streamDataRef.current[threadId] = {
+            ...current,
+            messages: stableMessages as StreamData["messages"],
+            liveMessages: []
+          }
+          notifyStreamSubscribers(threadId)
+          break
+        }
         case "coordinator_ai_snapshot_message":
           applyCoordinatorAssistantSnapshotMessage(threadId, data.assistantMessage)
           break
@@ -3004,6 +3027,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       flushGoalSubturnComplete,
       getOrCreateLiveStreamAccumulator,
       notifyHookLogSubscribers,
+      notifyStreamSubscribers,
       appendSubagentTranscriptMessages,
       refreshGoalUi,
       scheduleCoordinatorNotificationTurn,

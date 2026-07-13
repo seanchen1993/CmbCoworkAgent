@@ -410,6 +410,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // we have already surfaced so fallback extraction can stay incremental.
   private emittedMessageIds: Set<string> = new Set()
 
+  // Includes renderer-generated fallback IDs that the main process cannot see.
+  // A values snapshot clears the set because it commits the current graph step.
+  private inFlightMainMessageIds: Set<string> = new Set()
+
   // `useStream` treats repeated messages with the same ID as incremental text.
   // Values snapshots are full-state, so only forward the newly appended suffix.
   private mainAssistantTextByMessageId: Map<string, string> = new Map()
@@ -465,6 +469,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.subagentAssistantAccum.clear()
     this.quietCoordinatorToolCallIds.clear()
     this.emittedMessageIds.clear()
+    this.inFlightMainMessageIds.clear()
     this.mainAssistantTextByMessageId.clear()
     this.mainAssistantReasoningByMessageId.clear()
     this.accumulatedToolCalls.clear()
@@ -866,6 +871,24 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // Custom events (e.g. routing_result) sent directly from main process
       case "custom": {
         const data = event.data
+        if (data?.type === "stream_retry_reset") {
+          const discardedMessageIds = Array.isArray(data.discardedMessageIds)
+            ? data.discardedMessageIds.filter((id): id is string => typeof id === "string")
+            : []
+          this.resetMainStreamAttempt(discardedMessageIds)
+          const messages = transformSerializedValuesMessages(
+            Array.isArray(data.messages) ? (data.messages as SerializedMessageChunk[]) : []
+          )
+          this.advanceFallbackIndexesFromValuesMessages(messages)
+          // A values event replaces useStream's partial message state with the
+          // last checkpointed snapshot before the retry begins.
+          events.push({ event: "values", data: { messages } })
+          events.push({
+            event: "custom",
+            data: { ...data, messages, discardedMessageIds }
+          })
+          break
+        }
         if (data?.type === "goal_subturn_complete" && Array.isArray(data.messages)) {
           this.resetCurrentAssistantMessage()
           const messages = transformSerializedValuesMessages(
@@ -1032,6 +1055,42 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private resetCurrentAssistantMessage(): void {
     this.currentMessageId = null
     this.currentMessageIndex = null
+  }
+
+  private resetMainStreamAttempt(messageIds: string[]): void {
+    const discardedMessageIds = new Set([...messageIds, ...this.inFlightMainMessageIds])
+    this.inFlightMainMessageIds.clear()
+    const discardedMessagePrefixes = [...discardedMessageIds].map((id) => `${id}:`)
+    const discardedToolCallIds = new Set<string>()
+
+    for (const messageId of discardedMessageIds) {
+      this.emittedMessageIds.delete(messageId)
+      this.mainAssistantTextByMessageId.delete(messageId)
+      this.mainAssistantReasoningByMessageId.delete(messageId)
+      const completedCalls = this.completedToolCallsByMessageId.get(messageId)
+      if (completedCalls) {
+        for (const toolCallId of completedCalls.keys()) discardedToolCallIds.add(toolCallId)
+      }
+      this.completedToolCallsByMessageId.delete(messageId)
+    }
+
+    for (const [key, toolCallId] of this.toolCallChunkIndexToId) {
+      if (!discardedMessagePrefixes.some((prefix) => key.startsWith(prefix))) continue
+      discardedToolCallIds.add(toolCallId)
+      this.toolCallChunkIndexToId.delete(key)
+    }
+
+    for (const toolCallId of discardedToolCallIds) {
+      this.accumulatedToolCalls.delete(toolCallId)
+    }
+    for (const [name, calls] of this.completedToolCallsByName) {
+      const retained = calls.filter((call) => !discardedToolCallIds.has(call.id))
+      if (retained.length > 0) this.completedToolCallsByName.set(name, retained)
+      else this.completedToolCallsByName.delete(name)
+    }
+
+    this.currentChunkMessageId = undefined
+    this.resetCurrentAssistantMessage()
   }
 
   /**
@@ -1216,6 +1275,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             })
           this.currentMessageId = msgId
           this.currentMessageIndex = messageIndex
+          this.inFlightMainMessageIds.add(msgId)
           const visibleToolCalls = this.hydrateToolCallsWithAccumulatedArgs(
             this.filterVisibleMainToolCalls(kwargs.tool_calls, isCoordinatorMode)
           )
@@ -1351,6 +1411,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             className,
             content
           })
+        this.inFlightMainMessageIds.add(msgId)
 
         events.push({
           event: "messages",
@@ -1434,6 +1495,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
               toolName: kwargs.name
             })
 
+          this.inFlightMainMessageIds.add(msgId)
           this.rememberEmittedMessage(msgId)
           events.push({
             event: "messages",
@@ -1464,6 +1526,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       }
     } else if (mode === "values") {
+      this.inFlightMainMessageIds.clear()
       // Values mode returns full state with serialized LangChain messages
       const state = data as {
         messages?: SerializedMessageChunk[]

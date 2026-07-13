@@ -111,6 +111,11 @@ assertEqual(
   "P12g-3 plain tool text must not become a stream error"
 )
 assertEqual(
+  classifyApiError({ message: "terminated" }),
+  "unknown",
+  "P12g-3a plain tool-result object must not become a network error"
+)
+assertEqual(
   isRetryableApiError(Object.assign(new Error("aborted"), { name: "AbortError" })),
   false,
   "P12g-4 user abort → not retryable"
@@ -124,6 +129,20 @@ assertEqual(
   "network_error",
   "P12g-5 nested UND_ERR_SOCKET → network_error"
 )
+const wrappedAbortError = Object.assign(new TypeError("terminated"), {
+  cause: Object.assign(new Error("Aborted"), { name: "AbortError" })
+})
+assertEqual(
+  isRetryableApiError(wrappedAbortError),
+  false,
+  "P12g-6 nested AbortError overrides terminated"
+)
+for (const code of ["ECONNRESET", "EPIPE", "ETIMEDOUT"]) {
+  assert(
+    isStreamDisconnectLikeError(Object.assign(new Error(code), { code })),
+    `P12g-7 ${code} → stream disconnect`
+  )
+}
 
 const fetchStatusDetail = extractErrorDetail(new Error("proxy returned a non-OpenAI body"), {
   status: 502,
