@@ -63,8 +63,10 @@ import {
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
+  isCheckpointEmptyAssistantToolCallMessage,
   mergeCheckpointAuthorityTranscriptMessages
 } from "../../../shared/checkpoint-transcript"
+import { reconcileMessageDisplayOrder } from "./message-display-order"
 import {
   isInternalGoalPromptMessage,
   shouldSuppressCheckpointApprovalRestore,
@@ -86,7 +88,12 @@ import {
   restoreRawCheckpointMessageTime,
   restoreVisibleCheckpointMessageTimes
 } from "./checkpoint-message-times"
-import { mergeLiveStreamMessages, type LiveStreamMessage } from "./live-stream-messages"
+import {
+  liveStreamMessageRole,
+  mergeLiveStreamMessages,
+  replaceLiveStreamMessageId,
+  type LiveStreamMessage
+} from "./live-stream-messages"
 import { buildSyntheticCheckpointBaselineIds } from "./stream-message-ids"
 import {
   loadWorkspaceFilesDeduped,
@@ -1086,7 +1093,11 @@ interface CustomEventData {
   workerTurn?: number
   parentThreadId?: string
   messages?: LiveStreamMessage[]
+  discardedMessageIds?: string[]
   assistantMessage?: LiveStreamMessage
+  fromId?: string
+  toId?: string
+  role?: Message["role"]
   result?: AgentAutoCommitResult
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   agentmdLoader?: "plugin" | "cmbdevclaw"
@@ -1215,6 +1226,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
   const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
   const liveStreamAccumulatorsRef = useRef<Record<string, LiveStreamAccumulator>>({})
+  const durableTranscriptSyncSeqRef = useRef<Record<string, number>>({})
   const checkpointFallbackIndexBaselinesRef = useRef<Record<string, StreamFallbackIndexBaselines>>(
     {}
   )
@@ -1677,6 +1689,81 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     [accumulateLiveStreamMessages, flushLiveStreamAccumulator]
   )
 
+  const syncPersistedThreadMessagesAfterStreamStop = useCallback(
+    (
+      threadId: string,
+      orderHintMessages: ReadonlyArray<{ id?: string }> | undefined
+    ): void => {
+      const seq = (durableTranscriptSyncSeqRef.current[threadId] ?? 0) + 1
+      durableTranscriptSyncSeqRef.current[threadId] = seq
+
+      void (async () => {
+        for (const delayMs of [50, 350]) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs))
+          if (durableTranscriptSyncSeqRef.current[threadId] !== seq) return
+          if (!initializedThreadsRef.current.has(threadId)) return
+          if (threadStatesRef.current[threadId]?.historyLoading) return
+          if (streamDataRef.current[threadId]?.isLoading) return
+
+          let persistedMessages: Message[]
+          try {
+            persistedMessages = normalizePersistedThreadMessages(
+              await window.api.threads.getMessages(threadId)
+            ).filter(isVisibleCheckpointTranscriptMessage)
+          } catch (error) {
+            console.warn(
+              "[ThreadContext] Failed to sync durable transcript after stream stop:",
+              error
+            )
+            return
+          }
+          if (durableTranscriptSyncSeqRef.current[threadId] !== seq) return
+          if (!initializedThreadsRef.current.has(threadId)) return
+          if (threadStatesRef.current[threadId]?.historyLoading) return
+          if (streamDataRef.current[threadId]?.isLoading) return
+          if (persistedMessages.length === 0) continue
+
+          const syncedMessageIds = new Set(persistedMessages.map((message) => message.id))
+          const liveOrderHint =
+            orderHintMessages && orderHintMessages.length > 0
+              ? orderHintMessages
+              : streamDataRef.current[threadId]?.messages
+
+          setThreadStates((prev) => {
+            if (!initializedThreadsRef.current.has(threadId)) return prev
+            if (prev[threadId]?.historyLoading) return prev
+            if (streamDataRef.current[threadId]?.isLoading) return prev
+            const state = normalizeThreadState(prev[threadId] || createDefaultThreadState())
+            const merged = mergePersistedMessagesIntoTranscript(state.messages, persistedMessages)
+            const ordered = reconcileMessageDisplayOrder(merged, liveOrderHint)
+            const next = {
+              ...prev,
+              [threadId]: {
+                ...state,
+                messages: ordered,
+                toolCallStates: upsertToolCallStatesFromMessages(state.toolCallStates, ordered)
+              }
+            }
+            threadStatesRef.current = next
+            return next
+          })
+
+          const currentStreamData = streamDataRef.current[threadId]
+          if (currentStreamData?.liveMessages?.length) {
+            const liveMessages = currentStreamData.liveMessages.filter(
+              (message) => !message.id || !syncedMessageIds.has(message.id)
+            )
+            if (liveMessages.length !== currentStreamData.liveMessages.length) {
+              streamDataRef.current[threadId] = { ...currentStreamData, liveMessages }
+              notifyStreamSubscribers(threadId)
+            }
+          }
+        }
+      })()
+    },
+    [notifyStreamSubscribers]
+  )
+
   const finalizeRunningSubagentsForStoppedStream = useCallback((threadId: string) => {
     setThreadStates((prev) => {
       const current = prev[threadId]
@@ -1707,7 +1794,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Handle stream updates from ThreadStreamHolder
   const handleStreamUpdate = useCallback(
     (threadId: string, data: StreamData, options: StreamUpdateOptions = {}) => {
+      const previousStreamData = streamDataRef.current[threadId]
+      const wasLoading = previousStreamData?.isLoading === true
       const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+      if (data.isLoading && !wasLoading) {
+        durableTranscriptSyncSeqRef.current[threadId] =
+          (durableTranscriptSyncSeqRef.current[threadId] ?? 0) + 1
+      }
       if (!options.ignoreHistoryLoading && threadStatesRef.current[threadId]?.historyLoading) {
         streamDataRef.current[threadId] = { ...data, liveMessages: [] }
         notifyStreamSubscribers(threadId)
@@ -1771,6 +1864,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           threadStatesRef.current = next
           return next
         })
+        if (wasLoading || options.finalizeCachedSnapshot) {
+          syncPersistedThreadMessagesAfterStreamStop(threadId, data.messages)
+        }
       }
     },
     [
@@ -1780,7 +1876,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getCurrentThreadMessageIds,
       getOrCreateLiveStreamAccumulator,
       notifyStreamSubscribers,
-      seedLiveStreamBaselineFromMessages
+      seedLiveStreamBaselineFromMessages,
+      syncPersistedThreadMessagesAfterStreamStop
     ]
   )
 
@@ -2403,6 +2500,123 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     ]
   )
 
+  const applyMessageIdAlias = useCallback(
+    (threadId: string, fromId?: string, toId?: string, role?: Message["role"]) => {
+      if (!fromId || !toId || fromId === toId) return
+      const committedMessages = threadStatesRef.current[threadId]?.messages ?? []
+      const sourceMessage = committedMessages.find((message) => message.id === fromId)
+      const targetMessage = committedMessages.find((message) => message.id === toId)
+      if (sourceMessage && targetMessage && sourceMessage.role !== targetMessage.role) {
+        console.error("[ThreadContext] Refusing cross-role message id alias:", {
+          threadId,
+          fromId,
+          fromRole: sourceMessage.role,
+          toId,
+          toRole: targetMessage.role
+        })
+        return
+      }
+      const liveMessages = streamDataRef.current[threadId]?.liveMessages ?? []
+      const accumulatorMessages = liveStreamAccumulatorsRef.current[threadId]?.messages ?? []
+      const findRole = (id: string): Message["role"] | undefined => {
+        const committedRole = committedMessages.find((message) => message.id === id)?.role
+        if (committedRole) return committedRole
+        const liveMessage =
+          liveMessages.find((message) => message.id === id) ??
+          accumulatorMessages.find((message) => message.id === id)
+        return liveMessage ? liveStreamMessageRole(liveMessage.type) : undefined
+      }
+      const aliasRole = role ?? findRole(fromId) ?? findRole(toId)
+
+      const commitLocalAlias = (): void => {
+        const accumulator = liveStreamAccumulatorsRef.current[threadId]
+        if (accumulator) {
+          accumulator.messages = replaceLiveStreamMessageId(accumulator.messages, fromId, toId)
+          const fromTime = accumulator.messageTimes[fromId]
+          if (fromTime) {
+            const targetTime = accumulator.messageTimes[toId]
+            accumulator.messageTimes[toId] = targetTime
+              ? {
+                  start_at:
+                    fromTime.start_at.getTime() <= targetTime.start_at.getTime()
+                      ? fromTime.start_at
+                      : targetTime.start_at,
+                  ...(fromTime.end_at || targetTime.end_at
+                    ? {
+                        end_at:
+                          !targetTime.end_at ||
+                          (fromTime.end_at &&
+                            fromTime.end_at.getTime() > targetTime.end_at.getTime())
+                            ? fromTime.end_at
+                            : targetTime.end_at
+                      }
+                    : {})
+                }
+              : fromTime
+            delete accumulator.messageTimes[fromId]
+          }
+          accumulator.baselineIds.delete(fromId)
+        }
+
+        updateThreadState(threadId, (state) => {
+          if (!state.messages.some((message) => message.id === fromId)) return {}
+          if (state.messages.some((message) => message.id === toId)) {
+            return { messages: state.messages.filter((message) => message.id !== fromId) }
+          }
+          return {
+            messages: state.messages.map((message) =>
+              message.id === fromId ? { ...message, id: toId } : message
+            )
+          }
+        })
+
+        const currentStreamData = streamDataRef.current[threadId]
+        if (currentStreamData) {
+          streamDataRef.current[threadId] = {
+            ...currentStreamData,
+            liveMessages: replaceLiveStreamMessageId(
+              currentStreamData.liveMessages ?? [],
+              fromId,
+              toId
+            )
+          }
+          notifyStreamSubscribers(threadId)
+        }
+      }
+
+      void (async () => {
+        let lastError: unknown
+        for (const delay of [0, 100, 300]) {
+          if (delay > 0) {
+            await new Promise((resolve) => window.setTimeout(resolve, delay))
+          }
+          try {
+            const result = await window.api.threads.replaceMessageId(
+              threadId,
+              fromId,
+              toId,
+              aliasRole
+            )
+            if (!result.replaced) {
+              console.warn("[ThreadContext] Message id migration was rejected:", {
+                threadId,
+                fromId,
+                toId
+              })
+              return
+            }
+            commitLocalAlias()
+            return
+          } catch (error) {
+            lastError = error
+          }
+        }
+        console.error("[ThreadContext] Failed to persist message id migration:", lastError)
+      })()
+    },
+    [notifyStreamSubscribers, updateThreadState]
+  )
+
   // Handle custom events from ThreadStreamHolder (interrupts, workspace updates, etc.)
   const handleCustomEvent = useCallback(
     (threadId: string, data: CustomEventData) => {
@@ -2414,6 +2628,41 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         subagentCount: Array.isArray(data.subagents) ? data.subagents.length : undefined
       })
       switch (data.type) {
+        case "message_id_alias":
+          applyMessageIdAlias(
+            threadId,
+            data.fromId,
+            data.toId,
+            data.role === "user" ||
+              data.role === "assistant" ||
+              data.role === "system" ||
+              data.role === "tool"
+              ? data.role
+              : undefined
+          )
+          break
+        case "stream_retry_reset": {
+          const discardedMessageIds = new Set(
+            Array.isArray(data.discardedMessageIds) ? data.discardedMessageIds : []
+          )
+          const stableMessages = Array.isArray(data.messages) ? data.messages : []
+          const accumulator = getOrCreateLiveStreamAccumulator(threadId)
+          accumulator.messages = []
+          accumulator.messageTimes = {}
+          accumulator.lastStartedAtMs = undefined
+          for (const messageId of discardedMessageIds) {
+            accumulator.baselineIds.delete(messageId)
+          }
+
+          const current = streamDataRef.current[threadId] ?? defaultStreamData
+          streamDataRef.current[threadId] = {
+            ...current,
+            messages: stableMessages as StreamData["messages"],
+            liveMessages: []
+          }
+          notifyStreamSubscribers(threadId)
+          break
+        }
         case "coordinator_ai_snapshot_message":
           applyCoordinatorAssistantSnapshotMessage(threadId, data.assistantMessage)
           break
@@ -3002,9 +3251,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     },
     [
       applyCoordinatorAssistantSnapshotMessage,
+      applyMessageIdAlias,
       flushGoalSubturnComplete,
       getOrCreateLiveStreamAccumulator,
       notifyHookLogSubscribers,
+      notifyStreamSubscribers,
       appendSubagentTranscriptMessages,
       refreshGoalUi,
       scheduleCoordinatorNotificationTurn,
@@ -3665,6 +3916,38 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
 
       const restoredGoalUiEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+      if (checkpointMessagesLoaded) {
+        const persistedMessagesById = new Map(
+          persistedThreadMessages.map((message) => [message.id, message])
+        )
+        const transcriptRepairs = rawRestoredMessages.flatMap((message): Message | [] => {
+          const persistedMessage = persistedMessagesById.get(message.id)
+          const hasPersistedContent =
+            typeof persistedMessage?.content === "string"
+              ? persistedMessage.content.length > 0
+              : Array.isArray(persistedMessage?.content) && persistedMessage.content.length > 0
+          const checkpointClearsToolCalls =
+            message.role === "assistant" &&
+            Array.isArray(message.tool_calls) &&
+            message.tool_calls.length === 0 &&
+            Array.isArray(persistedMessage?.tool_calls) &&
+            persistedMessage.tool_calls.length > 0
+          if (
+            !(isCheckpointEmptyAssistantToolCallMessage(message) && hasPersistedContent) &&
+            !checkpointClearsToolCalls
+          ) {
+            return []
+          }
+          return { ...message, content_priority: 1 }
+        })
+        if (transcriptRepairs.length > 0) {
+          try {
+            await window.api.threads.appendMessages(threadId, transcriptRepairs)
+          } catch (error) {
+            console.warn("[ThreadContext] Failed to repair checkpoint transcript:", error)
+          }
+        }
+      }
       const checkpointTranscript = buildRestoredCheckpointTranscript(
         checkpointMessagesLoaded ? rawRestoredMessages : persistedThreadMessages,
         checkpointMessagesLoaded ? restoredMessages : visiblePersistedThreadMessages,
@@ -4394,6 +4677,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete streamSubscribersRef.current[threadId]
       delete hookLogBucketsRef.current[threadId]
       delete liveStreamAccumulatorsRef.current[threadId]
+      delete durableTranscriptSyncSeqRef.current[threadId]
       delete checkpointFallbackIndexBaselinesRef.current[threadId]
       delete subagentTranscriptsRef.current[threadId]
       disableChatReportUploadForThread(threadId)

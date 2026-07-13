@@ -32,9 +32,12 @@ export function mergeLiveStreamMessages(
     const existingContentPriority = existing?.content_priority ?? 0
     const incomingContentPriority = message.content_priority ?? 0
     const hasToolCallsField = Object.prototype.hasOwnProperty.call(message, "tool_calls")
+    const hasAuthoritativeIncomingContent =
+      incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
     const shouldUseIncomingContent =
-      hasUsefulStreamContent(message.content) &&
-      incomingContentPriority >= existingContentPriority
+      hasAuthoritativeIncomingContent ||
+      (hasUsefulStreamContent(message.content) &&
+        incomingContentPriority >= existingContentPriority)
     merged.set(message.id, {
       ...existing,
       ...message,
@@ -73,6 +76,28 @@ export function mergeLiveStreamMessages(
   }
 
   return Array.from(merged.values())
+}
+
+export function replaceLiveStreamMessageId(
+  messages: LiveStreamMessage[],
+  fromId: string,
+  toId: string
+): LiveStreamMessage[] {
+  if (!fromId || !toId || fromId === toId) return messages
+  const sourceIndex = messages.findIndex((message) => message.id === fromId)
+  if (sourceIndex < 0) return messages
+
+  const targetIndex = messages.findIndex((message) => message.id === toId)
+  const source = { ...messages[sourceIndex], id: toId }
+  const target = targetIndex >= 0 ? messages[targetIndex] : undefined
+  const canonical = target ? mergeLiveStreamMessages([source], [target])[0] : source
+  const insertionIndex = targetIndex >= 0 ? Math.min(sourceIndex, targetIndex) : sourceIndex
+
+  return messages.flatMap((message, index) => {
+    if (index === insertionIndex) return [canonical]
+    if (message.id === fromId || message.id === toId) return []
+    return [message]
+  })
 }
 
 function hasLiveStreamMessageId(message: LiveStreamMessage): message is LiveStreamMessage & {

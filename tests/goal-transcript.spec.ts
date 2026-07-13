@@ -901,6 +901,28 @@ function testWorkflowPlumbingStaysOutOfCheckpointTranscript(): void {
   )
 }
 
+function testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore(): void {
+  const rawCheckpointMessages = [
+    message("user-1", "user", "用动态工作流实现！"),
+    message("assistant-launch", "assistant", "已启动工作流，结果稍后通知。"),
+    message(
+      "workflow-marker",
+      "user",
+      `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}workflow-run-1]] <task-notification />`
+    ),
+    message("assistant-result", "assistant", "工作流已完成，结果是：只出现一次。")
+  ]
+  const visibleCheckpointMessages = rawCheckpointMessages.filter(isVisibleCheckpointTranscriptMessage)
+
+  assertArrayEqual(
+    buildRestoredCheckpointTranscript(rawCheckpointMessages, visibleCheckpointMessages, []).map(
+      (item) => item.id
+    ),
+    ["user-1", "assistant-launch", "assistant-result"],
+    "restore builder must not consume the assistant after hidden workflow plumbing twice"
+  )
+}
+
 function run(): void {
   const tests = [
     testGoalArtifactsAreNotCheckpointTranscript,
@@ -926,7 +948,8 @@ function run(): void {
     testGoalUserEventDedupesWhenCheckpointMessageLacksActiveWindow,
     testGoalEventsStayInGoalUiState,
     testVisibilityPredicateMatchesTranscriptBuilder,
-    testWorkflowPlumbingStaysOutOfCheckpointTranscript
+    testWorkflowPlumbingStaysOutOfCheckpointTranscript,
+    testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore
   ]
 
   for (const test of tests) {

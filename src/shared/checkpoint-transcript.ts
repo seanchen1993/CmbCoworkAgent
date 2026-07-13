@@ -33,6 +33,7 @@ export interface FilteredThreadValuesInput {
 
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
+  role?: string
   content?: unknown
   tool_calls?: unknown[]
   tool_call_id?: string
@@ -159,11 +160,27 @@ function mergeCheckpointAuthorityContent(baseContent: unknown, incomingContent: 
   return shouldUseIncomingContent(baseContent, incomingContent) ? incomingContent : baseContent
 }
 
+export function isCheckpointEmptyAssistantToolCallMessage(
+  message: CheckpointAuthorityTranscriptMessage
+): boolean {
+  const contentIsEmpty =
+    message.content === undefined ||
+    message.content === null ||
+    message.content === "" ||
+    (Array.isArray(message.content) && message.content.length === 0)
+  return (
+    message.role === "assistant" &&
+    Array.isArray(message.tool_calls) &&
+    message.tool_calls.length > 0 &&
+    contentIsEmpty
+  )
+}
+
 function mergeCheckpointAuthorityToolCalls(
   baseToolCalls: unknown[] | undefined,
   incomingToolCalls: unknown[] | undefined
 ): unknown[] | undefined {
-  if (Array.isArray(baseToolCalls) && baseToolCalls.length > 0) return baseToolCalls
+  if (Array.isArray(baseToolCalls)) return baseToolCalls
   return Array.isArray(incomingToolCalls) && incomingToolCalls.length > 0
     ? incomingToolCalls
     : baseToolCalls
@@ -172,9 +189,12 @@ function mergeCheckpointAuthorityToolCalls(
 export function mergeCheckpointAuthorityTranscriptMessage<
   T extends CheckpointAuthorityTranscriptMessage
 >(base: T, incoming: T): T {
+  const checkpointClearsToolCallContent = isCheckpointEmptyAssistantToolCallMessage(base)
   return {
     ...base,
-    content: mergeCheckpointAuthorityContent(base.content, incoming.content),
+    content: checkpointClearsToolCallContent
+      ? base.content
+      : mergeCheckpointAuthorityContent(base.content, incoming.content),
     tool_calls: mergeCheckpointAuthorityToolCalls(base.tool_calls, incoming.tool_calls) as
       | T["tool_calls"]
       | undefined,
