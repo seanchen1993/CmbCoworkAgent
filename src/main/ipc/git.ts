@@ -1183,7 +1183,17 @@ export function registerGitHandlers(): void {
           console.log(
             `[Git] triggering post-commit measurement: commitSha=${sha ?? "unknown"} snapshots=${stagedCapture.snapshots.length}`
           )
-          measureForCommit(stagedCapture.snapshots, sha, stagedCapture.captureTimeMs)
+          const durable = await measureForCommit(
+            stagedCapture.snapshots,
+            sha,
+            stagedCapture.captureTimeMs,
+            stagedCapture.workingDir
+          )
+          if (!durable) {
+            console.warn(
+              `[Git] adoption measurement queued for retry: commitSha=${sha ?? "unknown"}`
+            )
+          }
         } catch (e) {
           console.warn("[Git] adoption post-commit measurement skipped:", e)
         }
