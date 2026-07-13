@@ -734,6 +734,56 @@ function StageBucketSplit({
   )
 }
 
+/** Harness / VibeCoding total-caliber adoption rates shown directly in each project row. */
+function ProjectStageAdoptionRates({
+  buckets
+}: {
+  buckets: DashboardStageBuckets
+}): React.JSX.Element {
+  const rows: Array<{
+    key: "pluginConstrained" | "vibecoding"
+    bucket: StageBucket
+    shortLabel: string
+    dot: string
+  }> = [
+    {
+      key: "pluginConstrained",
+      bucket: "plugin_constrained",
+      shortLabel: "Harness",
+      dot: "bg-emerald-500"
+    },
+    {
+      key: "vibecoding",
+      bucket: "vibecoding",
+      shortLabel: "VibeCoding",
+      dot: "bg-violet-500"
+    }
+  ]
+  return (
+    <div className="flex flex-col items-end gap-0.5 whitespace-nowrap">
+      {rows.map(({ key, bucket, shortLabel, dot }) => {
+        const stats = buckets[key].codeStats
+        const detail = stats
+          ? `${formatLineCount(stats.adoptedLines)}/${formatLineCount(stats.inclusiveEffectiveGeneratedLines)} 行`
+          : "—"
+        return (
+          <span
+            key={bucket}
+            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+            title={`${STAGE_BUCKET_LABELS[bucket]}：总量口径提交采纳率 ${formatPercent(stats?.inclusiveAdoptionRate)}（${detail}）`}
+          >
+            <span className={`size-1.5 rounded-full ${dot}`} />
+            <span>{shortLabel}</span>
+            <span className="font-medium text-foreground">
+              {formatPercent(stats?.inclusiveAdoptionRate)}
+            </span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
 /** 流程阶段三桶分行展示（插件约束（Harness）/ VibeCoding / 未归因），与状态细分同款紧凑口径。空则不渲染。 */
 function StageBucketRows({
   buckets,
@@ -1118,6 +1168,9 @@ function ProjectRow({
             />
           </div>
         </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <ProjectStageAdoptionRates buckets={project.stageBuckets} />
+        </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
           {creatorId && creatorId !== creatorName ? (
@@ -1143,7 +1196,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={12} className="px-3 py-3">
+          <td colSpan={13} className="px-3 py-3">
             <div className="space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -1570,8 +1623,9 @@ function ProjectListSection({
         <>
           <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-            项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及展开行的技能、各特性采纳明细与关联
-            Commit 按所选时间范围统计。
+            项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及
+            Harness / VibeCoding
+            流程采纳率按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
           </p>
         </>
       )}
@@ -1642,11 +1696,11 @@ function ProjectListSection({
 
       <div
         className={cn(
-          "overflow-hidden rounded-xl border border-border bg-card",
+          "overflow-x-auto rounded-xl border border-border bg-card",
           effectiveLoading && "opacity-70"
         )}
       >
-        <table className="w-full text-xs">
+        <table className="w-full min-w-[1560px] text-xs">
           <thead>
             <tr className="border-b border-border bg-muted/30 text-muted-foreground">
               <th
@@ -1686,6 +1740,12 @@ function ProjectListSection({
               />
               <th className="px-3 py-2 text-right font-medium">提交口径采纳率</th>
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="按流程阶段归因拆分的总量口径提交采纳率"
+              >
+                Harness / VibeCoding 采纳率
+              </th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
               <SortableTh
@@ -1718,7 +1778,7 @@ function ProjectListSection({
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={13} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -1728,7 +1788,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={13} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -1736,12 +1796,12 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={12} className="h-[49px]" />
+                  <td colSpan={13} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={13} className="px-3 py-10 text-center text-muted-foreground">
                   {emptyText}
                 </td>
               </tr>
