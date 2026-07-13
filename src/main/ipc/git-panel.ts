@@ -745,17 +745,77 @@ async function isKnownWorktreePath(worktreePath: string, relPath: string): Promi
   }
 }
 
+async function getKnownWorktreePaths(worktreePath: string, relPaths: string[]): Promise<Set<string>> {
+  const normalizedPaths = normalizeGitPathspecList(relPaths)
+  const knownPaths = new Set<string>()
+  const missingPaths: string[] = []
+
+  for (const relPath of normalizedPaths) {
+    if (relPath === ".") {
+      knownPaths.add(relPath)
+      continue
+    }
+    try {
+      await stat(path.join(worktreePath, relPath))
+      knownPaths.add(relPath)
+    } catch {
+      missingPaths.push(relPath)
+    }
+  }
+
+  for (const chunk of chunkGitPathspecs(["ls-files", "-z"], missingPaths)) {
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["-C", worktreePath, "--literal-pathspecs", "ls-files", "-z", "--", ...chunk],
+        {
+          env: GIT_BASE_ENV,
+          timeout: 10_000,
+          maxBuffer: GIT_EXEC_MAX_BUFFER_BYTES,
+          ...GIT_SPAWN_OPTIONS
+        }
+      )
+      for (const rawPath of String(stdout || "").split("\0")) {
+        const normalized = normalizeGitRelativePath(rawPath)
+        if (normalized) knownPaths.add(normalized)
+      }
+    } catch {
+      // Keep the stat-based result; the caller will preserve the original path.
+    }
+  }
+
+  return knownPaths
+}
+
 async function normalizeExecutablePathspecs(worktreePath: string, pathspecs: string[]): Promise<string[]> {
   const normalizedPathspecs = normalizeGitPathspecList(pathspecs)
   const result: string[] = []
+  const fallbackPathsByPathspec = new Map<string, string>()
 
   for (const pathspec of normalizedPathspecs) {
     const fallbackPath = worktreeBasenamePrefixedPathToRelativePath(worktreePath, pathspec)
     if (
       fallbackPath &&
-      normalizeGitRelativePath(fallbackPath) !== normalizeGitRelativePath(pathspec) &&
-      !(await isKnownWorktreePath(worktreePath, pathspec)) &&
-      (await isKnownWorktreePath(worktreePath, fallbackPath))
+      normalizeGitRelativePath(fallbackPath) !== normalizeGitRelativePath(pathspec)
+    ) {
+      fallbackPathsByPathspec.set(pathspec, fallbackPath)
+    }
+  }
+
+  const knownPaths = fallbackPathsByPathspec.size > 0
+    ? await getKnownWorktreePaths(worktreePath, [
+        ...normalizedPathspecs,
+        ...fallbackPathsByPathspec.values()
+      ])
+    : null
+
+  for (const pathspec of normalizedPathspecs) {
+    const fallbackPath = fallbackPathsByPathspec.get(pathspec)
+    if (
+      fallbackPath &&
+      knownPaths &&
+      !knownPaths.has(pathspec) &&
+      knownPaths.has(fallbackPath)
     ) {
       result.push(fallbackPath)
       continue
