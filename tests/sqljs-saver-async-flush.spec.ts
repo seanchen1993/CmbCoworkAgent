@@ -183,6 +183,66 @@ async function testConcurrentFlushStrictSerializesWithClose(dir: string): Promis
   console.log("PASS concurrent flushStrict calls serialize with close")
 }
 
+async function testMutationBurstSurvivesConcurrentFlushStrictStorm(dir: string): Promise<void> {
+  const dbPath = join(dir, "strict-flush-storm.sqlite")
+  const threadId = "t-strict-flush-storm"
+  const saver = new SqlJsSaver(dbPath)
+  const pendingFlushes: Promise<void>[] = []
+
+  for (let index = 1; index <= 30; index += 1) {
+    const checkpointId = `storm-cp-${index.toString().padStart(2, "0")}`
+    const parentCheckpointId =
+      index > 1 ? `storm-cp-${(index - 1).toString().padStart(2, "0")}` : undefined
+    await putCheckpoint(saver, threadId, checkpointId, "", parentCheckpointId)
+    pendingFlushes.push(saver.flush())
+    pendingFlushes.push(saver.flushStrict())
+    if (index % 5 === 0) {
+      pendingFlushes.push(saver.flushStrict())
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  }
+
+  await Promise.all(pendingFlushes)
+  await Promise.all(Array.from({ length: 8 }, () => saver.flushStrict()))
+  await saver.close()
+
+  const latestId = await readBackLatestId(dbPath, threadId)
+  assert.equal(latestId, "storm-cp-30", "strict flush storm should persist the last checkpoint")
+
+  const reopened = new SqlJsSaver(dbPath)
+  const retainedIds: string[] = []
+  for await (const tuple of reopened.list(config(threadId))) {
+    retainedIds.push(tuple.checkpoint.id)
+  }
+  await reopened.close()
+  assert(
+    retainedIds.includes("storm-cp-30"),
+    `flush storm should retain storm-cp-30, got ${retainedIds.join(", ")}`
+  )
+  console.log("PASS mutation burst survives concurrent flushStrict storm")
+}
+
+async function testCloseAndPostCloseFlushStrictRaceIsIdempotent(dir: string): Promise<void> {
+  const dbPath = join(dir, "strict-close-race.sqlite")
+  const threadId = "t-strict-close-race"
+  const saver = new SqlJsSaver(dbPath)
+
+  await putCheckpoint(saver, threadId, "close-race-cp-1")
+  await new Promise((resolve) => setTimeout(resolve, 320))
+  await putCheckpoint(saver, threadId, "close-race-cp-2", "", "close-race-cp-1")
+
+  const closePromise = saver.close()
+  await Promise.all([
+    closePromise,
+    ...Array.from({ length: 12 }, () => saver.flushStrict()),
+    ...Array.from({ length: 12 }, () => saver.flush())
+  ])
+
+  const latestId = await readBackLatestId(dbPath, threadId)
+  assert.equal(latestId, "close-race-cp-2", "close/flushStrict race should keep latest checkpoint")
+  console.log("PASS close and post-close flushStrict race is idempotent")
+}
+
 async function testRecoverFromBackupWhenLiveFileIsCorrupt(dir: string): Promise<void> {
   const dbPath = join(dir, "corrupt-live.sqlite")
   const saver = new SqlJsSaver(dbPath)
@@ -388,6 +448,8 @@ async function main(): Promise<void> {
     await testFlushRemainsReusable(dir)
     await testFlushStrictReportsPersistenceFailure(dir)
     await testConcurrentFlushStrictSerializesWithClose(dir)
+    await testMutationBurstSurvivesConcurrentFlushStrictStorm(dir)
+    await testCloseAndPostCloseFlushStrictRaceIsIdempotent(dir)
     await testRecoverFromBackupWhenLiveFileIsCorrupt(dir)
     await testRecoverFromNewerTempSnapshot(dir)
     await testOversizedLiveStillRecoversNewerTempSnapshot(dir)

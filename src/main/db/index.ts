@@ -21,6 +21,12 @@ let dirty = false
 let savePromise: Promise<void> | null = null
 let flushPromise: Promise<unknown | null> | null = null
 let blockAsyncWrite = false
+type ThreadMessageRole = Message["role"]
+interface ThreadMessageIdAlias {
+  toId: string
+  role?: ThreadMessageRole
+}
+const threadMessageIdAliases = new Map<string, Map<string, ThreadMessageIdAlias>>()
 
 // Debounce window for background saves. sql.js holds the whole DB in memory and
 // db.export() snapshots it on the main thread (~1-2ms); coalescing bursts keeps
@@ -35,6 +41,7 @@ const THREAD_MESSAGE_JSON_ARRAY_LIMIT = 100
 const THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT = 80
 const THREAD_MESSAGE_JSON_DEPTH_LIMIT = 6
 const THREAD_MESSAGE_TOOL_CALL_LIMIT = 50
+const THREAD_MESSAGE_ALIAS_LIMIT = 1_000
 
 /**
  * Atomically persist the current DB snapshot off the main thread: export()
@@ -320,6 +327,10 @@ function hasUsefulContent(content: Message["content"]): boolean {
   return typeof content === "string" ? content.length > 0 : content.length > 0
 }
 
+function hasUsefulToolCalls(toolCalls: Message["tool_calls"]): boolean {
+  return Array.isArray(toolCalls) && toolCalls.length > 0
+}
+
 function mergeMessageContent(
   existing: Message["content"],
   incoming: Message["content"]
@@ -352,16 +363,67 @@ function clampToolCalls(value: unknown): Message["tool_calls"] {
 
 function mergeToolCalls(
   existing: Message["tool_calls"],
-  incoming: Message["tool_calls"]
+  incoming: Message["tool_calls"],
+  options: { incomingAuthoritative?: boolean; preferExisting?: boolean } = {}
 ): Message["tool_calls"] {
-  return Array.isArray(incoming) && incoming.length > 0
+  if (options.preferExisting) return clampToolCalls(existing)
+  return Array.isArray(incoming) && (incoming.length > 0 || options.incomingAuthoritative)
     ? clampToolCalls(incoming)
     : clampToolCalls(existing)
+}
+
+function isAssistantToolCallToTextAlias(
+  source: { role?: Message["role"]; content?: Message["content"]; tool_calls?: Message["tool_calls"] },
+  target: { role?: Message["role"]; content?: Message["content"]; tool_calls?: Message["tool_calls"] }
+): boolean {
+  return (
+    source.role === "assistant" &&
+    target.role === "assistant" &&
+    hasUsefulToolCalls(source.tool_calls) &&
+    !hasUsefulToolCalls(target.tool_calls) &&
+    hasUsefulContent(target.content ?? "")
+  )
+}
+
+function mergeAliasedMessageContent(
+  sourceContent: Message["content"],
+  targetContent: Message["content"],
+  sourceContentPriority: number,
+  targetContentPriority: number
+): Message["content"] {
+  if (sourceContentPriority > targetContentPriority) return normalizeMessageContent(sourceContent)
+  if (targetContentPriority > sourceContentPriority) return normalizeMessageContent(targetContent)
+  if (sourceContentPriority > 0 && targetContentPriority > 0) {
+    return normalizeMessageContent(targetContent)
+  }
+  return normalizeMessageContent(hasUsefulContent(targetContent) ? targetContent : sourceContent)
+}
+
+function mergeAliasedToolCalls(
+  sourceToolCalls: Message["tool_calls"],
+  targetToolCalls: Message["tool_calls"],
+  sourceContentPriority: number,
+  targetContentPriority: number
+): Message["tool_calls"] {
+  if (sourceContentPriority > targetContentPriority) {
+    return Array.isArray(sourceToolCalls) ? clampToolCalls(sourceToolCalls) : clampToolCalls(targetToolCalls)
+  }
+  if (targetContentPriority > sourceContentPriority) {
+    return Array.isArray(targetToolCalls) ? clampToolCalls(targetToolCalls) : clampToolCalls(sourceToolCalls)
+  }
+  if (sourceContentPriority > 0 && targetContentPriority > 0) {
+    return Array.isArray(targetToolCalls) ? clampToolCalls(targetToolCalls) : clampToolCalls(sourceToolCalls)
+  }
+  return mergeToolCalls(sourceToolCalls, targetToolCalls)
 }
 
 function mergeNormalizedThreadMessages(existing: Message, incoming: Message): Message {
   const existingCreatedAt = normalizeTimestamp(existing.created_at)
   const incomingCreatedAt = normalizeTimestamp(incoming.created_at)
+  const existingContentPriority = existing.content_priority ?? 0
+  const incomingContentPriority = incoming.content_priority ?? 0
+  const hasAuthoritativeIncomingContent =
+    incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
   const createdAt =
     existingCreatedAt !== null && incomingCreatedAt !== null
       ? new Date(Math.min(existingCreatedAt, incomingCreatedAt))
@@ -370,8 +432,16 @@ function mergeNormalizedThreadMessages(existing: Message, incoming: Message): Me
   return {
     ...existing,
     ...incoming,
-    content: mergeMessageContent(existing.content, incoming.content),
-    tool_calls: mergeToolCalls(existing.tool_calls, incoming.tool_calls),
+    content:
+      hasAuthoritativeIncomingContent
+        ? normalizeMessageContent(incoming.content)
+        : existingContentPriority > incomingContentPriority
+          ? normalizeMessageContent(existing.content)
+          : mergeMessageContent(existing.content, incoming.content),
+    tool_calls: mergeToolCalls(existing.tool_calls, incoming.tool_calls, {
+      incomingAuthoritative: hasAuthoritativeIncomingContent,
+      preferExisting: existingContentPriority > incomingContentPriority
+    }),
     tool_call_id: incoming.tool_call_id ?? existing.tool_call_id,
     name: incoming.name ?? existing.name,
     status: incoming.status ?? existing.status,
@@ -430,6 +500,7 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
   console.log("Initializing database at:", dbPath)
   // Reset in case the DB was previously closed (flush/close set the guard).
   blockAsyncWrite = false
+  threadMessageIdAliases.clear()
 
   const SQL = await initSqlJs()
 
@@ -460,6 +531,7 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
       name TEXT,
       status TEXT,
       is_error INTEGER,
+      content_priority INTEGER,
       goal_id TEXT,
       active_window_id TEXT,
       created_at INTEGER NOT NULL,
@@ -568,6 +640,12 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
   if (!hasThreadMessageActiveWindowId) {
     db.run("ALTER TABLE thread_messages ADD COLUMN active_window_id TEXT")
   }
+  const hasThreadMessageContentPriority = threadMessageColumns.some(
+    (row) => row[1] === "content_priority"
+  )
+  if (!hasThreadMessageContentPriority) {
+    db.run("ALTER TABLE thread_messages ADD COLUMN content_priority INTEGER")
+  }
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
   db.run(
@@ -593,6 +671,7 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
 export async function closeDatabase(): Promise<void> {
   await flush()
   blockAsyncWrite = true
+  threadMessageIdAliases.clear()
   if (!db) return
   db.close()
   db = null
@@ -621,6 +700,7 @@ interface ThreadMessageRow {
   name: string | null
   status: string | null
   is_error: number | null
+  content_priority: number | null
   goal_id: string | null
   active_window_id: string | null
   created_at: number
@@ -660,6 +740,9 @@ function normalizeThreadMessageInput(message: Message, fallbackTime: number): Me
     ...(typeof message.active_window_id === "string" && message.active_window_id
       ? { active_window_id: message.active_window_id }
       : {}),
+    ...(typeof message.content_priority === "number" && message.content_priority > 0
+      ? { content_priority: message.content_priority }
+      : {}),
     created_at: new Date(createdAt),
     ...(startAt !== null ? { start_at: new Date(startAt) } : {}),
     ...(endAt !== null ? { end_at: new Date(endAt) } : {})
@@ -690,6 +773,80 @@ function coalesceNormalizedThreadMessages(
   return merged
 }
 
+function resolveThreadMessageIdAliasEntry(
+  threadId: string,
+  messageId: string
+): { id: string; role?: ThreadMessageRole } {
+  const aliases = threadMessageIdAliases.get(threadId)
+  if (!aliases) return { id: messageId }
+
+  let current = messageId
+  let role: ThreadMessageRole | undefined
+  const visited = new Set<string>()
+  while (true) {
+    if (visited.has(current)) {
+      // 检测到循环引用，记录警告以便调试
+      console.warn(
+        `[DB] Circular alias detected for thread ${threadId}: ${Array.from(visited).join(" -> ")}`
+      )
+      break
+    }
+    visited.add(current)
+    const next = aliases.get(current)
+    if (!next || next.toId === current) break
+    role = role ?? next.role
+    current = next.toId
+  }
+  return { id: current, role }
+}
+
+function rememberThreadMessageIdAlias(
+  threadId: string,
+  fromId: string,
+  toId: string,
+  role?: ThreadMessageRole
+): void {
+  let aliases = threadMessageIdAliases.get(threadId)
+  if (!aliases) {
+    aliases = new Map<string, ThreadMessageIdAlias>()
+    threadMessageIdAliases.set(threadId, aliases)
+  }
+  aliases.set(fromId, { toId, ...(role ? { role } : {}) })
+  while (aliases.size > THREAD_MESSAGE_ALIAS_LIMIT) {
+    const oldestId = aliases.keys().next().value
+    if (typeof oldestId !== "string") break
+    // 检查被驱逐的键是否被其他别名引用（即是否作为值出现），
+    // 如果是则跳过驱逐以避免别名链断裂。
+    const isReferencedAsValue = Array.from(aliases.values()).some((v) => v.toId === oldestId)
+    if (isReferencedAsValue) {
+      // 将该条目重新插入到末尾（LRU 风格），然后继续检查下一个最旧的条目
+      const value = aliases.get(oldestId)!
+      aliases.delete(oldestId)
+      aliases.set(oldestId, value)
+      continue
+    }
+    aliases.delete(oldestId)
+  }
+}
+
+function findAliasSourceForCanonicalCollision(
+  threadId: string,
+  targetId: string,
+  existingRole: ThreadMessageRole
+): string | null {
+  const aliases = threadMessageIdAliases.get(threadId)
+  if (!aliases) return null
+
+  for (const [fromId] of aliases) {
+    if (fromId === targetId) continue
+    const resolved = resolveThreadMessageIdAliasEntry(threadId, fromId)
+    if (resolved.id !== targetId) continue
+    if (resolved.role && resolved.role !== existingRole) continue
+    return fromId
+  }
+  return null
+}
+
 function threadMessageRowToMessage(row: ThreadMessageRow): Message {
   const createdAt = dateFromTimestamp(row.created_at) ?? new Date()
   const startAt = dateFromTimestamp(row.start_at)
@@ -706,6 +863,9 @@ function threadMessageRowToMessage(row: ThreadMessageRow): Message {
     ...(row.name ? { name: row.name } : {}),
     ...(row.status ? { status: row.status } : {}),
     ...(isError !== undefined ? { is_error: isError } : {}),
+    ...(typeof row.content_priority === "number" && row.content_priority > 0
+      ? { content_priority: row.content_priority }
+      : {}),
     ...(row.goal_id ? { goal_id: row.goal_id } : {}),
     ...(row.active_window_id ? { active_window_id: row.active_window_id } : {}),
     created_at: createdAt,
@@ -839,7 +999,92 @@ export function upsertThreadMessages(
   const database = getDb()
   if (!getThread(threadId)) return 0
 
-  const normalizedMessages = coalesceNormalizedThreadMessages(messages, Date.now())
+  const aliasCandidates = messages.map((message) => {
+    const messageId = typeof message.id === "string" ? message.id.trim() : ""
+    if (!messageId) return { message, messageId, canonicalId: "", aliasRole: undefined }
+    const resolved = resolveThreadMessageIdAliasEntry(threadId, messageId)
+    return { message, messageId, canonicalId: resolved.id, aliasRole: resolved.role }
+  })
+  const incomingRoleById = new Map<string, Message["role"]>()
+  const incomingMessageById = new Map<string, Message>()
+  for (const { message, messageId } of aliasCandidates) {
+    if (messageId && isMessageRole(message.role)) incomingRoleById.set(messageId, message.role)
+    if (messageId) incomingMessageById.set(messageId, message)
+  }
+  const aliasTargetRows = getThreadMessageRows(
+    database,
+    threadId,
+    aliasCandidates
+      .filter((candidate) => candidate.canonicalId && candidate.canonicalId !== candidate.messageId)
+      .map((candidate) => candidate.canonicalId)
+  )
+  const aliasedMessages = aliasCandidates.map(({ message, messageId, canonicalId, aliasRole }) => {
+    if (!messageId || !canonicalId || canonicalId === messageId) return message
+    const target = aliasTargetRows.get(canonicalId)
+    const sameBatchTargetRole = incomingRoleById.get(canonicalId)
+    if (sameBatchTargetRole && isMessageRole(message.role) && sameBatchTargetRole !== message.role) {
+      console.warn(
+        `[DB] Ignoring message id alias across same-batch roles for thread ${threadId}: ` +
+          `${messageId} (${message.role}) -> ${canonicalId} (${sameBatchTargetRole})`
+      )
+      return message
+    }
+    const sameBatchTargetMessage = incomingMessageById.get(canonicalId)
+    if (
+      sameBatchTargetMessage &&
+      isAssistantToolCallToTextAlias(message, sameBatchTargetMessage)
+    ) {
+      console.warn(
+        `[DB] Ignoring assistant tool-call to text message alias in same batch for thread ${threadId}: ` +
+          `${messageId} -> ${canonicalId}`
+      )
+      return message
+    }
+    if (
+      target &&
+      isAssistantToolCallToTextAlias(message, {
+        role: target.role,
+        content: parseMessageContent(target.content_json),
+        tool_calls: parseToolCalls(target.tool_calls_json)
+      })
+    ) {
+      console.warn(
+        `[DB] Ignoring assistant tool-call to text message alias for thread ${threadId}: ` +
+          `${messageId} -> ${canonicalId}`
+      )
+      return message
+    }
+    if (
+      !target &&
+      !sameBatchTargetMessage &&
+      aliasRole === "assistant" &&
+      message.role === "assistant" &&
+      hasUsefulToolCalls(message.tool_calls)
+    ) {
+      console.warn(
+        `[DB] Ignoring unresolved assistant tool-call message alias for thread ${threadId}: ` +
+          `${messageId} -> ${canonicalId}`
+      )
+      return message
+    }
+    if (target && isMessageRole(message.role) && target.role !== message.role) {
+      console.warn(
+        `[DB] Ignoring message id alias across roles for thread ${threadId}: ` +
+          `${messageId} (${message.role}) -> ${canonicalId} (${target.role})`
+      )
+      return message
+    }
+    if (!target && aliasRole && isMessageRole(message.role) && aliasRole !== message.role) {
+      console.warn(
+        `[DB] Ignoring message id alias with mismatched expected role for thread ${threadId}: ` +
+          `${messageId} (${message.role}) -> ${canonicalId} (${aliasRole})`
+      )
+      return message
+    }
+    if (!target && !aliasRole) return message
+    return { ...message, id: canonicalId }
+  })
+  const normalizedMessages = coalesceNormalizedThreadMessages(aliasedMessages, Date.now())
   if (normalizedMessages.length === 0) return 0
 
   let changed = 0
@@ -856,16 +1101,62 @@ export function upsertThreadMessages(
       const createdAt = normalizeTimestamp(normalized.created_at, Date.now()) ?? Date.now()
       const startAt = normalizeTimestamp(normalized.start_at)
       const endAt = normalizeTimestamp(normalized.end_at)
-      const existing = existingRows.get(normalized.id)
+      let existing = existingRows.get(normalized.id)
+      if (existing && existing.role !== normalized.role) {
+        const aliasSourceId = findAliasSourceForCanonicalCollision(
+          threadId,
+          normalized.id,
+          existing.role
+        )
+        if (aliasSourceId) {
+          const sourceRows = getThreadMessageRows(database, threadId, [aliasSourceId])
+          if (!sourceRows.has(aliasSourceId)) {
+            database.run(
+              "UPDATE thread_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
+              [aliasSourceId, threadId, normalized.id]
+            )
+            existingRows.delete(normalized.id)
+            existing = undefined
+            changed++
+          }
+        }
+      }
+      if (existing && existing.role !== normalized.role) {
+        console.warn(
+          `[DB] Refusing to update message row across roles for thread ${threadId}: ` +
+            `${normalized.id} (${existing.role}) <- ${normalized.role}`
+        )
+        continue
+      }
 
       const existingContent = existing ? parseMessageContent(existing.content_json) : ""
       const existingToolCalls = existing ? parseToolCalls(existing.tool_calls_json) : undefined
+      const existingContentPriority =
+        typeof existing?.content_priority === "number" && existing.content_priority > 0
+          ? existing.content_priority
+          : 0
+      const incomingContentPriority =
+        typeof normalized.content_priority === "number" && normalized.content_priority > 0
+          ? normalized.content_priority
+          : 0
+      const hasAuthoritativeIncomingContent =
+        incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
       const nextContent = normalizeMessageContent(
-        existing ? mergeMessageContent(existingContent, normalized.content) : normalized.content
+        existing
+          ? hasAuthoritativeIncomingContent
+            ? normalized.content
+            : existingContentPriority > incomingContentPriority
+              ? existingContent
+              : mergeMessageContent(existingContent, normalized.content)
+          : normalized.content
       )
       const nextToolCalls = existing
-        ? mergeToolCalls(existingToolCalls, normalized.tool_calls)
+        ? mergeToolCalls(existingToolCalls, normalized.tool_calls, {
+            incomingAuthoritative: hasAuthoritativeIncomingContent,
+            preferExisting: existingContentPriority > incomingContentPriority
+          })
         : clampToolCalls(normalized.tool_calls)
+      const nextContentPriority = Math.max(existingContentPriority, incomingContentPriority)
       const contentJson = safeJsonStringify(nextContent)
       const toolCallsJson = Array.isArray(nextToolCalls) ? safeJsonStringify(nextToolCalls) : null
       const toolCallId = normalized.tool_call_id ?? existing?.tool_call_id ?? null
@@ -895,7 +1186,7 @@ export function upsertThreadMessages(
         database.run(
           `UPDATE thread_messages
            SET role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?,
-               name = ?, status = ?, is_error = ?, goal_id = ?, active_window_id = ?,
+               name = ?, status = ?, is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?,
                created_at = ?, start_at = ?, end_at = ?
            WHERE thread_id = ? AND message_id = ?`,
           [
@@ -906,6 +1197,7 @@ export function upsertThreadMessages(
             name,
             status,
             isError,
+            nextContentPriority > 0 ? nextContentPriority : null,
             goalId,
             activeWindowId,
             nextCreatedAt,
@@ -920,9 +1212,9 @@ export function upsertThreadMessages(
         database.run(
           `INSERT INTO thread_messages (
              thread_id, message_id, role, content_json, tool_calls_json, tool_call_id,
-             name, status, is_error, goal_id, active_window_id, created_at, start_at, end_at,
+             name, status, is_error, content_priority, goal_id, active_window_id, created_at, start_at, end_at,
              ordinal
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             threadId,
             normalized.id,
@@ -933,6 +1225,7 @@ export function upsertThreadMessages(
             name,
             status,
             isError,
+            nextContentPriority > 0 ? nextContentPriority : null,
             goalId,
             activeWindowId,
             nextCreatedAt,
@@ -952,12 +1245,182 @@ export function upsertThreadMessages(
   } catch (error) {
     try {
       database.run("ROLLBACK")
-    } catch {}
+    } catch {
+      // Preserve the original transaction error.
+    }
     throw error
   }
 
   if (changed > 0) saveToDisk()
   return changed
+}
+
+export function replaceThreadMessageId(
+  threadId: string,
+  fromMessageId: string,
+  toMessageId: string,
+  role?: ThreadMessageRole
+): boolean {
+  // 注意：调用方传入的 ID 可能包含前后空格，此处统一 trim。
+  // upsertThreadMessages 在写入时也会 trim message.id，因此数据库中存储的 ID 均为 trim 后的值。
+  // 两处 trim 逻辑保持一致，确保别名解析时不会因空格导致不一致。
+  const requestedFromId = fromMessageId.trim()
+  const requestedToId = toMessageId.trim()
+  if (!requestedFromId || !requestedToId || requestedFromId === requestedToId) return false
+
+  const fromAlias = resolveThreadMessageIdAliasEntry(threadId, requestedFromId)
+  const toAlias = resolveThreadMessageIdAliasEntry(threadId, requestedToId)
+  const fromId = fromAlias.id
+  const toId = toAlias.id
+  if (fromId === toId) return true
+
+  const database = getDb()
+  const rows = getThreadMessageRows(database, threadId, [fromId, toId])
+  const source = rows.get(fromId)
+  const target = rows.get(toId)
+  if (role && source && source.role !== role) {
+    console.warn(
+      `[DB] Refusing to remember message id alias with mismatched source role for thread ${threadId}: ` +
+        `${fromId} (${source.role}) -> ${toId} (${role})`
+    )
+    return false
+  }
+  if (role && target && target.role !== role && !source) {
+    console.warn(
+      `[DB] Refusing to remember message id alias with mismatched target role for thread ${threadId}: ` +
+        `${fromId} (${role}) -> ${toId} (${target.role})`
+    )
+    return false
+  }
+  if (source && target && source.role !== target.role) {
+    console.warn(
+      `[DB] Refusing to merge message id alias across roles for thread ${threadId}: ` +
+        `${fromId} (${source.role}) -> ${toId} (${target.role})`
+    )
+    return false
+  }
+  if (
+    source &&
+    target &&
+    isAssistantToolCallToTextAlias(
+      {
+        role: source.role,
+        content: parseMessageContent(source.content_json),
+        tool_calls: parseToolCalls(source.tool_calls_json)
+      },
+      {
+        role: target.role,
+        content: parseMessageContent(target.content_json),
+        tool_calls: parseToolCalls(target.tool_calls_json)
+      }
+    )
+  ) {
+    console.warn(
+      `[DB] Refusing to merge assistant tool-call message into text answer for thread ${threadId}: ` +
+        `${fromId} -> ${toId}`
+    )
+    return false
+  }
+  if (
+    source &&
+    !target &&
+    (role === "assistant" || source.role === "assistant") &&
+    source.role === "assistant" &&
+    hasUsefulToolCalls(parseToolCalls(source.tool_calls_json))
+  ) {
+    console.warn(
+      `[DB] Refusing to rename assistant tool-call message to unresolved alias target for thread ${threadId}: ` +
+        `${fromId} -> ${toId}`
+    )
+    return false
+  }
+
+  const aliasRole = source?.role ?? target?.role ?? role ?? fromAlias.role ?? toAlias.role
+  rememberThreadMessageIdAlias(threadId, requestedFromId, toId, aliasRole)
+  if (fromId !== requestedFromId) {
+    rememberThreadMessageIdAlias(threadId, fromId, toId, aliasRole)
+  }
+  if (!source) return true
+
+  database.run("BEGIN")
+  try {
+    if (!target) {
+      database.run(
+        "UPDATE thread_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
+        [toId, threadId, fromId]
+      )
+    } else {
+      const targetContent = parseMessageContent(target.content_json)
+      const sourceContent = parseMessageContent(source.content_json)
+      const sourceToolCalls = parseToolCalls(source.tool_calls_json)
+      const targetToolCalls = parseToolCalls(target.tool_calls_json)
+      const sourceContentPriority =
+        typeof source.content_priority === "number" && source.content_priority > 0
+          ? source.content_priority
+          : 0
+      const targetContentPriority =
+        typeof target.content_priority === "number" && target.content_priority > 0
+          ? target.content_priority
+          : 0
+      const mergedContentPriority = Math.max(sourceContentPriority, targetContentPriority)
+      const mergedContent = mergeAliasedMessageContent(
+        sourceContent,
+        targetContent,
+        sourceContentPriority,
+        targetContentPriority
+      )
+      const mergedToolCalls = mergeAliasedToolCalls(
+        sourceToolCalls,
+        targetToolCalls,
+        sourceContentPriority,
+        targetContentPriority
+      )
+
+      database.run("DELETE FROM thread_messages WHERE thread_id = ? AND message_id = ?", [
+        threadId,
+        fromId
+      ])
+      database.run(
+        `UPDATE thread_messages
+         SET role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
+             is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
+             end_at = ?, ordinal = ?
+         WHERE thread_id = ? AND message_id = ?`,
+        [
+          target.role ?? source.role,
+          safeJsonStringify(mergedContent),
+          Array.isArray(mergedToolCalls) ? safeJsonStringify(mergedToolCalls) : null,
+          target.tool_call_id ?? source.tool_call_id,
+          target.name ?? source.name,
+          target.status ?? source.status,
+          target.is_error ?? source.is_error,
+          mergedContentPriority > 0 ? mergedContentPriority : null,
+          target.goal_id ?? source.goal_id,
+          target.active_window_id ?? source.active_window_id,
+          Math.min(
+            Number(source.created_at) || Date.now(),
+            Number(target.created_at) || Date.now()
+          ),
+          target.start_at ?? source.start_at,
+          target.end_at ?? source.end_at,
+          Math.min(Number(source.ordinal), Number(target.ordinal)),
+          threadId,
+          toId
+        ]
+      )
+    }
+    database.run("COMMIT")
+  } catch (error) {
+    try {
+      database.run("ROLLBACK")
+    } catch {
+      // Preserve the original transaction error.
+    }
+    throw error
+  }
+
+  saveToDisk()
+  return true
 }
 
 export function getAllThreads(): ThreadRow[] {
@@ -1076,6 +1539,7 @@ export function mergeThreadValues(
 
 export function deleteThread(threadId: string): void {
   const database = getDb()
+  threadMessageIdAliases.delete(threadId)
   database.run("DELETE FROM thread_messages WHERE thread_id = ?", [threadId])
   database.run("DELETE FROM thread_goal_events WHERE thread_id = ?", [threadId])
   database.run("DELETE FROM thread_goals WHERE thread_id = ?", [threadId])

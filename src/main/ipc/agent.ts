@@ -289,9 +289,10 @@ function hasPendingApprovalForThread(threadId: string): boolean {
 async function markLatestForkBoundary(input: {
   threadId: string
   turnId?: string
-  source: "agent_run_complete"
+  source: "agent_run_complete" | "agent_run_interrupted"
 }): Promise<void> {
   const { threadId, turnId, source } = input
+  const outcome = source === "agent_run_interrupted" ? "interrupted" : "completed"
   try {
     if (hasPendingApprovalForThread(threadId)) return
     await withCheckpointer(threadId, async (checkpointer) => {
@@ -299,8 +300,11 @@ async function markLatestForkBoundary(input: {
         configurable: { thread_id: threadId, checkpoint_ns: "" }
       })
       if (!tuple) return
-      if (checkpointHasInterrupt(tuple.checkpoint)) return
-      if ((tuple.pendingWrites?.length ?? 0) > 0) return
+      // 用户中断场景（agent_run_interrupted）下，checkpoint 可能包含 __interrupt__，
+      // 此时应跳过 checkpointHasInterrupt 检查，允许创建 fork boundary，
+      // 以便用户可以在中断点之后进行 fork 操作。
+      if (checkpointHasInterrupt(tuple.checkpoint) && source !== "agent_run_interrupted") return
+      if ((tuple.pendingWrites?.length ?? 0) > 0 && source !== "agent_run_interrupted") return
 
       const checkpointId =
         typeof tuple.config.configurable?.checkpoint_id === "string"
@@ -320,12 +324,13 @@ async function markLatestForkBoundary(input: {
           cmb_fork_boundary: {
             version: 1,
             kind: "turn_complete",
-            boundaryId: `turn_complete:${threadId}:${checkpointId}`,
+            boundaryId: `${outcome === "interrupted" ? "turn_interrupted" : "turn_complete"}:${threadId}:${checkpointId}`,
             turnId,
             checkpointId,
             checkpointNs: "",
             completedAt: new Date().toISOString(),
             source,
+            outcome,
             lastVisibleMessageId
           }
         } as unknown as CheckpointMetadata
@@ -449,6 +454,16 @@ export function forgetCoordinatorThreadState(threadId: string): void {
 
 export function hasActiveAgentRun(threadId: string): boolean {
   return activeRuns.has(threadId)
+}
+
+export function isActiveAgentRunAborting(threadId: string): boolean {
+  return activeRuns.get(threadId)?.signal.aborted === true
+}
+
+export async function waitForActiveAgentRunToSettle(
+  threadId: string
+): Promise<"settled" | "timed_out"> {
+  return waitForReplacedRunToSettle(threadId)
 }
 
 async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
@@ -1598,17 +1613,19 @@ function threadIdFromAgentStreamChannel(channel: string): string | null {
   return threadId || null
 }
 
-function isDonePayload(payload: unknown): boolean {
+function isTerminalStreamPayload(payload: unknown): boolean {
+  const type =
+    !!payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as { type?: unknown }).type
+      : undefined
   return (
-    !!payload &&
-    typeof payload === "object" &&
-    !Array.isArray(payload) &&
-    (payload as { type?: unknown }).type === "done"
+    type === "done" ||
+    type === "error"
   )
 }
 
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
-  if (isDonePayload(payload)) {
+  if (isTerminalStreamPayload(payload)) {
     const threadId = threadIdFromAgentStreamChannel(channel)
     if (threadId) flushPendingStreamTranscriptMessages(threadId)
   }
@@ -7033,6 +7050,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
           }
+        } else {
+          pauseActiveGoalForRuntimeStop("Agent run was aborted.")
+          syncUsedSkillsContext()
+          tracer.finish("cancelled").catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_interrupted"
+          })
+          turnStateShouldDispose = true
         }
       } catch (error) {
         await settleDrainedCoordinatorNotifications("restore")
@@ -7176,6 +7213,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
             })
           }
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_interrupted"
+          })
           turnStateShouldDispose = true
         }
       } finally {
@@ -7216,6 +7258,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             updateThread(threadId, { metadata: JSON.stringify(metadata) })
           }
         }
+        flushPendingStreamTranscriptMessages(threadId)
         const currentController = activeRuns.get(threadId)
         const replacedByNewRun = Boolean(currentController && currentController !== abortController)
         if (currentController === abortController) {
@@ -8021,6 +8064,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             type: "error",
             error: error instanceof Error ? error.message : "Unknown error"
           })
+        } else {
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_interrupted"
+          })
         }
         turnStateShouldDispose = true
       } finally {
@@ -8048,6 +8097,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             updateThread(threadId, { metadata: JSON.stringify(metadata) })
           }
         }
+        flushPendingStreamTranscriptMessages(threadId)
         const currentController = activeRuns.get(threadId)
         const replacedByNewRun = Boolean(currentController && currentController !== abortController)
         if (currentController === abortController) {
@@ -8803,6 +8853,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"
         })
+      } else {
+        await markLatestForkBoundary({
+          threadId,
+          turnId: turnState.turnId,
+          source: "agent_run_interrupted"
+        })
       }
       turnStateShouldDispose = true
     } finally {
@@ -8830,6 +8886,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           updateThread(threadId, { metadata: JSON.stringify(metadata) })
         }
       }
+      flushPendingStreamTranscriptMessages(threadId)
       const currentController = activeRuns.get(threadId)
       const replacedByNewRun = Boolean(currentController && currentController !== abortController)
       if (currentController === abortController) {
@@ -8915,6 +8972,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // entrypoint with cancelWorkers=true and must not abort the foreground turn.
           LocalSandbox.cancelBackgroundTasks(threadId)
           controller.abort()
+          flushPendingStreamTranscriptMessages(threadId)
           // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
           // A user can cancel and immediately send another message; the next invoke must wait
           // for checkpoint/sandbox cleanup before opening a replacement stream.
