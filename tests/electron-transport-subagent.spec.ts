@@ -80,13 +80,15 @@ function aiMessage(input: {
   id?: string
   content?: unknown
   toolCalls?: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+  additionalKwargs?: Record<string, unknown>
 }): unknown {
   return {
     id: ["langchain_core", "messages", "AIMessage"],
     kwargs: {
       id: input.id,
       content: input.content ?? "",
-      tool_calls: input.toolCalls
+      tool_calls: input.toolCalls,
+      additional_kwargs: input.additionalKwargs
     }
   }
 }
@@ -125,12 +127,16 @@ function toolMessage(input: {
   }
 }
 
-function humanMessage(content: string, input?: { id?: string }): unknown {
+function humanMessage(
+  content: string,
+  input?: { id?: string; additionalKwargs?: Record<string, unknown> }
+): unknown {
   return {
     id: ["langchain_core", "messages", "HumanMessage"],
     kwargs: {
       id: input?.id ?? `human-${content}`,
-      content
+      content,
+      additional_kwargs: input?.additionalKwargs
     }
   }
 }
@@ -684,6 +690,22 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       "worker side-channel should recognize live plain user-shaped messages"
     )
 
+    const hiddenSummarySideChannelMessages =
+      transport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          humanMessage("You are in the middle of a conversation that has been summarized.", {
+            id: "focused-worker-summary",
+            additionalKwargs: { lc_source: "summarization" }
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    assert(
+      hiddenSummarySideChannelMessages.length === 0,
+      "worker message side-channel should hide structurally marked summaries"
+    )
+
     const repeatedHumanIdAcrossTurnsTransport = new ElectronIPCTransport()
     resetWorkerFocusStore()
     openWorkerFocusViewForTest({
@@ -825,6 +847,10 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
 
     const directValuesMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
       streamValuesEvent([
+        humanMessage("Here is a summary of the conversation to date:\nsummary", {
+          id: "focused-worker-values-summary",
+          additionalKwargs: { lc_source: "summarization" }
+        }),
         humanMessage("Worker prompt"),
         aiMessage({
           id: "focused-worker-values-ai",
@@ -851,6 +877,10 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
         (message) => message.role === "assistant" && message.tool_calls?.[0]?.name === "list_dir"
       ),
       "worker side-channel should use values snapshots as a live fallback"
+    )
+    assert(
+      !directValuesMessages.some((message) => message.id.includes("values-summary")),
+      "worker values fallback should hide structurally marked summaries"
     )
     assert(
       directValuesMessages.some(
@@ -3386,9 +3416,65 @@ function testWorkflowSnapshotConverterSurvivesCorruptToolCalls(): void {
     !JSON.stringify(out).includes("NOTACALL"),
     "a corrupt tool-call element is dropped, not surfaced as a fake tool call"
   )
+
+  const compactionMessages = transport.convertWorkflowAgentValuesSnapshot(
+    [
+      humanMessage("You are in the middle of a conversation that has been summarized.", {
+        id: "workflow-summary",
+        additionalKwargs: { lc_source: "summarization" }
+      }),
+      aiMessage({
+        id: "workflow-visible-assistant",
+        content: "Here is a summary of the conversation to date:\n用户要求原样输出"
+      })
+    ],
+    "wfagent:wf_x:0"
+  )
+  assert(
+    !compactionMessages.some((message) => message.id.includes("workflow-summary")),
+    "workflow values converter should hide structurally marked summaries"
+  )
+  assert(
+    compactionMessages.some((message) => message.id.includes("workflow-visible-assistant")),
+    "workflow values converter should preserve ordinary assistant prose"
+  )
+}
+
+function testSummarizationMessagesAreHiddenByMarkerOnly(): void {
+  const transport = new ElectronIPCTransport()
+  const markedSummaryEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-marked-summary",
+        content: "Here is a summary of the conversation to date:\ninternal summary",
+        additionalKwargs: { lc_source: "summarization" }
+      })
+    )
+  )
+  assert(
+    messageEvents(markedSummaryEvents).length === 0,
+    "main message stream should hide structurally marked summaries"
+  )
+
+  const visibleAssistantEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-visible-summary-prose",
+        content: "Here is a summary of the conversation to date:\n用户要求原样输出"
+      })
+    )
+  )
+  assert(
+    messageEvents(visibleAssistantEvents).length === 1,
+    "main message stream should preserve matching prose without the structural marker"
+  )
 }
 
 async function run(): Promise<void> {
+  testSummarizationMessagesAreHiddenByMarkerOnly()
+  console.log("PASS electron transport filters summarization by structural marker only")
   testWorkflowSnapshotConverterSurvivesCorruptToolCalls()
   console.log("PASS electron transport workflow converter survives corrupt tool_calls")
   await testSubagentInternalsAreHiddenButObservable()

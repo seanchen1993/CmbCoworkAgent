@@ -13,6 +13,7 @@ import {
 /* eslint-disable react-refresh/only-export-components */
 import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport, type StreamFallbackIndexBaselines } from "./electron-transport"
+import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
 import {
   isCoordinatorModeMetadata,
   isExplicitNormalModeMetadata,
@@ -3456,11 +3457,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             let internalGoalPromptIndex = 0
             const checkpointRawRestoredMessages = channelValues.messages.flatMap(
               (msg, index): Message | [] => {
-                const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
-                const lcSource = additionalKwargs?.lc_source
-                if (lcSource === "summarization") {
+                if (isSerializedSummarizationMessage(msg)) {
                   return []
                 }
+                const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
                 if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
                   return []
                 }

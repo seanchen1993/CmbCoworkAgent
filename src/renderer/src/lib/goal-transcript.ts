@@ -20,26 +20,13 @@ export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "conten
   )
 }
 
-export function isContextCompactionTranscriptArtifact(
-  message: Pick<Message, "role" | "content">
-): boolean {
-  if (message.role === "user") return false
-  if (typeof message.content !== "string") return false
-  const content = message.content.trimStart()
-  return (
-    content.startsWith("You are in the middle of a conversation that has been summarized.") ||
-    content.startsWith("Here is a summary of the conversation to date:")
-  )
-}
-
 export function isVisibleCheckpointTranscriptMessage(
   message: Pick<Message, "role" | "content">
 ): boolean {
   return (
     !isInternalGoalPromptMessage(message) &&
     !isGoalTranscriptArtifact(message) &&
-    !isWorkflowPlumbingTranscriptContent(message.content) &&
-    !isContextCompactionTranscriptArtifact(message)
+    !isWorkflowPlumbingTranscriptContent(message.content)
   )
 }
 

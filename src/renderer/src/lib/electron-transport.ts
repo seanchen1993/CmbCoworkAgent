@@ -14,6 +14,7 @@ import {
   buildToolMessageFallbackId
 } from "./stream-message-ids"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
+import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -220,6 +221,7 @@ export function transformSerializedValuesMessages(
   }
 
   for (const msg of messages ?? []) {
+    if (isSerializedSummarizationMessage(msg)) continue
     const className = getSerializedMessageClassName(msg)
     if (className.includes("Human")) {
       // Local user bubbles are appended before stream submit. Internal goal
@@ -526,6 +528,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     if (event.mode === "messages") {
       const [msgChunk, metadata] = event.data as [SerializedMessageChunk, MessageMetadata]
+      if (isSerializedSummarizationMessage(msgChunk)) return []
       const kwargs = msgChunk?.kwargs || {}
       const classId = Array.isArray(msgChunk?.id) ? msgChunk.id : []
       const className = classId[classId.length - 1] || ""
@@ -913,6 +916,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const converted: Message[] = []
     let latestAiIndex = -1
     for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (isSerializedSummarizationMessage(messages[index])) continue
       if (this.isSerializedAIMessage(messages[index])) {
         latestAiIndex = index
         break
@@ -920,6 +924,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     for (let index = 0; index < messages.length; index += 1) {
       const message = messages[index]
+      if (isSerializedSummarizationMessage(message)) continue
       const kwargs = message.kwargs || {}
       const className = this.getSerializedMessageClassName(message)
       const additionalKwargs = kwargs.additional_kwargs
@@ -1052,6 +1057,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (mode === "messages") {
       // Messages mode returns [message, metadata] tuples
       const [msgChunk, metadata] = data as [SerializedMessageChunk, MessageMetadata]
+      if (isSerializedSummarizationMessage(msgChunk)) return events
 
       // LangChain serialization: actual data is in kwargs
       const kwargs = msgChunk?.kwargs || {}
@@ -2048,6 +2054,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const events: StreamEvent[] = []
     let currentTurnStart = 0
     for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (isSerializedSummarizationMessage(messages[index])) continue
       if (this.isSerializedHumanMessage(messages[index])) {
         currentTurnStart = index + 1
         break
@@ -2056,6 +2063,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     let latestCurrentTurnAiIndex = -1
     for (let index = currentTurnStart; index < messages.length; index += 1) {
+      if (isSerializedSummarizationMessage(messages[index])) continue
       if (this.isSerializedAIMessage(messages[index])) latestCurrentTurnAiIndex = index
     }
     const reusableCurrentMessageId =
@@ -2071,6 +2079,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       let sawToolAfterCandidate = false
       for (let index = currentTurnStart; index < messages.length; index += 1) {
         const message = messages[index]
+        if (isSerializedSummarizationMessage(message)) continue
         if (candidateIndex >= 0 && this.isSerializedToolMessage(message)) {
           sawToolAfterCandidate = true
         }
@@ -2109,6 +2118,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     let sawToolAfterCurrentMessageCandidate = false
     for (let index = 0; index < messages.length; index += 1) {
       const message = messages[index]
+      if (isSerializedSummarizationMessage(message)) continue
       const kwargs = message.kwargs || {}
       const className = this.getSerializedMessageClassName(message)
       const fallbackType = this.isSerializedToolMessage(message)

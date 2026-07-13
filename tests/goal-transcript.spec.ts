@@ -125,26 +125,26 @@ function testGoalArtifactsAreNotCheckpointTranscript(): void {
   )
 }
 
-function testContextCompactionArtifactsAreNotCheckpointTranscript(): void {
+function testContextCompactionProseRemainsVisibleWithoutStructuralMarker(): void {
   assert(
-    !isVisibleCheckpointTranscriptMessage(
+    isVisibleCheckpointTranscriptMessage(
       message(
         "compact-deepagents",
         "assistant",
         "You are in the middle of a conversation that has been summarized.\nsummary"
       )
     ),
-    "deepagents context summary text should be hidden if it reaches transcript rendering"
+    "ordinary assistant text must not be hidden only because it resembles compaction prose"
   )
   assert(
-    !isVisibleCheckpointTranscriptMessage(
+    isVisibleCheckpointTranscriptMessage(
       message(
         "compact-legacy",
         "assistant",
         "Here is a summary of the conversation to date:\nsummary"
       )
     ),
-    "legacy summary text should be hidden if it reaches transcript rendering"
+    "legacy-looking assistant text must remain visible without an internal marker"
   )
   assert(
     isVisibleCheckpointTranscriptMessage(
@@ -904,7 +904,7 @@ function testWorkflowPlumbingStaysOutOfCheckpointTranscript(): void {
 function run(): void {
   const tests = [
     testGoalArtifactsAreNotCheckpointTranscript,
-    testContextCompactionArtifactsAreNotCheckpointTranscript,
+    testContextCompactionProseRemainsVisibleWithoutStructuralMarker,
     testInternalGoalPromptsAndGoalArtifactsAreFilteredTogether,
     testAllGoalCommandsStayInCheckpointTranscript,
     testKnownGoalNoticeVariantsStayOutOfCheckpointTranscript,

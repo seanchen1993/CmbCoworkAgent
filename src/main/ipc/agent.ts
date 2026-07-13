@@ -66,6 +66,7 @@ import {
   deriveCheckpointTranscriptIndex,
   isWorkflowPlumbingTranscriptContent
 } from "../../shared/checkpoint-transcript"
+import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
 import {
   FORK_BOUNDARY_MARKER_VERSION,
   FORK_BOUNDARY_THREAD_METADATA_KEY
@@ -2797,6 +2798,7 @@ function shouldSkipMainTranscriptStreamPayload(
   threadId: string
 ): boolean {
   if (mode !== "messages") return true
+  if (Array.isArray(payload) && isSerializedSummarizationMessage(payload[0])) return true
   if (isCoordinatorWorkerStreamChunk(mode, payload, threadId)) return true
   const metadata = messageStreamMetadata(mode, payload)
   const checkpointNs =
