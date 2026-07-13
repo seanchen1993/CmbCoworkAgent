@@ -230,9 +230,10 @@ export async function initializeAdoptionIndex(): Promise<void> {
     )
     db.run(`CREATE INDEX IF NOT EXISTS idx_gen_created_at ON gen_events(created_at)`)
 
-    // Transactional outbox for adoption terminal events. The complete CoworkEvent
-    // payload is stored once so every retry reuses the server-idempotent top-level
-    // eventId instead of rebuilding a new envelope id.
+    // Transactional outbox for durable adoption telemetry (terminal adoption
+    // events plus separately reported test-code generations). The complete
+    // CoworkEvent payload is stored once so every retry reuses the
+    // server-idempotent top-level eventId instead of rebuilding a new envelope.
     db.run(`
       CREATE TABLE IF NOT EXISTS event_outbox (
         event_id TEXT PRIMARY KEY,
@@ -489,7 +490,7 @@ function insertOutboxEventUnsafe(event: EventOutboxInput): boolean {
   }
 }
 
-/** Persist a standalone adoption event (for example skipped_large) for delivery. */
+/** Persist a standalone adoption event (for example code_test_gen/skipped_large). */
 export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): boolean {
   if (!db) return false
   try {

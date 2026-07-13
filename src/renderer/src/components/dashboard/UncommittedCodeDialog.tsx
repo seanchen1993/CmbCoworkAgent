@@ -634,7 +634,7 @@ export function UncommittedCodeAnalysisPanel({
           </div>
 
           <p className="text-[10px] leading-relaxed text-muted-foreground">
-            未提交 = 生成行数 − 已测量（进 commit
+            仅统计生产代码流（不含单独上报的测试生成）。未提交 = 生成行数 − 已测量（进 commit
             的有效生成）行数，时间口径同上方事件筛选框；若所选范围包含当天，会自动排除最近 2
             小时的在途生成（刚生成还没来得及提交）。称「近似」是因为它按行数聚合归人，而非逐条
             genEventId

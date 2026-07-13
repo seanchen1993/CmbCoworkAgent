@@ -13,9 +13,9 @@
  *      markers without changing the already-completed git commit outcome.
  *   2. Performance. Line-level hashing uses a lightweight FNV-1a 32-bit
  *      function; no new deps; no per-line crypto hashing.
- *   3. Local first. `code_adopt` envelopes use a SQLite transactional outbox;
- *      retries reuse the exact top-level eventId. Other telemetry remains
- *      fire-and-forget through `trackEvent()`.
+ *   3. Local first. `code_adopt` and `code_test_gen` envelopes use a SQLite
+ *      transactional outbox; retries reuse the exact top-level eventId. Other
+ *      telemetry remains fire-and-forget through `trackEvent()`.
  *   4. Only code files are tracked (whitelist + build-output blacklist).
  *
  * ── Storage layout ───────────────────────────────────────
@@ -24,7 +24,7 @@
  *     YYYY-MM-DDTHH-MM-SS.jsonl    ← sealed shards
  *   ~/.cmbcoworkagent/adoption-index.sqlite
  *     ├─ gen_events                ← lookup index for commit-time L3
- *     ├─ event_outbox              ← immutable code_adopt envelopes
+ *     ├─ event_outbox              ← immutable durable telemetry envelopes
  *     └─ commit_jobs               ← restart-safe commit measurement queue
  *
  *   Retention: 14 days / 100 MB hard cap.
@@ -43,6 +43,7 @@ import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
 import { normalizeSkillSourceRefs } from "../utils/skill-source"
 import { extractShellFileOps } from "../agent/exec-policy"
 import { buildEvent, getEventReporter, trackEvent, type CoworkEvent } from "./event-reporter"
+import { getTestCodeMatchRule, type TestCodeMatchRule } from "./adoption-file-policy"
 import {
   cleanupAdoptionDeliveryRecords,
   closeAdoptionIndex,
@@ -839,6 +840,74 @@ export function recordGen(input: RecordGenInput): void {
   })
 }
 
+function buildCodeGenerationProperties(args: {
+  eventId: string
+  input: RecordGenInput
+  absPath: string
+  relPath: string
+  lineCount: number
+  deletedLineCount: number
+  createdAt: number
+  ctx: AdoptionContext
+  usedSkills: string[]
+  skillSource: string[]
+  testMatchRule?: TestCodeMatchRule
+}): Record<string, unknown> {
+  const {
+    eventId,
+    input,
+    absPath,
+    relPath,
+    lineCount,
+    deletedLineCount,
+    createdAt,
+    ctx,
+    usedSkills,
+    skillSource,
+    testMatchRule
+  } = args
+  return {
+    schemaVersion: 1,
+    eventId,
+    threadId: input.threadId,
+    traceId: ctx.traceId,
+    stepIndex: input.stepIndex,
+    tool: input.tool,
+    language: extname(absPath).slice(1).toLowerCase() || null,
+    lineCount,
+    deletedLineCount,
+    usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
+    modelId: ctx.modelId ?? null,
+    modelName: ctx.modelName ?? null,
+    harnessProjectId: ctx.harnessProjectId ?? null,
+    harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessNodeName: ctx.harnessNodeName ?? null,
+    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
+    harnessAdapterName: ctx.harnessAdapterName ?? null,
+    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    ...(testMatchRule ? { testMatchRule } : {}),
+    // note: filePath / content / fingerprint intentionally withheld
+    createdAt: new Date(createdAt).toISOString(),
+    relativeHint: relPath.split("/").slice(-1)[0]
+  }
+}
+
+function enqueueTestCodeGeneration(
+  properties: Record<string, unknown>,
+  createdAt: number
+): boolean {
+  const event = buildEvent("code_test_gen", "code_adoption", properties)
+  if (!enqueueEventOutbox(toOutboxEvent(event, createdAt))) {
+    console.warn(
+      `[AdoptionTracker] failed to persist code_test_gen event for genEventId=${String(properties.eventId ?? "unknown")}`
+    )
+    return false
+  }
+  scheduleOutboxDrain()
+  return true
+}
+
 async function doRecordGen(input: RecordGenInput): Promise<void> {
   try {
     if (!isCodeFile(input.filePath)) {
@@ -869,6 +938,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     const relPath = input.workspacePath
       ? relative(input.workspacePath, absPath).replace(/\\/g, "/")
       : absPath.replace(/\\/g, "/")
+    const testMatchRule = getTestCodeMatchRule(relPath)
 
     // ── Cheap upper-bound line count check (skip hashing for giant baselines) ──
     // Counts every physical line incl. blanks — non-blank count can only be ≤ this.
@@ -887,7 +957,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         relPath,
         lineCount: rawLineCount,
         createdAt,
-        ctx
+        ctx,
+        testMatchRule
       })
       return
     }
@@ -904,7 +975,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         relPath,
         lineCount: baseline.rawGeneratedLineCount,
         createdAt,
-        ctx
+        ctx,
+        testMatchRule
       })
       return
     }
@@ -915,8 +987,6 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       console.log(`[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`)
       return
     }
-    const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
-
     // `hashes` is the net-new baseline. For edit_file this removes unchanged
     // oldString context from newString, while `oldLineHashes` keeps only the
     // old-only lines that should supersede earlier agent generations.
@@ -932,6 +1002,34 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // the file size. Boundary-line merging (e.g. oldString ending mid-line)
     // can introduce small +/- 1 errors; acceptable for an auxiliary metric.
     const deletedLineCount = deriveDeletedLineCount(input)
+    const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+    const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
+    const generationProperties = buildCodeGenerationProperties({
+      eventId,
+      input,
+      absPath,
+      relPath,
+      lineCount: reportedLineCount,
+      deletedLineCount,
+      createdAt,
+      ctx,
+      usedSkills,
+      skillSource,
+      ...(testMatchRule ? { testMatchRule } : {})
+    })
+
+    // Test code is intentionally a separate analytics stream. It never enters
+    // gen_events, so commit measurement cannot turn it into a standard
+    // code_adopt or add it to the existing adoption-rate numerator/denominator.
+    if (testMatchRule) {
+      const persisted = enqueueTestCodeGeneration(generationProperties, createdAt)
+      console.log(
+        `[AdoptionTracker] recordTestGen ${persisted ? "OK" : "FAILED"}: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} deletedLineCount=${deletedLineCount} matchRule=${testMatchRule} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+      )
+      return
+    }
+
+    const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
     const jsonlEntry: JsonlGenEntry = {
       t: "gen",
       eventId,
@@ -950,8 +1048,6 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // carry them too (ES can then slice adoption rates by skill / model / trace
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
-    const usedSkills = normalizeUsedSkills(ctx.usedSkills)
-    const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
     insertGenEvent({
       event_id: eventId,
       file_path: absPath,
@@ -978,30 +1074,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     })
 
     // ── Cloud event (metadata only) ─────────────────────
-    trackEvent("code_gen", "code_adoption", {
-      schemaVersion: 1,
-      eventId,
-      threadId: input.threadId,
-      traceId: ctx.traceId,
-      stepIndex: input.stepIndex,
-      tool: input.tool,
-      language: extname(absPath).slice(1).toLowerCase() || null,
-      lineCount: reportedLineCount,
-      deletedLineCount,
-      usedSkills,
-      ...(skillSource.length > 0 ? { skillSource } : {}),
-      modelId: ctx.modelId ?? null,
-      modelName: ctx.modelName ?? null,
-      harnessProjectId: ctx.harnessProjectId ?? null,
-      harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
-      harnessNodeName: ctx.harnessNodeName ?? null,
-      harnessNodeStatus: ctx.harnessNodeStatus ?? null,
-      harnessAdapterName: ctx.harnessAdapterName ?? null,
-      harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
-      // note: filePath / content / fingerprint intentionally withheld
-      createdAt: new Date(createdAt).toISOString(),
-      relativeHint: relPath.split("/").slice(-1)[0] // leaf filename only, not a full path
-    })
+    trackEvent("code_gen", "code_adoption", generationProperties)
     console.log(
       `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${baseline.rawGeneratedLineCount} supersededHashes=${oldLineHashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
     )
@@ -1013,7 +1086,8 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
 /**
  * Emit the L1 `code_gen` + a terminal `code_adopt(skipped_large)` pair for a
  * generation whose baseline exceeded `MAX_LINES_FOR_MEASURE`. Skips JSONL and
- * sqlite index so we do not blow up local storage with giant BLOBs.
+ * sqlite index so we do not blow up local storage with giant BLOBs. Oversize
+ * test code emits only its durable `code_test_gen` metadata event.
  */
 function emitSkippedLargeAtGen(args: {
   eventId: string
@@ -1024,37 +1098,36 @@ function emitSkippedLargeAtGen(args: {
   createdAt: number
   /** Attribution snapshot taken before any await — see doRecordGen. */
   ctx: AdoptionContext
+  testMatchRule: TestCodeMatchRule | null
 }): void {
-  const { eventId, input, absPath, relPath, lineCount, createdAt, ctx } = args
-  const language = extname(absPath).slice(1).toLowerCase() || null
+  const { eventId, input, absPath, relPath, lineCount, createdAt, ctx, testMatchRule } = args
   const deletedLineCount = deriveDeletedLineCount(input)
   const usedSkills = normalizeUsedSkills(ctx.usedSkills)
   const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
-
-  // L1 — record that the agent generated code (metadata only, no path/content)
-  trackEvent("code_gen", "code_adoption", {
-    schemaVersion: 1,
+  const generationProperties = buildCodeGenerationProperties({
     eventId,
-    threadId: input.threadId,
-    traceId: ctx.traceId,
-    stepIndex: input.stepIndex,
-    tool: input.tool,
-    language,
+    input,
+    absPath,
+    relPath,
     lineCount,
     deletedLineCount,
+    createdAt,
+    ctx,
     usedSkills,
-    ...(skillSource.length > 0 ? { skillSource } : {}),
-    modelId: ctx.modelId ?? null,
-    modelName: ctx.modelName ?? null,
-    harnessProjectId: ctx.harnessProjectId ?? null,
-    harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
-    harnessNodeName: ctx.harnessNodeName ?? null,
-    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
-    harnessAdapterName: ctx.harnessAdapterName ?? null,
-    harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
-    createdAt: new Date(createdAt).toISOString(),
-    relativeHint: relPath.split("/").slice(-1)[0]
+    skillSource,
+    ...(testMatchRule ? { testMatchRule } : {})
   })
+
+  if (testMatchRule) {
+    const persisted = enqueueTestCodeGeneration(generationProperties, createdAt)
+    console.log(
+      `[AdoptionTracker] recordTestGen ${persisted ? "OK" : "FAILED"}: eventId=${eventId} file=${relPath} lineCount=${lineCount} deletedLineCount=${deletedLineCount} matchRule=${testMatchRule} oversize=true threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
+    )
+    return
+  }
+
+  // L1 — record that the agent generated code (metadata only, no path/content)
+  trackEvent("code_gen", "code_adoption", generationProperties)
 
   // Terminal L2/L3 equivalent — no hashing possible, so persist skipped_large
   // immediately. The complete envelope (including its top-level eventId) is

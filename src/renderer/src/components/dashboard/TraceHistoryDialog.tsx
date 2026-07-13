@@ -75,6 +75,9 @@ function GeneratedLinesTooltip(): React.JSX.Element {
       <div className="text-muted-foreground">当前按 agent 写入或编辑的非空行统计。</div>
       <div className="text-muted-foreground">空行和仅包含空白字符的行不会计入。</div>
       <div className="text-muted-foreground">
+        标准 test 路径或 test 命名文件会单独上报，不计入采纳率。
+      </div>
+      <div className="text-muted-foreground">
         该指标表示原始生成量，包含后续被 agent 自己改写的中间稿。
       </div>
     </div>

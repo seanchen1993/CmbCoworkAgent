@@ -1,5 +1,5 @@
 /**
- * Durable code-adoption delivery tests.
+ * Durable code-adoption telemetry delivery tests.
  *
  * Run:
  *   npx tsx tests/adoption-outbox.spec.ts
@@ -54,11 +54,26 @@ function sleep(ms: number): Promise<void> {
 
 class AdoptionReporter implements IEventReporter {
   readonly adoptionCalls: CoworkEvent[] = []
+  readonly generationCalls: CoworkEvent[] = []
+  readonly testGenerationCalls: CoworkEvent[] = []
   failAdoption = false
+  failTestGeneration = false
 
   async report(event: CoworkEvent): Promise<EventReportResult> {
+    const snapshot = JSON.parse(JSON.stringify(event)) as CoworkEvent
+    if (event.eventName === "code_gen") {
+      this.generationCalls.push(snapshot)
+      return { ok: true, status: 200 }
+    }
+    if (event.eventName === "code_test_gen") {
+      this.testGenerationCalls.push(snapshot)
+      if (this.failTestGeneration) {
+        return { ok: false, retryable: true, error: "simulated test generation failure" }
+      }
+      return { ok: true, status: 200 }
+    }
     if (event.eventName !== "code_adopt") return { ok: true, status: 200 }
-    this.adoptionCalls.push(JSON.parse(JSON.stringify(event)) as CoworkEvent)
+    this.adoptionCalls.push(snapshot)
     if (this.failAdoption) {
       return { ok: false, retryable: true, error: "simulated network failure" }
     }
@@ -130,6 +145,15 @@ async function waitForPendingGen(filePath: string): Promise<string> {
   throw new Error(`timed out waiting for code_gen row: ${filePath}`)
 }
 
+async function waitForTestGenerationCall(reporter: AdoptionReporter): Promise<CoworkEvent> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const event = reporter.testGenerationCalls[0]
+    if (event) return event
+    await sleep(20)
+  }
+  throw new Error("timed out waiting for code_test_gen delivery")
+}
+
 async function generateAndCommit(
   repo: string,
   fileName: string
@@ -163,6 +187,96 @@ function commitJobId(repo: string, commitSha: string): string {
   return createHash("sha256")
     .update(`${resolve(repo).replace(/\\/g, "/")}\0${commitSha.toLowerCase()}`)
     .digest("hex")
+}
+
+async function testTestGenerationUsesSeparateDurableOutbox(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    const reporter = new AdoptionReporter()
+    reporter.failTestGeneration = true
+    setEventReporter(reporter)
+    await initializeAdoptionTracker()
+
+    await withTempRepo("test-generation-outbox", async (repo) => {
+      const testDir = join(repo, "tests")
+      const filePath = join(testDir, "generated.ts")
+      const generatedContent = "export const first = 1\n\nexport const second = 2\n"
+      await mkdir(testDir, { recursive: true })
+      await writeFile(filePath, generatedContent)
+
+      recordGen({
+        threadId: "test-generation-outbox",
+        workspacePath: repo,
+        filePath,
+        tool: "write_file",
+        generatedContent,
+        deletedLineCount: 0
+      })
+
+      const firstEvent = await waitForTestGenerationCall(reporter)
+      assert(firstEvent.eventName === "code_test_gen", "test code should use its own event name")
+      assert(
+        firstEvent.properties?.lineCount === 2,
+        "test generation should count net non-blank lines"
+      )
+      assert(
+        firstEvent.properties?.testMatchRule === "directory",
+        "test event should expose its classification rule"
+      )
+      assert(
+        firstEvent.properties?.relativeHint === "generated.ts",
+        "test event should keep the same leaf-only path privacy boundary"
+      )
+      assert(reporter.generationCalls.length === 0, "test code must not emit a standard code_gen")
+      assert(reporter.adoptionCalls.length === 0, "test code must not emit a standard code_adopt")
+      assert(
+        findPendingGensForFile(filePath, 0).length === 0,
+        "test code must not enter commit-time gen_events"
+      )
+      assert(
+        getOutboxEvent(firstEvent.eventId)?.status === "retry",
+        "failed code_test_gen delivery should remain durable in the outbox"
+      )
+
+      markOutboxFailed(firstEvent.eventId, "retry test generation after restart", 0, false)
+      assert(flushAdoptionIndex(), "test generation retry state should flush before restart")
+      shutdownAdoptionTracker()
+
+      reporter.failTestGeneration = false
+      await initializeAdoptionTracker()
+      await flushAdoptionEventOutbox()
+
+      assert(reporter.testGenerationCalls.length === 2, "code_test_gen should retry after restart")
+      const retriedEvent = reporter.testGenerationCalls[1]
+      assert(
+        retriedEvent.eventId === firstEvent.eventId,
+        "code_test_gen retry must reuse the server idempotency key"
+      )
+      assert(
+        JSON.stringify(retriedEvent) === JSON.stringify(firstEvent),
+        "code_test_gen retry must reuse the immutable payload"
+      )
+      assert(
+        getOutboxEvent(firstEvent.eventId)?.status === "delivered",
+        "successful code_test_gen retry should complete the outbox row"
+      )
+
+      await git(repo, ["add", "tests/generated.ts"])
+      const commitTimeMs = Date.now()
+      const snapshots = await captureStagedSnapshotsForCommit(repo)
+      await git(repo, ["commit", "-q", "-m", "add generated test"])
+      const commitSha = await git(repo, ["rev-parse", "HEAD"])
+      assert(
+        await measureForCommit(snapshots, commitSha, commitTimeMs, repo),
+        "test-only commit job should still complete"
+      )
+      await flushAdoptionEventOutbox()
+      assert(
+        reporter.adoptionCalls.length === 0,
+        "committing separately reported test code must not emit code_adopt"
+      )
+    })
+  })
+  console.log("PASS test generation is isolated and retried through the durable outbox")
 }
 
 async function testStableOutboxRetryAcrossRestart(): Promise<void> {
@@ -353,6 +467,7 @@ async function testOutboxAttemptAndRetentionLimits(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  await testTestGenerationUsesSeparateDurableOutbox()
   await testStableOutboxRetryAcrossRestart()
   await testCommitJobRecoveryFromRepoAndSha()
   await testOutboxAttemptAndRetentionLimits()
