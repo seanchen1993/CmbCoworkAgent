@@ -1,6 +1,9 @@
 import { getUserInfo } from "../storage"
 import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchItem,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailItem,
   HarnessEnterpriseProjectDetailResult,
@@ -14,6 +17,7 @@ import type {
 import { getHarnessLeanTokenConfig } from "./service"
 
 const ENTERPRISE_PROJECT_SEARCH_PAGE_SIZE = 15
+const DEPLOY_UNIT_SEARCH_PAGE_SIZE = 20
 const ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS = 10000
 const ENTERPRISE_PROJECT_SUCCESS_CODE = "SUC0000"
 const LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS = 30000
@@ -31,6 +35,17 @@ interface EnterpriseProjectQueryResponse {
         data?: unknown[]
       }
     | unknown[]
+}
+
+interface DeployUnitQueryResponse {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: {
+    records?: unknown[]
+    total?: number
+    pages?: number
+    current?: number
+  }
 }
 
 interface LeanstarReviewSummaryResponse {
@@ -79,12 +94,23 @@ function getEnterpriseProjectListUrl(): string {
   return (import.meta.env.VITE_ENTERPRISE_PROJECT_LIST as string | undefined)?.trim() || ""
 }
 
+function getDeployUnitQueryUrl(): string {
+  return (import.meta.env.VITE_DEPLOY_UNIT_QUERY_URL as string | undefined)?.trim() || ""
+}
+
 function logHarnessHttpRequest(configKey: string, method: string, url: string, detail?: string): void {
   console.log(`[HarnessBoard] [${configKey}] Running${detail ? ` (${detail})` : ""}: ${method} ${url}`)
 }
 
 function isEnterpriseProjectQueryMockEnabled(): boolean {
   const value = (import.meta.env.VITE_ENTERPRISE_PROJECT_QUERY_MOCK as string | undefined)
+    ?.trim()
+    .toLowerCase()
+  return value === "1" || value === "true" || value === "yes" || value === "on"
+}
+
+function isDeployUnitQueryMockEnabled(): boolean {
+  const value = (import.meta.env.VITE_DEPLOY_UNIT_QUERY_MOCK as string | undefined)
     ?.trim()
     .toLowerCase()
   return value === "1" || value === "true" || value === "yes" || value === "on"
@@ -136,6 +162,19 @@ function normalizeEnterpriseProjectDetailItem(value: unknown): HarnessEnterprise
     status: normalizeText(value.status),
     phaseStatus: normalizeText(value.phaseStatus),
     baselineEndDate: normalizeText(value.baselineEndDate)
+  }
+}
+
+function normalizeDeployUnitSearchItem(value: unknown): HarnessDeployUnitSearchItem | null {
+  if (!isObject(value)) return null
+
+  const deployUnit = normalizeText(value.deployUnit)
+  if (!deployUnit) return null
+
+  return {
+    deployUnit,
+    ownerId: normalizeText(value.ownerId),
+    ownerName: normalizeText(value.ownerName)
   }
 }
 
@@ -224,6 +263,28 @@ function normalizeDetailResponse(
   return { projects }
 }
 
+function normalizeDeployUnitSearchResponse(
+  response: DeployUnitQueryResponse
+): HarnessDeployUnitSearchResult {
+  if (response.returnCode !== ENTERPRISE_PROJECT_SUCCESS_CODE) {
+    throw new Error(response.errorMsg || "发布单元查询失败")
+  }
+
+  const records = Array.isArray(response.body?.records) ? response.body.records : []
+  const deployUnits = records
+    .map((item) => normalizeDeployUnitSearchItem(item))
+    .filter((item): item is HarnessDeployUnitSearchItem => item !== null)
+  const total = numberValue(response.body?.total)
+  const current = numberValue(response.body?.current) || 1
+  const pages = numberValue(response.body?.pages)
+
+  return {
+    deployUnits,
+    total,
+    hasMore: total > deployUnits.length || pages > current
+  }
+}
+
 function makeMockEnterpriseProjectSearchResult(): HarnessEnterpriseProjectSearchResult {
   return {
     total: 3,
@@ -282,6 +343,30 @@ function makeMockEnterpriseProjectDetailResult(
   const requestedCodes = new Set(prjCodeList)
   return {
     projects: details.filter((project) => requestedCodes.has(project.projectCode))
+  }
+}
+
+function makeMockDeployUnitSearchResult(): HarnessDeployUnitSearchResult {
+  return {
+    total: 3,
+    hasMore: false,
+    deployUnits: [
+      {
+        deployUnit: "LF39.18_WealthBoxApi",
+        ownerId: "80280631",
+        ownerName: "陈强"
+      },
+      {
+        deployUnit: "LF39.18_WealthBoxWeb",
+        ownerId: "80280631",
+        ownerName: "陈强"
+      },
+      {
+        deployUnit: "LF39.18_WealthBoxJob",
+        ownerId: "80280632",
+        ownerName: "李敏"
+      }
+    ]
   }
 }
 
@@ -384,6 +469,65 @@ export async function searchEnterpriseProjects(
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("项目查询超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+export async function searchDeployUnits(
+  input: HarnessDeployUnitSearchInput
+): Promise<HarnessDeployUnitSearchResult> {
+  const deployUnit = normalizeText(input.keyword)
+  if (!deployUnit) {
+    return { deployUnits: [], total: 0, hasMore: false }
+  }
+
+  if (isDeployUnitQueryMockEnabled()) {
+    return makeMockDeployUnitSearchResult()
+  }
+
+  const userInfo = getUserInfo()
+  const roomName = deriveUpperOrgLv1FromPath(userInfo?.pathName)
+  const queryUrl = getDeployUnitQueryUrl()
+  if (!queryUrl) {
+    throw new Error("未配置发布单元查询地址")
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+
+  try {
+    logHarnessHttpRequest(
+      "deploy_unit_search",
+      "POST",
+      queryUrl,
+      `deployUnit=${deployUnit}, pageNumber=1, pageSize=${DEPLOY_UNIT_SEARCH_PAGE_SIZE}`
+    )
+    const response = await fetch(queryUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        deployUnit,
+        ...(roomName ? { orgId: roomName } : {}),
+        pageNumber: 1,
+        pageSize: DEPLOY_UNIT_SEARCH_PAGE_SIZE
+      }),
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      throw new Error("发布单元查询失败")
+    }
+
+    const json = (await response.json()) as DeployUnitQueryResponse
+    return normalizeDeployUnitSearchResponse(json)
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("发布单元查询超时")
     }
     throw error
   } finally {

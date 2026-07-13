@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_LIST?: string
+  readonly VITE_DEPLOY_UNIT_QUERY_URL?: string
+  readonly VITE_DEPLOY_UNIT_QUERY_MOCK?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_MOCK?: string
   readonly VITE_ES_INDEX_SKILL_EVAL?: string
   readonly VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS?: string

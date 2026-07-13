@@ -60,6 +60,8 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
@@ -3208,6 +3210,13 @@ const api = {
         "harnessBoard:searchEnterpriseProjects",
         input
       ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    searchDeployUnits: (
+      input: HarnessDeployUnitSearchInput
+    ): Promise<HarnessDeployUnitSearchResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:searchDeployUnits",
+        input
+      ) as Promise<HarnessDeployUnitSearchResult>,
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ): Promise<HarnessEnterpriseProjectDetailResult> =>

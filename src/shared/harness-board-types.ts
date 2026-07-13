@@ -218,6 +218,22 @@ export interface HarnessEnterpriseProjectSearchResult {
   hasMore: boolean
 }
 
+export interface HarnessDeployUnitSearchInput {
+  keyword: string
+}
+
+export interface HarnessDeployUnitSearchItem {
+  deployUnit: string
+  ownerId: string
+  ownerName: string
+}
+
+export interface HarnessDeployUnitSearchResult {
+  deployUnits: HarnessDeployUnitSearchItem[]
+  total: number
+  hasMore: boolean
+}
+
 export interface HarnessEnterpriseProjectDetailInput {
   prjCodeList: string[]
 }

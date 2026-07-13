@@ -25,12 +25,15 @@ import {
 import {
   getEnterpriseProjectDetails,
   getProjectReviews,
+  searchDeployUnits,
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
@@ -122,6 +125,16 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       input: HarnessEnterpriseProjectSearchInput
     ): Promise<HarnessEnterpriseProjectSearchResult> => {
       return searchEnterpriseProjects(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:searchDeployUnits",
+    async (
+      _event,
+      input: HarnessDeployUnitSearchInput
+    ): Promise<HarnessDeployUnitSearchResult> => {
+      return searchDeployUnits(input)
     }
   )
 

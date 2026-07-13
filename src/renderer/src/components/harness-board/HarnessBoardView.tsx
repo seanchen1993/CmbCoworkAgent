@@ -100,6 +100,7 @@ import type {
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessDeployUnitMapping,
+  HarnessDeployUnitSearchItem,
   HarnessLeanTokenConfig,
   HarnessSessionBinding,
   HarnessAdapterRegistryItem,
@@ -173,6 +174,7 @@ const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的�
 const PROJECT_STATUS_POLL_INTERVAL_MS = 60 * 1000
 const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
 const ENTERPRISE_PROJECT_SEARCH_MIN_CHARS = 2
+const DEPLOY_UNIT_SEARCH_MIN_CHARS = 3
 const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
 const ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS = 160
 type ProjectSidebarScrollIntent = "preserve" | "top" | null
@@ -1890,6 +1892,162 @@ function EnterpriseProjectSearchInput({
   )
 }
 
+function DeployUnitSearchInput({
+  value,
+  onValueChange,
+  onSelect
+}: {
+  value: string
+  onValueChange: (value: string) => void
+  onSelect: (deployUnit: HarnessDeployUnitSearchItem) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [deployUnits, setDeployUnits] = useState<HarnessDeployUnitSearchItem[]>([])
+  const [hasMore, setHasMore] = useState(false)
+  const [searchKeyword, setSearchKeyword] = useState("")
+  const requestIdRef = useRef(0)
+  const keyword = searchKeyword.trim()
+  const shouldShowPopover =
+    open &&
+      (loading ||
+      deployUnits.length > 0 ||
+      (keyword.length > 0 && keyword.length < DEPLOY_UNIT_SEARCH_MIN_CHARS))
+
+  const clearSearchState = useCallback(() => {
+    setSearchKeyword("")
+    setLoading(false)
+    setDeployUnits([])
+    setHasMore(false)
+    setOpen(false)
+  }, [])
+
+  useEffect(() => {
+    if (!searchKeyword || value.trim() === searchKeyword.trim()) return
+    clearSearchState()
+  }, [clearSearchState, searchKeyword, value])
+
+  useEffect(() => {
+    const nextRequestId = requestIdRef.current + 1
+    requestIdRef.current = nextRequestId
+
+    if (!keyword || keyword.length < DEPLOY_UNIT_SEARCH_MIN_CHARS) {
+      setLoading(false)
+      setDeployUnits([])
+      setHasMore(false)
+      return
+    }
+
+    let canceled = false
+    setLoading(true)
+    const timer = window.setTimeout(() => {
+      window.api.harnessBoard
+        .searchDeployUnits({ keyword })
+        .then((result) => {
+          if (canceled || requestIdRef.current !== nextRequestId) return
+          setDeployUnits(result.deployUnits)
+          setHasMore(result.hasMore)
+          setOpen(result.deployUnits.length > 0)
+        })
+        .catch((error) => {
+          if (canceled || requestIdRef.current !== nextRequestId) return
+          setDeployUnits([])
+          setHasMore(false)
+          setOpen(false)
+          toast.error(cleanIpcError(error))
+        })
+        .finally(() => {
+          if (!canceled && requestIdRef.current === nextRequestId) setLoading(false)
+        })
+    }, ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS)
+
+    return () => {
+      canceled = true
+      window.clearTimeout(timer)
+    }
+  }, [keyword])
+
+  const handleSelect = (deployUnit: HarnessDeployUnitSearchItem): void => {
+    clearSearchState()
+    onSelect(deployUnit)
+  }
+
+  return (
+    <Popover
+      open={shouldShowPopover}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) {
+          setOpen(true)
+          return
+        }
+        clearSearchState()
+      }}
+    >
+      <PopoverAnchor asChild>
+        <Input
+          value={value}
+          onChange={(event) => {
+            const nextValue = event.target.value
+            setSearchKeyword(nextValue)
+            onValueChange(nextValue)
+            setOpen(true)
+          }}
+          onFocus={() => {
+            if (searchKeyword.trim()) setOpen(true)
+          }}
+          placeholder="输入发布单元 ID 搜索"
+          className={harnessProjectCreateInputClassName}
+          aria-autocomplete="list"
+        />
+      </PopoverAnchor>
+      <PopoverContent
+        align="start"
+        sideOffset={4}
+        className={harnessProjectPopoverContentClassName}
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
+        <div className="max-h-72 overflow-hidden py-1 text-sm">
+          {keyword.length < DEPLOY_UNIT_SEARCH_MIN_CHARS ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              继续输入发布单元 ID 以搜索
+            </div>
+          ) : loading ? (
+            <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              搜索发布单元...
+            </div>
+          ) : deployUnits.length > 0 ? (
+            <>
+              <div className="max-h-60 overscroll-y-contain overflow-y-auto py-1">
+                {deployUnits.map((deployUnit) => (
+                  <button
+                    key={deployUnit.deployUnit}
+                    type="button"
+                    className="group grid w-full cursor-pointer gap-1.5 px-2 py-2 text-left outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                    onClick={() => handleSelect(deployUnit)}
+                  >
+                    <span className="truncate text-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
+                      {deployUnit.deployUnit}
+                    </span>
+                    <span className="truncate text-xs leading-5 text-muted-foreground group-hover:text-accent-foreground group-focus-visible:text-accent-foreground">
+                      负责人：{deployUnit.ownerName || "-"}/{deployUnit.ownerId || "-"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              {hasMore && (
+                <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+                  仅显示前 20 条，请输入更精确的关键词
+                </div>
+              )}
+            </>
+          ) : null}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
 function ProjectFormDialog({
   open,
   creating,
@@ -3165,13 +3323,14 @@ function ProjectModeSettingsPanel({
                   key={index}
                   className="grid grid-cols-[minmax(150px,0.8fr)_minmax(180px,1fr)_minmax(220px,1.2fr)_132px_40px] items-center gap-2"
                 >
-                  <Input
+                  <DeployUnitSearchInput
                     value={mapping.deployUnitId}
-                    onChange={(event) =>
-                      onChange(index, { ...mapping, deployUnitId: event.target.value })
+                    onValueChange={(deployUnitId) =>
+                      onChange(index, { ...mapping, deployUnitId })
                     }
-                    placeholder="请输入发布单元 ID"
-                    className={harnessProjectCreateInputClassName}
+                    onSelect={(deployUnit) =>
+                      onChange(index, { ...mapping, deployUnitId: deployUnit.deployUnit })
+                    }
                   />
                   <Input
                     value={mapping.description || ""}
