@@ -11,6 +11,7 @@ import {
   Circle,
   CircleDashed,
   CircleHelp,
+  CircleX,
   FileText,
   FolderOpen,
   GitBranch,
@@ -4548,10 +4549,62 @@ function ProjectReviewSummary({
       : false
   const result = reviewState.kind === "loaded" && isCurrentProject ? reviewState.result : null
   const reviews = result?.reviews ?? []
+  const [reviewsExpanded, setReviewsExpanded] = useState(false)
+
+  useEffect(() => {
+    setReviewsExpanded(false)
+  }, [normalizedProjectCode])
+
+  const hasReviewResult = Boolean(result?.tokenConfigured)
 
   return (
     <div className="mt-4 space-y-2 text-xs">
-      <div className="font-medium text-muted-foreground">项目评审情况</div>
+      <div className="flex items-center justify-between gap-2 font-medium text-muted-foreground">
+        <span>项目评审情况</span>
+        {hasReviewResult && (
+          <span className="flex shrink-0 items-center gap-1">
+            {reviews.length > 0 ? (
+              <>
+                <TooltipProvider delayDuration={150}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span tabIndex={0} className="inline-flex">
+                        <CheckCircle2 className="size-3.5 text-status-nominal" aria-label="存在评审记录" />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="z-[70] max-w-72">
+                      已有项目评审流程，请确认详设文档已存在。
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <button
+                  type="button"
+                  className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  title={reviewsExpanded ? "收起评审结果" : "展开评审结果"}
+                  aria-label={reviewsExpanded ? "收起评审结果" : "展开评审结果"}
+                  aria-expanded={reviewsExpanded}
+                  onClick={() => setReviewsExpanded((expanded) => !expanded)}
+                >
+                  <ChevronDown className={cn("size-3 transition-transform", reviewsExpanded && "rotate-180")} />
+                </button>
+              </>
+            ) : (
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span tabIndex={0} className="inline-flex">
+                      <CircleX className="size-3.5 text-destructive" aria-label="无评审记录" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="z-[70] max-w-72">
+                    在进入 ST 流程之前发起评审并上传文档以避免 NC
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+          </span>
+        )}
+      </div>
       {!normalizedProjectCode ? (
         <div className="leading-5 text-muted-foreground">-</div>
       ) : !isCurrentProject || reviewState.kind === "loading" ? (
@@ -4575,36 +4628,38 @@ function ProjectReviewSummary({
           className="rounded-sm text-left font-medium text-primary/85 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           onClick={openReviewPage}
         >
-          项目无评审记录，发起评审以避免 NC
+          发起项目评审流程
         </button>
       ) : (
-        <TooltipProvider delayDuration={120}>
-          <ul className="space-y-1">
-            {reviews.slice(0, 3).map((review, index) => (
-              <li key={`${review.title}:${index}`} className="min-w-0">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div
-                      tabIndex={0}
-                      className="group flex min-w-0 cursor-default items-center rounded-md border border-transparent bg-muted/20 py-1.5 pr-2 transition-colors hover:border-border hover:bg-muted/45 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        reviewsExpanded && (
+          <TooltipProvider delayDuration={120}>
+            <ul className="space-y-1">
+              {reviews.map((review, index) => (
+                <li key={`${review.title}:${index}`} className="min-w-0">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div
+                        tabIndex={0}
+                        className="group flex min-w-0 cursor-default items-center rounded-md border border-transparent bg-muted/20 py-1.5 pr-2 transition-colors hover:border-border hover:bg-muted/45 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      >
+                        <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+                          {review.title || "-"}
+                        </span>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      side="right"
+                      align="start"
+                      className="z-[70] w-80 max-w-[min(20rem,calc(100vw-2rem))] p-0"
                     >
-                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-                        {review.title || "-"}
-                      </span>
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent
-                    side="right"
-                    align="start"
-                    className="z-[70] w-80 max-w-[min(20rem,calc(100vw-2rem))] p-0"
-                  >
-                    <ProjectReviewTooltipContent review={review} />
-                  </TooltipContent>
-                </Tooltip>
-              </li>
-            ))}
-          </ul>
-        </TooltipProvider>
+                      <ProjectReviewTooltipContent review={review} />
+                    </TooltipContent>
+                  </Tooltip>
+                </li>
+              ))}
+            </ul>
+          </TooltipProvider>
+        )
       )}
     </div>
   )

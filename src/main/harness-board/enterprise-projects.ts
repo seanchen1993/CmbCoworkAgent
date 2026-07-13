@@ -401,14 +401,6 @@ function makeMockProjectReviewResult(projectCode: string): HarnessProjectReviewR
         end_time: "2026-07-08 17:00:00",
         creator: "wanglei (王磊)",
         members: "张明, 李娜, 陈晨"
-      },
-      {
-        title: `${projectCode} 安全合规评审`,
-        type: "安全评审 - 合规检查",
-        start_time: "2026-07-09 10:00:00",
-        end_time: "2026-07-09 11:00:00",
-        creator: "chenchen (陈晨)",
-        members: "张明, 李娜"
       }
     ]
   }
