@@ -334,17 +334,73 @@ function largeArgumentPlaceholder(
   return `[large ${toolName}.${field} omitted after successful execution${path}; bytes=${length}; sha256=${sha256}; preview=${JSON.stringify(preview)}]`
 }
 
+function toolMessageIsError(message: ToolMessage): boolean {
+  const record = message as ToolMessage & { is_error?: unknown }
+  return (
+    message.status === "error" ||
+    record.is_error === true ||
+    message.additional_kwargs?.is_error === true
+  )
+}
+
+function fileToolMessageIsSuccessful(message: ToolMessage, toolName: string): boolean {
+  if (toolMessageIsError(message) || typeof message.content !== "string") return false
+  const content = message.content.trim()
+
+  // deepagents returns backend errors as plain strings. ToolNode then assigns
+  // status="success", so only its explicit success receipts prove mutation.
+  if (toolName === "write_file") return /^Successfully wrote to '.+'$/s.test(content)
+  if (toolName === "edit_file") {
+    return /^Successfully replaced \d+ occurrence\(s\) in '.+'$/s.test(content)
+  }
+  return false
+}
+
+function successfulToolCallIdsAfter(
+  messages: BaseMessage[],
+  assistantIndex: number,
+  calls: ToolCall[]
+): Set<string> {
+  const ids = new Set<string>()
+  const fileToolNamesById = new Map<string, string>()
+  for (const call of calls) {
+    if (isNonEmptyString(call.id) && LARGE_FILE_TOOL_NAMES.has(call.name)) {
+      fileToolNamesById.set(call.id, call.name)
+    }
+  }
+
+  for (let index = assistantIndex + 1; index < messages.length; index++) {
+    const message = messages[index]
+    if (!ToolMessage.isInstance(message)) break
+    const toolName = fileToolNamesById.get(message.tool_call_id)
+    if (toolName && fileToolMessageIsSuccessful(message, toolName)) {
+      ids.add(message.tool_call_id)
+    }
+  }
+  return ids
+}
+
 /**
  * Clone only completed large file-edit arguments needed to keep future model
  * requests small. The persisted transcript retains the exact original values.
  */
-function elideLargeFileToolArgsForRequest(message: AIMessage): AIMessage {
+function elideLargeFileToolArgsForRequest(
+  message: AIMessage,
+  successfulToolCallIds: Set<string>
+): AIMessage {
   const calls = message.tool_calls
   if (!Array.isArray(calls) || calls.length === 0) return message
 
   let changed = false
   const nextCalls = calls.map((call) => {
-    if (!LARGE_FILE_TOOL_NAMES.has(call.name) || !isPlainRecord(call.args)) return call
+    if (
+      !isNonEmptyString(call.id) ||
+      !successfulToolCallIds.has(call.id) ||
+      !LARGE_FILE_TOOL_NAMES.has(call.name) ||
+      !isPlainRecord(call.args)
+    ) {
+      return call
+    }
 
     const args = call.args as Record<string, unknown>
     const fields =
@@ -525,14 +581,18 @@ export function recoverEmittedMalformedToolCalls(message: AIMessage): boolean {
 export function sanitizeModelRequestMessages(messages: BaseMessage[]): BaseMessage[] {
   let changed = false
   const out: BaseMessage[] = []
-  for (const message of messages) {
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
     if (!AIMessage.isInstance(message)) {
       out.push(message)
       continue
     }
     // Blank internal markers and large completed file arguments from model history.
     const deMarked = redactRecoveryMarkersForRequest(message)
-    const sanitized = elideLargeFileToolArgsForRequest(deMarked)
+    const sanitized = elideLargeFileToolArgsForRequest(
+      deMarked,
+      successfulToolCallIdsAfter(messages, index, deMarked.tool_calls ?? [])
+    )
     if (sanitized !== message) changed = true
     const normalized = Array.isArray(sanitized.tool_calls) ? sanitized.tool_calls : []
     const rawToolCalls = rawAdditionalKwargsToolCalls(sanitized)

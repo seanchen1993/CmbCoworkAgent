@@ -79,13 +79,16 @@ const NETWORK_MESSAGE_TOKENS = [
 ]
 
 const STREAM_DISCONNECT_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
   "UND_ERR_SOCKET",
   "UND_ERR_BODY_TIMEOUT",
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_HEADERS_TIMEOUT"
 ])
 const STREAM_DISCONNECT_MESSAGE_RE =
-  /\bterminated\b|\bstream\b.*\b(closed|disconnected|terminated|reset)\b|\b(premature close|body stream|other side closed)\b/i
+  /\bterminated\b|\bstream\b.*\b(closed|disconnected|terminated|reset)\b|\b(premature close|body stream|other side closed|socket hang up|connection reset)\b/i
 
 type ErrorLike = {
   name?: unknown
@@ -120,23 +123,33 @@ function isAbortLikeError(error: unknown): boolean {
  * bare string such as "terminated" must not become a network error.
  */
 export function isStreamDisconnectLikeError(error: unknown): boolean {
-  if (isAbortLikeError(error)) return false
-
   const visited = new Set<object>()
+  const chain: ErrorLike[] = []
   let current: unknown = error
   while (true) {
     const detail = asErrorLike(current)
-    if (!detail || visited.has(detail as object)) return false
+    if (!detail || visited.has(detail as object)) break
     visited.add(detail as object)
+    chain.push(detail)
+    current = detail.cause
+  }
 
+  // A provider may wrap an AbortError in TypeError("terminated"). Cancellation
+  // wins over every disconnect-looking wrapper in the chain.
+  if (chain.some((detail) => isAbortLikeError(detail))) return false
+
+  for (const detail of chain) {
     const code = typeof detail.code === "string" ? detail.code : ""
     if (STREAM_DISCONNECT_CODES.has(code)) return true
 
+    // classifyApiError also receives plain tool-result objects. Only real Error
+    // instances may opt into message-based stream matching; plain objects still
+    // need an explicit network code.
     const message = typeof detail.message === "string" ? detail.message : ""
-    if (STREAM_DISCONNECT_MESSAGE_RE.test(message)) return true
-
-    current = detail.cause
+    if (detail instanceof Error && STREAM_DISCONNECT_MESSAGE_RE.test(message)) return true
   }
+
+  return false
 }
 
 /**

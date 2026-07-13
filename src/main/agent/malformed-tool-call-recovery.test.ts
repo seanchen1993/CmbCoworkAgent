@@ -451,7 +451,7 @@ describe("sanitizeModelRequestMessages (input sanitize)", () => {
       ]
     })
     const result = new ToolMessage({
-      content: "Wrote /tmp/report.md",
+      content: "Successfully wrote to '/tmp/report.md'",
       tool_call_id: "call_large_write",
       name: "write_file"
     })
@@ -485,7 +485,12 @@ describe("sanitizeModelRequestMessages (input sanitize)", () => {
         }
       ]
     })
-    const messages = [assistant, new HumanMessage("continue")]
+    const result = new ToolMessage({
+      content: "Successfully replaced 1 occurrence(s) in '/tmp/report.md'",
+      tool_call_id: "call_large_edit",
+      name: "edit_file"
+    })
+    const messages = [assistant, result, new HumanMessage("continue")]
 
     const out = sanitizeModelRequestMessages(messages)
 
@@ -495,6 +500,99 @@ describe("sanitizeModelRequestMessages (input sanitize)", () => {
     expect(String(sentArgs.oldString)).toContain("file_path=/tmp/report.md")
     expect((assistant.tool_calls![0].args as Record<string, unknown>).oldString).toBe(oldString)
     expect((assistant.tool_calls![0].args as Record<string, unknown>).newString).toBe(newString)
+  })
+
+  it("keeps large arguments when the matching tool execution failed", () => {
+    const content = "x".repeat(32 * 1024 + 1)
+    const assistant = new AIMessage({
+      content: "",
+      tool_calls: [
+        {
+          id: "call_failed_write",
+          name: "write_file",
+          args: { file_path: "/tmp/report.md", content },
+          type: "tool_call"
+        }
+      ]
+    })
+    const result = new ToolMessage({
+      content: "permission denied",
+      tool_call_id: "call_failed_write",
+      name: "write_file",
+      status: "error"
+    })
+    const messages = [assistant, result, new HumanMessage("continue")]
+
+    expect(sanitizeModelRequestMessages(messages)).toBe(messages)
+    expect((assistant.tool_calls![0].args as Record<string, unknown>).content).toBe(content)
+  })
+
+  it("keeps large arguments when ToolNode labels a returned file error as success", () => {
+    const content = "x".repeat(32 * 1024 + 1)
+    const assistant = new AIMessage({
+      content: "",
+      tool_calls: [
+        {
+          id: "call_string_error",
+          name: "write_file",
+          args: { file_path: "/tmp/report.md", content },
+          type: "tool_call"
+        }
+      ]
+    })
+    const result = new ToolMessage({
+      content: "Access denied",
+      tool_call_id: "call_string_error",
+      name: "write_file",
+      status: "success"
+    })
+    const messages = [assistant, result, new HumanMessage("continue")]
+
+    expect(sanitizeModelRequestMessages(messages)).toBe(messages)
+    expect((assistant.tool_calls![0].args as Record<string, unknown>).content).toBe(content)
+  })
+
+  it("keeps large arguments when a status-less result contains structured error output", () => {
+    const content = "x".repeat(32 * 1024 + 1)
+    const assistant = new AIMessage({
+      content: "",
+      tool_calls: [
+        {
+          id: "call_json_error",
+          name: "write_file",
+          args: { file_path: "/tmp/report.md", content },
+          type: "tool_call"
+        }
+      ]
+    })
+    const result = new ToolMessage({
+      content: JSON.stringify({ error: "permission denied" }),
+      tool_call_id: "call_json_error",
+      name: "write_file"
+    })
+    const messages = [assistant, result, new HumanMessage("continue")]
+
+    expect(sanitizeModelRequestMessages(messages)).toBe(messages)
+    expect((assistant.tool_calls![0].args as Record<string, unknown>).content).toBe(content)
+  })
+
+  it("keeps large arguments when the tool call has no paired result yet", () => {
+    const content = "x".repeat(32 * 1024 + 1)
+    const assistant = new AIMessage({
+      content: "",
+      tool_calls: [
+        {
+          id: "call_pending_write",
+          name: "write_file",
+          args: { file_path: "/tmp/report.md", content },
+          type: "tool_call"
+        }
+      ]
+    })
+    const messages = [assistant, new HumanMessage("continue")]
+
+    expect(sanitizeModelRequestMessages(messages)).toBe(messages)
+    expect((assistant.tool_calls![0].args as Record<string, unknown>).content).toBe(content)
   })
 
   it("returns the same array reference when nothing is poisoned", () => {
