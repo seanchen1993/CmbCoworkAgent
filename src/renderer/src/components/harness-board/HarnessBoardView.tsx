@@ -4496,7 +4496,10 @@ const PROJECT_REVIEW_HEADERS: Array<[keyof HarnessProjectReviewItem, string]> = 
 ]
 
 function buildLeanstarProjectReviewUrl(projectCode: string): string {
-  return `https://leanstar-devops.paas.cmbchina.cn/team/426/projects/${encodeURIComponent(projectCode)}/review`
+  return (import.meta.env.VITE_LEANSTAR_PROJECT_REVIEW_URL_TEMPLATE?.trim() || "").replace(
+    "{projectCode}",
+    encodeURIComponent(projectCode)
+  )
 }
 
 function ProjectReviewTooltipContent({
@@ -6494,7 +6497,7 @@ export function HarnessBoardView({
   const handleOpenLeanToken = useCallback((): void => {
     void window.electron
       .openExternal(
-        "https://leanstar-devops.paas.cmbchina.cn/outside?microAppCode=personal-center&subRoute=personal-token"
+        import.meta.env.VITE_LEANSTAR_PERSONAL_TOKEN_URL?.trim() || ""
       )
       .catch((error) => {
         setLeanTokenError(cleanIpcError(error))

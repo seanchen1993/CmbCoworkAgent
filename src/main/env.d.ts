@@ -10,6 +10,9 @@ interface ImportMetaEnv {
   readonly VITE_ENTERPRISE_PROJECT_LIST?: string
   readonly VITE_DEPLOY_UNIT_QUERY_URL?: string
   readonly VITE_DEPLOY_UNIT_QUERY_MOCK?: string
+  readonly VITE_LEANSTAR_REVIEW_GATEWAY_URL?: string
+  readonly VITE_LEANSTAR_PROJECT_REVIEW_URL_TEMPLATE?: string
+  readonly VITE_LEANSTAR_PERSONAL_TOKEN_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_MOCK?: string
   readonly VITE_ES_INDEX_SKILL_EVAL?: string
   readonly VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS?: string

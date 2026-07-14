@@ -18,10 +18,10 @@ import { getHarnessLeanTokenConfig } from "./service"
 
 const ENTERPRISE_PROJECT_SEARCH_PAGE_SIZE = 15
 const DEPLOY_UNIT_SEARCH_PAGE_SIZE = 20
+const DEPLOY_UNIT_FALLBACK_ORG_ID = "991175"
 const ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS = 10000
 const ENTERPRISE_PROJECT_SUCCESS_CODE = "SUC0000"
 const LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS = 30000
-const LEANSTAR_REVIEW_GATEWAY_URL = "http://leanstar-ai-gateway.paasuat.cmbchina.cn"
 
 interface EnterpriseProjectQueryResponse {
   returnCode?: string
@@ -96,6 +96,31 @@ function getEnterpriseProjectListUrl(): string {
 
 function getDeployUnitQueryUrl(): string {
   return (import.meta.env.VITE_DEPLOY_UNIT_QUERY_URL as string | undefined)?.trim() || ""
+}
+
+function getLeanstarReviewGatewayUrl(): string {
+  return (import.meta.env.VITE_LEANSTAR_REVIEW_GATEWAY_URL as string | undefined)?.trim() || ""
+}
+
+function resolveDeployUnitOrgId(originPathId?: string): string {
+  try {
+    const parts =
+      typeof originPathId === "string"
+        ? originPathId
+            .split("/")
+            .map((part) => part.trim())
+            .filter(Boolean)
+        : []
+    const orgId =
+      parts.length === 6 || parts.length === 7
+        ? parts[4]
+        : parts.length <= 5
+          ? parts[parts.length - 1]
+          : ""
+    return normalizeText(orgId) || DEPLOY_UNIT_FALLBACK_ORG_ID
+  } catch {
+    return DEPLOY_UNIT_FALLBACK_ORG_ID
+  }
 }
 
 function logHarnessHttpRequest(configKey: string, method: string, url: string, detail?: string): void {
@@ -481,7 +506,7 @@ export async function searchDeployUnits(
   }
 
   const userInfo = getUserInfo()
-  const roomName = deriveUpperOrgLv1FromPath(userInfo?.pathName)
+  const orgId = resolveDeployUnitOrgId(userInfo?.originPathId)
   const queryUrl = getDeployUnitQueryUrl()
   if (!queryUrl) {
     throw new Error("未配置发布单元查询地址")
@@ -489,25 +514,27 @@ export async function searchDeployUnits(
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+  const requestPayload = {
+    deployUnit,
+    orgId,
+    pageNumber: 1,
+    pageSize: DEPLOY_UNIT_SEARCH_PAGE_SIZE
+  }
+  let requestSucceeded = false
 
   try {
     logHarnessHttpRequest(
       "deploy_unit_search",
       "POST",
       queryUrl,
-      `deployUnit=${deployUnit}, pageNumber=1, pageSize=${DEPLOY_UNIT_SEARCH_PAGE_SIZE}`
+      `input=${JSON.stringify(requestPayload)}`
     )
     const response = await fetch(queryUrl, {
       method: "POST",
       headers: {
         "content-type": "application/json"
       },
-      body: JSON.stringify({
-        deployUnit,
-        ...(roomName ? { orgId: roomName } : {}),
-        pageNumber: 1,
-        pageSize: DEPLOY_UNIT_SEARCH_PAGE_SIZE
-      }),
+      body: JSON.stringify(requestPayload),
       signal: controller.signal
     })
 
@@ -516,7 +543,9 @@ export async function searchDeployUnits(
     }
 
     const json = (await response.json()) as DeployUnitQueryResponse
-    return normalizeDeployUnitSearchResponse(json)
+    const result = normalizeDeployUnitSearchResponse(json)
+    requestSucceeded = true
+    return result
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("发布单元查询超时")
@@ -524,6 +553,7 @@ export async function searchDeployUnits(
     throw error
   } finally {
     clearTimeout(timeout)
+    console.log(`[HarnessBoard] [deploy_unit_search] ${requestSucceeded ? "success" : "failed"}`)
   }
 }
 
@@ -605,8 +635,9 @@ export async function getProjectReviews(
     "Ls-Access-Token": token,
     "Content-Type": "application/json"
   }
-  const summaryUrl = `${LEANSTAR_REVIEW_GATEWAY_URL}/api/review/summary/${encodeURIComponent(projectCode)}`
-  const reviewTypesUrl = `${LEANSTAR_REVIEW_GATEWAY_URL}/api/review/review-types`
+  const reviewGatewayUrl = getLeanstarReviewGatewayUrl()
+  const summaryUrl = `${reviewGatewayUrl}/api/review/summary/${encodeURIComponent(projectCode)}`
+  const reviewTypesUrl = `${reviewGatewayUrl}/api/review/review-types`
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS)
 
