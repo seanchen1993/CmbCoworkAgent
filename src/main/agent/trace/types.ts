@@ -214,7 +214,7 @@ export interface RoutingTrace {
   layers: RoutingLayerRecord[]
 }
 
-export type TraceTriggerSource = RoutingTrace["taskSource"]
+export type TraceTriggerSource = RoutingTrace["taskSource"] | "internal_notification"
 
 /** How the agent's run ended. */
 export type TraceOutcome =

@@ -1905,6 +1905,7 @@ function normalizeTraceTriggerSource(value: unknown): TraceTriggerSource {
     value === "scheduler_reminder" ||
     value === "scheduler_action" ||
     value === "memory_summarize" ||
+    value === "internal_notification" ||
     value === "optimizer"
     ? value
     : "chat"

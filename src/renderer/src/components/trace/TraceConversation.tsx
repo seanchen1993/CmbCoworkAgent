@@ -2,6 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Bot, ChevronDown, ChevronRight, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import {
+  classifyInternalNotificationTurn,
+  type InternalNotificationTurnKind
+} from "../../../../shared/internal-notification-turn"
 
 type TraceRole = "user" | "assistant" | "tool"
 
@@ -38,6 +42,7 @@ interface TraceConversationStep {
 export interface TraceConversationSource {
   traceId?: string
   userMessage?: string
+  triggerSource?: string
   startedAt?: string
   outcome?: string
   errorMessage?: string
@@ -85,6 +90,7 @@ export interface TraceConversationSummary {
   tools: TraceConversationToolInfo[]
   assistantText: string
   userText: string
+  internalNotificationKind: InternalNotificationTurnKind | null
 }
 
 interface TraceConversationToolInfo {
@@ -322,11 +328,24 @@ function isUsefulAssistantText(text: string): boolean {
 
 export function buildTraceConversation(trace: TraceConversationSource | null | undefined): TraceConversationSummary {
   if (!trace) {
-    return { messages: [], toolNames: [], tools: [], assistantText: "", userText: "" }
+    return {
+      messages: [],
+      toolNames: [],
+      tools: [],
+      assistantText: "",
+      userText: "",
+      internalNotificationKind: null
+    }
   }
 
   const rootInput = trace.nodes?.find((node) => node.type === "trace")?.input
-  const userText = cleanUserText(textFromUnknown(trace.userMessage) || textFromUnknown(rootInput))
+  const rawUserText = textFromUnknown(trace.userMessage) || textFromUnknown(rootInput)
+  const internalNotificationKind = classifyInternalNotificationTurn({
+    content: rawUserText,
+    executionMode: trace.executionMode,
+    triggerSource: trace.triggerSource
+  })
+  const userText = internalNotificationKind ? "" : cleanUserText(rawUserText)
 
   const assistantCandidates = [
     ...(trace.modelCalls ?? []).map((call) => textFromUnknown(call.outputMessage?.content)),
@@ -358,7 +377,14 @@ export function buildTraceConversation(trace: TraceConversationSource | null | u
     })
   }
 
-  return { messages, toolNames, tools, assistantText, userText }
+  return {
+    messages,
+    toolNames,
+    tools,
+    assistantText,
+    userText,
+    internalNotificationKind
+  }
 }
 
 export function buildThreadConversation(traces: TraceConversationSource[]): TraceConversationSummary {
@@ -407,7 +433,14 @@ export function buildThreadConversation(traces: TraceConversationSource[]): Trac
     [...messages].reverse().find((message) => message.role === "assistant")?.content ?? ""
   const userText = messages.find((message) => message.role === "user")?.content ?? ""
 
-  return { messages, toolNames, tools: allTools, assistantText, userText }
+  return {
+    messages,
+    toolNames,
+    tools: allTools,
+    assistantText,
+    userText,
+    internalNotificationKind: null
+  }
 }
 
 function roleIcon(role: TraceRole): React.JSX.Element {

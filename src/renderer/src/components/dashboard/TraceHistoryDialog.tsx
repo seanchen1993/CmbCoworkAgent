@@ -460,6 +460,12 @@ function inferredToolCount(trace: DashboardTraceDetail): number {
   return metadataToolCount || trace.totalToolCalls
 }
 
+function internalNotificationPreview(kind: "coordinator" | "workflow" | "internal"): string {
+  if (kind === "coordinator") return "Agent Team 内部通知触发"
+  if (kind === "workflow") return "Ultra Workflow 内部通知触发"
+  return "内部通知触发"
+}
+
 function TraceCard({
   trace,
   selected,
@@ -498,7 +504,10 @@ function TraceCard({
         )}
       </div>
       <p className="line-clamp-3 text-xs leading-5 text-foreground/80">
-        {trace.userMessage || "无用户输入记录"}
+        {conversation.userText ||
+          (conversation.internalNotificationKind
+            ? internalNotificationPreview(conversation.internalNotificationKind)
+            : "无用户输入记录")}
       </p>
       {conversation.assistantText && (
         <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">

@@ -133,6 +133,10 @@ import {
   buildWorkflowNotificationMessage
 } from "../agent/workflow/notification"
 import {
+  COORDINATOR_NOTIFICATION_PROMPT_PREFIX,
+  INTERNAL_NOTIFICATION_TRIGGER_SOURCE
+} from "../../shared/internal-notification-turn"
+import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot
 } from "../agent/coordinator-worker-manager"
@@ -2477,7 +2481,6 @@ function buildCoordinatorTurnContextPrompt(workerContext: string): string | unde
 ${sections.join("\n\n")}`
 }
 
-const COORDINATOR_NOTIFICATION_PROMPT_PREFIX = "[[CMB_COORDINATOR_WORKER_NOTIFICATION]]"
 const COORDINATOR_INTERNAL_CONTEXT_START = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_START]]"
 const COORDINATOR_INTERNAL_CONTEXT_END = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_END]]"
 const COORDINATOR_INTERNAL_NOTIFICATION_START = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_START]]"
@@ -4643,11 +4646,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // events are sliceable by stage and by status-within-stage. Best-effort: any
       // failure leaves nodeName/nodeStatus absent (we never report the raw node id).
       let harnessFeatureBinding: HarnessFeatureBindingContext | undefined
+      let isWorkflowNotificationTrace = false
       try {
         const bindingThread = getThread(threadId)
         if (bindingThread?.metadata) {
-          harnessFeatureBinding =
-            readHarnessFeatureMetadata(JSON.parse(bindingThread.metadata)) ?? undefined
+          const bindingMetadata = JSON.parse(bindingThread.metadata) as Record<string, unknown>
+          harnessFeatureBinding = readHarnessFeatureMetadata(bindingMetadata) ?? undefined
+          isWorkflowNotificationTrace =
+            message.trim() === WORKFLOW_NOTIFICATION_TURN_PROMPT &&
+            getAgentModeFromMetadata(bindingMetadata) === "workflow"
         }
       } catch {
         // Non-project threads or unparsable metadata: leave the trace untagged.
@@ -4666,8 +4673,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       // Start trace collection for this invocation (modelId resolved later)
+      const isInternalNotificationTrace =
+        isTrustedCoordinatorNotificationInvoke || isWorkflowNotificationTrace
       const tracer = new TraceCollector(threadId, rootUserPrompt, modelId ?? "unknown", {
-        triggerSource: "chat",
+        triggerSource: isInternalNotificationTrace ? INTERNAL_NOTIFICATION_TRIGGER_SOURCE : "chat",
+        includeSkillEval: !isInternalNotificationTrace,
         ...(harnessFeatureBinding ? { harnessFeature: harnessFeatureBinding } : {})
       })
       const skillUsageDetector = new SkillUsageDetector()
