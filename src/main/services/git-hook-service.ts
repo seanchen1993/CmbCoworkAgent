@@ -8,6 +8,7 @@ import { getOpenworkDir } from "../storage"
 import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
 import {
+  getCommitMeasurementStatus,
   hasPendingGenerationsForCommit,
   isCodeFile,
   measureForCommit,
@@ -1137,7 +1138,11 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     (await getCommitTimeMs(meta.gitRoot, meta.commitSha)) ??
     (Number.isFinite(committedAtMs) ? committedAtMs : undefined)
 
-  if (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots, commitTimeMs)) {
+  const existingJobStatus = await getCommitMeasurementStatus(meta.gitRoot, meta.commitSha)
+  if (
+    !existingJobStatus &&
+    (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots, commitTimeMs))
+  ) {
     console.log(
       `[GitHook] skip commit snapshot without pending code_gen: commitSha=${meta.commitSha} files=${snapshots.length}`
     )
@@ -1147,7 +1152,18 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     return
   }
 
-  measureForCommit(snapshots, meta.commitSha, commitTimeMs)
+  const measurementCompleted = await measureForCommit(
+    snapshots,
+    meta.commitSha,
+    commitTimeMs,
+    meta.gitRoot
+  )
+  if (!measurementCompleted) {
+    console.warn(
+      `[GitHook] adoption measurement not durable yet; keeping ready snapshot: commitSha=${meta.commitSha}`
+    )
+    return
+  }
 
   const gitRoot = meta.gitRoot
   const [stats, branch, remoteUrl] = await Promise.all([
@@ -1536,7 +1552,11 @@ async function reconcileOneCommit(
   // git.commit.created. With the bound, such commits correctly gate to "no
   // pending gens" and are skipped here.
   const commitTimeMs = await getCommitTimeMs(gitRoot, commitSha)
-  if (probe.length === 0 || !hasPendingGenerationsForCommit(probe, commitTimeMs)) {
+  const existingJobStatus = await getCommitMeasurementStatus(gitRoot, commitSha)
+  if (
+    !existingJobStatus &&
+    (probe.length === 0 || !hasPendingGenerationsForCommit(probe, commitTimeMs))
+  ) {
     processed.add(commitSha)
     await saveProcessedCommitSet(repoDir, processed)
     return
@@ -1559,13 +1579,14 @@ async function reconcileOneCommit(
     }
   }
 
-  if (snapshots.length === 0) {
+  if (snapshots.length === 0 && !existingJobStatus) {
     processed.add(commitSha)
     await saveProcessedCommitSet(repoDir, processed)
     return
   }
 
-  measureForCommit(snapshots, commitSha, commitTimeMs)
+  const measurementCompleted = await measureForCommit(snapshots, commitSha, commitTimeMs, gitRoot)
+  if (!measurementCompleted) return
 
   const [stats, branch, remoteUrl] = await Promise.all([
     getCommitStats(gitRoot, commitSha),

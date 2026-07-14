@@ -878,7 +878,17 @@ async function executeRepositoryAutoCommitPlan(params: {
     const commitHash = await getHead(repo.repoPath)
     if (adoptionSnapshots.length > 0) {
       try {
-        measureForCommit(adoptionSnapshots, commitHash ?? undefined, adoptionCaptureTimeMs)
+        const durable = await measureForCommit(
+          adoptionSnapshots,
+          commitHash ?? undefined,
+          adoptionCaptureTimeMs,
+          repo.repoPath
+        )
+        if (!durable) {
+          console.warn(
+            `[AgentAutoCommit] adoption measurement queued for retry: commitSha=${commitHash ?? "unknown"}`
+          )
+        }
       } catch {
         // best-effort
       }
@@ -1292,7 +1302,17 @@ export async function maybeAutoCommitAfterAgentRun({
       const commitHash = await getHead(workspacePath)
       if (adoptionSnapshots.length > 0) {
         try {
-          measureForCommit(adoptionSnapshots, commitHash ?? undefined, adoptionCaptureTimeMs)
+          const durable = await measureForCommit(
+            adoptionSnapshots,
+            commitHash ?? undefined,
+            adoptionCaptureTimeMs,
+            workspacePath
+          )
+          if (!durable) {
+            console.warn(
+              `[AgentAutoCommit] adoption measurement queued for retry: commitSha=${commitHash ?? "unknown"}`
+            )
+          }
         } catch {
           // adoption measurement must never affect the commit outcome
         }

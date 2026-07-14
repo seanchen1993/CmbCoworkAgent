@@ -9,8 +9,8 @@
  *   - Uses sql.js (same as db/index.ts) to stay consistent with the rest of
  *     the main process. The database file lives at
  *     `~/.cmbcoworkagent/adoption-index.sqlite`.
- *   - The JSONL shard files on disk remain the source of truth; this index
- *     is a fast query layer and can be rebuilt from JSONL if lost.
+ *   - JSONL shards retain local measurement history. SQLite is authoritative
+ *     for pending generations, durable commit jobs, and delivery state.
  *   - All methods are synchronous after init — sql.js runs in-process and
  *     the data volume (14-day window) is small enough that there's no need
  *     for async buffering.
@@ -151,6 +151,69 @@ function readBlobStats(sql: string): { count: number; bytes: number } | null {
   } finally {
     stmt?.free()
   }
+}
+
+export type EventOutboxStatus = "pending" | "sending" | "retry" | "delivered" | "dead_letter"
+
+export interface EventOutboxInput {
+  /** Stable top-level CoworkEvent.eventId. Retries MUST reuse this id. */
+  eventId: string
+  eventName: string
+  payloadJson: string
+  createdAt: number
+}
+
+export interface EventOutboxRow {
+  event_id: string
+  event_name: string
+  payload_json: string
+  status: EventOutboxStatus
+  attempts: number
+  next_attempt_at: number
+  last_error: string | null
+  created_at: number
+  updated_at: number
+  delivered_at: number | null
+}
+
+export type CommitJobStatus = "pending" | "processing" | "completed"
+
+export interface CommitJobInput {
+  jobId: string
+  repoPath: string
+  commitSha: string
+  commitTimeMs?: number
+  createdAt: number
+}
+
+export interface CommitJobRow {
+  job_id: string
+  repo_path: string
+  commit_sha: string
+  commit_time_ms: number | null
+  status: CommitJobStatus
+  attempts: number
+  next_attempt_at: number
+  last_error: string | null
+  created_at: number
+  updated_at: number
+  completed_at: number | null
+}
+
+export interface AdoptionMeasurementWrite {
+  genEventId: string
+  /** Absent when a generation has no net-new baseline and needs no cloud event. */
+  outboxEvent?: EventOutboxInput
+  /** Local-only per-line detail persisted atomically with the terminal measurement. */
+  details?: AdoptLineDetailsInput | null
+  /** Optional storage bounds applied before the transaction is flushed to disk. */
+  detailsLimits?: AdoptLineDetailsLimits
+}
+
+export interface AdoptionMeasurementCommitResult {
+  success: boolean
+  measuredCount: number
+  enqueuedCount: number
 }
 
 // ─────────────────────────────────────────────────────────
@@ -315,6 +378,54 @@ export async function initializeAdoptionIndex(): Promise<void> {
       `CREATE INDEX IF NOT EXISTS idx_adopt_line_details_measured_at ON adopt_line_details(measured_at)`
     )
 
+    // Transactional outbox for durable adoption telemetry (terminal adoption
+    // events plus separately reported test-code generations). The complete
+    // CoworkEvent payload is stored once so every retry reuses the
+    // server-idempotent top-level eventId instead of rebuilding a new envelope.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS event_outbox (
+        event_id TEXT PRIMARY KEY,
+        event_name TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        delivered_at INTEGER
+      )
+    `)
+    db.run(
+      `CREATE INDEX IF NOT EXISTS idx_event_outbox_due
+         ON event_outbox(status, next_attempt_at, created_at)`
+    )
+
+    // Durable commit measurement queue. repo_path + commit_sha is enough to
+    // reconstruct the committed blobs after restart, so large snapshots never
+    // need to be copied into this sqlite file.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS commit_jobs (
+        job_id TEXT PRIMARY KEY,
+        repo_path TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        commit_time_ms INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        UNIQUE(repo_path, commit_sha)
+      )
+    `)
+    db.run(
+      `CREATE INDEX IF NOT EXISTS idx_commit_jobs_due
+         ON commit_jobs(status, next_attempt_at, created_at)`
+    )
+
+    scheduleSave()
     console.log("[AdoptionIndex] initialized at", dbPath)
   } catch (e) {
     console.warn("[AdoptionIndex] init failed (tracker will degrade gracefully):", e)
@@ -322,7 +433,7 @@ export async function initializeAdoptionIndex(): Promise<void> {
   }
 }
 
-export function flushAdoptionIndex(): void {
+export function flushAdoptionIndex(): boolean {
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null
@@ -332,10 +443,13 @@ export function flushAdoptionIndex(): void {
       const data = db.export()
       writeFileSync(getAdoptionIndexPath(), Buffer.from(data))
       dirty = false
+      return true
     } catch (e) {
       console.warn("[AdoptionIndex] flush failed:", e)
+      return false
     }
   }
+  return db !== null
 }
 
 export function closeAdoptionIndex(): void {
@@ -588,6 +702,291 @@ export function finalizeGenMeasurement(
   }
 }
 
+function insertOutboxEventUnsafe(event: EventOutboxInput): boolean {
+  if (!db) throw new Error("adoption index is not initialized")
+  db.run(
+    `INSERT OR IGNORE INTO event_outbox
+       (event_id, event_name, payload_json, status, attempts, next_attempt_at,
+        last_error, created_at, updated_at, delivered_at)
+     VALUES (?, ?, ?, 'pending', 0, 0, NULL, ?, ?, NULL)`,
+    [event.eventId, event.eventName, event.payloadJson, event.createdAt, event.createdAt]
+  )
+  if (db.getRowsModified() > 0) return true
+
+  const stmt = db.prepare(`SELECT event_name, payload_json FROM event_outbox WHERE event_id = ?`)
+  stmt.bind([event.eventId])
+  try {
+    if (!stmt.step()) throw new Error(`outbox conflict disappeared: ${event.eventId}`)
+    const existing = stmt.getAsObject() as { event_name?: unknown; payload_json?: unknown }
+    if (existing.event_name !== event.eventName || existing.payload_json !== event.payloadJson) {
+      throw new Error(`outbox eventId reused with a different payload: ${event.eventId}`)
+    }
+    return false
+  } finally {
+    stmt.free()
+  }
+}
+
+/** Persist a standalone adoption event (for example code_test_gen/skipped_large). */
+export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): boolean {
+  if (!db) return false
+  try {
+    db.run("BEGIN TRANSACTION")
+    insertOutboxEventUnsafe(event)
+    db.run("COMMIT")
+    scheduleSave()
+    return !flushNow || flushAdoptionIndex()
+  } catch (e) {
+    try {
+      db.run("ROLLBACK")
+    } catch {
+      // transaction may already have committed
+    }
+    console.warn("[AdoptionIndex] enqueueEventOutbox failed:", e)
+    return false
+  }
+}
+
+/**
+ * Atomically closes pending generation rows, enqueues their immutable cloud
+ * events, and completes the owning commit job. Network delivery is deliberately
+ * outside this transaction; the outbox survives offline periods and restarts.
+ */
+export function commitAdoptionMeasurements(
+  writes: AdoptionMeasurementWrite[],
+  commitJobId?: string
+): AdoptionMeasurementCommitResult {
+  if (!db) return { success: false, measuredCount: 0, enqueuedCount: 0 }
+  let measuredCount = 0
+  let enqueuedCount = 0
+  let detailsLimits: AdoptLineDetailsLimits | undefined
+  try {
+    db.run("BEGIN TRANSACTION")
+    for (const write of writes) {
+      db.run(
+        `UPDATE gen_events
+            SET measured = 1,
+                generated_lines_blob = NULL
+          WHERE event_id = ? AND measured = 0`,
+        [write.genEventId]
+      )
+      if (db.getRowsModified() <= 0) continue
+      measuredCount += 1
+      if (write.details) insertAdoptLineDetailsRow(write.genEventId, write.details)
+      if (write.detailsLimits) detailsLimits = write.detailsLimits
+      if (write.outboxEvent) {
+        if (insertOutboxEventUnsafe(write.outboxEvent)) enqueuedCount += 1
+      }
+    }
+    if (commitJobId) {
+      const now = Date.now()
+      db.run(
+        `UPDATE commit_jobs
+            SET status = 'completed', completed_at = ?, updated_at = ?, last_error = NULL
+          WHERE job_id = ?`,
+        [now, now, commitJobId]
+      )
+      if (db.getRowsModified() <= 0) {
+        throw new Error(`commit job not found: ${commitJobId}`)
+      }
+    }
+    db.run("COMMIT")
+    if (detailsLimits) trimAdoptLineDetails(detailsLimits.maxRows, detailsLimits.maxBytes)
+    scheduleSave()
+    // A completed job must be durable before its caller writes processed-commits.json.
+    if (!flushAdoptionIndex()) {
+      // Keep the in-memory job retryable. Its measured rows and outbox payloads
+      // remain together in the same database image and will be flushed on the
+      // next attempt; callers must not advance processed-commits yet.
+      if (commitJobId) {
+        const now = Date.now()
+        db.run(
+          `UPDATE commit_jobs
+              SET status = 'pending', completed_at = NULL, next_attempt_at = 0,
+                  last_error = 'sqlite flush failed', updated_at = ?
+            WHERE job_id = ?`,
+          [now, commitJobId]
+        )
+        scheduleSave()
+      }
+      return { success: false, measuredCount: 0, enqueuedCount: 0 }
+    }
+    return { success: true, measuredCount, enqueuedCount }
+  } catch (e) {
+    try {
+      db.run("ROLLBACK")
+    } catch {
+      // transaction may already have committed
+    }
+    console.warn("[AdoptionIndex] commitAdoptionMeasurements failed:", e)
+    return { success: false, measuredCount: 0, enqueuedCount: 0 }
+  }
+}
+
+export function enqueueCommitJob(input: CommitJobInput): CommitJobRow | null {
+  if (!db) return null
+  try {
+    db.run(
+      `INSERT INTO commit_jobs
+         (job_id, repo_path, commit_sha, commit_time_ms, status, attempts,
+          next_attempt_at, last_error, created_at, updated_at, completed_at)
+       VALUES (?, ?, ?, ?, 'pending', 0, 0, NULL, ?, ?, NULL)
+       ON CONFLICT(job_id) DO UPDATE SET
+         repo_path = excluded.repo_path,
+         commit_sha = excluded.commit_sha,
+         commit_time_ms = COALESCE(commit_jobs.commit_time_ms, excluded.commit_time_ms),
+         updated_at = CASE
+           WHEN commit_jobs.status = 'completed' THEN commit_jobs.updated_at
+           ELSE excluded.updated_at
+         END`,
+      [
+        input.jobId,
+        input.repoPath,
+        input.commitSha,
+        input.commitTimeMs ?? null,
+        input.createdAt,
+        input.createdAt
+      ]
+    )
+    scheduleSave()
+    // Persist the recovery record before starting any asynchronous measurement.
+    if (!flushAdoptionIndex()) return null
+    return getCommitJob(input.jobId)
+  } catch (e) {
+    console.warn("[AdoptionIndex] enqueueCommitJob failed:", e)
+    return null
+  }
+}
+
+export function getCommitJob(jobId: string): CommitJobRow | null {
+  if (!db || !jobId) return null
+  const stmt = db.prepare(`SELECT * FROM commit_jobs WHERE job_id = ?`)
+  stmt.bind([jobId])
+  try {
+    return stmt.step() ? (stmt.getAsObject() as unknown as CommitJobRow) : null
+  } finally {
+    stmt.free()
+  }
+}
+
+export function listDueCommitJobs(now: number, limit: number): CommitJobRow[] {
+  if (!db) return []
+  const stmt = db.prepare(
+    `SELECT * FROM commit_jobs
+      WHERE status = 'pending' AND next_attempt_at <= ?
+      ORDER BY created_at ASC
+      LIMIT ?`
+  )
+  stmt.bind([now, Math.max(1, limit)])
+  try {
+    const rows: CommitJobRow[] = []
+    while (stmt.step()) rows.push(stmt.getAsObject() as unknown as CommitJobRow)
+    return rows
+  } finally {
+    stmt.free()
+  }
+}
+
+export function markCommitJobProcessing(jobId: string): boolean {
+  if (!db) return false
+  try {
+    const now = Date.now()
+    db.run(
+      `UPDATE commit_jobs
+          SET status = 'processing', attempts = attempts + 1, updated_at = ?
+        WHERE job_id = ? AND status = 'pending'`,
+      [now, jobId]
+    )
+    const changed = db.getRowsModified() > 0
+    if (changed) scheduleSave()
+    return changed
+  } catch (e) {
+    console.warn("[AdoptionIndex] markCommitJobProcessing failed:", e)
+    return false
+  }
+}
+
+export function markCommitJobRetry(jobId: string, nextAttemptAt: number, error: string): void {
+  if (!db) return
+  try {
+    const now = Date.now()
+    db.run(
+      `UPDATE commit_jobs
+          SET status = 'pending', next_attempt_at = ?, last_error = ?, updated_at = ?
+        WHERE job_id = ? AND status != 'completed'`,
+      [nextAttemptAt, error.slice(0, 2000), now, jobId]
+    )
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] markCommitJobRetry failed:", e)
+  }
+}
+
+export function resetInterruptedCommitJobs(): void {
+  if (!db) return
+  try {
+    const now = Date.now()
+    db.run(
+      `UPDATE commit_jobs
+          SET status = 'pending', next_attempt_at = 0,
+              last_error = COALESCE(last_error, 'interrupted before completion'), updated_at = ?
+        WHERE status = 'processing'`,
+      [now]
+    )
+    if (db.getRowsModified() > 0) scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] resetInterruptedCommitJobs failed:", e)
+  }
+}
+
+export function listDueOutboxEvents(now: number, limit: number): EventOutboxRow[] {
+  if (!db) return []
+  const stmt = db.prepare(
+    `SELECT * FROM event_outbox
+      WHERE status IN ('pending', 'retry') AND next_attempt_at <= ?
+      ORDER BY created_at ASC
+      LIMIT ?`
+  )
+  stmt.bind([now, Math.max(1, limit)])
+  try {
+    const rows: EventOutboxRow[] = []
+    while (stmt.step()) rows.push(stmt.getAsObject() as unknown as EventOutboxRow)
+    return rows
+  } finally {
+    stmt.free()
+  }
+}
+
+export function getOutboxEvent(eventId: string): EventOutboxRow | null {
+  if (!db || !eventId) return null
+  const stmt = db.prepare(`SELECT * FROM event_outbox WHERE event_id = ?`)
+  stmt.bind([eventId])
+  try {
+    return stmt.step() ? (stmt.getAsObject() as unknown as EventOutboxRow) : null
+  } finally {
+    stmt.free()
+  }
+}
+
+export function markOutboxSending(eventId: string): boolean {
+  if (!db) return false
+  try {
+    const now = Date.now()
+    db.run(
+      `UPDATE event_outbox
+          SET status = 'sending', attempts = attempts + 1, updated_at = ?
+        WHERE event_id = ? AND status IN ('pending', 'retry')`,
+      [now, eventId]
+    )
+    const changed = db.getRowsModified() > 0
+    if (changed) scheduleSave()
+    return changed
+  } catch (e) {
+    console.warn("[AdoptionIndex] markOutboxSending failed:", e)
+    return false
+  }
+}
+
 export function getAdoptLineDetails(
   commitSha: string,
   genEventId: string
@@ -604,6 +1003,79 @@ export function getAdoptLineDetails(
     return stmt.getAsObject() as unknown as AdoptLineDetailsRow
   } finally {
     stmt.free()
+  }
+}
+
+export function markOutboxDelivered(eventId: string): void {
+  if (!db) return
+  try {
+    const now = Date.now()
+    db.run(
+      `UPDATE event_outbox
+          SET status = 'delivered', delivered_at = ?, updated_at = ?, last_error = NULL
+        WHERE event_id = ?`,
+      [now, now, eventId]
+    )
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] markOutboxDelivered failed:", e)
+  }
+}
+
+export function markOutboxFailed(
+  eventId: string,
+  error: string,
+  nextAttemptAt: number,
+  permanent: boolean
+): void {
+  if (!db) return
+  try {
+    const now = Date.now()
+    db.run(
+      `UPDATE event_outbox
+          SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
+        WHERE event_id = ?`,
+      [permanent ? "dead_letter" : "retry", nextAttemptAt, error.slice(0, 2000), now, eventId]
+    )
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] markOutboxFailed failed:", e)
+  }
+}
+
+export function resetInterruptedOutboxEvents(staleBefore: number): void {
+  if (!db) return
+  try {
+    const now = Date.now()
+    db.run(
+      `UPDATE event_outbox
+          SET status = 'retry', next_attempt_at = 0,
+              last_error = COALESCE(last_error, 'interrupted while sending'), updated_at = ?
+        WHERE status = 'sending' AND updated_at <= ?`,
+      [now, staleBefore]
+    )
+    if (db.getRowsModified() > 0) scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] resetInterruptedOutboxEvents failed:", e)
+  }
+}
+
+export function cleanupAdoptionDeliveryRecords(cutoff: number): void {
+  if (!db) return
+  try {
+    // The outbox has one total retention window measured from event creation.
+    // This applies to unresolved rows too, so a permanently offline endpoint
+    // cannot grow the database forever.
+    db.run(`DELETE FROM event_outbox WHERE created_at < ?`, [cutoff])
+    const outboxDeleted = db.getRowsModified()
+    db.run(
+      `DELETE FROM commit_jobs
+        WHERE status = 'completed' AND completed_at IS NOT NULL AND completed_at < ?`,
+      [cutoff]
+    )
+    if (outboxDeleted > 0 || db.getRowsModified() > 0) scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] cleanupAdoptionDeliveryRecords failed:", e)
   }
 }
 

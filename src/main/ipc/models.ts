@@ -4492,7 +4492,17 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // 提交后主动刷新 HEAD 短缓存，保证后续 push/telemetry 读取到最新提交。
         void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(() => null)
         if (adoptionSnapshots.length > 0) {
-          measureForCommit(adoptionSnapshots, commitSha, adoptionCaptureTimeMs)
+          const durable = await measureForCommit(
+            adoptionSnapshots,
+            commitSha,
+            adoptionCaptureTimeMs,
+            worktreePath
+          )
+          if (!durable) {
+            console.warn(
+              `[GitPanel] adoption measurement queued for retry: commitSha=${commitSha ?? "unknown"}`
+            )
+          }
         }
         const postState = await buildGitPanelState(worktreePath, tracked, {
           includeAllWhenNoTracked: true,
