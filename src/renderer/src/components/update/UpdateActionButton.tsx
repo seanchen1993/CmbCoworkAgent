@@ -31,15 +31,18 @@ export function UpdateActionButton({
   const [dialogOpen, setDialogOpen] = useState(false)
   const [status, setStatus] = useState<UpdateStatus>("idle")
   const [version, setVersion] = useState<string | null>(null)
+  const [selfTestSource, setSelfTestSource] = useState(false)
 
   const syncUpdateStatus = useCallback(async () => {
     try {
       const updateStatus = await window.api.update.getStatus()
       setStatus(updateStatus.status as UpdateStatus)
       setVersion(updateStatus.update?.version ?? null)
+      setSelfTestSource(updateStatus.source?.channel === "selftest")
     } catch {
       setStatus("idle")
       setVersion(null)
+      setSelfTestSource(false)
     }
   }, [])
 
@@ -64,6 +67,7 @@ export function UpdateActionButton({
       .then((s) => {
         setStatus(s.status as UpdateStatus)
         setVersion(s.update?.version ?? null)
+        setSelfTestSource(s.source?.channel === "selftest")
         if (s.status === "downloaded" && consumeAutoOpenForVersion(s.update?.version)) {
           setDialogOpen(true)
         }
@@ -71,15 +75,18 @@ export function UpdateActionButton({
       .catch(() => {
         setStatus("idle")
         setVersion(null)
+        setSelfTestSource(false)
       })
 
     const removeAvailable = updateApi.onAvailable((info) => {
       setStatus("available")
       setVersion(info.version)
+      setSelfTestSource(info.source?.channel === "selftest")
     })
     const removeDownloaded = updateApi.onDownloaded((info) => {
       setStatus("downloaded")
       setVersion(info.version)
+      setSelfTestSource(info.source?.channel === "selftest")
       if (consumeAutoOpenForVersion(info.version)) {
         setDialogOpen(true)
       }
@@ -107,13 +114,17 @@ export function UpdateActionButton({
 
   const statusTagText =
     status === "downloaded"
-      ? "重启更新"
+      ? selfTestSource
+        ? "自测重启"
+        : "重启更新"
       : status === "downloading"
         ? "下载中"
         : status === "error"
           ? "更新失败"
           : hasUpdate
-            ? "可更新"
+            ? selfTestSource
+              ? "自测更新"
+              : "可更新"
             : null
 
   if (variant === "tag") {
@@ -137,7 +148,11 @@ export function UpdateActionButton({
                   ? "bg-red-100 text-red-700 hover:bg-red-200"
                   : "bg-status-warning/15 text-status-warning hover:bg-status-warning/25"
               )}
-              title={version ? `发现新版本 v${version}` : "查看更新状态"}
+              title={
+                version
+                  ? `${selfTestSource ? "发现自测版本" : "发现新版本"} v${version}`
+                  : "查看更新状态"
+              }
               onClick={() => setDialogOpen(true)}
             >
               {statusTagText}
@@ -180,7 +195,7 @@ export function UpdateActionButton({
                 hasUpdate && "text-red-700"
               )}
             >
-              {hasUpdate ? "发现新版本！" : "检测版本"}
+              {hasUpdate ? (selfTestSource ? "发现自测版本！" : "发现新版本！") : "检测版本"}
             </div>
           </div>
           {hasUpdate && (

@@ -25,6 +25,7 @@ import type { LatestJson } from "./checker"
 let currentAppVersion = "1.3.10"
 let getUserInfoImpl: () => UserInfoConfig | null = () => null
 let currentManifest: LatestJson | null = null
+let expectedManifestFile = "cmbdevclaw-latest.json"
 let chainTestRoot = ""
 
 vi.mock("electron", () => ({
@@ -49,7 +50,7 @@ beforeAll(async () => {
     const url = new URL(req.url ?? "/", "http://localhost")
     if (req.method === "POST" && url.pathname === "/download") {
       const file = url.searchParams.get("file")
-      if (file === "cmbdevclaw-latest.json") {
+      if (file === expectedManifestFile) {
         res.writeHead(200, { "content-type": "application/json" })
         res.end(JSON.stringify(currentManifest))
         return
@@ -81,6 +82,7 @@ beforeEach(() => {
   currentAppVersion = "1.3.10"
   getUserInfoImpl = () => null
   currentManifest = null
+  expectedManifestFile = "cmbdevclaw-latest.json"
   clearPendingUpdateChain()
 })
 
@@ -122,6 +124,28 @@ const sales: UserInfoConfig = {
 // ---------------------------------------------------------------------------
 
 describe("E2E gray release — real HTTP server, real checkForUpdate", () => {
+  it("C0 自测入口：可按指定 manifest 文件检查更新", async () => {
+    expectedManifestFile = "cmbdevclaw-latest.selftest.json"
+    currentAppVersion = "1.4.5"
+    currentManifest = {
+      ...baseManifest,
+      version: "1.4.8",
+      minVersion: "1.4.5",
+      releaseNotes: "自测 1.4.8",
+      asar: { version: "1.4.8", file: "selftest-1.4.8.asar.gz", sha256: "selftest-sha", size: 200 }
+    }
+
+    const r = await checkForUpdate(baseUrl, { manifestFile: expectedManifestFile })
+
+    expect(r).toMatchObject({
+      version: "1.4.8",
+      targetVersion: "1.4.8",
+      updateType: "asar",
+      downloadFile: "selftest-1.4.8.asar.gz",
+      channel: "stable"
+    })
+  })
+
   it("C1 兼容性：manifest 不写 staging → stable，行为完全等同改造前", async () => {
     // 模拟存量用户：还在 1.3.10，升级到 1.4.0 是 minor → 走 full installer
     currentAppVersion = "1.3.10"

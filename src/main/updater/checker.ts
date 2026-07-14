@@ -5,6 +5,7 @@ import { getUserInfo, type UserInfoConfig } from "../storage"
 import type { FeatureGatesConfig } from "../../shared/feature-gates"
 import { evaluateStaging } from "./gray-release"
 import { compareSemver } from "./semver"
+import { DEFAULT_UPDATE_MANIFEST_FILE } from "./channel-config"
 import {
   clearPendingUpdateChain,
   readLegacyUpdateMarker,
@@ -121,7 +122,11 @@ export interface UpdateCheckResult {
  * Determine update type by comparing version numbers.
  * Only patch-level changes use ASAR replacement; everything else uses full installer.
  */
-function determineUpdateType(currentVersion: string, newVersion: string, minVersion: string): UpdateType {
+function determineUpdateType(
+  currentVersion: string,
+  newVersion: string,
+  minVersion: string
+): UpdateType {
   // If current version is below minVersion, force full update
   if (compareSemver(currentVersion, minVersion) < 0) {
     return "full"
@@ -141,9 +146,12 @@ function determineUpdateType(currentVersion: string, newVersion: string, minVers
 /**
  * Fetch latest.json from the update server.
  */
-export function fetchLatestJson(baseUrl: string): Promise<LatestJson> {
+export function fetchLatestJson(
+  baseUrl: string,
+  manifestFile: string = DEFAULT_UPDATE_MANIFEST_FILE
+): Promise<LatestJson> {
   const url = new URL(`${baseUrl}/download`)
-  url.searchParams.set("file", "cmbdevclaw-latest.json")
+  url.searchParams.set("file", manifestFile)
   const urlStr = url.toString()
   console.log("[Updater] Fetching:", urlStr)
 
@@ -158,7 +166,9 @@ export function fetchLatestJson(baseUrl: string): Promise<LatestJson> {
       }
 
       let data = ""
-      res.on("data", (chunk: Buffer) => { data += chunk.toString() })
+      res.on("data", (chunk: Buffer) => {
+        data += chunk.toString()
+      })
       res.on("end", () => {
         try {
           const json = JSON.parse(data) as LatestJson
@@ -325,8 +335,7 @@ export function selectChannelTarget(
     pendingChain.intermediateVersion === currentVersion &&
     pendingChain.targetVersion === latest.staging.version &&
     canCompleteWithAsar(currentVersion, latest.staging.version, latest.minVersion) &&
-    (!latest.staging.minVersion ||
-      compareSemver(currentVersion, latest.staging.minVersion) >= 0) &&
+    (!latest.staging.minVersion || compareSemver(currentVersion, latest.staging.minVersion) >= 0) &&
     decision.reason !== "staging-expired"
 
   if ((decision.hit || continuingStagingChain) && stagingViable && latest.staging) {
@@ -405,7 +414,10 @@ export function selectChannelTarget(
   }
 }
 
-function resolvePendingChain(latest: LatestJson, currentVersion: string): PendingUpdateChain | null {
+function resolvePendingChain(
+  latest: LatestJson,
+  currentVersion: string
+): PendingUpdateChain | null {
   const persisted = readPendingUpdateChain()
   if (persisted) {
     if (compareSemver(currentVersion, persisted.targetVersion) >= 0) {
@@ -444,8 +456,11 @@ function resolvePendingChain(latest: LatestJson, currentVersion: string): Pendin
  * Check for updates against the remote server.
  * Returns null if no update is available for the current client.
  */
-export async function checkForUpdate(baseUrl: string): Promise<UpdateCheckResult | null> {
-  const latest = await fetchLatestJson(baseUrl)
+export async function checkForUpdate(
+  baseUrl: string,
+  options: { manifestFile?: string } = {}
+): Promise<UpdateCheckResult | null> {
+  const latest = await fetchLatestJson(baseUrl, options.manifestFile)
   const currentVersion = app.getVersion()
   return selectChannelTarget(
     latest,

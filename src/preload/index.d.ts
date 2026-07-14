@@ -1,3 +1,4 @@
+import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
   Thread,
   Message,
@@ -92,10 +93,7 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
-import type {
-  CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
-} from "../shared/close-to-tray"
+import type { CloseToTrayPromptAction, CloseToTrayPromptEvent } from "../shared/close-to-tray"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -2307,15 +2305,11 @@ interface CustomAPI {
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
-    getProjectReviews: (
-      input: HarnessProjectReviewInput
-    ) => Promise<HarnessProjectReviewResult>
+    getProjectReviews: (input: HarnessProjectReviewInput) => Promise<HarnessProjectReviewResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
-    getLocalAgentmdDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ) => Promise<string[]>
+    getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -2334,7 +2328,7 @@ interface CustomAPI {
   }
   update: {
     check: () => Promise<
-      | { hasUpdate: false }
+      | { hasUpdate: false; source?: UpdateSourceInfo | null }
       | {
           hasUpdate: true
           version: string
@@ -2353,6 +2347,7 @@ interface CustomAPI {
             message: string
           } | null
           currentError?: string | null
+          source?: UpdateSourceInfo | null
         }
     >
     download: () => Promise<{ success: boolean }>
@@ -2379,6 +2374,7 @@ interface CustomAPI {
       } | null
       errorMessage: string | null
       canRollback: boolean
+      source: UpdateSourceInfo | null
     }>
     getStartupResult: () => Promise<{ updatedFrom?: string; updatedTo?: string }>
     onAvailable: (
@@ -2390,6 +2386,7 @@ interface CustomAPI {
         size: number
         mandatory: boolean
         autoDownloading?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => () => void
     onProgress: (
@@ -2410,6 +2407,7 @@ interface CustomAPI {
         releaseNotes?: string
         size?: number
         mandatory?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => () => void
     onError: (callback: (err: { message: string; silent?: boolean }) => void) => () => void
