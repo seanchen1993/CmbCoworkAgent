@@ -1002,8 +1002,7 @@ function formatMarkdownTableCell(value: string): string {
 
 function resolveHarnessAdditionalWorkspaceRootMappings(
   projectId: string,
-  featureId: string,
-  _workspacePath: string
+  featureId: string
 ): HarnessDeployUnitMapping[] {
   const seen = new Set<string>()
   const mappings: HarnessDeployUnitMapping[] = []
@@ -2428,8 +2427,7 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
 }
 
 function resolveFeatureSelectedDeployUnits(
-  input: HarnessFeatureCreateInput,
-  _project: HarnessProjectMetadata
+  input: HarnessFeatureCreateInput
 ): HarnessDeployUnitMapping[] {
   if (!Array.isArray(input.selectedDeployUnits)) return []
 
@@ -2681,6 +2679,7 @@ export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   enableAgentsPrompt?: boolean
   enableTaskTool?: boolean
+  runtimePolicy?: HarnessRuntimePolicy
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
   additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
@@ -2711,10 +2710,41 @@ function isHarnessSessionContextOk(value: unknown): boolean {
   return value === true
 }
 
+export type HarnessRuntimeAgentMode = "solo" | "agent_team"
+
+export interface HarnessRuntimePolicy {
+  agentMode?: HarnessRuntimeAgentMode
+  toolCustomConfig?: Record<string, { enabled?: boolean }>
+}
+
+const HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS = new Set(["task"])
+
+function normalizeHarnessRuntimePolicy(value: unknown): HarnessRuntimePolicy | undefined {
+  if (!isObject(value)) return undefined
+
+  const agentMode = value.agentMode === "solo" || value.agentMode === "agent_team" ? value.agentMode : undefined
+  const toolCustomConfig: Record<string, { enabled?: boolean }> = {}
+  if (isObject(value.toolCustomConfig)) {
+    for (const [toolName, config] of Object.entries(value.toolCustomConfig)) {
+      if (!HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS.has(toolName) || !isObject(config)) continue
+      if (typeof config.enabled === "boolean") {
+        toolCustomConfig[toolName] = { enabled: config.enabled }
+      }
+    }
+  }
+
+  if (!agentMode && Object.keys(toolCustomConfig).length === 0) return undefined
+  return {
+    ...(agentMode ? { agentMode } : {}),
+    ...(Object.keys(toolCustomConfig).length > 0 ? { toolCustomConfig } : {})
+  }
+}
+
 interface HarnessSessionContextInjectResult {
   prompt?: string
   warning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
+  runtimePolicy?: HarnessRuntimePolicy
 }
 
 function formatSessionContextInjectWarning(detail: string): string {
@@ -2766,6 +2796,7 @@ function readHarnessFeatureSessionContextAgentPrompt(
       })
       return { warning: formatSessionContextInjectWarning(detail) }
     }
+    const runtimePolicy = normalizeHarnessRuntimePolicy(result.runtimePolicy)
     if (sessionContext.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
       console.warn("[HarnessBoard] session_context_inject sessionContext truncated:", {
         chars: sessionContext.length,
@@ -2773,10 +2804,15 @@ function readHarnessFeatureSessionContextAgentPrompt(
       })
       return {
         prompt: sessionContext.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS),
-        agentmdLoadStatus
+        agentmdLoadStatus,
+        ...(runtimePolicy ? { runtimePolicy } : {})
       }
     }
-    return { prompt: sessionContext, agentmdLoadStatus }
+    return {
+      prompt: sessionContext,
+      agentmdLoadStatus,
+      ...(runtimePolicy ? { runtimePolicy } : {})
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     console.error("[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:", {
@@ -2804,7 +2840,7 @@ export function buildHarnessFeatureAgentContext(
   const plugin = findAdapterPlugin(project)
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
-  const enableTaskTool = boardConfigEnableTaskTool(cwd)
+  const boardConfigTaskToolEnabled = boardConfigEnableTaskTool(cwd)
   const systemId = normalizeText(project.systemId).trim()
   const featureBinding = findFeatureDeployUnitBinding(project.projectId, feature.slug)
   const sessionContextInjectionSource =
@@ -2825,12 +2861,14 @@ export function buildHarnessFeatureAgentContext(
   const sessionContextInjectResult = usePluginAgentsPrompt
     ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, { sessionWorkspacePath })
     : undefined
+  const runtimePolicy = sessionContextInjectResult?.runtimePolicy
+  const enableTaskTool =
+    runtimePolicy?.toolCustomConfig?.task?.enabled ?? boardConfigTaskToolEnabled
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
   const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
   const additionalWorkspaceRootMappings = resolveHarnessAdditionalWorkspaceRootMappings(
     project.projectId,
-    feature.slug,
-    sessionWorkspacePath
+    feature.slug
   )
   const additionalWorkspaceRoots = additionalWorkspaceRootMappings.map(
     (mapping) => mapping.localRepoPath
@@ -2846,6 +2884,7 @@ export function buildHarnessFeatureAgentContext(
     systemPromptInject,
     enableAgentsPrompt: !pluginPromptLoaded,
     ...(enableTaskTool !== undefined ? { enableTaskTool } : {}),
+    ...(runtimePolicy ? { runtimePolicy } : {}),
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
       ? {
@@ -3028,7 +3067,7 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
-  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input, project)
+  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input)
   const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
     input.sessionContextInjectionSource
   )

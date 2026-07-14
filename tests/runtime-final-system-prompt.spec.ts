@@ -33,8 +33,6 @@ const PLUGIN_AGENTS_PROMPT = [
   "</INSTRUCTIONS>"
 ].join("\n")
 const EXTRA_SYSTEM_PROMPT = "EXTRA_SYSTEM_PROMPT"
-const PROJECT_MODE_SUBAGENTS_ENV = "PROJECT_MODE_SUBAGENTS_ENABLED"
-const PROJECT_MODE_SUBAGENTS_DISABLED_VALUES = new Set(["0", "false", "off", "no", "disabled"])
 
 interface TempWorkspace {
   tempRoot: string
@@ -152,11 +150,6 @@ function resolveExistingWorkspace(workspacePath: string): string {
   }
 }
 
-function isProjectModeSubagentsEnabledForDiagnostic(): boolean {
-  const raw = process.env[PROJECT_MODE_SUBAGENTS_ENV]?.trim().toLowerCase()
-  return raw ? !PROJECT_MODE_SUBAGENTS_DISABLED_VALUES.has(raw) : true
-}
-
 async function withTempWorkspace<T>(fn: (workspace: TempWorkspace) => Promise<T>): Promise<T> {
   const tempRoot = mkdtempSync(join(tmpdir(), "runtime-final-system-prompt-"))
   const agentsHome = join(tempRoot, "agents-home")
@@ -223,9 +216,7 @@ async function buildRuntimePromptFromHarnessContext(
 ): Promise<RuntimePromptBuildResult> {
   let runtimePrompt = buildBaseRuntimePrompt(workspacePath, harnessContext.systemPromptInject, {
     includeBackgroundExec: true,
-    includeSubagents: harnessContext.featureId
-      ? isProjectModeSubagentsEnabledForDiagnostic()
-      : true
+    includeSubagents: harnessContext.featureId ? (harnessContext.enableTaskTool ?? true) : true
   })
   const normalizedHarnessAgentsPrompt = harnessContext.harnessAgentsPrompt?.trim()
   const enableAgentsPrompt = harnessContext.enableAgentsPrompt !== false

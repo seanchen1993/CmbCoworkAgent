@@ -16,7 +16,6 @@ interface ImportMetaEnv {
   readonly VITE_ADMIN_YST_IDS?: string
   readonly VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS?: string
   readonly VITE_RENDER_URL?: string
-  readonly VITE_PROJECT_MODE_SUBAGENTS_ENABLED?: string
   readonly VITE_PROJECT_MODE_MEMORY_ENABLED?: string
   /** Smart routing Layer 3 classifier — internal fallback model (injected at build time for internal builds) */
   readonly VITE_ROUTING_CLASSIFIER_MODEL?: string

@@ -371,18 +371,9 @@ const SHARED_TOOL_NAMES = new Set([
 ])
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
-const PROJECT_MODE_SUBAGENTS_ENV = "VITE_PROJECT_MODE_SUBAGENTS_ENABLED"
-const PROJECT_MODE_SUBAGENTS_DISABLED_VALUES = new Set(["0", "false", "off", "no", "disabled"])
-
-function isProjectModeSubagentsEnabled(): boolean {
-  const raw = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined)
-    ?.trim()
-    .toLowerCase()
-  return raw ? !PROJECT_MODE_SUBAGENTS_DISABLED_VALUES.has(raw) : true
-}
 
 function resolveProjectModeTaskToolEnabled(enableTaskTool?: boolean): boolean {
-  return enableTaskTool ?? isProjectModeSubagentsEnabled()
+  return enableTaskTool ?? true
 }
 
 type RuntimePromptToolPolicy = {
@@ -3681,9 +3672,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
   if (runtimePolicy.isProjectMode) {
-    const envValue = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
     console.log(
-      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"}, ${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
+      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"})`
     )
     const memoryEnvValue = (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
     console.log(

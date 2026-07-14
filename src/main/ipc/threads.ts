@@ -103,6 +103,7 @@ import {
   type CheckpointTuple
 } from "@langchain/langgraph-checkpoint"
 import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
+import { buildHarnessFeatureAgentContext } from "../harness-board/service"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 
@@ -2130,6 +2131,19 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         existsSync(lastWorkspacePath)
       ) {
         nextMetadata.workspacePath = lastWorkspacePath
+      }
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(nextMetadata, "agentMode")) {
+      try {
+        const workspacePath =
+          typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
+        const harnessContext = buildHarnessFeatureAgentContext(nextMetadata, { workspacePath })
+        const initialAgentMode = harnessContext?.runtimePolicy?.agentMode
+        if (initialAgentMode === "solo") nextMetadata.agentMode = "normal"
+        if (initialAgentMode === "agent_team") nextMetadata.agentMode = "coordinator"
+      } catch (error) {
+        console.warn("[Threads] Failed to apply Harness initial agent mode:", error)
       }
     }
 
