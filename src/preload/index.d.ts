@@ -2338,6 +2338,7 @@ interface CustomAPI {
       | {
           hasUpdate: true
           version: string
+          targetVersion: string
           updateType: string
           releaseNotes: string
           size: number
@@ -2362,6 +2363,7 @@ interface CustomAPI {
       status: string
       update: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
@@ -2382,6 +2384,7 @@ interface CustomAPI {
     onAvailable: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
@@ -2402,6 +2405,7 @@ interface CustomAPI {
     onDownloaded: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes?: string
         size?: number

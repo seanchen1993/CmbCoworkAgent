@@ -66,6 +66,7 @@ async function performDownload(silent: boolean): Promise<void> {
     console.log("[Updater] Download complete:", downloadedFilePath)
     broadcast("update:downloaded", {
       version: lastCheckResult.version,
+      targetVersion: lastCheckResult.targetVersion,
       updateType: lastCheckResult.updateType,
       releaseNotes: lastCheckResult.releaseNotes,
       size: lastCheckResult.downloadSize,
@@ -99,6 +100,7 @@ async function performCheck(manual: boolean): Promise<UpdateCheckResult | null> 
       updateStatus = "available"
       broadcast("update:available", {
         version: result.version,
+        targetVersion: result.targetVersion,
         updateType: result.updateType,
         releaseNotes: result.releaseNotes,
         size: result.downloadSize,
@@ -138,6 +140,7 @@ export function registerUpdaterHandlers(): void {
       return {
         hasUpdate: true,
         version: lastCheckResult.version,
+        targetVersion: lastCheckResult.targetVersion,
         updateType: lastCheckResult.updateType,
         releaseNotes: lastCheckResult.releaseNotes,
         size: lastCheckResult.downloadSize,
@@ -153,6 +156,7 @@ export function registerUpdaterHandlers(): void {
       ? {
           hasUpdate: true,
           version: result.version,
+          targetVersion: result.targetVersion,
           updateType: result.updateType,
           releaseNotes: result.releaseNotes,
           size: result.downloadSize,
@@ -225,7 +229,13 @@ export function registerUpdaterHandlers(): void {
       if (lastCheckResult.updateType === "asar") {
         installAsarUpdate(downloadedFilePath, lastCheckResult.version)
       } else {
-        installFullUpdate(downloadedFilePath, lastCheckResult.version)
+        installFullUpdate(
+          downloadedFilePath,
+          lastCheckResult.version,
+          lastCheckResult.targetVersion,
+          lastCheckResult.channel,
+          lastCheckResult.minVersion
+        )
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "安装失败"
@@ -264,6 +274,7 @@ export function registerUpdaterHandlers(): void {
       update: lastCheckResult
         ? {
             version: lastCheckResult.version,
+            targetVersion: lastCheckResult.targetVersion,
             updateType: lastCheckResult.updateType,
             releaseNotes: lastCheckResult.releaseNotes,
             size: lastCheckResult.downloadSize,

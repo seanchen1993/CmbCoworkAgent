@@ -15,6 +15,12 @@ import {
 } from "./installer"
 import { getUpdatesDir, downloadUpdate } from "./downloader"
 import { fetchLatestJson } from "./checker"
+import {
+  canCompleteWithAsar,
+  isLegacyIntermediateFullCandidate,
+  type UpdateMarker
+} from "./update-marker"
+import { clearPendingUpdateChain, writePendingUpdateChain } from "./update-chain"
 
 const ROLLBACK_ATTEMPT_MARKER_TTL_MS = 30 * 60 * 1000
 const FULL_BACKUP_CLEANUP_STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000
@@ -23,13 +29,6 @@ const FULL_BACKUP_INSESSION_CLEANUP_DELAY_MS = 60 * 1000
 
 let inSessionCleanupTimer: NodeJS.Timeout | null = null
 let inSessionCleanupScheduled = false
-
-interface UpdateMarker {
-  fromVersion: string
-  toVersion: string
-  updatedAt?: string
-  updateType?: string
-}
 
 interface FullBackupCleanupState {
   fromVersion?: string
@@ -161,26 +160,60 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
 
   const currentVersion = app.getVersion()
 
+  const legacyIntermediateCandidate = isLegacyIntermediateFullCandidate(marker, currentVersion)
+
   if (currentVersion === marker.toVersion) {
+    const installedVersion = marker.toVersion
     console.log(
       `[Updater] Self-check passed: version ${currentVersion} matches expected ${marker.toVersion}`
     )
     unlinkSync(markerPath)
 
     if (marker.updateType === "full") {
-      holdFullBackupCleanup(marker)
+      if (
+        marker.releaseVersion &&
+        marker.channel &&
+        marker.minVersion &&
+        canCompleteWithAsar(installedVersion, marker.releaseVersion, marker.minVersion)
+      ) {
+        writePendingUpdateChain({
+          intermediateVersion: installedVersion,
+          targetVersion: marker.releaseVersion,
+          channel: marker.channel,
+          minVersion: marker.minVersion
+        })
+        console.log(
+          `[Updater] Persisted ${marker.channel} update chain: ` +
+            `${installedVersion} -> ${marker.releaseVersion}`
+        )
+      } else {
+        clearPendingUpdateChain()
+      }
+      holdFullBackupCleanup({ ...marker, toVersion: installedVersion })
       return {
         updatedFrom: marker.fromVersion,
-        updatedTo: marker.toVersion,
+        updatedTo: installedVersion,
         updateType: marker.updateType,
         retainedFullBackup: true
       }
     }
 
     // Clean up backup files after successful ASAR update.
+    clearPendingUpdateChain()
     cleanupBackups()
 
     return { updatedFrom: marker.fromVersion, updatedTo: marker.toVersion, updateType: marker.updateType }
+  }
+
+  if (legacyIntermediateCandidate) {
+    // Old installers wrote the final release into toVersion and did not record
+    // minVersion. Keep the installed app and its rollback backup, but defer the
+    // success decision until checker.ts can validate the live manifest floor.
+    console.warn(
+      `[Updater] Legacy full bootstrap awaits manifest validation: ` +
+        `installed ${currentVersion}, target ${marker.toVersion}`
+    )
+    return { retainedFullBackup: true }
   }
 
   // Version mismatch - the update didn't take effect, auto-rollback
@@ -196,6 +229,7 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
       return {}
     }
 
+    clearPendingUpdateChain()
     markFullRollbackAttempting(markerPath)
     executeFullRollback(fullBackupDir)
     return {}
@@ -208,6 +242,7 @@ export async function runStartupSelfCheck(): Promise<StartupCheckResult> {
     return {}
   }
 
+  clearPendingUpdateChain()
   executeRollback(backupPath)
   return {}
 }
@@ -1028,6 +1063,7 @@ function executeRollback(backupAsarPath: string): void {
  * Tries local backup first, then downloads from server if needed.
  */
 export async function rollbackToPrevious(baseUrl: string): Promise<void> {
+  clearPendingUpdateChain()
   const backupPath = getBackupPath()
   const fullBackupDir = getFullBackupDir()
 

@@ -14,6 +14,7 @@ type UpdateStage = "idle" | "available" | "downloading" | "downloaded" | "instal
 
 interface UpdateInfo {
   version: string
+  targetVersion: string
   updateType: string
   releaseNotes: string
   size: number
@@ -139,6 +140,7 @@ export function UpdateDialog({
           ? { ...prev, ...info }
           : {
               version: info.version,
+              targetVersion: info.targetVersion,
               updateType: info.updateType,
               releaseNotes: info.releaseNotes ?? "",
               size: info.size ?? 0,
@@ -177,6 +179,7 @@ export function UpdateDialog({
       if (result.hasUpdate) {
         setUpdateInfo({
           version: result.version,
+          targetVersion: result.targetVersion,
           updateType: result.updateType,
           releaseNotes: result.releaseNotes,
           size: result.size,
@@ -268,6 +271,7 @@ export function UpdateDialog({
   }, [open, stage, updateInfo, handleCheck])
 
   const isMandatory = updateInfo?.mandatory ?? false
+  const isIntermediate = !!updateInfo && updateInfo.version !== updateInfo.targetVersion
 
   return (
     <Dialog
@@ -308,17 +312,27 @@ export function UpdateDialog({
         {stage === "available" && updateInfo && (
           <>
             <DialogHeader>
-              <DialogTitle>发现新版本 v{updateInfo.version}</DialogTitle>
+              <DialogTitle>
+                {isIntermediate
+                  ? `需要兼容性更新 v${updateInfo.version}`
+                  : `发现新版本 v${updateInfo.version}`}
+              </DialogTitle>
               <DialogDescription>
-                {updateInfo.updateType === "asar"
-                  ? "轻量更新（仅替换业务代码，无需重新安装）"
-                  : "完整更新（需要重新安装应用文件）"}
+                {isIntermediate
+                  ? `本次先升级至 v${updateInfo.version}，完成后可继续升级至 v${updateInfo.targetVersion}`
+                  : updateInfo.updateType === "asar"
+                    ? "轻量更新（仅替换业务代码，无需重新安装）"
+                    : "完整更新（需要重新安装应用文件）"}
               </DialogDescription>
             </DialogHeader>
 
             <div className="space-y-3">
               <div className="text-sm text-muted-foreground">
-                <div className="font-medium text-foreground mb-1">更新内容：</div>
+                <div className="font-medium text-foreground mb-1">
+                  {isIntermediate
+                    ? `最终版本 v${updateInfo.targetVersion} 更新内容：`
+                    : "更新内容："}
+                </div>
                 <div className="whitespace-pre-line bg-muted/50 rounded-md p-3 max-h-40 overflow-y-auto">
                   {updateInfo.releaseNotes}
                 </div>
@@ -388,16 +402,22 @@ export function UpdateDialog({
             <DialogHeader>
               <DialogTitle>v{updateInfo.version} 已就绪</DialogTitle>
               <DialogDescription>
-                {updateInfo.updateType === "asar"
-                  ? "轻量更新已下载完成，重启应用即可完成更新。请先保存当前工作。"
-                  : "完整更新已下载完成，重启应用将自动安装新版本。请先保存当前工作。"}
+                {isIntermediate
+                  ? `这是升级至 v${updateInfo.targetVersion} 的第一阶段，重启完成后应用会继续检查最终更新。`
+                  : updateInfo.updateType === "asar"
+                    ? "轻量更新已下载完成，重启应用即可完成更新。请先保存当前工作。"
+                    : "完整更新已下载完成，重启应用将自动安装新版本。请先保存当前工作。"}
               </DialogDescription>
             </DialogHeader>
 
             {updateInfo.releaseNotes && (
               <div className="space-y-3">
                 <div className="text-sm text-muted-foreground">
-                  <div className="font-medium text-foreground mb-1">更新内容：</div>
+                  <div className="font-medium text-foreground mb-1">
+                    {isIntermediate
+                      ? `最终版本 v${updateInfo.targetVersion} 更新内容：`
+                      : "更新内容："}
+                  </div>
                   <div className="whitespace-pre-line bg-muted/50 rounded-md p-3 max-h-40 overflow-y-auto">
                     {updateInfo.releaseNotes}
                   </div>
