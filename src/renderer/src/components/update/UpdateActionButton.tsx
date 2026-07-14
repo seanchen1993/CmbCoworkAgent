@@ -31,15 +31,18 @@ export function UpdateActionButton({
   const [dialogOpen, setDialogOpen] = useState(false)
   const [status, setStatus] = useState<UpdateStatus>("idle")
   const [version, setVersion] = useState<string | null>(null)
+  const [mandatory, setMandatory] = useState(false)
 
   const syncUpdateStatus = useCallback(async () => {
     try {
       const updateStatus = await window.api.update.getStatus()
       setStatus(updateStatus.status as UpdateStatus)
       setVersion(updateStatus.update?.version ?? null)
+      setMandatory(updateStatus.update?.mandatory ?? false)
     } catch {
       setStatus("idle")
       setVersion(null)
+      setMandatory(false)
     }
   }, [])
 
@@ -64,23 +67,32 @@ export function UpdateActionButton({
       .then((s) => {
         setStatus(s.status as UpdateStatus)
         setVersion(s.update?.version ?? null)
-        if (s.status === "downloaded" && consumeAutoOpenForVersion(s.update?.version)) {
+        setMandatory(s.update?.mandatory ?? false)
+        if (s.update?.mandatory && s.status !== "idle") {
+          setDialogOpen(true)
+        } else if (s.status === "downloaded" && consumeAutoOpenForVersion(s.update?.version)) {
           setDialogOpen(true)
         }
       })
       .catch(() => {
         setStatus("idle")
         setVersion(null)
+        setMandatory(false)
       })
 
     const removeAvailable = updateApi.onAvailable((info) => {
       setStatus("available")
       setVersion(info.version)
+      setMandatory(info.mandatory ?? false)
+      if (info.mandatory) {
+        setDialogOpen(true)
+      }
     })
     const removeDownloaded = updateApi.onDownloaded((info) => {
       setStatus("downloaded")
       setVersion(info.version)
-      if (consumeAutoOpenForVersion(info.version)) {
+      setMandatory(info.mandatory ?? false)
+      if (info.mandatory || consumeAutoOpenForVersion(info.version)) {
         setDialogOpen(true)
       }
     })
@@ -106,7 +118,9 @@ export function UpdateActionButton({
   if (variant !== "tag" && hideWhenCurrent && !hasUpdate) return null
 
   const statusTagText =
-    status === "downloaded"
+    mandatory
+      ? "强制更新"
+      : status === "downloaded"
       ? "重启更新"
       : status === "downloading"
         ? "下载中"
