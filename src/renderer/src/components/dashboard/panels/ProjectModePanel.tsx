@@ -1374,7 +1374,7 @@ function SortableTh({
 }): React.JSX.Element {
   if (!enabled) {
     return (
-      <th className="px-3 py-2 text-right font-medium" title={title}>
+      <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title={title}>
         {label}
       </th>
     )
@@ -1382,18 +1382,18 @@ function SortableTh({
   const active = activeKey === sortKey
   const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
   return (
-    <th className="px-3 py-2 text-right font-medium">
+    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
       <button
         type="button"
         onClick={() => onSort(sortKey)}
         title={title ?? `按${label}排序`}
         className={cn(
-          "ml-auto inline-flex items-center gap-1 transition-colors hover:text-foreground",
+          "ml-auto inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
           active ? "text-foreground" : "text-muted-foreground"
         )}
       >
         <span>{label}</span>
-        <Icon className={cn("size-3", active ? "opacity-100" : "opacity-40")} />
+        <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
       </button>
     </th>
   )
@@ -1703,7 +1703,7 @@ function ProjectListSection({
       >
         <table className="w-full min-w-[1560px] text-xs">
           <thead>
-            <tr className="border-b border-border bg-muted/30 text-muted-foreground">
+            <tr className="whitespace-nowrap border-b border-border bg-muted/30 text-muted-foreground">
               <th
                 className={cn(
                   PROJECT_LIST_PROJECT_COLUMN_CLASS,
