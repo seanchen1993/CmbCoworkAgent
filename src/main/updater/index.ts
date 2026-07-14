@@ -98,7 +98,6 @@ async function performCheck(manual: boolean): Promise<UpdateCheckResult | null> 
 
     if (result) {
       updateStatus = "available"
-      const shouldAutoDownload = result.mandatory || !manual
       broadcast("update:available", {
         version: result.version,
         targetVersion: result.targetVersion,
@@ -106,14 +105,13 @@ async function performCheck(manual: boolean): Promise<UpdateCheckResult | null> 
         releaseNotes: result.releaseNotes,
         size: result.downloadSize,
         mandatory: result.mandatory,
-        autoDownloading: shouldAutoDownload
+        autoDownloading: !manual
       })
       console.log(`[Updater] Update available: v${result.version} (${result.updateType})`)
 
-      if (shouldAutoDownload) {
-        // Mandatory updates always start immediately. Non-mandatory auto-checks
-        // keep the previous silent-background behavior.
-        void performDownload(!manual && !result.mandatory)
+      if (!manual) {
+        // Auto-check: silently download in background, notify when ready
+        performDownload(true)
       }
     } else if (manual) {
       console.log("[Updater] Already up to date")
@@ -163,8 +161,8 @@ export function registerUpdaterHandlers(): void {
           releaseNotes: result.releaseNotes,
           size: result.downloadSize,
           mandatory: result.mandatory,
-          currentStatus: updateStatus,
-          currentProgress: lastDownloadProgress,
+          currentStatus: "available" as const,
+          currentProgress: null,
           currentError: null
         }
       : { hasUpdate: false }
@@ -251,9 +249,6 @@ export function registerUpdaterHandlers(): void {
 
   // Dismiss the update notification
   ipcMain.handle("update:dismiss", async () => {
-    if (lastCheckResult?.mandatory) {
-      throw new Error("强制更新不可忽略")
-    }
     // Don't clear lastCheckResult — background download may still be in progress
     // and needs it to broadcast update:downloaded with the right info
     if (updateStatus !== "downloading") {

@@ -45,10 +45,9 @@ function getProgressTitle(progress: DownloadProgress | null, version?: string): 
   return version ? `正在下载 v${version}` : "正在下载更新..."
 }
 
-function getProgressDescription(progress: DownloadProgress | null, mandatory: boolean): string {
+function getProgressDescription(progress: DownloadProgress | null): string {
   if (progress?.phase === "verifying") return "下载已完成，正在校验文件完整性"
   if (progress?.phase === "extracting") return "下载已完成，正在解压更新文件"
-  if (mandatory) return "这是强制更新，下载完成后需要立即重启完成更新"
   return "下载完成后将提示您重启应用"
 }
 
@@ -95,15 +94,18 @@ export function UpdateDialog({
           setStage("available")
           onOpenChange(true)
         } else if (s.status === "downloading" && s.update) {
+          // Background download already in progress — only show if dialog is manually opened
           setUpdateInfo(s.update)
           setProgress(s.progress)
           setStage("downloading")
-          if (s.update.mandatory) onOpenChange(true)
         } else if (s.status === "downloaded" && s.update) {
+          // Don't self-open: UpdateActionButton owns the per-version auto-open
+          // coordination so card/tag variants and any future mount points stay
+          // consistent. We just hydrate stage so an already-open dialog shows
+          // the correct UI.
           setUpdateInfo(s.update)
           setProgress(null)
           setStage("downloaded")
-          if (s.update.mandatory) onOpenChange(true)
         } else if (s.status === "error" && s.update) {
           setUpdateInfo(s.update)
           setProgress(null)
@@ -119,8 +121,8 @@ export function UpdateDialog({
     const removeAvailable = api.onAvailable((info) => {
       setUpdateInfo(info)
       if ((info as UpdateInfo & { autoDownloading?: boolean }).autoDownloading) {
+        // Background download started automatically — don't interrupt user
         setStage("downloading")
-        if (info.mandatory) onOpenChange(true)
       } else {
         // Manual check — show available dialog
         setStage("available")
@@ -147,7 +149,11 @@ export function UpdateDialog({
       )
       setProgress(null)
       setStage("downloaded")
-      if (info.mandatory) onOpenChange(true)
+      // Don't self-open here. UpdateActionButton owns the per-version auto-open
+      // gate (autoOpenedVersions Set) and will set dialogOpen=true. Opening
+      // ourselves would bypass that coordination if/when the dialog is ever
+      // mounted while closed (e.g. variant="card", which keeps UpdateDialog
+      // mounted regardless of dialogOpen).
     })
 
     const removeError = api.onError((err) => {
@@ -235,14 +241,8 @@ export function UpdateDialog({
     }
   }, [])
 
-  const handleDismiss = useCallback(async () => {
-    try {
-      await window.api.update.dismiss()
-    } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : "强制更新不可忽略")
-      onOpenChange(true)
-      return
-    }
+  const handleDismiss = useCallback(() => {
+    window.api.update.dismiss()
     setStage("idle")
     setUpdateInfo(null)
     setProgress(null)
@@ -256,16 +256,12 @@ export function UpdateDialog({
   const handleRetry = useCallback(() => {
     setErrorMsg("")
     if (updateInfo) {
-      if (updateInfo.mandatory) {
-        void handleDownload()
-      } else {
-        setStage("available")
-      }
+      setStage("available")
     } else {
       setStage("idle")
       handleCheck()
     }
-  }, [updateInfo, handleCheck, handleDownload])
+  }, [updateInfo, handleCheck])
 
   // Auto-check when dialog opens manually and nothing is happening
   useEffect(() => {
@@ -283,15 +279,15 @@ export function UpdateDialog({
       onOpenChange={(v) => {
         if (v) return onOpenChange(true)
         if (stage === "installing") return
-        if (isMandatory) return
         if (stage === "downloading") return handleHideDownloading()
         // Keep main process state so the sidebar tag stays red and the user
         // can re-open this dialog later to install.
         if (stage === "downloaded") return onOpenChange(false)
+        if (isMandatory) return
         handleDismiss()
       }}
     >
-      <DialogContent className="sm:max-w-md" showCloseButton={!isMandatory && stage !== "installing"}>
+      <DialogContent className="sm:max-w-md">
         {/* idle / checking */}
         {stage === "idle" && (
           <>
@@ -317,16 +313,12 @@ export function UpdateDialog({
           <>
             <DialogHeader>
               <DialogTitle>
-                {isMandatory
-                  ? `必须更新至 v${updateInfo.version}`
-                  : isIntermediate
+                {isIntermediate
                   ? `需要兼容性更新 v${updateInfo.version}`
                   : `发现新版本 v${updateInfo.version}`}
               </DialogTitle>
               <DialogDescription>
-                {isMandatory
-                  ? "当前版本需要完成更新后继续使用，更新过程中请先保存当前工作。"
-                  : isIntermediate
+                {isIntermediate
                   ? `本次先升级至 v${updateInfo.version}，完成后可继续升级至 v${updateInfo.targetVersion}`
                   : updateInfo.updateType === "asar"
                     ? "轻量更新（仅替换业务代码，无需重新安装）"
@@ -368,7 +360,7 @@ export function UpdateDialog({
           <>
             <DialogHeader>
               <DialogTitle>{getProgressTitle(progress, updateInfo?.version)}</DialogTitle>
-              <DialogDescription>{getProgressDescription(progress, isMandatory)}</DialogDescription>
+              <DialogDescription>{getProgressDescription(progress)}</DialogDescription>
             </DialogHeader>
 
             <div className="space-y-3">
@@ -408,13 +400,9 @@ export function UpdateDialog({
         {stage === "downloaded" && updateInfo && (
           <>
             <DialogHeader>
-              <DialogTitle>
-                {isMandatory ? `必须重启完成 v${updateInfo.version} 更新` : `v${updateInfo.version} 已就绪`}
-              </DialogTitle>
+              <DialogTitle>v{updateInfo.version} 已就绪</DialogTitle>
               <DialogDescription>
-                {isMandatory
-                  ? "强制更新已下载完成，请保存当前工作并立即重启完成更新。"
-                  : isIntermediate
+                {isIntermediate
                   ? `这是升级至 v${updateInfo.targetVersion} 的第一阶段，重启完成后应用会继续检查最终更新。`
                   : updateInfo.updateType === "asar"
                     ? "轻量更新已下载完成，重启应用即可完成更新。请先保存当前工作。"
@@ -471,25 +459,19 @@ export function UpdateDialog({
           <>
             <DialogHeader>
               <DialogTitle>更新失败</DialogTitle>
-              <DialogDescription>
-                {isMandatory
-                  ? `${errorMsg || "未知错误"}。这是强制更新，请稍后重试。`
-                  : errorMsg || "未知错误"}
-              </DialogDescription>
+              <DialogDescription>{errorMsg || "未知错误"}</DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              {!isMandatory && (
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setStage("idle")
-                    onOpenChange(false)
-                  }}
-                >
-                  关闭
-                </Button>
-              )}
-              <Button onClick={handleRetry}>{isMandatory ? "重试更新" : "重试"}</Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setStage("idle")
+                  onOpenChange(false)
+                }}
+              >
+                关闭
+              </Button>
+              <Button onClick={handleRetry}>重试</Button>
             </DialogFooter>
           </>
         )}
