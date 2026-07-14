@@ -3107,18 +3107,6 @@ const UNCOMMITTED_ANTIJOIN_BATCH = 1000
 const UNCOMMITTED_COMPOSITE_PAGE = 1000
 // 安全上限：最多翻 200 页（20 万用户），防止异常情况下无限翻页。
 const UNCOMMITTED_COMPOSITE_MAX_PAGES = 200
-// 排除最近 N 毫秒内的「在途生成」：刚生成还没来得及 commit，不应算作未提交。
-const UNCOMMITTED_SETTLE_MS = 2 * 60 * 60 * 1000
-
-/**
- * 把生成时间范围的上界收敛到 min(range.to, now − settle)，得到「已结算」的查询范围。
- * 只有当所选范围延伸到最近 2 小时内（即包含当天到现在）时才会被裁剪；上界本就在
- * 2 小时之前的历史范围保持不变，与外部事件筛选框一致。
- */
-function uncommittedSettledRange(range: TimeRange): TimeRange {
-  const settle = new Date(Date.now() - UNCOMMITTED_SETTLE_MS).toISOString()
-  return { from: range.from, to: range.to < settle ? range.to : settle }
-}
 
 function buildUncommittedSelfUserFilter(
   access: UncommittedAnalysisAccess
@@ -3189,21 +3177,19 @@ async function fetchUncommittedRanking(
   // 管理员可看全部；unrestricted 名单用户看本室；普通用户只看本人。
   const access = requireDashboardUncommittedAnalysisAccess()
   const scopeFilters = uncommittedScopeFilters(options, access)
-  // 上界排除最近 2 小时的在途生成；纯历史范围不受影响（见 uncommittedSettledRange）。
-  const settledRange = uncommittedSettledRange(range)
 
   // 两类事件各自的过滤（用各自的时间字段）。同时用于「顶层 should 限定 composite
   // 只对窗口内有 gen 或 adopt 的用户建桶」+「桶内 filter 子聚合分别求和」。
   const genEventFilter = {
     bool: {
-      filter: [{ term: { eventName: "code_gen" } }, timeRangeFilter("eventTime", settledRange)]
+      filter: [{ term: { eventName: "code_gen" } }, timeRangeFilter("eventTime", range)]
     }
   }
   const adoptEventFilter = {
     bool: {
       filter: [
         { term: { eventName: "code_adopt" } },
-        timeRangeFilter("properties.generatedAt", settledRange),
+        timeRangeFilter("properties.generatedAt", range),
         { exists: { field: "properties.adoptedLineCount" } },
         { exists: { field: "properties.generatedLineCount" } },
         { exists: { field: "properties.effectiveGeneratedLineCount" } }
@@ -3347,8 +3333,6 @@ async function fetchUncommittedDetail(
   const normalizedSapId = sapId.trim()
   if (!normalizedSapId) throw new Error("sapId is required")
   const scopeFilters = uncommittedScopeFilters(options, access)
-  // 与榜单口径一致：上界排除最近 2 小时的在途生成。
-  const settledRange = uncommittedSettledRange(range)
 
   // 1) 扫描该用户最近的 code_gen（降序，单次查询，封顶 scanCap）。时间口径同外部筛选框。
   const genBody = {
@@ -3359,7 +3343,7 @@ async function fetchUncommittedDetail(
         filter: [
           { term: { eventName: "code_gen" } },
           { term: { sapId: normalizedSapId } },
-          timeRangeFilter("eventTime", settledRange),
+          timeRangeFilter("eventTime", range),
           ...scopeFilters
         ]
       }
