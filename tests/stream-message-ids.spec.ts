@@ -1762,6 +1762,107 @@ function testGoalSubturnCompleteAdvancesSystemFallbackIndex(): void {
   )
 }
 
+function testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "retry-ai", content: "partial" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1"
+  )
+
+  const resetEvents = convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "stream_retry_reset",
+        discardedMessageIds: ["retry-ai"],
+        messages: [
+          {
+            id: ["langchain_core", "messages", "SystemMessage"],
+            kwargs: { id: "stable-system", content: "stable checkpoint" }
+          }
+        ]
+      }
+    },
+    "thread-1"
+  )
+  const resetValues = resetEvents.find((event) => event.event === "values")?.data as
+    | { messages?: Array<{ id?: string }> }
+    | undefined
+  assertEqual(
+    resetValues?.messages?.[0]?.id,
+    "stable-system",
+    "retry reset should restore stable values"
+  )
+
+  const retryEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "retry-ai-2", content: "complete" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1"
+  )
+  const retryMessage = retryEvents.find((event) => event.event === "messages")?.data as
+    | [{ content?: string }]
+    | undefined
+  assertEqual(
+    retryMessage?.[0]?.content,
+    "complete",
+    "retry should not subtract or append the discarded partial content"
+  )
+
+  const finalEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "SystemMessage"],
+            kwargs: { id: "stable-system", content: "stable checkpoint" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "retry-ai-final", content: "complete" }
+          }
+        ]
+      }
+    },
+    "thread-1"
+  )
+  const alias = finalEvents.find(
+    (event) =>
+      event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+  )?.data as { fromId?: string; toId?: string } | undefined
+  assertEqual(alias?.fromId, "retry-ai-2", "retry should reuse the discarded logical slot")
+  assertEqual(alias?.toId, "retry-ai-final", "retry values should adopt the checkpoint id")
+}
+
 const tests: Array<[string, () => void]> = [
   ["testExplicitIdWins", testExplicitIdWins],
   ["testFallbackIdIsStableForSameValuesMessage", testFallbackIdIsStableForSameValuesMessage],
@@ -1862,6 +1963,10 @@ const tests: Array<[string, () => void]> = [
   [
     "testGoalSubturnCompleteAdvancesSystemFallbackIndex",
     testGoalSubturnCompleteAdvancesSystemFallbackIndex
+  ],
+  [
+    "testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState",
+    testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState
   ]
 ]
 
