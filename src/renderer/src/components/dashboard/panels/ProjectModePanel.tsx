@@ -1082,22 +1082,23 @@ function ProjectRow({
                 >
                   {project.name}
                 </span>
-                {project.systemConstraintEverLoadedSuccessfully && (
-                  <Badge
-                    variant="outline"
-                    className="shrink-0 border-status-nominal/40 bg-status-nominal/10 px-1.5 py-0 text-[10px] font-medium text-status-nominal normal-case tracking-normal"
-                    title="该项目至少有一次会话完整加载系统约束"
-                  >
-                    约束加载成功
-                  </Badge>
-                )}
               </div>
-              {project.systemName && (
-                <div
-                  className="truncate text-[10px] text-muted-foreground"
-                  title={project.systemName}
-                >
-                  {project.systemName}
+              {(project.systemName || project.systemConstraintEverLoadedSuccessfully) && (
+                <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+                  {project.systemName && (
+                    <span className="min-w-0 truncate" title={project.systemName}>
+                      {project.systemName}
+                    </span>
+                  )}
+                  {project.systemConstraintEverLoadedSuccessfully && (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 border-status-nominal/40 bg-status-nominal/10 px-1.5 py-0 text-[10px] font-medium text-status-nominal normal-case tracking-normal"
+                      title="该项目至少有一次会话完整加载系统约束"
+                    >
+                      约束加载
+                    </Badge>
+                  )}
                 </div>
               )}
             </div>
