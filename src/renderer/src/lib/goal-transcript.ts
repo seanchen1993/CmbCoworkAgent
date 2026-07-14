@@ -308,6 +308,7 @@ export function buildRestoredCheckpointTranscript(
     }
 
     if (isGoalTranscriptArtifact(rawMessage)) continue
+    if (isWorkflowPlumbingTranscriptContent(rawMessage.content)) continue
 
     const visibleMessage = visibleCheckpointMessages[visibleIndex] ?? rawMessage
     visibleIndex += 1

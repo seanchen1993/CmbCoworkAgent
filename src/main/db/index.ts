@@ -327,6 +327,10 @@ function hasUsefulContent(content: Message["content"]): boolean {
   return typeof content === "string" ? content.length > 0 : content.length > 0
 }
 
+function hasUsefulToolCalls(toolCalls: Message["tool_calls"]): boolean {
+  return Array.isArray(toolCalls) && toolCalls.length > 0
+}
+
 function mergeMessageContent(
   existing: Message["content"],
   incoming: Message["content"]
@@ -359,16 +363,67 @@ function clampToolCalls(value: unknown): Message["tool_calls"] {
 
 function mergeToolCalls(
   existing: Message["tool_calls"],
-  incoming: Message["tool_calls"]
+  incoming: Message["tool_calls"],
+  options: { incomingAuthoritative?: boolean; preferExisting?: boolean } = {}
 ): Message["tool_calls"] {
-  return Array.isArray(incoming) && incoming.length > 0
+  if (options.preferExisting) return clampToolCalls(existing)
+  return Array.isArray(incoming) && (incoming.length > 0 || options.incomingAuthoritative)
     ? clampToolCalls(incoming)
     : clampToolCalls(existing)
+}
+
+function isAssistantToolCallToTextAlias(
+  source: { role?: Message["role"]; content?: Message["content"]; tool_calls?: Message["tool_calls"] },
+  target: { role?: Message["role"]; content?: Message["content"]; tool_calls?: Message["tool_calls"] }
+): boolean {
+  return (
+    source.role === "assistant" &&
+    target.role === "assistant" &&
+    hasUsefulToolCalls(source.tool_calls) &&
+    !hasUsefulToolCalls(target.tool_calls) &&
+    hasUsefulContent(target.content ?? "")
+  )
+}
+
+function mergeAliasedMessageContent(
+  sourceContent: Message["content"],
+  targetContent: Message["content"],
+  sourceContentPriority: number,
+  targetContentPriority: number
+): Message["content"] {
+  if (sourceContentPriority > targetContentPriority) return normalizeMessageContent(sourceContent)
+  if (targetContentPriority > sourceContentPriority) return normalizeMessageContent(targetContent)
+  if (sourceContentPriority > 0 && targetContentPriority > 0) {
+    return normalizeMessageContent(targetContent)
+  }
+  return normalizeMessageContent(hasUsefulContent(targetContent) ? targetContent : sourceContent)
+}
+
+function mergeAliasedToolCalls(
+  sourceToolCalls: Message["tool_calls"],
+  targetToolCalls: Message["tool_calls"],
+  sourceContentPriority: number,
+  targetContentPriority: number
+): Message["tool_calls"] {
+  if (sourceContentPriority > targetContentPriority) {
+    return Array.isArray(sourceToolCalls) ? clampToolCalls(sourceToolCalls) : clampToolCalls(targetToolCalls)
+  }
+  if (targetContentPriority > sourceContentPriority) {
+    return Array.isArray(targetToolCalls) ? clampToolCalls(targetToolCalls) : clampToolCalls(sourceToolCalls)
+  }
+  if (sourceContentPriority > 0 && targetContentPriority > 0) {
+    return Array.isArray(targetToolCalls) ? clampToolCalls(targetToolCalls) : clampToolCalls(sourceToolCalls)
+  }
+  return mergeToolCalls(sourceToolCalls, targetToolCalls)
 }
 
 function mergeNormalizedThreadMessages(existing: Message, incoming: Message): Message {
   const existingCreatedAt = normalizeTimestamp(existing.created_at)
   const incomingCreatedAt = normalizeTimestamp(incoming.created_at)
+  const existingContentPriority = existing.content_priority ?? 0
+  const incomingContentPriority = incoming.content_priority ?? 0
+  const hasAuthoritativeIncomingContent =
+    incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
   const createdAt =
     existingCreatedAt !== null && incomingCreatedAt !== null
       ? new Date(Math.min(existingCreatedAt, incomingCreatedAt))
@@ -377,8 +432,16 @@ function mergeNormalizedThreadMessages(existing: Message, incoming: Message): Me
   return {
     ...existing,
     ...incoming,
-    content: mergeMessageContent(existing.content, incoming.content),
-    tool_calls: mergeToolCalls(existing.tool_calls, incoming.tool_calls),
+    content:
+      hasAuthoritativeIncomingContent
+        ? normalizeMessageContent(incoming.content)
+        : existingContentPriority > incomingContentPriority
+          ? normalizeMessageContent(existing.content)
+          : mergeMessageContent(existing.content, incoming.content),
+    tool_calls: mergeToolCalls(existing.tool_calls, incoming.tool_calls, {
+      incomingAuthoritative: hasAuthoritativeIncomingContent,
+      preferExisting: existingContentPriority > incomingContentPriority
+    }),
     tool_call_id: incoming.tool_call_id ?? existing.tool_call_id,
     name: incoming.name ?? existing.name,
     status: incoming.status ?? existing.status,
@@ -468,6 +531,7 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
       name TEXT,
       status TEXT,
       is_error INTEGER,
+      content_priority INTEGER,
       goal_id TEXT,
       active_window_id TEXT,
       created_at INTEGER NOT NULL,
@@ -576,6 +640,12 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
   if (!hasThreadMessageActiveWindowId) {
     db.run("ALTER TABLE thread_messages ADD COLUMN active_window_id TEXT")
   }
+  const hasThreadMessageContentPriority = threadMessageColumns.some(
+    (row) => row[1] === "content_priority"
+  )
+  if (!hasThreadMessageContentPriority) {
+    db.run("ALTER TABLE thread_messages ADD COLUMN content_priority INTEGER")
+  }
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
   db.run(
@@ -630,6 +700,7 @@ interface ThreadMessageRow {
   name: string | null
   status: string | null
   is_error: number | null
+  content_priority: number | null
   goal_id: string | null
   active_window_id: string | null
   created_at: number
@@ -668,6 +739,9 @@ function normalizeThreadMessageInput(message: Message, fallbackTime: number): Me
     ...(typeof message.goal_id === "string" && message.goal_id ? { goal_id: message.goal_id } : {}),
     ...(typeof message.active_window_id === "string" && message.active_window_id
       ? { active_window_id: message.active_window_id }
+      : {}),
+    ...(typeof message.content_priority === "number" && message.content_priority > 0
+      ? { content_priority: message.content_priority }
       : {}),
     created_at: new Date(createdAt),
     ...(startAt !== null ? { start_at: new Date(startAt) } : {}),
@@ -789,6 +863,9 @@ function threadMessageRowToMessage(row: ThreadMessageRow): Message {
     ...(row.name ? { name: row.name } : {}),
     ...(row.status ? { status: row.status } : {}),
     ...(isError !== undefined ? { is_error: isError } : {}),
+    ...(typeof row.content_priority === "number" && row.content_priority > 0
+      ? { content_priority: row.content_priority }
+      : {}),
     ...(row.goal_id ? { goal_id: row.goal_id } : {}),
     ...(row.active_window_id ? { active_window_id: row.active_window_id } : {}),
     created_at: createdAt,
@@ -929,8 +1006,10 @@ export function upsertThreadMessages(
     return { message, messageId, canonicalId: resolved.id, aliasRole: resolved.role }
   })
   const incomingRoleById = new Map<string, Message["role"]>()
+  const incomingMessageById = new Map<string, Message>()
   for (const { message, messageId } of aliasCandidates) {
     if (messageId && isMessageRole(message.role)) incomingRoleById.set(messageId, message.role)
+    if (messageId) incomingMessageById.set(messageId, message)
   }
   const aliasTargetRows = getThreadMessageRows(
     database,
@@ -947,6 +1026,44 @@ export function upsertThreadMessages(
       console.warn(
         `[DB] Ignoring message id alias across same-batch roles for thread ${threadId}: ` +
           `${messageId} (${message.role}) -> ${canonicalId} (${sameBatchTargetRole})`
+      )
+      return message
+    }
+    const sameBatchTargetMessage = incomingMessageById.get(canonicalId)
+    if (
+      sameBatchTargetMessage &&
+      isAssistantToolCallToTextAlias(message, sameBatchTargetMessage)
+    ) {
+      console.warn(
+        `[DB] Ignoring assistant tool-call to text message alias in same batch for thread ${threadId}: ` +
+          `${messageId} -> ${canonicalId}`
+      )
+      return message
+    }
+    if (
+      target &&
+      isAssistantToolCallToTextAlias(message, {
+        role: target.role,
+        content: parseMessageContent(target.content_json),
+        tool_calls: parseToolCalls(target.tool_calls_json)
+      })
+    ) {
+      console.warn(
+        `[DB] Ignoring assistant tool-call to text message alias for thread ${threadId}: ` +
+          `${messageId} -> ${canonicalId}`
+      )
+      return message
+    }
+    if (
+      !target &&
+      !sameBatchTargetMessage &&
+      aliasRole === "assistant" &&
+      message.role === "assistant" &&
+      hasUsefulToolCalls(message.tool_calls)
+    ) {
+      console.warn(
+        `[DB] Ignoring unresolved assistant tool-call message alias for thread ${threadId}: ` +
+          `${messageId} -> ${canonicalId}`
       )
       return message
     }
@@ -1014,12 +1131,32 @@ export function upsertThreadMessages(
 
       const existingContent = existing ? parseMessageContent(existing.content_json) : ""
       const existingToolCalls = existing ? parseToolCalls(existing.tool_calls_json) : undefined
+      const existingContentPriority =
+        typeof existing?.content_priority === "number" && existing.content_priority > 0
+          ? existing.content_priority
+          : 0
+      const incomingContentPriority =
+        typeof normalized.content_priority === "number" && normalized.content_priority > 0
+          ? normalized.content_priority
+          : 0
+      const hasAuthoritativeIncomingContent =
+        incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
       const nextContent = normalizeMessageContent(
-        existing ? mergeMessageContent(existingContent, normalized.content) : normalized.content
+        existing
+          ? hasAuthoritativeIncomingContent
+            ? normalized.content
+            : existingContentPriority > incomingContentPriority
+              ? existingContent
+              : mergeMessageContent(existingContent, normalized.content)
+          : normalized.content
       )
       const nextToolCalls = existing
-        ? mergeToolCalls(existingToolCalls, normalized.tool_calls)
+        ? mergeToolCalls(existingToolCalls, normalized.tool_calls, {
+            incomingAuthoritative: hasAuthoritativeIncomingContent,
+            preferExisting: existingContentPriority > incomingContentPriority
+          })
         : clampToolCalls(normalized.tool_calls)
+      const nextContentPriority = Math.max(existingContentPriority, incomingContentPriority)
       const contentJson = safeJsonStringify(nextContent)
       const toolCallsJson = Array.isArray(nextToolCalls) ? safeJsonStringify(nextToolCalls) : null
       const toolCallId = normalized.tool_call_id ?? existing?.tool_call_id ?? null
@@ -1049,7 +1186,7 @@ export function upsertThreadMessages(
         database.run(
           `UPDATE thread_messages
            SET role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?,
-               name = ?, status = ?, is_error = ?, goal_id = ?, active_window_id = ?,
+               name = ?, status = ?, is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?,
                created_at = ?, start_at = ?, end_at = ?
            WHERE thread_id = ? AND message_id = ?`,
           [
@@ -1060,6 +1197,7 @@ export function upsertThreadMessages(
             name,
             status,
             isError,
+            nextContentPriority > 0 ? nextContentPriority : null,
             goalId,
             activeWindowId,
             nextCreatedAt,
@@ -1074,9 +1212,9 @@ export function upsertThreadMessages(
         database.run(
           `INSERT INTO thread_messages (
              thread_id, message_id, role, content_json, tool_calls_json, tool_call_id,
-             name, status, is_error, goal_id, active_window_id, created_at, start_at, end_at,
+             name, status, is_error, content_priority, goal_id, active_window_id, created_at, start_at, end_at,
              ordinal
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             threadId,
             normalized.id,
@@ -1087,6 +1225,7 @@ export function upsertThreadMessages(
             name,
             status,
             isError,
+            nextContentPriority > 0 ? nextContentPriority : null,
             goalId,
             activeWindowId,
             nextCreatedAt,
@@ -1160,6 +1299,41 @@ export function replaceThreadMessageId(
     )
     return false
   }
+  if (
+    source &&
+    target &&
+    isAssistantToolCallToTextAlias(
+      {
+        role: source.role,
+        content: parseMessageContent(source.content_json),
+        tool_calls: parseToolCalls(source.tool_calls_json)
+      },
+      {
+        role: target.role,
+        content: parseMessageContent(target.content_json),
+        tool_calls: parseToolCalls(target.tool_calls_json)
+      }
+    )
+  ) {
+    console.warn(
+      `[DB] Refusing to merge assistant tool-call message into text answer for thread ${threadId}: ` +
+        `${fromId} -> ${toId}`
+    )
+    return false
+  }
+  if (
+    source &&
+    !target &&
+    (role === "assistant" || source.role === "assistant") &&
+    source.role === "assistant" &&
+    hasUsefulToolCalls(parseToolCalls(source.tool_calls_json))
+  ) {
+    console.warn(
+      `[DB] Refusing to rename assistant tool-call message to unresolved alias target for thread ${threadId}: ` +
+        `${fromId} -> ${toId}`
+    )
+    return false
+  }
 
   const aliasRole = source?.role ?? target?.role ?? role ?? fromAlias.role ?? toAlias.role
   rememberThreadMessageIdAlias(threadId, requestedFromId, toId, aliasRole)
@@ -1178,12 +1352,28 @@ export function replaceThreadMessageId(
     } else {
       const targetContent = parseMessageContent(target.content_json)
       const sourceContent = parseMessageContent(source.content_json)
-      const mergedContent = normalizeMessageContent(
-        hasUsefulContent(targetContent) ? targetContent : sourceContent
+      const sourceToolCalls = parseToolCalls(source.tool_calls_json)
+      const targetToolCalls = parseToolCalls(target.tool_calls_json)
+      const sourceContentPriority =
+        typeof source.content_priority === "number" && source.content_priority > 0
+          ? source.content_priority
+          : 0
+      const targetContentPriority =
+        typeof target.content_priority === "number" && target.content_priority > 0
+          ? target.content_priority
+          : 0
+      const mergedContentPriority = Math.max(sourceContentPriority, targetContentPriority)
+      const mergedContent = mergeAliasedMessageContent(
+        sourceContent,
+        targetContent,
+        sourceContentPriority,
+        targetContentPriority
       )
-      const mergedToolCalls = mergeToolCalls(
-        parseToolCalls(source.tool_calls_json),
-        parseToolCalls(target.tool_calls_json)
+      const mergedToolCalls = mergeAliasedToolCalls(
+        sourceToolCalls,
+        targetToolCalls,
+        sourceContentPriority,
+        targetContentPriority
       )
 
       database.run("DELETE FROM thread_messages WHERE thread_id = ? AND message_id = ?", [
@@ -1193,7 +1383,7 @@ export function replaceThreadMessageId(
       database.run(
         `UPDATE thread_messages
          SET role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
-             is_error = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
+             is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
              end_at = ?, ordinal = ?
          WHERE thread_id = ? AND message_id = ?`,
         [
@@ -1204,6 +1394,7 @@ export function replaceThreadMessageId(
           target.name ?? source.name,
           target.status ?? source.status,
           target.is_error ?? source.is_error,
+          mergedContentPriority > 0 ? mergedContentPriority : null,
           target.goal_id ?? source.goal_id,
           target.active_window_id ?? source.active_window_id,
           Math.min(

@@ -272,6 +272,7 @@ export interface Message {
   id: string
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  content_priority?: number
   reasoning?: string
   tool_calls?: ToolCall[]
   // For tool messages - links result to its tool call

@@ -716,6 +716,417 @@ async function testReplaceThreadMessageIdKeepsSingleCanonicalRow(): Promise<void
   await db.closeDatabase()
 }
 
+async function testAssistantToolCallAliasDoesNotPolluteFinalTextAnswer(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-tool-call-alias-guard"
+
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Tool call alias guard" })
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "tool-call-source",
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call-1", name: "execute", args: { command: "git status --short" } }],
+      created_at: new Date("2026-07-10T01:00:00.000Z")
+    },
+    {
+      id: "text-answer-target",
+      role: "assistant",
+      content: "DUP_TEST_A_20260711 只应该出现一次。",
+      created_at: new Date("2026-07-10T01:00:02.000Z")
+    }
+  ])
+
+  assertEqual(
+    db.replaceThreadMessageId(threadId, "tool-call-source", "text-answer-target", "assistant"),
+    false,
+    "a tool-call assistant row must not be merged into a text-only final answer row"
+  )
+  let messages = db.getThreadMessages(threadId)
+  assertEqual(
+    messages.some((message) => message.id === "tool-call-source"),
+    true,
+    "the rejected alias should preserve the original tool-call assistant row"
+  )
+  assertEqual(
+    messages.find((message) => message.id === "text-answer-target")?.tool_calls?.length ?? 0,
+    0,
+    "the text-only final answer must not inherit tool calls from the rejected alias"
+  )
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "existing-tool-call-source",
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call-existing", name: "execute", args: {} }],
+      created_at: new Date("2026-07-10T01:00:02.500Z")
+    }
+  ])
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "existing-tool-call-source",
+      "future-text-answer-target",
+      "assistant"
+    ),
+    false,
+    "an existing tool-call row must not be renamed to a future text-answer alias target"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "future-text-answer-target",
+      role: "assistant",
+      content: "future final text",
+      created_at: new Date("2026-07-10T01:00:02.750Z")
+    }
+  ])
+  messages = db.getThreadMessages(threadId)
+  assertEqual(
+    messages.some((message) => message.id === "existing-tool-call-source"),
+    true,
+    "the existing tool-call source should remain under its original id"
+  )
+  assertEqual(
+    messages.find((message) => message.id === "future-text-answer-target")?.tool_calls?.length ??
+      0,
+    0,
+    "a future text answer must not inherit tool calls from a rejected existing-source alias"
+  )
+
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "remembered-tool-call-source",
+      "remembered-text-answer-target",
+      "assistant"
+    ),
+    true,
+    "pre-row assistant aliases may still be remembered"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "remembered-tool-call-source",
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call-2", name: "execute", args: {} }],
+      created_at: new Date("2026-07-10T01:00:03.000Z")
+    },
+    {
+      id: "remembered-text-answer-target",
+      role: "assistant",
+      content: "final text after a zero-arg tool",
+      created_at: new Date("2026-07-10T01:00:04.000Z")
+    }
+  ])
+  messages = db.getThreadMessages(threadId)
+  assertEqual(
+    messages.some((message) => message.id === "remembered-tool-call-source"),
+    true,
+    "a same-batch text target must not steal a remembered tool-call source id"
+  )
+  assertEqual(
+    messages.find((message) => message.id === "remembered-text-answer-target")?.tool_calls
+      ?.length ?? 0,
+    0,
+    "same-batch final text must stay free of source tool calls"
+  )
+
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "unresolved-tool-call-source",
+      "unresolved-final-answer-target",
+      "assistant"
+    ),
+    true,
+    "pre-row assistant aliases may be remembered before either row exists"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "unresolved-tool-call-source",
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call-3", name: "execute", args: {} }],
+      created_at: new Date("2026-07-10T01:00:05.000Z")
+    }
+  ])
+  messages = db.getThreadMessages(threadId)
+  assertEqual(
+    messages.some((message) => message.id === "unresolved-tool-call-source"),
+    true,
+    "an unresolved assistant alias must not rename a tool-call row without seeing its target"
+  )
+  assertEqual(
+    messages.some((message) => message.id === "unresolved-final-answer-target"),
+    false,
+    "the unresolved alias target must not be created by a tool-call source row"
+  )
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
+async function testReplaceThreadMessageIdRespectsAuthoritativeContentPriority(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-message-id-priority-merge"
+
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Message alias priority merge" })
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "authoritative-empty-source",
+      role: "assistant",
+      content: "",
+      content_priority: 1,
+      tool_calls: [],
+      created_at: new Date("2026-07-10T02:00:00.000Z")
+    },
+    {
+      id: "stale-target",
+      role: "assistant",
+      content: "stale final text",
+      tool_calls: [{ id: "call-stale", name: "execute", args: {} }],
+      created_at: new Date("2026-07-10T02:00:01.000Z")
+    }
+  ])
+
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "authoritative-empty-source",
+      "stale-target",
+      "assistant"
+    ),
+    true,
+    "same-role aliases should still merge when the source is an authoritative empty repair"
+  )
+  let messages = db.getThreadMessages(threadId)
+  let repaired = messages.find((message) => message.id === "stale-target")
+  assertEqual(repaired?.content, "", "source authoritative empty content should clear stale target")
+  assertEqual(
+    repaired?.tool_calls?.length ?? -1,
+    0,
+    "source authoritative empty tool_calls should clear stale target tool calls"
+  )
+  assertEqual(repaired?.content_priority, 1, "merged repair priority should persist")
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "stale-target",
+      role: "assistant",
+      content: "late stale replay",
+      tool_calls: [{ id: "call-stale", name: "execute", args: {} }],
+      created_at: new Date("2026-07-10T02:00:02.000Z")
+    }
+  ])
+  repaired = db.getThreadMessages(threadId).find((message) => message.id === "stale-target")
+  assertEqual(
+    repaired?.content,
+    "",
+    "a lower-priority replay must not undo an authoritative alias clear"
+  )
+  assertEqual(
+    repaired?.tool_calls?.length ?? -1,
+    0,
+    "a lower-priority replay must not restore tool calls after an authoritative alias clear"
+  )
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "stale-source",
+      role: "assistant",
+      content: "stale source text",
+      tool_calls: [{ id: "call-source-stale", name: "execute", args: {} }],
+      created_at: new Date("2026-07-10T02:00:03.000Z")
+    },
+    {
+      id: "authoritative-empty-target",
+      role: "assistant",
+      content: "",
+      content_priority: 1,
+      tool_calls: [],
+      created_at: new Date("2026-07-10T02:00:04.000Z")
+    }
+  ])
+  assertEqual(
+    db.replaceThreadMessageId(
+      threadId,
+      "stale-source",
+      "authoritative-empty-target",
+      "assistant"
+    ),
+    true,
+    "same-role aliases should merge when the target is an authoritative empty repair"
+  )
+  messages = db.getThreadMessages(threadId)
+  repaired = messages.find((message) => message.id === "authoritative-empty-target")
+  assertEqual(repaired?.content, "", "target authoritative empty content should clear stale source")
+  assertEqual(
+    repaired?.tool_calls?.length ?? -1,
+    0,
+    "target authoritative empty tool_calls should clear stale source tool calls"
+  )
+  assertEqual(
+    messages.some((message) => message.id === "stale-source"),
+    false,
+    "merged stale source row should be removed"
+  )
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
+async function testAuthoritativeSnapshotCanClearPersistedAssistantContent(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-authoritative-empty-snapshot"
+
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Authoritative empty snapshot" })
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "final answer accidentally attached to the tool call",
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: new Date("2026-07-10T00:00:00.000Z")
+    }
+  ])
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "",
+      content_priority: 1,
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: new Date("2026-07-10T00:00:01.000Z")
+    }
+  ])
+
+  const messages = db.getThreadMessages(threadId)
+  assertEqual(messages[0]?.content, "", "an authoritative snapshot should clear persisted content")
+  assertEqual(
+    messages[0]?.tool_calls?.length ?? -1,
+    1,
+    "a tool-call assistant repair should keep its legitimate tool call"
+  )
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "",
+      content_priority: 1,
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: new Date("2026-07-10T00:00:02.000Z")
+    },
+    {
+      id: "assistant-tool-call",
+      role: "assistant",
+      content: "late lower-priority replay",
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: new Date("2026-07-10T00:00:03.000Z")
+    }
+  ])
+  assertEqual(
+    db.getThreadMessages(threadId)[0]?.content,
+    "",
+    "a lower-priority replay in the same batch must not undo an authoritative clear"
+  )
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-equal-priority-tool-call",
+      role: "assistant",
+      content: "earlier authoritative content",
+      content_priority: 1,
+      tool_calls: [{ id: "call-2", name: "get_status", args: {} }],
+      created_at: new Date("2026-07-10T00:00:04.000Z")
+    },
+    {
+      id: "assistant-equal-priority-tool-call",
+      role: "assistant",
+      content: "",
+      content_priority: 1,
+      tool_calls: [{ id: "call-2", name: "get_status", args: {} }],
+      created_at: new Date("2026-07-10T00:00:05.000Z")
+    }
+  ])
+  assertEqual(
+    db
+      .getThreadMessages(threadId)
+      .find((message) => message.id === "assistant-equal-priority-tool-call")?.content,
+    "",
+    "the latest authoritative DB snapshot should replace equal-priority content"
+  )
+
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-final-answer",
+      role: "assistant",
+      content: "DUP_TEST_A_20260711 只应该出现一次。",
+      tool_calls: [{ id: "call-final", name: "execute", args: {} }],
+      created_at: new Date("2026-07-10T00:00:06.000Z")
+    }
+  ])
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-final-answer",
+      role: "assistant",
+      content: "DUP_TEST_A_20260711 只应该出现一次。",
+      content_priority: 1,
+      tool_calls: [],
+      created_at: new Date("2026-07-10T00:00:07.000Z")
+    }
+  ])
+  let finalAnswer = db
+    .getThreadMessages(threadId)
+    .find((message) => message.id === "assistant-final-answer")
+  assertEqual(
+    finalAnswer?.tool_calls?.length ?? -1,
+    0,
+    "an authoritative checkpoint final answer should clear polluted persisted tool calls"
+  )
+
+  await db.flush()
+  await db.closeDatabase()
+  await db.initializeDatabase()
+  finalAnswer = db
+    .getThreadMessages(threadId)
+    .find((message) => message.id === "assistant-final-answer")
+  assertEqual(
+    finalAnswer?.tool_calls?.length ?? -1,
+    0,
+    "cleared final-answer tool calls should survive database reopen"
+  )
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "assistant-final-answer",
+      role: "assistant",
+      content: "lower-priority replay",
+      tool_calls: [{ id: "call-final", name: "execute", args: {} }],
+      created_at: new Date("2026-07-10T00:00:08.000Z")
+    }
+  ])
+  finalAnswer = db
+    .getThreadMessages(threadId)
+    .find((message) => message.id === "assistant-final-answer")
+  assertEqual(
+    finalAnswer?.content,
+    "DUP_TEST_A_20260711 只应该出现一次。",
+    "a lower-priority replay after reopen must not replace authoritative final text"
+  )
+  assertEqual(
+    finalAnswer?.tool_calls?.length ?? -1,
+    0,
+    "a lower-priority replay after reopen must not restore cleared tool calls"
+  )
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
 async function main(): Promise<void> {
   await withTempHome(async () => {
     await testMessagesPersistAcrossReopen()
@@ -726,6 +1137,9 @@ async function main(): Promise<void> {
     await testMessageLookupHelpersStayBoundedToRequestedRange()
     await testDurableTailFeedsRuntimeContext()
     await testReplaceThreadMessageIdKeepsSingleCanonicalRow()
+    await testAssistantToolCallAliasDoesNotPolluteFinalTextAnswer()
+    await testReplaceThreadMessageIdRespectsAuthoritativeContentPriority()
+    await testAuthoritativeSnapshotCanClearPersistedAssistantContent()
   })
   console.log("thread-messages-db.spec.ts passed")
 }

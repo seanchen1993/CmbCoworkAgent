@@ -106,6 +106,7 @@ import {
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
 const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
 const MARKET_ALL_USER_CACHE_KEY = "market_panel_query_all_user_cache_v1"
+const MARKET_FRONTEND_PAGE_SIZE = 10
 
 interface MarketPanelAllUserItem {
   sapId: string
@@ -962,6 +963,12 @@ export function MarketPanel(): React.JSX.Element {
     mcp: "",
     plugin: ""
   })
+  const [marketPageNums, setMarketPageNums] = useState<Record<MarketItemType, number>>({
+    skill: 1,
+    orgSkill: 1,
+    mcp: 1,
+    plugin: 1
+  })
   const [uploadFilterModes, setUploadFilterModes] = useState<UploadFilterMode[]>([])
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [pendingInitialCategoryFilter, setPendingInitialCategoryFilter] = useState<string | null>(
@@ -1093,9 +1100,35 @@ export function MarketPanel(): React.JSX.Element {
   const activeTabIntro = tabIntros[activeTab]
   const activeSearchQuery = searchQueries[activeTab] ?? ""
 
-  const setSearchQueryForTab = useCallback((tab: MarketItemType, query: string) => {
-    setSearchQueries((prev) => (prev[tab] === query ? prev : { ...prev, [tab]: query }))
+  const setMarketPageForTab = useCallback((tab: MarketItemType, pageNum: number) => {
+    const numericPageNum = Number.isFinite(pageNum) ? Math.floor(pageNum) : 1
+    const nextPageNum = Math.max(1, numericPageNum)
+    setMarketPageNums((prev) =>
+      prev[tab] === nextPageNum ? prev : { ...prev, [tab]: nextPageNum }
+    )
   }, [])
+
+  const resetMarketPageForTab = useCallback((tab: MarketItemType) => {
+    setMarketPageNums((prev) => (prev[tab] === 1 ? prev : { ...prev, [tab]: 1 }))
+  }, [])
+
+  const setActiveMarketPage = useCallback(
+    (pageNum: number) => {
+      setMarketPageForTab(activeTab, pageNum)
+      if (activeTab !== ORG_SKILL_MARKET_TYPE) {
+        listCardContainerRef.current?.scrollTo({ top: 0 })
+      }
+    },
+    [activeTab, setMarketPageForTab]
+  )
+
+  const setSearchQueryForTab = useCallback(
+    (tab: MarketItemType, query: string) => {
+      setSearchQueries((prev) => (prev[tab] === query ? prev : { ...prev, [tab]: query }))
+      resetMarketPageForTab(tab)
+    },
+    [resetMarketPageForTab]
+  )
 
   const getScrollAreaViewport = useCallback((root: HTMLDivElement | null): HTMLDivElement | null => {
     if (!root) return null
@@ -2074,6 +2107,16 @@ export function MarketPanel(): React.JSX.Element {
     return sortSkillItemsByUsage(filteredData, skillUsageSummary, skillSortMode)
   }, [activeTab, filteredData, skillSortMode, skillUsageSummary])
   const visibleMarketData = activeTab === "skill" ? sortedSkillData : filteredData
+  const activeMarketPageNum = marketPageNums[activeTab] ?? 1
+  const marketTotalItems = visibleMarketData.length
+  const marketTotalPages = Math.max(1, Math.ceil(marketTotalItems / MARKET_FRONTEND_PAGE_SIZE))
+  const safeMarketPageNum = Math.min(Math.max(1, activeMarketPageNum), marketTotalPages)
+  const paginatedMarketData = useMemo(() => {
+    const startIndex = (safeMarketPageNum - 1) * MARKET_FRONTEND_PAGE_SIZE
+    return visibleMarketData.slice(startIndex, startIndex + MARKET_FRONTEND_PAGE_SIZE)
+  }, [safeMarketPageNum, visibleMarketData])
+  const hasPreviousMarketPage = safeMarketPageNum > 1
+  const hasNextMarketPage = safeMarketPageNum < marketTotalPages
   const emptyResultMessage = activeSearchQuery.trim()
     ? "未找到匹配的项目"
     : uploadFilterModes.length > 1
@@ -2087,6 +2130,24 @@ export function MarketPanel(): React.JSX.Element {
             : uploadFilterModes[0] === "certified"
               ? "未找到认证项目"
               : "暂无可用项目"
+
+  useEffect(() => {
+    if (activeTab === ORG_SKILL_MARKET_TYPE) return
+    resetMarketPageForTab(activeTab)
+  }, [
+    activeSearchQuery,
+    activeTab,
+    categoryFilter,
+    resetMarketPageForTab,
+    skillSortMode,
+    uploadFilterModes
+  ])
+
+  useEffect(() => {
+    if (activeTab === ORG_SKILL_MARKET_TYPE) return
+    if (activeMarketPageNum === safeMarketPageNum) return
+    setMarketPageForTab(activeTab, safeMarketPageNum)
+  }, [activeMarketPageNum, activeTab, safeMarketPageNum, setMarketPageForTab])
 
   const marketCategoryStats = useMemo(() => {
     const categoryCounter = new Map<string, { primary: string; count: number }>()
@@ -2956,17 +3017,48 @@ export function MarketPanel(): React.JSX.Element {
 
                       <div
                         key={
-                          filteredData.length === 0 ? "market-results-empty" : "market-results-list"
+                          visibleMarketData.length === 0
+                            ? "market-results-empty"
+                            : "market-results-list"
                         }
                         className="space-y-3 min-w-0"
                       >
-                        <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
-                          <span>
-                            {categoryFilter
-                              ? `当前分类：${categoryFilter}`
-                              : `全部 ${getMarketTypePluralLabel(activeTab)}`}
-                            {` · 筛选结果 ${filteredData.length} 个`}
-                          </span>
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#87867f] px-1">
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <span>
+                              {categoryFilter
+                                ? `当前分类：${categoryFilter}`
+                                : `全部 ${getMarketTypePluralLabel(activeTab)}`}
+                              {` · 筛选结果 ${visibleMarketData.length} 个 · 当前页 ${paginatedMarketData.length} 个`}
+                            </span>
+                            {visibleMarketData.length > 0 ? (
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <span className="tabular-nums">
+                                  第 {safeMarketPageNum} / {marketTotalPages} 页
+                                </span>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+                                  aria-label="上一页"
+                                  onClick={() => setActiveMarketPage(safeMarketPageNum - 1)}
+                                  disabled={!hasPreviousMarketPage}
+                                >
+                                  上一页
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+                                  aria-label="下一页"
+                                  onClick={() => setActiveMarketPage(safeMarketPageNum + 1)}
+                                  disabled={!hasNextMarketPage}
+                                >
+                                  下一页
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
                           {activeTab === "skill" ? (
                             <div className="flex items-center gap-2">
                               <div className="inline-block w-[30px]">排序</div>
@@ -2988,7 +3080,7 @@ export function MarketPanel(): React.JSX.Element {
                             </div>
                           ) : null}
                         </div>
-                        {filteredData.length === 0 ? (
+                        {visibleMarketData.length === 0 ? (
                           <div
                             key="market-empty-results"
                             className="flex flex-col items-center justify-center py-16 text-[#87867f]"
@@ -3004,7 +3096,7 @@ export function MarketPanel(): React.JSX.Element {
                             ref={listCardContainerRef}
                             className="grid max-h-[calc(100vh-330px)] grid-cols-1 gap-3 overflow-y-auto pr-1 2xl:grid-cols-2"
                           >
-                            {visibleMarketData.map((item) => (
+                            {paginatedMarketData.map((item) => (
                               <MarketItemCard
                                 key={getItemKey(item)}
                                 item={item}

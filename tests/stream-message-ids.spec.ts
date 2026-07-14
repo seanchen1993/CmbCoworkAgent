@@ -603,7 +603,351 @@ function testNormalStreamingProviderIdChangesStayInOneLogicalSlot(): void {
   assertEqual(
     secondMessage?.[0]?.id,
     "chunk-ai-id-1",
-    "later chunks must reuse the slot even when their provider id changes"
+    "later chunks must reuse the slot when the current assistant has not called a tool"
+  )
+}
+
+function testNormalStreamingProviderIdChangeAfterZeroArgumentToolCallStartsNewLogicalSlot(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  const emitChunk = (
+    id: string,
+    content: string,
+    toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown> }>
+  ): Array<{ event: string; data: unknown }> =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: { id, content, ...(toolCalls ? { tool_calls: toolCalls } : {}) }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+
+  const firstEvents = emitChunk("tool-call-ai-id", "", [
+    { id: "call-1", name: "get_status", args: {} }
+  ])
+  const aliasEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: "canonical-tool-call-ai-id",
+              content: "",
+              tool_calls: [{ id: "call-1", name: "get_status", args: {} }]
+            }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const secondEvents = emitChunk("final-ai-id", "final answer")
+  const firstMessage = firstEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string }]
+    | undefined
+  const secondMessage = secondEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string }]
+    | undefined
+  const alias = aliasEvents.find(
+    (event) =>
+      event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+  )?.data as { fromId?: string; toId?: string } | undefined
+
+  assertEqual(firstMessage?.[0]?.id, "tool-call-ai-id", "the tool call should keep its provider id")
+  assertEqual(alias?.fromId, "tool-call-ai-id", "the values snapshot should migrate the live id")
+  assertEqual(
+    alias?.toId,
+    "canonical-tool-call-ai-id",
+    "the values snapshot should establish the canonical tool-call id"
+  )
+  assertEqual(
+    secondMessage?.[0]?.id,
+    "final-ai-id",
+    "a provider id after a tool call must start a new assistant slot before the result is observed"
+  )
+
+  const snapshotEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: "canonical-tool-call-ai-id",
+              content: "",
+              tool_calls: [{ id: "call-1", name: "get_status", args: {} }]
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "ToolMessage"],
+            kwargs: {
+              id: "tool-result-id",
+              content: "file contents",
+              tool_call_id: "call-1",
+              name: "get_status"
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-ai-id", content: "final answer" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const snapshot = snapshotEvents.find((event) => event.event === "values")?.data as
+    | {
+        messages?: Array<{
+          id?: string
+          content?: string
+          content_priority?: number
+        }>
+      }
+    | undefined
+  assertEqual(
+    snapshot?.messages?.[0]?.id,
+    "canonical-tool-call-ai-id",
+    "the snapshot must retain the tool-call slot"
+  )
+  assertEqual(snapshot?.messages?.[0]?.content, "", "the tool-call slot must remain empty")
+  assertEqual(
+    snapshot?.messages?.[2]?.id,
+    "final-ai-id",
+    "the snapshot must retain the final-answer slot"
+  )
+  assertEqual(
+    snapshot?.messages?.[2]?.content,
+    "final answer",
+    "the final answer must stay separate"
+  )
+  assertEqual(
+    snapshot?.messages?.[0]?.content_priority,
+    1,
+    "values content should be authoritative over speculative live content"
+  )
+}
+
+function testNormalStreamingProviderIdChangesDuringSameToolCallStayInOneLogicalSlot(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  const emitToolCall = (id: string, args: Record<string, unknown>) =>
+    convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: {
+              id,
+              content: "",
+              tool_calls: [{ id: "call-1", name: "read_file", args }]
+            }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+
+  emitToolCall("tool-call-ai-id-1", {})
+  const continuedEvents = emitToolCall("tool-call-ai-id-2", { path: "a.ts" })
+  const continuedMessage = continuedEvents.find((event) => event.event === "messages")?.data as
+    | [{ id?: string }]
+    | undefined
+
+  assertEqual(
+    continuedMessage?.[0]?.id,
+    "tool-call-ai-id-1",
+    "provider id churn within the same tool call must not split the assistant message"
+  )
+}
+
+function testNewToolCallWithIdlessContinuationStartsNewLogicalSlot(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: {
+            id: "tool-call-ai-id-1",
+            content: "",
+            tool_calls: [{ id: "call-1", name: "get_status", args: {} }]
+          }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const nextEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: {
+            id: "tool-call-ai-id-2",
+            content: "",
+            tool_call_chunks: [
+              { id: "call-2", name: "get_status", args: "", index: 0 },
+              { args: "{}", index: 0 }
+            ]
+          }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+  const toolCallEvent = nextEvents.find(
+    (event) =>
+      event.event === "custom" && (event.data as { type?: string }).type === "tool_call"
+  )?.data as { messageId?: string } | undefined
+
+  assertEqual(
+    toolCallEvent?.messageId,
+    "tool-call-ai-id-2",
+    "an explicit new tool-call id must win over id-less continuation chunks in the same batch"
+  )
+}
+
+function testNormalCorruptToolCallsDoNotBreakMessageBoundaryDetection(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  let events: Array<{ event: string; data: unknown }> = []
+  try {
+    events = convertToSDKEvents(
+      {
+        type: "stream",
+        mode: "messages",
+        data: [
+          {
+            id: ["langchain_core", "messages", "AIMessageChunk"],
+            kwargs: {
+              id: "corrupt-tool-calls-ai-id",
+              content: "answer",
+              tool_calls: { not: "an array" }
+            }
+          },
+          { langgraph_node: "agent" }
+        ]
+      },
+      "thread-1",
+      "normal"
+    )
+  } catch (error) {
+    throw new Error(`corrupt tool_calls must not break boundary detection: ${String(error)}`)
+  }
+
+  const message = events.find((event) => event.event === "messages")?.data as
+    | [{ id?: string }]
+    | undefined
+  assertEqual(
+    message?.[0]?.id,
+    "corrupt-tool-calls-ai-id",
+    "valid assistant content should survive corrupt tool-call metadata"
+  )
+}
+
+function testNormalSparseEmptyValuesMessageIsNotContentAuthoritative(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "sparse-ai-id", content: "" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+  const values = events.find((event) => event.event === "values")?.data as
+    | { messages?: Array<{ content_priority?: number }> }
+    | undefined
+
+  assertEqual(
+    values?.messages?.[0]?.content_priority,
+    undefined,
+    "an ordinary sparse empty values message must not clear useful streamed content"
   )
 }
 
@@ -719,6 +1063,278 @@ function testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary(): void {
     "the post-tool answer should keep a separate logical slot"
   )
   assertEqual(aliases[1]?.toId, "final-ai-after-tool", "the post-tool slot should adopt its id")
+}
+
+function testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundaryAfterHistory(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: {
+            id: "live-tool-call-ai-id",
+            content: "",
+            tool_calls: [
+              {
+                id: "call-1",
+                name: "execute",
+                args: { command: "git status --short" }
+              }
+            ]
+          }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "ToolMessage"],
+          kwargs: {
+            id: "tool-result-id",
+            content: " M src/renderer/src/App.tsx",
+            tool_call_id: "call-1",
+            name: "execute"
+          }
+        },
+        { langgraph_node: "tools" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-final-ai-id", content: "DUP_TEST_A_20260711 only once" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "history-ai-id", content: "hello history" }
+          },
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { id: "current-user-id", content: "current question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: "final-tool-call-ai-id",
+              content: "",
+              tool_calls: [
+                {
+                  id: "call-1",
+                  name: "execute",
+                  args: { command: "git status --short" }
+                }
+              ]
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "ToolMessage"],
+            kwargs: {
+              id: "tool-result-id",
+              content: " M src/renderer/src/App.tsx",
+              tool_call_id: "call-1",
+              name: "execute"
+            }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-answer-ai-id", content: "DUP_TEST_A_20260711 only once" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const aliases = events
+    .filter(
+      (event) =>
+        event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+    )
+    .map((event) => event.data as { fromId?: string; toId?: string })
+
+  assertEqual(aliases.length, 2, "current turn assistant slots should both reconcile")
+  assertEqual(
+    aliases[0]?.fromId,
+    "live-tool-call-ai-id",
+    "the tool-call slot should keep its own live id"
+  )
+  assertEqual(
+    aliases[0]?.toId,
+    "final-tool-call-ai-id",
+    "the tool-call slot should adopt the checkpoint id"
+  )
+  assertEqual(
+    aliases[1]?.fromId,
+    "live-final-ai-id",
+    "the final-answer slot should keep its own live id"
+  )
+  assertEqual(
+    aliases[1]?.toId,
+    "final-answer-ai-id",
+    "the final-answer slot should adopt the checkpoint id"
+  )
+}
+
+function testNormalValuesSnapshotMissingToolCallAssistantDoesNotStealToolSlot(): void {
+  const transport = new ElectronIPCTransport()
+  transport.setFallbackIndexBaselines({ ai: 1, tool: 0, system: 0, human: 0 })
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string,
+        agentMode?: "normal" | "coordinator" | "workflow"
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: {
+            id: "live-tool-call-ai-id",
+            content: "",
+            tool_calls: [
+              {
+                id: "call-1",
+                name: "execute",
+                args: { command: "git status --short" }
+              }
+            ]
+          }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "ToolMessage"],
+          kwargs: {
+            id: "tool-result-id",
+            content: " M src/renderer/src/App.tsx",
+            tool_call_id: "call-1",
+            name: "execute"
+          }
+        },
+        { langgraph_node: "tools" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "live-final-ai-id", content: "DUP_TEST_A_20260711 only once" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const events = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "history-ai-id", content: "hello history" }
+          },
+          {
+            id: ["langchain_core", "messages", "HumanMessage"],
+            kwargs: { id: "current-user-id", content: "current question" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "final-answer-ai-id", content: "DUP_TEST_A_20260711 only once" }
+          }
+        ]
+      }
+    },
+    "thread-1",
+    "normal"
+  )
+
+  const aliases = events
+    .filter(
+      (event) =>
+        event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+    )
+    .map((event) => event.data as { fromId?: string; toId?: string })
+
+  assertEqual(
+    aliases.some(
+      (alias) =>
+        alias.fromId === "live-tool-call-ai-id" && alias.toId === "final-answer-ai-id"
+    ),
+    false,
+    "a text-only final snapshot must not alias the earlier tool-call assistant slot"
+  )
 }
 
 function testNormalValuesSnapshotDoesNotAliasToLaterAssistantThatQuotesLiveText(): void {
@@ -1146,6 +1762,107 @@ function testGoalSubturnCompleteAdvancesSystemFallbackIndex(): void {
   )
 }
 
+function testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState(): void {
+  const transport = new ElectronIPCTransport()
+  const convertToSDKEvents = (
+    transport as unknown as {
+      convertToSDKEvents: (
+        event: unknown,
+        threadId: string
+      ) => Array<{ event: string; data: unknown }>
+    }
+  ).convertToSDKEvents.bind(transport)
+
+  convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "retry-ai", content: "partial" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1"
+  )
+
+  const resetEvents = convertToSDKEvents(
+    {
+      type: "custom",
+      data: {
+        type: "stream_retry_reset",
+        discardedMessageIds: ["retry-ai"],
+        messages: [
+          {
+            id: ["langchain_core", "messages", "SystemMessage"],
+            kwargs: { id: "stable-system", content: "stable checkpoint" }
+          }
+        ]
+      }
+    },
+    "thread-1"
+  )
+  const resetValues = resetEvents.find((event) => event.event === "values")?.data as
+    | { messages?: Array<{ id?: string }> }
+    | undefined
+  assertEqual(
+    resetValues?.messages?.[0]?.id,
+    "stable-system",
+    "retry reset should restore stable values"
+  )
+
+  const retryEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "messages",
+      data: [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "retry-ai-2", content: "complete" }
+        },
+        { langgraph_node: "agent" }
+      ]
+    },
+    "thread-1"
+  )
+  const retryMessage = retryEvents.find((event) => event.event === "messages")?.data as
+    | [{ content?: string }]
+    | undefined
+  assertEqual(
+    retryMessage?.[0]?.content,
+    "complete",
+    "retry should not subtract or append the discarded partial content"
+  )
+
+  const finalEvents = convertToSDKEvents(
+    {
+      type: "stream",
+      mode: "values",
+      data: {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "SystemMessage"],
+            kwargs: { id: "stable-system", content: "stable checkpoint" }
+          },
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "retry-ai-final", content: "complete" }
+          }
+        ]
+      }
+    },
+    "thread-1"
+  )
+  const alias = finalEvents.find(
+    (event) =>
+      event.event === "custom" && (event.data as { type?: string }).type === "message_id_alias"
+  )?.data as { fromId?: string; toId?: string } | undefined
+  assertEqual(alias?.fromId, "retry-ai-2", "retry should reuse the discarded logical slot")
+  assertEqual(alias?.toId, "retry-ai-final", "retry values should adopt the checkpoint id")
+}
+
 const tests: Array<[string, () => void]> = [
   ["testExplicitIdWins", testExplicitIdWins],
   ["testFallbackIdIsStableForSameValuesMessage", testFallbackIdIsStableForSameValuesMessage],
@@ -1184,8 +1901,36 @@ const tests: Array<[string, () => void]> = [
     testNormalStreamingProviderIdChangesStayInOneLogicalSlot
   ],
   [
+    "testNormalStreamingProviderIdChangeAfterZeroArgumentToolCallStartsNewLogicalSlot",
+    testNormalStreamingProviderIdChangeAfterZeroArgumentToolCallStartsNewLogicalSlot
+  ],
+  [
+    "testNormalStreamingProviderIdChangesDuringSameToolCallStayInOneLogicalSlot",
+    testNormalStreamingProviderIdChangesDuringSameToolCallStayInOneLogicalSlot
+  ],
+  [
+    "testNewToolCallWithIdlessContinuationStartsNewLogicalSlot",
+    testNewToolCallWithIdlessContinuationStartsNewLogicalSlot
+  ],
+  [
+    "testNormalCorruptToolCallsDoNotBreakMessageBoundaryDetection",
+    testNormalCorruptToolCallsDoNotBreakMessageBoundaryDetection
+  ],
+  [
+    "testNormalSparseEmptyValuesMessageIsNotContentAuthoritative",
+    testNormalSparseEmptyValuesMessageIsNotContentAuthoritative
+  ],
+  [
     "testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary",
     testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundary
+  ],
+  [
+    "testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundaryAfterHistory",
+    testNormalValuesLogicalSlotsDoNotMergeAcrossToolBoundaryAfterHistory
+  ],
+  [
+    "testNormalValuesSnapshotMissingToolCallAssistantDoesNotStealToolSlot",
+    testNormalValuesSnapshotMissingToolCallAssistantDoesNotStealToolSlot
   ],
   [
     "testNormalValuesSnapshotDoesNotAliasToLaterAssistantThatQuotesLiveText",
@@ -1218,6 +1963,10 @@ const tests: Array<[string, () => void]> = [
   [
     "testGoalSubturnCompleteAdvancesSystemFallbackIndex",
     testGoalSubturnCompleteAdvancesSystemFallbackIndex
+  ],
+  [
+    "testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState",
+    testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState
   ]
 ]
 
