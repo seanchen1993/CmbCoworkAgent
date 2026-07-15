@@ -34,7 +34,7 @@ import {
   SkipForward,
   Trash2,
   Workflow,
-  Zap, MoveRight
+  Zap
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -324,13 +324,45 @@ interface HarnessProjectPhaseStep {
   tone: HarnessProjectPhaseTone
 }
 
-interface HarnessProjectStageStatusItem {
-  id: string
-  title: string
-  description: string
-  icon: ReactNode
-  status: HarnessStatus
-  tone: HarnessProjectPhaseTone
+const ENTERPRISE_PROJECT_PHASE_SEQUENCE = [
+  "计划中",
+  "开发中",
+  "ST中",
+  "ST完成",
+  "UAT业务审核",
+  "上线中",
+  "上线完成",
+  "结项中",
+  "结项完成"
+] as const
+
+function buildEnterpriseProjectPhaseSteps(currentPhaseStatus: string): HarnessProjectPhaseStep[] {
+  const normalizedPhaseStatus = currentPhaseStatus.trim()
+  const currentIndex = ENTERPRISE_PROJECT_PHASE_SEQUENCE.findIndex(
+    (phaseStatus) => phaseStatus === normalizedPhaseStatus
+  )
+
+  return ENTERPRISE_PROJECT_PHASE_SEQUENCE.map((phaseStatus, index) => {
+    const tone: HarnessProjectPhaseTone =
+      currentIndex === -1 ? "upcoming" : index < currentIndex ? "done" : index === currentIndex ? "current" : "upcoming"
+
+    return {
+      id: `enterprise-phase-${index + 1}`,
+      order: index + 1,
+      title: phaseStatus,
+      statusLabel:
+        currentIndex === -1
+          ? normalizedPhaseStatus
+            ? "未匹配"
+            : "待同步"
+          : index < currentIndex
+            ? "已完成"
+            : index === currentIndex
+              ? "当前阶段"
+              : "待开始",
+      tone
+    }
+  })
 }
 
 interface SelectedFeature {
@@ -1528,10 +1560,19 @@ function HarnessProjectPhaseFlow({
 }: {
   steps: HarnessProjectPhaseStep[]
 }): React.JSX.Element {
+  const isCompactFlow = steps.length > 5
+
   return (
     <section className="w-full shrink-0 rounded-2xl border border-border/80  p-4 shadow-sx bg-background-elevated/80 ">
-      <div className="flex flex-col gap-3">
-        <div className="grid gap-5 md:grid-cols-[repeat(5,minmax(0,1fr))]">
+      <div className="flex flex-col gap-3 overflow-x-auto pb-1">
+        <div
+          className={cn(
+            "grid gap-5",
+            isCompactFlow
+              ? "min-w-max grid-flow-col auto-cols-[minmax(128px,144px)]"
+              : "md:grid-cols-[repeat(5,minmax(0,1fr))]"
+          )}
+        >
           {steps.map((step, index) => {
             const isDone = step.tone === "done"
             const isCurrent = step.tone === "current"
@@ -1572,7 +1613,7 @@ function HarnessProjectPhaseFlow({
                       : "border-border/100 bg-background/100 hover:border-status-info/20 hover:bg-background",
                     isDone && "border-status-nominal/20 bg-status-nominal/[0.04]"
                   )}
-                  title={step.title}
+                  title={`${step.title} ${step.statusLabel}`}
                 >
                   <div
                     className={cn(
@@ -1595,6 +1636,16 @@ function HarnessProjectPhaseFlow({
                     >
                       {step.title}
                     </div>
+                    <div
+                      className={cn(
+                        "mt-1 text-[11px]",
+                        isDone && "text-status-nominal/80",
+                        isCurrent && "text-status-info",
+                        step.tone === "upcoming" && "text-muted-foreground"
+                      )}
+                    >
+                      {step.statusLabel}
+                    </div>
                   </div>
                 </button>
               </div>
@@ -1607,53 +1658,28 @@ function HarnessProjectPhaseFlow({
 }
 
 function HarnessProjectStageStatusPanel({
-  items,
-  onStageAction
+  projectCode,
+  reviewState,
+  onOpenLeanTokenSettings
 }: {
-  items: HarnessProjectStageStatusItem[]
-  onStageAction: (item: HarnessProjectStageStatusItem) => void
+  projectCode: string
+  reviewState: ProjectReviewState
+  onOpenLeanTokenSettings: () => void
 }): React.JSX.Element {
   return (
     <section className={"flex h-full min-h-0 flex-col overflow-hidden p-3 bg-background-elevated/80 shadow-sm ml-2 rounded-xl"}>
       <div className="flex items-center justify-between gap-3 px-1 py-1">
         <div className="min-w-0">
-          <div className="text-sm font-semibold">阶段状态</div>
+          <div className="text-sm font-semibold">项目度量信息</div>
         </div>
       </div>
 
-      <div className="mt-2 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-        {items.map((item) => (
-          // <div className={'flex border-border bg-background  p-4 rounded-lg items-center gap-3 cursor-pointer hover:border-[#d1cfc5] transition-colors'}>
-          <div  className="flex w-full cursor-pointer  gap-2 rounded-md border border-border bg-background
-          px-3 py-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
-          <div
-              className={cn(
-                "relative flex size-11 shrink-0 items-center justify-center rounded-2xl  transition-colors",
-              )}
-            >
-              {item.icon}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[15px] font-medium tracking-tight text-foreground">{item.title}</div>
-              <div className="mt-1 truncate text-xs leading-5 text-muted-foreground">
-                {item.description}
-              </div>
-            </div>
-            <span
-              aria-hidden="true"
-              className="flex  shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors group-hover:bg-muted group-hover:text-foreground"
-            >
-            {item.tone === "done" ? <span className={"text-green-600 font-bold flex space-x-2"}>
-              <span className={"text-xs"}>已完成</span>
-              <Check className="size-4 " />
-            </span> : <span className={"text-gray-600 font-bold flex space-x-2"}>
-              <span className={"text-xs"}>去处理</span>
-              <MoveRight className="size-4 " />
-            </span>}
-
-            </span>
-          </div>
-        ))}
+      <div className="min-h-0 flex-1 overflow-y-auto px-1 pr-1">
+        <ProjectReviewSummary
+          projectCode={projectCode}
+          reviewState={reviewState}
+          onOpenLeanTokenSettings={onOpenLeanTokenSettings}
+        />
       </div>
     </section>
   )
@@ -4933,9 +4959,9 @@ function EnterpriseProjectDetailSummary({
 
   if (entry.kind === "miss") {
     return (
-      <div>
-        <p className="text-xs leading-5 text-status-warning">请选择有效的项目编号</p>
-      </div>
+      <span className="shrink-0 rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
+        项目编号无效
+      </span>
     )
   }
 
@@ -4948,12 +4974,14 @@ function EnterpriseProjectDetailSummary({
   return (
     <>
       {fields.map(([label, value]) => (
-        <div key={label}>
-          <dt className="text-xs text-muted-foreground">{label}</dt>
-          <dd className="mt-1 truncate font-medium" title={value || "-"}>
-            {value || "-"}
-          </dd>
-        </div>
+        <span
+          key={label}
+          className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground"
+          title={`${label} ${value || "-"}`}
+        >
+          {label}
+          <strong className="ml-1 font-medium text-foreground">{value || "-"}</strong>
+        </span>
       ))}
     </>
   )
@@ -5330,160 +5358,8 @@ function ProjectDetailPage({
   const runs = detail?.runs ?? []
   const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
-  const phaseSteps: HarnessProjectPhaseStep[] = archived
-    ? [
-        { id: "requirements", order: 1, title: "需求分析", statusLabel: "已完成", tone: "done" },
-        { id: "design", order: 2, title: "分析设计", statusLabel: "已完成", tone: "done" },
-        { id: "development", order: 3, title: "开发", statusLabel: "已完成", tone: "done" },
-        { id: "testing", order: 4, title: "测试", statusLabel: "已完成", tone: "done" },
-        { id: "release", order: 5, title: "上线", statusLabel: "已完成", tone: "done" }
-      ]
-    : [
-        { id: "requirements", order: 1, title: "需求分析", statusLabel: "已完成", tone: "done" },
-        { id: "design", order: 2, title: "分析设计", statusLabel: "已完成", tone: "done" },
-        { id: "development", order: 3, title: "开发", statusLabel: "进行中", tone: "current" },
-        { id: "testing", order: 4, title: "测试", statusLabel: "待开始", tone: "upcoming" },
-        { id: "release", order: 5, title: "上线", statusLabel: "未开始", tone: "upcoming" }
-      ]
-  const stageStatusItems: HarnessProjectStageStatusItem[] = archived
-    ? [
-        {
-          id: "design-review",
-          title: "总体/详细设计流程",
-          description: "文档+评审",
-          icon: <Workflow className="size-4" />,
-          status: { label: "已评审", uiKind: "done" },
-          tone: "done"
-        },
-        {
-          id: "code-review",
-          title: "代码检视",
-          description: "代码检视率",
-          icon: <Search className="size-4" />,
-          status: { label: "100%", uiKind: "done" },
-          tone: "done"
-        },
-        {
-          id: "st-report",
-          title: "ST测试流程",
-          description: "ST测试报告是否已上传",
-          icon: <FileText className="size-4" />,
-          status: { label: "已上传", uiKind: "done" },
-          tone: "done"
-        },
-        {
-          id: "uat-report",
-          title: "UAT测试流程",
-          description: "UAT测试报告是否已上传",
-          icon: <FileText className="size-4" />,
-          status: { label: "已上传", uiKind: "done" },
-          tone: "done"
-        },
-        {
-          id: "release",
-          title: "上线流程",
-          description: "是否已上线",
-          icon: <RefreshCw className="size-4" />,
-          status: { label: "已上线", uiKind: "done" },
-          tone: "done"
-        },
-        {
-          id: "close",
-          title: "结项流程",
-          description: "是否已结项",
-          icon: <Archive className="size-4" />,
-          status: { label: "已结项", uiKind: "done" },
-          tone: "done"
-        }
-      ]
-    : [
-        {
-          id: "design-review",
-          title: "总体/详细设计流程",
-          description: "文档 + 评审",
-          icon: <Workflow className="size-4" />,
-          status: { label: "待评审", uiKind: "warning" },
-          tone: "done"
-        },
-        {
-          id: "code-review",
-          title: "代码检视",
-          description: "代码检视率 88%",
-          icon: <Search className="size-4" />,
-          status: { label: "78%", uiKind: "active" },
-          tone: "done"
-        },
-        {
-          id: "st-report",
-          title: "ST测试流程",
-          description: "ST测试报告是否已上传",
-          icon: <FileText className="size-4" />,
-          status: { label: "未上传", uiKind: "warning" },
-          tone: "upcoming"
-        },
-        {
-          id: "uat-report",
-          title: "UAT测试流程",
-          description: "UAT测试报告是否已上传",
-          icon: <FileText className="size-4" />,
-          status: { label: "未上传", uiKind: "warning" },
-          tone: "upcoming"
-        },
-        {
-          id: "release",
-          title: "上线流程",
-          description: "是否已上线",
-          icon: <RefreshCw className="size-4" />,
-          status: { label: "未上线", uiKind: "pending" },
-          tone: "upcoming"
-        },
-        {
-          id: "close",
-          title: "结项流程",
-          description: "是否已结项",
-          icon: <Archive className="size-4" />,
-          status: { label: "未结项", uiKind: "pending" },
-          tone: "upcoming"
-        }
-      ]
-
-  const handleStageAction = useCallback(
-    (item: HarnessProjectStageStatusItem): void => {
-      const normalizedStageTitle = `${item.title} ${item.description}`.toLowerCase()
-      const targetRun =
-        runs.find((run) => {
-          const normalizedRunText = `${run.title} ${run.slug}`.toLowerCase()
-          switch (item.id) {
-            case "design-review":
-              return /design|review|设计/.test(normalizedRunText)
-            case "code-review":
-              return /review|检视|code/.test(normalizedRunText)
-            case "st-report":
-              return /st|test|测试|report/.test(normalizedRunText)
-            case "uat-report":
-              return /uat|test|测试|report/.test(normalizedRunText)
-            case "release":
-              return /release|publish|deploy|上线/.test(normalizedRunText)
-            case "close":
-              return /close|archive|结项|归档/.test(normalizedRunText)
-            default:
-              return normalizedRunText.includes(normalizedStageTitle)
-          }
-        }) ?? runs.find((run) => run.overallStatus.uiKind === "active") ?? runs[0] ?? null
-
-      if (targetRun) {
-        onOpenFeature(project.projectId, targetRun.slug)
-        return
-      }
-
-      if (!archived) {
-        onCreateFeature(project)
-        return
-      }
-
-      toast.info("当前项目暂无可跳转处理的特性")
-    },
-    [archived, onCreateFeature, onOpenFeature, project, runs]
+  const phaseSteps = buildEnterpriseProjectPhaseSteps(
+    enterpriseProjectDetail?.kind === "hit" ? enterpriseProjectDetail.project.phaseStatus : ""
   )
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const projectRootPath = resolveProjectRootPath(project)
@@ -5549,7 +5425,11 @@ function ProjectDetailPage({
               className={harnessDetailRefreshButtonClassName}
               onClick={() => onRefresh(project.projectId)}
             >
-              {loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              {loading ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RefreshCw className="size-4" />
+              )}
               刷新
             </Button>
             {!archived && (
@@ -5586,60 +5466,70 @@ function ProjectDetailPage({
           <div className="min-h-0 flex-1 overflow-hidden">
             <div className="flex h-full min-h-0 flex-col gap-3">
               <section className={cn(harnessSurfaceClassName, "overflow-hidden px-3 py-2")}>
-                <div className="flex min-w-0 items-start gap-3">
-                  <div
-                    className="flex size-9 shrink-0 items-center justify-center rounded-2xl border border-status-info/20 bg-status-info/10 text-status-info">
+                <div className="flex min-w-0 items-center gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  <div className="flex size-8 shrink-0 items-center justify-center rounded-xl border border-status-info/20 bg-status-info/10 text-status-info">
                     <Workflow className="size-4" />
                   </div>
-                  <div className="flex min-w-0 items-center gap-2 flex-1 pt-1">
-                    <h2 className="truncate text-sm font-semibold">{project.name}</h2>
-                    {pluginCompatibilityMessage ? (
-                      <StatusPill
-                        status={boardCompatibilityStatus(project.boardCompatibility)}
-                        tooltip={pluginCompatibilityMessage}
-                      />
-                    ) : detail?.projectState ? (
-                      <StatusPill status={detail.projectState} tooltip={detail.error} />
-                    ) : (
-                      <span
-                        className="rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
-                          {loading ? "同步中" : "暂无状态"}
-                        </span>
-                    )}
-                    <div
-                      className="-mx-0.5 mt-1 flex min-w-0 items-center gap-2 overflow-x-auto pb-0.5 pr-1 text-[11px] text-muted-foreground [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                      <span className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5">
-                        系统编号 {project.systemId || "-"}
-                      </span>
-                      <span
-                        className="shrink-0 max-w-48 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5"
-                        title={project.systemName}>
-                        系统名称 {project.systemName || "-"}
-                      </span>
-                      <span
-                        className="shrink-0 max-w-56 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5"
-                        title={projectRootPath}
-                      >
-                        工作区 {getWorkspaceName(projectRootPath)}
-                      </span>
-                      {enterpriseProjectDetail?.kind === "hit" && (
-                        <>
-                          <span className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5">
-                            阶段 {enterpriseProjectDetail.project.phaseStatus || "-"}
-                          </span>
-                          <span
-                            className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5">
-                            结项 {enterpriseProjectDetail.project.baselineEndDate || "-"}
-                          </span>
-                        </>
-                      )}
-                    </div>
-                  </div>
+                  <h2
+                    className="max-w-56 shrink-0 truncate text-sm font-semibold"
+                    title={project.name}
+                  >
+                    {project.name}
+                  </h2>
+                  {pluginCompatibilityMessage ? (
+                    <StatusPill
+                      status={boardCompatibilityStatus(project.boardCompatibility)}
+                      tooltip={pluginCompatibilityMessage}
+                    />
+                  ) : detail?.projectState ? (
+                    <StatusPill status={detail.projectState} tooltip={detail.error} />
+                  ) : (
+                    <span className="shrink-0 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
+                      {loading ? "同步中" : "暂无状态"}
+                    </span>
+                  )}
+                  <span className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground">
+                    系统编号{" "}
+                    <strong className="font-medium text-foreground">
+                      {project.systemId || "-"}
+                    </strong>
+                  </span>
+                  <span
+                    className="shrink-0 max-w-48 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground"
+                    title={project.systemName}
+                  >
+                    系统名称{" "}
+                    <strong className="font-medium text-foreground">
+                      {project.systemName || "-"}
+                    </strong>
+                  </span>
+                  <span
+                    className="shrink-0 max-w-52 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground"
+                    title={projectRootPath}
+                  >
+                    工作区{" "}
+                    <strong className="font-medium text-foreground">
+                      {getWorkspaceName(projectRootPath)}
+                    </strong>
+                  </span>
+                  <EnterpriseProjectDetailSummary entry={enterpriseProjectDetail} />
+                  <span className="shrink-0 rounded-full border border-border/70 bg-muted/35 px-2 py-0.5 text-[11px] text-muted-foreground">
+                    特性{" "}
+                    <strong className="font-medium text-foreground">
+                      {loading || !detail ? "-" : runs.length}
+                    </strong>
+                  </span>
+                  <span className="shrink-0 rounded-full border border-border/70 bg-muted/35 px-2 py-0.5 text-[11px] text-muted-foreground">
+                    进行中{" "}
+                    <strong className="font-medium text-foreground">
+                      {loading || !detail ? "-" : activeCount}
+                    </strong>
+                  </span>
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon-sm"
-                    className="size-7 shrink-0 self-center"
+                    className="ml-auto size-7 shrink-0"
                     title="打开项目工作区"
                     aria-label="打开项目工作区"
                     onClick={openProjectWorkspaceInFileManager}
@@ -5647,59 +5537,33 @@ function ProjectDetailPage({
                     <FolderOpen className="size-3.5" />
                   </Button>
                 </div>
-                <div className="mt-4 border-t border-border pt-4">
-                  <div className="text-sm font-semibold">项目度量信息</div>
-                  <ProjectReviewSummary
-                    projectCode={project.projectCode}
-                    reviewState={projectReviewState}
-                    onOpenLeanTokenSettings={onOpenLeanTokenSettings}
-                  />
-                </div>
-                <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border pt-4 text-xs text-muted-foreground">
-                  <div>
-                    特性数
-                    <strong className="mt-1 block text-sm text-foreground">
-                      {loading || !detail ? "-" : runs.length}
-                    </strong>
-                  </div>
-                  <div>
-                    进行中
-                    <strong className="mt-1 block text-sm text-foreground">
-                      {loading || !detail ? "-" : activeCount}
-                    </strong>
-                  </div>
-                </div>
               </section>
+              <HarnessProjectPhaseFlow steps={phaseSteps} />
+
               <div className="flex min-h-0 min-w-0 flex-1 flex-col xl:flex-row  mb-1">
                 <div className="flex min-h-0 min-w-0 flex-1 flex-col ">
-                  <HarnessProjectPhaseFlow steps={phaseSteps} />
-                  <div
-                    className="mt-2 flex min-h-0 flex-1 flex-col rounded-2xl border border-border/80  p-4 shadow-sm bg-background-elevated/80 ">
+                  <div className=" flex min-h-0 flex-1 flex-col rounded-2xl border border-border/80  p-4 shadow-sm bg-background-elevated/80 ">
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <div className={harnessKickerClassName}>Feature workspace</div>
                         <div className="mt-1 text-base font-semibold">特性列表</div>
                       </div>
-                      <div
-                        className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
+                      <div className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
                         {loading || !detail ? "读取中" : `${runs.length} 个特性`}
                       </div>
                     </div>
                     {loading || !detail ? (
-                      <div
-                        className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-border/80 text-sm text-muted-foreground">
+                      <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-border/80 text-sm text-muted-foreground">
                         <Loader2 className="mr-2 size-4 animate-spin text-status-info" />
                         读取项目详情
                       </div>
                     ) : detail.error ? (
-                      <div
-                        className="flex items-start gap-2 rounded-xl border border-status-warning/30 bg-status-warning/10 px-3 py-3 text-sm text-status-warning">
+                      <div className="flex items-start gap-2 rounded-xl border border-status-warning/30 bg-status-warning/10 px-3 py-3 text-sm text-status-warning">
                         <AlertCircle className="mt-0.5 size-4 shrink-0" />
                         <div>{detail.error}</div>
                       </div>
                     ) : runs.length === 0 ? (
-                      <div
-                        className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-dashed border-border/80 bg-gradient-to-br from-background via-background/95 to-muted/35 px-6 py-12 text-center shadow-sm">
+                      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-dashed border-border/80 bg-gradient-to-br from-background via-background/95 to-muted/35 px-6 py-12 text-center shadow-sm">
                         <div
                           aria-hidden="true"
                           className="pointer-events-none absolute -right-8 -top-10 size-28 rounded-full bg-status-info/10 blur-2xl"
@@ -5716,7 +5580,8 @@ function ProjectDetailPage({
                             当前项目还没有特性
                           </div>
                           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                            从一个清晰的 feature 开始拆解工作，创建后就可以在这里持续跟踪阶段、产物和协作会话。
+                            从一个清晰的 feature
+                            开始拆解工作，创建后就可以在这里持续跟踪阶段、产物和协作会话。
                           </p>
                           {!archived && (
                             <Button
@@ -5757,7 +5622,11 @@ function ProjectDetailPage({
                   </div>
                 </div>
                 <aside className="w-full shrink-0 xl:w-[360px]">
-                  <HarnessProjectStageStatusPanel items={stageStatusItems} onStageAction={handleStageAction} />
+                  <HarnessProjectStageStatusPanel
+                    projectCode={project.projectCode}
+                    reviewState={projectReviewState}
+                    onOpenLeanTokenSettings={onOpenLeanTokenSettings}
+                  />
                 </aside>
               </div>
             </div>
