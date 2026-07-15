@@ -1182,6 +1182,7 @@ export class CoordinatorWorkerManager {
   private readonly warnedScratchpadDirs = new Set<string>()
   private readonly onTerminalNotification?: (worker: CoordinatorWorkerSnapshot) => void
   private sequence = 0
+  private shuttingDown = false
 
   constructor(options: CoordinatorWorkerManagerOptions = {}) {
     this.onTerminalNotification = options.onTerminalNotification
@@ -1400,6 +1401,67 @@ export class CoordinatorWorkerManager {
     const normalized = normalizeThreadId(parentThreadId)
     this.pruneInMemoryWorkerHistory(normalized)
     return Array.from(this.getParentMap(normalized)?.values() ?? []).map(toSnapshot)
+  }
+
+  hasRunningWorkers(): boolean {
+    for (const records of this.workersByParent.values()) {
+      for (const record of records.values()) {
+        if (record.status === "running") return true
+      }
+    }
+    return false
+  }
+
+  /** Cancel all live workers and wait, within a shared deadline, for their run
+   * and terminal-state persistence promises to settle during application exit. */
+  async cancelAllWorkersAndWait(timeoutMs = 5_000): Promise<void> {
+    this.shuttingDown = true
+    const records = Array.from(this.workersByParent.values()).flatMap((workers) =>
+      Array.from(workers.values()).filter(
+        (record) =>
+          record.status === "running" ||
+          Boolean(record.currentRun || record.terminalPersistPromise || record.statePersistPromise)
+      )
+    )
+    if (records.length === 0) return
+
+    for (const record of records) {
+      if (record.status === "running") {
+        this.cancelRecord(record, "Application is quitting.", true, true)
+      } else {
+        // A parent abort may have synchronously transitioned the worker before
+        // this global drain took its snapshot. Still suppress and await the
+        // cancellation persistence that is already in flight.
+        record.suppressNotificationAutoRun = true
+        record.dismissNotificationOnTerminalPersist = true
+      }
+    }
+
+    const pending = records.flatMap((record) =>
+      [record.currentRun, record.terminalPersistPromise, record.statePersistPromise].filter(
+        (promise): promise is Promise<void> => Boolean(promise)
+      )
+    )
+    if (pending.length === 0) return
+
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
+    try {
+      await Promise.race([
+        Promise.allSettled(pending).then(() => undefined),
+        new Promise<void>((resolve) => {
+          timeoutTimer = setTimeout(() => {
+            timedOut = true
+            resolve()
+          }, Math.max(0, timeoutMs))
+        })
+      ])
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+    }
+    if (timedOut) {
+      console.warn("[CoordinatorWorker] Timed out waiting for workers to settle during shutdown")
+    }
   }
 
   bindWorkerUpdates(
@@ -2145,6 +2207,9 @@ export class CoordinatorWorkerManager {
     ownedFiles: string[]
     workerIdToIgnore?: string
   }): void {
+    if (this.shuttingDown) {
+      throw new Error("The application is quitting; a coordinator worker can no longer be started.")
+    }
     if (input.workload === "read_only") return
     const records = Array.from(this.getParentMap(input.parentThreadId)?.values() ?? [])
     if (input.workload === "verify") {
