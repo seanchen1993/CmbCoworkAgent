@@ -94,7 +94,8 @@ import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type {
   CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
+  CloseToTrayPromptEvent,
+  WindowCloseBehavior
 } from "../shared/close-to-tray"
 
 interface ElectronAPI {
@@ -104,7 +105,13 @@ interface ElectronAPI {
   openLoginPage: () => void
   closeLoginPage: () => void
   onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptEvent) => void) => () => void
-  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction) => void
+  respondCloseToTrayPrompt: (
+    requestId: number,
+    action: CloseToTrayPromptAction,
+    rememberChoice?: boolean
+  ) => void
+  getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
+  setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void

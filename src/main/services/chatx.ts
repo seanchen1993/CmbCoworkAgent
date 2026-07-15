@@ -664,6 +664,10 @@ export function startChatX(): void {
   connect()
 }
 
+export function hasActiveChatXRuns(): boolean {
+  return runningChats.size > 0
+}
+
 export function stopChatX(): void {
   console.log("[ChatX] Stopping ChatX service")
   stopped = true

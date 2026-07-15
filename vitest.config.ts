@@ -16,7 +16,8 @@ export default defineConfig({
     include: [
       "src/main/**/*.test.ts",
       "src/shared/**/*.test.ts",
-      "src/renderer/src/components/panels/git-panel-file-tree.test.ts"
+      "src/renderer/src/components/panels/git-panel-file-tree.test.ts",
+      "tests/close-to-tray.spec.ts"
     ]
   }
 })

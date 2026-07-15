@@ -28,6 +28,7 @@ import {
 } from "./hooks/types"
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
+import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
 import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -1358,6 +1359,23 @@ function getSettingsStore(): Store {
     _settingsStore = new Store({ name: "settings", cwd: getOpenworkDir() })
   }
   return _settingsStore
+}
+
+const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
+
+export function getWindowCloseBehavior(): WindowCloseBehavior {
+  try {
+    return normalizeWindowCloseBehavior(getSettingsStore().get(WINDOW_CLOSE_BEHAVIOR_KEY))
+  } catch (error) {
+    console.warn("[Storage] Failed to load window close behavior; using ask:", error)
+    return "ask"
+  }
+}
+
+export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
+  const normalized = normalizeWindowCloseBehavior(behavior)
+  getSettingsStore().set(WINDOW_CLOSE_BEHAVIOR_KEY, normalized)
+  return normalized
 }
 
 /**

@@ -456,6 +456,10 @@ export function hasActiveAgentRun(threadId: string): boolean {
   return activeRuns.has(threadId)
 }
 
+export function hasAnyActiveAgentRuns(): boolean {
+  return activeRuns.size > 0
+}
+
 export function isActiveAgentRunAborting(threadId: string): boolean {
   return activeRuns.get(threadId)?.signal.aborted === true
 }

@@ -1,7 +1,8 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
 import type {
   CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
+  CloseToTrayPromptEvent,
+  WindowCloseBehavior
 } from "../shared/close-to-tray"
 import type {
   Thread,
@@ -151,6 +152,8 @@ type PetState =
 
 const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
 const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
@@ -186,9 +189,21 @@ const electronAPI = {
     ipcRenderer.on(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
     return () => ipcRenderer.removeListener(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
   },
-  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction): void => {
-    ipcRenderer.send(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, { requestId, action })
+  respondCloseToTrayPrompt: (
+    requestId: number,
+    action: CloseToTrayPromptAction,
+    rememberChoice = false
+  ): void => {
+    ipcRenderer.send(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, {
+      requestId,
+      action,
+      rememberChoice
+    })
   },
+  getWindowCloseBehavior: (): Promise<WindowCloseBehavior> =>
+    ipcRenderer.invoke(WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL) as Promise<WindowCloseBehavior>,
+  setWindowCloseBehavior: (behavior: WindowCloseBehavior): Promise<WindowCloseBehavior> =>
+    ipcRenderer.invoke(WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL, behavior) as Promise<WindowCloseBehavior>,
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
       callback(data)
