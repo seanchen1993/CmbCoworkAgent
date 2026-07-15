@@ -2894,6 +2894,64 @@ async function testWorkflowSubagentStopsAfterStructuredOutputSuccess(): Promise<
   assert(streamClosedEarly, "successful structured_output closes the stream iterator early")
 }
 
+async function testWorkflowSubagentStreamModeRequestsTokenStreaming(): Promise<void> {
+  // Regression guard for the streamMode contract: it must subscribe "messages"
+  // ALONGSIDE "values". Subscribing "messages" attaches LangGraph's
+  // StreamMessagesHandler (lc_prefer_streaming = true), which is what switches the
+  // underlying HTTP request to SSE — with ["values"] alone the completion request is
+  // non-streaming, so any single turn whose generation exceeds the 60s first-byte
+  // watchdog in createRetryingFetch (e.g. write_file of a large file) times out on
+  // every retry and can never succeed. Do NOT "simplify" this back to ["values"].
+  const capturedModes: unknown[] = []
+  const result = await runWorkflowSubagent(
+    {
+      parentThreadId: "thread-streammode",
+      defaultModelId: "default",
+      cleanupThread: async () => undefined,
+      isRetryableApiError: () => false,
+      createRuntime: async () => ({
+        stream: async (_input: unknown, config: unknown) => {
+          capturedModes.push((config as { streamMode?: unknown } | undefined)?.streamMode)
+          return (async function* () {
+            // Token-level chunk interleaved BEFORE the values snapshot: the consume
+            // loop must skip it without perturbing the final result.
+            yield ["messages", [{ _getType: () => "AIMessageChunk", content: "tok" }, {}]]
+            yield [
+              "values",
+              {
+                messages: [
+                  {
+                    _getType: () => "ai",
+                    content: "done",
+                    usage_metadata: { output_tokens: 3 }
+                  }
+                ]
+              }
+            ]
+          })()
+        }
+      })
+    },
+    {
+      prompt: "write a large file",
+      agentIndex: 0,
+      label: "streammode",
+      runId: "wf_streammode",
+      signal: new AbortController().signal
+    }
+  )
+
+  assert(capturedModes.length === 1, `expected exactly one stream call, got ${capturedModes.length}`)
+  const mode = capturedModes[0]
+  assert(Array.isArray(mode), "streamMode is passed in array form (tuple-emitting stream)")
+  assert(
+    (mode as unknown[]).includes("values") && (mode as unknown[]).includes("messages"),
+    `streamMode must subscribe both "values" and "messages" (SSE side effect), got ${JSON.stringify(mode)}`
+  )
+  assert(result.text === "done", "token-level messages chunks do not perturb the final snapshot")
+  assert(result.outputTokens === 3, `token metering unaffected by messages chunks, got ${result.outputTokens}`)
+}
+
 async function testStructuredOutputPatternValidationStaysLocal(): Promise<void> {
   const schema = {
     type: "object",
@@ -3488,6 +3546,7 @@ const tests = [
   testWorkflowSubagentRepairsNormalizedDanglingThenNudges,
   testWorkflowSubagentNudgesAfterClosedToolCall,
   testWorkflowSubagentStopsAfterStructuredOutputSuccess,
+  testWorkflowSubagentStreamModeRequestsTokenStreaming,
   testStructuredOutputPatternValidationStaysLocal,
   testStructuredOutputExamplePromptOmitsInvalidExamples,
   testOversizedScriptRejected,

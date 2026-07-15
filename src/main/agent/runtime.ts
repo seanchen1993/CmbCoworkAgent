@@ -3048,6 +3048,9 @@ function createRetryingFetch(
       }
 
       try {
+        const requestedStream =
+          typeof init?.body === "string" && init.body.includes('"stream":true')
+        const attemptStartedAt = Date.now()
         const res = await fetch(input, { ...init, signal: attemptCtrl.signal })
 
         // IMPORTANT: do not cancel the per-attempt timeout yet for streaming
@@ -3056,6 +3059,14 @@ function createRetryingFetch(
         // because downstream (SDK / LangChain) owns the stream lifetime from
         // here and should not be interrupted mid-stream by our timer.
         cleanup()
+
+        // Ground truth for the streaming path: an SSE response announces itself as
+        // content-type text/event-stream; application/json means the gateway buffered
+        // the whole completion — long generations on that path will hit the 60s
+        // first-byte watchdog above.
+        console.log(
+          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}`
+        )
 
         // Success or non-retryable error — return as-is.
         if (!isRetryableStatus(res.status)) {

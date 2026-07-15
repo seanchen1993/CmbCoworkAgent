@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
+import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import {
   isWindowCloseBehavior,
   type CloseToTrayPromptAction,
@@ -3198,16 +3199,17 @@ const api = {
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
-      ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<HarnessDeployUnitMapping[]>,
+      ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
+        HarnessDeployUnitMapping[]
+      >,
     getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
     saveDeployUnitMappings: (
       mappings: HarnessDeployUnitMapping[]
     ): Promise<HarnessDeployUnitMapping[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:saveDeployUnitMappings",
-        mappings
-      ) as Promise<HarnessDeployUnitMapping[]>,
+      ipcRenderer.invoke("harnessBoard:saveDeployUnitMappings", mappings) as Promise<
+        HarnessDeployUnitMapping[]
+      >,
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke(
         "harnessBoard:saveLeanTokenConfig",
@@ -3239,9 +3241,7 @@ const api = {
         "harnessBoard:getEnterpriseProjectDetails",
         input
       ) as Promise<HarnessEnterpriseProjectDetailResult>,
-    getProjectReviews: (
-      input: HarnessProjectReviewInput
-    ): Promise<HarnessProjectReviewResult> =>
+    getProjectReviews: (input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> =>
       ipcRenderer.invoke(
         "harnessBoard:getProjectReviews",
         input
@@ -3257,17 +3257,13 @@ const api = {
         projectId
       ) as Promise<HarnessDynamicWorkflowConfig | null>,
     getPublicAgentmdDeployUnits: (projectId: string): Promise<string[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:getPublicAgentmdDeployUnits",
-        projectId
-      ) as Promise<string[]>,
-    getLocalAgentmdDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ): Promise<string[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:getLocalAgentmdDeployUnitMappings",
-        mappings
-      ) as Promise<string[]>,
+      ipcRenderer.invoke("harnessBoard:getPublicAgentmdDeployUnits", projectId) as Promise<
+        string[]
+      >,
+    getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]): Promise<string[]> =>
+      ipcRenderer.invoke("harnessBoard:getLocalAgentmdDeployUnitMappings", mappings) as Promise<
+        string[]
+      >,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -3319,10 +3315,11 @@ const api = {
   },
   update: {
     check: (): Promise<
-      | { hasUpdate: false }
+      | { hasUpdate: false; source?: UpdateSourceInfo | null }
       | {
           hasUpdate: true
           version: string
+          targetVersion: string
           updateType: string
           releaseNotes: string
           size: number
@@ -3337,6 +3334,7 @@ const api = {
             message: string
           } | null
           currentError?: string | null
+          source?: UpdateSourceInfo | null
         }
     > => ipcRenderer.invoke("update:check"),
     download: (): Promise<{ success: boolean }> => ipcRenderer.invoke("update:download"),
@@ -3347,6 +3345,7 @@ const api = {
       status: string
       update: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
@@ -3362,17 +3361,20 @@ const api = {
       } | null
       errorMessage: string | null
       canRollback: boolean
+      source: UpdateSourceInfo | null
     }> => ipcRenderer.invoke("update:get-status"),
     getStartupResult: (): Promise<{ updatedFrom?: string; updatedTo?: string }> =>
       ipcRenderer.invoke("update:get-startup-result"),
     onAvailable: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
         mandatory: boolean
         autoDownloading?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => {
       const wrapper = (_event: unknown, info: Parameters<typeof callback>[0]): void =>
@@ -3398,10 +3400,12 @@ const api = {
     onDownloaded: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes?: string
         size?: number
         mandatory?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => {
       const wrapper = (_event: unknown, info: Parameters<typeof callback>[0]): void =>
