@@ -4850,6 +4850,10 @@ export class LocalSandbox
   /** Track all active child processes for cleanup on app quit. */
   private static readonly activeProcesses = new Set<ChildProcess>()
 
+  static hasActiveProcesses(): boolean {
+    return LocalSandbox.activeProcesses.size > 0
+  }
+
   /** Kill all active child processes. Call from app 'will-quit' hook. */
   static killAll(): void {
     for (const proc of LocalSandbox.activeProcesses) {

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -19,23 +19,30 @@ import {
   isAppTrayAvailable,
   requestAppAttention,
   setAppQuitting,
-  showPendingAppAttention,
-  shouldHideMainWindowOnClose
+  showPendingAppAttention
 } from "./app-tray"
 import { setAppAttentionHandler } from "./app-attention-events"
 import {
   APP_ATTENTION_CHANNEL,
   isRendererAppAttentionPayload
 } from "../shared/app-attention"
-import type {
-  CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
+import {
+  closePromptActionToBehavior,
+  isCloseToTrayPromptResponse,
+  isWindowCloseBehavior,
+  resolveWindowCloseRequest,
+  type CloseToTrayPromptReason,
+  type CloseToTrayPromptEvent,
+  type WindowCloseBehavior
 } from "../shared/close-to-tray"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
 const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
 const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
 const EVENT_CATEGORIES = new Set<EventCategory>([
@@ -49,21 +56,6 @@ const EVENT_CATEGORIES = new Set<EventCategory>([
   "chatx",
   "workspace"
 ])
-
-function isCloseToTrayPromptResponse(
-  payload: unknown
-): payload is { requestId: number; action: CloseToTrayPromptAction } {
-  if (!payload || typeof payload !== "object") return false
-  // 使用 in 操作符进行属性存在性检查，比 as 断言更安全
-  if (!("requestId" in payload) || !("action" in payload)) return false
-  const record = payload as Record<string, unknown>
-  return (
-    typeof record.requestId === "number" &&
-    (record.action === "minimize-to-tray" ||
-      record.action === "direct-close" ||
-      record.action === "cancel")
-  )
-}
 
 function isTrackEventPayload(payload: unknown): payload is {
   eventName: string
@@ -212,7 +204,12 @@ const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
 }
 process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
 process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
-import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
+import {
+  disposeAllAgentThreadStates,
+  hasAnyActiveAgentTasks,
+  registerAgentHandlers,
+  shutdownAllAgentTasks
+} from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
@@ -239,6 +236,7 @@ import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
@@ -253,9 +251,19 @@ import {
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
 import { getAllThreads, initializeDatabase, flush } from "./db"
-import { startScheduler, stopScheduler } from "./services/scheduler"
-import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
-import { startChatX, stopChatX } from "./services/chatx"
+import {
+  hasActiveScheduledTaskRuns,
+  startScheduler,
+  stopScheduler,
+  stopSchedulerAndWait
+} from "./services/scheduler"
+import {
+  isHeartbeatRunning,
+  startHeartbeat,
+  stopHeartbeat,
+  stopHeartbeatAndWait
+} from "./services/heartbeat"
+import { hasActiveChatXRuns, startChatX, stopChatX, stopChatXAndWait } from "./services/chatx"
 import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
@@ -263,7 +271,13 @@ import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
+import {
+  getOpenworkDir,
+  getWindowCloseBehavior,
+  isKeepAwakeEnabled,
+  setKeepAwakeEnabled,
+  setWindowCloseBehavior
+} from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
@@ -279,6 +293,8 @@ let loginWindow: BrowserWindow | null = null
 let closeToTrayPromptOpen = false
 let closeToTrayPromptRequestId = 0
 let closeToTrayPromptTimer: NodeJS.Timeout | null = null
+let closeToTrayPromptReason: CloseToTrayPromptReason | null = null
+let closeToTrayPromptRememberChoiceAllowed = false
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -391,25 +407,51 @@ function hideMainWindowToTray(window: BrowserWindow): void {
 
 function clearCloseToTrayPromptState(): void {
   closeToTrayPromptOpen = false
+  closeToTrayPromptReason = null
+  closeToTrayPromptRememberChoiceAllowed = false
   if (closeToTrayPromptTimer) {
     clearTimeout(closeToTrayPromptTimer)
     closeToTrayPromptTimer = null
   }
 }
 
-function requestHideMainWindowToTray(window: BrowserWindow): void {
+function hasActiveForegroundRuns(): boolean {
+  return (
+    hasAnyActiveAgentTasks() ||
+    hasActiveChatXRuns() ||
+    hasActiveScheduledTaskRuns() ||
+    isHeartbeatRunning()
+  )
+}
+
+function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
+  const savedBehavior = setWindowCloseBehavior(behavior)
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, savedBehavior)
+  }
+  return savedBehavior
+}
+
+function requestWindowCloseChoice(
+  window: BrowserWindow,
+  reason: CloseToTrayPromptReason
+): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return
   if (closeToTrayPromptOpen) {
-    if (!window.isDestroyed()) window.focus()
+    window.focus()
     return
   }
 
+  const trayAvailable = isAppTrayAvailable()
   closeToTrayPromptOpen = true
+  closeToTrayPromptReason = reason
+  closeToTrayPromptRememberChoiceAllowed = reason !== "active-runs"
   closeToTrayPromptRequestId += 1
   const requestId = closeToTrayPromptRequestId
   closeToTrayPromptTimer = setTimeout(() => {
     if (closeToTrayPromptRequestId === requestId) {
       console.warn("[Main] Close-to-tray prompt timed out")
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
         const event: CloseToTrayPromptEvent = {
           type: "dismiss",
           requestId,
@@ -424,7 +466,10 @@ function requestHideMainWindowToTray(window: BrowserWindow): void {
   const event: CloseToTrayPromptEvent = {
     type: "open",
     requestId,
-    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘"
+    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘",
+    reason,
+    canMinimizeToTray: trayAvailable,
+    rememberChoiceAllowed: closeToTrayPromptRememberChoiceAllowed
   }
   window.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
 }
@@ -521,11 +566,23 @@ function createWindow(): void {
     console.warn("[Main] Main window close requested", {
       pet: getPetWindowDebugInfo()
     })
-    if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
-      event.preventDefault()
-      if (mainWindow) {
-        requestHideMainWindowToTray(mainWindow)
-      }
+    const trayAvailable = isAppTrayAvailable()
+    const decision = resolveWindowCloseRequest({
+      behavior: getWindowCloseBehavior(),
+      isAppQuitting: isAppQuitting(),
+      trayAvailable,
+      hasActiveForegroundRuns: hasActiveForegroundRuns()
+    })
+    if (decision.action === "allow-close") return
+
+    event.preventDefault()
+    if (!mainWindow) return
+    if (decision.action === "minimize-to-tray") {
+      hideMainWindowToTray(mainWindow)
+    } else if (decision.action === "quit") {
+      app.quit()
+    } else {
+      requestWindowCloseChoice(mainWindow, decision.reason)
     }
   })
 
@@ -687,6 +744,7 @@ if (!gotTheLock) {
     registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
+    registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
@@ -703,21 +761,112 @@ if (!gotTheLock) {
       requestAppAttention({ kind: payload.kind, threadId: payload.threadId })
     })
 
+    ipcMain.handle(WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL, (event) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Window close settings are only available to the main window")
+      }
+      return getWindowCloseBehavior()
+    })
+
+    ipcMain.handle(WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL, (event, behavior: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Window close settings are only available to the main window")
+      }
+      if (!isWindowCloseBehavior(behavior)) {
+        throw new Error("Invalid window close behavior")
+      }
+      return saveWindowCloseBehavior(behavior)
+    })
+
     ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
       if (event.sender.id !== mainWindow.webContents.id) return
       if (!isCloseToTrayPromptResponse(payload)) return
       if (!closeToTrayPromptOpen || payload.requestId !== closeToTrayPromptRequestId) return
 
-      clearCloseToTrayPromptState()
-      if (payload.action === "minimize-to-tray") {
-        hideMainWindowToTray(mainWindow)
-      } else if (payload.action === "direct-close") {
-        // app.quit() 会触发 before-quit → will-quit 事件链，
-        // 其中会执行 fireSessionEndAll（中断活跃 agent 运行）、
-        // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
-        app.quit()
+      const promptWindow = mainWindow
+      const promptReason = closeToTrayPromptReason
+      const rememberChoiceAllowed = closeToTrayPromptRememberChoiceAllowed
+      const needsActiveRunConfirmation = (): boolean =>
+        payload.action === "direct-close" &&
+        promptReason !== "active-runs" &&
+        hasActiveForegroundRuns()
+
+      if (payload.action === "minimize-to-tray" && !isAppTrayAvailable()) {
+        clearCloseToTrayPromptState()
+        requestWindowCloseChoice(promptWindow, "tray-unavailable")
+        return
       }
+
+      // A background ChatX message can start while the ordinary close prompt is
+      // open. Upgrade to the non-suppressible safety prompt before quitting.
+      if (needsActiveRunConfirmation()) {
+        clearCloseToTrayPromptState()
+        requestWindowCloseChoice(promptWindow, "active-runs")
+        return
+      }
+
+      let rememberError: unknown = null
+      const rememberedBehavior = closePromptActionToBehavior(payload.action)
+      if (rememberChoiceAllowed && payload.rememberChoice && rememberedBehavior) {
+        try {
+          saveWindowCloseBehavior(rememberedBehavior)
+        } catch (error) {
+          console.warn("[Main] Failed to remember window close behavior:", error)
+          rememberError = error
+        }
+      }
+
+      clearCloseToTrayPromptState()
+
+      const performAction = (): void => {
+        if (payload.action === "minimize-to-tray") {
+          // The native save-failure warning may outlive the tray. Never hide
+          // the only main window after its recovery entry point disappeared.
+          if (!isAppTrayAvailable() && !promptWindow.isDestroyed()) {
+            requestWindowCloseChoice(promptWindow, "tray-unavailable")
+            return
+          }
+          if (!promptWindow.isDestroyed()) hideMainWindowToTray(promptWindow)
+        } else if (payload.action === "direct-close") {
+          // The save-failure warning is asynchronous. A task can start while it
+          // is open, so repeat the safety check immediately before the real quit.
+          if (needsActiveRunConfirmation() && !promptWindow.isDestroyed()) {
+            requestWindowCloseChoice(promptWindow, "active-runs")
+            return
+          }
+          // app.quit() 会触发 before-quit → will-quit 事件链，
+          // 其中会先中断并等待活跃任务，再执行 fireSessionEndAll，
+          // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
+          app.quit()
+        }
+      }
+
+      if (rememberError && !promptWindow.isDestroyed()) {
+        void dialog
+          .showMessageBox(promptWindow, {
+            type: "warning",
+            title: "设置未保存",
+            message: "无法记住本次关闭窗口的选择",
+            detail: "本次操作仍会执行，原关闭窗口设置保持不变。",
+            buttons: ["知道了"],
+            defaultId: 0,
+            noLink: true
+          })
+          .catch((error) => console.warn("[Main] Failed to show close setting warning:", error))
+          .finally(performAction)
+        return
+      }
+
+      performAction()
     })
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
@@ -853,26 +1002,60 @@ if (!gotTheLock) {
   // then re-issue app.quit(). will-quit fires during teardown — async hook spawns
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
+  let sessionEndInProgress = false
   app.on("before-quit", (event) => {
-    setAppQuitting(true)
+    const activeSessions = hasActiveSessions()
+    const activeTasks = hasActiveForegroundRuns()
     console.warn("[Main] before-quit", {
       sessionEndDone,
-      hasActiveSessions: hasActiveSessions(),
+      sessionEndInProgress,
+      hasActiveSessions: activeSessions,
+      hasActiveTasks: activeTasks,
       pet: getPetWindowDebugInfo()
     })
-    if (sessionEndDone) return
-    if (!hasActiveSessions()) {
+    if (sessionEndDone) {
+      setAppQuitting(true)
+      return
+    }
+    if (sessionEndInProgress) {
+      // fireSessionEndAll clears its session map before awaiting hooks. A second
+      // quit request must not observe the empty map and bypass the in-flight drain.
+      event.preventDefault()
+      return
+    }
+    if (!activeSessions && !activeTasks) {
       sessionEndDone = true
+      setAppQuitting(true)
       return
     }
     event.preventDefault()
-    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
-      .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
-      .finally(() => disposeAllAgentThreadStates())
-      .finally(() => {
+    sessionEndInProgress = true
+    void (async () => {
+      try {
+        const shutdownResults = await Promise.allSettled([
+          shutdownAllAgentTasks(5_000),
+          stopChatXAndWait(5_000),
+          stopSchedulerAndWait(5_000),
+          stopHeartbeatAndWait(5_000)
+        ])
+        for (const result of shutdownResults) {
+          if (result.status === "rejected") {
+            console.warn("[Main] Active task shutdown error:", result.reason)
+          }
+        }
+        await fireSessionEndAll(5_000, (threadId) =>
+          makeBroadcastHookResultCallback(`agent:stream:${threadId}`)
+        )
+      } catch (error) {
+        console.warn("[Main] SessionEnd hooks error:", error)
+      } finally {
+        disposeAllAgentThreadStates()
         sessionEndDone = true
+        sessionEndInProgress = false
+        setAppQuitting(true)
         app.quit()
-      })
+      }
+    })()
   })
 
   let quitting = false

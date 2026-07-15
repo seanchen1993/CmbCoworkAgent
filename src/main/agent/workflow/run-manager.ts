@@ -317,6 +317,7 @@ function workspaceKey(p: string): string {
 
 class WorkflowRunManager {
   private readonly active = new Map<string, ActiveWorkflowRun>()
+  private shuttingDown = false
   /** Per-run count of auto re-reports after a failed notification turn (E). */
   private readonly renotifyAttempts = new Map<string, number>()
   /**
@@ -351,6 +352,10 @@ class WorkflowRunManager {
 
   isActive(threadId: string): boolean {
     return this.active.has(threadId)
+  }
+
+  hasActiveRuns(): boolean {
+    return this.active.size > 0
   }
 
   activeRunId(threadId: string): string | undefined {
@@ -431,6 +436,9 @@ class WorkflowRunManager {
 
   /** Launches a run in the background. Throws synchronously on invalid state. */
   launch(request: WorkflowLaunchRequest): WorkflowLaunchResult {
+    if (this.shuttingDown) {
+      throw new Error("The application is quitting; a workflow can no longer be launched.")
+    }
     if (this.active.has(request.threadId)) {
       throw new Error(
         `A dynamic workflow (${this.active.get(request.threadId)!.runId}) is already running in this thread. Wait for its task-notification or cancel it from the workflow panel.`
@@ -713,6 +721,31 @@ class WorkflowRunManager {
         timer.unref?.()
       })
     ])
+  }
+
+  /** Cancel every background workflow and give its terminal state a bounded
+   * opportunity to flush before the application exits. */
+  async cancelAllAndWait(timeoutMs = 5_000): Promise<void> {
+    this.shuttingDown = true
+    const entries = Array.from(this.active.values())
+    if (entries.length === 0) return
+
+    for (const entry of entries) {
+      entry.userCancelled = true
+      entry.controller.abort()
+    }
+
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.allSettled(entries.map((entry) => entry.settled)).then(() => undefined),
+        new Promise<void>((resolve) => {
+          timeoutTimer = setTimeout(resolve, Math.max(0, timeoutMs))
+        })
+      ])
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+    }
   }
 
   /**

@@ -284,6 +284,7 @@ function canPreviewSystemPrompt(): boolean {
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+let agentTaskShutdownStarted = false
 const goalStore = new SqlGoalStore()
 const goalManager = new GoalManager(goalStore)
 let restoredRuntimeGoalsReconciled = false
@@ -463,6 +464,71 @@ export function forgetCoordinatorThreadState(threadId: string): void {
 
 export function hasActiveAgentRun(threadId: string): boolean {
   return activeRuns.has(threadId)
+}
+
+export function hasAnyActiveAgentTasks(): boolean {
+  return (
+    activeRuns.size > 0 ||
+    workflowRunManager.hasActiveRuns() ||
+    coordinatorWorkerManager.hasRunningWorkers() ||
+    LocalSandbox.hasActiveProcesses()
+  )
+}
+
+/** Stop foreground turns, detached workflows/workers, and tool child processes.
+ * The wait is bounded because application shutdown must still make progress if
+ * a provider or child process does not observe its abort signal. */
+export async function shutdownAllAgentTasks(timeoutMs = 5_000): Promise<void> {
+  agentTaskShutdownStarted = true
+  const foregroundRuns = Array.from(activeRuns.entries()).map(([threadId, controller]) => ({
+    threadId,
+    controller,
+    settled: activeRunSettled.get(threadId)
+  }))
+
+  for (const run of foregroundRuns) {
+    LocalSandbox.cancelBackgroundTasks(run.threadId)
+    run.controller.abort()
+  }
+
+  const workflowShutdown = workflowRunManager.cancelAllAndWait(timeoutMs)
+  const coordinatorShutdown = coordinatorWorkerManager.cancelAllWorkersAndWait(timeoutMs)
+  LocalSandbox.killAll()
+
+  let foregroundTimeoutTimer: ReturnType<typeof setTimeout> | undefined
+  let foregroundTimedOut = false
+  const foregroundShutdown =
+    foregroundRuns.length === 0
+      ? Promise.resolve()
+      : Promise.race([
+          Promise.allSettled(
+            foregroundRuns.flatMap((run) => (run.settled ? [run.settled] : []))
+          ).then(() => undefined),
+          new Promise<void>((resolve) => {
+            foregroundTimeoutTimer = setTimeout(() => {
+              foregroundTimedOut = true
+              resolve()
+            }, Math.max(0, timeoutMs))
+          })
+        ]).finally(() => {
+          if (foregroundTimeoutTimer) clearTimeout(foregroundTimeoutTimer)
+        })
+
+  await Promise.allSettled([foregroundShutdown, workflowShutdown, coordinatorShutdown])
+  if (foregroundTimedOut) {
+    console.warn("[Agent] Timed out waiting for foreground runs to settle during shutdown")
+  }
+}
+
+function rejectAgentStartDuringShutdown(window: BrowserWindow, channel: string): boolean {
+  if (!agentTaskShutdownStarted) return false
+  safeSendToWindow(window, channel, {
+    type: "error",
+    error: "APP_SHUTTING_DOWN",
+    message: "The application is quitting and cannot start another agent run."
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+  return true
 }
 
 export function isActiveAgentRunAborting(threadId: string): boolean {
@@ -4264,6 +4330,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const channel = isTrustedCoordinatorNotificationInvoke
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
+      if (rejectAgentStartDuringShutdown(window, channel)) return
       let modelInputMessage = message
       let routingMessage = message
       let rootUserPrompt = message
@@ -7471,6 +7538,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.error("[Agent] No window found for resume")
         return
       }
+      if (rejectAgentStartDuringShutdown(window, channel)) return
 
       // Get workspace path from thread metadata
       const thread = getThread(threadId)
@@ -8347,6 +8415,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.error("[Agent] No window found for interrupt response")
       return
     }
+    if (rejectAgentStartDuringShutdown(window, channel)) return
     if (
       rejectRuntimeRestoredCheckpointResume(
         threadId,

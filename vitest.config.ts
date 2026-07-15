@@ -17,7 +17,8 @@ export default defineConfig({
       "src/main/**/*.test.ts",
       "src/shared/**/*.test.ts",
       "src/renderer/src/components/panels/git-panel-file-tree.test.ts",
-      "src/renderer/src/components/trace/TraceConversation.test.ts"
+      "src/renderer/src/components/trace/TraceConversation.test.ts",
+      "tests/close-to-tray.spec.ts"
     ]
   }
 })

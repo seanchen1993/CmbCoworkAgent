@@ -96,7 +96,8 @@ import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-ty
 import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
 import type {
   CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
+  CloseToTrayPromptEvent,
+  WindowCloseBehavior
 } from "../shared/close-to-tray"
 
 interface ElectronAPI {
@@ -106,7 +107,14 @@ interface ElectronAPI {
   openLoginPage: () => void
   closeLoginPage: () => void
   onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptEvent) => void) => () => void
-  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction) => void
+  respondCloseToTrayPrompt: (
+    requestId: number,
+    action: CloseToTrayPromptAction,
+    rememberChoice?: boolean
+  ) => void
+  getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
+  setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
+  onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
@@ -1543,6 +1551,10 @@ interface CustomAPI {
       workspacePath: string,
       cardNumber?: string
     ) => Promise<AgentAutoCommitWorkspaceCard>
+  }
+  expertAgents: {
+    list: () => Promise<import("../shared/expert-agent-types").ExpertAgentEntry[]>
+    setEnabled: (name: string, enabled: boolean) => Promise<string[]>
   }
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
