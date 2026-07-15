@@ -1130,6 +1130,49 @@ const context = {
   auditGaps: []
 }
 
+// 候选文件的 glob 模式(现状勘察与项目探索共用)。同时扫根目录与一级子目录:
+// 前后端同仓(frontend/ + backend/)时两侧清单都要被发现。
+const manifestPatterns = [
+  "AGENTS.md",
+  "README.md",
+  "package.json",
+  "*/package.json",
+  "pom.xml",
+  "*/pom.xml",
+  "build.gradle",
+  "*/build.gradle",
+  "build.gradle.kts",
+  "go.mod",
+  "*/go.mod",
+  "Cargo.toml",
+  "pyproject.toml",
+  "*/pyproject.toml",
+  "requirements.txt",
+  "*/requirements.txt",
+  "Makefile"
+]
+const sourcePatterns = [
+  "src/**/*.ts",
+  "src/**/*.tsx",
+  "src/**/*.js",
+  "src/**/*.jsx",
+  "src/**/*.java",
+  "src/**/*.go",
+  "src/**/*.py",
+  "src/**/*.rs",
+  "src/**/*.vue",
+  "app/**/*.ts",
+  "app/**/*.tsx",
+  "*/src/**/*.ts",
+  "*/src/**/*.tsx",
+  "*/src/**/*.vue",
+  "*/src/**/*.java",
+  "*/src/**/*.py",
+  "test/**/*",
+  "tests/**/*",
+  "__tests__/**/*"
+]
+
 // ---- 确定验收标准 ----
 phase("确定验收标准")
 if (hasExplicitContract) {
@@ -1153,6 +1196,47 @@ if (hasExplicitContract) {
   }
   log(`使用外部注入合同：${context.criteria.length} 条验收标准。`)
 } else {
+  // 现状勘察:合同定稿前先让一个探索代理找出"需求没点名、但会与之交互的既有代码"
+  // (已有同类能力/会受影响的特性/与需求冲突的现状)。"定稿前核实引用事实"的指令只能
+  // 防引用失实,防不了未被引用的交互代码被无视——真实 run 已击穿过一次(登录锁定
+  // 合同无视了既有的账户禁用与登录审计打点)。候选文件用需求文本抽 token 排序,
+  // 勘察不盲扫;代理故障时降级继续(合同代理仍有自行核实的指令兜底)。
+  let recon = null
+  {
+    const manifestLists = await parallel(manifestPatterns.map((p) => () => safeGlob(p)))
+    const sourceLists = await parallel(sourcePatterns.map((p) => () => safeGlob(p)))
+    throwIfGlobOverflow()
+    const reconTokens = contractIdentifierTokens(
+      { title: "", goal: requirement, constraints: [], conventions: [] },
+      []
+    )
+    const reconManifests = take(uniq(manifestLists.flat()), MAX_MANIFESTS)
+    const reconMatched = rankPathsByTokens(uniq(sourceLists.flat()), reconTokens, 30)
+    recon = await agent(
+      `请只读勘察项目现状，不要修改文件。一份开发需求即将被固化为验收合同，你的任务是找出"需求没有点名、但实现时必然与之交互的既有代码与行为"，防止合同带盲区出厂。
+
+开发需求：
+${requirement}
+
+项目 manifest 路径清单：
+${lines(reconManifests) || "- 未找到"}
+
+与需求关键词匹配的候选文件（按命中度排序，仅是起点，必须用 grep/read 实际核实）：
+${lines(reconMatched) || "- 无命中（请直接用 grep/glob 检索）"}
+
+重点回答三件事，写进返回结果：
+1. 已存在的同类/相邻能力（summary 概述；relevantFiles 给路径，reason 说明它与需求的关系，suggestedUse 标注"交互：<会怎样相互影响>"或"可复用：<符号名>"）；
+2. 需求实现会触碰的既有行为（如同一方法/接口上已有的校验、审计、状态分支——它们与新功能的先后/互斥关系是合同必须定义的）；
+3. 与需求冲突或使需求假设不成立的现状（写进 risks）。`,
+      {
+        label: "探索：需求现状勘察",
+        phase: "确定验收标准",
+        agentType: "Explore",
+        schema: EXPLORE_SCHEMA
+      }
+    )
+    if (!recon) log("需求现状勘察未返回结构化结果，合同代理将自行核实现状（降级继续）。")
+  }
   const contract = await agent(
     `请把下面的开发需求固化为一份"交付合同"。合同的核心是验收标准清单（criteria）：
 - 把需求里每个可独立核查的承诺拆成一条标准，粒度以"对应一段独立实现或一条独立证据"为准：
@@ -1164,8 +1248,24 @@ if (hasExplicitContract) {
 - 评定复杂度 complexity：simple（1-3 条标准、单模块小改动）、standard（跨少数模块）、complex（跨多模块、需要多轮实现验证）。
 - conventions 写跨任务公约：统一入口、命名、错误码风格等，防止多个实现代理各写各的。
 - globalValidationCommands 必须是可在 shell 里原样执行的完整命令：含通配符等特殊字符时必须加引号（如 -Dtest='*Test' 而不是 -Dtest=*Test，后者会被 shell 展开导致命令失真、验证空跑）。
+- 定稿前必须用 read/glob/grep 核实需求引用的代码事实（接口/类/字段/模块/测试是否真实存在、现有行为是否与需求冲突）；与代码不符的引用不得照抄进标准——列入 openQuestions 并将 canProceed 设为 false。
+- 下方"代码现状简报"列出的既有交互行为不得无视：新功能与它们的先后/互斥/叠加关系，要么固化为标准或约束，要么按下一条的门槛列入 openQuestions——沉默跳过等于合同带盲区出厂。
+- openQuestions 门槛（阻塞是最后手段）：只留给"没有合理默认、且不同选择会实质改变交付范围或安全边界"的决策。凡你已能给出合理默认的（按需求原文执行、保持现状、不扩大范围），直接采用默认继续成契——把所采默认写进对应标准或非目标/约束（用户会在合同文档里复核，不同意可推翻重跑），并在 proceedReason 里逐条汇总"已采默认"。严禁用"请确认是否优化/是否对齐"这类自带答案的问题阻塞交付。
 - 如果缺少关键业务规则或安全边界，将 canProceed 设为 false 并列出 openQuestions，不要编造。
-
+${
+  recon
+    ? `
+代码现状简报（勘察代理产出；引用的事实仍须自行核实）：
+概况：${clip(recon.summary, 1200)}
+相关现状（路径 — 与需求的关系）：
+${take(recon.relevantFiles || [], 30)
+  .map((f) => `- ${f.path}：${clip(f.reason, 160)}${f.suggestedUse ? `（${clip(f.suggestedUse, 120)}）` : ""}`)
+  .join("\n") || "- 无"}
+潜在冲突/风险：
+${lines(take(recon.risks || [], 10).map((r) => clip(r, 300)))}
+`
+    : ""
+}
 需求内容：
 ${requirement}`,
     {
@@ -1247,47 +1347,6 @@ await writeState(context, "contract_done", "合同已成立。", [])
 // 子代理自己会按需调用相关 SKILL.md，脚本重复注入只会浪费上下文。
 phase("项目探索")
 {
-  // 同时扫根目录与一级子目录：前后端同仓（frontend/ + backend/）时两侧清单都要被发现。
-  const manifestPatterns = [
-    "AGENTS.md",
-    "README.md",
-    "package.json",
-    "*/package.json",
-    "pom.xml",
-    "*/pom.xml",
-    "build.gradle",
-    "*/build.gradle",
-    "build.gradle.kts",
-    "go.mod",
-    "*/go.mod",
-    "Cargo.toml",
-    "pyproject.toml",
-    "*/pyproject.toml",
-    "requirements.txt",
-    "*/requirements.txt",
-    "Makefile"
-  ]
-  const sourcePatterns = [
-    "src/**/*.ts",
-    "src/**/*.tsx",
-    "src/**/*.js",
-    "src/**/*.jsx",
-    "src/**/*.java",
-    "src/**/*.go",
-    "src/**/*.py",
-    "src/**/*.rs",
-    "src/**/*.vue",
-    "app/**/*.ts",
-    "app/**/*.tsx",
-    "*/src/**/*.ts",
-    "*/src/**/*.tsx",
-    "*/src/**/*.vue",
-    "*/src/**/*.java",
-    "*/src/**/*.py",
-    "test/**/*",
-    "tests/**/*",
-    "__tests__/**/*"
-  ]
   const manifestLists = await parallel(manifestPatterns.map((p) => () => safeGlob(p)))
   const sourceLists = await parallel(sourcePatterns.map((p) => () => safeGlob(p)))
   throwIfGlobOverflow()
@@ -1373,7 +1432,8 @@ ${lines(matchedFiles) || "- 无命中（合同未含代码标识符，请直接�
 其他源码/测试文件抽样（各类型轮流抽取，仅示意项目结构，绝非全量）：
 ${lines(sampledFiles)}
 
-请返回相关文件、命令和风险。定位"合同标准最可能触及的文件"时，必须用 grep 按验收标准里的关键词（接口名/类名/字段名等）实际检索核实——上面清单只是起点，grep 命中的才是可靠依据；若合同提到的模块在清单/根 manifest 的 modules 里不存在，这本身就是要上报的风险。`,
+请返回相关文件、命令和风险。定位"合同标准最可能触及的文件"时，必须用 grep 按验收标准里的关键词（接口名/类名/字段名等）实际检索核实——上面清单只是起点，grep 命中的才是可靠依据；若合同提到的模块在清单/根 manifest 的 modules 里不存在，这本身就是要上报的风险。
+主动识别可直接复用的现有函数/工具/模式（项目里已有合适实现，后续就不该新写），在对应 relevantFiles 的 suggestedUse 里标注"可复用：<类名/方法名>"。`,
             {
               label: "探索：" + item.label,
               phase: "项目探索",
@@ -1479,6 +1539,7 @@ ${pending.map((c) => `- ${c.id}（${c.verify}）：${clip(c.text, 500)}${c.note 
 ${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）：\n${clip(context.conventionsBrief, 2000)}\n` : ""}
 要求：
 - 每个工作包声明它负责证实哪些标准（acIds），粒度小到一个 agent 可以安全完成。
+- 优先复用项目画像中标注"可复用"的现有函数/工具（确无可复用才规划新建），在工作包 objective 里写明要复用的实现及其文件路径。
 - 每条待证实标准必须被至少一个工作包认领；确实无法认领的，在 blockers 里说明原因。
 - conventionsBrief 写一页跨包公约（统一入口/命名/风格），所有实现代理都会收到它。
 - 工作包之间如有依赖写 dependencies（用工作包 id）。
@@ -1596,6 +1657,7 @@ ${renderWorkCriteria(pkgCriteria)}
 
 执行要求：
 - 做最小且正确的修改；变更后尽量运行工作包的验证命令。
+- 动手前先找现成：项目里已有合适的函数/工具/模式就直接复用，禁止重复实现已存在的能力。
 - 对 verify=test 的标准：先写出（或先运行确认）会失败的测试，再实现使其通过——严禁实现完成后补测试充数。
 - 如果标准带有上一轮的失败/驳回备注，必须针对性修复。
 - 如果无法安全完成，返回 status=blocked 并列出阻塞项。`,

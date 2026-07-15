@@ -1,6 +1,6 @@
 {
   "name": "cmbdevclaw",
-  "version": "1.4.7",
+  "version": "1.5.0",
   "description": "CMBDevClaw description",
   "author": {
     "name": "CMBDevClaw",
@@ -180,6 +180,7 @@
     "react-diff-viewer-continued": "^4.1.2",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.4.0",
+    "react-window": "^2.2.7",
     "recharts": "^3.8.1",
     "rehype-highlight": "^7.0.2",
     "rehype-katex": "^7.0.1",

@@ -14,10 +14,19 @@ type UpdateStage = "idle" | "available" | "downloading" | "downloaded" | "instal
 
 interface UpdateInfo {
   version: string
+  targetVersion: string
   updateType: string
   releaseNotes: string
   size: number
   mandatory: boolean
+}
+
+interface UpdateSourceInfo {
+  channel: "production" | "selftest"
+  baseUrl: string
+  manifestFile: string
+  configPath?: string
+  expiresAt?: string
 }
 
 interface DownloadProgress {
@@ -62,6 +71,7 @@ export function UpdateDialog({
   const [progress, setProgress] = useState<DownloadProgress | null>(null)
   const [errorMsg, setErrorMsg] = useState("")
   const [checking, setChecking] = useState(false)
+  const [sourceInfo, setSourceInfo] = useState<UpdateSourceInfo | null>(null)
 
   // Show post-update success toast once on first mount
   const startupChecked = useRef(false)
@@ -88,6 +98,7 @@ export function UpdateDialog({
     api
       .getStatus()
       .then((s) => {
+        setSourceInfo(s.source)
         if (s.status === "available" && s.update) {
           setUpdateInfo(s.update)
           setStage("available")
@@ -119,6 +130,7 @@ export function UpdateDialog({
 
     const removeAvailable = api.onAvailable((info) => {
       setUpdateInfo(info)
+      setSourceInfo(info.source ?? null)
       if ((info as UpdateInfo & { autoDownloading?: boolean }).autoDownloading) {
         // Background download started automatically — don't interrupt user
         setStage("downloading")
@@ -134,11 +146,13 @@ export function UpdateDialog({
     })
 
     const removeDownloaded = api.onDownloaded((info) => {
+      setSourceInfo(info.source ?? null)
       setUpdateInfo((prev) =>
         prev
           ? { ...prev, ...info }
           : {
               version: info.version,
+              targetVersion: info.targetVersion,
               updateType: info.updateType,
               releaseNotes: info.releaseNotes ?? "",
               size: info.size ?? 0,
@@ -174,9 +188,11 @@ export function UpdateDialog({
     setErrorMsg("")
     try {
       const result = await window.api.update.check()
+      setSourceInfo(result.source ?? null)
       if (result.hasUpdate) {
         setUpdateInfo({
           version: result.version,
+          targetVersion: result.targetVersion,
           updateType: result.updateType,
           releaseNotes: result.releaseNotes,
           size: result.size,
@@ -242,6 +258,7 @@ export function UpdateDialog({
     window.api.update.dismiss()
     setStage("idle")
     setUpdateInfo(null)
+    setSourceInfo(null)
     setProgress(null)
     onOpenChange(false)
   }, [onOpenChange])
@@ -268,6 +285,16 @@ export function UpdateDialog({
   }, [open, stage, updateInfo, handleCheck])
 
   const isMandatory = updateInfo?.mandatory ?? false
+  const isIntermediate = !!updateInfo && updateInfo.version !== updateInfo.targetVersion
+  const isSelfTestSource = sourceInfo?.channel === "selftest"
+  const sourceNotice = isSelfTestSource ? (
+    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+      <div className="font-medium">自测更新通道</div>
+      <div className="mt-1 break-all">manifest：{sourceInfo.manifestFile}</div>
+      {sourceInfo.baseUrl && <div className="mt-0.5 break-all">baseUrl：{sourceInfo.baseUrl}</div>}
+      {sourceInfo.expiresAt && <div className="mt-0.5">过期时间：{sourceInfo.expiresAt}</div>}
+    </div>
+  ) : null
 
   return (
     <Dialog
@@ -293,6 +320,7 @@ export function UpdateDialog({
                 {checking ? "正在检查更新..." : "当前已是最新版本"}
               </DialogDescription>
             </DialogHeader>
+            {sourceNotice}
             <DialogFooter>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 关闭
@@ -308,17 +336,28 @@ export function UpdateDialog({
         {stage === "available" && updateInfo && (
           <>
             <DialogHeader>
-              <DialogTitle>发现新版本 v{updateInfo.version}</DialogTitle>
+              <DialogTitle>
+                {isIntermediate
+                  ? `需要兼容性更新 v${updateInfo.version}`
+                  : `发现新版本 v${updateInfo.version}`}
+              </DialogTitle>
               <DialogDescription>
-                {updateInfo.updateType === "asar"
-                  ? "轻量更新（仅替换业务代码，无需重新安装）"
-                  : "完整更新（需要重新安装应用文件）"}
+                {isIntermediate
+                  ? `本次先升级至 v${updateInfo.version}，完成后可继续升级至 v${updateInfo.targetVersion}`
+                  : updateInfo.updateType === "asar"
+                    ? "轻量更新（仅替换业务代码，无需重新安装）"
+                    : "完整更新（需要重新安装应用文件）"}
               </DialogDescription>
             </DialogHeader>
 
             <div className="space-y-3">
+              {sourceNotice}
               <div className="text-sm text-muted-foreground">
-                <div className="font-medium text-foreground mb-1">更新内容：</div>
+                <div className="font-medium text-foreground mb-1">
+                  {isIntermediate
+                    ? `最终版本 v${updateInfo.targetVersion} 更新内容：`
+                    : "更新内容："}
+                </div>
                 <div className="whitespace-pre-line bg-muted/50 rounded-md p-3 max-h-40 overflow-y-auto">
                   {updateInfo.releaseNotes}
                 </div>
@@ -350,6 +389,7 @@ export function UpdateDialog({
             </DialogHeader>
 
             <div className="space-y-3">
+              {sourceNotice}
               <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
                 <div
                   className="bg-primary h-full rounded-full transition-all duration-300"
@@ -388,16 +428,23 @@ export function UpdateDialog({
             <DialogHeader>
               <DialogTitle>v{updateInfo.version} 已就绪</DialogTitle>
               <DialogDescription>
-                {updateInfo.updateType === "asar"
-                  ? "轻量更新已下载完成，重启应用即可完成更新。请先保存当前工作。"
-                  : "完整更新已下载完成，重启应用将自动安装新版本。请先保存当前工作。"}
+                {isIntermediate
+                  ? `这是升级至 v${updateInfo.targetVersion} 的第一阶段，重启完成后应用会继续检查最终更新。`
+                  : updateInfo.updateType === "asar"
+                    ? "轻量更新已下载完成，重启应用即可完成更新。请先保存当前工作。"
+                    : "完整更新已下载完成，重启应用将自动安装新版本。请先保存当前工作。"}
               </DialogDescription>
             </DialogHeader>
+            {sourceNotice}
 
             {updateInfo.releaseNotes && (
               <div className="space-y-3">
                 <div className="text-sm text-muted-foreground">
-                  <div className="font-medium text-foreground mb-1">更新内容：</div>
+                  <div className="font-medium text-foreground mb-1">
+                    {isIntermediate
+                      ? `最终版本 v${updateInfo.targetVersion} 更新内容：`
+                      : "更新内容："}
+                  </div>
                   <div className="whitespace-pre-line bg-muted/50 rounded-md p-3 max-h-40 overflow-y-auto">
                     {updateInfo.releaseNotes}
                   </div>
@@ -441,6 +488,7 @@ export function UpdateDialog({
               <DialogTitle>更新失败</DialogTitle>
               <DialogDescription>{errorMsg || "未知错误"}</DialogDescription>
             </DialogHeader>
+            {sourceNotice}
             <DialogFooter>
               <Button
                 variant="outline"
