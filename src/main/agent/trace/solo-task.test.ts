@@ -224,6 +224,7 @@ describe("SoloTaskTraceManager", () => {
     const response = {
       id: "child-ai-1",
       content: "I inspected it",
+      additional_kwargs: { reasoning_content: "I should inspect the repository first." },
       tool_calls: [{ id: "child-tool-1", name: "read_file", args: { path: "README.md" } }],
       usage_metadata: { input_tokens: 120, output_tokens: 30, total_tokens: 150 },
       response_metadata: { model_name: "provider-model" }
@@ -240,7 +241,14 @@ describe("SoloTaskTraceManager", () => {
     expect(tracer.modelCalls).toHaveLength(1)
     expect(tracer.modelCalls[0]).toMatchObject({
       messageId: "child-ai-1",
+      outputMessage: {
+        content: "I inspected it",
+        reasoning: "I should inspect the repository first."
+      },
       tokenUsage: { inputTokens: 120, outputTokens: 30, totalTokens: 150 }
+    })
+    expect(tracer.endedLlmNodes[0]).toMatchObject({
+      metadata: { reasoning: "I should inspect the repository first." }
     })
     expect(tracer.stepToolCalls).toEqual([{ name: "read_file", args: { path: "README.md" } }])
 

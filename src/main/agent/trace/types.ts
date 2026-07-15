@@ -32,6 +32,8 @@ export interface TraceToolCall {
 export interface TraceChatMessage {
   role: "system" | "user" | "assistant" | "tool" | "unknown"
   content: string
+  /** Provider-explicit reasoning/summary visible to the client; never inferred hidden chain-of-thought. */
+  reasoning?: string
   name?: string
   toolCallId?: string
 }

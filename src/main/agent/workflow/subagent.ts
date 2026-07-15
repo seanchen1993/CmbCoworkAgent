@@ -25,6 +25,11 @@ import {
   type WorkflowSubagentResult
 } from "./types"
 import { WORKFLOW_SUBAGENT_BASE_PROMPT, buildWorkflowSubagentStructuredPrompt } from "./prompts"
+import {
+  extractVisibleReasoning,
+  TRACE_REASONING_MAX_CHARS,
+  truncateReasoningForTrace
+} from "../../../shared/model-reasoning"
 
 const STRUCTURED_OUTPUT_FATAL_ERROR = Symbol.for("cmb.workflow.structured_output.fatal")
 // Explicitly marks a structured-output failure as "retry on a fresh session" so the
@@ -513,6 +518,12 @@ async function runOnce(
     throwIfAborted(controller.signal, request.signal, timeoutMs)
 
     const text = extractFinalAssistantText(snapshot)
+    let reasoning = ""
+    if (tracer) {
+      runTraceSideEffect("Workflow reasoning observer", () => {
+        reasoning = truncateReasoningForTrace(extractFinalAssistantReasoning(snapshot))
+      })
+    }
     const outputTokens = extractOutputTokens(snapshot, text)
     const toolCallCount = extractWorkflowToolCallCount(snapshot)
 
@@ -533,7 +544,8 @@ async function runOnce(
             outputTokens,
             toolCallCount,
             modelFellBack,
-            structuredOutput: true
+            structuredOutput: true,
+            ...(reasoning ? { reasoning } : {})
           }
         })
         traceTerminalRecorded = true
@@ -553,7 +565,8 @@ async function runOnce(
           outputTokens,
           toolCallCount,
           modelFellBack,
-          structuredOutput: false
+          structuredOutput: false,
+          ...(reasoning ? { reasoning } : {})
         }
       })
       traceTerminalRecorded = true
@@ -913,12 +926,16 @@ function rootSchemaCoversProperty(schema: Record<string, unknown>, key: string):
   ) {
     return true
   }
-  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties)) return true
+  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties))
+    return true
   return rootSchemaVariants(schema).some((variant) => rootSchemaCoversProperty(variant, key))
 }
 
 function rootSchemaDeclaresProperty(schema: Record<string, unknown>, key: string): boolean {
-  if (isPlainRecord(schema.properties) && Object.prototype.hasOwnProperty.call(schema.properties, key)) {
+  if (
+    isPlainRecord(schema.properties) &&
+    Object.prototype.hasOwnProperty.call(schema.properties, key)
+  ) {
     return true
   }
   return rootSchemaVariants(schema).some((variant) => rootSchemaDeclaresProperty(variant, key))
@@ -1962,6 +1979,17 @@ function extractFinalAssistantText(snapshot: unknown): string {
     if (Array.isArray(toolCalls) && toolCalls.length > 0) continue
     const text = extractTextFromUnknownContent(message.content ?? message.kwargs?.content)
     if (text.trim()) return text.trim()
+  }
+  return ""
+}
+
+function extractFinalAssistantReasoning(snapshot: unknown): string {
+  const messages = snapshotMessages(snapshot)
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (!isAiMessage(message)) continue
+    const reasoning = extractVisibleReasoning(message, TRACE_REASONING_MAX_CHARS + 1).trim()
+    if (reasoning) return reasoning
   }
   return ""
 }

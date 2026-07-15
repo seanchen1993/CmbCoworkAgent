@@ -9,6 +9,7 @@ import {
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
 import type { TraceChatMessage, TraceContext, TraceOutcome, TraceTokenUsage } from "./types"
 import { nowIsoLocal } from "../../util/local-time"
+import { extractVisibleReasoning, truncateReasoningForTrace } from "../../../shared/model-reasoning"
 
 /**
  * Metadata/configurable key attached to deepagents' task-owned subgraph runs.
@@ -433,13 +434,21 @@ export class SoloTaskTraceManager {
         const output = extractText(
           responseRecord.content ?? asRecord(responseRecord.kwargs)?.content
         )
+        const reasoning = truncateReasoningForTrace(
+          extractVisibleReasoning(responseRecord, MAX_TRACE_CONTENT + 1),
+          MAX_TRACE_CONTENT
+        )
         const tokenUsage = responseTokenUsage(responseRecord)
 
         entry.tracer.recordModelCall({
           ...(messageId ? { messageId } : {}),
           startedAt,
           inputMessages,
-          outputMessage: { role: "assistant", content: output },
+          outputMessage: {
+            role: "assistant",
+            content: output,
+            ...(reasoning ? { reasoning } : {})
+          },
           toolCalls: toolCalls.map((call) => ({ name: call.name, args: call.args })),
           tokenUsage
         })
@@ -452,7 +461,11 @@ export class SoloTaskTraceManager {
           nodeId: llmNodeId,
           status: "success",
           output,
-          metadata: { tokenUsage, toolCallCount: toolCalls.length }
+          metadata: {
+            tokenUsage,
+            toolCallCount: toolCalls.length,
+            ...(reasoning ? { reasoning } : {})
+          }
         })
       })
       if (modelRecorded) this.observedOwnerIds.add(ownerId)

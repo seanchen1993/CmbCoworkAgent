@@ -124,3 +124,167 @@ describe("Trace conversation internal notifications", () => {
     expect(result.messages.some((message) => message.content === "后台任务已经完成")).toBe(true)
   })
 })
+
+describe("Trace conversation event timeline", () => {
+  it("places a completed child agent before the root agent final reply", () => {
+    const result = buildThreadConversation([
+      traceWithResponse({
+        traceId: "root-trace",
+        startedAt: "2026-07-15T14:23:00.000Z",
+        endedAt: "2026-07-15T14:26:00.000Z",
+        userMessage: "审查项目",
+        modelCalls: undefined,
+        steps: undefined,
+        nodes: [
+          {
+            id: "root-node",
+            type: "trace",
+            startedAt: "2026-07-15T14:23:00.000Z",
+            input: { userMessage: "审查项目" }
+          },
+          {
+            id: "root-dispatch",
+            type: "llm",
+            startedAt: "2026-07-15T14:23:05.000Z",
+            endedAt: "2026-07-15T14:23:06.000Z",
+            output: ""
+          },
+          {
+            id: "task-call",
+            parentId: "root-dispatch",
+            type: "tool",
+            name: "task",
+            startedAt: "2026-07-15T14:23:06.000Z",
+            input: { description: "执行代码审查" }
+          },
+          {
+            id: "root-final",
+            type: "llm",
+            startedAt: "2026-07-15T14:25:50.000Z",
+            endedAt: "2026-07-15T14:26:00.000Z",
+            output: "主 Agent 最终回复"
+          }
+        ]
+      }),
+      traceWithResponse({
+        traceId: "child-trace",
+        traceKind: "subagent",
+        subagentKind: "task",
+        parentTraceId: "root-trace",
+        startedAt: "2026-07-15T14:23:07.000Z",
+        endedAt: "2026-07-15T14:25:40.000Z",
+        userMessage: "执行代码审查",
+        modelCalls: undefined,
+        steps: undefined,
+        nodes: [
+          {
+            id: "child-dispatch",
+            type: "llm",
+            startedAt: "2026-07-15T14:23:08.000Z",
+            endedAt: "2026-07-15T14:23:09.000Z",
+            output: ""
+          },
+          {
+            id: "child-read",
+            parentId: "child-dispatch",
+            type: "tool",
+            name: "read_file",
+            startedAt: "2026-07-15T14:23:09.000Z",
+            endedAt: "2026-07-15T14:23:10.000Z"
+          },
+          {
+            id: "child-final",
+            type: "llm",
+            startedAt: "2026-07-15T14:25:30.000Z",
+            endedAt: "2026-07-15T14:25:40.000Z",
+            output: "子 Agent 审查结果"
+          }
+        ]
+      })
+    ])
+
+    const contents = result.messages.map((message) => message.content)
+    const taskToolIndex = contents.findIndex((content) => content.includes("task"))
+    const subagentIndex = result.messages.findIndex((message) => message.role === "subagent")
+    expect(contents.indexOf("审查项目")).toBeLessThan(taskToolIndex)
+    expect(taskToolIndex).toBeLessThan(subagentIndex)
+    expect(subagentIndex).toBeLessThan(contents.indexOf("主 Agent 最终回复"))
+    expect(result.messages[subagentIndex]?.subagentRun).toMatchObject({
+      actorLabel: "Task Agent",
+      sourceLabel: "主 Agent",
+      instruction: "执行代码审查",
+      result: "子 Agent 审查结果",
+      tools: [expect.objectContaining({ name: "read_file" })]
+    })
+    expect(result.toolNames).toEqual(["task", "read_file"])
+    expect(
+      result.messages.some(
+        (message) => message.role === "user" && message.content === "执行代码审查"
+      )
+    ).toBe(false)
+  })
+
+  it("keeps explicit reasoning attached to the matching assistant event", () => {
+    const fromNode = buildTraceConversation(
+      traceWithResponse({
+        modelCalls: undefined,
+        steps: undefined,
+        nodes: [
+          {
+            id: "llm-1",
+            type: "llm",
+            startedAt: "2026-07-14T15:21:01.000Z",
+            endedAt: "2026-07-14T15:21:02.000Z",
+            output: "节点回答",
+            metadata: { reasoning: "节点思考摘要" }
+          }
+        ]
+      })
+    )
+    const fromModelCall = buildTraceConversation(
+      traceWithResponse({
+        modelCalls: [
+          {
+            startedAt: "2026-07-14T15:21:01.000Z",
+            outputMessage: { content: "模型回答", reasoning: "模型思考摘要" }
+          }
+        ],
+        steps: []
+      })
+    )
+
+    expect(fromNode.messages.find((message) => message.role === "assistant")).toMatchObject({
+      content: "节点回答",
+      reasoning: "节点思考摘要"
+    })
+    expect(fromModelCall.messages.find((message) => message.role === "assistant")).toMatchObject({
+      content: "模型回答",
+      reasoning: "模型思考摘要"
+    })
+  })
+
+  it("keeps identical replies emitted by different model events", () => {
+    const result = buildTraceConversation(
+      traceWithResponse({
+        modelCalls: undefined,
+        steps: undefined,
+        nodes: [
+          {
+            id: "llm-1",
+            type: "llm",
+            endedAt: "2026-07-14T15:21:01.000Z",
+            output: "继续处理"
+          },
+          {
+            id: "llm-2",
+            type: "llm",
+            endedAt: "2026-07-14T15:21:02.000Z",
+            output: "继续处理"
+          }
+        ]
+      })
+    )
+
+    expect(result.messages.filter((message) => message.content === "继续处理")).toHaveLength(2)
+  })
+})

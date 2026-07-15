@@ -190,14 +190,15 @@ function sanitizeMessage(
   state: TruncationState,
   compressed = false
 ): TraceChatMessage {
+  const contentLimit = compressed ? LIMITS.compressedMessage : LIMITS.messageContent
   return {
     ...message,
-    content: truncateString(
-      message.content ?? "",
-      compressed ? LIMITS.compressedMessage : LIMITS.messageContent,
-      `${path}.content`,
-      state
-    )
+    content: truncateString(message.content ?? "", contentLimit, `${path}.content`, state),
+    ...(message.reasoning
+      ? {
+          reasoning: truncateString(message.reasoning, contentLimit, `${path}.reasoning`, state)
+        }
+      : {})
   }
 }
 
@@ -207,6 +208,7 @@ function sanitizeModelCall(
   state: TruncationState,
   compressed = false
 ): TraceModelCall {
+  const outputLimit = compressed ? LIMITS.compressedValue : LIMITS.assistantText
   return {
     ...call,
     inputMessages: call.inputMessages.map((message, index) =>
@@ -216,10 +218,20 @@ function sanitizeModelCall(
       ...call.outputMessage,
       content: truncateString(
         call.outputMessage.content ?? "",
-        compressed ? LIMITS.compressedValue : LIMITS.assistantText,
+        outputLimit,
         `${path}.outputMessage.content`,
         state
-      )
+      ),
+      ...(call.outputMessage.reasoning
+        ? {
+            reasoning: truncateString(
+              call.outputMessage.reasoning,
+              outputLimit,
+              `${path}.outputMessage.reasoning`,
+              state
+            )
+          }
+        : {})
     },
     toolCalls: call.toolCalls.map((toolCall, index) =>
       sanitizeToolCall(toolCall, `${path}.toolCalls[${index}]`, state, compressed)
@@ -254,6 +266,10 @@ function sanitizeNode(
   compressed = false
 ): TraceNode {
   const limit = compressed ? LIMITS.compressedValue : LIMITS.nodeValue
+  const reasoning = typeof node.metadata?.reasoning === "string" ? node.metadata.reasoning : ""
+  const metadataWithoutReasoning = node.metadata
+    ? Object.fromEntries(Object.entries(node.metadata).filter(([key]) => key !== "reasoning"))
+    : undefined
   return {
     ...node,
     ...(node.input !== undefined
@@ -263,7 +279,16 @@ function sanitizeNode(
       ? { output: sanitizeUnknown(node.output, limit, `${path}.output`, state) }
       : {}),
     ...(node.metadata !== undefined
-      ? { metadata: sanitizeRecord(node.metadata, limit, `${path}.metadata`, state) }
+      ? {
+          metadata: {
+            ...sanitizeRecord(metadataWithoutReasoning ?? {}, limit, `${path}.metadata`, state),
+            ...(reasoning
+              ? {
+                  reasoning: truncateString(reasoning, limit, `${path}.metadata.reasoning`, state)
+                }
+              : {})
+          }
+        }
       : {})
   }
 }
@@ -503,12 +528,46 @@ function summarizeOversizedTrace(trace: AgentTrace, state: TruncationState): Age
       // execution tree still shows tool args/results for oversized traces
       // instead of empty panels. The compressedValue limit bounds each field.
       ...(node.input !== undefined
-        ? { input: { _traceTruncatedJson: truncateSerialized(node.input, LIMITS.oversizedNodeValue, `nodes.${node.id}.input`, state) } }
+        ? {
+            input: {
+              _traceTruncatedJson: truncateSerialized(
+                node.input,
+                LIMITS.oversizedNodeValue,
+                `nodes.${node.id}.input`,
+                state
+              )
+            }
+          }
         : {}),
       ...(node.output !== undefined
-        ? { output: { _traceTruncatedJson: truncateSerialized(node.output, LIMITS.oversizedNodeValue, `nodes.${node.id}.output`, state) } }
+        ? {
+            output: {
+              _traceTruncatedJson: truncateSerialized(
+                node.output,
+                LIMITS.oversizedNodeValue,
+                `nodes.${node.id}.output`,
+                state
+              )
+            }
+          }
         : {}),
-      metadata: node.metadata?.tokenUsage ? { tokenUsage: node.metadata.tokenUsage } : undefined
+      metadata:
+        node.metadata?.tokenUsage ||
+        (typeof node.metadata?.reasoning === "string" && node.metadata.reasoning)
+          ? {
+              ...(node.metadata?.tokenUsage ? { tokenUsage: node.metadata.tokenUsage } : {}),
+              ...(typeof node.metadata?.reasoning === "string" && node.metadata.reasoning
+                ? {
+                    reasoning: truncateString(
+                      node.metadata.reasoning,
+                      LIMITS.oversizedNodeValue,
+                      `nodes.${node.id}.metadata.reasoning`,
+                      state
+                    )
+                  }
+                : {})
+            }
+          : undefined
     })),
     errorMessage: trace.errorMessage
       ? truncateString(trace.errorMessage, LIMITS.compressedValue, "errorMessage", state)

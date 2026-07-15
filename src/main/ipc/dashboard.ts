@@ -8987,6 +8987,14 @@ function makeMockTraceWithConversation(args: {
   const endedAt = new Date(args.startedAt.getTime() + args.durationMs)
   const midpoint = Math.ceil(args.toolCalls.length / 2)
   const outcome = args.outcome ?? "success"
+  const initialAssistantText = isSubagentMockTrace(args.observability)
+    ? "我会按父 Agent 交付的子任务独立完成工具调用，并在结束时回传结果。"
+    : "我会先拆解任务，再把需要交给子 Agent 的部分分派出去。"
+  const finalStartedAt = new Date(Math.max(args.startedAt.getTime(), endedAt.getTime() - 1_000))
+  const totalInputTokens = 3200 + args.userIndex * 420
+  const totalOutputTokens = 900 + args.userIndex * 130
+  const firstInputTokens = Math.floor(totalInputTokens * 0.55)
+  const firstOutputTokens = Math.floor(totalOutputTokens * 0.25)
 
   return {
     traceId: args.traceId,
@@ -9012,32 +9020,45 @@ function makeMockTraceWithConversation(args: {
       {
         index: 0,
         startedAt: args.startedAt.toISOString(),
-        assistantText: isSubagentMockTrace(args.observability)
-          ? "我会按父 Agent 交付的子任务独立完成工具调用，并在结束时回传结果。"
-          : "我会先拆解任务，再把需要交给子 Agent 的部分分派出去。",
+        assistantText: initialAssistantText,
         toolCalls: args.toolCalls.slice(0, midpoint)
       },
       {
         index: 1,
-        startedAt: new Date(args.startedAt.getTime() + Math.min(12_000, args.durationMs)).toISOString(),
+        startedAt: finalStartedAt.toISOString(),
         assistantText: args.assistantSummary,
         toolCalls: args.toolCalls.slice(midpoint)
       }
     ],
     modelCalls: [
       {
-        messageId: `mock-message-${args.traceId}`,
+        messageId: `mock-message-${args.traceId}-dispatch`,
         startedAt: args.startedAt.toISOString(),
+        inputMessages: [{ role: "user", content: args.userMessage }],
+        outputMessage: {
+          role: "assistant",
+          content: initialAssistantText
+        },
+        toolCalls: args.toolCalls.slice(0, midpoint),
+        tokenUsage: {
+          inputTokens: firstInputTokens,
+          outputTokens: firstOutputTokens,
+          totalTokens: firstInputTokens + firstOutputTokens
+        }
+      },
+      {
+        messageId: `mock-message-${args.traceId}-final`,
+        startedAt: finalStartedAt.toISOString(),
         inputMessages: [{ role: "user", content: args.userMessage }],
         outputMessage: {
           role: "assistant",
           content: args.assistantSummary
         },
-        toolCalls: [],
+        toolCalls: args.toolCalls.slice(midpoint),
         tokenUsage: {
-          inputTokens: 3200 + args.userIndex * 420,
-          outputTokens: 900 + args.userIndex * 130,
-          totalTokens: 4100 + args.userIndex * 550
+          inputTokens: totalInputTokens - firstInputTokens,
+          outputTokens: totalOutputTokens - firstOutputTokens,
+          totalTokens: totalInputTokens - firstInputTokens + totalOutputTokens - firstOutputTokens
         }
       }
     ],
@@ -9458,7 +9479,9 @@ function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTr
     makeMockTraceWithConversation({
       traceId: "mock-task-agent-child-trace",
       threadId: "mock-task-agent-child-thread",
-      startedAt: isoStart(18 * 60 * 1000),
+      // A Solo task is synchronous: it starts after the root task call and
+      // completes before the root Agent can emit its final reply.
+      startedAt: isoStart(17 * 60 * 1000 + 5_000),
       durationMs: 45_000,
       skill,
       userIndex: 7,

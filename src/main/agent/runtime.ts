@@ -145,6 +145,11 @@ import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
 import type { ApprovalRequest, ApprovalDecision } from "../types"
 import { emitAppAttention } from "../app-attention-events"
+import {
+  isTraceReasoningTruncated,
+  mergeStreamingReasoning,
+  truncateReasoningForTrace
+} from "../../shared/model-reasoning"
 import type {
   McpCapabilityService,
   McpCapabilityTool,
@@ -212,6 +217,7 @@ import {
 import {
   createWorkerValuesSnapshotContext,
   extractWorkerFinalText,
+  extractWorkerVisibleReasoning,
   extractWorkerUsage,
   isWorkerFinalTextDelta,
   observeSkillUsageFromStream,
@@ -2442,8 +2448,7 @@ ${shellGuidance}
 `
         : ""
 
-  const memorySection =
-    options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
+  const memorySection = options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
   return (
     workingDirSection +
     backgroundExecSection +
@@ -3704,11 +3709,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
   if (runtimePolicy.isProjectMode) {
-    const envValue = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
+    const envValue =
+      (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
     console.log(
       `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"}, ${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
     )
-    const memoryEnvValue = (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
+    const memoryEnvValue =
+      (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
     console.log(
       `[Runtime] Project mode memory enabled: ${isProjectModeMemoryEnabled()} (${PROJECT_MODE_MEMORY_ENV}=${memoryEnvValue})`
     )
@@ -4062,16 +4069,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const isReadOnlyRuntime =
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
-  let systemPrompt = getSystemPrompt(
-    workspacePath,
-    windowsSandbox,
-    {
-      includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-      includeSubagents: runtimePolicy.includeSubagents,
-      includeMemory: runtimePolicy.includeMemory,
-      includeCurrentTime: runtimePolicy.includeCurrentTime
-    }
-  )
+  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, {
+    includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
+    includeSubagents: runtimePolicy.includeSubagents,
+    includeMemory: runtimePolicy.includeMemory,
+    includeCurrentTime: runtimePolicy.includeCurrentTime
+  })
   let agentsPrompt: AgentsPromptRuntimeResult = {
     type: "workspace",
     prompt: null,
@@ -4125,7 +4128,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
     }
   } else if (enableAgentsPrompt && normalizedHarnessAgentsPrompt) {
-    console.log("[Runtime] Workspace AGENTS.md prompt injection suppressed by Harness AGENTS.md prompt")
+    console.log(
+      "[Runtime] Workspace AGENTS.md prompt injection suppressed by Harness AGENTS.md prompt"
+    )
   } else {
     console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
   }
@@ -4147,8 +4152,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     systemPrompt += "\n\n" + combinedAgentsPrompt
   }
   const combinedAgentsPromptPreview =
-    [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") ||
-    undefined
+    [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
   if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
     onAgentsPromptLoadStatus({
       items: agentsPromptLoadStatusItems,
@@ -4781,6 +4785,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let messageModeFinalText = ""
     let messageModeAssistantText = ""
     let messageModeAssistantTextTruncated = false
+    let workerReasoning = ""
     let tokenUsage: CoordinatorWorkerTokenUsage | undefined
     const seenWorkerToolCallKeys = new Set<string>()
     const workerToolNames = new Set<string>()
@@ -4949,6 +4954,24 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             tokenUsage,
             extractWorkerUsage(mode, data, effectiveWorkerPrompt, valuesContext)
           )
+          if (workerTracer) {
+            runTraceSideEffect("CoordinatorWorker reasoning observer", () => {
+              const reasoning = extractWorkerVisibleReasoning(
+                mode,
+                data,
+                effectiveWorkerPrompt,
+                valuesContext
+              )
+              if (reasoning?.text) {
+                if (reasoning.isDelta && isTraceReasoningTruncated(workerReasoning)) return
+                workerReasoning = truncateReasoningForTrace(
+                  reasoning.isDelta
+                    ? mergeStreamingReasoning(workerReasoning, reasoning.text)
+                    : reasoning.text
+                )
+              }
+            })
+          }
           const extracted = extractWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)
           if (shouldClearWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)) {
             messageModeAssistantText = ""
@@ -5210,7 +5233,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           metadata: {
             tokenUsage,
             toolNames: Array.from(workerToolNames),
-            toolCallCount: workerToolCallCount
+            toolCallCount: workerToolCallCount,
+            ...(workerReasoning ? { reasoning: workerReasoning } : {})
           }
         })
         workerTraceTerminalRecorded = true
@@ -5221,7 +5245,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         tokenUsage
       }
     } catch (error) {
-      workerTraceOutcome = workerInput.abortSignal.aborted || isAbortError(error) ? "cancelled" : "error"
+      workerTraceOutcome =
+        workerInput.abortSignal.aborted || isAbortError(error) ? "cancelled" : "error"
       workerTraceError = describeToolError(error)
       throw error
     } finally {

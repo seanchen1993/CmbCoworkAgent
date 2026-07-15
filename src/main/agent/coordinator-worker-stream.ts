@@ -3,6 +3,7 @@ import type {
   CoordinatorWorkerTokenUsage
 } from "./coordinator-worker-manager"
 import type { SkillUsageDetector } from "./skill-evolution/usage-detector"
+import { extractVisibleReasoning, TRACE_REASONING_MAX_CHARS } from "../../shared/model-reasoning"
 
 const TRANSCRIPT_FIELD_MAX_CHARS = 8_000
 
@@ -66,6 +67,34 @@ export function extractWorkerFinalText(
   }
 
   return ""
+}
+
+export function extractWorkerVisibleReasoning(
+  mode: string,
+  payload: unknown,
+  currentTurnPrompt?: string,
+  valuesContext?: WorkerValuesSnapshotContext
+): { text: string; isDelta: boolean } | undefined {
+  if (mode === "messages") {
+    if (!Array.isArray(payload)) return undefined
+    const data = getSerializedObject(payload[0])
+    if (!data || !getMessageClassName(data).includes("AI")) return undefined
+    const text = extractVisibleReasoning(data, TRACE_REASONING_MAX_CHARS + 1)
+    if (!text) return undefined
+    return { text, isDelta: getMessageClassName(data).includes("AIMessageChunk") }
+  }
+
+  if (mode === "values") {
+    const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
+    if (!messages) return undefined
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const data = getSerializedObject(messages[index])
+      if (!data || !getMessageClassName(data).includes("AI")) continue
+      const text = extractVisibleReasoning(data, TRACE_REASONING_MAX_CHARS + 1).trim()
+      if (text) return { text, isDelta: false }
+    }
+  }
+  return undefined
 }
 
 export function isWorkerFinalTextDelta(mode: string, payload: unknown): boolean {

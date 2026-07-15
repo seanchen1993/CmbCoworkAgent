@@ -69,6 +69,12 @@ import {
 } from "../../shared/checkpoint-transcript"
 import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
 import {
+  extractVisibleReasoning,
+  isTraceReasoningTruncated,
+  mergeStreamingReasoning,
+  truncateReasoningForTrace
+} from "../../shared/model-reasoning"
+import {
   FORK_BOUNDARY_MARKER_VERSION,
   FORK_BOUNDARY_THREAD_METADATA_KEY
 } from "../../shared/checkpoint-forkability"
@@ -1693,10 +1699,7 @@ function isTerminalStreamPayload(payload: unknown): boolean {
     !!payload && typeof payload === "object" && !Array.isArray(payload)
       ? (payload as { type?: unknown }).type
       : undefined
-  return (
-    type === "done" ||
-    type === "error"
-  )
+  return type === "done" || type === "error"
 }
 
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
@@ -4689,7 +4692,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let userTranscriptMessagePersisted = false
       let visibleTranscriptUserMessage = message
       if (!isTrustedCoordinatorNotificationInvoke && !shouldDeferUserTranscriptPersistence) {
-        persistVisibleUserTranscriptMessage(threadId, message, userMessageId, goalTranscriptBoundary)
+        persistVisibleUserTranscriptMessage(
+          threadId,
+          message,
+          userMessageId,
+          goalTranscriptBoundary
+        )
         userTranscriptMessagePersisted = true
       }
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
@@ -5909,6 +5917,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const _subagentStopFired = new Set<string>()
         const _subagentStartFired = new Set<string>()
         const _llmNodeByMessageId = new Map<string, string>()
+        const _reasoningByAiMessageId = new Map<string, string>()
         const _toolNodeByRef = new Map<string, string>()
         const _toolNameByCallId = new Map<string, string>()
         const MODEL_INPUT_WINDOW = 12
@@ -6106,6 +6115,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }>
               | undefined
             const msgId = (kwargs.id as string) || ""
+            const streamedReasoning = extractVisibleReasoning(kwargs, MAX_TRACE_CONTENT + 1)
+            if (msgId && streamedReasoning) {
+              const existingReasoning = _reasoningByAiMessageId.get(msgId) ?? ""
+              const reasoning = className.includes("AIMessageChunk")
+                ? isTraceReasoningTruncated(existingReasoning)
+                  ? existingReasoning
+                  : mergeStreamingReasoning(existingReasoning, streamedReasoning)
+                : streamedReasoning
+              _reasoningByAiMessageId.set(
+                msgId,
+                truncateReasoningForTrace(reasoning, MAX_TRACE_CONTENT)
+              )
+            }
             if (isCapturedSoloTaskMessage) {
               if (msgId) _soloTaskAiMessageIds.add(msgId)
               for (const toolCall of toolCalls ?? []) {
@@ -6323,6 +6345,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 _llmNodeByMessageId.set(aiMsgKey, llmNodeId)
 
                 const usageForTrace = usageForRunAccounting
+                const reasoning = truncateReasoningForTrace(
+                  extractVisibleReasoning(kwargs, MAX_TRACE_CONTENT + 1) ||
+                    _reasoningByAiMessageId.get(rawAiMsgId) ||
+                    "",
+                  MAX_TRACE_CONTENT
+                )
 
                 tracer.recordModelCall({
                   messageId: rawAiMsgId || aiMsgKey,
@@ -6330,7 +6358,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   inputMessages: inputSlice,
                   outputMessage: {
                     role: "assistant",
-                    content: extractText(kwargs.content)
+                    content: extractText(kwargs.content),
+                    ...(reasoning ? { reasoning } : {})
                   },
                   toolCalls: outputToolCalls,
                   tokenUsage: usageForTrace
@@ -6341,7 +6370,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   output: extractText(kwargs.content),
                   status: "success",
                   metadata: {
-                    tokenUsage: usageForTrace
+                    tokenUsage: usageForTrace,
+                    ...(reasoning ? { reasoning } : {})
                   }
                 })
               }

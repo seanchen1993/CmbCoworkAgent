@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Bot, ChevronDown, ChevronRight, User, Wrench } from "lucide-react"
+import { Bot, Brain, ChevronDown, ChevronRight, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import {
@@ -7,7 +7,7 @@ import {
   type InternalNotificationTurnKind
 } from "../../../../shared/internal-notification-turn"
 
-type TraceRole = "user" | "assistant" | "tool"
+type TraceRole = "user" | "assistant" | "tool" | "subagent"
 
 interface TraceConversationNode {
   id?: string
@@ -17,6 +17,8 @@ interface TraceConversationNode {
   input?: unknown
   output?: unknown
   status?: string
+  startedAt?: string
+  endedAt?: string
   metadata?: Record<string, unknown>
 }
 
@@ -28,13 +30,16 @@ interface TraceConversationToolCall {
 }
 
 interface TraceConversationModelCall {
+  startedAt?: string
   outputMessage?: {
     content?: unknown
+    reasoning?: unknown
   }
   toolCalls?: TraceConversationToolCall[]
 }
 
 interface TraceConversationStep {
+  startedAt?: string
   assistantText?: string
   toolCalls?: TraceConversationToolCall[]
 }
@@ -44,6 +49,7 @@ export interface TraceConversationSource {
   userMessage?: string
   triggerSource?: string
   startedAt?: string
+  endedAt?: string
   outcome?: string
   errorMessage?: string
   totalToolCalls?: number
@@ -80,6 +86,10 @@ export interface TraceConversationMessage {
   content: string
   label: string
   tools?: TraceConversationToolInfo[]
+  reasoning?: string
+  subagentRun?: TraceConversationSubagentRun
+  /** Actual event time used by the aggregated thread timeline. */
+  occurredAt?: string
   /** Which trace this message was reconstructed from (thread view only). */
   traceId?: string
 }
@@ -101,6 +111,18 @@ interface TraceConversationToolInfo {
   status?: string
 }
 
+interface TraceConversationSubagentRun {
+  actorLabel: string
+  sourceLabel: string
+  instruction: string
+  result: string
+  reasoning?: string
+  tools: TraceConversationToolInfo[]
+  outcome?: string
+  startedAt?: string
+  endedAt?: string
+}
+
 function formatMessageTime(iso?: string): string {
   if (!iso) return ""
   const date = new Date(iso)
@@ -110,7 +132,7 @@ function formatMessageTime(iso?: string): string {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : {}
 }
 
@@ -191,6 +213,16 @@ function traceActorLabel(trace: TraceConversationSource): string {
   return "主 Agent"
 }
 
+function traceSourceLabel(trace: TraceConversationSource): string {
+  if (trace.handoffSourceAgent === "coordinator" || trace.executionMode === "coordinator") {
+    return "Agent Team"
+  }
+  if (trace.handoffSourceAgent === "ultra_workflow" || trace.executionMode === "workflow") {
+    return "Ultra Workflow"
+  }
+  return "主 Agent"
+}
+
 function instructionLabel(trace: TraceConversationSource): string {
   return isSubagentTrace(trace) ? `${traceActorLabel(trace)} 指令` : "用户"
 }
@@ -212,7 +244,8 @@ function traceContextLabels(trace: TraceConversationSource): string[] {
   if (trace.executionMode && trace.executionMode !== "normal") labels.push(trace.executionMode)
   if (trace.workflowPhase) labels.push(`phase ${trace.workflowPhase}`)
   if (trace.parentTraceId) labels.push(`parent ${shortId(trace.parentTraceId)}`)
-  if (trace.rootTraceId && trace.rootTraceId !== trace.traceId) labels.push(`root ${shortId(trace.rootTraceId)}`)
+  if (trace.rootTraceId && trace.rootTraceId !== trace.traceId)
+    labels.push(`root ${shortId(trace.rootTraceId)}`)
   return labels
 }
 
@@ -220,7 +253,11 @@ function displayToolCount(trace: TraceConversationSource, inferred: number): num
   return trace.totalToolCalls && trace.totalToolCalls > 0 ? trace.totalToolCalls : inferred
 }
 
-function TraceContextPills({ trace }: { trace: TraceConversationSource }): React.JSX.Element | null {
+function TraceContextPills({
+  trace
+}: {
+  trace: TraceConversationSource
+}): React.JSX.Element | null {
   const labels = traceContextLabels(trace).filter(Boolean)
   if (labels.length === 0) return null
   return (
@@ -263,59 +300,129 @@ function formatDuration(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-function extractToolInfos(trace: TraceConversationSource): TraceConversationToolInfo[] {
-  const nodeTools = (trace.nodes ?? [])
-    .filter((node) => node.type === "tool")
-    .map((node): TraceConversationToolInfo => {
+interface TimedToolGroup {
+  occurredAt?: string
+  tools: TraceConversationToolInfo[]
+}
+
+interface TimelineEntry {
+  message: TraceConversationMessage
+  timestamp: number
+  traceOrder: number
+  sequence: number
+}
+
+function validEventTime(...candidates: Array<string | undefined>): string | undefined {
+  return candidates.find((candidate) => {
+    if (!candidate) return false
+    return !Number.isNaN(new Date(candidate).getTime())
+  })
+}
+
+function eventTimestamp(occurredAt: string | undefined, traceOrder: number): number {
+  if (occurredAt) {
+    const parsed = new Date(occurredAt).getTime()
+    if (!Number.isNaN(parsed)) return parsed
+  }
+  // Keep timestamp-less legacy events deterministic without moving them ahead
+  // of every real event in the thread.
+  return Number.MAX_SAFE_INTEGER - 10_000 + traceOrder
+}
+
+function nodeDurationMs(node: TraceConversationNode): number | undefined {
+  if (!node.startedAt || !node.endedAt) return undefined
+  const duration = new Date(node.endedAt).getTime() - new Date(node.startedAt).getTime()
+  return Number.isFinite(duration) && duration >= 0 ? duration : undefined
+}
+
+function extractTimedToolGroups(trace: TraceConversationSource): TimedToolGroup[] {
+  const nodes = trace.nodes ?? []
+  const toolNodes = nodes.filter((node) => node.type === "tool")
+  if (toolNodes.length > 0) {
+    const grouped = new Map<string, TimedToolGroup>()
+    for (const [index, node] of toolNodes.entries()) {
       const toolCallId =
         typeof node.metadata?.toolCallId === "string" ? node.metadata.toolCallId : undefined
-      const resultNode = (trace.nodes ?? []).find((candidate) => {
+      const resultNode = nodes.find((candidate) => {
         if (candidate.type !== "tool_result") return false
         if (node.id && candidate.parentId === node.id) return true
-        if (candidate.metadata?.toolCallId && toolCallId) {
-          return candidate.metadata.toolCallId === toolCallId
-        }
-        return false
+        return Boolean(
+          candidate.metadata?.toolCallId &&
+          toolCallId &&
+          candidate.metadata.toolCallId === toolCallId
+        )
       })
-      return {
+      const groupKey = node.parentId || node.id || `tool-${index}`
+      const occurredAt = validEventTime(node.startedAt, resultNode?.startedAt, trace.startedAt)
+      const group = grouped.get(groupKey) ?? { occurredAt, tools: [] }
+      group.occurredAt = validEventTime(group.occurredAt, occurredAt)
+      group.tools.push({
         name: node.name ?? "unknown",
         input: node.input,
         output: resultNode?.output,
+        durationMs: nodeDurationMs(node),
         status: resultNode?.status ?? node.status
-      }
-    })
-  if (nodeTools.length > 0) return nodeTools
+      })
+      grouped.set(groupKey, group)
+    }
+    return [...grouped.values()]
+  }
 
-  const stepTools = (trace.steps ?? []).flatMap((step) =>
-    (step.toolCalls ?? []).map((tool): TraceConversationToolInfo => ({
-      name: tool.name ?? "unknown",
-      input: tool.args,
-      output: tool.result,
-      durationMs: tool.durationMs
-    }))
-  )
-  if (stepTools.length > 0) return stepTools
+  const stepGroups = (trace.steps ?? []).flatMap((step): TimedToolGroup[] => {
+    const tools = (step.toolCalls ?? []).map(
+      (tool): TraceConversationToolInfo => ({
+        name: tool.name ?? "unknown",
+        input: tool.args,
+        output: tool.result,
+        durationMs: tool.durationMs
+      })
+    )
+    return tools.length > 0
+      ? [{ occurredAt: validEventTime(step.startedAt, trace.startedAt), tools }]
+      : []
+  })
+  if (stepGroups.length > 0) return stepGroups
 
-  const modelTools = (trace.modelCalls ?? []).flatMap((call) =>
-    (call.toolCalls ?? []).map((tool): TraceConversationToolInfo => ({
-      name: tool.name ?? "unknown",
-      input: tool.args,
-      output: tool.result,
-      durationMs: tool.durationMs
-    }))
-  )
-  if (modelTools.length > 0) return modelTools
+  const modelGroups = (trace.modelCalls ?? []).flatMap((call): TimedToolGroup[] => {
+    const tools = (call.toolCalls ?? []).map(
+      (tool): TraceConversationToolInfo => ({
+        name: tool.name ?? "unknown",
+        input: tool.args,
+        output: tool.result,
+        durationMs: tool.durationMs
+      })
+    )
+    return tools.length > 0
+      ? [{ occurredAt: validEventTime(call.startedAt, trace.startedAt), tools }]
+      : []
+  })
+  if (modelGroups.length > 0) return modelGroups
 
-  return (trace.nodes ?? []).flatMap((node) => {
+  return nodes.flatMap((node): TimedToolGroup[] => {
     const toolNames = node.metadata?.toolNames
     if (!Array.isArray(toolNames)) return []
-    return toolNames
+    const tools = toolNames
       .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
-      .map((name): TraceConversationToolInfo => ({
-        name,
-        status: node.status,
-        output: node.output
-      }))
+      .map(
+        (name): TraceConversationToolInfo => ({
+          name,
+          status: node.status,
+          output: node.output
+        })
+      )
+    return tools.length > 0
+      ? [
+          {
+            occurredAt: validEventTime(
+              node.startedAt,
+              node.endedAt,
+              trace.endedAt,
+              trace.startedAt
+            ),
+            tools
+          }
+        ]
+      : []
   })
 }
 
@@ -326,7 +433,11 @@ function isUsefulAssistantText(text: string): boolean {
   return true
 }
 
-export function buildTraceConversation(trace: TraceConversationSource | null | undefined): TraceConversationSummary {
+// Exported for deterministic reconstruction tests; UI components below consume the same builder.
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildTraceConversation(
+  trace: TraceConversationSource | null | undefined
+): TraceConversationSummary {
   if (!trace) {
     return {
       messages: [],
@@ -347,35 +458,13 @@ export function buildTraceConversation(trace: TraceConversationSource | null | u
   })
   const userText = internalNotificationKind ? "" : cleanUserText(rawUserText)
 
-  const assistantCandidates = [
-    ...(trace.modelCalls ?? []).map((call) => textFromUnknown(call.outputMessage?.content)),
-    ...(trace.nodes ?? [])
-      .filter((node) => node.type === "llm" || node.type === "message")
-      .map((node) => textFromUnknown(node.output)),
-    ...(trace.steps ?? []).map((step) => step.assistantText?.trim() ?? "")
-  ].filter(isUsefulAssistantText)
-
-  let assistantText = assistantCandidates[assistantCandidates.length - 1] ?? ""
-  if (!assistantText && trace.outcome === "error") {
-    assistantText = trace.errorMessage?.trim() || "本次运行失败，trace 中没有记录最终回复。"
-  } else if (!assistantText && trace.outcome === "cancelled") {
-    assistantText = "本次运行被取消，trace 中没有记录最终回复。"
-  }
-
-  const tools = extractToolInfos(trace)
+  const timeline = sortTimeline(buildTraceTimeline(trace, 0, false))
+  const messages = timeline.map((entry) => entry.message)
+  const assistantText =
+    [...messages].reverse().find((message) => message.role === "assistant" && message.content)
+      ?.content ?? ""
+  const tools = messages.flatMap((message) => message.tools ?? [])
   const toolNames = uniqueToolNames(tools.map((tool) => tool.name))
-
-  const messages: TraceConversationMessage[] = []
-  if (userText) messages.push({ role: "user", label: instructionLabel(trace), content: userText })
-  if (assistantText) messages.push({ role: "assistant", label: responseLabel(trace), content: assistantText })
-  if (toolNames.length > 0) {
-    messages.push({
-      role: "tool",
-      label: toolMessageLabel(trace),
-      content: `调用 ${displayToolCount(trace, tools.length)} 次工具：${summarizeToolNames(tools)}`,
-      tools
-    })
-  }
 
   return {
     messages,
@@ -387,51 +476,205 @@ export function buildTraceConversation(trace: TraceConversationSource | null | u
   }
 }
 
-export function buildThreadConversation(traces: TraceConversationSource[]): TraceConversationSummary {
-  const ordered = [...traces].sort((a, b) => {
-    const left = a.startedAt ?? ""
-    const right = b.startedAt ?? ""
-    return left.localeCompare(right)
-  })
-  const messages: TraceConversationMessage[] = []
-  const allTools: TraceConversationToolInfo[] = []
-
-  for (const trace of ordered) {
-    const item = buildTraceConversation(trace)
-    const time = formatMessageTime(trace.startedAt)
-    const suffix = time ? ` · ${time}` : ""
-    if (item.userText) {
-      messages.push({
-        role: "user",
-        label: `${instructionLabel(trace)}${suffix}`,
-        content: item.userText,
-        traceId: trace.traceId
-      })
-    }
-    if (item.assistantText) {
-      messages.push({
-        role: "assistant",
-        label: `${responseLabel(trace)}${suffix}`,
-        content: item.assistantText,
-        traceId: trace.traceId
-      })
-    }
-    if (item.tools.length > 0) {
-      messages.push({
-        role: "tool",
-        label: `${toolMessageLabel(trace)}${suffix}`,
-        content: `调用 ${displayToolCount(trace, item.tools.length)} 次工具：${summarizeToolNames(item.tools)}`,
-        tools: item.tools,
-        traceId: trace.traceId
-      })
-    }
-    allTools.push(...item.tools)
+function buildTraceTimeline(
+  trace: TraceConversationSource,
+  traceOrder: number,
+  includeTime: boolean
+): TimelineEntry[] {
+  const entries: TimelineEntry[] = []
+  let sequence = 0
+  const add = (
+    message: Omit<TraceConversationMessage, "occurredAt">,
+    occurredAt?: string
+  ): void => {
+    const time = validEventTime(occurredAt, trace.startedAt)
+    const suffix = includeTime ? formatMessageTime(time) : ""
+    entries.push({
+      message: {
+        ...message,
+        label: suffix ? `${message.label} · ${suffix}` : message.label,
+        traceId: message.traceId ?? trace.traceId,
+        occurredAt: time
+      },
+      timestamp: eventTimestamp(time, traceOrder),
+      traceOrder,
+      sequence: sequence++
+    })
   }
+
+  const rootInput = trace.nodes?.find((node) => node.type === "trace")?.input
+  const rawUserText = textFromUnknown(trace.userMessage) || textFromUnknown(rootInput)
+  const internalNotificationKind = classifyInternalNotificationTurn({
+    content: rawUserText,
+    executionMode: trace.executionMode,
+    triggerSource: trace.triggerSource
+  })
+  const userText = internalNotificationKind ? "" : cleanUserText(rawUserText)
+  if (userText) {
+    add({ role: "user", label: instructionLabel(trace), content: userText }, trace.startedAt)
+  }
+
+  const llmNodes = (trace.nodes ?? []).filter((node) => node.type === "llm")
+  const terminalMessageNodes = (trace.nodes ?? []).filter(
+    (node) =>
+      node.type === "message" &&
+      node.name !== "User Message" &&
+      isUsefulAssistantText(textFromUnknown(node.output))
+  )
+  // Collector terminal nodes are bookkeeping fallbacks. Once real LLM nodes
+  // exist, rendering both would duplicate a Solo task's final answer.
+  const nodeAssistantCandidates = llmNodes.length > 0 ? llmNodes : terminalMessageNodes
+  let assistantCount = 0
+  const addAssistant = (content: string, reasoning: string, occurredAt?: string): void => {
+    if (!isUsefulAssistantText(content) && !reasoning) return
+    assistantCount += 1
+    add(
+      {
+        role: "assistant",
+        label: responseLabel(trace),
+        content,
+        ...(reasoning ? { reasoning } : {})
+      },
+      occurredAt
+    )
+  }
+
+  if (nodeAssistantCandidates.length > 0) {
+    for (const node of nodeAssistantCandidates) {
+      addAssistant(
+        textFromUnknown(node.output),
+        textFromUnknown(node.metadata?.reasoning),
+        validEventTime(node.endedAt, node.startedAt, trace.endedAt, trace.startedAt)
+      )
+    }
+  } else if ((trace.modelCalls ?? []).length > 0) {
+    for (const call of trace.modelCalls ?? []) {
+      addAssistant(
+        textFromUnknown(call.outputMessage?.content),
+        textFromUnknown(call.outputMessage?.reasoning),
+        validEventTime(call.startedAt, trace.endedAt, trace.startedAt)
+      )
+    }
+  } else {
+    for (const step of trace.steps ?? []) {
+      addAssistant(
+        step.assistantText?.trim() ?? "",
+        "",
+        validEventTime(step.startedAt, trace.endedAt, trace.startedAt)
+      )
+    }
+  }
+
+  if (assistantCount === 0 && trace.outcome === "error") {
+    addAssistant(
+      trace.errorMessage?.trim() || "本次运行失败，trace 中没有记录最终回复。",
+      "",
+      trace.endedAt
+    )
+  } else if (assistantCount === 0 && trace.outcome === "cancelled") {
+    addAssistant("本次运行被取消，trace 中没有记录最终回复。", "", trace.endedAt)
+  }
+
+  const toolGroups = extractTimedToolGroups(trace)
+  for (const group of toolGroups) {
+    const count =
+      toolGroups.length === 1 ? displayToolCount(trace, group.tools.length) : group.tools.length
+    add(
+      {
+        role: "tool",
+        label: toolMessageLabel(trace),
+        content: `调用 ${count} 次工具：${summarizeToolNames(group.tools)}`,
+        tools: group.tools
+      },
+      group.occurredAt
+    )
+  }
+
+  return entries
+}
+
+function sortTimeline(entries: TimelineEntry[]): TimelineEntry[] {
+  return entries.sort(
+    (left, right) =>
+      left.timestamp - right.timestamp ||
+      left.traceOrder - right.traceOrder ||
+      left.sequence - right.sequence
+  )
+}
+
+function buildSubagentTimelineEntry(
+  trace: TraceConversationSource,
+  traceOrder: number
+): TimelineEntry {
+  const conversation = buildTraceConversation(trace)
+  const assistantMessages = conversation.messages.filter((message) => message.role === "assistant")
+  const resultMessage = assistantMessages[assistantMessages.length - 1]
+  const instruction =
+    conversation.messages.find((message) => message.role === "user")?.content ||
+    cleanUserText(trace.userMessage ?? "")
+  // A synchronous task child is conceptually nested at the task invocation.
+  // Detached Agent Team / Workflow spans are completion events, so keep them
+  // anchored at their actual end time instead.
+  const occurredAt =
+    trace.linkType === "parent_child" || trace.subagentKind === "task"
+      ? validEventTime(trace.startedAt, trace.endedAt)
+      : validEventTime(trace.endedAt, trace.startedAt)
+  const actorLabel = traceActorLabel(trace)
+  const result = resultMessage?.content ?? ""
+  return {
+    message: {
+      role: "subagent",
+      label: `${actorLabel} 执行`,
+      content: result,
+      traceId: trace.traceId,
+      occurredAt,
+      subagentRun: {
+        actorLabel,
+        sourceLabel: traceSourceLabel(trace),
+        instruction,
+        result,
+        ...(resultMessage?.reasoning ? { reasoning: resultMessage.reasoning } : {}),
+        tools: conversation.tools,
+        outcome: trace.outcome,
+        startedAt: trace.startedAt,
+        endedAt: trace.endedAt
+      }
+    },
+    timestamp: eventTimestamp(occurredAt, traceOrder),
+    traceOrder,
+    sequence: 0
+  }
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildThreadConversation(
+  traces: TraceConversationSource[]
+): TraceConversationSummary {
+  const ordered = [...traces].sort(
+    (left, right) =>
+      (left.startedAt ?? "").localeCompare(right.startedAt ?? "") ||
+      (left.traceId ?? "").localeCompare(right.traceId ?? "")
+  )
+  const messages = sortTimeline(
+    ordered.flatMap((trace, traceOrder) =>
+      isSubagentTrace(trace)
+        ? [buildSubagentTimelineEntry(trace, traceOrder)]
+        : buildTraceTimeline(trace, traceOrder, true)
+    )
+  ).map((entry) => entry.message)
+  const allTools = messages.flatMap((message) => message.tools ?? message.subagentRun?.tools ?? [])
 
   const toolNames = uniqueToolNames(allTools.map((tool) => tool.name))
   const assistantText =
-    [...messages].reverse().find((message) => message.role === "assistant")?.content ?? ""
-  const userText = messages.find((message) => message.role === "user")?.content ?? ""
+    [...messages].reverse().find((message) => message.role === "assistant" && message.content)
+      ?.content ??
+    [...messages].reverse().find((message) => message.role === "subagent" && message.content)
+      ?.content ??
+    ""
+  const userText =
+    messages.find((message) => message.role === "user")?.content ??
+    messages.find((message) => message.subagentRun?.instruction)?.subagentRun?.instruction ??
+    ""
 
   return {
     messages,
@@ -449,6 +692,29 @@ function roleIcon(role: TraceRole): React.JSX.Element {
   return <Bot className="size-3.5" />
 }
 
+function ReasoningDetails({ text }: { text: string }): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mb-1.5 rounded-md border border-border/70 bg-muted/35">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[10px] text-muted-foreground hover:text-foreground"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        <Brain className="size-3" />
+        <span className="font-medium">思考过程</span>
+      </button>
+      {open && (
+        <div className="whitespace-pre-wrap break-words border-t border-border/60 px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
+          {text}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const VALUE_PREVIEW_LIMIT = 220
 
 /**
@@ -458,7 +724,13 @@ const VALUE_PREVIEW_LIMIT = 220
  * results, so a collapsed-by-default expander keeps the conversation compact
  * while still letting you read everything the trace retained.
  */
-function ExpandableValue({ label, value }: { label: string; value: unknown }): React.JSX.Element | null {
+function ExpandableValue({
+  label,
+  value
+}: {
+  label: string
+  value: unknown
+}): React.JSX.Element | null {
   const [expanded, setExpanded] = useState(false)
   const text = serializeValue(value)
   if (!text) return null
@@ -509,7 +781,10 @@ function ToolCallDetails({
       {open && (
         <div className="space-y-2 border-t border-border/60 px-2.5 py-2">
           {tools.map((tool, index) => (
-            <div key={`${tool.name}-${index}`} className="rounded-md border border-border bg-background px-2.5 py-2">
+            <div
+              key={`${tool.name}-${index}`}
+              className="rounded-md border border-border bg-background px-2.5 py-2"
+            >
               <div className="flex items-center gap-2 text-[11px]">
                 <span className="font-medium text-foreground">{tool.name}</span>
                 {tool.status && (
@@ -518,7 +793,9 @@ function ToolCallDetails({
                   </span>
                 )}
                 {tool.durationMs ? (
-                  <span className="ml-auto text-[10px] text-muted-foreground">{formatDuration(tool.durationMs)}</span>
+                  <span className="ml-auto text-[10px] text-muted-foreground">
+                    {formatDuration(tool.durationMs)}
+                  </span>
                 ) : null}
               </div>
               <ExpandableValue label="Input" value={tool.input} />
@@ -527,6 +804,118 @@ function ToolCallDetails({
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function subagentOutcomeLabel(outcome?: string): string {
+  if (outcome === "success") return "已完成"
+  if (outcome === "error") return "失败"
+  if (outcome === "cancelled") return "已取消"
+  return "状态未知"
+}
+
+function subagentDurationMs(run: TraceConversationSubagentRun): number | undefined {
+  if (!run.startedAt || !run.endedAt) return undefined
+  const duration = new Date(run.endedAt).getTime() - new Date(run.startedAt).getTime()
+  return Number.isFinite(duration) && duration >= 0 ? duration : undefined
+}
+
+function SubagentRunCard({ run }: { run: TraceConversationSubagentRun }): React.JSX.Element {
+  const duration = subagentDurationMs(run)
+  const timeRange = [formatMessageTime(run.startedAt), formatMessageTime(run.endedAt)]
+    .filter(Boolean)
+    .filter((value, index, values) => index === 0 || value !== values[index - 1])
+    .join(" – ")
+  const isError = run.outcome === "error"
+  const isCancelled = run.outcome === "cancelled"
+
+  return (
+    <div
+      className={cn(
+        "overflow-hidden rounded-xl border bg-background shadow-sm",
+        isError
+          ? "border-destructive/35"
+          : isCancelled
+            ? "border-amber-500/35"
+            : "border-blue-500/30"
+      )}
+    >
+      <div
+        className={cn(
+          "flex items-center gap-2 border-b px-3 py-2",
+          isError
+            ? "border-destructive/20 bg-destructive/5"
+            : isCancelled
+              ? "border-amber-500/20 bg-amber-500/5"
+              : "border-blue-500/20 bg-blue-500/5"
+        )}
+      >
+        <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-300">
+          <Bot className="size-3.5" />
+        </span>
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-foreground">
+            <span className="truncate">{run.sourceLabel}</span>
+            <span className="text-muted-foreground">→</span>
+            <span className="truncate text-blue-700 dark:text-blue-300">{run.actorLabel}</span>
+          </div>
+          <div className="text-[9px] text-muted-foreground">子 Agent 内嵌执行</div>
+        </div>
+        <span
+          className={cn(
+            "ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[9px]",
+            isError
+              ? "border-destructive/25 bg-destructive/10 text-destructive"
+              : isCancelled
+                ? "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+          )}
+        >
+          {subagentOutcomeLabel(run.outcome)}
+        </span>
+        {(timeRange || duration !== undefined) && (
+          <span className="shrink-0 text-[9px] text-muted-foreground">
+            {[timeRange, duration !== undefined ? formatDuration(duration) : ""]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-2.5 p-3">
+        {run.instruction && (
+          <div className="rounded-lg bg-muted/45 px-3 py-2">
+            <div className="mb-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+              任务指令
+            </div>
+            <div className="whitespace-pre-wrap break-words text-[11px] leading-5 text-foreground">
+              {run.instruction}
+            </div>
+          </div>
+        )}
+
+        {run.tools.length > 0 && (
+          <ToolCallDetails
+            tools={run.tools}
+            label={`执行 ${run.tools.length} 次工具：${summarizeToolNames(run.tools)}`}
+          />
+        )}
+
+        {(run.result || run.reasoning) && (
+          <div className="rounded-lg border border-border/70 bg-card px-3 py-2">
+            <div className="mb-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
+              执行结果
+            </div>
+            {run.reasoning ? <ReasoningDetails text={run.reasoning} /> : null}
+            {run.result ? (
+              <div className="whitespace-pre-wrap break-words text-[11px] leading-5 text-foreground">
+                {run.result}
+              </div>
+            ) : null}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -544,14 +933,21 @@ export function TraceConversation({
 
   if (conversation.messages.length === 0) {
     return (
-      <section className={cn("rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground", className)}>
+      <section
+        className={cn(
+          "rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground",
+          className
+        )}
+      >
         trace 中暂无可还原的对话内容
       </section>
     )
   }
 
   return (
-    <section className={cn("space-y-3 rounded-lg border border-border bg-card/50 px-4 py-3", className)}>
+    <section
+      className={cn("space-y-3 rounded-lg border border-border bg-card/50 px-4 py-3", className)}
+    >
       <div className="flex items-center justify-between gap-3">
         <h4 className="text-xs font-semibold text-foreground">{title}</h4>
         <TraceContextPills trace={trace} />
@@ -564,15 +960,19 @@ export function TraceConversation({
             className={cn(
               "flex gap-2",
               message.role === "user" ? "justify-end" : "justify-start",
-              message.role === "tool" ? "pl-8" : ""
+              message.role === "tool" || message.role === "subagent" ? "pl-8" : ""
             )}
           >
-            {message.role !== "user" && message.role !== "tool" && (
+            {message.role !== "user" && message.role !== "tool" && message.role !== "subagent" && (
               <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                 {roleIcon(message.role)}
               </span>
             )}
-            {message.role === "tool" && message.tools ? (
+            {message.role === "subagent" && message.subagentRun ? (
+              <div className="w-full max-w-[86%]">
+                <SubagentRunCard run={message.subagentRun} />
+              </div>
+            ) : message.role === "tool" && message.tools ? (
               <div className="max-w-[78%]">
                 <ToolCallDetails tools={message.tools} label={message.content} />
               </div>
@@ -585,13 +985,18 @@ export function TraceConversation({
                     : "border border-border bg-background text-foreground"
                 )}
               >
-                <div className={cn(
-                  "mb-1 text-[10px] font-medium",
-                  message.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"
-                )}>
+                <div
+                  className={cn(
+                    "mb-1 text-[10px] font-medium",
+                    message.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"
+                  )}
+                >
                   {message.label}
                 </div>
-                <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                {message.reasoning ? <ReasoningDetails text={message.reasoning} /> : null}
+                {message.content ? (
+                  <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                ) : null}
               </div>
             )}
             {message.role === "user" && (
@@ -634,13 +1039,20 @@ export function TraceThreadConversation({
     if (!selectedTraceId) return
     const container = scrollRef.current
     if (!container) return
-    const target = container.querySelector<HTMLElement>(`[data-trace-id="${CSS.escape(selectedTraceId)}"]`)
+    const target = container.querySelector<HTMLElement>(
+      `[data-trace-id="${CSS.escape(selectedTraceId)}"]`
+    )
     if (target) target.scrollIntoView({ behavior: "smooth", block: "center" })
   }, [selectedTraceId, conversation.messages.length])
 
   if (conversation.messages.length === 0) {
     return (
-      <section className={cn("rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground", className)}>
+      <section
+        className={cn(
+          "rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground",
+          className
+        )}
+      >
         {loading ? "正在加载完整会话…" : "thread 中暂无可还原的对话内容"}
       </section>
     )
@@ -681,16 +1093,29 @@ export function TraceThreadConversation({
               className={cn(
                 "flex scroll-mt-2 gap-2",
                 message.role === "user" ? "justify-end" : "justify-start",
-                message.role === "tool" ? "pl-8" : ""
+                message.role === "tool" || message.role === "subagent" ? "pl-8" : ""
               )}
             >
-              {message.role !== "user" && message.role !== "tool" && (
-                <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  {roleIcon(message.role)}
-                </span>
-              )}
-              {message.role === "tool" && message.tools ? (
-                <div className={cn("max-w-[78%] rounded-lg", isSelected && "ring-2 ring-primary/50")}>
+              {message.role !== "user" &&
+                message.role !== "tool" &&
+                message.role !== "subagent" && (
+                  <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                    {roleIcon(message.role)}
+                  </span>
+                )}
+              {message.role === "subagent" && message.subagentRun ? (
+                <div
+                  className={cn(
+                    "w-full max-w-[86%] rounded-xl",
+                    isSelected && "ring-2 ring-primary/50"
+                  )}
+                >
+                  <SubagentRunCard run={message.subagentRun} />
+                </div>
+              ) : message.role === "tool" && message.tools ? (
+                <div
+                  className={cn("max-w-[78%] rounded-lg", isSelected && "ring-2 ring-primary/50")}
+                >
                   <ToolCallDetails tools={message.tools} label={message.content} />
                 </div>
               ) : (
@@ -703,13 +1128,20 @@ export function TraceThreadConversation({
                     isSelected && "ring-2 ring-primary/50"
                   )}
                 >
-                  <div className={cn(
-                    "mb-1 text-[10px] font-medium",
-                    message.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"
-                  )}>
+                  <div
+                    className={cn(
+                      "mb-1 text-[10px] font-medium",
+                      message.role === "user"
+                        ? "text-primary-foreground/70"
+                        : "text-muted-foreground"
+                    )}
+                  >
                     {message.label}
                   </div>
-                  <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                  {message.reasoning ? <ReasoningDetails text={message.reasoning} /> : null}
+                  {message.content ? (
+                    <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                  ) : null}
                 </div>
               )}
               {message.role === "user" && (
