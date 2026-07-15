@@ -99,6 +99,7 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
   APP_ATTENTION_CHANNEL,
   getAgentStreamAttentionKind,
@@ -1990,6 +1991,12 @@ const api = {
         workspacePath,
         cardNumber
       }) as Promise<AgentAutoCommitWorkspaceCard>
+  },
+  expertAgents: {
+    list: (): Promise<ExpertAgentEntry[]> =>
+      ipcRenderer.invoke("expertAgents:list") as Promise<ExpertAgentEntry[]>,
+    setEnabled: (name: string, enabled: boolean): Promise<string[]> =>
+      ipcRenderer.invoke("expertAgents:setEnabled", { name, enabled }) as Promise<string[]>
   },
   taskCards: {
     list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>

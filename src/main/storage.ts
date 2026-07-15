@@ -1378,6 +1378,20 @@ export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowClo
   return normalized
 }
 
+/** Enabled expert-library agent names (专家团 opt-ins), persisted in the shared
+ * settings store (key "enabledExpertAgents"). Non-string entries are dropped
+ * defensively; validity against the current library is the caller's concern
+ * (stored names may outlive a library upgrade). */
+export function getEnabledExpertAgents(): string[] {
+  const raw = getSettingsStore().get("enabledExpertAgents", []) as unknown
+  if (!Array.isArray(raw)) return []
+  return raw.filter((n): n is string => typeof n === "string")
+}
+
+export function setEnabledExpertAgents(names: string[]): void {
+  getSettingsStore().set("enabledExpertAgents", names)
+}
+
 /**
  * Resolve the user-designated default model config (the "默认模型" chosen in
  * settings), falling back to the first configured model when no explicit
