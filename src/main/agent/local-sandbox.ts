@@ -37,6 +37,10 @@ import fg from "fast-glob"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import micromatch from "micromatch"
+import {
+  isSameMarkdownDocumentPath,
+  renderPluginSkillMarkdownPlaceholders
+} from "./markdown-placeholders"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import {
@@ -64,6 +68,18 @@ import { runHooksEnriched } from "../hooks/required-skill"
 import { detectToolFailure, hasFailureFired, markFailureFired } from "../hooks/tool-failure"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput } from "../hooks/updated-input"
+import {
+  formatFailureFuseWarning,
+  getFailureFuseMode,
+  isFailureFuseHaltError,
+  recordToolFailure,
+  recordToolSuccess,
+  shouldAttachFailureFuseFeedback,
+  shouldSendFailureFuseNotice,
+  throwIfFailureFuseHalt,
+  type FailureFuseDecision,
+  type FailureFuseNoticeCallback
+} from "./failure-fuse"
 import type { HookScopeController } from "../hooks/scope"
 import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
@@ -278,6 +294,8 @@ export interface LocalSandboxOptions {
   hookScope?: HookScopeController
   /** Optional callback invoked after each hook executes — used to emit results to the renderer. */
   onHookResult?: HookResultCallback
+  /** Optional callback invoked when repeated tool failures should be shown to the user. */
+  onFailureFuseNotice?: FailureFuseNoticeCallback
   /** Renderer user message id that owns this chat turn, used to group hook logs. */
   hookTurnId?: string
   /** AbortSignal for cancelling running child processes when the user aborts.
@@ -314,6 +332,10 @@ export interface LocalSandboxOptions {
   harnessAdapterName?: string
   /** Optional bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
   harnessAdapterVersion?: string
+  /** Optional current harness workflow node/stage name exposed as HARNESS_NODE_NAME. */
+  harnessNodeName?: string
+  /** Optional current harness workflow node/stage status exposed as HARNESS_NODE_STATUS. */
+  harnessNodeStatus?: string
   /** Optional harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Optional harness project directory exposed to child processes as PROJECT_DIR. */
@@ -419,6 +441,8 @@ export class LocalSandbox
   private readonly harnessProjectId?: string
   private readonly harnessAdapterName?: string
   private readonly harnessAdapterVersion?: string
+  private readonly harnessNodeName?: string
+  private readonly harnessNodeStatus?: string
   private readonly projectCode?: string
   private readonly projectDir?: string
   private readonly codexExePath: string
@@ -426,6 +450,7 @@ export class LocalSandbox
   private readonly resolveHooks: LocalSandboxHookResolver
   private readonly _hookScope?: HookScopeController
   private readonly _onHookResult?: HookResultCallback
+  private readonly _onFailureFuseNotice?: FailureFuseNoticeCallback
   private readonly _hookTurnId?: string
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
@@ -547,6 +572,38 @@ export class LocalSandbox
       parts.push(`[Hook requested review] ${postResult.reason}`)
     }
     return parts.length > 0 ? parts.join("\n\n") : null
+  }
+
+  private static mergeFailureFuseWarning(
+    postResult: HookResult | null,
+    decision: FailureFuseDecision | null
+  ): HookResult | null {
+    if (!shouldAttachFailureFuseFeedback(decision)) return postResult
+    const warning = formatFailureFuseWarning(decision)
+    if (!postResult) {
+      return {
+        exitCode: null,
+        stdout: "",
+        stderr: "",
+        blocked: false,
+        additionalContext: warning
+      }
+    }
+    return {
+      ...postResult,
+      additionalContext: postResult.additionalContext
+        ? `${postResult.additionalContext}\n\n${warning}`
+        : warning
+    }
+  }
+
+  private static parseToolResultForFailure(toolResult: string | undefined): unknown {
+    if (typeof toolResult !== "string") return toolResult
+    try {
+      return JSON.parse(toolResult)
+    } catch {
+      return toolResult
+    }
   }
 
   private static getElevatedSandboxUserProfileRoot(networkEnabled: boolean): string {
@@ -1670,6 +1727,10 @@ export class LocalSandbox
     if (harnessAdapterName) baseEnv.HARNESS_ADAPTER_NAME = harnessAdapterName
     const harnessAdapterVersion = options.harnessAdapterVersion?.trim()
     if (harnessAdapterVersion) baseEnv.HARNESS_ADAPTER_VERSION = harnessAdapterVersion
+    const harnessNodeName = options.harnessNodeName?.trim()
+    if (harnessNodeName) baseEnv.HARNESS_NODE_NAME = harnessNodeName
+    const harnessNodeStatus = options.harnessNodeStatus?.trim()
+    if (harnessNodeStatus) baseEnv.HARNESS_NODE_STATUS = harnessNodeStatus
     const projectCode = options.projectCode?.trim()
     if (projectCode) baseEnv.PROJECT_CODE = projectCode
     const projectDir = options.projectDir?.trim()
@@ -1691,6 +1752,8 @@ export class LocalSandbox
     this.harnessProjectId = harnessProjectId || undefined
     this.harnessAdapterName = harnessAdapterName || undefined
     this.harnessAdapterVersion = harnessAdapterVersion || undefined
+    this.harnessNodeName = harnessNodeName || undefined
+    this.harnessNodeStatus = harnessNodeStatus || undefined
     this.projectCode = projectCode || undefined
     this.projectDir = projectDir || undefined
     this.codexExePath = options.codexExePath ?? "codex"
@@ -1699,6 +1762,7 @@ export class LocalSandbox
     this.resolveHooks = options.hookResolver ?? (() => this.getHooks())
     this._hookScope = options.hookScope
     this._onHookResult = options.onHookResult
+    this._onFailureFuseNotice = options.onFailureFuseNotice
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
@@ -2408,13 +2472,19 @@ export class LocalSandbox
       ...(this.harnessAdapterVersion && !context.harnessAdapterVersion
         ? { harnessAdapterVersion: this.harnessAdapterVersion }
         : {}),
+      ...(this.harnessNodeName && !context.harnessNodeName
+        ? { harnessNodeName: this.harnessNodeName }
+        : {}),
+      ...(this.harnessNodeStatus && !context.harnessNodeStatus
+        ? { harnessNodeStatus: this.harnessNodeStatus }
+        : {}),
       ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
       ...(this.projectDir && !context.projectDir ? { projectDir: this.projectDir } : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
 
     const hooks = this.resolveHooks(event, hookContext)
-    const result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
+    let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -2424,25 +2494,48 @@ export class LocalSandbox
     // a throw-path failure already caught by toolErrorMiddleware does not
     // re-trigger here.
     if (event === "PostToolUse" && context.toolResult) {
+      const failureFuseDecision = this.recordFailureFuseDecisionFromResult(hookContext)
+      if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+        this._onFailureFuseNotice?.(failureFuseDecision)
+      }
+      result = LocalSandbox.mergeFailureFuseWarning(result, failureFuseDecision)
       this.maybeFirePostToolUseFailureFromResult(hookContext)
+      if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
     }
     return result
   }
 
-  private maybeFirePostToolUseFailureFromResult(context: HookContext): void {
-    let parsed: unknown = context.toolResult
-    if (typeof context.toolResult === "string") {
-      try {
-        parsed = JSON.parse(context.toolResult)
-      } catch {
-        // Not JSON — pass the raw string to detectToolFailure so it can
-        // pattern-match plain-text failure markers (the execute tool from
-        // deepagents returns "<output>\n[Command failed with exit code N]"
-        // rather than a structured object). Without this, every execute
-        // failure slipped past PostToolUseFailure entirely.
-        parsed = context.toolResult
-      }
+  private recordFailureFuseDecisionFromResult(context: HookContext): FailureFuseDecision | null {
+    if (!context.toolResult) return null
+    const turnId = context.turnId ?? this._hookTurnId
+    if (!turnId) return null
+
+    const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
+    const signal = detectToolFailure(context.toolName ?? "", parsed)
+    const threadId = context.sessionId ?? this.runId
+    const toolName = context.toolName
+    if (!signal) {
+      recordToolSuccess({ threadId, turnId, toolName, toolArgs: context.toolArgs })
+      return null
     }
+
+    const toolCallId = (context.toolArgs?.tool_call_id ??
+      context.toolArgs?.tool_use_id ??
+      "") as string
+
+    return recordToolFailure({
+      threadId,
+      turnId,
+      toolName,
+      toolCallId,
+      toolArgs: context.toolArgs,
+      signal,
+      mode: getFailureFuseMode()
+    })
+  }
+
+  private maybeFirePostToolUseFailureFromResult(context: HookContext): void {
+    const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
     const signal = detectToolFailure(context.toolName ?? "", parsed)
     if (!signal) return
     const toolCallId = (context.toolArgs?.tool_call_id ??
@@ -3575,7 +3668,7 @@ export class LocalSandbox
           ? updatedArgs.limit
           : limit
     } catch (error) {
-      if (isHookHaltError(error)) throw error
+      if (isHookHaltError(error) || isFailureFuseHaltError(error)) throw error
       throw error
     }
     if (this.isHiddenSkillPath(effectiveFilePath)) {
@@ -3645,7 +3738,7 @@ export class LocalSandbox
           this._skillHooksFired.add(skillHookKey)
         }
       } catch (hookError) {
-        if (isHookHaltError(hookError)) throw hookError
+        if (isHookHaltError(hookError) || isFailureFuseHaltError(hookError)) throw hookError
         console.warn("[Hooks] PreSkillUse error:", hookError)
       }
 
@@ -3699,6 +3792,15 @@ export class LocalSandbox
           formatted
       }
 
+      if (skillMatch && isSameMarkdownDocumentPath(resolvedPath, skillMatch.path)) {
+        result = renderPluginSkillMarkdownPlaceholders(result, skillMatch, {
+          pluginWorkspace: this.pluginWorkspace,
+          projectDir: this.projectDir,
+          featureId: this.featureId,
+          systemId: this.systemId
+        })
+      }
+
       if (fireSkillHooks && skillMatch) {
         this._hookScope?.activateSkill(skillMatch.name, skillMatch.pluginId, skillMatch.rootDir)
         this._hookScope?.activatePersistentHooks(
@@ -3735,7 +3837,7 @@ export class LocalSandbox
         hookVisibleResult
       )
     } catch (e: unknown) {
-      if (isHookHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return await this.applyPostToolUseHookToText(
         "read_file",
@@ -4044,7 +4146,7 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
-      if (isHookHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
     }
@@ -4252,12 +4354,12 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
-        if (isHookHaltError(e)) throw e
+        if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
       }
     } catch (e: unknown) {
-      if (isHookHaltError(e)) throw e
+      if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return { error: `Error editing file '${effectiveFilePath}': ${msg}` }
     }
@@ -5653,11 +5755,14 @@ export class LocalSandbox
         startedMessage
       )
     } catch (error) {
-      if (isHookHaltError(error)) {
+      if (isHookHaltError(error) || isFailureFuseHaltError(error)) {
         taskAbortController.abort()
         task.completed = true
+        const reason = isFailureFuseHaltError(error)
+          ? "failure fuse halted the turn"
+          : "PostToolUse halted the turn"
         task.result = {
-          output: `Background task ${taskId} cancelled because PostToolUse halted the turn.`,
+          output: `Background task ${taskId} cancelled because ${reason}.`,
           exitCode: 130,
           truncated: false
         }

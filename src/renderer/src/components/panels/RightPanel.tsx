@@ -31,7 +31,9 @@ import {
   EyeOff,
   Loader2,
   Copy,
-  Check
+  Check,
+  ShieldCheck,
+  Eye
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -50,15 +52,22 @@ import {
 } from "@/lib/workspace-file-load"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
+import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { getRightPanelSkillPathSegments } from "@/components/panels/skill-tree-path"
+import {
+  getSystemConstraintsLoadCounts,
+  SystemConstraintsPanel
+} from "@/components/panels/SystemConstraintsPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
 type SkillHookMetadata = Awaited<ReturnType<typeof window.api.hooks.skills.list>>[number]
+type RightPanelSkillMarketInfo = Pick<MarketItem, "name" | "chinese_name">
 type DisplayHook = HookConfig & {
   source: "global" | "workspace" | "plugin" | "skill"
   pluginId?: string
@@ -85,6 +94,7 @@ const PREVIEW_MAX_HEIGHT = "100vh"
 type PanelHeights = {
   tasks: number
   files: number
+  systemConstraints: number
   agents: number
   skills: number
   plugins: number
@@ -197,6 +207,7 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 interface RightPanelProps {
   threadId?: string | null
   moduleMode: "work" | "preview" | "git"
+  showSystemConstraints?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
@@ -214,6 +225,7 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 export function RightPanel({
   threadId,
   moduleMode,
+  showSystemConstraints = false,
   onRequestPreviewMode,
   onRequestWorkMode,
   onPreviewFullscreenChange
@@ -221,6 +233,7 @@ export function RightPanel({
   const {
     currentThreadId: storeCurrentThreadId,
     pluginVersion,
+    rightPanelWorkRequest,
     skillGenerationByThread,
     setSkillGenerationPhase
   } =
@@ -228,6 +241,7 @@ export function RightPanel({
       useShallow((s) => ({
         currentThreadId: s.currentThreadId,
         pluginVersion: s.pluginVersion,
+        rightPanelWorkRequest: s.rightPanelWorkRequest,
         // Subscribe to the whole map so we re-render when any thread's card changes
         skillGenerationByThread: s.skillGenerationByThread,
         setSkillGenerationPhase: s.setSkillGenerationPhase
@@ -249,8 +263,12 @@ export function RightPanel({
     () => threadState?.coordinatorWorkers ?? [],
     [threadState?.coordinatorWorkers]
   )
+  const systemConstraintCounts = getSystemConstraintsLoadCounts(
+    showSystemConstraints ? threadState?.harnessAgentmdLoadStatus : null
+  )
   const runningSubagentIdsRef = useRef<Set<string>>(new Set())
   const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
+  const handledWorkRequestIdsRef = useRef<Set<number>>(new Set())
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
@@ -262,6 +280,7 @@ export function RightPanel({
   const prevStreamLoadingRef = useRef(false)
   const [tasksOpen, setTasksOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [systemConstraintsOpen, setSystemConstraintsOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
@@ -270,6 +289,9 @@ export function RightPanel({
   const [lspConfig, setLspConfig] = useState<LspConfig | null>(null)
   const [lspStatus, setLspStatus] = useState<LspStatus | null>(null)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
+  const [marketSkillMap, setMarketSkillMap] = useState<Record<string, RightPanelSkillMarketInfo>>(
+    {}
+  )
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
   const [hooks, setHooks] = useState<DisplayHook[]>([])
@@ -311,6 +333,39 @@ export function RightPanel({
   useEffect(() => {
     let cancelled = false
 
+    const loadMarketSkills = async (): Promise<void> => {
+      try {
+        const res = await marketApi.getSkills()
+        if (!res.success || !res.data || cancelled) return
+
+        const next: Record<string, RightPanelSkillMarketInfo> = {}
+        for (const item of res.data) {
+          const normalized = normalizeRightPanelSkillName(item.name)
+          if (!normalized) continue
+          next[normalized] = {
+            name: item.name,
+            chinese_name: item.chinese_name
+          }
+        }
+
+        if (!cancelled) {
+          setMarketSkillMap(next)
+        }
+      } catch (error) {
+        console.warn("[RightPanel] Failed to load market skills:", error)
+      }
+    }
+
+    void loadMarketSkills()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
     const loadLspSummary = async (): Promise<void> => {
       try {
         const cfg = await window.api.lsp.getConfig()
@@ -344,6 +399,19 @@ export function RightPanel({
       setAgentsOpen(true)
     }
   }, [skillGenerationAgent.phase])
+
+  useEffect(() => {
+    setSystemConstraintsOpen(false)
+  }, [currentThreadId])
+
+  useEffect(() => {
+    if (!showSystemConstraints) return
+    if (rightPanelWorkRequest?.target !== "systemConstraints") return
+    if (rightPanelWorkRequest.threadId !== currentThreadId) return
+    if (handledWorkRequestIdsRef.current.has(rightPanelWorkRequest.id)) return
+    handledWorkRequestIdsRef.current.add(rightPanelWorkRequest.id)
+    setSystemConstraintsOpen(true)
+  }, [currentThreadId, rightPanelWorkRequest, showSystemConstraints])
 
   // Auto-open once when an ordinary task subagent starts.
   useEffect(() => {
@@ -660,6 +728,7 @@ export function RightPanel({
   // Store content heights in pixels (null = auto/equal distribution)
   const [tasksHeight, setTasksHeight] = useState<number | null>(null)
   const [filesHeight, setFilesHeight] = useState<number | null>(null)
+  const [systemConstraintsHeight, setSystemConstraintsHeight] = useState<number | null>(null)
   const [agentsHeight, setAgentsHeight] = useState<number | null>(null)
   const [skillsHeight, setSkillsHeight] = useState<number | null>(null)
   const [pluginsHeight, setPluginsHeight] = useState<number | null>(null)
@@ -670,6 +739,7 @@ export function RightPanel({
   const dragStartHeights = useRef<{
     tasks: number
     files: number
+    systemConstraints: number
     agents: number
     skills: number
     plugins: number
@@ -686,15 +756,17 @@ export function RightPanel({
     const openPanels = [
       tasksOpen,
       filesOpen,
+      showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
       pluginsOpen,
       hooksOpen,
       lspOpen
     ]
-    let used = HEADER_HEIGHT * 7
+    const sectionCount = showSystemConstraints ? 8 : 7
+    let used = HEADER_HEIGHT * sectionCount
     // Fixed visual gaps between section blocks
-    used += SECTION_GAP * 6
+    used += SECTION_GAP * (sectionCount - 1)
 
     // Count handles between consecutive open panels
     let handles = 0
@@ -706,7 +778,18 @@ export function RightPanel({
     used += HANDLE_HEIGHT * handles
 
     return Math.max(0, totalHeight - used)
-  }, [moduleMode, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
+  }, [
+    moduleMode,
+    tasksOpen,
+    filesOpen,
+    showSystemConstraints,
+    systemConstraintsOpen,
+    agentsOpen,
+    skillsOpen,
+    pluginsOpen,
+    hooksOpen,
+    lspOpen
+  ])
 
   // Get current heights for each panel's content area
   const getContentHeights = useCallback(() => {
@@ -714,6 +797,7 @@ export function RightPanel({
     const openCount = [
       tasksOpen,
       filesOpen,
+      showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
       pluginsOpen,
@@ -722,7 +806,16 @@ export function RightPanel({
     ].filter(Boolean).length
 
     if (openCount === 0) {
-      return { tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, lsp: 0 }
+      return {
+        tasks: 0,
+        files: 0,
+        systemConstraints: 0,
+        agents: 0,
+        skills: 0,
+        plugins: 0,
+        hooks: 0,
+        lsp: 0
+      }
     }
 
     const defaultHeight = available / openCount
@@ -730,6 +823,10 @@ export function RightPanel({
     return {
       tasks: tasksOpen ? (tasksHeight ?? defaultHeight) : 0,
       files: filesOpen ? (filesHeight ?? defaultHeight) : 0,
+      systemConstraints:
+        showSystemConstraints && systemConstraintsOpen
+          ? (systemConstraintsHeight ?? defaultHeight)
+          : 0,
       agents: agentsOpen ? (agentsHeight ?? defaultHeight) : 0,
       skills: skillsOpen ? (skillsHeight ?? defaultHeight) : 0,
       plugins: pluginsOpen ? (pluginsHeight ?? defaultHeight) : 0,
@@ -740,6 +837,8 @@ export function RightPanel({
     getAvailableContentHeight,
     tasksOpen,
     filesOpen,
+    showSystemConstraints,
+    systemConstraintsOpen,
     agentsOpen,
     skillsOpen,
     pluginsOpen,
@@ -747,6 +846,7 @@ export function RightPanel({
     lspOpen,
     tasksHeight,
     filesHeight,
+    systemConstraintsHeight,
     agentsHeight,
     skillsHeight,
     pluginsHeight,
@@ -1085,17 +1185,28 @@ export function RightPanel({
   useEffect(() => {
     setTasksHeight(null)
     setFilesHeight(null)
+    setSystemConstraintsHeight(null)
     setAgentsHeight(null)
     setSkillsHeight(null)
     setPluginsHeight(null)
     setHooksHeight(null)
     setLspHeight(null)
-  }, [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
+  }, [
+    tasksOpen,
+    filesOpen,
+    systemConstraintsOpen,
+    agentsOpen,
+    skillsOpen,
+    pluginsOpen,
+    hooksOpen,
+    lspOpen
+  ])
 
   // Calculate heights in an effect (refs can't be accessed during render)
   const [heights, setHeights] = useState<PanelHeights>({
     tasks: 0,
     files: 0,
+    systemConstraints: 0,
     agents: 0,
     skills: 0,
     plugins: 0,
@@ -1110,6 +1221,7 @@ export function RightPanel({
     moduleMode === "work" &&
     !tasksOpen &&
     !filesOpen &&
+    !(showSystemConstraints && systemConstraintsOpen) &&
     !agentsOpen &&
     !skillsOpen &&
     !pluginsOpen &&
@@ -1214,7 +1326,9 @@ export function RightPanel({
           </div>
 
           {/* Resize handle after TASKS */}
-          {tasksOpen && (filesOpen || agentsOpen) && <ResizeHandle onDrag={handleTasksResize} />}
+          {tasksOpen && (filesOpen || (!showSystemConstraints && agentsOpen)) && (
+            <ResizeHandle onDrag={handleTasksResize} />
+          )}
 
           {/* FILES */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
@@ -1233,7 +1347,33 @@ export function RightPanel({
           </div>
 
           {/* Resize handle after FILES */}
-          {filesOpen && agentsOpen && <ResizeHandle onDrag={handleFilesResize} />}
+          {!showSystemConstraints && filesOpen && agentsOpen && (
+            <ResizeHandle onDrag={handleFilesResize} />
+          )}
+
+          {showSystemConstraints && (
+            <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+              <SectionHeader
+                title="系统约束"
+                icon={ShieldCheck}
+                detail={
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {systemConstraintCounts.loaded}/{systemConstraintCounts.total}
+                  </span>
+                }
+                isOpen={systemConstraintsOpen}
+                onToggle={() => setSystemConstraintsOpen((prev) => !prev)}
+              />
+              {systemConstraintsOpen && (
+                <div
+                  className="overflow-auto right-panel-scroll"
+                  style={{ height: heights.systemConstraints }}
+                >
+                  <SystemConstraintsPanel state={threadState?.harnessAgentmdLoadStatus} />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* AGENTS */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
@@ -1269,7 +1409,12 @@ export function RightPanel({
             />
             {skillsOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.skills }}>
-                <SkillsContent skills={skills} disabledSkills={disabledSkills} />
+                <SkillsContent
+                  skills={skills}
+                  disabledSkills={disabledSkills}
+                  marketSkillMap={marketSkillMap}
+                  threadId={currentThreadId}
+                />
               </div>
             )}
           </div>
@@ -2876,6 +3021,35 @@ function countRightPanelTreeSkills(node: RightPanelSkillTreeNode): number {
   )
 }
 
+function normalizeRightPanelSkillName(value?: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+}
+
+function resolveRightPanelSkillMarketInfo(
+  skill: SkillMetadata,
+  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
+): RightPanelSkillMarketInfo | undefined {
+  if (skill.pluginId || skill.pluginName) return undefined
+  if (skill.source !== "user") return undefined
+  return marketSkillMap[normalizeRightPanelSkillName(skill.name)]
+}
+
+function getRightPanelSkillDisplayName(
+  skill: SkillMetadata,
+  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
+): string {
+  const marketInfo = resolveRightPanelSkillMarketInfo(skill, marketSkillMap)
+  if (!marketInfo) return skill.name
+
+  const marketChinese = marketInfo.chinese_name?.trim()
+  if (marketChinese) return marketChinese
+
+  const metadataChinese = skill.metadata?.chinese_name?.trim()
+  return metadataChinese || skill.name
+}
+
 function splitRightPanelSkillsByEnabled(
   skills: SkillMetadata[],
   disabledSkills: ReadonlySet<string>
@@ -2893,10 +3067,14 @@ function splitRightPanelSkillsByEnabled(
 
 function SkillsContent({
   skills,
-  disabledSkills
+  disabledSkills,
+  marketSkillMap,
+  threadId
 }: {
   skills: SkillMetadata[]
   disabledSkills: Set<string>
+  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
+  threadId?: string | null
 }): React.JSX.Element {
   const [expandedTreeNodes, setExpandedTreeNodes] = useState<Set<string>>(new Set())
   const toggleTreeNode = useCallback((nodeKey: string) => {
@@ -2907,6 +3085,23 @@ function SkillsContent({
       return next
     })
   }, [])
+  const openSkillPreview = useCallback(
+    (skill: SkillMetadata) => {
+      if (!threadId) {
+        toast.error("当前线程不可用，无法预览技能文件")
+        return
+      }
+      if (!skill.path) {
+        toast.error("未找到技能文件路径")
+        return
+      }
+      emitOpenResourcePreview({
+        threadId,
+        filePath: skill.path
+      })
+    },
+    [threadId]
+  )
 
   if (skills.length === 0) {
     return (
@@ -2957,6 +3152,9 @@ function SkillsContent({
             0
           )
           const childrenExpanded = expandedTreeNodes.has(node.key)
+          const displayName = node.skill
+            ? getRightPanelSkillDisplayName(node.skill, marketSkillMap)
+            : node.label
           return (
             <div key={node.key} className="space-y-2">
               {node.skill ? (
@@ -2976,8 +3174,33 @@ function SkillsContent({
                         disabled && "text-muted-foreground line-through"
                       )}
                     >
-                      {node.skill.name}
+                      {displayName}
                     </span>
+                    <IconPopoverButton
+                      icon={<Eye className="size-3.5" />}
+                      popoverContent="可以预览完整信息"
+                      aria-label="预览完整技能信息"
+                      className="shrink-0 rounded-md p-1"
+                      stopPropagation
+                      onClick={() => {
+                        if (!node.skill) return
+                        openSkillPreview(node.skill)
+                      }}
+                    />
+                    {(node.skill.pluginName || node.skill.pluginId) && (
+                      <div className="mt-1 flex min-w-0 items-center gap-1">
+                        <Badge
+                          variant="outline"
+                          className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
+                          title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
+                        >
+                        <span className="truncate">
+                          插件
+                        </span>
+                        </Badge>
+                      </div>
+                    )}
+
                     {childCount > 0 && (
                       <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
                         <Folder className="mr-1 size-2.5" />
@@ -2990,19 +3213,7 @@ function SkillsContent({
                       </Badge>
                     )}
                   </div>
-                  {(node.skill.pluginName || node.skill.pluginId) && (
-                    <div className="mt-1 flex min-w-0 items-center gap-1">
-                      <Badge
-                        variant="outline"
-                        className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
-                        title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
-                      >
-                        <span className="truncate">
-                          插件 · {node.skill.pluginName ?? node.skill.pluginId}
-                        </span>
-                      </Badge>
-                    </div>
-                  )}
+
                   {node.skill.description && (
                     <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                       {node.skill.description}

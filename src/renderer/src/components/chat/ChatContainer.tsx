@@ -45,13 +45,27 @@ import {
   PlayCircle,
   Trash2,
   Copy,
-  Workflow
+  Workflow,
+  GitFork,
+  FolderOpen,
+  Paperclip
 } from "lucide-react"
 import type { FileAttachment } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { useAppStore } from "@/lib/store"
 import {
   consumePendingHarnessNextAction,
@@ -72,6 +86,7 @@ import {
   filterCoordinatorNoiseMessages,
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
+import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
 import { isCoordinatorModeMetadata, isWorkflowModeMetadata } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
@@ -81,12 +96,19 @@ import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
+import {
+  getSystemConstraintsLoadCounts,
+  hasNoLoadedSystemConstraints,
+  SystemConstraintsPreviewPopover
+} from "@/components/panels/SystemConstraintsPanel"
 import type {
   GoalUiState,
+  ForkableCheckpoint,
   HITLRequest,
   Message,
   SkillMetadata,
   Thread,
+  ThreadForkOverrides,
   ToolCallState,
   ToolCallStatus,
   UserInputResponse
@@ -123,6 +145,18 @@ import {
   useSlashCommands,
   type SlashCommandItem
 } from "@/features/slash-commands/useSlashCommands"
+import {
+  removeAtFileTokenFromInput,
+  useAtFileMentions,
+  type AtFileSuggestion
+} from "@/features/mentions/useAtFileMentions"
+import { AtFileMentionPopover } from "@/features/mentions/AtFileMentionPopover"
+import {
+  resolveAtFileAttachments,
+  resolveAtFileSelection,
+  type MentionedWorkspaceFile
+} from "@/features/mentions/atFileAttachments"
+import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
@@ -156,6 +190,9 @@ import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
+
+const PROJECT_MODE_AGENT_TEAM_ENABLED =
+  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
 
 const MARKET_SKILLS_CACHE_TTL_MS = 10 * 60 * 1000
 
@@ -1158,6 +1195,13 @@ const THINKING_MESSAGES = [
 ]
 
 const SUPPORTED_EXTS = new Set([".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"])
+const ATTACH_FILE_POPOVER_CONTENT = (
+  <div className="space-y-1">
+    <div>1. 添加文件 (txt, md, csv, docx, xlsx)</div>
+    <div>2. doc文件：不要直接改后缀，在文件系统“另存为”docx之后，再选择上传。</div>
+  </div>
+)
+const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
@@ -1198,38 +1242,6 @@ const messageTimeOrderEntries = (
   return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
 }
 
-const toDate = (value: Date | string | undefined): Date | undefined => {
-  if (!value) return undefined
-  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : undefined
-  const parsed = new Date(value)
-  return Number.isFinite(parsed.getTime()) ? parsed : undefined
-}
-
-const toTime = (value: Date | string | undefined): number | null => {
-  const date = toDate(value)
-  return date ? date.getTime() : null
-}
-
-const getMessageDisplayTime = (message: Message): number | null => {
-  return toTime(message.start_at) ?? toTime(message.created_at) ?? toTime(message.end_at)
-}
-
-const sortMessagesForDisplay = (messages: Message[]): Message[] => {
-  return messages
-    .map((message, index) => ({
-      message,
-      index,
-      time: getMessageDisplayTime(message)
-    }))
-    .sort((a, b) => {
-      if (a.time !== null && b.time !== null && a.time !== b.time) {
-        return a.time - b.time
-      }
-      return a.index - b.index
-    })
-    .map((entry) => entry.message)
-}
-
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -1244,6 +1256,48 @@ const getMessageText = (content: Message["content"]): string => {
     .join("\n")
 }
 
+type ForkDestinationMode = "local" | "workspace"
+
+interface MessageForkDialogTarget {
+  sourceThreadId: string
+  sourceWorkspacePath: string | null
+  message: Message
+  checkpoint: ForkableCheckpoint
+}
+
+function getForkWorkspacePath(thread: Thread | null): string | null {
+  const workspacePath = thread?.metadata?.workspacePath
+  return typeof workspacePath === "string" && workspacePath.trim() ? workspacePath : null
+}
+
+function getForkWorkspaceLabel(path: string | null): string {
+  if (!path) return "未关联工作区"
+  const segments = path.split(/[\\/]/).filter(Boolean)
+  return segments.at(-1) || path
+}
+
+function formatForkCheckpointTime(value?: string): string {
+  if (!value) return "未知时间"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function getForkMessagePreview(message: Message): string {
+  const text = getMessageText(message.content).replace(/\s+/g, " ").trim()
+  if (!text) return "这条消息没有可预览文本"
+  return text.length > 180 ? `${text.slice(0, 180)}...` : text
+}
+
+const MESSAGE_FORK_CHECKPOINT_HINT =
+  "可在左侧会话列表右键该会话，选择“从 checkpoint fork”。"
+
+function getMessageForkCheckpointHint(errorMessage?: string): string {
+  const message = errorMessage?.trim()
+  if (!message) return `该消息附近没有可精确 fork 的稳定 checkpoint。${MESSAGE_FORK_CHECKPOINT_HINT}`
+  return `${message} ${MESSAGE_FORK_CHECKPOINT_HINT}`
+}
+
 const getMessageBubbleText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -1256,7 +1310,7 @@ const getMessageBubbleText = (content: Message["content"]): string => {
 
 // MessageBubble renders `null` for messages with no visible content: tool-result
 // messages, empty system notices, and assistant/user messages whose text is empty
-// and that carry no tool calls. Such empty wrappers must NOT get content-visibility
+// and that carry no tool calls or reasoning. Such empty wrappers must NOT get content-visibility
 // containment — when scrolled off-screen the intrinsic-size fallback would reserve
 // phantom height (stacking across many empty tool results into a large blank gap
 // between tools and text). Detection is intentionally generous: a false positive
@@ -1272,6 +1326,12 @@ const messageRendersNothing = (message: Message): boolean => {
   if (message.role === "tool") return true
   const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
   if (hasToolCalls) return false
+  if (message.role === "assistant" && typeof message.reasoning === "string") {
+    return (
+      message.reasoning.trim().length === 0 &&
+      getMessageBubbleText(message.content).trim().length === 0
+    )
+  }
   const visibleText =
     message.role === "system"
       ? getMessageText(message.content)
@@ -1458,12 +1518,16 @@ function ChatErrorCard({
     : "代理出错"
   const reason = (detail?.reason || error || "").trim()
   const hint = detail?.hint
+  const displayedModel = detail?.modelDisplayName || detail?.model || detail?.modelName
+  const apiModelName = detail?.modelName
   const hasDetails = Boolean(
     detail &&
     (detail.status != null ||
       detail.requestId ||
       detail.code ||
-      detail.model ||
+      displayedModel ||
+      apiModelName ||
+      detail.modelId ||
       (detail.failover && detail.failover.length > 0) ||
       detail.rawBody)
   )
@@ -1524,10 +1588,22 @@ function ChatErrorCard({
                     </button>
                   </div>
                 )}
-                {detail?.model && (
+                {displayedModel && (
                   <div className="flex gap-2">
                     <span className="shrink-0 w-16 text-muted-foreground/70">模型</span>
-                    <span className="font-mono break-all">{detail.model}</span>
+                    <span className="font-mono break-all">{displayedModel}</span>
+                  </div>
+                )}
+                {apiModelName && apiModelName !== displayedModel && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">Model</span>
+                    <span className="font-mono break-all">{apiModelName}</span>
+                  </div>
+                )}
+                {detail?.modelId && detail.modelId !== displayedModel && (
+                  <div className="flex gap-2">
+                    <span className="shrink-0 w-16 text-muted-foreground/70">配置标识</span>
+                    <span className="font-mono break-all">{detail.modelId}</span>
                   </div>
                 )}
                 {detail?.failover && detail.failover.length > 0 && (
@@ -1536,7 +1612,14 @@ function ChatErrorCard({
                     <ul className="flex-1 min-w-0 space-y-0.5">
                       {detail.failover.map((f, i) => (
                         <li key={`${f.modelId}-${i}`} className="break-words">
-                          <span className="font-mono">{f.modelId}</span>：{f.reason}
+                          <span className="font-mono">
+                            {f.modelDisplayName
+                              ? `${f.modelDisplayName} (${f.modelId})`
+                              : f.modelName
+                                ? `${f.modelName} (${f.modelId})`
+                                : f.modelId}
+                          </span>
+                          ：{f.reason}
                         </li>
                       ))}
                     </ul>
@@ -1608,6 +1691,8 @@ interface ChatMessageListProps {
   onApprovalDecision: (decision: ChatApprovalDecision) => void
   onEditUserMessage: (message: Message) => void
   onSetGoalFromMessage: (text: string) => void
+  onForkFromMessage: (message: Message) => void
+  forkingMessageId: string | null
   onOpenHookLogBucket: (turnId: string) => void
   threadId: string
   assistantDurationMsById: Map<string, number>
@@ -1630,6 +1715,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
   onApprovalDecision,
   onEditUserMessage,
   onSetGoalFromMessage,
+  onForkFromMessage,
+  forkingMessageId,
   onOpenHookLogBucket,
   threadId,
   assistantDurationMsById,
@@ -1679,6 +1766,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
               onApprovalDecision={onApprovalDecision}
               onEditUserMessage={onEditUserMessage}
               onSetGoalFromMessage={onSetGoalFromMessage}
+              onForkFromMessage={onForkFromMessage}
+              forkingMessageId={forkingMessageId}
               threadId={threadId}
               isLoading={isLoading}
               hasUserAfterHead={hasUserAfterHead}
@@ -1711,6 +1800,114 @@ const ChatMessageList = React.memo(function ChatMessageList({
     </>
   )
 })
+
+function SystemPromptPreviewButton({ threadId }: { threadId?: string | null }): React.JSX.Element | null {
+  const [allowed, setAllowed] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [prompt, setPrompt] = useState<string | null>(null)
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null)
+  const closeTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.agent
+      .canPreviewSystemPrompt()
+      .then((nextAllowed) => {
+        if (!cancelled) setAllowed(nextAllowed)
+      })
+      .catch(() => {
+        if (!cancelled) setAllowed(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const loadPreview = useCallback(async () => {
+    if (!threadId || loading) return
+    setLoading(true)
+    try {
+      const preview = await window.api.agent.getSystemPromptPreview(threadId)
+      setPrompt(preview.prompt)
+      setUpdatedAt(preview.updatedAt)
+    } catch {
+      setPrompt(null)
+      setUpdatedAt(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [loading, threadId])
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer()
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpen(false)
+      closeTimerRef.current = null
+    }, 120)
+  }, [clearCloseTimer])
+
+  useEffect(() => {
+    return () => clearCloseTimer()
+  }, [clearCloseTimer])
+
+  useEffect(() => {
+    setOpen(false)
+    setPrompt(null)
+    setUpdatedAt(null)
+  }, [threadId])
+
+  if (!allowed || !threadId) return null
+
+  const updatedAtLabel = updatedAt ? new Date(updatedAt).toLocaleString() : "暂无"
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onMouseEnter={() => {
+            clearCloseTimer()
+            setOpen(true)
+            void loadPreview()
+          }}
+          onMouseLeave={scheduleClose}
+          className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          title="系统提示词预览"
+          aria-label="系统提示词预览"
+        >
+          <FileText className="size-3.5" />
+          <span>系统提示词预览</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        side="top"
+        sideOffset={8}
+        onMouseEnter={() => {
+          clearCloseTimer()
+          setOpen(true)
+        }}
+        onMouseLeave={scheduleClose}
+        className="w-[720px] max-w-[calc(100vw-2rem)] p-0"
+      >
+        <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground">
+          {loading ? "加载中..." : `更新时间：${updatedAtLabel}`}
+        </div>
+        <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5">
+          {prompt || "暂无系统提示词；请先运行一次当前会话。"}
+        </pre>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 export function ChatContainer({
   threadId,
@@ -1865,24 +2062,42 @@ export function ChatContainer({
     threads,
     models,
     createThread,
+    forkThread,
     updateThread,
     generateTitleForFirstMessage,
     setShowCustomizeView,
     rightPanelCollapsed,
-    pluginVersion
+    pluginVersion,
+    requestOpenRightPanelSystemConstraints
   } = useAppStore()
+  const [forkingMessageId, setForkingMessageId] = useState<string | null>(null)
   const currentThread = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
     [threadId, threads]
   )
+  const currentForkWorkspacePath = useMemo(
+    () => getForkWorkspacePath(currentThread),
+    [currentThread]
+  )
+  const [messageForkTarget, setMessageForkTarget] = useState<MessageForkDialogTarget | null>(null)
+  const currentThreadIdRef = useRef(threadId)
+  const messageForkRequestIdRef = useRef(0)
+  currentThreadIdRef.current = threadId
+  const [forkDestinationMode, setForkDestinationMode] =
+    useState<ForkDestinationMode>("local")
+  const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
+  const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
   const harnessFeatureBinding = useMemo(
     () => getHarnessFeatureBinding(currentThread),
     [currentThread]
   )
-  const disableCoordinatorModeOption =
+  const isProjectModeAgentContext =
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
+  const disableCoordinatorModeOption =
+    isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
+  const disableWorkflowModeOption = isProjectModeAgentContext
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -1896,7 +2111,10 @@ export function ChatContainer({
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
-      if (disableCoordinatorModeOption) {
+      if (
+        (disableCoordinatorModeOption && isCoordinatorModeMetadata(metadata)) ||
+        (disableWorkflowModeOption && isWorkflowModeMetadata(metadata))
+      ) {
         return "normal"
       }
       if (isWorkflowModeMetadata(metadata)) {
@@ -1911,9 +2129,11 @@ export function ChatContainer({
           console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
           return false
         })
-      return environmentForcedCoordinator ? "coordinator" : "normal"
+      return environmentForcedCoordinator && !disableCoordinatorModeOption
+        ? "coordinator"
+        : "normal"
     },
-    [disableCoordinatorModeOption]
+    [disableCoordinatorModeOption, disableWorkflowModeOption]
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
@@ -1930,13 +2150,16 @@ export function ChatContainer({
   useEffect(() => {
     let cancelled = false
     const currentThread = threads.find((thread) => thread.thread_id === threadId)
-    const metadataDerivedMode: ChatAgentMode = disableCoordinatorModeOption
-      ? "normal"
-      : isWorkflowModeMetadata(currentThread?.metadata)
-        ? "workflow"
-        : isCoordinatorModeMetadata(currentThread?.metadata)
-          ? "coordinator"
-          : "normal"
+    const metadataDerivedMode: ChatAgentMode =
+      disableCoordinatorModeOption && isCoordinatorModeMetadata(currentThread?.metadata)
+        ? "normal"
+        : disableWorkflowModeOption && isWorkflowModeMetadata(currentThread?.metadata)
+          ? "normal"
+          : isWorkflowModeMetadata(currentThread?.metadata)
+            ? "workflow"
+            : isCoordinatorModeMetadata(currentThread?.metadata)
+              ? "coordinator"
+              : "normal"
     setAgentMode(metadataDerivedMode)
     agentModeHydratedRef.current = metadataDerivedMode !== "normal"
 
@@ -1952,7 +2175,13 @@ export function ChatContainer({
     return () => {
       cancelled = true
     }
-  }, [threadId, threads, loadResolvedAgentMode, disableCoordinatorModeOption])
+  }, [
+    threadId,
+    threads,
+    loadResolvedAgentMode,
+    disableCoordinatorModeOption,
+    disableWorkflowModeOption
+  ])
 
   const allSkillsRef = useRef<MarketItem[]>([])
   const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
@@ -1993,9 +2222,8 @@ export function ChatContainer({
         (s) => s.source === "project" || s.source === "user"
       )
 
-      // In harness mode, resolve the project's bound plugin name so same-name
-      // plugin rows can prefer the project's own plugin. Standalone-vs-plugin
-      // duplicates remain visible and are disambiguated in the slash popover.
+      // In harness mode, resolve the project's bound plugin so slash surfaces
+      // only expose standalone skills and skills owned by that plugin.
       let preferredPlugin: { id?: string; name?: string } | null = null
       if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
         try {
@@ -2012,8 +2240,8 @@ export function ChatContainer({
         }
       }
 
-      // Keep same-name standalone/plugin rows visible; in harness mode only
-      // same-name plugin rows are collapsed toward the bound plugin.
+      // Keep same-name standalone/plugin rows visible outside harness mode; in
+      // harness mode, plugin skills are restricted to the bound plugin.
       const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
       setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
       setSkillsHarnessProjectId(targetProjectId)
@@ -2070,10 +2298,12 @@ export function ChatContainer({
     workspacePath,
     tokenUsage,
     contextReminder,
+    harnessAgentmdLoadStatus,
     currentModel,
     draftInput: input,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
+    workspaceFiles,
     coordinatorWorkers,
     workflowRun,
     scheduledTaskLoading,
@@ -2101,6 +2331,27 @@ export function ChatContainer({
   } = useCurrentThread(threadId)
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
+  const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
+  const shouldShowNextActionDialogTips = Boolean(nextActionDialogTips) && !readOnly
+  const systemConstraintCounts = getSystemConstraintsLoadCounts(harnessAgentmdLoadStatus)
+  const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
+  const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
+  const showSystemConstraintsButton = surface === "harness-project"
+  const systemConstraintsTitle =
+    systemConstraintsLoadFailed
+      ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+      : systemConstraintCounts.total > 0
+      ? `系统约束已加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+      : "系统约束，点击查看详情"
+  const systemConstraintsLabel =
+    systemConstraintsLoadFailed
+      ? "系统约束未全部加载"
+      : systemConstraintCounts.loaded > 0
+        ? "系统约束已加载"
+        : "系统约束"
+  const handleOpenSystemConstraints = useCallback((): void => {
+    requestOpenRightPanelSystemConstraints(threadId)
+  }, [requestOpenRightPanelSystemConstraints, threadId])
   const harnessDialogTipsProjectId = harnessFeatureBinding?.projectId ?? null
   const harnessDialogTipsSlug = harnessFeatureBinding?.slug ?? null
   const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
@@ -2111,14 +2362,13 @@ export function ChatContainer({
   }, [pendingHarnessDialogTips, setHarnessNextActionDialogTips])
 
   useEffect(() => {
-    if (!shouldShowHarnessDialogTips || !harnessDialogTipsProjectId || !harnessDialogTipsSlug) {
-      setHarnessDialogTips(null)
+    if (shouldShowNextActionDialogTips && nextActionDialogTips) {
+      setHarnessDialogTips(nextActionDialogTips)
       return
     }
 
-    const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
-    if (nextActionDialogTips) {
-      setHarnessDialogTips(nextActionDialogTips)
+    if (!shouldShowHarnessDialogTips || !harnessDialogTipsProjectId || !harnessDialogTipsSlug) {
+      setHarnessDialogTips(null)
       return
     }
 
@@ -2140,9 +2390,9 @@ export function ChatContainer({
   }, [
     harnessDialogTipsProjectId,
     harnessDialogTipsSlug,
-    pendingHarnessDialogTips,
+    nextActionDialogTips,
     shouldShowHarnessDialogTips,
-    storedHarnessNextActionDialogTips
+    shouldShowNextActionDialogTips
   ])
 
   // Hook logs live in an external store so updates don't re-render the full provider tree.
@@ -2210,22 +2460,24 @@ export function ChatContainer({
   const isLoading = streamData.isLoading || scheduledTaskLoading
   const isHarnessContextReminderEnabled =
     surface === "harness-project" && Boolean(harnessFeatureBinding) && !readOnly
-  const agentModeSwitchDisabledReason = disableCoordinatorModeOption
-    ? "项目模式暂不支持子代理协同模式，只能使用 Solo Agent。"
-    : !canChangeAgentMode
-      ? historyLoading
-        ? "会话历史加载中，暂时不能切换执行模式。"
-        : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
-      : isLoading
-        ? "当前请求执行中，结束后才能切换执行模式。"
-        : undefined
+  const agentModeSwitchDisabledReason = !canChangeAgentMode
+    ? historyLoading
+      ? "会话历史加载中，暂时不能切换执行模式。"
+      : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
+    : isLoading
+      ? "当前请求执行中，结束后才能切换执行模式。"
+      : undefined
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
       const previousMode = agentMode
       void (async () => {
-        if (disableCoordinatorModeOption && nextMode !== "normal") {
-          toast.error("项目模式暂不支持子代理协同/工作流模式，只能使用 Solo Agent。")
+        if (disableCoordinatorModeOption && nextMode === "coordinator") {
+          toast.error("项目模式暂不支持子代理协同，只能使用 Solo Agent。")
+          return
+        }
+        if (disableWorkflowModeOption && nextMode === "workflow") {
+          toast.error("项目模式暂不支持 Workflow，只能使用 Solo Agent。")
           return
         }
         if (historyLoading) {
@@ -2280,6 +2532,7 @@ export function ChatContainer({
     [
       agentMode,
       disableCoordinatorModeOption,
+      disableWorkflowModeOption,
       historyLoading,
       threadId,
       threadMessages,
@@ -2316,19 +2569,31 @@ export function ChatContainer({
 
   // ── File attachments state ──
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
+  const [mentionedFiles, setMentionedFiles] = useState<MentionedWorkspaceFile[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const attachmentsRef = useRef<FileAttachment[]>([])
+  const mentionedFilesRef = useRef<MentionedWorkspaceFile[]>([])
 
   // Keep ref in sync with state
   useEffect(() => {
     attachmentsRef.current = attachments
   }, [attachments])
+  useEffect(() => {
+    mentionedFilesRef.current = mentionedFiles
+  }, [mentionedFiles])
 
   const totalAttachmentChars = useMemo(
     () => attachments.reduce((sum, a) => sum + a.content.length, 0),
     [attachments]
   )
+  const totalMentionedFileChars = useMemo(
+    () => mentionedFiles.reduce((sum, file) => sum + (file.contentChars ?? 0), 0),
+    [mentionedFiles]
+  )
+  const totalPendingFileChars = totalAttachmentChars + totalMentionedFileChars
+  const totalPendingFileCount = attachments.length + mentionedFiles.length
+  const hasPendingFilePayload = totalPendingFileCount > 0
 
   const handleFileSelectByPath = useCallback(
     async (filePaths: string[]) => {
@@ -2337,9 +2602,12 @@ export function ChatContainer({
       clearError()
       try {
         const snapshot = attachmentsRef.current
-        let currentCount = snapshot.length
+        let currentCount = snapshot.length + mentionedFilesRef.current.length
         let currentChars = snapshot.reduce((sum, a) => sum + a.content.length, 0)
-        const existingPaths = new Set(snapshot.map((a) => a.filePath))
+        const existingPaths = new Set([
+          ...snapshot.map((a) => a.filePath),
+          ...mentionedFilesRef.current.map((item) => item.absolutePath)
+        ])
 
         for (const filePath of filePaths) {
           // #7: skip duplicates
@@ -2354,7 +2622,11 @@ export function ChatContainer({
           const ext = lastDot >= 0 ? filePath.substring(lastDot).toLowerCase() : ""
           if (!ext || !SUPPORTED_EXTS.has(ext)) {
             const fileName = filePath.replace(/^.*[/\\]/, "") || filePath
-            setError(`不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            if (ext === ".doc") {
+              setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
+            } else {
+              setError(`不支持的文件类型"${fileName}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            }
             continue
           }
 
@@ -2372,9 +2644,9 @@ export function ChatContainer({
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
-              if (result.attachment.filename.includes(".doc")) {
+              if (result.attachment.filename.toLowerCase().endsWith(".docx")) {
                 setError(
-                  `文件 "${result.attachment.filename}" 内容为空，可尝试将文件用 WPS 另存为 docx 后添加`
+                  `文件 "${result.attachment.filename}" 内容为空；若原始文件为 doc，请${DOC_SAVE_AS_DOCX_HINT}`
                 )
               } else {
                 setError(`文件 "${result.attachment.filename}" 内容为空`)
@@ -2399,8 +2671,8 @@ export function ChatContainer({
   )
 
   const handleAttachClick = useCallback(async () => {
-    if (attachmentsRef.current.length >= MAX_ATTACHMENTS) {
-      setError(`最多只能添加 ${MAX_ATTACHMENTS} 个附件`)
+    if (attachmentsRef.current.length + mentionedFilesRef.current.length >= MAX_ATTACHMENTS) {
+      setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
       return
     }
     const result = await window.api.file.select()
@@ -2411,6 +2683,9 @@ export function ChatContainer({
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
+  }, [])
+  const removeMentionedFile = useCallback((index: number) => {
+    setMentionedFiles((prev) => prev.filter((_, i) => i !== index))
   }, [])
 
   const dropZoneRef = useRef<HTMLDivElement>(null)
@@ -2903,6 +3178,22 @@ export function ChatContainer({
 
   const displayMessages = useMemo(() => {
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
+    const liveReasoningById = new Map<string, string>()
+    for (const liveMessage of streamData.liveMessages || []) {
+      if (
+        liveMessage.id &&
+        liveStreamMessageRole(liveMessage.type) === "assistant" &&
+        typeof liveMessage.reasoning === "string" &&
+        liveMessage.reasoning.trim()
+      ) {
+        liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
+      }
+    }
+    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
+      if (message.role !== "assistant" || message.reasoning) return message
+      const liveReasoning = liveReasoningById.get(message.id)
+      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
+    })
     const streamingMsgs: Message[] = (streamData.liveMessages || [])
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
@@ -2913,23 +3204,27 @@ export function ChatContainer({
           id: streamMsg.id,
           role,
           content: normalizeLiveStreamMessageContent(streamMsg.content),
+          ...(role === "assistant" && streamMsg.reasoning ? { reasoning: streamMsg.reasoning } : {}),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
           ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
           ...(role === "tool" &&
             streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
-          created_at: new Date(),
+          created_at: streamMsg.start_at ?? streamMsg.end_at ?? new Date(),
           ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
           ...(streamMsg.end_at && { end_at: streamMsg.end_at })
         }
       })
 
     // Clean up attachment XML tags in user messages for display
-    const allMessages = [...threadMessages, ...streamingMsgs].filter(
-      isVisibleCheckpointTranscriptMessage
+    const allMessages = reconcileMessageDisplayOrder(
+      [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
+        isVisibleCheckpointTranscriptMessage
+      ),
+      streamData.messages
     )
-    const cleanedMessages = sortMessagesForDisplay(allMessages).map((msg) => {
+    const cleanedMessages = allMessages.map((msg) => {
       if (
         msg.role !== "user" ||
         typeof msg.content !== "string" ||
@@ -2957,7 +3252,7 @@ export function ChatContainer({
       return { ...msg, content: cleaned }
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.liveMessages])
+  }, [threadMessages, streamData.liveMessages, streamData.messages])
 
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
@@ -3205,8 +3500,9 @@ export function ChatContainer({
     const nextAction = pendingHarnessNextAction
     const userMessage = nextAction?.userMessage?.trim() ?? ""
     const slashSkill = nextAction?.slashSkill?.trim() ?? ""
+    const pendingPreferredPlugin = nextAction?.preferredPlugin ?? null
 
-    if (!harnessFeatureBinding) return
+    if (!harnessFeatureBinding && !pendingPreferredPlugin) return
     if (!userMessage && !slashSkill) {
       if (nextAction?.dialogTips) consumePendingHarnessNextAction(threadId)
       return
@@ -3220,14 +3516,14 @@ export function ChatContainer({
     let nextSkill: SkillMetadata | null = null
     if (slashSkill) {
       if (skillsLoading) return
-      if (skillsLoadTargetProjectId !== harnessFeatureBinding.projectId) return
-      if (skillsHarnessProjectId === harnessFeatureBinding.projectId) {
-        nextSkill = selectSkillForSlashName(
-          enabledSkillsForSlash,
-          slashSkill,
-          skillsHarnessPreferredPlugin
-        )
-      }
+      const expectedProjectId = harnessFeatureBinding?.projectId ?? null
+      if (skillsLoadTargetProjectId !== expectedProjectId) return
+      if (skillsHarnessProjectId !== expectedProjectId) return
+      nextSkill = selectSkillForSlashName(
+        enabledSkillsForSlash,
+        slashSkill,
+        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin
+      )
     }
 
     if (userMessage) setInput(userMessage)
@@ -3255,8 +3551,14 @@ export function ChatContainer({
     skills: enabledSkillsForSlash,
     skillSelected: selectedSkill !== null
   })
+  const atFileMentions = useAtFileMentions({
+    input,
+    cursorOffset: inputRef.current?.selectionStart ?? input.length,
+    workspaceFiles,
+    disabled: slash.mode.kind === "slash" || !workspacePath
+  })
   const slashPopoverKind = slash.mode.kind
-  const hasPendingGoalTransportPayload = attachments.length > 0 || selectedSkill !== null
+  const hasPendingGoalTransportPayload = hasPendingFilePayload || selectedSkill !== null
   const hasActiveGoalRunning = goalUi.goal?.status === "active"
   const goalControlAllowedWhileLoading =
     streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning
@@ -3296,8 +3598,8 @@ export function ChatContainer({
       }
       return "任务运行中，可使用取消按钮停止当前任务"
     }
-    if (attachments.length > 0) return "输入消息或直接发送文件..."
-    if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；Shift + Enter 换行"
+    if (hasPendingFilePayload) return "输入消息或直接发送文件..."
+    if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；@ 引用文件；Shift + Enter 换行"
     if (goal.status === "active") {
       return "输入新消息会暂停当前 Goal；查看详情用 /goal status"
     }
@@ -3306,9 +3608,9 @@ export function ChatContainer({
     }
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
-    attachments.length,
     contextReminderPending,
     goalUi.goal,
+    hasPendingFilePayload,
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
@@ -3324,6 +3626,24 @@ export function ChatContainer({
     }
   }, [slashPopoverKind, loadSkills])
 
+  const insertTextAtCursor = useCallback(
+    (text: string, replaceRange?: { start: number; end: number }) => {
+      const textarea = inputRef.current
+      const selectionStart = replaceRange?.start ?? textarea?.selectionStart ?? input.length
+      const selectionEnd = replaceRange?.end ?? textarea?.selectionEnd ?? input.length
+      const nextInput = `${input.slice(0, selectionStart)}${text}${input.slice(selectionEnd)}`
+      const nextCursor = selectionStart + text.length
+
+      setInput(nextInput)
+      requestAnimationFrame(() => {
+        const target = inputRef.current
+        if (!target) return
+        target.setSelectionRange(nextCursor, nextCursor)
+      })
+    },
+    [input, setInput]
+  )
+
   // Depend on the stable callback refs, not the whole `slash` object —
   // the hook returns a fresh literal every render, which would re-create
   // applySkillSelection each keystroke and cascade into popover rerenders.
@@ -3333,7 +3653,6 @@ export function ChatContainer({
       setSelectedSkill(s)
       setInput("")
       slashResetSelection()
-      requestAnimationFrame(() => inputRef.current?.focus())
     },
     [setInput, slashResetSelection, setSelectedSkill]
   )
@@ -3346,12 +3665,79 @@ export function ChatContainer({
       requestAnimationFrame(() => {
         const textarea = inputRef.current
         if (!textarea) return
-        textarea.focus()
         const cursor = nextInput.length
         textarea.setSelectionRange(cursor, cursor)
       })
     },
     [setInput, slashResetSelection]
+  )
+
+  const applyAtFileMention = useCallback(
+    (file: AtFileSuggestion) => {
+      if (atFileMentions.mode.kind !== "at-file" || !workspacePath) return
+
+      try {
+        const selection = resolveAtFileSelection({
+          file,
+          workspacePath,
+          attachments: attachmentsRef.current,
+          mentionedFiles: mentionedFilesRef.current,
+          maxAttachments: MAX_ATTACHMENTS
+        })
+        if (selection.kind === "duplicate") {
+          setError(`文件"${selection.filename}"已添加，跳过重复`)
+          return
+        }
+        if (selection.kind === "limit") {
+          setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
+          return
+        }
+        if (selection.kind === "unsupported") {
+          // 这里直接拦住不支持类型，避免它进入 chip 之后又在发送时悄悄失效。
+          setError(`@文件暂不支持 "${selection.filename}" 这种类型`)
+          return
+        }
+
+        clearError()
+          void (async () => {
+            let contentChars = 0
+            try {
+              const readResult = await window.api.workspace.readFile(
+                threadId,
+                selection.mentionedFile.workspaceFilePath
+              )
+              if (readResult.success && typeof readResult.content === "string") {
+                contentChars = readResult.content.length
+              }
+            } catch {
+              contentChars = 0
+            }
+
+            setMentionedFiles((prev) => [
+              ...prev,
+              {
+                ...selection.mentionedFile,
+                contentChars
+              }
+            ])
+          })()
+
+        const { nextInput, nextCursor } = removeAtFileTokenFromInput(input, {
+          startPos: atFileMentions.mode.startPos,
+          endPos: atFileMentions.mode.endPos
+        })
+
+        setInput(nextInput)
+        requestAnimationFrame(() => {
+          const textarea = inputRef.current
+          if (!textarea) return
+          textarea.setSelectionRange(nextCursor, nextCursor)
+        })
+      } catch {
+        setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
+      }
+    },
+    [atFileMentions.mode, clearError, input, setError, setInput, threadId, workspacePath]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
@@ -3436,6 +3822,7 @@ export function ChatContainer({
       }
       setInput("")
       setAttachments([])
+      setMentionedFiles([])
       setSelectedSkill(null)
       insertLog("send: /goal resume")
       await appendVisibleUserMessageWithTime("/goal resume", { persistTiming: false })
@@ -3563,9 +3950,9 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent, defaultText=''): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = input.trim()
+    const trimmedInput = defaultText ||  input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -3577,7 +3964,7 @@ export function ChatContainer({
     if (readOnly) return
     if (contextReminderPending) return
     if (
-      (!trimmedInput && attachments.length === 0 && !selectedSkill) ||
+      (!trimmedInput && !hasPendingFilePayload && !selectedSkill) ||
       historyLoading ||
       (isLoading && !allowSubmitWhileLoading) ||
       !stream
@@ -3715,8 +4102,38 @@ export function ChatContainer({
       // Snapshot the skill selection before we clear it — synchronous path, no
       // async gap, so no token/stillOurs needed.
       const skill = selectedSkill
-      const rawMessage = trimmedInput
-      const currentAttachments = attachments.length > 0 ? [...attachments] : undefined
+      let rawMessage = trimmedInput
+      // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
+      // 这里仅消费结果，避免发送流程继续堆积细节分支。
+      const {
+        cleanedMessage,
+        attachments: resolvedAttachments,
+        mentionCountLimitHit,
+        mentionAttachmentLimitHit,
+        warningMessage: atFileWarningMessage
+      } = await resolveAtFileAttachments({
+        rawMessage,
+        attachments,
+        mentionedFiles,
+        workspacePath,
+        workspaceFiles,
+        maxAttachments: MAX_ATTACHMENTS,
+        maxTotalChars: MAX_TOTAL_CHARS,
+        readWorkspaceFile: (filePath) => window.api.workspace.readFile(threadId, filePath)
+      })
+      rawMessage = cleanedMessage
+
+      // 优先提示数量上限；如果数量没超，再提示内容总量上限。
+      if (mentionCountLimitHit) {
+        setError(`@文件最多只会带入前 ${MAX_ATTACHMENTS} 个附件`)
+      } else if (mentionAttachmentLimitHit) {
+        setError(`@文件内容总量已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
+      } else if (atFileWarningMessage) {
+        // 非致命失败只做提示，不中断后面的普通发送流程。
+        setError(atFileWarningMessage)
+      }
+
+      const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
       // If user only uploaded files without text, add a default prompt.
       // skill-only sends (text empty, no attachments) still fall into this branch
       // because the default prompt requires attachments — for skill-only we let
@@ -3724,9 +4141,10 @@ export function ChatContainer({
       // When a skill is active we also skip the default prompt: the skill's own
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
-      const userText = rawMessage || (currentAttachments && !skill ? "请分析以下文件内容。" : "")
+      const userText = rawMessage || (attachmentPayload && !skill ? "请分析以下文件内容。" : "")
       setInput("")
       setAttachments([])
+      setMentionedFiles([])
       if (skill) setSelectedSkill(null)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
@@ -3741,8 +4159,8 @@ export function ChatContainer({
 
       // Build the full message with attachments as XML tags (sent to model)
       let fullMessage = userText
-      if (currentAttachments && currentAttachments.length > 0) {
-        const attachmentTexts = currentAttachments.map((att) => {
+      if (attachmentPayload && attachmentPayload.length > 0) {
+        const attachmentTexts = attachmentPayload.map((att) => {
           const truncAttr = att.truncated ? ' truncated="true"' : ""
           const pathAttr = att.filePath ? ` path="${escXml(att.filePath)}"` : ""
           const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
@@ -3778,8 +4196,8 @@ export function ChatContainer({
       // That replay-vs-live divergence is a pre-existing limitation of the
       // attachment pipeline and is not introduced by the slash-command code.
       let displayContent: string = userText
-      if (currentAttachments && currentAttachments.length > 0) {
-        const fileNames = currentAttachments.map((a) => `📎 ${a.filename}`).join("\n")
+      if (attachmentPayload && attachmentPayload.length > 0) {
+        const fileNames = attachmentPayload.map((a) => `📎 ${a.filename}`).join("\n")
         displayContent = `${fileNames}\n\n${userText}`
       }
       displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
@@ -3799,17 +4217,26 @@ export function ChatContainer({
         : coordinatorPrefixed
           ? "coordinator"
           : agentMode
+      if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+        submitAgentMode = "normal"
+      }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
         submitAgentMode = await loadResolvedAgentMode().catch((error) => {
           console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
           return agentMode
         })
+        if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+          submitAgentMode = "normal"
+        }
         agentModeHydratedRef.current = true
         if (submitAgentMode !== agentMode) {
           setAgentMode(submitAgentMode)
         }
       }
-      if (disableCoordinatorModeOption && agentMode !== "normal") {
+      if (
+        (disableCoordinatorModeOption && agentMode === "coordinator") ||
+        (disableWorkflowModeOption && agentMode === "workflow")
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
       } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
@@ -3939,9 +4366,41 @@ export function ChatContainer({
       }
     }
 
+    if (atFileMentions.mode.kind === "at-file") {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        atFileMentions.moveSelection(1)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        atFileMentions.moveSelection(-1)
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        atFileMentions.dismiss()
+        return
+      }
+      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+        const selected = atFileMentions.mode.suggestions[atFileMentions.selectedIdx]
+        if (selected) {
+          e.preventDefault()
+          applyAtFileMention(selected)
+          return
+        }
+      }
+    }
+
     // Backspace at start of empty input removes the skill chip.
     // Skip while IME is composing — there Backspace edits the pinyin buffer,
     // not the textarea, and the user doesn't intend to drop the chip.
+    if (e.key === "Backspace" && !isComposing && input.length === 0 && mentionedFiles.length > 0) {
+      e.preventDefault()
+      setMentionedFiles((prev) => prev.slice(0, -1))
+      return
+    }
+
     if (e.key === "Backspace" && !isComposing && selectedSkill && input.length === 0) {
       e.preventDefault()
       setSelectedSkill(null)
@@ -3956,21 +4415,8 @@ export function ChatContainer({
 
   const handleInsertNewline = useCallback((): void => {
     if (effectiveInputDisabled) return
-
-    const textarea = inputRef.current
-    const selectionStart = textarea?.selectionStart ?? input.length
-    const selectionEnd = textarea?.selectionEnd ?? input.length
-    const nextInput = `${input.slice(0, selectionStart)}\n${input.slice(selectionEnd)}`
-    const nextCursor = selectionStart + 1
-
-    setInput(nextInput)
-    requestAnimationFrame(() => {
-      const target = inputRef.current
-      if (!target) return
-      target.focus()
-      target.setSelectionRange(nextCursor, nextCursor)
-    })
-  }, [effectiveInputDisabled, input, setInput])
+    insertTextAtCursor("\n")
+  }, [effectiveInputDisabled, insertTextAtCursor])
 
   // Auto-resize textarea based on content
   const adjustTextareaHeight = useCallback((): void => {
@@ -3997,19 +4443,26 @@ export function ChatContainer({
     }
   }, [adjustTextareaHeight, input])
 
-  const handleCancel = async (): Promise<void> => {
+  const handleCancel = async (e): Promise<void> => {
+    e.preventDefault()
+    e.stopPropagation()
+
     if (scheduledTaskLoading && scheduledTaskId) {
       try {
         await window.api.scheduledTasks.cancel(scheduledTaskId)
       } catch (err) {
         console.error("[ChatContainer] Failed to cancel scheduled task:", err)
       }
+      // 取消是发信号等收敛;若主进程实际无任务在跑(渲染态因丢 done 冻结),
+      // 上面的调用是空操作且不会再有事件回来解锁——立即用权威态校正自愈。
+      threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading && threadId === "heartbeat") {
       try {
         await window.api.heartbeat.cancel()
       } catch (err) {
         console.error("[ChatContainer] Failed to cancel heartbeat:", err)
       }
+      threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
       // ChatX bot thread: scheduledTaskLoading is true but no scheduledTaskId
       try {
@@ -4638,7 +5091,7 @@ export function ChatContainer({
 
     return (
       <div className="pt-6 pb-8">
-        {shouldShowHarnessDialogTips && harnessDialogTips ? (
+        {(shouldShowHarnessDialogTips || shouldShowNextActionDialogTips) && harnessDialogTips ? (
           <DialogTipsMarkdown content={harnessDialogTips} />
         ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
           <RotatingHeadline />
@@ -4891,6 +5344,7 @@ export function ChatContainer({
     programmingSkillCards,
     programmingSkills.length,
     shouldShowHarnessDialogTips,
+    shouldShowNextActionDialogTips,
     shouldShowWelcomeHeadline,
     shouldShowWelcomeSkillTabs,
     showAllCustomSkills,
@@ -4976,6 +5430,148 @@ export function ChatContainer({
     },
     [setInput]
   )
+
+  const handleForkFromMessage = useCallback(
+    async (message: Message): Promise<void> => {
+      if (isLoading || forkingMessageId) return
+      const sourceThreadId = threadId
+      const requestId = messageForkRequestIdRef.current + 1
+      messageForkRequestIdRef.current = requestId
+      setForkingMessageId(message.id)
+      try {
+        const checkpoint = await window.api.threads.resolveForkCheckpointForMessage({
+          threadId: sourceThreadId,
+          messageId: message.id,
+          message: {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            tool_calls: message.tool_calls
+          }
+        })
+        if (
+          messageForkRequestIdRef.current !== requestId ||
+          currentThreadIdRef.current !== sourceThreadId
+        ) {
+          return
+        }
+        if (!checkpoint) {
+          toast.error(getMessageForkCheckpointHint())
+          return
+        }
+        setForkDestinationMode("local")
+        setForkWorkspacePath(null)
+        setMessageForkTarget({
+          sourceThreadId,
+          sourceWorkspacePath: currentForkWorkspacePath,
+          message,
+          checkpoint
+        })
+      } catch (error) {
+        if (
+          messageForkRequestIdRef.current !== requestId ||
+          currentThreadIdRef.current !== sourceThreadId
+        ) {
+          return
+        }
+        toast.error(
+          getMessageForkCheckpointHint(
+            error instanceof Error ? error.message : "读取 fork checkpoint 失败"
+          )
+        )
+      } finally {
+        if (messageForkRequestIdRef.current === requestId) {
+          setForkingMessageId(null)
+        }
+      }
+    },
+    [currentForkWorkspacePath, forkingMessageId, isLoading, threadId]
+  )
+
+  const handleSelectForkWorkspace = useCallback(async (): Promise<string | null> => {
+    if (selectingForkWorkspace) return forkWorkspacePath
+    setSelectingForkWorkspace(true)
+    try {
+      const path = await window.api.workspace.select()
+      if (path) {
+        setForkDestinationMode("workspace")
+        setForkWorkspacePath(path)
+      }
+      return path
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "选择工作区失败")
+      return null
+    } finally {
+      setSelectingForkWorkspace(false)
+    }
+  }, [forkWorkspacePath, selectingForkWorkspace])
+
+  const resetMessageForkDialog = useCallback((): void => {
+    messageForkRequestIdRef.current += 1
+    setMessageForkTarget(null)
+    setForkDestinationMode("local")
+    setForkWorkspacePath(null)
+    setSelectingForkWorkspace(false)
+  }, [])
+
+  useEffect(() => {
+    messageForkRequestIdRef.current += 1
+    setMessageForkTarget(null)
+    setForkingMessageId(null)
+    setForkDestinationMode("local")
+    setForkWorkspacePath(null)
+    setSelectingForkWorkspace(false)
+  }, [threadId])
+
+  const handleConfirmMessageFork = useCallback(async (): Promise<void> => {
+    if (!messageForkTarget || forkingMessageId) return
+    if (messageForkTarget.sourceThreadId !== currentThreadIdRef.current) {
+      toast.error("当前会话已切换，请回到目标会话后重新点击 fork。")
+      resetMessageForkDialog()
+      return
+    }
+
+    let selectedWorkspacePath = forkWorkspacePath
+    if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
+      selectedWorkspacePath = await handleSelectForkWorkspace()
+      if (!selectedWorkspacePath) return
+    }
+
+    const overrides: ThreadForkOverrides | undefined =
+      forkDestinationMode === "workspace"
+        ? { workspacePath: selectedWorkspacePath }
+        : undefined
+
+    const resolvedMessageId =
+      messageForkTarget.checkpoint.messageForkMode === "checkpoint"
+        ? undefined
+        : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
+    setForkingMessageId(messageForkTarget.message.id)
+    try {
+      await forkThread({
+        sourceThreadId: messageForkTarget.sourceThreadId,
+        checkpointId: messageForkTarget.checkpoint.checkpointId,
+        ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
+        overrides
+      })
+      toast.success("已从这条消息创建新会话")
+      resetMessageForkDialog()
+    } catch (error) {
+      toast.error(
+        getMessageForkCheckpointHint(error instanceof Error ? error.message : "Fork 会话失败")
+      )
+    } finally {
+      setForkingMessageId(null)
+    }
+  }, [
+    forkDestinationMode,
+    forkThread,
+    forkWorkspacePath,
+    forkingMessageId,
+    handleSelectForkWorkspace,
+    messageForkTarget,
+    resetMessageForkDialog
+  ])
 
   const handleEditGoal = useCallback((): void => {
     const objective = goalUi.goal?.objective?.trim()
@@ -5116,6 +5712,19 @@ export function ChatContainer({
     </div>
   )
 
+  const isMessageForkBusy =
+    Boolean(messageForkTarget && forkingMessageId === messageForkTarget.message.id) ||
+    selectingForkWorkspace
+  const messageForkPreview = messageForkTarget
+    ? getForkMessagePreview(messageForkTarget.message)
+    : ""
+  const messageForkUsesCheckpointBoundary =
+    messageForkTarget?.checkpoint.messageForkMode === "checkpoint"
+  const messageForkSourceWorkspacePath =
+    messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
+  const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
+  const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
       {/* In-session keyword search (Ctrl/Cmd+F) */}
@@ -5132,6 +5741,122 @@ export function ChatContainer({
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
+
+      <Dialog
+        open={!!messageForkTarget}
+        onOpenChange={(open) => {
+          if (!open && !isMessageForkBusy) resetMessageForkDialog()
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-base">
+              {messageForkUsesCheckpointBoundary ? "从 checkpoint fork" : "Fork 这条消息"}
+            </DialogTitle>
+            <DialogDescription>
+              {messageForkUsesCheckpointBoundary
+                ? "创建一个新会话，历史保留到最近的稳定 checkpoint。"
+                : "创建一个新会话，历史只保留到这条消息所在节点。"}
+            </DialogDescription>
+          </DialogHeader>
+          {messageForkTarget ? (
+            <div className="space-y-4">
+              <div className="rounded-sm border border-border bg-muted/25 px-3 py-2">
+                <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span>
+                    checkpoint {formatForkCheckpointTime(messageForkTarget.checkpoint.createdAt)}
+                  </span>
+                  <span>{messageForkTarget.checkpoint.messageCount} 条消息</span>
+                </div>
+                <div className="line-clamp-3 text-sm text-foreground">
+                  {messageForkPreview}
+                </div>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  disabled={isMessageForkBusy}
+                  onClick={() => setForkDestinationMode("local")}
+                  className={cn(
+                    "rounded-sm border px-3 py-2 text-left transition-colors",
+                    forkDestinationMode === "local"
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:bg-accent"
+                  )}
+                >
+                  <div className="text-sm font-medium">派生到本地</div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {currentForkWorkspaceLabel}
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  disabled={isMessageForkBusy}
+                  onClick={() => setForkDestinationMode("workspace")}
+                  className={cn(
+                    "rounded-sm border px-3 py-2 text-left transition-colors",
+                    forkDestinationMode === "workspace"
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:bg-accent"
+                  )}
+                >
+                  <div className="text-sm font-medium">派生到其他工作区</div>
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
+                    {forkWorkspacePath ? selectedForkWorkspaceLabel : "选择一个本地工作区路径"}
+                  </div>
+                </button>
+              </div>
+
+              {forkDestinationMode === "workspace" ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isMessageForkBusy}
+                  onClick={() => void handleSelectForkWorkspace()}
+                  className="w-full justify-start"
+                >
+                  {selectingForkWorkspace ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <FolderOpen className="size-4" />
+                  )}
+                  {forkWorkspacePath ? forkWorkspacePath : "选择工作区文件夹"}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isMessageForkBusy}
+              onClick={resetMessageForkDialog}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={isMessageForkBusy || !messageForkTarget}
+              onClick={() => void handleConfirmMessageFork()}
+            >
+              {isMessageForkBusy ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <GitFork className="size-4" />
+              )}
+              {isMessageForkBusy
+                ? selectingForkWorkspace
+                  ? "选择中"
+                  : "正在 fork"
+                : forkDestinationMode === "workspace" && !forkWorkspacePath
+                  ? "选择工作区并 Fork"
+                  : "Fork"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {skillIntentBanner}
       {nuxDialog}
@@ -5191,6 +5916,8 @@ export function ChatContainer({
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
                     onSetGoalFromMessage={handleSetGoalFromMessage}
+                    onForkFromMessage={handleForkFromMessage}
+                    forkingMessageId={forkingMessageId}
                     onOpenHookLogBucket={handleOpenHookLogBucket}
                     threadId={threadId}
                     assistantDurationMsById={assistantDurationMsById}
@@ -5257,9 +5984,11 @@ export function ChatContainer({
                       <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
                       <div className="flex-1 min-w-0">
                         <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {hookInterruption.action === "halt"
-                            ? "Hook 已停止本轮"
-                            : "Hook 已阻断本轮"}
+                          {hookInterruption.event.startsWith("Failure fuse")
+                            ? "工具失败熔断已停止本轮"
+                            : hookInterruption.action === "halt"
+                              ? "Hook 已停止本轮"
+                              : "Hook 已阻断本轮"}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
                           <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
@@ -5276,7 +6005,9 @@ export function ChatContainer({
                           </div>
                         )}
                         <div className="text-xs text-muted-foreground mt-2">
-                          这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。
+                          {hookInterruption.event.startsWith("Failure fuse")
+                            ? "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
+                            : "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"}
                         </div>
                       </div>
                       <button
@@ -5643,6 +6374,12 @@ export function ChatContainer({
                   onSelectSkill={applySkillSelection}
                   skillsLoading={skillsLoading}
                 />
+                <AtFileMentionPopover
+                  mode={atFileMentions.mode}
+                  selectedIdx={atFileMentions.selectedIdx}
+                  onHoverIdx={atFileMentions.setSelectedIdx}
+                  onSelectFile={applyAtFileMention}
+                />
                 <div className="flex flex-col gap-2">
                   <div className="flex items-end gap-2">
                     <div
@@ -5660,7 +6397,7 @@ export function ChatContainer({
                       onDragOver={handleDragOver}
                       onDragLeave={handleDragLeave}
                     >
-                      {/* Selected-skill chip sits above attachments and the textarea */}
+                      {/* Selected chips sit above the textarea inside the composer shell. */}
                       {selectedSkill && (
                         <div className="flex items-center gap-1.5 px-3 pt-2.5">
                           <SkillChip
@@ -5690,17 +6427,26 @@ export function ChatContainer({
                           <span className="text-sm text-primary">拖放文件到这里</span>
                         </div>
                       )}
-                      {/* Attachment chips inside input box */}
-                      {attachments.length > 0 && (
+                      {/* File chips inside input box */}
+                      {(mentionedFiles.length > 0 || attachments.length > 0) && (
                         <div className="flex flex-col gap-1 px-3 pt-2.5">
-                          <div className="flex flex-wrap gap-1.5">
+                          <ul className="flex flex-wrap gap-1.5">
+                            {mentionedFiles.map((file, idx) => (
+                              <li key={file.absolutePath}>
+                                <MentionFileChip
+                                  label={file.displayPath}
+                                  popoverText={file.absolutePath}
+                                  onRemove={() => removeMentionedFile(idx)}
+                                />
+                              </li>
+                            ))}
                             {attachments.map((att, idx) => (
-                              <div
+                              <li
                                 key={`${att.filename}-${idx}`}
-                                className="flex items-center gap-1.5 px-2 py-1 bg-muted/50 rounded-md text-xs group"
+                                className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1 text-xs group cursor-default"
                               >
-                                <FileText className="size-3 text-muted-foreground shrink-0" />
-                                <span className="truncate max-w-[160px]" title={att.filePath}>
+                                <Paperclip className="size-3 shrink-0 text-muted-foreground" />
+                                <span className="max-w-[160px] truncate" title={att.filePath}>
                                   {att.filename}
                                 </span>
                                 {att.truncated && (
@@ -5711,20 +6457,28 @@ export function ChatContainer({
                                 <button
                                   type="button"
                                   onClick={() => removeAttachment(idx)}
-                                  className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+                                  className="text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                                  aria-label={`移除附件 ${att.filename}`}
                                 >
                                   <X className="size-3" />
                                 </button>
-                              </div>
+                              </li>
                             ))}
                             {attachmentLoading && (
-                              <Loader2 className="size-4 animate-spin text-muted-foreground self-center" />
+                              <li>
+                                <Loader2 className="size-4 animate-spin self-center text-muted-foreground" />
+                              </li>
                             )}
-                          </div>
+                          </ul>
                           <div className="text-[10px] text-muted-foreground/50">
-                            {attachments.length}/{MAX_ATTACHMENTS} 个文件 ·{" "}
-                            {totalAttachmentChars.toLocaleString()}/
-                            {MAX_TOTAL_CHARS.toLocaleString()} 字符
+                            {totalPendingFileCount}/{MAX_ATTACHMENTS} 个文件
+                            {hasPendingFilePayload && (
+                              <>
+                                {" · "}
+                                {totalPendingFileChars.toLocaleString()}/
+                                {MAX_TOTAL_CHARS.toLocaleString()} 字符
+                              </>
+                            )}
                           </div>
                         </div>
                       )}
@@ -5746,7 +6500,7 @@ export function ChatContainer({
                           "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
                           "p-4 text-sm placeholder:text-muted-foreground",
                           "focus:outline-none disabled:opacity-70",
-                          attachments.length > 0 && "pt-1.5"
+                          hasPendingFilePayload && "pt-1.5"
                         )}
                         rows={3}
                         style={{ minHeight: "44px", maxHeight: "200px" }}
@@ -5754,29 +6508,42 @@ export function ChatContainer({
                       {/* Bottom bar: + button left, send button right */}
                       <div className="flex items-center justify-between px-3 pb-2 w-full">
                         <div className="flex items-center gap-1 flex-1 overflow-auto">
-                          <button
-                            type="button"
+                          <IconPopoverButton
+                            icon={<Plus className="size-4" />}
+                            popoverContent={ATTACH_FILE_POPOVER_CONTENT}
+                            popoverClassName="max-w-64 leading-relaxed"
                             disabled={
                               effectiveComposerControlsDisabled ||
                               attachmentLoading ||
-                              attachments.length >= MAX_ATTACHMENTS ||
-                              totalAttachmentChars >= MAX_TOTAL_CHARS
+                              totalPendingFileCount >= MAX_ATTACHMENTS ||
+                              totalPendingFileChars >= MAX_TOTAL_CHARS
                             }
+                            aria-label="添加文件"
+                            className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
                             onClick={handleAttachClick}
-                            title="添加文件 (txt, md, csv, docx, xlsx)"
-                            className="flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            <Plus className="size-4" />
-                          </button>
+                          />
                           <div className="w-px h-4 bg-border mx-1" />
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
-                            mode={disableCoordinatorModeOption ? "normal" : agentMode}
+                            mode={
+                              (disableCoordinatorModeOption && agentMode === "coordinator") ||
+                              (disableWorkflowModeOption && agentMode === "workflow")
+                                ? "normal"
+                                : agentMode
+                            }
                             locked={
-                              disableCoordinatorModeOption || isLoading || !canChangeAgentMode
+                              isLoading || !canChangeAgentMode
                             }
                             lockedReason={agentModeSwitchDisabledReason}
+                            disabledModes={
+                              disableCoordinatorModeOption || disableWorkflowModeOption
+                                ? {
+                                    coordinator: disableCoordinatorModeOption,
+                                    workflow: disableWorkflowModeOption
+                                  }
+                                : undefined
+                            }
                             onChange={handleAgentModeChange}
                           />
                           <div className="w-px h-4 bg-border mx-1" />
@@ -5847,11 +6614,39 @@ export function ChatContainer({
                                   </Tooltip>
                                 </TooltipProvider>
                               )}
+                              <TooltipProvider delayDuration={180}>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (effectiveInputDisabled) return
+                                        // 创建伪造的表单提交事件
+                                        const fakeEvent = {
+                                          preventDefault: () => {}
+                                        } as React.FormEvent
+                                        // 发送继续消息
+                                        handleSubmit(fakeEvent, '继续')
+                                      }}
+                                      disabled={effectiveInputDisabled}
+                                      className="flex items-center justify-center gap-1 px-2.5 h-7 rounded-md border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                      aria-label="继续对话"
+                                    >
+                                      <Send className="size-3.5" />
+                                      <span className="text-xs font-medium">继续</span>
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top" sideOffset={6}>
+                                    点击自动发送“继续”2字
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+
                               <button
                                 type="submit"
                                 disabled={
                                   effectiveInputDisabled ||
-                                  (!input.trim() && attachments.length === 0 && !selectedSkill) ||
+                                  (!input.trim() && !hasPendingFilePayload && !selectedSkill) ||
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }
@@ -5900,6 +6695,7 @@ export function ChatContainer({
                         </button>
                       )}
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                      <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (
                         <ContextUsageIndicator
@@ -5907,6 +6703,30 @@ export function ChatContainer({
                           modelId={currentModel}
                           contextLimit={modelContextLimit}
                         />
+                      )}
+                      {showSystemConstraintsButton && (
+                        <SystemConstraintsPreviewPopover
+                          preview={systemConstraintsPromptPreview}
+                          align="start"
+                          side="top"
+                          sideOffset={8}
+                        >
+                          <button
+                            type="button"
+                            className={cn(
+                              "flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs transition-colors hover:opacity-80",
+                              systemConstraintsLoadFailed
+                                ? "bg-amber-500/20 text-amber-600 dark:text-amber-300"
+                                : "bg-emerald-500/20 text-emerald-600 dark:text-emerald-300"
+                            )}
+                            title={systemConstraintsTitle}
+                            aria-label={systemConstraintsTitle}
+                            onClick={handleOpenSystemConstraints}
+                          >
+                            <ShieldCheck className="size-3.5" />
+                            <span>{systemConstraintsLabel}</span>
+                          </button>
+                        </SystemConstraintsPreviewPopover>
                       )}
                     </div>
                     <div className="flex min-w-0 items-center gap-2">

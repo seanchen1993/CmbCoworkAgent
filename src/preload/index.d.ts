@@ -1,5 +1,6 @@
 import type {
   Thread,
+  Message,
   ModelConfig,
   Provider,
   StreamEvent,
@@ -7,6 +8,10 @@ import type {
   SkillMetadata,
   McpConnectorConfig,
   McpConnectorUpsert,
+  McpImportApplyResult,
+  McpImportConfigApplyRequest,
+  McpImportConfigRequest,
+  McpImportPreviewResult,
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
@@ -33,7 +38,11 @@ import type {
   ConfigurePreferredIdeResult,
   IdeSettings,
   OpenIdeRequest,
-  PreferredIde
+  PreferredIde,
+  ForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams,
+  ThreadForkParams,
+  ThreadForkResponse
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -52,6 +61,10 @@ import type {
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessProjectDetailViewModel,
@@ -59,6 +72,8 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -77,6 +92,10 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type {
+  CloseToTrayPromptAction,
+  CloseToTrayPromptEvent
+} from "../shared/close-to-tray"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -84,6 +103,8 @@ interface ElectronAPI {
   closeLoginWindow: () => void
   openLoginPage: () => void
   closeLoginPage: () => void
+  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptEvent) => void) => () => void
+  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction) => void
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
@@ -506,10 +527,14 @@ interface DashboardProjectModeFeature {
 interface DashboardProjectModeSkillCount {
   skill: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
   skill: string
+  isPlugin?: boolean
+  pluginName?: string
   commitCount: number
 }
 
@@ -563,6 +588,7 @@ interface DashboardProjectModeProject {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
   featureCount: number
@@ -587,6 +613,7 @@ interface DashboardProjectModeProjectCounts {
 
 type DashboardProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -796,6 +823,10 @@ interface CustomAPI {
       }
     ) => Promise<void>
     isCoordinatorModeForced: () => Promise<boolean>
+    canPreviewSystemPrompt: () => Promise<boolean>
+    getSystemPromptPreview: (
+      threadId: string
+    ) => Promise<{ prompt: string | null; updatedAt: number | null }>
   }
   workflows: {
     listRuns: (threadId: string) => Promise<unknown[]>
@@ -827,9 +858,22 @@ interface CustomAPI {
     list: () => Promise<Thread[]>
     get: (threadId: string) => Promise<Thread | null>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
+    fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
+    listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
+    resolveForkCheckpointForMessage: (
+      params: ThreadForkCheckpointForMessageParams
+    ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
     delete: (threadId: string) => Promise<void>
+    getMessages: (threadId: string) => Promise<Message[]>
+    appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
+    replaceMessageId: (
+      threadId: string,
+      fromId: string,
+      toId: string,
+      role?: Message["role"]
+    ) => Promise<{ replaced: boolean }>
     exportSession: (
       threadId: string
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
@@ -924,6 +968,9 @@ interface CustomAPI {
         topP: number
         topK: number
         interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       }>
     >
@@ -939,6 +986,9 @@ interface CustomAPI {
       topP: number
       topK: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null>
     setCustomConfig: (config: {
@@ -953,6 +1003,9 @@ interface CustomAPI {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<void>
     // Backward-compatible alias, prefer upsertCustomConfig in new code.
@@ -968,6 +1021,9 @@ interface CustomAPI {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
@@ -982,6 +1038,9 @@ interface CustomAPI {
       temperature?: number
       topP?: number
       topK?: number
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   ide: {
@@ -1090,7 +1149,10 @@ interface CustomAPI {
       suggestedCommitMessage?: string
       error?: string
     }>
-    getGitPanelMeta: (threadId: string, options?: { worktreePath?: string }) => Promise<{
+    getGitPanelMeta: (
+      threadId: string,
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
       isWorktree: boolean
       isGitRepo?: boolean
@@ -1216,7 +1278,10 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
-    pushWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
+    pushWorktree: (
+      threadId: string,
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
       autoCommitted?: boolean
       error?: string
@@ -1226,7 +1291,10 @@ interface CustomAPI {
         detail: string
       }>
     }>
-    pullWorktree: (threadId: string, options?: { worktreePath?: string }) => Promise<{
+    pullWorktree: (
+      threadId: string,
+      options?: { worktreePath?: string }
+    ) => Promise<{
       success: boolean
       detail?: string
       error?: string
@@ -1369,6 +1437,8 @@ interface CustomAPI {
       url?: string
       advanced?: McpConnectorConfig["advanced"]
     }) => Promise<{ success: boolean; tools?: string[]; error?: string }>
+    previewImport: (params: McpImportConfigRequest) => Promise<McpImportPreviewResult>
+    importConfig: (params: McpImportConfigApplyRequest) => Promise<McpImportApplyResult>
   }
   memory: {
     listProjects: (request?: { workspacePath?: string | null }) => Promise<
@@ -1415,6 +1485,7 @@ interface CustomAPI {
       }
     ) => Promise<void>
     getEnabled: () => Promise<boolean>
+    getProjectModeEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
     getDreamEnabled: () => Promise<boolean>
     setDreamEnabled: (enabled: boolean) => Promise<void>
@@ -1550,6 +1621,7 @@ interface CustomAPI {
       claudeModelId?: string
       syncSkills?: boolean
       syncMemory?: boolean
+      launchSource?: "select_dir" | "restart"
     }) => Promise<string>
     write: (id: string, data: string) => void
     resize: (id: string, cols: number, rows: number) => void
@@ -1649,6 +1721,12 @@ interface CustomAPI {
     runElevatedSetup: (workspacePaths?: string[]) => Promise<{ success: boolean; error?: string }>
     getYoloMode: () => Promise<boolean>
     setYoloMode: (yolo: boolean) => Promise<void>
+    getFailureFuseWarning: () => Promise<boolean>
+    setFailureFuseWarning: (enabled: boolean) => Promise<void>
+    getFailureFuseModelFeedback: () => Promise<boolean>
+    setFailureFuseModelFeedback: (enabled: boolean) => Promise<void>
+    getFailureFuseDebug: () => Promise<boolean>
+    setFailureFuseDebug: (enabled: boolean) => Promise<void>
     getPendingApprovals: (threadId: string) => Promise<unknown[]>
     isNuxNeeded: () => Promise<boolean>
     completeNux: (mode: "elevated" | "unelevated" | "none") => Promise<void>
@@ -2214,6 +2292,14 @@ interface CustomAPI {
   harnessBoard: {
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
+    getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
+    getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
+    saveDeployUnitMappings: (
+      mappings: HarnessDeployUnitMapping[]
+    ) => Promise<HarnessDeployUnitMapping[]>
+    saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
+    syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
+    getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
@@ -2221,8 +2307,15 @@ interface CustomAPI {
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
+    getProjectReviews: (
+      input: HarnessProjectReviewInput
+    ) => Promise<HarnessProjectReviewResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
+    getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
+    getLocalAgentmdDeployUnitMappings: (
+      mappings: HarnessDeployUnitMapping[]
+    ) => Promise<string[]>
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -2318,9 +2411,7 @@ interface CustomAPI {
     onError: (callback: (err: { message: string; silent?: boolean }) => void) => () => void
   }
   git: {
-    currentBranch: (
-      cwd?: string
-    ) => Promise<{
+    currentBranch: (cwd?: string) => Promise<{
       isGitRepo: boolean
       branch: string | null
       isWorktree: boolean

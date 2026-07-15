@@ -9,10 +9,12 @@ import {
   createWorkflowRunStore,
   findUndeliveredTerminalRun,
   getWorkflowRunsDir,
+  isWorkflowRunDirDisposed,
   markWorkflowRunNotified,
   persistAgentToolStream,
   persistRecoveredRun,
-  pruneWorkflowRuns
+  pruneWorkflowRuns,
+  workflowThreadDisposalEpoch
 } from "./run-store"
 import { runWorkflowSubagent, type WorkflowSubagentDeps } from "./subagent"
 import {
@@ -30,8 +32,9 @@ import { emitAppAttention } from "../../app-attention-events"
  * `<task-notification>` is folded back into the conversation so the model can
  * report the outcome (mirrors how coordinator async workers notify).
  *
- * One active run per thread (the workflow tool is exclusive per thread, and a
- * second concurrent run over the same workspace would fight the first).
+ * One active run per thread (the workflow tool is exclusive per thread).
+ * Same-WORKSPACE concurrency across different threads is intentionally
+ * ALLOWED — see launch() and activeRunForWorkspace() for the tradeoff notes.
  */
 
 export const WORKFLOW_EVENTS_CHANNEL_PREFIX = "agent:workflow-events:"
@@ -335,6 +338,16 @@ class WorkflowRunManager {
    * point the disk is still stale (disk full) and there's nothing better to report.
    */
   private readonly flushFailedRuns = new Map<string, PersistedWorkflowRun>()
+  /** Disposal epoch at snapshot capture, in lockstep with flushFailedRuns.
+   * persistRecoveredRun mkdirs, so a snapshot from an incarnation deleted
+   * since must be DROPPED, not written — even after reviveWorkflowThread
+   * cleared the set tombstones for a fixed-id recreation. */
+  private readonly flushFailedEpochs = new Map<string, number>()
+
+  private dropFlushFailedRun(runId: string): void {
+    this.flushFailedRuns.delete(runId)
+    this.flushFailedEpochs.delete(runId)
+  }
 
   isActive(threadId: string): boolean {
     return this.active.has(threadId)
@@ -344,13 +357,22 @@ class WorkflowRunManager {
     return this.active.get(threadId)?.runId
   }
 
+  /** The workspace of the thread's ACTIVE run, if any. threads:delete uses it
+   * as a fallback when the thread's metadata lost its workspacePath — the run
+   * entry knows where its artifacts live, so the sweep can still find them. */
+  activeWorkspaceForThread(threadId: string): string | undefined {
+    return this.active.get(threadId)?.workspacePath
+  }
+
   /**
-   * A run active over the same workspace on ANY thread. Two workflows over one
-   * workspace would race on file writes (the script's host writeFile + every
-   * subagent's edit_file land in the same tree, serialized only WITHIN a run), so
-   * the second launch must be refused. Compared by CANONICAL path (workspaceKey),
-   * NOT raw string: two threads can name one directory via a symlink, a macOS
-   * case-variant, or a trailing slash, all of which a string compare would miss.
+   * A run active over the same workspace on ANY thread. NOT a launch mutex —
+   * concurrent same-workspace workflows on different threads are intentionally
+   * ALLOWED (see launch(): matches Claude Code desktop; same-thread exclusivity
+   * still holds). This lookup serves the callers that must know a workspace is
+   * busy, e.g. auto-commit skips while any run is active on it. Compared by
+   * CANONICAL path (workspaceKey), NOT raw string: two threads can name one
+   * directory via a symlink, a macOS case-variant, or a trailing slash, all of
+   * which a string compare would miss.
    */
   activeRunForWorkspace(workspacePath: string): { threadId: string; runId: string } | undefined {
     const key = workspaceKey(workspacePath)
@@ -379,8 +401,32 @@ class WorkflowRunManager {
   isBusyForThread(threadId: string, workspacePath: string | undefined): boolean {
     if (this.isActive(threadId)) return true
     if (!workspacePath) return false
-    const pendingRun = this.findPendingNotification(workspacePath, threadId)
-    return pendingRun !== null && !this.isRenotifyExhausted(pendingRun.runId)
+    return this.hasDeliverablePendingNotification(workspacePath, threadId)
+  }
+
+  /** Busy-guard variant of findPendingNotification WITHOUT its first-candidate
+   * blind spot: that lookup returns the newest/flush-failed candidate only, so
+   * an exhausted (or in-flight) FIRST candidate makes single-candidate guards
+   * report idle while an older, perfectly deliverable run still waits — and a
+   * workspace switch / mode exit would orphan it off the auto-report path.
+   * Deliverable = not delivered AND renotify not exhausted; an in-flight one
+   * COUNTS as busy (it stays undelivered until its ack lands). */
+  hasDeliverablePendingNotification(workspacePath: string, threadId: string): boolean {
+    // In-flight explicitly counts as busy even for an exhausted run: a
+    // hydrate/kick can re-report an exhausted run, and exiting workflow mode
+    // mid-report would strand that delivery.
+    const deliverable = (runId: string): boolean =>
+      this.inFlightNotifications.has(runId) || !this.isRenotifyExhausted(runId)
+    for (const snapshot of this.flushFailedRuns.values()) {
+      if (
+        snapshot.threadId === threadId &&
+        !snapshot.notificationDelivered &&
+        deliverable(snapshot.runId)
+      ) {
+        return true
+      }
+    }
+    return findUndeliveredTerminalRun(workspacePath, threadId, deliverable) !== null
   }
 
   /** Launches a run in the background. Throws synchronously on invalid state. */
@@ -389,6 +435,15 @@ class WorkflowRunManager {
       throw new Error(
         `A dynamic workflow (${this.active.get(request.threadId)!.runId}) is already running in this thread. Wait for its task-notification or cancel it from the workflow panel.`
       )
+    }
+    // Deletion tombstone: a foreground turn that outlived its thread's deletion
+    // could still reach the workflow tool. Refusing here (rather than silently
+    // skipping artifacts) keeps `.cmbdevclaw/workflows/<threadId>` deleted —
+    // persistScriptFile below would otherwise mkdir it back — and fails the
+    // tool call cleanly instead of starting a run whose every persist and
+    // subagent checkpointer is already tombstoned.
+    if (isWorkflowRunDirDisposed(request.workspacePath, request.threadId)) {
+      throw new Error("This thread has been deleted; a workflow can no longer be launched on it.")
     }
     // No workspace-level mutual exclusion: concurrent workflows over the SAME
     // workspace on different threads are intentionally allowed (matches Claude
@@ -405,7 +460,7 @@ class WorkflowRunManager {
     // old in-memory terminal state is superseded. Without this, get-run/hydrate (which prefer
     // getFlushFailedRun) would keep showing the OLD terminal run instead of the NEW active one — the
     // disk re-persist may still be failing, so it isn't cleared on the success/ack paths.
-    this.flushFailedRuns.delete(request.runId)
+    this.dropFlushFailedRun(request.runId)
 
     const now = new Date().toISOString()
     const initial: PersistedWorkflowRun = {
@@ -579,6 +634,7 @@ class WorkflowRunManager {
             // reported, so a snapshot would just get re-surfaced by
             // findPendingNotification and wrongly reported.
             this.flushFailedRuns.set(request.runId, JSON.parse(JSON.stringify(runStore.state)))
+            this.flushFailedEpochs.set(request.runId, workflowThreadDisposalEpoch(request.threadId))
             // Bound memory: under a persistent disk fault these (each holding a full
             // journal) could pile up. Evict the oldest ALREADY-DELIVERED snapshot —
             // its result was already reported, so only its stale history copy is lost.
@@ -590,7 +646,7 @@ class WorkflowRunManager {
               let evicted = false
               for (const [id, snap] of this.flushFailedRuns) {
                 if (snap.notificationDelivered && !this.inFlightNotifications.has(id)) {
-                  this.flushFailedRuns.delete(id)
+                  this.dropFlushFailedRun(id)
                   evicted = true
                   break
                 }
@@ -667,6 +723,10 @@ class WorkflowRunManager {
     // A run whose final persist failed has a stale on-disk copy (maybe still
     // "running", invisible to the disk scan below), so prefer its in-memory
     // snapshot — that's its true terminal state. Skip one already in-flight.
+    // NOTE: this scans in Map INSERTION order (oldest flush-failure first,
+    // FIFO reporting) — deliberately NOT the disk path's newest-first; with
+    // multiple flush-failed snapshots the earliest completed one reports
+    // first, and nothing is lost either way.
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
@@ -713,7 +773,7 @@ class WorkflowRunManager {
    * (e.g. after a restart) would have to come from disk anyway.
    */
   clearFlushFailedRun(runId: string): void {
-    this.flushFailedRuns.delete(runId)
+    this.dropFlushFailedRun(runId)
   }
 
   /**
@@ -748,7 +808,7 @@ class WorkflowRunManager {
   forgetThread(threadId: string): void {
     for (const [runId, snap] of this.flushFailedRuns) {
       if (snap.threadId === threadId) {
-        this.flushFailedRuns.delete(runId)
+        this.dropFlushFailedRun(runId)
         this.inFlightNotifications.delete(runId)
         this.renotifyAttempts.delete(runId)
       }
@@ -761,20 +821,58 @@ class WorkflowRunManager {
    * hydrate / resume stop reading the stale copy. Marks the snapshot delivered first
    * so it can't be re-reported; keeps it (for a later retry) only if the write-back
    * still fails — otherwise drops it.
+   *
+   * `expectedStartedAt` is the startedAt of the run snapshot the ack's notification
+   * reported — the same fence as markNotified: an old notification's ack must not
+   * settle a NEWER instance's flush-failed snapshot (same runId via resume), or that
+   * instance's completion would be marked delivered without ever being reported. On
+   * mismatch we still retry plain persistence (disk may have recovered) but leave
+   * `notificationDelivered` untouched — the new instance's own ack owns that flag.
+   *
+   * @returns whether the ack path should KICK THE PENDING DRAIN — deliberately NOT
+   * "did the write-back land". The two diverge exactly when the disk is still faulty,
+   * and that is the case that matters: findPendingNotification reads flushFailedRuns
+   * BEFORE the disk, so a snapshot stranded in memory is still perfectly reportable.
+   * Gating the kick on disk success stalls it until the next hydrate/reload. A kick can
+   * never re-report the run we just acked: on a match the snapshot is marked delivered
+   * (memory scan skips it) and its disk copy is still the pre-terminal "running" record
+   * (disk scan skips it too); on a mismatch the snapshot IS a never-reported new
+   * instance, so serving it is the whole point. When no snapshot exists this run never
+   * flush-failed — say nothing and let markNotified's `delivered` govern the kick, which
+   * is what guards the ordinary double-report case.
    */
   async recoverFlushFailedRun(
     workspacePath: string,
     threadId: string,
-    runId: string
+    runId: string,
+    expectedStartedAt?: string
   ): Promise<boolean> {
     const snapshot = this.flushFailedRuns.get(runId)
     if (!snapshot) return false
-    snapshot.notificationDelivered = true
-    if (await persistRecoveredRun(workspacePath, threadId, snapshot)) {
-      this.flushFailedRuns.delete(runId)
+    if (expectedStartedAt !== undefined && snapshot.startedAt !== expectedStartedAt) {
+      // Stale ack: never claim the NEW instance's delivered flag — that belongs to its
+      // own ack. Best-effort write-back for disk consistency, then kick regardless: an
+      // unreported instance exists under this runId, and markNotified already returned
+      // false for it (a flush-failed run's disk copy is still "running", and that check
+      // precedes markNotified's own fence), so this is its ONLY kick signal.
+      await this.retryPersistFlushFailedRun(workspacePath, threadId, runId)
       return true
     }
-    return false
+    snapshot.notificationDelivered = true
+    if (
+      await persistRecoveredRun(
+        workspacePath,
+        threadId,
+        snapshot,
+        this.flushFailedEpochs.get(runId)
+      )
+    ) {
+      this.dropFlushFailedRun(runId)
+    }
+    // Kick even when the write-back failed: this run is settled either way (delivered in
+    // memory, drop deferred to a later retry), and the BACKLOG behind it — other
+    // flush-failed snapshots, other terminal runs — must not wait for a hydrate.
+    return true
   }
 
   /**
@@ -782,24 +880,42 @@ class WorkflowRunManager {
    * the disk may have recovered since the ack-time write-back failed, so this is a
    * real retry entry point instead of leaving it stranded in memory until restart
    * (#3). Does NOT touch notificationDelivered (the ack owns that) — just persists the
-   * current snapshot and drops it on success. Callers fire-and-forget.
+   * current snapshot and drops it on success. Read-path callers fire-and-forget; the
+   * stale-ack path uses the boolean to decide whether the pending drain is worth a kick.
    */
   async retryPersistFlushFailedRun(
     workspacePath: string,
     threadId: string,
     runId: string
-  ): Promise<void> {
+  ): Promise<boolean> {
     const snapshot = this.flushFailedRuns.get(runId)
-    if (!snapshot) return
-    if (await persistRecoveredRun(workspacePath, threadId, snapshot)) {
-      this.flushFailedRuns.delete(runId)
+    if (!snapshot) return false
+    if (
+      await persistRecoveredRun(
+        workspacePath,
+        threadId,
+        snapshot,
+        this.flushFailedEpochs.get(runId)
+      )
+    ) {
+      this.dropFlushFailedRun(runId)
+      return true
     }
+    return false
   }
 
   /** Persists delivered=true. Called ONLY after the notification turn SUCCEEDS, so
-   * a crash mid-turn leaves it false on disk and the run is re-reported. */
-  markNotified(workspacePath: string, threadId: string, runId: string): Promise<boolean> {
-    return markWorkflowRunNotified(workspacePath, threadId, runId)
+   * a crash mid-turn leaves it false on disk and the run is re-reported.
+   * `expectedStartedAt` must be the startedAt of the run snapshot the notification
+   * was built from: a resume reuses the runId, so without it a late ack can mark a
+   * NEWER instance delivered and swallow that instance's own notification. */
+  markNotified(
+    workspacePath: string,
+    threadId: string,
+    runId: string,
+    expectedStartedAt?: string
+  ): Promise<boolean> {
+    return markWorkflowRunNotified(workspacePath, threadId, runId, expectedStartedAt)
   }
 
   /**
@@ -811,7 +927,17 @@ class WorkflowRunManager {
    */
   renotify(threadId: string, runId: string): boolean {
     const attempts = (this.renotifyAttempts.get(runId) ?? 0) + 1
-    if (attempts > MAX_RENOTIFY_ATTEMPTS) return false
+    if (attempts > MAX_RENOTIFY_ATTEMPTS) {
+      // Record the REFUSAL as the exhaustion sentinel (attempts becomes
+      // MAX+1). Exhaustion must not be declared one step earlier — at the
+      // MAXth broadcast the final re-report is merely SCHEDULED, and treating
+      // it as exhausted lets the mode-exit guard unlock before the renderer's
+      // timer fires; the renderer then drops the notification (thread no
+      // longer in workflow mode) and the last allowed report is silently
+      // thrown away.
+      this.renotifyAttempts.set(runId, attempts)
+      return false
+    }
     this.renotifyAttempts.set(runId, attempts)
     broadcast(threadId, { type: "workflow_notification", runId })
     return true
@@ -826,7 +952,10 @@ class WorkflowRunManager {
    * still retries it while the thread remains in workflow mode.
    */
   isRenotifyExhausted(runId: string): boolean {
-    return (this.renotifyAttempts.get(runId) ?? 0) >= MAX_RENOTIFY_ATTEMPTS
+    // STRICTLY greater: attempts === MAX means the final re-report has been
+    // dispatched and is still pending — deliverable, not exhausted. The
+    // sentinel (MAX+1) is written only when a further attempt is refused.
+    return (this.renotifyAttempts.get(runId) ?? 0) > MAX_RENOTIFY_ATTEMPTS
   }
 
   /**

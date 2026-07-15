@@ -68,6 +68,7 @@ async function testFallbackOnlyInvokedOnceAfterPrimaryThrow(): Promise<void> {
     createHookScope(),
     () => [],
     undefined,
+    undefined,
     { workspacePath: process.cwd(), threadId: "thread-1" }
   )
 
@@ -110,6 +111,7 @@ async function testFallbackRequiresSafeToRetry(): Promise<void> {
     service,
     createHookScope(),
     () => [],
+    undefined,
     undefined,
     { workspacePath: process.cwd(), threadId: "thread-2" }
   )
@@ -157,6 +159,7 @@ async function testScopedSnapshotCacheReusesBaseSnapshot(): Promise<void> {
     service,
     createHookScope(),
     () => [],
+    undefined,
     undefined,
     { workspacePath: process.cwd(), threadId: "thread-cache" }
   )

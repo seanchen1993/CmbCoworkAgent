@@ -738,8 +738,61 @@ process.stdin.on('end', () => require('fs').writeFileSync(${JSON.stringify(out)}
   })
 }
 
+async function testHarnessNodeContextInjected(): Promise<void> {
+  await withTempDir("hook-harness-node", async (dir) => {
+    const out = join(dir, "harness-node.json")
+    const command = nodeCommand(`
+let input = ''
+process.stdin.on('data', (chunk) => { input += chunk })
+process.stdin.on('end', () => {
+  require('fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
+    envName: process.env.HARNESS_NODE_NAME || '',
+    envStatus: process.env.HARNESS_NODE_STATUS || '',
+    stdin: JSON.parse(input)
+  }))
+})
+`)
+    const hook = makeHook({
+      event: "PreToolUse",
+      matcher: "*",
+      command
+    })
+    await runHooks([hook], "PreToolUse", {
+      toolName: "execute",
+      harnessNodeName: "Dev-代码实现",
+      harnessNodeStatus: "进行中"
+    })
+    assert(existsSync(out), "hook should have written harness node payload")
+    const payload = JSON.parse(await readFile(out, "utf8")) as {
+      envName?: string
+      envStatus?: string
+      stdin?: Record<string, unknown>
+    }
+    assert(
+      payload.envName === "Dev-代码实现",
+      `HARNESS_NODE_NAME mismatch: ${payload.envName}`
+    )
+    assert(
+      payload.envStatus === "进行中",
+      `HARNESS_NODE_STATUS mismatch: ${payload.envStatus}`
+    )
+    assert(
+      payload.stdin?.harness_node_name === "Dev-代码实现",
+      `stdin harness_node_name mismatch: ${payload.stdin?.harness_node_name}`
+    )
+    assert(
+      payload.stdin?.harness_node_status === "进行中",
+      `stdin harness_node_status mismatch: ${payload.stdin?.harness_node_status}`
+    )
+  })
+}
+
 function normalizePathForAssert(value: string): string {
-  return value.trim().replace(/\\/g, "/").toLowerCase()
+  return value
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/private\/var\//, "/var/")
+    .toLowerCase()
 }
 
 async function testHookSourceRootControlsCommandCwd(): Promise<void> {
@@ -1076,6 +1129,8 @@ async function run(): Promise<void> {
   console.log("PASS B8 SKILL_NAME/SKILL_PATH/SKILL_ROOT env vars injected")
   await testStdinPayloadIncludesSkillFields()
   console.log("PASS B9 stdin payload includes skill_* fields")
+  await testHarnessNodeContextInjected()
+  console.log("PASS B9b harness node env/stdin fields injected")
   await testHookSourceRootControlsCommandCwd()
   console.log("PASS B11 hook source root controls command cwd")
   await testWorkspaceHookCwdSupportsChinesePath()

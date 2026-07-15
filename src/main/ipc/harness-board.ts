@@ -8,14 +8,23 @@ import {
   deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
+  getHarnessKnowledgePreview,
+  getHarnessLocalAgentmdDeployUnitMappings,
+  getHarnessProjectPublicAgentmdDeployUnits,
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
+  listHarnessDeployUnitMappings,
+  getHarnessLeanTokenConfig,
+  saveHarnessDeployUnitMappings,
+  saveHarnessLeanTokenConfig,
   skipHarnessRunNode,
+  syncHarnessProjectConstraints,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import {
   getEnterpriseProjectDetails,
+  getProjectReviews,
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
@@ -27,15 +36,21 @@ import type {
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
-  HarnessDynamicWorkflowConfig
+  HarnessDynamicWorkflowConfig,
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
@@ -52,6 +67,42 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("harnessBoard:listProjects", async (): Promise<HarnessProjectListItem[]> => {
     return listHarnessProjects()
   })
+
+  ipcMain.handle("harnessBoard:getDeployUnitMappings", async (): Promise<HarnessDeployUnitMapping[]> => {
+    return listHarnessDeployUnitMappings()
+  })
+
+  ipcMain.handle("harnessBoard:getLeanTokenConfig", async (): Promise<HarnessLeanTokenConfig> => {
+    return getHarnessLeanTokenConfig()
+  })
+
+  ipcMain.handle(
+    "harnessBoard:saveDeployUnitMappings",
+    async (_event, mappings: HarnessDeployUnitMapping[]): Promise<HarnessDeployUnitMapping[]> => {
+      return saveHarnessDeployUnitMappings(mappings)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:saveLeanTokenConfig",
+    async (_event, input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> => {
+      return saveHarnessLeanTokenConfig(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:syncProjectConstraints",
+    async (_event, adapterId: string): Promise<HarnessProjectConstraintSyncResult> => {
+      return syncHarnessProjectConstraints(adapterId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getKnowledgePreview",
+    async (_event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
+      return getHarnessKnowledgePreview(adapterId)
+    }
+  )
 
   ipcMain.handle(
     "harnessBoard:createProject",
@@ -85,6 +136,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:getProjectReviews",
+    async (_event, input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> => {
+      return getProjectReviews(input)
+    }
+  )
+
+  ipcMain.handle(
     "harnessBoard:createFeature",
     async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
       const result = createHarnessFeature(input)
@@ -98,6 +156,20 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     "harnessBoard:getDynamicWorkflowConfig",
     async (_event, projectId: string): Promise<HarnessDynamicWorkflowConfig | null> => {
       return getHarnessDynamicWorkflowConfig(projectId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getPublicAgentmdDeployUnits",
+    async (_event, projectId: string): Promise<string[]> => {
+      return getHarnessProjectPublicAgentmdDeployUnits(projectId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getLocalAgentmdDeployUnitMappings",
+    async (_event, mappings: HarnessDeployUnitMapping[]): Promise<string[]> => {
+      return getHarnessLocalAgentmdDeployUnitMappings(mappings)
     }
   )
 
