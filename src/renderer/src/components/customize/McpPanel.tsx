@@ -142,16 +142,12 @@ export function McpPanel(): React.JSX.Element {
     }
   }, [])
 
-  const handleMcpAddSuccess = useCallback(async (preferredConnectorName?: string) => {
+  const handleMcpAddSuccess = useCallback(async () => {
     try {
       const updated = await window.api.mcp.list()
       setMcpConnectors(updated)
       setSelectedMcpConnector((prev) => {
-        if (preferredConnectorName) {
-          const preferred = updated.find((c) => c.name === preferredConnectorName)
-          if (preferred) return preferred
-        }
-        if (!prev) return updated[0] ?? null
+        if (!prev) return null
         return updated.find((c) => c.id === prev.id) ?? null
       })
     } catch (e) {
@@ -168,9 +164,7 @@ export function McpPanel(): React.JSX.Element {
         name: connector.name,
         description: marketMcpMap[key]?.description || connector.url || connector.command || "",
         category: marketMcpMap[key]?.category,
-        chineseName: marketMcpMap[key]?.chinese_name,
-        guidance: marketMcpMap[key]?.guidance,
-        extraJson: marketMcpMap[key]?.extra_json
+        chineseName: marketMcpMap[key]?.chinese_name
       })
       setPublishDialogOpen(true)
     },

@@ -6,9 +6,7 @@ import {
   Loader2,
   Sparkles,
   Search,
-  FileCheck,
-  Code2,
-  ChevronRight
+  FileCheck
 } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
@@ -88,9 +86,7 @@ export function SubagentPanel(): React.JSX.Element {
               <div className="text-xs mt-1">Subagents will appear here when spawned</div>
             </div>
           ) : (
-            subagents.map((subagent) => (
-              <SubagentCard key={subagent.id} subagent={subagent} threadId={currentThreadId} />
-            ))
+            subagents.map((subagent) => <SubagentCard key={subagent.id} subagent={subagent} />)
           )}
         </div>
       </ScrollArea>
@@ -110,15 +106,28 @@ export function SubagentPanel(): React.JSX.Element {
   )
 }
 
-export function SubagentCard({
-  subagent,
-  threadId
-}: {
-  subagent: Subagent
-  threadId?: string | null
-}): React.JSX.Element {
-  const { currentThreadId, openSubagentFocusView } = useAppStore()
-  const effectiveThreadId = threadId ?? currentThreadId
+export function SubagentCard({ subagent }: { subagent: Subagent }): React.JSX.Element {
+  const { currentThreadId } = useAppStore()
+  const threadState = useThreadState(currentThreadId)
+  // Phase 2 (A1'): show the subagent's streamed thinking text here, prominently
+  // and separate from the tool-execution log so reasoning is not buried.
+  const subagentCount = threadState?.subagents?.length ?? 0
+  const thinkingEntries = (threadState?.subagentInternalLogs ?? []).filter(
+    (entry) => entry.kind === "assistant"
+  )
+  // Attribution is set explicitly by the transport (subagentToolCallId); the UI no
+  // longer guesses from checkpoint_ns. With a single subagent, show all thinking so
+  // entries whose owner could not be resolved still appear.
+  const thinkingText = (
+    subagentCount <= 1
+      ? thinkingEntries
+      : thinkingEntries.filter((entry) => entry.subagentToolCallId === subagent.toolCallId)
+  )
+    .map((entry) => entry.content)
+    .filter(Boolean)
+    .join("\n\n")
+    .trim()
+
   const getStatusConfig = (): {
     icon: React.ElementType
     badge: "outline" | "info" | "nominal" | "critical"
@@ -133,14 +142,11 @@ export function SubagentCard({
         return { icon: CheckCircle2, badge: "nominal" as const, label: "DONE" }
       case "failed":
         return { icon: XCircle, badge: "critical" as const, label: "FAILED" }
-      case "cancelled":
-        return { icon: XCircle, badge: "outline" as const, label: "STOPPED" }
     }
   }
 
   const config = getStatusConfig()
   const StatusIcon = config.icon
-  const latestToolLabel = subagent.currentTool || "等待工具调用"
 
   const getDuration = (): string | null => {
     if (!subagent.startedAt || !subagent.completedAt) return null
@@ -184,48 +190,6 @@ export function SubagentCard({
       <CardContent className="pt-0 space-y-2">
         <p className="text-sm text-muted-foreground line-clamp-2">{subagent.description}</p>
 
-        <button
-          type="button"
-          disabled={!effectiveThreadId}
-          onClick={() => {
-            if (!effectiveThreadId) return
-            openSubagentFocusView({
-              threadId: effectiveThreadId,
-              subagentId: subagent.id,
-              name: subagent.name,
-              description: subagent.description,
-              status: subagent.status
-            })
-          }}
-          className={cn(
-            "group flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left text-xs transition-all",
-            "border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.06)]",
-            "hover:border-slate-300 hover:from-white hover:to-slate-100 hover:shadow-[0_4px_14px_rgba(15,23,42,0.08)]",
-            "disabled:cursor-not-allowed disabled:opacity-55",
-            "dark:border-slate-700/80 dark:from-slate-900 dark:to-slate-950 dark:text-slate-100 dark:hover:border-slate-600"
-          )}
-        >
-          <span className="flex min-w-0 items-center gap-2.5">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-sky-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-sky-300">
-              <Code2 className="size-3.5" />
-            </span>
-            <span className="min-w-0">
-              <span className="block text-[12px] font-semibold leading-none">打开完整记录</span>
-              <span className="mt-1 block truncate text-[10px] text-slate-500 dark:text-slate-400">
-                查看思考、工具参数和执行结果
-              </span>
-            </span>
-          </span>
-          <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 dark:text-slate-500" />
-        </button>
-
-        <div className="rounded-lg border border-border/55 bg-muted/20 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-          <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground/85">
-            <Code2 className="size-3.5 shrink-0 text-muted-foreground" />
-            <span className="truncate">{latestToolLabel}</span>
-          </span>
-        </div>
-
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           {subagent.startedAt && (
             <span className="flex items-center gap-1">
@@ -237,8 +201,6 @@ export function SubagentCard({
             <span className="flex items-center gap-1">
               {subagent.status === "running" ? (
                 <Loader2 className="size-3 animate-spin" />
-              ) : subagent.status === "failed" || subagent.status === "cancelled" ? (
-                <XCircle className="size-3" />
               ) : (
                 <CheckCircle2 className="size-3" />
               )}
@@ -246,6 +208,18 @@ export function SubagentCard({
             </span>
           )}
         </div>
+
+        {thinkingText && (
+          <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 px-2.5 py-2">
+            <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-sky-700 dark:text-sky-300">
+              <Sparkles className="size-3" />
+              思考过程
+            </div>
+            <div className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-muted-foreground">
+              {thinkingText}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

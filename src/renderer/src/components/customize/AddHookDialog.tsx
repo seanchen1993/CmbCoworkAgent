@@ -127,7 +127,7 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     value: "Setup",
     label: "工作区初始化（Setup）",
     description:
-      '每个 workspace 首次启动触发一次（init），用户在工作区设置里点 "重新初始化" 触发 maintenance。payload 含 trigger 与 workspace_path'
+      "每个 workspace 首次启动触发一次（init），用户在工作区设置里点 \"重新初始化\" 触发 maintenance。payload 含 trigger 与 workspace_path"
   },
   {
     value: "SubagentStart",
@@ -1470,13 +1470,17 @@ export function AddHookDialog(props: {
   //                      hookType === "command").
   //   passthroughStatusMessage — PR-13b custom spinner text.
   //   passthroughAsync — PR-15 config-layer async flag.
-  const [matcherPreserve, setMatcherPreserve] = useState<string | undefined>(editHook?.matcher)
+  const [matcherPreserve, setMatcherPreserve] = useState<string | undefined>(
+    editHook?.matcher
+  )
   const [passthroughIf, setPassthroughIf] = useState<string | undefined>(editHook?.if)
   const [passthroughShell, setPassthroughShell] = useState(editHook?.shell)
   const [passthroughStatusMessage, setPassthroughStatusMessage] = useState<string | undefined>(
     editHook?.statusMessage
   )
-  const [passthroughAsync, setPassthroughAsync] = useState<boolean | undefined>(editHook?.async)
+  const [passthroughAsync, setPassthroughAsync] = useState<boolean | undefined>(
+    editHook?.async
+  )
   // command fields
   const [command, setCommand] = useState(editHook?.command ?? "")
   // PR-14 — http hook fields. The headers / allowedEnvVars editors are simple
@@ -1518,7 +1522,9 @@ export function AddHookDialog(props: {
   const [persistAfterInterrupt, setPersistAfterInterrupt] = useState(
     editHook?.persistAfterInterrupt === true
   )
-  const [injectUserContext, setInjectUserContext] = useState(Boolean(editHook?.injectUserContext))
+  const [injectUserContext, setInjectUserContext] = useState(
+    Boolean(editHook?.injectUserContext)
+  )
   // Original custom `include` from a JSON-authored hook, preserved across edits.
   const [injectUserContextInclude, setInjectUserContextInclude] = useState<
     HookUserContextField[] | null
@@ -1818,7 +1824,8 @@ export function AddHookDialog(props: {
             const base = include.filter((field) => field !== YST_ID_TOKEN_FIELD)
             include = injectUserToken ? [...base, YST_ID_TOKEN_FIELD] : base
           }
-          config.injectUserContext = include.length > 0 ? { enabled: true, include } : true
+          config.injectUserContext =
+            include.length > 0 ? { enabled: true, include } : true
         } else {
           config.injectUserContext =
             hookType === "command" && injectUserToken
@@ -2330,8 +2337,8 @@ export function AddHookDialog(props: {
                     className="h-9 font-mono text-xs"
                   />
                   <p className="text-xs text-muted-foreground">
-                    必填 http(s):// URL。POST 事件 JSON；2xx + JSON 响应等同 command stdout。 本地
-                    webhook 网关（127.0.0.1 / localhost / 私网）均允许。
+                    必填 http(s):// URL。POST 事件 JSON；2xx + JSON 响应等同 command stdout。
+                    本地 webhook 网关（127.0.0.1 / localhost / 私网）均允许。
                   </p>
                 </div>
 
@@ -2498,14 +2505,13 @@ export function AddHookDialog(props: {
                   <p className="text-xs text-muted-foreground">
                     兼容 Claude Code 的
                     <code className="mx-1 font-mono text-foreground/85">once: true</code>
-                    。同一会话里，同一条 Hook
-                    第一次成功执行（exit=0）后不再重复执行；不同事件、来源或 Hook ID
-                    分别计算。脚本失败或超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。
+                    。同一会话里，同一条 Hook 第一次成功执行（exit=0）后不再重复执行；不同事件、来源或
+                    Hook ID 分别计算。脚本失败或超时（exit≠0）不会标记为已执行，下次匹配时仍会再试。
                     会话结束、编辑、禁用再启用或删除该 Hook 都会立即清除"已执行"状态。
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    在 SubagentStop / Notification / SessionStart / SessionEnd 等 fire-and-forget
-                    事件下，并发触发可能仍执行多次（runner 不加同步锁）；如需严格只跑一次，请使用
+                    在 SubagentStop / Notification / SessionStart / SessionEnd 等
+                    fire-and-forget 事件下，并发触发可能仍执行多次（runner 不加同步锁）；如需严格只跑一次，请使用
                     PreToolUse / PostToolUse / Stop 等同步事件。
                   </p>
                 </div>
@@ -2523,13 +2529,11 @@ export function AddHookDialog(props: {
                 />
                 <div className="space-y-1">
                   <label htmlFor="hook-persist-after-interrupt" className="text-sm font-medium">
-                    触发后当前线程持续生效
+                    触发后本会话持续生效
                   </label>
                   <p className="text-xs text-muted-foreground">
-                    仅对插件和技能 Hook 生效。开启后，只要当前线程里触发过该 Hook 所属的插件或技能，
-                    这条 Hook
-                    后续轮次、以及应用重启后继续此线程时也会继续命中；同一技能下未开启的兄弟 Hook
-                    不会被一起保留。
+                    仅对插件和技能 Hook 生效。开启后，只要本会话里触发过该 Hook 所属的插件或技能，
+                    这条 Hook 后续轮次也会继续命中；同一技能下未开启的兄弟 Hook 不会被一起保留。
                   </p>
                 </div>
               </div>

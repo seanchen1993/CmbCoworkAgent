@@ -15,17 +15,6 @@ function formatNumber(n: number): string {
   return String(Math.round(n))
 }
 
-function formatTierName(tier: string): string {
-  if (tier === "premium") return "强力"
-  if (tier === "economy") return "经济"
-  return tier
-}
-
-function getTierColor(tier: string): string {
-  if (tier === "economy") return "#10b981"
-  return "#8b5cf6"
-}
-
 export function ModelPanel({
   data,
   loading
@@ -42,14 +31,10 @@ export function ModelPanel({
     ...m,
     totalTokens: m.inputTokens + m.outputTokens
   }))
-  const smartTierData = data.smartByTier.map((item) => ({
-    ...item,
-    label: formatTierName(item.tier)
-  }))
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 2xl:grid-cols-4 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         {/* Model distribution pie chart */}
         <div className="rounded-xl border border-border bg-card p-4">
           <h3 className="text-xs font-medium text-muted-foreground mb-3">模型使用分布</h3>
@@ -84,7 +69,7 @@ export function ModelPanel({
 
         {/* Premium vs Economy */}
         <div className="rounded-xl border border-border bg-card p-4">
-          <h3 className="text-xs font-medium text-muted-foreground mb-3">强力/经济模型使用占比</h3>
+          <h3 className="text-xs font-medium text-muted-foreground mb-3">Premium / Economy 分流</h3>
           {data.byTier.length > 0 ? (
             <ResponsiveContainer width="100%" height={200}>
               <PieChart>
@@ -99,9 +84,8 @@ export function ModelPanel({
                   labelLine={false}
                   fontSize={10}
                 >
-                  {data.byTier.map((item) => (
-                    <Cell key={item.tier} fill={getTierColor(item.tier)} />
-                  ))}
+                  <Cell fill="#8b5cf6" />
+                  <Cell fill="#10b981" />
                 </Pie>
                 <Tooltip
                   contentStyle={{
@@ -120,47 +104,9 @@ export function ModelPanel({
           )}
         </div>
 
-        {/* Smart routing Premium vs Economy */}
-        <div className="rounded-xl border border-border bg-card p-4">
-          <h3 className="text-xs font-medium text-muted-foreground mb-3">智能路由强力 / 经济分流</h3>
-          {smartTierData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={200}>
-              <PieChart>
-                <Pie
-                  data={smartTierData}
-                  dataKey="count"
-                  nameKey="label"
-                  cx="50%"
-                  cy="50%"
-                  outerRadius={70}
-                  label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
-                  labelLine={false}
-                  fontSize={10}
-                >
-                  {smartTierData.map((item) => (
-                    <Cell key={item.tier} fill={getTierColor(item.tier)} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: "var(--color-card)",
-                    border: "1px solid var(--color-border)",
-                    borderRadius: 8,
-                    fontSize: 12
-                  }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-[200px] text-xs text-muted-foreground">
-              暂无智能路由数据
-            </div>
-          )}
-        </div>
-
         {/* Routing layer hits */}
         <div className="rounded-xl border border-border bg-card p-4">
-          <h3 className="text-xs font-medium text-muted-foreground mb-3">路由最终决策层命中</h3>
+          <h3 className="text-xs font-medium text-muted-foreground mb-3">路由决策层命中</h3>
           {data.byLayer.length > 0 ? (
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={data.byLayer} layout="vertical">

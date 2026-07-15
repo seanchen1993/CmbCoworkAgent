@@ -1,16 +1,15 @@
-import { memo, useId, useState, type JSX } from "react"
-import { AlertTriangle, Check, ChevronDown, Route, Sparkles, Workflow, Zap } from "lucide-react"
+import { useId, useState, type JSX } from "react"
+import { AlertTriangle, Check, ChevronDown, Route, Workflow, Zap } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
-export type ChatAgentMode = "normal" | "coordinator" | "workflow"
+export type ChatAgentMode = "normal" | "coordinator"
 
 interface AgentModeSwitcherProps {
   mode: ChatAgentMode
   locked?: boolean
   lockedReason?: string
-  disabledModes?: Partial<Record<ChatAgentMode, boolean>>
   onChange: (mode: ChatAgentMode) => void
 }
 
@@ -26,8 +25,8 @@ const MODES: Array<{
     value: "normal",
     label: "Solo Agent",
     shortLabel: "Solo",
-    description: "单主控轻量执行，必要时并行委派。",
-    detail: "适合日常问答、明确小改动、快速排查与独立子任务。",
+    description: "单 agent 串行执行，低开销、响应快。",
+    detail: "适合日常问答、明确小改动、快速排查与验证。",
     badge: "轻量"
   },
   {
@@ -37,78 +36,19 @@ const MODES: Array<{
     description: "多代理并行研究、实现、验证与汇总。",
     detail: "适合复杂开发、深度排查、文档产出和高可信交付。",
     badge: "编排"
-  },
-  {
-    value: "workflow",
-    label: "Ultra Workflow",
-    shortLabel: "Workflow",
-    description: "模型编写编排脚本，批量并行子代理执行与交叉验证。",
-    detail: "适合全库审计、批量迁移、大规模调研等可分解的大任务。",
-    badge: "动态工作流"
   }
 ]
 
-const MODE_ICONS: Record<ChatAgentMode, typeof Zap> = {
-  normal: Zap,
-  coordinator: Workflow,
-  workflow: Sparkles
-}
-
-interface ModeTheme {
-  trigger: string
-  triggerIcon: string
-  itemSelected: string
-  itemIcon: string
-  badge: string
-}
-
-const NEUTRAL_THEME: ModeTheme = {
-  trigger:
-    "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground",
-  triggerIcon: "bg-muted text-muted-foreground",
-  itemSelected: "border-border bg-muted/70 text-foreground shadow-sm",
-  itemIcon: "bg-muted text-muted-foreground group-hover:text-foreground",
-  badge: "border-border bg-background text-muted-foreground"
-}
-
-const MODE_THEMES: Record<ChatAgentMode, ModeTheme> = {
-  normal: NEUTRAL_THEME,
-  coordinator: {
-    trigger:
-      "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300",
-    triggerIcon: "bg-emerald-500 text-white",
-    itemSelected:
-      "border-emerald-200 bg-emerald-50/80 text-foreground shadow-sm dark:border-emerald-500/30 dark:bg-emerald-500/10",
-    itemIcon: "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300",
-    badge:
-      "border-emerald-200 bg-emerald-100 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300"
-  },
-  workflow: {
-    trigger:
-      "border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-300",
-    triggerIcon: "bg-violet-500 text-white",
-    itemSelected:
-      "border-violet-200 bg-violet-50/80 text-foreground shadow-sm dark:border-violet-500/30 dark:bg-violet-500/10",
-    itemIcon: "bg-violet-100 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300",
-    badge:
-      "border-violet-200 bg-violet-100 text-violet-700 dark:border-violet-500/30 dark:bg-violet-500/15 dark:text-violet-300"
-  }
-}
-
-export const AgentModeSwitcher = memo(AgentModeSwitcherImpl)
-
-function AgentModeSwitcherImpl({
+export function AgentModeSwitcher({
   mode,
   locked,
   lockedReason,
-  disabledModes,
   onChange
 }: AgentModeSwitcherProps): JSX.Element {
   const [open, setOpen] = useState(false)
   const lockedReasonId = useId()
   const activeMode = MODES.find((item) => item.value === mode) ?? MODES[0]
-  const activeTheme = MODE_THEMES[activeMode.value]
-  const ActiveIcon = MODE_ICONS[activeMode.value]
+  const ActiveIcon = mode === "coordinator" ? Workflow : Zap
 
   const handleModeSelect = (nextMode: ChatAgentMode): void => {
     if (nextMode !== mode) {
@@ -130,13 +70,15 @@ function AgentModeSwitcherImpl({
       aria-describedby={lockedReason ? lockedReasonId : undefined}
       className={cn(
         "h-8 gap-1.5 rounded-full border px-2.5 text-xs shadow-sm transition-all",
-        mode === "normal" ? NEUTRAL_THEME.trigger : activeTheme.trigger
+        mode === "coordinator"
+          ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
+          : "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground"
       )}
     >
       <span
         className={cn(
           "grid size-5 place-items-center rounded-full",
-          mode === "normal" ? NEUTRAL_THEME.triggerIcon : activeTheme.triggerIcon
+          mode === "coordinator" ? "bg-emerald-500 text-white" : "bg-muted text-muted-foreground"
         )}
       >
         <ActiveIcon className="size-3.5" />
@@ -153,7 +95,7 @@ function AgentModeSwitcherImpl({
 
   const popoverContent = (
     <PopoverContent
-      className="w-[420px] overflow-hidden border-border bg-background p-0 shadow-xl"
+      className="w-[360px] overflow-hidden border-border bg-background p-0 shadow-xl"
       align="start"
       sideOffset={8}
     >
@@ -165,7 +107,7 @@ function AgentModeSwitcherImpl({
           <div className="min-w-0">
             <div className="text-sm font-semibold text-foreground">执行模式</div>
             <div className="text-xs leading-5 text-muted-foreground">
-              Solo 快速直达；Team 多代理编排；Workflow 大规模并行。
+              Solo Agent 快速直达；Agent Team 多代理编排。
             </div>
           </div>
         </div>
@@ -181,14 +123,12 @@ function AgentModeSwitcherImpl({
       <div className="space-y-2 p-2">
         {MODES.map((item) => {
           const selected = item.value === mode
-          const itemDisabled = (locked || Boolean(disabledModes?.[item.value])) && !selected
-          const Icon = MODE_ICONS[item.value]
-          const theme = MODE_THEMES[item.value]
+          const Icon = item.value === "coordinator" ? Workflow : Zap
           return (
             <button
               key={item.value}
               type="button"
-              disabled={itemDisabled}
+              disabled={locked && !selected}
               aria-current={selected ? "true" : undefined}
               onClick={() => {
                 if (selected) {
@@ -200,8 +140,10 @@ function AgentModeSwitcherImpl({
               className={cn(
                 "group flex w-full items-start gap-3 rounded-xl border p-3 text-left transition-all",
                 selected
-                  ? theme.itemSelected
-                  : itemDisabled
+                  ? item.value === "coordinator"
+                    ? "border-emerald-200 bg-emerald-50/80 text-foreground shadow-sm dark:border-emerald-500/30 dark:bg-emerald-500/10"
+                    : "border-border bg-muted/70 text-foreground shadow-sm"
+                  : locked
                     ? "cursor-not-allowed border-transparent text-muted-foreground opacity-70"
                     : "border-transparent text-muted-foreground hover:border-border hover:bg-muted/50 hover:text-foreground"
               )}
@@ -209,7 +151,9 @@ function AgentModeSwitcherImpl({
               <span
                 className={cn(
                   "mt-0.5 grid size-8 shrink-0 place-items-center rounded-xl transition-colors",
-                  theme.itemIcon
+                  item.value === "coordinator"
+                    ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300"
+                    : "bg-muted text-muted-foreground group-hover:text-foreground"
                 )}
               >
                 <Icon className="size-4" />
@@ -220,7 +164,9 @@ function AgentModeSwitcherImpl({
                   <span
                     className={cn(
                       "rounded-full border px-1.5 py-0.5 text-[10px] leading-none",
-                      theme.badge
+                      item.value === "coordinator"
+                        ? "border-emerald-200 bg-emerald-100 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300"
+                        : "border-border bg-background text-muted-foreground"
                     )}
                   >
                     {item.badge}

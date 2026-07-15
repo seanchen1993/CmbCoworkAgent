@@ -72,10 +72,7 @@ export function SubagentKanbanCard({
   parentThread,
   onClick
 }: SubagentCardProps): React.JSX.Element {
-  const isDone =
-    subagent.status === "completed" ||
-    subagent.status === "failed" ||
-    subagent.status === "cancelled"
+  const isDone = subagent.status === "completed" || subagent.status === "failed"
 
   return (
     <Card
@@ -98,20 +95,10 @@ export function SubagentKanbanCard({
               <span className="text-sm font-medium truncate">{subagent.name}</span>
               {isDone && (
                 <Badge
-                  variant={
-                    subagent.status === "failed"
-                      ? "critical"
-                      : subagent.status === "cancelled"
-                        ? "outline"
-                        : "nominal"
-                  }
+                  variant={subagent.status === "failed" ? "critical" : "nominal"}
                   className="shrink-0 text-[9px]"
                 >
-                  {subagent.status === "failed"
-                    ? "失败"
-                    : subagent.status === "cancelled"
-                      ? "已停止"
-                      : "完成"}
+                  {subagent.status === "failed" ? "失败" : "完成"}
                 </Badge>
               )}
             </div>

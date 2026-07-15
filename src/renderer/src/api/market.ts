@@ -56,7 +56,6 @@ export interface MarketItem {
   user_id?: string // 110
   guidance?: string // Usage guidance for the skill/item
   chinese_name?: string // Chinese name for the skill/item
-  extra_json?: string
   // Only keep essential UI fields for compatibility
   id?: string
   type?: MarketItemType
@@ -642,8 +641,7 @@ export const marketApi = {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string,
-    extraJson?: string
+    userId?: string
   ): Promise<{ success: boolean; data?: MarketUploadResponse; error?: string }> {
     console.log(`Uploading ${resourceType} file: ${file.name} category:${category} version:${version}`)
 
@@ -662,9 +660,6 @@ export const marketApi = {
     }
     if (userId) {
       formData.append("user_id", userId)
-    }
-    if (extraJson) {
-      formData.append("extra_json", extraJson)
     }
     const ip = localStorage.getItem("localIp")
     formData.append("ip", ip || "")
@@ -707,9 +702,7 @@ export const marketApi = {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string,
-    extraJson?: string,
-    ipOverride?: string | null
+    userId?: string
   ): Promise<{ success: boolean; data?: MarketUpdateResponse; error?: string }> {
     console.log(`Updating ${resourceType} item: ${name} category:${category} version:${version}`)
 
@@ -731,10 +724,7 @@ export const marketApi = {
     if (userId) {
       formData.append("user_id", userId)
     }
-    if (extraJson) {
-      formData.append("extra_json", extraJson)
-    }
-    const ip = ipOverride ?? localStorage.getItem("localIp")
+    const ip = localStorage.getItem("localIp")
     formData.append("ip", ip || "")
 
     const response = await fetch(ENDPOINTS.update(resourceType, name), {

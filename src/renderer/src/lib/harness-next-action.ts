@@ -17,26 +17,10 @@ export function normalizeHarnessNextAction(value: unknown): HarnessWorkflowNextA
   const slashSkill = typeof record.slashSkill === "string" ? record.slashSkill.trim() : ""
   const userMessage = typeof record.userMessage === "string" ? record.userMessage.trim() : ""
   const dialogTips = typeof record.dialogTips === "string" ? record.dialogTips.trim() : ""
-  const preferredPlugin =
-    record.preferredPlugin && typeof record.preferredPlugin === "object" && !Array.isArray(record.preferredPlugin)
-      ? record.preferredPlugin as Record<string, unknown>
-      : null
-  const preferredPluginId =
-    typeof preferredPlugin?.id === "string" ? preferredPlugin.id.trim() : ""
-  const preferredPluginName =
-    typeof preferredPlugin?.name === "string" ? preferredPlugin.name.trim() : ""
   const nextAction = {
     ...(slashSkill ? { slashSkill } : {}),
     ...(userMessage ? { userMessage } : {}),
-    ...(dialogTips ? { dialogTips } : {}),
-    ...(preferredPluginId || preferredPluginName
-      ? {
-          preferredPlugin: {
-            ...(preferredPluginId ? { id: preferredPluginId } : {}),
-            ...(preferredPluginName ? { name: preferredPluginName } : {})
-          }
-        }
-      : {})
+    ...(dialogTips ? { dialogTips } : {})
   }
   return Object.keys(nextAction).length > 0 ? nextAction : undefined
 }

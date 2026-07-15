@@ -4,10 +4,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { basename, join } from "path"
 import { getMemoryStore } from "./store"
 import { notifyMemoryChanged } from "./events"
-import { trackEvent } from "../services/event-reporter"
 import {
   scanMemoryFiles,
-  formatManifest,
   regenerateManifest,
   buildFrontmatter,
   isValidFactFilename,
@@ -144,8 +142,6 @@ export interface SummarizeOptions {
   model: ChatOpenAI
   conversation: string
   memoryDir: string
-  scopeHint?: string
-  allowedTypes?: MemoryType[]
 }
 
 interface CreateOp {
@@ -259,20 +255,7 @@ function clampContent(s: string): string {
   return s.slice(0, MAX_CONTENT_CHARS) + "\n…(truncated)"
 }
 
-function isAllowedType(type: MemoryType, allowedTypes?: Set<MemoryType>): boolean {
-  return !allowedTypes || allowedTypes.has(type)
-}
-
-function applyCreate(
-  memoryDir: string,
-  op: CreateOp,
-  existing: Set<string>,
-  allowedTypes?: Set<MemoryType>
-): string | null {
-  if (!isAllowedType(op.type, allowedTypes)) {
-    console.warn("[Memory] Create op rejected by scope type policy:", op.type, op.name)
-    return null
-  }
+function applyCreate(memoryDir: string, op: CreateOp, existing: Set<string>): string | null {
   // Validate or regenerate filename.
   let filename = op.filename
   if (!filename || !isValidFactFilename(filename, op.type)) {
@@ -295,11 +278,7 @@ function applyCreate(
   return fullPath
 }
 
-function applyUpdate(
-  memoryDir: string,
-  op: UpdateOp,
-  allowedTypes?: Set<MemoryType>
-): string | null {
+function applyUpdate(memoryDir: string, op: UpdateOp): string | null {
   // Path-traversal guard: the LLM-supplied filename must be a bare filename
   // (no slashes, no parent traversal) and must match the per-fact file shape.
   const safe = basename(op.filename)
@@ -326,10 +305,6 @@ function applyUpdate(
   const type = parseMemoryType(frontmatter.type)
   if (!type) {
     console.warn("[Memory] Update target has invalid/missing type, skipping:", safe)
-    return null
-  }
-  if (!isAllowedType(type, allowedTypes)) {
-    console.warn("[Memory] Update op rejected by scope type policy:", type, safe)
     return null
   }
   const fm = buildFrontmatter({
@@ -360,32 +335,24 @@ function readCurrentMemoryMd(memoryDir: string): string {
   return content.slice(0, MAX_CURRENT_MEMORY_MD_PROMPT_CHARS) + "\n...(truncated)"
 }
 
-function buildScopedMemoryMd(memoryDir: string, allowedTypes: Set<MemoryType>): string {
-  const headers = scanMemoryFiles(memoryDir).filter((header) =>
-    header.type ? isAllowedType(header.type, allowedTypes) : false
-  )
-  return formatManifest(headers)
-}
-
 /**
- * Per-directory serialization queues: prevents concurrent writes to the same
- * memory directory (MEMORY.md clobber / slug collision) while allowing
- * global and project directories to be summarized in parallel.
+ * Module-level serialization queue: ensures two concurrent summarize calls
+ * (e.g. two agent threads ending within seconds of each other) don't
+ * clobber each other's MEMORY.md writes or fight over per-fact slug
+ * collisions. Each call awaits the previous one before starting.
  */
-const summarizeQueues = new Map<string, Promise<void>>()
+let summarizeQueue: Promise<void> = Promise.resolve()
 
 export function summarizeAndSave(options: SummarizeOptions): Promise<void> {
-  const key = options.memoryDir
-  const prev = summarizeQueues.get(key) ?? Promise.resolve()
-  const next = prev.then(() => summarizeAndSaveInner(options))
-  // Swallow errors so one failure doesn't block subsequent calls for this dir.
-  summarizeQueues.set(key, next.catch(() => undefined))
+  const next = summarizeQueue.then(() => summarizeAndSaveInner(options))
+  // Swallow errors in the chain so one failure doesn't block subsequent
+  // calls forever. The inner function already logs its own failures.
+  summarizeQueue = next.catch(() => undefined)
   return next
 }
 
 async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
-  const { model, conversation, memoryDir, scopeHint } = options
-  const allowedTypes = options.allowedTypes ? new Set(options.allowedTypes) : undefined
+  const { model, conversation, memoryDir } = options
 
   if (!conversation.trim()) return
 
@@ -408,7 +375,6 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
         : conversation
 
     const userPrompt =
-      (scopeHint?.trim() ? `SCOPE RULES:\n${scopeHint.trim()}\n\n` : "") +
       `CURRENT MEMORY.md:\n${currentMemoryMd || "(empty)"}\n\n` +
       `EXISTING PER-FACT FILES:\n${manifestText}\n\n` +
       `CONVERSATION:\n${truncated}\n\n` +
@@ -431,13 +397,13 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
     for (const op of operations) {
       try {
         if (op.action === "create") {
-          const path = applyCreate(memoryDir, op, existingFilenames, allowedTypes)
+          const path = applyCreate(memoryDir, op, existingFilenames)
           if (path) {
             touched.push(path)
             creates++
           }
         } else if (op.action === "update") {
-          const path = applyUpdate(memoryDir, op, allowedTypes)
+          const path = applyUpdate(memoryDir, op)
           if (path) {
             touched.push(path)
             updates++
@@ -464,27 +430,10 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
     // overwriting the agent's mid-conversation edits.
     const memoryMdPath = join(memoryDir, "MEMORY.md")
     let manifestWritten = false
-    let manifestSource = "unchanged"
-    if (allowedTypes) {
-      try {
-        writeFileSync(
-          memoryMdPath,
-          clampMemoryMd(buildScopedMemoryMd(memoryDir, allowedTypes)),
-          "utf-8"
-        )
-        manifestWritten = true
-        manifestSource = "scope-filtered"
-      } catch (e) {
-        console.warn(
-          "[Memory] Failed to write scope-filtered MEMORY.md:",
-          e instanceof Error ? e.message : e
-        )
-      }
-    } else if (memoryMd && memoryMd.trim()) {
+    if (memoryMd && memoryMd.trim()) {
       try {
         writeFileSync(memoryMdPath, clampMemoryMd(memoryMd), "utf-8")
         manifestWritten = true
-        manifestSource = "rewritten by LLM"
       } catch (e) {
         console.warn(
           "[Memory] Failed to write LLM-curated MEMORY.md:",
@@ -496,7 +445,6 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
       try {
         regenerateManifest(memoryDir)
         manifestWritten = true
-        manifestSource = "bootstrapped"
       } catch (e) {
         console.warn("[Memory] Failed to bootstrap MEMORY.md:", e instanceof Error ? e.message : e)
       }
@@ -505,7 +453,7 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
     // Re-index touched files in the search store.
     if (touched.length > 0 || manifestWritten) {
       try {
-        const store = await getMemoryStore(memoryDir)
+        const store = await getMemoryStore()
         for (const path of touched) {
           const content = readFileSync(path, "utf-8")
           store.addDocument(path, content)
@@ -527,24 +475,8 @@ async function summarizeAndSaveInner(options: SummarizeOptions): Promise<void> {
 
     console.log(
       `[Memory] Applied ${creates} create, ${updates} update, ${skips} skip; ` +
-        `manifest ${manifestWritten ? manifestSource : "unchanged"}`
+        `manifest ${manifestWritten ? (memoryMd ? "rewritten by LLM" : "bootstrapped") : "unchanged"}`
     )
-
-    // Telemetry: background memory writes (summarizer) aren't tool calls, so they
-    // never appear in any conversation trace — emit a dedicated event when
-    // something was actually written.
-    if (touched.length > 0 || manifestWritten) {
-      try {
-        trackEvent("memory.write.applied", "memory", {
-          creates,
-          updates,
-          skips,
-          manifestWritten
-        })
-      } catch (e) {
-        console.warn("[event] failed to emit memory.write.applied:", e)
-      }
-    }
   } catch (e) {
     console.warn("[Memory] Failed to summarize:", e instanceof Error ? e.message : e)
   } finally {

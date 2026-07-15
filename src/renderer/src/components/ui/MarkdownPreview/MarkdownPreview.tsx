@@ -166,7 +166,7 @@ export function MarkdownPreview({
           <div
             className={`p-6 max-w-none ${whiteBackground ? "bg-white prose prose-gray" : "prose prose-gray dark:prose-invert"}`}
           >
-            <div className="streaming-markdown text-sm leading-relaxed overflow-auto">
+            <div className="streaming-markdown text-sm leading-relaxed">
               <ReactMarkdown
                 rehypePlugins={[rehypeHighlight]}
                 remarkPlugins={[remarkGfm, remarkBreaks]}

@@ -187,9 +187,8 @@ export interface HookConfig {
   /** Claude Code compatible one-shot hook: consumed in memory after a successful run. */
   once?: boolean
   /**
-   * If true, this skill / plugin hook stays active for the current thread after
-   * its owning skill / plugin is triggered once, including after app restart.
-   * Default false:
+   * If true, this skill / plugin hook stays active for the rest of the thread
+   * session after its owning skill / plugin is triggered once. Default false:
    * scoped hooks only run while the owning skill / plugin is active this turn.
    *
    * Persistence is per hook identity, not per whole skill/plugin scope, so a
@@ -306,11 +305,6 @@ export interface HookEnv {
   PLUGIN_OUTPUT_DIR?: string
   PLUGIN_WORKSPACE?: string
   FEATURE_ID?: string
-  HARNESS_PROJECT_ID?: string // harness project stable id (= properties.harnessProjectId on events)
-  HARNESS_ADAPTER_NAME?: string // bound adapter name (= properties.harnessAdapterName on events)
-  HARNESS_ADAPTER_VERSION?: string // bound adapter version (= properties.harnessAdapterVersion on events)
-  HARNESS_NODE_NAME?: string // current project-mode workflow node/stage name
-  HARNESS_NODE_STATUS?: string // current project-mode workflow node/stage status label
   PROJECT_CODE?: string
   PROJECT_DIR?: string
   USER_PROMPT?: string // UserPromptSubmit event

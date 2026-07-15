@@ -13,7 +13,6 @@ export interface IPCMessage {
   id: string
   type: "human" | "ai" | "tool" | "system"
   content: string
-  reasoning?: string
   tool_calls?: { id: string; name: string; args: Record<string, unknown> }[]
 }
 

@@ -1,13 +1,12 @@
 import { getUserInfo, type UserInfoConfig } from "../storage"
 import { fetchLatestJson, type LatestJson } from "../updater/checker"
 import { matchUserTargeting } from "../updater/gray-release"
-import {
-  FEATURE_GATES,
-  type FeatureGateCheckOptions,
-  type FeatureGateCheckResult,
-  type FeatureGateConfig,
-  type FeatureGatesConfig,
-  type FeatureGateKey
+import type {
+  FeatureGateCheckOptions,
+  FeatureGateCheckResult,
+  FeatureGateConfig,
+  FeatureGatesConfig,
+  FeatureGateKey
 } from "../../shared/feature-gates"
 
 const FEATURE_GATE_MANIFEST_TTL_MS = 6 * 60 * 60 * 1000
@@ -149,10 +148,6 @@ export async function isFeatureGateEnabled(
   name: FeatureGateKey,
   options: FeatureGateCheckOptions = {}
 ): Promise<FeatureGateCheckResult> {
-  if (name === FEATURE_GATES.projectMode) {
-    return { enabled: true, reason: "project-mode-public" }
-  }
-
   // TODO(temporary): 本地 dev 没有配置 VITE_UPDATE_SERVER_URL，远程 feature gate 拉不到，
   // 导致项目模式等开关本地用不了。dev 模式下临时全部放开，发布前移除。
   if (import.meta.env.DEV) {

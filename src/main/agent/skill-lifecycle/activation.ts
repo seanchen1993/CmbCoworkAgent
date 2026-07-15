@@ -17,11 +17,6 @@ export interface SkillActivationOptions {
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
-  harnessProjectId?: string
-  harnessAdapterName?: string
-  harnessAdapterVersion?: string
-  harnessNodeName?: string
-  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   sessionId?: string
@@ -76,11 +71,6 @@ function buildSkillContext(options: SkillActivationOptions): HookContext {
     systemId: options.systemId,
     pluginWorkspace: options.pluginWorkspace,
     featureId: options.featureId,
-    harnessProjectId: options.harnessProjectId,
-    harnessAdapterName: options.harnessAdapterName,
-    harnessAdapterVersion: options.harnessAdapterVersion,
-    harnessNodeName: options.harnessNodeName,
-    harnessNodeStatus: options.harnessNodeStatus,
     projectCode: options.projectCode,
     projectDir: options.projectDir,
     sessionId: options.sessionId,

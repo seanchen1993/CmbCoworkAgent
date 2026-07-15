@@ -93,7 +93,6 @@ export default defineConfig({
   },
   preload: {},
   renderer: {
-    cacheDir: resolve("node_modules/.vite/renderer"),
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
       // __APP_VERSION__: app.getVersion(),
@@ -106,17 +105,6 @@ export default defineConfig({
     },
     plugins: [optionalMmjModule(), react(), tailwindcss()],
     server: {
-      watch: {
-        ignored: [
-          "**/dist/**",
-          "**/out/**",
-          "**/build/**",
-          "**/tmp/**",
-          "**/temp/**",
-          "**/resources/bin/**",
-          "**/src/renderer/.vite/**"
-        ]
-      },
       proxy: {
       }
     }

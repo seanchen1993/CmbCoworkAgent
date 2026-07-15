@@ -927,83 +927,6 @@ async function testPushFailureReportedButCommitKept(): Promise<void> {
   })
 }
 
-// C22 — #3a regression: removing launch-baseline auto-commit means a workflow's
-// completion notification turn takes a FRESH snapshot and reports the result
-// without editing files. A workflow subagent's edits AND the user's concurrent
-// foreground edits are all dirty BEFORE that snapshot, so they are pre-existing
-// and untouched this turn → never auto-committed. The user's work is never swept
-// into a workflow commit, and the run's edits are left in the tree for review.
-async function testWorkflowNotificationLeavesConcurrentEditsUncommitted(): Promise<void> {
-  await withTempDir("ac-wf-notify", async (workspace) => {
-    await initRepo(workspace)
-    // Both produced while the background run was in flight (a workflow subagent
-    // edit and a user foreground edit), already dirty when the notification
-    // turn's fresh snapshot is taken.
-    await writeFile(join(workspace, "workflow-edit.ts"), "workflow subagent wrote this\n")
-    await writeFile(join(workspace, "user-edit.ts"), "user wrote this concurrently\n")
-
-    await setSettings(enabledSettings())
-    await setWorkspaceCard(workspace)
-    const { startAgentGitSnapshot, maybeAutoCommitAfterAgentRun } = await importAutoCommit()
-    // Fresh snapshot (post-#3a: no launch baseline is reused for workflow turns).
-    const snap = await startAgentGitSnapshot("t-wf-notify", workspace)
-
-    // The notification turn only reports the outcome; it edits no files.
-    const result = await maybeAutoCommitAfterAgentRun({
-      threadId: "t-wf-notify",
-      workspacePath: workspace,
-      snapshot: snap
-    })
-
-    assert(
-      result.status === "skipped",
-      `notification turn must not commit pre-existing dirty, got ${result.status}`
-    )
-    const status = await git(workspace, ["status", "--porcelain"])
-    assert(status.includes("workflow-edit.ts"), "workflow edit should remain dirty for review")
-    assert(status.includes("user-edit.ts"), "user edit must never be swept into a workflow commit")
-  })
-}
-
-// C23 — #3: CmbCoworkAgent's own internal dir (.cmbdevclaw/, e.g. workflow run
-// state) lives inside the user's workspace. If the user hasn't gitignored it, its
-// files show up dirty — auto-commit must NEVER sweep them into the user's repo.
-async function testInternalCmbdevclawDirNotCommitted(): Promise<void> {
-  await withTempDir("ac-internal-dir", async (workspace) => {
-    await initRepo(workspace)
-    await setSettings(enabledSettings())
-    await setWorkspaceCard(workspace)
-    const { startAgentGitSnapshot, recordAgentTouchedFile, maybeAutoCommitAfterAgentRun } =
-      await importAutoCommit()
-    const snap = await startAgentGitSnapshot("t-internal", workspace)
-
-    // A real agent edit + CmbCoworkAgent's own internal workflow state.
-    await writeFile(join(workspace, "agent.ts"), "agent wrote this\n")
-    recordAgentTouchedFile("t-internal", workspace, "agent.ts")
-    await mkdir(join(workspace, ".cmbdevclaw", "workflows", "thread-x"), { recursive: true })
-    await writeFile(join(workspace, ".cmbdevclaw", "workflows", "thread-x", "wf_abc.json"), "{}\n")
-    await writeFile(
-      join(workspace, ".cmbdevclaw", "workflows", "thread-x", "wf_abc.workflow.js"),
-      "// script\n"
-    )
-
-    const result = await maybeAutoCommitAfterAgentRun({
-      threadId: "t-internal",
-      workspacePath: workspace,
-      snapshot: snap
-    })
-    assert(result.status === "committed", `expected committed, got ${result.status}`)
-    assert(result.committedFiles?.includes("agent.ts") ?? false, "agent.ts should be committed")
-    assert(
-      !(result.committedFiles?.some((f) => f.includes(".cmbdevclaw")) ?? false),
-      `.cmbdevclaw must never be auto-committed, got ${JSON.stringify(result.committedFiles)}`
-    )
-    // The internal files stay untracked, not swept into the user's repo.
-    const tracked = await git(workspace, ["ls-files", ".cmbdevclaw"])
-    assert(tracked.trim() === "", `.cmbdevclaw must not be tracked, got: ${tracked}`)
-  })
-}
-
 async function run(): Promise<void> {
   await backupSettings()
   try {
@@ -1057,10 +980,6 @@ async function run(): Promise<void> {
     console.log("PASS C20 push: true with bare remote -> pushed=true")
     await testPushFailureReportedButCommitKept()
     console.log("PASS C21 push fails -> commit kept, pushError reported")
-    await testWorkflowNotificationLeavesConcurrentEditsUncommitted()
-    console.log("PASS C22 workflow notification leaves concurrent edits uncommitted (#3a)")
-    await testInternalCmbdevclawDirNotCommitted()
-    console.log("PASS C23 .cmbdevclaw internal dir never auto-committed (#3)")
   } finally {
     await restoreSettings()
   }

@@ -77,104 +77,6 @@ function isSameWorkerAssistantText(a: Message, b: Message): boolean {
   return first.includes(second) || second.includes(first)
 }
 
-function areWorkerContentsCompatible(
-  a: Message["content"] | undefined,
-  b: Message["content"] | undefined
-): boolean {
-  const first = contentSignatureKey(a).trim()
-  const second = contentSignatureKey(b).trim()
-  if (!first || !second) return true
-  return first === second || first.includes(second) || second.includes(first)
-}
-
-type WorkerToolCall = NonNullable<Message["tool_calls"]>[number]
-
-function hasWorkerToolArgs(args: WorkerToolCall["args"] | undefined): boolean {
-  return !!args && Object.keys(args).length > 0
-}
-
-function isSameWorkerToolCallIdentity(
-  left: WorkerToolCall,
-  right: WorkerToolCall,
-  index: number
-): boolean {
-  if (left.id || right.id) return !!left.id && left.id === right.id
-  return left.name === right.name && index >= 0
-}
-
-function findWorkerToolCallMatch(
-  toolCalls: WorkerToolCall[],
-  target: WorkerToolCall,
-  fallbackIndex: number,
-  usedIndexes?: Set<number>
-): { call: WorkerToolCall; index: number } | undefined {
-  if (target.id) {
-    const index = toolCalls.findIndex(
-      (toolCall, candidateIndex) =>
-        !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
-    )
-    return index >= 0 ? { call: toolCalls[index], index } : undefined
-  }
-
-  if (
-    fallbackIndex >= 0 &&
-    fallbackIndex < toolCalls.length &&
-    !usedIndexes?.has(fallbackIndex) &&
-    isSameWorkerToolCallIdentity(toolCalls[fallbackIndex], target, fallbackIndex)
-  ) {
-    return { call: toolCalls[fallbackIndex], index: fallbackIndex }
-  }
-
-  const index = toolCalls.findIndex(
-    (toolCall, candidateIndex) =>
-      !usedIndexes?.has(candidateIndex) &&
-      !toolCall.id &&
-      toolCall.name === target.name
-  )
-  return index >= 0 ? { call: toolCalls[index], index } : undefined
-}
-
-function areWorkerToolCallsCompatible(
-  left: Message["tool_calls"] | undefined,
-  right: Message["tool_calls"] | undefined
-): boolean {
-  if (!left?.length || !right?.length || left.length !== right.length) return false
-  const usedIndexes = new Set<number>()
-  for (let index = 0; index < right.length; index += 1) {
-    const match = findWorkerToolCallMatch(left, right[index], index, usedIndexes)
-    if (!match) return false
-    usedIndexes.add(match.index)
-  }
-  return true
-}
-
-function isCompatibleWorkerAssistantToolReplay(a: Message, b: Message): boolean {
-  if (a.role !== "assistant" || b.role !== "assistant") return false
-  if (!isWorkerSnapshotPair(a, b)) return false
-  if (!areWorkerToolCallsCompatible(a.tool_calls, b.tool_calls)) return false
-  return areWorkerContentsCompatible(a.content, b.content)
-}
-
-function isCompatibleWorkerToolResultReplay(a: Message, b: Message): boolean {
-  if (a.role !== "tool" || b.role !== "tool") return false
-  if (!isWorkerSnapshotPair(a, b)) return false
-  if (!a.tool_call_id || a.tool_call_id !== b.tool_call_id) return false
-  if (a.name && b.name && a.name !== b.name) return false
-  return areWorkerContentsCompatible(a.content, b.content)
-}
-
-function findCompatibleWorkerReplayIndex(
-  messages: Message[],
-  message: Message
-): number | undefined {
-  const index = messages.findIndex(
-    (item) =>
-      isCompatibleWorkerAssistantToolReplay(item, message) ||
-      isCompatibleWorkerToolResultReplay(item, message)
-  )
-  return index >= 0 ? index : undefined
-}
-
 function findSameWorkerAssistantTextIndex(messages: Message[], message: Message): number | undefined {
   const index = messages.findIndex((item) => isSameWorkerAssistantText(item, message))
   return index >= 0 ? index : undefined
@@ -351,7 +253,6 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
             signature
           )
         : undefined) ??
-      findCompatibleWorkerReplayIndex(merged, live) ??
       findSameWorkerAssistantTextIndex(merged, live)
     if (index === undefined) {
       indexById.set(live.id, merged.length)
@@ -376,7 +277,8 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
       ...live,
       id,
       content: resolveWorkerPanelContent(existing, live),
-      tool_calls: mergeWorkerToolCalls(existing.tool_calls, live.tool_calls),
+      tool_calls:
+        live.tool_calls && live.tool_calls.length > 0 ? live.tool_calls : existing.tool_calls,
       status: live.status ?? existing.status,
       is_error: live.is_error ?? existing.is_error
     }
@@ -385,29 +287,6 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
   }
 
   return merged
-}
-
-function mergeWorkerToolCalls(
-  existing: Message["tool_calls"] | undefined,
-  incoming: Message["tool_calls"] | undefined
-): Message["tool_calls"] | undefined {
-  if (!incoming?.length) return existing
-  if (!existing?.length) return incoming
-  if (!areWorkerToolCallsCompatible(existing, incoming)) return incoming
-
-  const usedIndexes = new Set<number>()
-  return incoming.map((incomingToolCall, index) => {
-    const match = findWorkerToolCallMatch(existing, incomingToolCall, index, usedIndexes)
-    if (match) usedIndexes.add(match.index)
-    const existingToolCall = match?.call
-    return {
-      ...(existingToolCall ?? incomingToolCall),
-      ...incomingToolCall,
-      args: hasWorkerToolArgs(incomingToolCall.args)
-        ? incomingToolCall.args
-        : (existingToolCall?.args ?? incomingToolCall.args)
-    }
-  })
 }
 
 function buildToolResults(

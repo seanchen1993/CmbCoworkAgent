@@ -8,25 +8,6 @@ const INTERNAL_COORDINATOR_CONTEXT_START = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_S
 const INTERNAL_COORDINATOR_CONTEXT_END = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_END]]"
 const INTERNAL_COORDINATOR_NOTIFICATION_START = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_START]]"
 const INTERNAL_COORDINATOR_NOTIFICATION_END = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_END]]"
-const WORKFLOW_NOTIFICATION_TURN_TRIGGER = "[[CMB_WORKFLOW_NOTIFICATION_TURN]]"
-const INTERNAL_WORKFLOW_NOTIFICATION_PREFIX = "[[CMB_WORKFLOW_NOTIFICATION_V1:"
-/** Renderer-submitted trigger; the main process expands it into the real notification. */
-export const WORKFLOW_NOTIFICATION_TURN_PROMPT = `${WORKFLOW_NOTIFICATION_TURN_TRIGGER}
-Process the completed workflow task-notification. This is an internal system turn, not a new user request.`
-
-/** Internal workflow plumbing messages (the trigger and the expanded notification). */
-export function isWorkflowNotificationPrompt(content: unknown): boolean {
-  if (typeof content !== "string") return false
-  const normalized = content.trimStart()
-  return (
-    // FULL-match the turn prompt (mirrors the main process's full-match fix), so a
-    // user who pastes text merely STARTING with the trigger (a log/sample) isn't
-    // silently hidden as internal plumbing.
-    normalized === WORKFLOW_NOTIFICATION_TURN_PROMPT ||
-    // The expanded notification carries a runId suffix, so it stays a prefix match.
-    normalized.startsWith(INTERNAL_WORKFLOW_NOTIFICATION_PREFIX)
-  )
-}
 
 function isQuietCoordinatorToolCall(toolCall: ToolCall): boolean {
   return QUIET_COORDINATOR_TOOL_NAMES.has(toolCall.name)
@@ -132,13 +113,6 @@ export function filterCoordinatorNoiseMessages(messages: Message[]): Message[] {
   return messages.flatMap((message) => {
     const contentText = messageContentToText(message.content)
     if (isInternalCoordinatorMessage(contentText, message.role)) {
-      return []
-    }
-
-    // Workflow notification plumbing (trigger + expanded <task-notification>)
-    // is internal regardless of role — the outcome reaches the user through
-    // the assistant's summary and the workflow panel.
-    if (isWorkflowNotificationPrompt(contentText)) {
       return []
     }
 

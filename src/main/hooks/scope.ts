@@ -46,11 +46,6 @@ export interface HookScopeController {
   snapshot(): HookScopeSnapshot
 }
 
-export interface HookScopeOptions {
-  initialPersistentHookKeys?: readonly string[]
-  onPersistentHookKeysChanged?: (keys: readonly string[]) => void
-}
-
 // Normalizers are exported so other modules (e.g. ipc/agent prune-at-interrupt
 // logic) can produce keys in the exact same shape that hookScope stores
 // internally. Keep these functions strictly pure / deterministic.
@@ -119,21 +114,11 @@ export function extractPluginIdFromProviderKey(providerKey?: string): string | u
   return pluginId || undefined
 }
 
-export function createHookScope(options: HookScopeOptions = {}): HookScopeController {
+export function createHookScope(): HookScopeController {
   const activePluginIds = new Set<string>()
   const activeSkillNames = new Set<string>()
   const activeSkillPaths = new Set<string>()
-  const persistentHookKeys = new Set<string>(
-    options.initialPersistentHookKeys?.filter((key) => key.length > 0) ?? []
-  )
-  const notifyPersistentHookKeysChanged = (): void => {
-    if (!options.onPersistentHookKeysChanged) return
-    try {
-      options.onPersistentHookKeysChanged([...persistentHookKeys])
-    } catch (error) {
-      console.warn("[Hooks] failed to persist hook scope keys:", error)
-    }
-  }
+  const persistentHookKeys = new Set<string>()
 
   return {
     activePluginIds,
@@ -153,27 +138,16 @@ export function createHookScope(options: HookScopeOptions = {}): HookScopeContro
       addActiveSkillPath(activeSkillPaths, normalizedPath)
     },
     activatePersistentHooks(hooks) {
-      let changed = false
       for (const hook of hooks) {
         if (hook.persistAfterInterrupt === true && hook.id) {
-          const key = getPersistentHookKey(hook)
-          if (!persistentHookKeys.has(key)) {
-            persistentHookKeys.add(key)
-            changed = true
-          }
+          persistentHookKeys.add(getPersistentHookKey(hook))
         }
       }
-      if (changed) notifyPersistentHookKeysChanged()
     },
     activatePersistentHookKeys(keys) {
-      let changed = false
       for (const key of keys) {
-        if (key && !persistentHookKeys.has(key)) {
-          persistentHookKeys.add(key)
-          changed = true
-        }
+        if (key) persistentHookKeys.add(key)
       }
-      if (changed) notifyPersistentHookKeysChanged()
     },
     pruneActivations(predicates) {
       for (const id of [...activePluginIds]) {

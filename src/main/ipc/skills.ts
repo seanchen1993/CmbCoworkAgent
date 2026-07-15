@@ -1,5 +1,5 @@
 import AdmZip from "adm-zip"
-import { BrowserWindow, IpcMain, shell } from "electron"
+import { IpcMain, shell } from "electron"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { existsSync, mkdirSync, rmSync } from "fs"
@@ -24,7 +24,6 @@ import {
   normalizeSkillRelativePath
 } from "../skills/discovery"
 import { getDiscoveredSkillId, normalizeSkillId } from "../skills/ids"
-import { isPluginSkillWriteAllowed } from "../skills/plugin-skill-evolution"
 import {
   decodeArchiveEntryName,
   normalizeArchiveEntryName,
@@ -59,12 +58,6 @@ interface SkillCloudBackupMetadata {
   originalSkillPath: string
   originalDirName: string
   createdAt: string
-  /**
-   * Set for plugin in-place evolutions. The evolved bundle was written into the
-   * plugin's own skill directory (not the custom dir), so rollback must restore
-   * back to that exact directory rather than re-create a standalone skill.
-   */
-  inPlacePluginSkillDir?: string | null
 }
 
 function sanitizeSkillName(name: string): string {
@@ -109,75 +102,6 @@ function getCloudEvolutionSkillBackupsDir(): string {
 
 function sanitizeBackupIdPart(value: string): string {
   return sanitizeSkillName(value).slice(0, 80) || "backup"
-}
-
-/**
- * Write an evolved skill bundle into an existing skill directory, in place.
- *
- * Used by the plugin in-place evolution path: the target dir is replaced with
- * the new bundle's contents (root SKILL.md + siblings), keeping the directory
- * at its original location so the owning plugin still resolves the skill.
- * Marketplace-only metadata files are skipped and zip path traversal is blocked.
- * The caller is responsible for backing the dir up first.
- */
-async function writeSkillBundleInPlace(
-  buffer: Buffer,
-  fileName: string,
-  skillDir: string
-): Promise<{ success: boolean; error?: string }> {
-  const ext = path.extname(fileName).toLowerCase()
-
-  if (ext === ".md") {
-    const content = buffer.toString("utf-8")
-    if (!parseYamlFrontmatter(content).name?.trim()) {
-      return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
-    }
-    await fs.writeFile(path.join(skillDir, "SKILL.md"), buffer)
-    return { success: true }
-  }
-
-  if (ext !== ".zip") {
-    return { success: false, error: "仅支持 .md 或 .zip 文件" }
-  }
-
-  const zip = new AdmZip(buffer)
-  const decodedEntries: DecodedZipEntry[] = zip.getEntries().map((entry) => ({
-    entry,
-    decodedName: decodeZipEntryName(entry)
-  }))
-  const skillMdEntry = selectRootSkillMarkdownEntry<(typeof decodedEntries)[number]>(
-    decodedEntries,
-    (item) => item.entry.isDirectory
-  )
-  if (!skillMdEntry) {
-    return { success: false, error: "ZIP 文件必须包含 SKILL.md" }
-  }
-  const skillMd = decodeSkillTextFile(skillMdEntry.entry.getData(), skillMdEntry.decodedName)
-  if (!parseYamlFrontmatter(skillMd).name?.trim()) {
-    return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
-  }
-  const basePrefix = skillMdEntry.decodedName.replace(/SKILL\.md$/i, "")
-
-  // Replace the directory contents so files dropped by the new bundle are gone.
-  await fs.rm(skillDir, { recursive: true, force: true })
-  await fs.mkdir(skillDir, { recursive: true })
-
-  const resolvedSkillDir = path.resolve(skillDir)
-  for (const item of decodedEntries) {
-    if (item.entry.isDirectory) continue
-    if (!item.decodedName.startsWith(basePrefix)) continue
-    const relativePath = item.decodedName.slice(basePrefix.length)
-    if (!relativePath) continue
-    if (isMarketplaceSkillMetadataPath(relativePath)) continue
-    const destPath = path.resolve(skillDir, relativePath)
-    if (destPath !== resolvedSkillDir && !destPath.startsWith(resolvedSkillDir + path.sep)) {
-      console.warn(`[Skills] Skipping plugin bundle entry with path traversal: ${item.decodedName}`)
-      continue
-    }
-    await fs.mkdir(path.dirname(destPath), { recursive: true })
-    await fs.writeFile(destPath, item.entry.getData())
-  }
-  return { success: true }
 }
 
 function getMimeTypeByPath(filePath: string): string {
@@ -862,136 +786,6 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
         return { success: true, skillName }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "回滚旧版 Skill 失败" }
-      }
-    }
-  )
-
-  ipcMain.handle(
-    "skills:applyPluginSkillEvolution",
-    async (
-      _event,
-      payload: {
-        skillPath: string
-        candidateId: string
-        skillName: string
-        buffer: ArrayBuffer
-        fileName: string
-        sourceVersion?: string | null
-        targetVersion?: string | null
-      }
-    ): Promise<{ success: boolean; backupId?: string; error?: string }> => {
-      const { skillPath, candidateId, skillName, buffer, fileName, sourceVersion, targetVersion } =
-        payload || {}
-      if (!skillPath || typeof skillPath !== "string") {
-        return { success: false, error: "无效的技能路径" }
-      }
-      if (!candidateId || typeof candidateId !== "string") {
-        return { success: false, error: "无效的候选 ID" }
-      }
-      if (!buffer || !fileName || typeof fileName !== "string") {
-        return { success: false, error: "无效的技能内容" }
-      }
-
-      try {
-        const skillDir = path.dirname(path.resolve(skillPath))
-        // Gate: only ENABLED plugin skill dirs are writable in place. Standalone
-        // skills go through the custom-dir upload path; plugin-owned files must
-        // never be writable from anywhere else.
-        const pluginSourceDirs = getEnabledPluginSkillSourceMetadata().map((s) => s.sourceDir)
-        if (!isPluginSkillWriteAllowed(skillDir, pluginSourceDirs)) {
-          return { success: false, error: "目标技能不属于已启用的插件，禁止原地写入" }
-        }
-        if (!existsSync(path.join(skillDir, "SKILL.md"))) {
-          return { success: false, error: "插件技能目录缺少 SKILL.md" }
-        }
-
-        // Back up the current plugin skill dir so the evolution is reversible.
-        const backupId = `${sanitizeBackupIdPart(candidateId)}-${Date.now()}`
-        const backupRoot = path.join(getCloudEvolutionSkillBackupsDir(), backupId)
-        const backupSkillDir = path.join(backupRoot, "skill")
-        const metadata: SkillCloudBackupMetadata = {
-          backupId,
-          candidateId,
-          skillName:
-            typeof skillName === "string" && skillName.trim()
-              ? skillName.trim()
-              : path.basename(skillDir),
-          sourceVersion: sourceVersion || null,
-          targetVersion: targetVersion || null,
-          originalSkillPath: path.resolve(skillPath),
-          originalDirName: path.basename(skillDir),
-          createdAt: new Date().toISOString(),
-          inPlacePluginSkillDir: skillDir
-        }
-        await fs.mkdir(backupRoot, { recursive: true })
-        await fs.cp(skillDir, backupSkillDir, { recursive: true })
-        await fs.writeFile(
-          path.join(backupRoot, "metadata.json"),
-          JSON.stringify(metadata, null, 2),
-          "utf-8"
-        )
-
-        // Write the evolved bundle into the plugin skill dir, in place.
-        const written = await writeSkillBundleInPlace(Buffer.from(buffer), fileName, skillDir)
-        if (!written.success) {
-          // Restore from the just-made backup so a half-written dir can't linger.
-          await fs.rm(skillDir, { recursive: true, force: true }).catch(() => {})
-          await fs.cp(backupSkillDir, skillDir, { recursive: true }).catch(() => {})
-          await fs.rm(backupRoot, { recursive: true, force: true }).catch(() => {})
-          return { success: false, error: written.error }
-        }
-
-        invalidateEnabledSkillsCache()
-        notifyHooksChanged("skill-evolved")
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send("skills:changed")
-        }
-        return { success: true, backupId }
-      } catch (e) {
-        return { success: false, error: e instanceof Error ? e.message : "原地写入插件技能失败" }
-      }
-    }
-  )
-
-  ipcMain.handle(
-    "skills:rollbackPluginSkillEvolution",
-    async (_event, backupId: string): Promise<{ success: boolean; skillName?: string; error?: string }> => {
-      if (!backupId || typeof backupId !== "string") {
-        return { success: false, error: "无效的备份 ID" }
-      }
-      try {
-        const backupsDir = getCloudEvolutionSkillBackupsDir()
-        const backupRoot = path.resolve(backupsDir, backupId)
-        if (!isPathUnderDir(backupRoot, backupsDir)) {
-          return { success: false, error: "无效的备份路径" }
-        }
-        const backupSkillDir = path.join(backupRoot, "skill")
-        const metadataPath = path.join(backupRoot, "metadata.json")
-        if (!existsSync(backupSkillDir) || !existsSync(metadataPath)) {
-          return { success: false, error: "备份不存在" }
-        }
-        const metadata = JSON.parse(await fs.readFile(metadataPath, "utf-8")) as SkillCloudBackupMetadata
-        const targetDir = metadata.inPlacePluginSkillDir
-        if (!targetDir) {
-          return { success: false, error: "该备份不是插件原地进化备份" }
-        }
-        // Re-check the gate: the plugin must still be enabled and the dir still
-        // inside its source, otherwise we refuse to write.
-        const pluginSourceDirs = getEnabledPluginSkillSourceMetadata().map((s) => s.sourceDir)
-        if (!isPluginSkillWriteAllowed(path.resolve(targetDir), pluginSourceDirs)) {
-          return { success: false, error: "对应插件已禁用或卸载，无法回滚" }
-        }
-
-        await fs.rm(targetDir, { recursive: true, force: true })
-        await fs.cp(backupSkillDir, targetDir, { recursive: true })
-        invalidateEnabledSkillsCache()
-        notifyHooksChanged("skill-restored")
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send("skills:changed")
-        }
-        return { success: true, skillName: metadata.skillName }
-      } catch (e) {
-        return { success: false, error: e instanceof Error ? e.message : "回滚插件技能失败" }
       }
     }
   )

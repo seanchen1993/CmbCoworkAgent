@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { CodeViewer } from "@/components/tabs/CodeViewer"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import ReactMarkdown from "react-markdown"
+import rehypeHighlight from "rehype-highlight"
 import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
+
+import "highlight.js/styles/github.css"
 
 interface HtmlPreviewProps {
   content: string
@@ -14,6 +17,15 @@ interface HtmlPreviewProps {
 
 function getFileName(path: string): string {
   return path.split("/").pop() || path
+}
+
+function getFencedCodeBlock(source: string, language: string): string {
+  const backtickMatches = source.match(/`+/g)
+  const maxBackticks = backtickMatches
+    ? backtickMatches.reduce((max, current) => Math.max(max, current.length), 0)
+    : 0
+  const fence = "`".repeat(Math.max(3, maxBackticks + 1))
+  return `${fence}${language}\n${source}\n${fence}`
 }
 
 export function HtmlPreview({
@@ -30,6 +42,7 @@ export function HtmlPreview({
   const [internalViewMode, setInternalViewMode] = useState<"preview" | "source">("preview")
   const [srcDocContent, setSrcDocContent] = useState(content)
   const currentViewMode = viewMode ?? internalViewMode
+  const highlightedSourceMarkdown = useMemo(() => getFencedCodeBlock(content, "html"), [content])
 
   useEffect(() => {
     let isCancelled = false
@@ -151,8 +164,12 @@ export function HtmlPreview({
             onLoad={syncHeight}
           />
         ) : (
-          <div className={fillHeight ? "flex h-full min-h-0" : "h-[80vh]"}>
-            <CodeViewer filePath={path ?? "preview.html"} content={content} />
+          <div className={fillHeight ? "min-h-full" : ""}>
+            <div className="prose prose-sm max-w-none dark:prose-invert p-3">
+              <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
+                {highlightedSourceMarkdown}
+              </ReactMarkdown>
+            </div>
           </div>
         )}
       </div>

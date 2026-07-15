@@ -41,7 +41,7 @@ import {
 interface ParsedPlugin {
   manifest: PluginManifest | null
   manifestRelPath: string | null
-  skillNames: string[]
+  skillDirs: string[]
   mcpConfigs: Record<string, PluginMcpServerConfig>
   mcpServerDetails: PluginMcpServerDetail[]
   hookCount: number
@@ -180,7 +180,7 @@ async function addDirToZip(zip: AdmZip, dirPath: string, rootDir: string): Promi
 
 async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<ParsedPlugin> {
   let manifest: PluginManifest | null = null
-  const skillNames: string[] = []
+  const skillDirs: string[] = []
   let mcpConfigs: Record<string, PluginMcpServerConfig> = {}
   let name = fallbackName?.trim() || path.basename(dirPath)
 
@@ -197,7 +197,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
         const key = skill.rootDir.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
         if (seenSkillDirs.has(key)) continue
         seenSkillDirs.add(key)
-        skillNames.push(skill.name)
+        skillDirs.push(skill.relativePath || ".")
       }
     } catch {
       console.warn("[Plugins] Failed to scan skills in", source.sourceDir)
@@ -260,7 +260,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
   return {
     manifest,
     manifestRelPath,
-    skillNames,
+    skillDirs,
     mcpConfigs,
     mcpServerDetails,
     hookCount,
@@ -284,7 +284,7 @@ async function installPluginFromDir(
   try {
     const parsed = await parsePluginDir(dirPath, fallbackName)
     if (
-      parsed.skillNames.length === 0 &&
+      parsed.skillDirs.length === 0 &&
       Object.keys(parsed.mcpConfigs).length === 0 &&
       parsed.hookCount === 0
     ) {
@@ -380,7 +380,7 @@ async function installPluginFromDir(
       author: formatAuthor(parsed.manifest?.author),
       path: destDir,
       enabled: true,
-      skillCount: parsed.skillNames.length,
+      skillCount: parsed.skillDirs.length,
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
       hookCount: parsed.hookCount,
       hookPath: parsed.hookPath,
@@ -437,7 +437,7 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
   for (const candidate of candidates) {
     const parsed = await parsePluginDir(candidate)
     if (
-      parsed.skillNames.length > 0 ||
+      parsed.skillDirs.length > 0 ||
       Object.keys(parsed.mcpConfigs).length > 0 ||
       parsed.hookCount > 0
     ) {
@@ -599,7 +599,7 @@ export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetai
     tempDir = extracted.tempDir
     const parsed = await parsePluginDir(extracted.pluginRoot)
     return {
-      skills: parsed.skillNames,
+      skills: parsed.skillDirs,
       mcpServers: Object.keys(parsed.mcpConfigs),
       mcpServerDetails: parsed.mcpServerDetails,
       hookCount: parsed.hookCount,
@@ -868,7 +868,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       }
       const parsed = await parsePluginDir(plugin.path)
       return {
-        skills: parsed.skillNames,
+        skills: parsed.skillDirs,
         mcpServers: Object.keys(parsed.mcpConfigs),
         mcpServerDetails: parsed.mcpServerDetails,
         hookCount: parsed.hookCount,

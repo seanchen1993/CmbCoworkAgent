@@ -1,14 +1,9 @@
 import { readFileSync } from "fs"
 import { posix as pathPosix } from "path"
 import {
-  getEnabledPluginSkillSourceMetadata,
-  type PluginSkillSourceMetadata
-} from "../../storage"
-import {
   ensureVersionedSkillIdentifier,
   parseYamlFrontmatter
 } from "../../utils/skill-identifiers"
-import { makePluginSkillSourceRef } from "../../utils/skill-source"
 
 const CLOUD_EVOLVER_NAME = "CMBDevClaw Trace Evolver"
 
@@ -20,29 +15,6 @@ export interface SkillMetadataLite {
 
 function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "")
-}
-
-function isSameOrChildPath(targetPath: string, parentPath: string): boolean {
-  const target = normalizePath(targetPath)
-  const parent = normalizePath(parentPath)
-  return target === parent || target.startsWith(`${parent}/`)
-}
-
-function findPluginSkillSource(normalizedPath: string): PluginSkillSourceMetadata | null {
-  try {
-    return (
-      getEnabledPluginSkillSourceMetadata().find((source) => {
-        const sourceDir = normalizePath(source.sourceDir)
-        const pluginRoot = normalizePath(source.pluginRoot)
-        return (
-          isSameOrChildPath(normalizedPath, sourceDir) ||
-          isSameOrChildPath(normalizedPath, pluginRoot)
-        )
-      }) ?? null
-    )
-  } catch {
-    return null
-  }
 }
 
 function getSkillPathAliases(skillPath: string): string[] {
@@ -126,8 +98,6 @@ export class SkillUsageDetector {
   private readonly localSkillLookupCache = new Map<string, string | null>()
   private readonly usedSkillNames = new Set<string>()
   private readonly usedEvolvedSkillNames = new Set<string>()
-  private readonly skillSourceByIdentifier = new Map<string, string>()
-  private readonly usedSkillSourceRefs = new Set<string>()
 
   onSkillsMetadata(skills: SkillMetadataLite[]): void {
     for (const skill of skills) {
@@ -136,38 +106,18 @@ export class SkillUsageDetector {
       const { identifier: skillIdentifier, evolved } = resolveSkillInfo(skillName, skill.version, skillPath)
       if (!skillName || !skillPath || !skillIdentifier) continue
 
-      const pluginSource = findPluginSkillSource(skillPath)
-      const skillSourceRef = pluginSource
-        ? makePluginSkillSourceRef(pluginSource.pluginId, skillIdentifier, pluginSource.pluginName)
-        : ""
       for (const candidatePath of getSkillPathAliases(skillPath)) {
-        this.registerSkillPath(candidatePath, skillIdentifier, evolved, skillSourceRef)
+        this.registerSkillPath(candidatePath, skillIdentifier, evolved)
       }
     }
   }
 
-  private registerSkillPath(
-    skillPath: string,
-    skillIdentifier: string,
-    evolved = false,
-    skillSourceRef = ""
-  ): void {
+  private registerSkillPath(skillPath: string, skillIdentifier: string, evolved = false): void {
     const normalizedSkillPath = normalizePath(skillPath)
     if (!normalizedSkillPath || !skillIdentifier) return
 
     this.loadedSkillsByDocPath.set(normalizedSkillPath, skillIdentifier)
     if (evolved) this.evolvedSkillIdentifiers.add(skillIdentifier)
-    const resolvedSkillSourceRef =
-      skillSourceRef ||
-      (() => {
-        const pluginSource = findPluginSkillSource(normalizedSkillPath)
-        return pluginSource
-          ? makePluginSkillSourceRef(pluginSource.pluginId, skillIdentifier, pluginSource.pluginName)
-          : ""
-      })()
-    if (resolvedSkillSourceRef) {
-      this.skillSourceByIdentifier.set(skillIdentifier, resolvedSkillSourceRef)
-    }
     const rootDir = normalizePath(pathPosix.dirname(normalizedSkillPath))
     if (rootDir && rootDir !== ".") {
       this.loadedSkillsByRootDir.set(rootDir, skillIdentifier)
@@ -201,8 +151,6 @@ export class SkillUsageDetector {
     if (this.evolvedSkillIdentifiers.has(skillIdentifier)) {
       this.usedEvolvedSkillNames.add(skillIdentifier)
     }
-    const skillSourceRef = this.skillSourceByIdentifier.get(skillIdentifier)
-    if (skillSourceRef) this.usedSkillSourceRefs.add(skillSourceRef)
   }
 
   /**
@@ -246,10 +194,6 @@ export class SkillUsageDetector {
 
   getUsedEvolvedSkillNames(): string[] {
     return Array.from(this.usedEvolvedSkillNames)
-  }
-
-  getUsedSkillSourceRefs(): string[] {
-    return Array.from(this.usedSkillSourceRefs)
   }
 
   hasUsedSkills(): boolean {

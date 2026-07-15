@@ -22,7 +22,7 @@ const GOAL_ASSISTANT_RESPONSE_MAX_BUDGET_CHARS = 12_000
 const APPROX_CHARS_PER_TOKEN = 4
 const GOAL_EVIDENCE_MIN_ITEM_CHARS = 1_500
 const GOAL_EVIDENCE_MAX_ITEM_CHARS = 8_000
-export const GOAL_EVALUATOR_TIMEOUT_MS = 60_000
+export const GOAL_EVALUATOR_TIMEOUT_MS = 30_000
 
 const IMPORTANT_EVIDENCE_LINE =
   /\b(BUILD SUCCESS|BUILD FAILURE|FAILED|FAILURE|ERROR|Exception|PASS|passed|tests?|mvn test|pnpm test|npm test|yarn test|pytest|vitest|jest|diff --git|@@|changed|modified|created|deleted|log\.)\b|(?:^|\s)[\w./-]+\.(?:ts|tsx|js|jsx|java|kt|py|json|md|xml|yml|yaml|go|rs|cpp|c|h)\b/i
@@ -98,10 +98,7 @@ export function shouldPauseGoalForEmptyTurn(input: GoalEvaluationInput): boolean
 }
 
 function stripThinkBlocks(text: string): string {
-  return text
-    .replace(/<think>[\s\S]*?<\/think>\s*/gi, "")
-    .replace(/^[\s\S]*?<\/think>\s*/i, "")
-    .replace(/^\s*<think>[ \t]*(?:\r?\n|$)[\s\S]*$/i, "")
+  return text.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "")
 }
 
 export function getCurrentTurnAssistantResponse(input: {
@@ -109,12 +106,8 @@ export function getCurrentTurnAssistantResponse(input: {
   currentTurnAssistantStart: number
   lastFinalText?: string
 }): string {
-  // Prefer the current turn's final values snapshot when available: it may replace
-  // an incomplete streaming draft. The caller must scope lastFinalText to messages
-  // after the current turn's user prompt so previous-turn answers cannot leak in.
-  const finalSnapshot = stripThinkBlocks(input.lastFinalText ?? "").trim()
-  if (finalSnapshot) return finalSnapshot
-
+  const finalText = stripThinkBlocks(input.lastFinalText ?? "").trim()
+  if (finalText) return finalText
   const start = Math.max(0, Math.min(input.currentTurnAssistantStart, input.assistantText.length))
   return stripThinkBlocks(input.assistantText.slice(start)).trim()
 }
@@ -353,10 +346,7 @@ function stringArray(value: unknown): string[] | undefined {
   return out.length > 0 ? out.slice(-10) : undefined
 }
 
-function inferBlockerType(
-  verdict: GoalJudgeDecision["verdict"],
-  reason: string
-): GoalJudgeDecision["blockerType"] {
+function inferBlockerType(verdict: GoalJudgeDecision["verdict"], reason: string): GoalJudgeDecision["blockerType"] {
   if (verdict !== "blocked") return undefined
   const normalized = reason.toLowerCase()
   if (
@@ -480,7 +470,9 @@ export function resolveEvaluatorConfig(modelId?: string): CustomModelConfig | nu
   if (configuredJudgeId) {
     const configuredJudge = findEvaluatorConfig(configs, configuredJudgeId)
     if (configuredJudge?.apiKey) return configuredJudge
-    console.warn(`[Goal] configured evaluator model "${configuredJudgeId}" is unavailable.`)
+    console.warn(
+      `[Goal] configured evaluator model "${configuredJudgeId}" is unavailable.`
+    )
     return null
   }
 
@@ -533,10 +525,7 @@ export async function evaluateGoalWithModel(
           reject(timeoutError)
         }, GOAL_EVALUATOR_TIMEOUT_MS)
       })
-      return await Promise.race([
-        model.invoke(messages, { signal: linkedSignal.signal }),
-        timeoutPromise
-      ])
+      return await Promise.race([model.invoke(messages, { signal: linkedSignal.signal }), timeoutPromise])
     } finally {
       if (timeout) clearTimeout(timeout)
     }

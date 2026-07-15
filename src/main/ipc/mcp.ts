@@ -11,30 +11,6 @@ import {
 import { resolveMcpConnectorKind } from "../mcp/connector-kind"
 import type { McpConnectorConfig, McpConnectorUpsert } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
-import {
-  buildMcpImportOperations,
-  parseMcpImportConfig,
-  previewMcpImportConfig
-} from "../mcp/config-import"
-import type {
-  McpImportApplyResult,
-  McpImportConfigApplyRequest,
-  McpImportConfigRequest,
-  McpImportPreviewResult
-} from "../types"
-
-const MCP_TEST_CONNECTION_TIMEOUT_MS = 30_000
-const MCP_TEST_CLOSE_TIMEOUT_MS = 3_000
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs)
-  })
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer)
-  })
-}
 
 export function buildMcpServerConfig(config: {
   kind?: McpConnectorConfig["kind"]
@@ -59,8 +35,7 @@ export function buildMcpServerConfig(config: {
     base.headers = config.advanced.headers
   }
   if (config.advanced?.transport) {
-    base.transport =
-      config.advanced.transport === "streamable-http" ? "http" : config.advanced.transport
+    base.transport = config.advanced.transport === "streamable-http" ? "http" : config.advanced.transport
   }
   if (config.advanced?.reconnect?.enabled) {
     base.reconnect = {
@@ -86,7 +61,7 @@ function toMcpConnectorUpsert(config: McpConnectorConfig): McpConnectorUpsert {
   }
 }
 
-export function validateMcpConnectorInput(config: McpConnectorUpsert): void {
+function validateMcpConnectorInput(config: McpConnectorUpsert): void {
   if (!config.name || typeof config.name !== "string" || !config.name.trim()) {
     throw new Error("名称不能为空")
   }
@@ -96,10 +71,7 @@ export function validateMcpConnectorInput(config: McpConnectorUpsert): void {
     if (!config.command || typeof config.command !== "string" || !config.command.trim()) {
       throw new Error("命令不能为空")
     }
-    if (
-      config.args &&
-      (!Array.isArray(config.args) || config.args.some((arg) => typeof arg !== "string"))
-    ) {
+    if (config.args && (!Array.isArray(config.args) || config.args.some((arg) => typeof arg !== "string"))) {
       throw new Error("命令参数格式无效")
     }
     if (
@@ -133,63 +105,6 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("mcp:list", async (): Promise<McpConnectorConfig[]> => {
     return getMcpConnectors()
   })
-
-  ipcMain.handle(
-    "mcp:previewImport",
-    async (_event, params: McpImportConfigRequest): Promise<McpImportPreviewResult> => {
-      return previewMcpImportConfig(params, getMcpConnectors())
-    }
-  )
-
-  ipcMain.handle(
-    "mcp:importConfig",
-    async (_event, params: McpImportConfigApplyRequest): Promise<McpImportApplyResult> => {
-      const parsed = parseMcpImportConfig({
-        rawJson: params.rawJson,
-        autoEnable: params.autoEnable ?? true
-      })
-      const result: McpImportApplyResult = {
-        created: [],
-        updated: [],
-        skipped: [],
-        errors: [...parsed.errors]
-      }
-
-      const operations = buildMcpImportOperations({
-        parsed: parsed.connectors,
-        existingConnectors: getMcpConnectors(),
-        conflictStrategy: params.conflictStrategy
-      })
-
-      let changed = false
-      for (const operation of operations) {
-        if (operation.action === "skip") {
-          result.skipped.push({ name: operation.name, reason: operation.reason })
-          continue
-        }
-
-        try {
-          validateMcpConnectorInput(operation.connector)
-          const id = upsertMcpConnector(operation.connector)
-          changed = true
-          if (operation.action === "update") {
-            result.updated.push({ id, name: operation.connector.name })
-          } else {
-            result.created.push({ id, name: operation.connector.name })
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          result.errors.push(`${operation.originalName}: ${message}`)
-        }
-      }
-
-      if (changed) {
-        await invalidateGlobalMcpCapabilityService("mcp:importConfig")
-      }
-
-      return result
-    }
-  )
 
   ipcMain.handle(
     "mcp:create",
@@ -228,12 +143,7 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
     "mcp:testConnection",
     async (
       _event,
-      params: {
-        id?: string
-        config?: McpConnectorUpsert
-        url?: string
-        advanced?: McpConnectorConfig["advanced"]
-      }
+      params: { id?: string; config?: McpConnectorUpsert; url?: string; advanced?: McpConnectorConfig["advanced"] }
     ): Promise<{ success: boolean; tools?: string[]; error?: string }> => {
       let config: McpConnectorUpsert
 
@@ -269,11 +179,7 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
           }
         })
 
-        const tools = await withTimeout(
-          client.getTools(),
-          MCP_TEST_CONNECTION_TIMEOUT_MS,
-          `测试连接超时（${Math.round(MCP_TEST_CONNECTION_TIMEOUT_MS / 1000)} 秒），请检查服务器地址、命令或网络状态`
-        )
+        const tools = await client.getTools()
 
         return {
           success: true,
@@ -284,11 +190,7 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
         return { success: false, error: message }
       } finally {
         if (client) {
-          try {
-            await withTimeout(client.close(), MCP_TEST_CLOSE_TIMEOUT_MS, "关闭 MCP 连接超时")
-          } catch {
-            /* best effort */
-          }
+          try { await client.close() } catch { /* best effort */ }
         }
       }
     }

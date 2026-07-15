@@ -33,27 +33,10 @@ const VERDICT_META: Record<string, { label: string; cls: string; hint: string }>
     label: "超大跳过",
     cls: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
     hint: "基线超 2 万行，未参与逐行测量（有效/采纳为空）"
-  },
-  superseded: {
-    label: "已重写",
-    cls: "bg-muted text-muted-foreground",
-    hint: "生成后整文件被后续 write_file 重写覆盖，原稿作废，不计入有效/采纳"
   }
 }
 
-function verdictMeta(
-  verdict: string | null,
-  reason?: string | null
-): { label: string; cls: string; hint: string } {
-  // superseded 现有两种作废原因，按 reason 细分展示（兼容旧数据：reason 为空时回退到
-  // 「同路径重写」文案）。
-  if (verdict === "superseded" && reason === "agent_rm") {
-    return {
-      label: "agent 删除",
-      cls: "bg-muted text-muted-foreground",
-      hint: "生成后该文件被 agent 删除（rm / git rm），原稿作废、不计入有效/采纳；与人工删除（计未采纳）相区别"
-    }
-  }
+function verdictMeta(verdict: string | null): { label: string; cls: string; hint: string } {
   if (verdict && VERDICT_META[verdict]) return VERDICT_META[verdict]
   return {
     label: verdict || "未知",
@@ -127,14 +110,8 @@ function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
   )
 }
 
-function VerdictBadge({
-  verdict,
-  reason
-}: {
-  verdict: string | null
-  reason?: string | null
-}): React.JSX.Element {
-  const meta = verdictMeta(verdict, reason)
+function VerdictBadge({ verdict }: { verdict: string | null }): React.JSX.Element {
+  const meta = verdictMeta(verdict)
   return (
     <TooltipProvider delayDuration={150}>
       <Tooltip>
@@ -175,7 +152,7 @@ function LocalLinesPanel({
       <div className="px-2 py-3 text-xs text-muted-foreground">
         {data?.reason ?? "本地无法逐行还原"}
         <div className="mt-1 text-[10px] text-muted-foreground/80">
-          逐行仅对当前机器近 14 天、且文件仍在该 commit 中的生成可用。
+          逐行仅对当前机器近 7 天、且文件仍在该 commit 中的生成可用。
         </div>
       </div>
     )
@@ -226,15 +203,7 @@ function TracePairRow({
   onViewThread?: (threadId: string) => void
 }): React.JSX.Element {
   const rate = pairRate(pair)
-  const isSuperseded = pair.verdict === "superseded"
-  const supersededByAgentRm = isSuperseded && pair.reason === "agent_rm"
-  // Superseded drafts are *expected* 0-adopt (their file was rewritten), so don't
-  // flag them with the rose "generated-but-not-adopted" treatment.
-  const zeroAdopted =
-    pair.adoptedLineCount === 0 &&
-    typeof pair.effectiveGeneratedLineCount === "number" &&
-    pair.effectiveGeneratedLineCount > 0 &&
-    !isSuperseded
+  const zeroAdopted = pair.adoptedLineCount === 0
   const orphan = !pair.file && !pair.generatedAt
   const canTrace = Boolean(commitSha && pair.genEventId)
   const threadId = pair.threadId
@@ -247,9 +216,7 @@ function TracePairRow({
   const toggle = (): void => {
     const next = !expanded
     setExpanded(next)
-    // Superseded drafts have no meaningful per-line view (the file was fully
-    // rewritten); the expanded panel shows a static note instead of fetching.
-    if (!next || fetched || !canTrace || isSuperseded) return
+    if (!next || fetched || !canTrace) return
     const api = window.api?.adoption
     if (!api || typeof api.commitLines !== "function") {
       setLocalError("当前环境不支持本地逐行溯源")
@@ -336,7 +303,7 @@ function TracePairRow({
           </div>
         </td>
         <td className="whitespace-nowrap px-3 py-2">
-          <VerdictBadge verdict={pair.verdict} reason={pair.reason} />
+          <VerdictBadge verdict={pair.verdict} />
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground">
           <div>{pair.measureSource ?? "—"}</div>
@@ -370,18 +337,7 @@ function TracePairRow({
       {expanded ? (
         <tr className="border-b border-border/60 bg-muted/10">
           <td colSpan={TRACE_COLSPAN} className="px-3 pb-3">
-            {isSuperseded ? (
-              <div className="px-2 py-3 text-xs text-muted-foreground">
-                {supersededByAgentRm
-                  ? "该生成所在文件已被 agent 删除（rm），原稿作废，逐行从略。"
-                  : "该生成已被后续整文件重写覆盖，原稿作废，逐行从略。"}
-                <div className="mt-1 text-[10px] text-muted-foreground/80">
-                  其有效/采纳均计 0，不影响该 commit 的采纳率分母。
-                </div>
-              </div>
-            ) : (
-              <LocalLinesPanel loading={localLoading} error={localError} data={localData} />
-            )}
+            <LocalLinesPanel loading={localLoading} error={localError} data={localData} />
           </td>
         </tr>
       ) : null}

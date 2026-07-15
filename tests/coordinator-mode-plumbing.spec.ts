@@ -51,7 +51,7 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
 }
 
 async function readProjectFile(path: string): Promise<string> {
-  return (await readFile(join(PROJECT_ROOT, path), "utf8")).replace(/\r\n/g, "\n")
+  return readFile(join(PROJECT_ROOT, path), "utf8")
 }
 
 async function testIpcTypesExposeAgentMode(): Promise<void> {
@@ -87,11 +87,10 @@ async function testRendererSendsAgentMode(): Promise<void> {
   const switcher = await readProjectFile("src/renderer/src/components/chat/AgentModeSwitcher.tsx")
   assertIncludes(switcher, 'value: "normal"', "AgentModeSwitcher exposes normal mode")
   assertIncludes(switcher, 'value: "coordinator"', "AgentModeSwitcher exposes coordinator mode")
-  assertIncludes(switcher, 'value: "workflow"', "AgentModeSwitcher exposes workflow mode")
   assertIncludes(
     switcher,
-    "Solo 快速直达；Team 多代理编排；Workflow 大规模并行。",
-    "AgentModeSwitcher explains the three execution modes"
+    "Solo Agent 快速直达；Agent Team 多代理编排",
+    "AgentModeSwitcher explains coordinator-only flow"
   )
   assertIncludes(switcher, "setOpen(false)", "AgentModeSwitcher closes after selection")
   assertMatches(
@@ -101,7 +100,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     switcher,
-    "适合日常问答、明确小改动、快速排查与独立子任务",
+    "适合日常问答、明确小改动、快速排查与验证",
     "AgentModeSwitcher explains normal mode"
   )
   assertIncludes(
@@ -114,18 +113,13 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(chat, "AgentModeSwitcher", "ChatContainer imports mode switcher")
   assertIncludes(
     chat,
-    "const initialAgentMode: ChatAgentMode = isWorkflowModeMetadata(initialThreadMetadata)",
-    "ChatContainer derives its initial mode (workflow/coordinator/normal) from stored thread metadata"
+    "const initialAgentMode = isCoordinatorModeMetadata(",
+    "ChatContainer derives its initial mode from stored thread metadata"
   )
   assertIncludes(
     chat,
-    "const metadataDerivedMode: ChatAgentMode = disableCoordinatorModeOption",
+    "const metadataDerivedMode: ChatAgentMode = isCoordinatorModeMetadata(currentThread?.metadata)",
     "ChatContainer re-derives mode synchronously when switching threads"
-  )
-  assertIncludes(
-    chat,
-    "isWorkflowModeMetadata(currentThread?.metadata)",
-    "ChatContainer re-derivation covers workflow mode alongside coordinator"
   )
   assertIncludes(
     chat,
@@ -144,7 +138,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "/^\\s*(?:\\[coordinator\\]|#coordinator)\\s*[:-]?/i.test(fullMessage)",
+    "const coordinatorPrefixed = /^\\s*(?:\\[coordinator\\]|#coordinator)",
     "ChatContainer recognizes coordinator prefixes before submitting"
   )
   assertIncludes(
@@ -168,22 +162,21 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。",
     "ChatContainer explains why mode switching is locked after conversation starts"
   )
-  // Formatting-insensitive: prettier may wrap the JSX attribute across lines.
   assertIncludes(
     chat,
-    "disableCoordinatorModeOption || isLoading || !canChangeAgentMode",
+    "locked={isLoading || !canChangeAgentMode}",
     "ChatContainer locks mode switching while running or after the thread has messages"
   )
 
   const threadContextSource = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
-  assertMatches(
+  assertIncludes(
     threadContextSource,
-    /state\.workspacePath === data\.path\s*\?\s*\{ workspacePath: data\.path \}\s*:\s*\{ workspacePath: data\.path, coordinatorWorkers: \[\] \}/,
+    "state.workspacePath === data.path\n                ? { workspacePath: data.path }\n                : { workspacePath: data.path, coordinatorWorkers: [] }",
     "ThreadContext clears stale coordinator workers when a backend workspace path change arrives"
   )
-  assertMatches(
+  assertIncludes(
     threadContextSource,
-    /state\.workspacePath === path\s*\?\s*\{ workspacePath: path \}\s*:\s*\{ workspacePath: path, coordinatorWorkers: \[\] \}/,
+    "state.workspacePath === path\n              ? { workspacePath: path }\n              : { workspacePath: path, coordinatorWorkers: [] }",
     "ThreadContext clears stale coordinator workers when the current thread switches workspace locally"
   )
   assertIncludes(
@@ -198,9 +191,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
 
   const tabbedPanel = await readProjectFile("src/renderer/src/components/tabs/TabbedPanel.tsx")
-  assertMatches(
+  assertIncludes(
     tabbedPanel,
-    /<ChatContainer\s+key=\{threadId\}/,
+    "<ChatContainer\n            key={threadId}",
     "TabbedPanel remounts ChatContainer when switching threads so old agent mode state cannot leak across threads"
   )
   assertIncludes(
@@ -255,8 +248,8 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "当前环境变量强制开启 Agent Team，不能切换到其他执行模式",
-    "ChatContainer blocks switching away from coordinator when it is forced by environment"
+    "当前环境变量强制开启 Agent Team，不能切回 Solo Agent",
+    "ChatContainer blocks switching back to normal when coordinator mode is forced by environment"
   )
 
   const transport = await readProjectFile("src/renderer/src/lib/electron-transport.ts")
@@ -319,21 +312,6 @@ async function testRendererSendsAgentMode(): Promise<void> {
     workspacePicker,
     'if (selection.status !== "success") return',
     "WorkspacePicker only resets worktree UI state after a successful workspace change"
-  )
-  assertMatches(
-    workspacePicker,
-    /async function handleCreateWorktree\(\): Promise<void> \{\s*if \(!canChangeWorkspace\)/,
-    "WorkspacePicker blocks worktree creation once the thread has messages"
-  )
-  assertMatches(
-    workspacePicker,
-    /function handleModeSelect\(selected: WorkspaceMode\): void \{\s*if \(selected === "worktree" && !canChangeWorkspace\)/,
-    "WorkspacePicker blocks switching into worktree mode once the thread has messages"
-  )
-  assertIncludes(
-    workspacePicker,
-    "isGit && !isWorktree && !isWorktreePath && canChangeWorkspace",
-    "WorkspacePicker only shows the worktree mode selector while workspace switching is allowed"
   )
 
   const preload = await readProjectFile("src/preload/index.ts")
@@ -427,9 +405,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "msg.additional_kwargs ?? msg.kwargs?.additional_kwargs",
     "thread context recognizes internal notification metadata from live and serialized messages"
   )
-  assertMatches(
+  assertIncludes(
     threadContext,
-    /const messageId =\s*msg\.kwargs\?\.id \?\? \(typeof msg\.id === "string" \? msg\.id : `msg-\$\{index\}`\)/,
+    'const messageId =\n                msg.kwargs?.id ?? (typeof msg.id === "string" ? msg.id : `msg-${index}`)',
     "thread context uses LangChain message kwargs.id before serialized class-path ids"
   )
   assertIncludes(
@@ -454,21 +432,8 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "(coordinatorNotificationAttemptsRef.current[threadId] ?? 0) > 0 ||",
-    "thread context reschedules coordinator notification on idle when an attempt is outstanding or a busy-deferred retry is pending"
-  )
-  // #2: workflow notifications get the SAME retry-on-idle handoff as coordinator,
-  // so a foreground turn longer than the bounded retry budget doesn't strand the
-  // workflow completion turn until the next hydrate.
-  assertIncludes(
-    threadContext,
-    "workflowNotificationRetryOnIdleRef.current[threadId] = true",
-    "thread context defers a busy workflow notification to a retry-on-idle handoff"
-  )
-  assertIncludes(
-    threadContext,
-    "if (workflowNotificationRetryOnIdleRef.current[threadId]) {",
-    "thread context reschedules a deferred workflow notification when the thread goes idle"
+    "!coordinatorNotificationRetryOnIdleRef.current[threadId]",
+    "thread context only suppresses idle retry when there is neither an outstanding attempt nor a deferred busy-stream retry"
   )
   assertIncludes(
     threadContext,
@@ -480,9 +445,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
     'worker.status === "running"',
     "thread context treats running coordinator workers as unresolved work"
   )
-  assertMatches(
+  assertIncludes(
     threadContext,
-    /worker\.notification_acknowledged === false &&\s*worker\.suppress_notification_auto_run !== true/,
+    "worker.notification_acknowledged === false &&\n            worker.suppress_notification_auto_run !== true",
     "thread context only treats unsuppressed terminal notifications as unresolved auto-run work"
   )
   assertIncludes(
@@ -490,9 +455,9 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "if (!initializedThreadsRef.current.has(threadId)) return false",
     "thread context does not keep polling cold threads whose coordinator notifications cannot auto-run yet"
   )
-  assertMatches(
+  assertIncludes(
     threadContext,
-    /if \(isThreadMetadataExplicitNormalMode\(threadId\) && !isEnvironmentCoordinatorMode\) \{\s*return false\s*\}/,
+    "if (isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode) {\n          return false\n        }",
     "thread context lets unresolved terminal notifications drop out of the periodic refresh loop when explicit normal mode suppresses coordinator auto-runs"
   )
   assertIncludes(
@@ -620,9 +585,16 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "用户输入的普通文本",
     "ChatContainer keeps user-typed coordinator internal markers visible as ordinary text"
   )
-  // The `keepPrepareApprovalForSaveMetadata` assertions were removed: that
-  // variable was deleted in the code_exec one-shot-save refactor (86a48337),
-  // so they could never pass and are unrelated to mode plumbing.
+  assertIncludes(
+    chat,
+    "keepPrepareApprovalForSaveMetadata",
+    "ChatContainer keeps the prepare approval visible until the save metadata approval replaces it"
+  )
+  assertIncludes(
+    chat,
+    "if (!keepPrepareApprovalForSaveMetadata)",
+    "ChatContainer clears ordinary orchestrator approvals while preserving code-exec bridge state"
+  )
 }
 
 async function testMainResolvesAndPersistsMode(): Promise<void> {
@@ -1009,9 +981,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "if (controller && !cancelWorkers) {",
     "agent cancel only aborts the foreground controller for full-turn cancellation, not background worker cancellation"
   )
-  assertMatches(
+  assertIncludes(
     agentIpc,
-    /suppressNotificationAutoRun: true,\s*dismissNotificationOnTerminalPersist: true/,
+    "suppressNotificationAutoRun: true,\n              dismissNotificationOnTerminalPersist: true",
     "agent cancel marks user-requested background worker cancellation notifications as non-resuming UI updates"
   )
   assertIncludes(
@@ -1019,14 +991,14 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "LocalSandbox.cancelBackgroundTasks(threadId)",
     "agent cancel still revokes foreground thread-scoped background tasks for full-turn cancellation"
   )
-  assertMatches(
+  assertIncludes(
     agentIpc,
-    /sendCoordinatorWorkers\(\s*window,\s*`agent:stream:\$\{threadId\}`,\s*coordinatorWorkerManager\.readWorkers\(threadId\)\s*\)/,
+    "sendCoordinatorWorkers(\n          window,\n          `agent:stream:${threadId}`,\n          coordinatorWorkerManager.readWorkers(threadId)\n        )",
     "agent cancel immediately publishes the full worker snapshot instead of a truncated cancelled-only list"
   )
-  assertMatches(
+  assertIncludes(
     agentIpc,
-    /console\.warn\("\[Agent\] Failed to wait for coordinator worker cancellation:", error\)\s*if \(!window \|\| window\.isDestroyed\(\)\) return\s*sendCoordinatorWorkers\(/,
+    'console.warn("[Agent] Failed to wait for coordinator worker cancellation:", error)\n            if (!window || window.isDestroyed()) return\n            sendCoordinatorWorkers(',
     "agent cancel publishes a full worker snapshot even when cleanup wait fails"
   )
   assertIncludes(
@@ -1090,11 +1062,6 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "visibleTranscriptUserMessage = effectiveMessage",
-    "agent IPC persists the de-weaponized coordinator marker text into the durable transcript"
-  )
-  assertIncludes(
-    agentIpc,
     "containsCoordinatorInternalMarker(effectiveMessage)",
     "agent IPC treats all coordinator internal markers as user-supplied text unless the IPC flag is trusted"
   )
@@ -1120,44 +1087,18 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "userMessage: isInternalNotificationTurn ? undefined : message",
-    "agent Stop hook context does not override internal (coordinator OR workflow) notification turns with placeholder text"
+    "userMessage: isCoordinatorNotificationTurn ? undefined : message",
+    "agent Stop hook context does not override internal coordinator notification turns with placeholder text"
   )
   assertIncludes(
     agentIpc,
     "processing internal worker notification turn",
     "agent IPC skips user-prompt hooks for internal worker notifications"
   )
-  // Explicit-skill activation + the UserPromptSubmit hook must be skipped for ANY
-  // internal notification turn (coordinator OR workflow), not just coordinator —
-  // otherwise a plugin could block/rewrite/halt the workflow result-report turn.
   assertIncludes(
     agentIpc,
-    "if (!isInternalNotificationTurn) {",
-    "explicit-skill + UserPromptSubmit hooks are gated on isInternalNotificationTurn (covers workflow turns)"
-  )
-  // The COMPLETION Stop hook is neutralized ONLY for WORKFLOW notification turns
-  // (not coordinator): it runs on the success path, so a plugin block would
-  // `return` without hitting the catch-side rollback, permanently losing a
-  // background workflow's one-and-only result report. Coordinator deliberately
-  // KEEPS HEAD behavior (Stop hooks fire) — its worker result is re-discoverable
-  // on the next thread hydrate, so the loss risk does not apply.
-  assertIncludes(
-    agentIpc,
-    "runStopHooks: isWorkflowNotificationTurn ? async () => null : undefined",
-    "Stop hooks are skipped ONLY for workflow notification turns (coordinator keeps HEAD behavior)"
-  )
-  // Guard against regressing coordinator: the Stop-hook skip must NOT key off the
-  // broader isInternalNotificationTurn (which also covers coordinator turns).
-  assertNotIncludes(
-    agentIpc,
-    "runStopHooks: isInternalNotificationTurn ? async () => null : undefined",
-    "Stop-hook skip must not be gated on isInternalNotificationTurn (would re-break coordinator)"
-  )
-  assertIncludes(
-    agentIpc,
-    "!isInternalNotificationTurn && isOnlineSkillEvolutionEnabled()",
-    "agent IPC excludes internal (coordinator OR workflow) notification turns from skill evolution"
+    "!isCoordinatorNotificationTurn && isOnlineSkillEvolutionEnabled()",
+    "agent IPC excludes internal worker notifications from skill evolution"
   )
   assertIncludes(
     agentIpc,
@@ -1248,7 +1189,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertSourceOrder(
     agentIpc,
-    "const humanMessages",
+    "const humanMessages = [",
     "const acknowledgeDeliveredCoordinatorNotificationsIfNeeded",
     "agent IPC delivery-acknowledges task-notifications only after constructing the internal HumanMessage batch"
   )
@@ -1619,14 +1560,14 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "User cancelled coordinator workers.",
     "agent IPC cancels workers only on explicit background-worker stop"
   )
-  assertMatches(
+  assertIncludes(
     agentIpc,
-    /void coordinatorWorkerManager\s*\.waitForWorkerCleanup/,
+    "void coordinatorWorkerManager\n          .waitForWorkerCleanup",
     "agent IPC waits for explicit worker stop cleanup without blocking the cancel response"
   )
-  assertMatches(
+  assertIncludes(
     agentIpc,
-    /coordinatorWorkerManager\.acknowledgeNotifications\(\s*threadId,\s*workers\.map\(\(worker\) => worker\.worker_id\)/,
+    "coordinatorWorkerManager.acknowledgeNotifications(\n              threadId,\n              workers.map((worker) => worker.worker_id)",
     "agent IPC acknowledges explicitly cancelled worker notifications to avoid an extra auto coordinator turn"
   )
   assertIncludes(
@@ -1643,8 +1584,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   const threadsIpc = await readProjectFile("src/main/ipc/threads.ts")
   assertIncludes(
     threadsIpc,
-    "retireThreadCheckpointers(threadId)",
-    "thread deletion retires the parent AND all sub-thread checkpointers (tombstone + poison)"
+    "closeWorkerCheckpointersForThread(threadId)",
+    "thread deletion closes worker checkpointers"
   )
   assertIncludes(
     threadsIpc,
@@ -1683,43 +1624,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     threadsIpc,
-    "getAgentModeFromMetadata(sourceMetadata)",
-    "thread fork inherits legacy coordinatorMode metadata through the shared mode resolver"
-  )
-  assertNotIncludes(
-    threadsIpc,
-    "overrides?.agentMode ?? sourceMetadata.agentMode",
-    "thread fork must not bypass legacy coordinatorMode metadata when inheriting agent mode"
-  )
-  assertIncludes(
-    threadsIpc,
-    'hasOwnProperty(overrides, "workspacePath")',
-    "thread fork treats explicit workspacePath null overrides as intentional"
-  )
-  assertNotIncludes(
-    threadsIpc,
-    "overrides?.workspacePath ?? sourceMetadata.workspacePath",
-    "thread fork must not swallow explicit workspacePath null overrides"
-  )
-  assertIncludes(
-    threadsIpc,
     "Timed out waiting for coordinator worker cleanup",
     "thread deletion logs cleanup timeout warnings instead of aborting the rest of teardown"
-  )
-  // The session export drops ONLY the new workflow notification plumbing.
-  // Coordinator export keeps its HEAD behavior verbatim — this feature must not
-  // alter what an existing coordinator session exports.
-  assertIncludes(
-    threadsIpc,
-    "if (isWorkflowPlumbingTranscriptContent(rawContent)) return []",
-    "session export filters workflow plumbing messages"
-  )
-  // Guard against regressing coordinator: the export filter must NOT match
-  // coordinator plumbing markers (that would change coordinator export output).
-  assertNotIncludes(
-    threadsIpc,
-    '"[[CMB_COORDINATOR_"',
-    "export filter must not drop coordinator plumbing (keeps HEAD coordinator export behavior)"
   )
   assertSourceOrder(
     threadsIpc,
@@ -1925,33 +1831,13 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "Eager MCP tools (if any are connected) ARE available for direct single-tool calls",
-    "runtime tells read-only workers eager MCP is available (deferred bridge still cut)"
+    "browser_playwright, deferred tools, and eager MCP tools are unavailable",
+    "runtime tells read-only workers that browser/deferred/eager MCP tools are unavailable"
   )
   assertIncludes(
     runtime,
-    "run read-only shell commands via execute",
-    "runtime lets read-only workers run read-only shell commands (execute kept)"
-  )
-  assertIncludes(
-    runtime,
-    "safety gate that blocks clearly-dangerous and unrecognized commands, but do NOT rely on it",
-    "runtime tells read-only workers the execute gate is a safety net, not a guarantee (self-restrict)"
-  )
-  assertIncludes(
-    runtime,
-    "no mkdir/touch/rm/cp/mv",
-    "runtime gives read-only workers an explicit mutating-command denylist (helps mid-tier models avoid wasted attempts)"
-  )
-  assertIncludes(
-    runtime,
-    'filesystemAccess?.workload === "read_only"',
-    "runtime gates a read-only worker's execute to provably read-only commands via isReadOnlyShellCommand"
-  )
-  assertIncludes(
-    runtime,
-    "run validation commands, and use available browser automation skills/tools",
-    "runtime tells verifier workers to use session-available browser verification capabilities"
+    "run validation commands, and use browser_playwright",
+    "runtime tells verifier workers browser verification is available when the tool exists"
   )
   assertIncludes(
     runtime,
@@ -1961,7 +1847,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertIncludes(
     runtime,
     "if (isConstrainedCoordinatorWorker)",
-    "runtime branches constrained coordinator workers onto an eager-MCP-only path (deferred bridge + code_exec withheld)"
+    "runtime branches constrained coordinator workers onto a lightweight capability-discovery path"
   )
   assertIncludes(
     runtime,
@@ -1975,13 +1861,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "Constrained coordinator worker: keeping",
-    "runtime keeps eager MCP for constrained coordinator workers (deferred bridge + code_exec withheld)"
-  )
-  assertIncludes(
-    runtime,
-    "deferred bridge + code_exec withheld",
-    "runtime withholds the deferred bridge + code_exec from constrained workers while keeping eager MCP"
+    "Skipping MCP and deferred tool discovery for constrained coordinator worker",
+    "runtime skips capability discovery work for constrained coordinator workers"
   )
   assertIncludes(
     runtime,
@@ -2172,8 +2053,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     workerAccess,
-    'new Set(["execute", "task_output", ...deferredToolNames])',
-    "worker access policy removes shell execution and deferred execution from owned_files-scoped write workers"
+    'new Set(["execute", "task_output", ...deferredToolNames, ...externalSideEffectToolNames])',
+    "worker access policy removes shell/browser execution from owned_files-scoped write workers"
   )
   assertIncludes(
     runtime,
@@ -2187,8 +2068,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    'eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")',
-    "runtime still discovers + keeps EAGER MCP for constrained coordinator workers"
+    "Skipping MCP and deferred tool discovery for constrained coordinator worker",
+    "runtime skips MCP discovery entirely for constrained coordinator workers"
   )
   assertIncludes(
     workerAccess,
@@ -2274,16 +2155,6 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     coordinatorMode,
-    "read_only workers do not receive direct write_file/edit_file tools, but they DO keep execute",
-    "coordinator prompt reflects that read_only workers keep (read-only-gated) execute — so the model prefers cheap read_only workers for shell inspection"
-  )
-  assertIncludes(
-    coordinatorMode,
-    "mvn dependency:tree",
-    "coordinator prompt lists build-tool read-only inspection subcommands so the model uses a read_only worker (not verify) for dependency inspection"
-  )
-  assertIncludes(
-    coordinatorMode,
     "toCoordinatorWorkerToolSnapshot",
     "coordinator worker tools strip internal fields before returning worker snapshots to the model"
   )
@@ -2318,251 +2189,15 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "closeCheckpointer(workerInput.workerThreadId)",
     "runtime releases worker checkpointer resources when a worker turn finishes"
   )
-  assertMatches(
+  assertIncludes(
     runtime,
-    /checkpointers\.delete\(threadId\)\s+await checkpointer\.close\(\)/,
+    "checkpointers.delete(threadId)\n    await checkpointer.close()",
     "runtime removes checkpointer from cache before awaiting close"
   )
   assertIncludes(
     runtime,
-    "retiredThreadIds.add(threadId)",
-    "thread retirement tombstones FIRST so no interleaved caller can recreate a checkpointer"
-  )
-  assertIncludes(
-    runtime,
-    "await checkpointer.retire()",
-    "thread retirement poisons instances (retire, not close) so held references cannot resurrect files"
-  )
-  assertIncludes(
-    runtime,
-    'if (threadId.includes("__")) continue',
-    "LRU eviction skips ALL sub-thread checkpointers (rule, not a name list)"
-  )
-  assertIncludes(
-    runtime,
-    "if (isRetiredThreadId(threadId) || !checkpointers.has(threadId)) {",
-    "the mid-init refusal re-sweeps on active tombstone OR no-cached-saver — a BEST-EFFORT mitigation (accepted residual: a revived saver mid-initialize is not cached either; its fallout is bounded and self-healing), not an ownership proof"
-  )
-  const workflowRunManager = await readProjectFile("src/main/agent/workflow/run-manager.ts")
-  assertIncludes(
-    workflowRunManager,
-    "isWorkflowRunDirDisposed(request.workspacePath, request.threadId)",
-    "workflow launch refuses a deleted thread (persistScriptFile would mkdir the swept run dir back)"
-  )
-  const workflowTool = await readProjectFile("src/main/agent/workflow/tool.ts")
-  assertSourceOrder(
-    workflowTool,
-    "isWorkflowRunDirDisposed(workspacePath, threadId)",
-    "await ensureWorkflowApproved(",
-    "workflow tool refuses a deleted thread BEFORE prompting for approval — the thread's UI is gone, so the prompt would hang the tool call"
-  )
-  const threadsIpcForRollback = await readProjectFile("src/main/ipc/threads.ts")
-  assertIncludes(
-    threadsIpcForRollback,
-    "rollbackWorkflowThreadDisposal(threadId, priorDisposalMark)",
-    "a deletion failing before dbDeleteThread rolls the workflow tombstone back — the surviving thread must not stay poisoned until restart"
-  )
-  assertSourceOrder(
-    threadsIpcForRollback,
-    "purgeThreadCheckpointArtifacts(threadId)",
-    "deleteCoordinatorWorkerArtifacts(threadId, workspacePath)",
-    "checkpoint sweeps run in the SAME sync segment as the retire settlement — an await before them would let a revived fixed-id beat flush a fresh checkpoint the old deletion then eats"
-  )
-  const retireCall = "await retireThreadCheckpointers(threadId)"
-  const purgeCall = "purgeThreadCheckpointArtifacts(threadId)"
-  const retireIndex = threadsIpcForRollback.indexOf(retireCall)
-  const purgeIndex = threadsIpcForRollback.indexOf(purgeCall)
-  assert(retireIndex >= 0, "thread deletion must await retireThreadCheckpointers")
-  assert(purgeIndex > retireIndex, "thread deletion must purge checkpoints after retire settles")
-  const retireToPurgeCodeOnly = threadsIpcForRollback
-    .slice(retireIndex + retireCall.length, purgeIndex)
-    .replace(/\/\/.*$/gm, "")
-  assert(
-    !/^\s*await\b/m.test(retireToPurgeCodeOnly),
-    "no await may be inserted between retire settlement and checkpoint sweeps"
-  )
-  // Same-thread deletion mutex (was a real P2: overlapping deletes interleave
-  // mark/rollback — A's failure rollback lifts the tombstone B depends on).
-  // Source-level guard: a behavioral test would need a full electron/db mock
-  // harness for the IPC handler; these three assertions lock the mutex shape.
-  assertIncludes(
-    threadsIpcForRollback,
-    "const deletingThreads = new Map<string, Promise<void>>()",
-    "thread deletion keeps a per-thread serialization map"
-  )
-  assertSourceOrder(
-    threadsIpcForRollback,
-    "while (deletingThreads.has(threadId))",
-    "const deletion = performThreadDeletion(event, threadId)",
-    "a new deletion WAITS OUT any in-flight deletion of the same thread before starting"
-  )
-  assertMatches(
-    threadsIpcForRollback,
-    /finally \{\s*if \(deletingThreads\.get\(threadId\) === deletion\) deletingThreads\.delete\(threadId\)/,
-    "the deletion mutex entry is released on success AND failure (finally), so a failed delete can be retried"
-  )
-  const chatxService = await readProjectFile("src/main/services/chatx.ts")
-  assertIncludes(
-    chatxService,
-    "handleInbound(next, true)",
-    "chatx queue drain must skip receipt-dedup — the entry's id was marked when it was queued, so re-checking silently dropped every queued message"
-  )
-  assertOccurrenceCount(
-    chatxService,
-    "abortController.signal.reason === CHATX_STOP_ABORT_REASON",
-    1,
-    "the stop reason may be consulted ONCE, in the abort CLASSIFICATION only — never for a handler-side dedup release (stopChatX's synchronous release is the single point; a second delete can strip a redelivered copy's fresh mark)"
-  )
-  assertSourceOrder(
-    chatxService,
-    "const replySent = lastAssistantText",
-    'processedOutcome = "replied"',
-    "the replied outcome is claimed only AFTER the HTTP send is verified — a swallowed send failure must not masquerade as 回复完成 while the remote got nothing"
-  )
-  assertOccurrenceCount(
-    chatxService,
-    "drainNextQueued(",
-    5,
-    "queue draining continues on EVERY requeued exit (definition + main finally + robot-gone + workspace-missing + setup-failure) — an early-exiting requeued message must not strand the backlog"
-  )
-  {
-    const stopChatXBody = chatxService.slice(
-      chatxService.indexOf("export function stopChatX"),
-      chatxService.indexOf("export function cancelChatXByThreadId")
-    )
-    assertIncludes(
-      stopChatXBody,
-      "processedMsgIds.delete(queued.msgId)",
-      "stopChatX releases the dedup marks of the queued messages it drops — dropped ≠ processed, broker redeliveries must still land after a restart"
-    )
-    assertMatches(
-      chatxService,
-      /inFlightMsgIds\.delete\(chatKey\)[\s\S]{0,900}?sendChatXReply/,
-      "the success branch removes the message from the stop-releasable set BEFORE the reply is sent — a stop landing after the reply must not re-open an already-answered msgId for redelivery (duplicate tools/replies)"
-    )
-    assertIncludes(
-      stopChatXBody,
-      "processedMsgIds.delete(activeMsgId)",
-      "stopChatX releases the ACTIVE message's dedup mark synchronously at abort — the handler's finally-release loses the race against a quick reconnect's broker redelivery"
-    )
-    assertIncludes(
-      stopChatXBody,
-      "controller.abort(CHATX_STOP_ABORT_REASON)",
-      "stopChatX carries its intent ON the abort signal — the global `stopped` flag is reset by restartChatX before the aborted handler's catch runs, so a flag check there swallows broker redeliveries"
-    )
-    assertNotIncludes(
-      stopChatXBody,
-      "runningChats.clear()",
-      "stopChatX must NOT clear owner-managed run state — the handler's finally does, after its close settles (else stop→restart reopens the dual-writer window on a reused chat thread)"
-    )
-  }
-  const schedulerService = await readProjectFile("src/main/services/scheduler.ts")
-  assertSourceOrder(
-    schedulerService,
-    "await closeCheckpointer(threadId)",
-    "runningTasks.delete(taskId)",
-    "scheduler run state survives until the checkpointer close settles (owner-finally), while still deleting before the renderer broadcast"
-  )
-  for (const [label, source] of [
-    ["chatx", chatxService],
-    ["scheduler", schedulerService]
-  ] as const) {
-    assertSourceOrder(
-      source,
-      "dbDeleteThread(threadId)",
-      "purgeThreadCheckpointArtifacts(threadId)",
-      `${label}'s discarded-thread cleanup deletes the transcript too (retire + purge), matching threads:delete semantics — a bare DB-row delete leaves an orphan checkpoint the finally's reusable close just flushed`
-    )
-    assertSourceOrder(
-      source,
-      "await retireThreadCheckpointers(threadId)",
-      "purgeThreadCheckpointArtifacts(threadId)",
-      `${label}'s discarded-thread cleanup must RETIRE before purging (writers poisoned before the disk sweep) — dbDelete + purge without retire would let the finally's reusable close resurrect the file`
-    )
-  }
-  assertMatches(
-    chatxService,
-    /await closeCheckpointer\(threadId\)[^\n]*\n\s*runningChats\.delete\(chatKey\)/,
-    "chatx keeps its runningChats gate up until the checkpointer close settles — an inbound in the close window would pin, skip the pending-close wait, and dual-write the reused thread's sqlite (heartbeat's finally, same family)"
-  )
-  {
-    const stopSchedulerBody = schedulerService.slice(
-      schedulerService.indexOf("export function stopScheduler"),
-      schedulerService.indexOf("function armTimer")
-    )
-    assertIncludes(
-      stopSchedulerBody,
-      "controller.abort()",
-      "stopScheduler still ABORTS every running task — abort-only means both halves: signal the stop AND leave run state to the owner's finally"
-    )
-    assertNotIncludes(
-      stopSchedulerBody,
-      "runningTasks.clear()",
-      "stopScheduler must NOT clear run state — executeTask's finally releases it after its own cleanup settles (owner-finally principle, same as stopChatX/stopHeartbeat)"
-    )
-    assertNotIncludes(
-      stopSchedulerBody,
-      "activeAbortControllers.clear()",
-      "stopScheduler must NOT clear controllers — isTaskRunning()/cancelTask() must stay accurate during the unwind window"
-    )
-  }
-  const workflowRunManagerSource = await readProjectFile("src/main/agent/workflow/run-manager.ts")
-  assertIncludes(
-    workflowRunManagerSource,
-    "> MAX_RENOTIFY_ATTEMPTS",
-    "exhaustion is STRICTLY greater-than: the MAXth (final) re-report is dispatched-and-pending, not exhausted — >= would unlock the mode-exit guard before the renderer timer fires and silently drop the last report"
-  )
-  assertIncludes(
-    workflowRunManagerSource,
-    "this.inFlightNotifications.has(runId) || !this.isRenotifyExhausted(runId)",
-    "the busy guard counts an in-flight (even exhausted) run as deliverable — exiting workflow mode mid-report would strand that delivery"
-  )
-  const heartbeatService = await readProjectFile("src/main/services/heartbeat.ts")
-  assertIncludes(
-    heartbeatService,
-    "reviveRetiredThread(threadId)",
-    "heartbeat lifts the runtime tombstone for its fixed thread id (else every beat fails until restart)"
-  )
-  assertIncludes(
-    heartbeatService,
-    "reviveWorkflowThread(threadId)",
-    "heartbeat lifts the run-store tombstone for its fixed thread id"
-  )
-  assertSourceOrder(
-    heartbeatService,
-    "reviveRetiredThread(threadId)",
-    "const existing = dbGetThread(threadId)",
-    "heartbeat revives UNCONDITIONALLY (before the row-exists branch) — a row-missing-only revive deadlocks when a deletion's late retire re-tombstones a mid-deletion recreation"
-  )
-  assertMatches(
-    heartbeatService,
-    /await closeCheckpointer\(HEARTBEAT_THREAD_ID\)[^\n]*\n(?:\s*\}\n)?\s*running = false/,
-    "heartbeat keeps `running` up until its checkpointer close settles — a run-now in the close window would pin, skip the pending-close wait, and dual-write the same file"
-  )
-  assertSourceOrder(
-    heartbeatService,
-    "running = true",
-    "await resolveModel",
-    "heartbeat sets its re-entry gate SYNCHRONOUSLY before the first await — a gate set after routing lets two fire-and-forget triggers race getCheckpointer's create-then-cache and dual-write the fixed-id sqlite"
-  )
-  const stopHeartbeatBody = heartbeatService.slice(
-    heartbeatService.indexOf("export function stopHeartbeat"),
-    heartbeatService.indexOf("/** Restart the timer")
-  )
-  assertNotIncludes(
-    stopHeartbeatBody,
-    "running = false",
-    "stopHeartbeat must NOT release the runNow re-entry gate — only the owning run's finally may, after its close settles (else stop+run-now reopens the dual-writer window)"
-  )
-  assertNotIncludes(
-    stopHeartbeatBody,
-    "abortController = null",
-    "stopHeartbeat must NOT null the shared controller — the running execution still reads its signal; the owner clears it identity-checked"
-  )
-  assertIncludes(
-    heartbeatService,
-    "if (abortController === controller) abortController = null",
-    "heartbeat run finally clears the shared controller only when it still owns it"
+    'if (parentThreadId.includes("__worker__"))',
+    "runtime refuses ambiguous worker-checkpoint cleanup requests for invalid parent thread ids"
   )
   assertIncludes(
     runtime,
@@ -2719,8 +2354,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "!disableMemoryInjection && memorySources?.length ? memorySources : undefined",
-    "coordinator main thread DOES inject memory — it is the only user-facing agent, so MEMORY.md collaboration prefs (e.g. reply-in-Chinese) reach it; mirrors CC carrying auto-MEMORY.md into the coordinator main. NOT gated by isCoordinatorMode (unlike todos/fs/skills)"
+    "memory: mainMemorySources",
+    "runtime avoids injecting memory middleware into coordinator main thread"
   )
   assertIncludes(
     workerManager,

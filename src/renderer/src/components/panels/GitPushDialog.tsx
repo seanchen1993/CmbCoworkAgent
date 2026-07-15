@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button"
 interface GitPushDialogProps {
   open: boolean
   running: boolean
-  loading?: boolean
   branch: string
   pendingCommits?: Array<{ hash: string; message: string; date: string }>
   onOpenChange: (open: boolean) => void
@@ -15,14 +14,13 @@ interface GitPushDialogProps {
 export function GitPushDialog({
   open,
   running,
-  loading = false,
   branch,
   pendingCommits,
   onOpenChange,
   onSubmit
 }: GitPushDialogProps): React.JSX.Element {
   const commitCount = pendingCommits?.length ?? 0
-  const noPushableCommits = !loading && commitCount === 0
+  const noPushableCommits = commitCount === 0
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -44,27 +42,11 @@ export function GitPushDialog({
             </div>
             <div className="flex items-center justify-between gap-3 text-xs">
               <span className="text-muted-foreground">待推送</span>
-              <span className="font-medium">
-                {loading ? (
-                  <span className="inline-flex items-center gap-1.5">
-                    <Loader2 className="size-3 animate-spin" />
-                    读取中
-                  </span>
-                ) : (
-                  `${commitCount} commits`
-                )}
-              </span>
+              <span className="font-medium">{commitCount} commits</span>
             </div>
           </div>
 
-          {loading ? (
-            <div className="rounded-lg border border-border/70 bg-muted/20 p-3 text-sm text-muted-foreground">
-              <div className="flex items-center gap-2">
-                <Loader2 className="size-4 animate-spin" />
-                正在读取当前仓库待推送提交...
-              </div>
-            </div>
-          ) : noPushableCommits ? (
+          {noPushableCommits ? (
             <div className="rounded-lg border border-amber-500/45 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
@@ -109,7 +91,7 @@ export function GitPushDialog({
             id="git-push-button"
             type="button"
             className="w-full h-9"
-            disabled={running || loading || noPushableCommits}
+            disabled={running || noPushableCommits}
             onClick={onSubmit}
           >
             {running ? (

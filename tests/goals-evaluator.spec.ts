@@ -14,10 +14,7 @@ import {
   shouldPauseGoalForEmptyTurn,
   type GoalEvaluationInput
 } from "../src/main/agent/goals/evaluator.ts"
-import {
-  evaluateGoalWithRuntimeRetry,
-  formatGoalEvaluatorRuntimeFailureReason
-} from "../src/main/agent/goals/evaluator-runtime.ts"
+import { evaluateGoalWithRuntimeRetry } from "../src/main/agent/goals/evaluator-runtime.ts"
 import type { GoalJudgeDecision, ThreadGoal } from "../src/main/agent/goals/types.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -273,7 +270,7 @@ async function testRuntimeEvaluatorRetryFallsBackAfterRepeatedFailure(): Promise
   let calls = 0
   const fallbackDecision: GoalJudgeDecision = {
     verdict: "blocked",
-    reason: "评估器暂时不可用。请稍后使用 /goal resume 重试。"
+    reason: "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。"
   }
   const decision = await evaluateGoalWithRuntimeRetry(goalEvaluationInput(), {
     retryDelayMs: 0,
@@ -293,79 +290,6 @@ async function testRuntimeEvaluatorRetryFallsBackAfterRepeatedFailure(): Promise
   )
 }
 
-function testRuntimeEvaluatorFailureReasonIncludesSanitizedSummary(): void {
-  const reason = formatGoalEvaluatorRuntimeFailureReason(
-    new Error(
-      [
-        "request timed out with token=sk-abcdefghijklmnopqrstuvwxyz after 30000ms",
-        "OPENAI_API_KEY=abc123secret",
-        "Authorization: ApiKey auth123secret",
-        "client_secret=client123secret",
-        "refresh_token=refresh123secret",
-        "password=password123secret",
-        "key=generic123secret",
-        "AWS_ACCESS_KEY_ID=aws123secret",
-        "basic auth https://user:pass-secret@host/v1",
-        "JWT eyJaaaaaaaaaa.bbbbbbbbbb.cccccccccc",
-        "signed https://example.com/file?Signature=signed123secret&Expires=1",
-        "provider said API key natural123secret",
-        "-----BEGIN PRIVATE KEY-----private123secret-----END PRIVATE KEY-----"
-      ].join("\n")
-    )
-  )
-
-  assert(
-    reason.includes("request timed out"),
-    "runtime evaluator failure reason should include a concise error summary"
-  )
-  assert(
-    !reason.includes("sk-abcdefghijklmnopqrstuvwxyz"),
-    "runtime evaluator failure reason should redact likely API keys"
-  )
-  for (const secret of [
-    "abc123secret",
-    "auth123secret",
-    "client123secret",
-    "refresh123secret",
-    "password123secret",
-    "generic123secret",
-    "aws123secret",
-    "pass-secret",
-    "eyJaaaaaaaaaa.bbbbbbbbbb.cccccccccc",
-    "signed123secret",
-    "natural123secret",
-    "private123secret"
-  ]) {
-    assert(!reason.includes(secret), `runtime evaluator failure reason should redact ${secret}`)
-  }
-  assert(reason.includes("[redacted]"), "runtime evaluator failure reason should mark redaction")
-  assert(
-    reason.includes("/goal resume"),
-    "runtime evaluator failure reason should keep the resume instruction"
-  )
-}
-
-function testRuntimeEvaluatorFailureReasonHandlesUnstringifiableErrors(): void {
-  const symbolReason = formatGoalEvaluatorRuntimeFailureReason(Symbol("evaluator timeout"))
-  const functionReason = formatGoalEvaluatorRuntimeFailureReason(function evaluatorFailure() {
-    return undefined
-  })
-  const undefinedJsonReason = formatGoalEvaluatorRuntimeFailureReason({
-    toJSON: () => undefined
-  })
-
-  for (const reason of [symbolReason, functionReason, undefinedJsonReason]) {
-    assert(
-      reason.includes("评估器暂时不可用"),
-      "runtime evaluator failure reason should never throw while formatting unknown errors"
-    )
-    assert(
-      reason.includes("/goal resume"),
-      "runtime evaluator failure reason should keep the resume instruction"
-    )
-  }
-}
-
 async function run(): Promise<void> {
   const tests = [
     testJudgePromptIncludesAllEvidenceWithUntrustedFencing,
@@ -375,9 +299,7 @@ async function run(): Promise<void> {
     testNeedsUserInputInference,
     testEmptyTurnPauseHeuristic,
     testRuntimeEvaluatorRetrySucceedsAfterTransientFailure,
-    testRuntimeEvaluatorRetryFallsBackAfterRepeatedFailure,
-    testRuntimeEvaluatorFailureReasonIncludesSanitizedSummary,
-    testRuntimeEvaluatorFailureReasonHandlesUnstringifiableErrors
+    testRuntimeEvaluatorRetryFallsBackAfterRepeatedFailure
   ]
 
   for (const test of tests) {

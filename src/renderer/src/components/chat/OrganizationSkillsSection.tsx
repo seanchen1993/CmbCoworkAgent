@@ -50,10 +50,11 @@ async function loadOrganizationSkillsOnce(): Promise<OrganizationSkillsSnapshot>
       console.error("[OrganizationSkillsSection] Failed to load organization skills:", error)
       const mockResponse = getMockOrgSkillMarketResponse(1, 4)
       const items = mockResponse.data?.slice(0, 4) ?? []
-      return {
+      cachedOrganizationSkillsData = {
         items,
         total: mockResponse.total ?? items.length
       }
+      return cachedOrganizationSkillsData
     } finally {
       organizationSkillsRequestPromise = null
     }

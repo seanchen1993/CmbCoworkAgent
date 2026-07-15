@@ -9,7 +9,6 @@ interface ImportMetaEnv {
   readonly VITE_OPEN_ASSISTANT_HUB_GATEWAY_URL?: string
   readonly VITE_ZZJ_WEB_URL: string
   readonly VITE_JUMP_RECORD_SKILL_URL?: string
-  readonly VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?: string
 }
 
 interface ImportMeta {

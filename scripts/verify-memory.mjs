@@ -11,7 +11,7 @@ import { homedir } from "os"
 import { createRequire } from "module"
 
 const require = createRequire(import.meta.url)
-const MEMORY_DIR = join(homedir(), ".cmbcoworkagent", "memory", "global")
+const MEMORY_DIR = join(homedir(), ".cmbcoworkagent", "memory")
 const DB_PATH = join(MEMORY_DIR, "index.sqlite")
 const STATE_PATH = join(MEMORY_DIR, ".dream_state.json")
 
@@ -29,16 +29,14 @@ if (!existsSync(MEMORY_DIR)) {
 }
 
 const allFiles = readdirSync(MEMORY_DIR)
-const mdFiles = allFiles.filter((f) => f.endsWith(".md"))
-const perFactFiles = mdFiles.filter((f) => f !== "MEMORY.md" && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f))
-const dailyFiles = mdFiles.filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+const mdFiles = allFiles.filter(f => f.endsWith(".md"))
+const perFactFiles = mdFiles.filter(f => f !== "MEMORY.md" && !/^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+const dailyFiles = mdFiles.filter(f => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
 
 console.log(`    Total .md files : ${mdFiles.length}`)
 console.log(`    Per-fact files  : ${perFactFiles.length}`)
 console.log(`    Legacy daily    : ${dailyFiles.length}`)
-console.log(
-  `    MEMORY.md       : ${existsSync(join(MEMORY_DIR, "MEMORY.md")) ? "✅ exists" : "❌ missing"}`
-)
+console.log(`    MEMORY.md       : ${existsSync(join(MEMORY_DIR, "MEMORY.md")) ? "✅ exists" : "❌ missing"}`)
 
 if (perFactFiles.length > 0) {
   console.log("\n    Per-fact files:")
@@ -65,12 +63,12 @@ if (!existsSync(STATE_PATH)) {
 } else {
   try {
     const state = JSON.parse(readFileSync(STATE_PATH, "utf-8"))
-    const lastRun = state.lastRunAt ? new Date(state.lastRunAt).toLocaleString() : "never"
+    const lastRun = state.lastRunAt
+      ? new Date(state.lastRunAt).toLocaleString()
+      : "never"
     console.log(`    lastRunAt           : ${lastRun}`)
     console.log(`    factCountAtLastRun  : ${state.factCountAtLastRun ?? 0}`)
-    console.log(
-      `    sessionsSinceLastRun: ${state.sessionsSinceLastRun ?? 0}  ← increments each conversation`
-    )
+    console.log(`    sessionsSinceLastRun: ${state.sessionsSinceLastRun ?? 0}  ← increments each conversation`)
   } catch (e) {
     console.log("    ⚠️  Failed to parse:", e.message)
   }
@@ -92,12 +90,10 @@ if (!existsSync(DB_PATH)) {
     if (info.length === 0) {
       console.log("    ⚠️  chunks table not found")
     } else {
-      const cols = info[0].values.map((r) => r[1])
+      const cols = info[0].values.map(r => r[1])
       const hasRecallCount = cols.includes("recall_count")
       const hasLastRecalled = cols.includes("last_recalled_at")
-      console.log(
-        `    recall_count column     : ${hasRecallCount ? "✅" : "❌ MISSING — run the app to trigger migration"}`
-      )
+      console.log(`    recall_count column     : ${hasRecallCount ? "✅" : "❌ MISSING — run the app to trigger migration"}`)
       console.log(`    last_recalled_at column : ${hasLastRecalled ? "✅" : "❌ MISSING"}`)
 
       if (hasRecallCount) {
@@ -111,9 +107,7 @@ if (!existsSync(DB_PATH)) {
           for (const row of stats[0].values) {
             const filename = String(row[0]).split(/[\\/]/).pop()
             const lastDate = row[2] ? new Date(Number(row[2])).toLocaleDateString() : "—"
-            console.log(
-              `      ${String(filename).padEnd(45)} recalls: ${row[1]}  last: ${lastDate}`
-            )
+            console.log(`      ${String(filename).padEnd(45)} recalls: ${row[1]}  last: ${lastDate}`)
           }
         } else {
           console.log("\n    recall_count = 0 for all chunks (no searches performed yet)")

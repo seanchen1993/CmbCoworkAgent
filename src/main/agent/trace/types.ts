@@ -375,8 +375,6 @@ export interface AgentTrace {
   appVersion?: string
   /** Which skills were actually used during this run, format: "name-version" e.g. "scheduler-assistant-v1.0.0" */
   usedSkills: string[]
-  /** Source refs for plugin-owned usedSkills, format: "plugin:<pluginId>/<skillIdentifier>". */
-  skillSource?: string[]
   /** Optional skill-eval payload computed before upload. Existing trace fields remain unchanged. */
   skillEval?: TraceSkillEvalExtension
   /** Used skills that were produced by the cloud trace evolver, same format as usedSkills. */
@@ -391,21 +389,6 @@ export interface AgentTrace {
   harnessProjectId?: string
   /** Harness Board feature slug this conversation belongs to (paired with harnessProjectId). */
   harnessFeatureSlug?: string
-  /**
-   * Harness Board workflow stage name (group-label, e.g. "Dev-代码实现") that was
-   * current when this turn ran, resolved per-turn from the feature's run state.
-   * Within a plugin the group+label pair is unique, so this is a stable bucket
-   * key; no raw node id is reported. Absent on pre-feature traces and on turns
-   * where the stage could not be resolved. Forward-only: historical traces have
-   * no stage name.
-   */
-  harnessNodeName?: string
-  /**
-   * Status of the current workflow node *at the time this turn ran*, as a stable
-   * enum label (进行中/已完成/未开始/...). Lets the dashboard sub-divide a stage's
-   * conversations by status-at-turn-time. Absent when unresolved. Forward-only.
-   */
-  harnessNodeStatus?: string
   /**
    * Harness adapter (plugin) bound to this project. Only populated for
    * project-mode traces (those with harnessProjectId). Lets the dashboard see

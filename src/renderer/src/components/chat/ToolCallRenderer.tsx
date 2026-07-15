@@ -71,7 +71,8 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
   execute: Terminal,
   write_todos: ListTodo,
   task: GitBranch,
-  git_push: GitBranch
+  git_push: GitBranch,
+  browser_playwright: Terminal
 }
 
 // Tools whose results are shown in the UI panels and don't need verbose display

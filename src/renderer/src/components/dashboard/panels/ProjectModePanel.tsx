@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { PieChart, Pie, Cell, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts"
 import {
   Boxes,
@@ -7,9 +7,6 @@ import {
   MessagesSquare,
   ArrowDownToLine,
   ArrowUpFromLine,
-  ArrowUp,
-  ArrowDown,
-  ArrowUpDown,
   ChevronLeft,
   ChevronDown,
   ChevronRight,
@@ -35,14 +32,12 @@ import {
 } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import { marketApi, type MarketItem } from "@/api/market"
-import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
+import { marketApi } from "@/api/market"
 import codeEfficiencyModel from "@/assets/code-efficiency-model.png"
 import {
   CodeAdoptionFunnel,
   GeneratedLinesTooltip,
   InclusiveAdoptionTooltip,
-  InclusivePushedAdoptionTooltip,
   MeasuredAdoptionTooltip,
   PushedAdoptionTooltip,
   SkillRankingPanel,
@@ -54,28 +49,15 @@ import type {
   DashboardProjectModeAdapter,
   DashboardProjectModeAnalytics,
   DashboardProjectModeFeature,
-  DashboardProjectModeFeatureNode,
-  DashboardProjectModeNodeStatus,
   DashboardProjectModeOrgDistributionItem,
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
   DashboardProjectModeProjectPageData,
-  DashboardProjectModeProjectPageOptions,
-  DashboardProjectModeProjectSortKey,
-  DashboardProjectModeProjectSortOrder,
   DashboardProjectModeProjectStatus,
   DashboardProjectModeSkillCount,
   DashboardProjectModeToolUsage,
-  DashboardCodeStats,
-  DashboardStageBuckets,
-  DashboardStageBucketStat
+  DashboardCodeStats
 } from "../use-dashboard"
-import { formatTopUserOrgName } from "../use-dashboard"
-import {
-  STAGE_BUCKET_HINTS,
-  STAGE_BUCKET_LABELS,
-  type StageBucket
-} from "../../../../../shared/harness-stage-bucket"
 
 const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   inclusiveEffectiveGeneratedLines: 0,
@@ -85,8 +67,7 @@ const EMPTY_FUNNEL_DATA: CodeAdoptionFunnelData = {
   pushedAdoptedLines: 0,
   inclusiveAdoptionRate: null,
   measuredAdoptionRate: null,
-  pushedAdoptionRate: null,
-  inclusivePushedAdoptionRate: null
+  pushedAdoptionRate: null
 }
 
 const EMPTY_TOOL_USAGE: DashboardProjectModeToolUsage = {
@@ -97,11 +78,6 @@ const EMPTY_TOOL_USAGE: DashboardProjectModeToolUsage = {
   totalTools: 0,
   totalToolCalls: 0
 }
-
-// 「生产效能代码指标」source 下拉哨兵。CODE_SOURCE_NATIVE 必须与主进程
-// src/main/ipc/dashboard.ts 的 NATIVE_CODE_SOURCE 字面量保持一致。
-const CODE_SOURCE_ALL = "__all__"
-const CODE_SOURCE_NATIVE = "__native__"
 
 const PROJECT_CHART_COLORS = [
   "#3b82f6",
@@ -168,8 +144,7 @@ function StatCard({
   value,
   sub,
   color,
-  hint,
-  tag
+  hint
 }: {
   icon: React.ElementType
   label: string
@@ -177,12 +152,10 @@ function StatCard({
   sub?: string
   color: string
   hint?: React.ReactNode
-  /** 口径标签：底部小药丸，如「总量口径 · 入库」。 */
-  tag?: string
 }): React.JSX.Element {
   return (
     <div className="flex w-full items-center gap-3 rounded-xl border border-border bg-card px-4 py-3">
-      <div className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${color}`}>
+      <div className={`flex size-9 items-center justify-center rounded-lg ${color}`}>
         <Icon className="size-4 text-white" />
       </div>
       <div className="min-w-0">
@@ -192,11 +165,6 @@ function StatCard({
         </div>
         <div className="text-lg font-bold leading-tight text-foreground">{value}</div>
         {sub && <div className="whitespace-nowrap text-[10px] text-muted-foreground">{sub}</div>}
-        {tag && (
-          <div className="mt-1.5 inline-block whitespace-nowrap rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-            {tag}
-          </div>
-        )}
       </div>
     </div>
   )
@@ -409,18 +377,6 @@ function lifecycleLabel(status?: string): string {
   }
 }
 
-function formatProjectCreatedAt(value?: string): string {
-  if (!value) return "—"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "—"
-  const pad = (n: number): string => String(n).padStart(2, "0")
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
-    date.getHours()
-  )}:${pad(date.getMinutes())}`
-}
-
-const PROJECT_LIST_PROJECT_COLUMN_CLASS = "max-w-[320px] overflow-hidden"
-
 function formatProjectCreatorDepartment(project: DashboardProjectModeProject): string {
   if (project.creatorUpperOrgLv1 && project.creatorUpperOrgLv0) {
     return `${project.creatorUpperOrgLv1}/${project.creatorUpperOrgLv0}`
@@ -466,11 +422,11 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
         </Tooltip>
       </TooltipProvider>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="w-[92vw] max-w-[1720px]">
+        <DialogContent className="max-w-5xl">
           <DialogHeader>
             <DialogTitle>生产效能代码指标 · 口径说明</DialogTitle>
           </DialogHeader>
-          <div className="max-h-[82vh] overflow-auto">
+          <div className="max-h-[80vh] overflow-auto">
             <img
               src={codeEfficiencyModel}
               alt="生产效能代码指标口径说明示意图"
@@ -483,482 +439,46 @@ function CodeEfficiencyModelInfo(): React.JSX.Element {
   )
 }
 
-/** Per-feature code-adoption line: 原始生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
+/** Per-feature code-adoption line: Agent生成行数 / 有效生成行数 / 已Commit·已Push 采纳率（含行数明细）。 */
 function FeatureCodeStatsLine({
-  codeStats,
-  compact = false
+  codeStats
 }: {
   codeStats?: DashboardCodeStats | null
-  /** 紧凑模式：隐藏「原始/有效生成行数」首行，提交口径 + 总量口径合并为一行。 */
-  compact?: boolean
 }): React.JSX.Element {
   if (!codeStats) {
     return <div className="text-[11px] text-muted-foreground/80">暂无代码生成数据</div>
   }
-  const commitDenom = formatLineCount(codeStats.effectiveGeneratedLines)
-  const pushDenom = formatLineCount(codeStats.pushedEffectiveGeneratedLines)
-  const totalDenom = formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)
-  const adopted = formatLineCount(codeStats.adoptedLines)
-  const pushedAdopted = formatLineCount(codeStats.pushedAdoptedLines)
-  const commitGroup = (
-    <>
-      <span className="text-muted-foreground/70">提交口径</span>
+  const adoptedLabel = `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
+  const pushedLabel = `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
       <span>
-        提交{" "}
+        Agent生成行数{" "}
+        <span className="font-medium text-foreground">
+          {formatLineCount(codeStats.generatedLines)}
+        </span>
+      </span>
+      <span className="inline-flex items-center gap-1">
+        有效生成行数{" "}
+        <span className="font-medium text-foreground">
+          {formatLineCount(codeStats.effectiveGeneratedLines)}
+        </span>
+        <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
+      </span>
+      <span>
+        提交率{" "}
         <span className="font-medium text-foreground">
           {formatPercent(codeStats.measuredAdoptionRate)}
         </span>
-        <span className="ml-1 text-muted-foreground/80">
-          ({adopted} / {commitDenom} 行)
-        </span>
+        <span className="ml-1 text-muted-foreground/80">({adoptedLabel})</span>
       </span>
       <span>
-        入库{" "}
+        入库率{" "}
         <span className="font-medium text-foreground">
           {formatPercent(codeStats.pushedAdoptionRate)}
         </span>
-        <span className="ml-1 text-muted-foreground/80">
-          ({pushedAdopted} / {pushDenom} 行)
-        </span>
+        <span className="ml-1 text-muted-foreground/80">({pushedLabel})</span>
       </span>
-    </>
-  )
-  const totalGroup = (
-    <>
-      <span className="text-muted-foreground/70">总量口径</span>
-      <span>
-        提交{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.inclusiveAdoptionRate)}
-        </span>
-        <span className="ml-1 text-muted-foreground/80">
-          ({adopted} / {totalDenom} 行)
-        </span>
-      </span>
-      <span>
-        入库{" "}
-        <span className="font-medium text-foreground">
-          {formatPercent(codeStats.inclusivePushedAdoptionRate)}
-        </span>
-        <span className="ml-1 text-muted-foreground/80">
-          ({pushedAdopted} / {totalDenom} 行)
-        </span>
-      </span>
-    </>
-  )
-  if (compact) {
-    // 紧凑：两口径合并到一行（flex-wrap，窄屏才换行）。
-    return (
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
-        {commitGroup}
-        {totalGroup}
-      </div>
-    )
-  }
-  return (
-    <div className="space-y-1 text-[11px] text-muted-foreground">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span>
-          原始生成行数{" "}
-          <span className="font-medium text-foreground">
-            {formatLineCount(codeStats.generatedLines)}
-          </span>
-        </span>
-        <span className="inline-flex items-center gap-1">
-          有效生成行数{" "}
-          <span className="font-medium text-foreground">
-            {formatLineCount(codeStats.effectiveGeneratedLines)}
-          </span>
-          <InfoHint hint="Agent 原始生成行数扣除被Agent后续修改覆盖、回退或删除的行后，真正纳入采纳率分母的有效产出。" />
-        </span>
-      </div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">{commitGroup}</div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">{totalGroup}</div>
-    </div>
-  )
-}
-
-/** 表格内一条「label X% (采纳/生成)」采纳率，按口径分组的列里上下各一条；有数据时可点击采纳溯源。 */
-function AdoptionRateLine({
-  label,
-  rate,
-  detail,
-  clickable,
-  onActivate,
-  title
-}: {
-  label: string
-  rate: number | null
-  detail: string
-  clickable: boolean
-  onActivate: () => void
-  title: string
-}): React.JSX.Element {
-  const body = (
-    <span className="whitespace-nowrap">
-      <span className="text-muted-foreground/70">{label}</span>{" "}
-      <span className="font-medium underline-offset-2 group-hover:underline">
-        {formatPercent(rate)}
-      </span>
-      <span className="ml-1 text-[10px] text-muted-foreground">{detail}</span>
-    </span>
-  )
-  if (clickable) {
-    return (
-      <button
-        type="button"
-        className="group block w-full text-right transition-colors hover:text-primary"
-        title={title}
-        onClick={(event) => {
-          event.stopPropagation()
-          onActivate()
-        }}
-      >
-        {body}
-      </button>
-    )
-  }
-  return <div className="text-right">{body}</div>
-}
-
-/** Status-at-turn-time sub-breakdown rows（进行中/已完成 等）。空则不渲染。表头/边框由 NodeBreakdownTabs 提供。 */
-function StageStatusRows({
-  byStatus,
-  onOpenStatusTraces
-}: {
-  byStatus: DashboardProjectModeNodeStatus[]
-  /** 可选：查看该「阶段+状态」的对话；不传则不显示按钮（如插件聚合无单项目 trace）。 */
-  onOpenStatusTraces?: (status: string) => void
-}): React.JSX.Element | null {
-  if (byStatus.length === 0) return null
-  return (
-    <div className="space-y-2">
-      {byStatus.map((s) => (
-        <div key={s.status} className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
-            <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
-              <span className="rounded bg-muted/60 px-1.5 py-0.5 text-foreground/80">
-                {s.status}
-              </span>
-              <span>{formatNumber(s.conversationCount)} 对话</span>
-            </span>
-            {onOpenStatusTraces ? (
-              <button
-                type="button"
-                className="inline-flex shrink-0 items-center gap-1 text-[10px] text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-                disabled={s.conversationCount === 0}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onOpenStatusTraces(s.status)
-                }}
-              >
-                <MessagesSquare className="size-3" />
-                查看对话
-              </button>
-            ) : null}
-          </div>
-          {/* 紧凑：提交口径 + 总量口径合并为一行，含 (采纳/分母 行)。 */}
-          <FeatureCodeStatsLine codeStats={s.codeStats} compact />
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/** Ordered, color-coded descriptors for the stage×skill buckets. */
-const STAGE_BUCKET_VIEW: ReadonlyArray<{
-  key: keyof DashboardStageBuckets
-  bucket: StageBucket
-  dot: string
-}> = [
-  { key: "pluginConstrained", bucket: "plugin_constrained", dot: "bg-emerald-500" },
-  { key: "vibecoding", bucket: "vibecoding", dot: "bg-violet-500" },
-  { key: "unattributed", bucket: "unattributed", dot: "bg-muted-foreground/40" }
-]
-
-/** True when every bucket is empty (no conversations and no generated lines). */
-function isStageBucketsEmpty(buckets: DashboardStageBuckets): boolean {
-  return STAGE_BUCKET_VIEW.every(({ key }) => {
-    const stat = buckets[key]
-    return stat.conversationCount === 0 && (stat.codeStats?.generatedLines ?? 0) === 0
-  })
-}
-
-/**
- * 流程阶段口径完整说明，复用 shared 的桶标签 / 含义常量，保证口径单一来源。
- * 三桶定义 + 每格指标图例，作为列表内「流程阶段口径」小 i 的权威说明。
- */
-function StageBucketCaliberHint(): React.JSX.Element {
-  return (
-    <div className="space-y-1.5">
-      <div>按每轮对话开始时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
-      {STAGE_BUCKET_VIEW.map(({ bucket }) => (
-        <div key={bucket}>
-          <span className="font-medium">{STAGE_BUCKET_LABELS[bucket]}</span>：
-          {STAGE_BUCKET_HINTS[bucket]}
-        </div>
-      ))}
-      <div className="opacity-80">每格依次为「对话数 · 生成行数 · 总量口径提交采纳率」。</div>
-    </div>
-  )
-}
-
-/**
- * Stage×skill 三桶拆分：插件约束（Harness）/ VibeCoding / 未归因。
- * 列表行内紧凑一行展示；全空则不渲染。
- */
-function StageBucketSplit({
-  buckets
-}: {
-  buckets: DashboardStageBuckets
-}): React.JSX.Element | null {
-  if (isStageBucketsEmpty(buckets)) return null
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-      {STAGE_BUCKET_VIEW.map(({ key, bucket, dot }) => {
-        const stat = buckets[key]
-        const lines = stat.codeStats?.generatedLines ?? 0
-        return (
-          <span key={bucket} className="flex items-center gap-1">
-            <span className={`size-1.5 rounded-full ${dot}`} />
-            <span className="text-foreground/80">{STAGE_BUCKET_LABELS[bucket]}</span>
-            <InfoHint hint={STAGE_BUCKET_HINTS[bucket]} />
-            <span>
-              {formatNumber(stat.conversationCount)} 对话 · {formatLineCount(lines)} 行 ·{" "}
-              {formatPercent(stat.codeStats?.inclusiveAdoptionRate)} 采纳
-            </span>
-          </span>
-        )
-      })}
-    </div>
-  )
-}
-
-/** 流程阶段三桶分行展示（插件约束（Harness）/ VibeCoding / 未归因），与状态细分同款紧凑口径。空则不渲染。 */
-function StageBucketRows({
-  buckets,
-  onOpenBucketTraces
-}: {
-  buckets: DashboardStageBuckets
-  /** 可选：按桶查看对话；不传则不显示按钮（如插件聚合无单项目 trace）。 */
-  onOpenBucketTraces?: (bucket: StageBucket) => void
-}): React.JSX.Element | null {
-  if (isStageBucketsEmpty(buckets)) return null
-  return (
-    <div className="space-y-2">
-      {STAGE_BUCKET_VIEW.map(({ key, bucket, dot }) => {
-        const stat = buckets[key]
-        return (
-          <div key={bucket} className="space-y-1">
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
-                <span className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 text-foreground/80">
-                  <span className={`size-1.5 rounded-full ${dot}`} />
-                  {STAGE_BUCKET_LABELS[bucket]}
-                </span>
-                <span>{formatNumber(stat.conversationCount)} 对话</span>
-              </span>
-              {onOpenBucketTraces ? (
-                <button
-                  type="button"
-                  className="inline-flex shrink-0 items-center gap-1 text-[10px] text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-                  disabled={stat.conversationCount === 0}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onOpenBucketTraces(bucket)
-                  }}
-                >
-                  <MessagesSquare className="size-3" />
-                  查看对话
-                </button>
-              ) : null}
-            </div>
-            {/* 紧凑：提交口径 + 总量口径合并为一行，含 (采纳/分母 行)。 */}
-            <FeatureCodeStatsLine codeStats={stat.codeStats} compact />
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-const NODE_STATUS_BREAKDOWN_HINT =
-  "按每轮对话开始时该节点的状态（进行中/已完成等）细分；多数对话发生在当前进行中的节点，故「进行中」通常占多数。"
-
-/**
- * 节点（阶段）内的子拆分，两个 tab 切换：
- *  - 状态细分：按节点状态（进行中/已完成…）；
- *  - 插件约束（Harness） vs VibeCoding：按 stage×skill 三桶。
- * 两侧都无数据则整体不渲染；仅一侧有数据时默认落在该 tab。
- */
-function NodeBreakdownTabs({
-  byStatus,
-  stageBuckets,
-  onOpenStatusTraces,
-  onOpenBucketTraces
-}: {
-  byStatus: DashboardProjectModeNodeStatus[]
-  stageBuckets: DashboardStageBuckets
-  onOpenStatusTraces?: (status: string) => void
-  onOpenBucketTraces?: (bucket: StageBucket) => void
-}): React.JSX.Element | null {
-  const hasStatus = byStatus.length > 0
-  const hasBuckets = !isStageBucketsEmpty(stageBuckets)
-  const [tab, setTab] = useState<"status" | "buckets">(hasStatus ? "status" : "buckets")
-  if (!hasStatus && !hasBuckets) return null
-
-  const tabButton = (id: "status" | "buckets", label: string): React.JSX.Element => (
-    <button
-      type="button"
-      className={`rounded px-1.5 py-0.5 transition-colors ${
-        tab === id
-          ? "bg-muted font-medium text-foreground"
-          : "text-muted-foreground/70 hover:text-foreground"
-      }`}
-      onClick={(event) => {
-        event.stopPropagation()
-        setTab(id)
-      }}
-    >
-      {label}
-    </button>
-  )
-
-  // 仅一侧有数据时按那侧落 tab，避免点到空 tab 看到空白。
-  const activeTab: "status" | "buckets" = tab === "buckets" && hasBuckets ? "buckets" : "status"
-
-  return (
-    <div className="space-y-2 border-t border-border/40 pt-1.5">
-      <div className="flex flex-wrap items-center gap-1 text-[10px]">
-        {hasStatus && tabButton("status", "状态细分")}
-        {hasBuckets && tabButton("buckets", "插件约束（Harness） vs VibeCoding")}
-        <InfoHint
-          hint={activeTab === "status" ? NODE_STATUS_BREAKDOWN_HINT : <StageBucketCaliberHint />}
-        />
-      </div>
-      {activeTab === "status" ? (
-        <StageStatusRows byStatus={byStatus} onOpenStatusTraces={onOpenStatusTraces} />
-      ) : (
-        <StageBucketRows buckets={stageBuckets} onOpenBucketTraces={onOpenBucketTraces} />
-      )}
-    </div>
-  )
-}
-
-function FeatureStageBreakdown({
-  feature,
-  loadNodes,
-  onOpenNodeTraces
-}: {
-  feature: DashboardProjectModeFeature
-  loadNodes: (feature: DashboardProjectModeFeature) => Promise<DashboardProjectModeFeatureNode[]>
-  onOpenNodeTraces: (
-    feature: DashboardProjectModeFeature,
-    node: DashboardProjectModeFeatureNode,
-    status?: string,
-    stageBucket?: StageBucket
-  ) => void
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false)
-  const [nodes, setNodes] = useState<DashboardProjectModeFeatureNode[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  // 展开时按当前面板时间范围拉取；range（→ loadNodes）变化且仍展开时自动重拉，
-  // 与插件聚合的 AdapterStageBreakdown 同款，保证刷新/改日期后阶段细分同步更新。
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    void (async () => {
-      try {
-        const result = await loadNodes(feature)
-        if (!cancelled) {
-          setError(null)
-          setNodes(result)
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [open, feature, loadNodes])
-
-  // 首次展开（无缓存、无错误）显示加载态；range 变化重拉时沿用旧数据直到新数据到达。
-  const loading = open && nodes === null && error === null
-
-  return (
-    <div className="space-y-1.5">
-      <button
-        type="button"
-        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-        onClick={(event) => {
-          event.stopPropagation()
-          setOpen((v) => !v)
-        }}
-      >
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        阶段细分
-        <InfoHint hint="按工作流节点（阶段）拆分该特性的对话与代码采纳。" />
-      </button>
-      {open && (
-        <div className="space-y-1.5 rounded-md border border-border/60 bg-background/60 p-2">
-          {loading && (
-            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-              <Loader2 className="size-3 animate-spin" />
-              加载阶段数据…
-            </div>
-          )}
-          {error && <div className="text-[11px] text-destructive">{error}</div>}
-          {!loading && !error && nodes && nodes.length === 0 && (
-            <div className="text-[11px] text-muted-foreground">暂无阶段数据</div>
-          )}
-          {!loading &&
-            !error &&
-            nodes?.map((node) => (
-              <div
-                key={node.nodeName}
-                className="space-y-1 rounded border border-border/50 px-2 py-1.5"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-foreground">
-                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                      阶段
-                    </span>
-                    <span className="font-medium">{node.nodeName}</span>
-                    {node.nodeName === STAGE_BUCKET_LABELS.unattributed && (
-                      <InfoHint hint={STAGE_BUCKET_HINTS.unattributed} />
-                    )}
-                    <span className="text-muted-foreground">
-                      · {formatNumber(node.conversationCount)} 对话
-                    </span>
-                  </span>
-                  <button
-                    type="button"
-                    className="inline-flex shrink-0 items-center gap-1 text-[11px] text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-                    disabled={node.conversationCount === 0}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      onOpenNodeTraces(feature, node)
-                    }}
-                  >
-                    <MessagesSquare className="size-3.5" />
-                    查看对话
-                  </button>
-                </div>
-                <FeatureCodeStatsLine codeStats={node.codeStats} />
-                <NodeBreakdownTabs
-                  byStatus={node.byStatus}
-                  stageBuckets={node.stageBuckets}
-                  onOpenStatusTraces={(status) => onOpenNodeTraces(feature, node, status)}
-                  onOpenBucketTraces={(bucket) =>
-                    onOpenNodeTraces(feature, node, undefined, bucket)
-                  }
-                />
-              </div>
-            ))}
-        </div>
-      )}
     </div>
   )
 }
@@ -969,47 +489,27 @@ function ProjectRow({
   onToggle,
   onOpenTraces,
   onOpenFeatureCommits,
-  onOpenProjectCommits,
-  loadFeatureNodes
+  onOpenProjectCommits
 }: {
   project: DashboardProjectModeProject
   expanded: boolean
   onToggle: () => void
-  onOpenTraces: (
-    feature?: DashboardProjectModeFeature,
-    node?: DashboardProjectModeFeatureNode,
-    status?: string,
-    stageBucket?: StageBucket
-  ) => void
+  onOpenTraces: (feature?: DashboardProjectModeFeature) => void
   onOpenFeatureCommits: (feature: DashboardProjectModeFeature) => void
   onOpenProjectCommits: (pushedOnly?: boolean) => void
-  loadFeatureNodes: (
-    feature: DashboardProjectModeFeature
-  ) => Promise<DashboardProjectModeFeatureNode[]>
 }): React.JSX.Element {
   const codeStats = project.codeStats
   const hasCommitAdoption = Boolean(codeStats && codeStats.effectiveGeneratedLines > 0)
   const hasPushedAdoption = Boolean(codeStats && codeStats.pushedEffectiveGeneratedLines > 0)
-  const adopted = codeStats ? formatLineCount(codeStats.adoptedLines) : "—"
-  const pushedAdopted = codeStats ? formatLineCount(codeStats.pushedAdoptedLines) : "—"
-  const commitDetail = codeStats
-    ? `${adopted}/${formatLineCount(codeStats.effectiveGeneratedLines)}`
+  const adoptionLineLabel = codeStats
+    ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
     : "—"
-  const pushDetail = codeStats
-    ? `${pushedAdopted}/${formatLineCount(codeStats.pushedEffectiveGeneratedLines)}`
+  const pushedAdoptionLineLabel = codeStats
+    ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
     : "—"
-  const totalDetail = codeStats
-    ? `${adopted}/${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)}`
-    : "—"
-  const totalPushDetail = codeStats
-    ? `${pushedAdopted}/${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)}`
-    : "—"
-  const commitTraceTitle = "查看采纳溯源：该项目关联的 commit 明细"
-  const pushTraceTitle = "查看采纳溯源：该项目已 Push 的 commit 明细"
   const creatorName = project.creatorUserName || project.creatorSapId || project.creatorYstId || "—"
   const creatorId = project.creatorSapId || project.creatorYstId || ""
   const creatorDepartment = formatProjectCreatorDepartment(project)
-  const createdAt = formatProjectCreatedAt(project.lifecycleCreatedAt)
 
   return (
     <>
@@ -1017,27 +517,19 @@ function ProjectRow({
         className="cursor-pointer border-b border-border/50 transition-colors hover:bg-muted/30"
         onClick={onToggle}
       >
-        <td className={cn(PROJECT_LIST_PROJECT_COLUMN_CLASS, "px-3 py-2")}>
-          <div className="flex max-w-full items-center gap-1.5">
+        <td className="px-3 py-2">
+          <div className="flex items-center gap-1.5">
             {expanded ? (
               <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
             ) : (
               <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
             )}
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 items-center gap-1.5">
-                <span
-                  className="block min-w-0 truncate font-medium text-foreground"
-                  title={project.name}
-                >
-                  {project.name}
-                </span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate font-medium text-foreground">{project.name}</span>
               </div>
               {project.systemName && (
-                <div
-                  className="truncate text-[10px] text-muted-foreground"
-                  title={project.systemName}
-                >
+                <div className="truncate text-[10px] text-muted-foreground">
                   {project.systemName}
                 </div>
               )}
@@ -1070,44 +562,54 @@ function ProjectRow({
           {formatLineCount(codeStats?.generatedLines ?? 0)}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          <div className="flex flex-col items-end gap-0.5">
-            <AdoptionRateLine
-              label="提交"
-              rate={codeStats?.measuredAdoptionRate ?? null}
-              detail={commitDetail}
-              clickable={hasCommitAdoption}
-              onActivate={() => onOpenProjectCommits(false)}
-              title={commitTraceTitle}
-            />
-            <AdoptionRateLine
-              label="入库"
-              rate={codeStats?.pushedAdoptionRate ?? null}
-              detail={pushDetail}
-              clickable={hasPushedAdoption}
-              onActivate={() => onOpenProjectCommits(true)}
-              title={pushTraceTitle}
-            />
-          </div>
+          {hasCommitAdoption ? (
+            <button
+              type="button"
+              className="ml-auto block text-right transition-colors hover:text-primary"
+              title="查看采纳溯源：该项目关联的 commit 明细"
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenProjectCommits(false)
+              }}
+            >
+              <div className="font-medium underline-offset-2 hover:underline">
+                {formatPercent(codeStats?.measuredAdoptionRate)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
+            </button>
+          ) : (
+            <>
+              <div className="font-medium">{formatPercent(codeStats?.measuredAdoptionRate)}</div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">{adoptionLineLabel}</div>
+            </>
+          )}
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
-          <div className="flex flex-col items-end gap-0.5">
-            <AdoptionRateLine
-              label="提交"
-              rate={codeStats?.inclusiveAdoptionRate ?? null}
-              detail={totalDetail}
-              clickable={hasCommitAdoption}
-              onActivate={() => onOpenProjectCommits(false)}
-              title={commitTraceTitle}
-            />
-            <AdoptionRateLine
-              label="入库"
-              rate={codeStats?.inclusivePushedAdoptionRate ?? null}
-              detail={totalPushDetail}
-              clickable={hasPushedAdoption}
-              onActivate={() => onOpenProjectCommits(true)}
-              title={pushTraceTitle}
-            />
-          </div>
+          {hasPushedAdoption ? (
+            <button
+              type="button"
+              className="ml-auto block text-right transition-colors hover:text-primary"
+              title="查看采纳溯源：该项目已 Push 的 commit 明细"
+              onClick={(event) => {
+                event.stopPropagation()
+                onOpenProjectCommits(true)
+              }}
+            >
+              <div className="font-medium underline-offset-2 hover:underline">
+                {formatPercent(codeStats?.pushedAdoptionRate)}
+              </div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">
+                {pushedAdoptionLineLabel}
+              </div>
+            </button>
+          ) : (
+            <>
+              <div className="font-medium">{formatPercent(codeStats?.pushedAdoptionRate)}</div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">
+                {pushedAdoptionLineLabel}
+              </div>
+            </>
+          )}
         </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
@@ -1116,7 +618,6 @@ function ProjectRow({
           ) : null}
         </td>
         <td className="px-3 py-2 text-muted-foreground">{creatorDepartment}</td>
-        <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">{createdAt}</td>
         <td className="px-3 py-2 text-right">
           <button
             type="button"
@@ -1134,7 +635,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={12} className="px-3 py-3">
+          <td colSpan={11} className="px-3 py-3">
             <div className="space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -1145,17 +646,6 @@ function ProjectRow({
                   <SkillChips skills={project.topSkills} />
                 )}
               </div>
-
-              {/* 流程阶段口径：插件约束（Harness）/ VibeCoding / 未归因 */}
-              {!isStageBucketsEmpty(project.stageBuckets) && (
-                <div className="space-y-1">
-                  <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                    <span>流程阶段口径：插件约束（Harness） vs VibeCoding</span>
-                    <InfoHint hint={<StageBucketCaliberHint />} />
-                  </div>
-                  <StageBucketSplit buckets={project.stageBuckets} />
-                </div>
-              )}
 
               {/* 特性状态 + 各特性采纳明细 + 关联 commit */}
               {project.features.length === 0 ? (
@@ -1217,15 +707,6 @@ function ProjectRow({
                         </div>
                       </div>
                       <FeatureCodeStatsLine codeStats={feature.codeStats} />
-                      {feature.slug && (
-                        <FeatureStageBreakdown
-                          feature={feature}
-                          loadNodes={loadFeatureNodes}
-                          onOpenNodeTraces={(f, node, status, stageBucket) =>
-                            onOpenTraces(f, node, status, stageBucket)
-                          }
-                        />
-                      )}
                     </div>
                   ))}
                 </div>
@@ -1242,9 +723,8 @@ function SkillChips({ skills }: { skills: DashboardProjectModeSkillCount[] }): R
   return (
     <>
       {skills.map((item) => (
-        <Badge key={item.id ?? item.skill} variant="outline" className="normal-case tracking-normal">
-          {item.skill}
-          {item.isPlugin && item.pluginName ? ` · ${item.pluginName}` : ""} · {formatNumber(item.count)}
+        <Badge key={item.skill} variant="outline" className="normal-case tracking-normal">
+          {item.skill} · {formatNumber(item.count)}
         </Badge>
       ))}
     </>
@@ -1291,51 +771,6 @@ function ProjectListSearchInput({
   )
 }
 
-/** 可排序表头单元格：未启用时退化为普通 <th>，启用时显示排序箭头并响应点击。 */
-function SortableTh({
-  label,
-  sortKey,
-  activeKey,
-  order,
-  enabled,
-  onSort,
-  title
-}: {
-  label: string
-  sortKey: DashboardProjectModeProjectSortKey
-  activeKey: DashboardProjectModeProjectSortKey | null
-  order: DashboardProjectModeProjectSortOrder
-  enabled: boolean
-  onSort: (key: DashboardProjectModeProjectSortKey) => void
-  title?: string
-}): React.JSX.Element {
-  if (!enabled) {
-    return (
-      <th className="px-3 py-2 text-right font-medium" title={title}>
-        {label}
-      </th>
-    )
-  }
-  const active = activeKey === sortKey
-  const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
-  return (
-    <th className="px-3 py-2 text-right font-medium">
-      <button
-        type="button"
-        onClick={() => onSort(sortKey)}
-        title={title ?? `按${label}排序`}
-        className={cn(
-          "ml-auto inline-flex items-center gap-1 transition-colors hover:text-foreground",
-          active ? "text-foreground" : "text-muted-foreground"
-        )}
-      >
-        <span>{label}</span>
-        <Icon className={cn("size-3", active ? "opacity-100" : "opacity-40")} />
-      </button>
-    </th>
-  )
-}
-
 /**
  * 项目列表：进行中 / 已归档双 tab + 项目名搜索 + 后端分页。
  * 默认随项目模式总览返回「进行中」第一页，已归档 tab 首次切换时懒加载。
@@ -1350,9 +785,7 @@ function ProjectListSection({
   onPageChange,
   onOpenTraces,
   onOpenFeatureCommits,
-  onOpenProjectCommits,
-  loadFeatureNodes,
-  lockedAdapterName
+  onOpenProjectCommits
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
   projectPages: Partial<
@@ -1369,65 +802,30 @@ function ProjectListSection({
     pageSize: number,
     adapterName: string,
     creatorKeyword: string,
-    creatorOrgKeyword: string,
-    sortBy?: DashboardProjectModeProjectSortKey | null,
-    sortOrder?: DashboardProjectModeProjectSortOrder
+    creatorOrgKeyword: string
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
-    feature?: DashboardProjectModeFeature,
-    node?: DashboardProjectModeFeatureNode,
-    status?: string,
-    stageBucket?: StageBucket
+    feature?: DashboardProjectModeFeature
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => void
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
-  loadFeatureNodes: (
-    project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
-  ) => Promise<DashboardProjectModeFeatureNode[]>
-  /** 嵌入模式：锁定到该插件名（隐藏标题与插件下拉，强制按此插件过滤）。用于插件「项目数」弹窗。 */
-  lockedAdapterName?: string
 }): React.JSX.Element {
-  const embedded = lockedAdapterName != null
   const [tab, setTab] = useState<ProjectListTab>("active")
   const [query, setQuery] = useState("")
   const [creatorQuery, setCreatorQuery] = useState("")
   const [departmentQuery, setDepartmentQuery] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  // null = 用所在 tab 的默认排序；非空 = 用户显式选择。
-  const [sortBy, setSortBy] = useState<DashboardProjectModeProjectSortKey | null>(null)
-  const [sortOrder, setSortOrder] = useState<DashboardProjectModeProjectSortOrder>("desc")
 
   const trimmed = query.trim()
   const creatorKeyword = creatorQuery.trim()
   const creatorOrgKeyword = departmentQuery.trim()
   const rawSelectedAdapter = adapterName.trim()
-  const selectedAdapter = embedded
-    ? (lockedAdapterName ?? "")
-    : adapterOptions.includes(rawSelectedAdapter)
-      ? rawSelectedAdapter
-      : ""
-  // 对话数 / 原始生成行数 排序仅在「进行中」开放（归档项目量大，按指标全量排序代价高）。
-  const metricSortAllowed = tab === "active"
-  // 项目列表默认按创建时间降序，最新创建的项目排在最前。
-  const tabDefaultSort: {
-    key: DashboardProjectModeProjectSortKey
-    order: DashboardProjectModeProjectSortOrder
-  } = { key: "createdAt", order: "desc" }
-  const sortKeyApplicable = (key: DashboardProjectModeProjectSortKey): boolean =>
-    key === "featureCount" || key === "createdAt"
-      ? true
-      : key === "archivedAt"
-        ? tab === "archived"
-        : metricSortAllowed
-  const useExplicitSort = sortBy !== null && sortKeyApplicable(sortBy)
-  const effectiveSortBy = useExplicitSort ? sortBy : tabDefaultSort.key
-  const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
+  const selectedAdapter = adapterOptions.includes(rawSelectedAdapter) ? rawSelectedAdapter : ""
   const pageData = projectPages[tab]
   const currentError = pageError[tab]
   const tabCount =
@@ -1436,15 +834,8 @@ function ProjectListSection({
   const pageMatchesAdapter = (pageData?.adapterName ?? "") === selectedAdapter
   const pageMatchesCreator = (pageData?.creatorKeyword ?? "") === creatorKeyword
   const pageMatchesCreatorOrg = (pageData?.creatorOrgKeyword ?? "") === creatorOrgKeyword
-  const pageMatchesSort =
-    (pageData?.sortBy ?? null) === effectiveSortBy &&
-    (pageData?.sortOrder ?? "desc") === effectiveSortOrder
   const pageMatchesFilter =
-    pageMatchesQuery &&
-    pageMatchesAdapter &&
-    pageMatchesCreator &&
-    pageMatchesCreatorOrg &&
-    pageMatchesSort
+    pageMatchesQuery && pageMatchesAdapter && pageMatchesCreator && pageMatchesCreatorOrg
   const pageItems = pageMatchesFilter ? (pageData?.projects ?? []) : []
   const total = pageMatchesFilter ? (pageData?.total ?? 0) : 0
   const totalPages = Math.max(1, Math.ceil(total / PROJECT_PAGE_SIZE))
@@ -1472,9 +863,7 @@ function ProjectListSection({
       (pageData.adapterName ?? "") === selectedAdapter &&
       (pageData.creatorKeyword ?? "") === creatorKeyword &&
       (pageData.creatorOrgKeyword ?? "") === creatorOrgKeyword &&
-      pageData.pageSize === PROJECT_PAGE_SIZE &&
-      (pageData.sortBy ?? null) === effectiveSortBy &&
-      (pageData.sortOrder ?? "desc") === effectiveSortOrder
+      pageData.pageSize === PROJECT_PAGE_SIZE
     ) {
       return
     }
@@ -1488,17 +877,13 @@ function ProjectListSection({
         PROJECT_PAGE_SIZE,
         selectedAdapter,
         creatorKeyword,
-        creatorOrgKeyword,
-        effectiveSortBy,
-        effectiveSortOrder
+        creatorOrgKeyword
       )
     }, 250)
     return () => window.clearTimeout(timer)
   }, [
     creatorKeyword,
     creatorOrgKeyword,
-    effectiveSortBy,
-    effectiveSortOrder,
     onPageChange,
     pageData,
     pageLoading,
@@ -1508,8 +893,6 @@ function ProjectListSection({
   ])
 
   const switchTab = (next: ProjectListTab): void => {
-    // 不重置排序态：归档 tab 由 effectiveSortBy 自动忽略指标排序，
-    // 切回进行中时仍恢复原排序（含默认的对话数降序）。
     setTab(next)
     setExpandedId(null)
   }
@@ -1528,26 +911,8 @@ function ProjectListSection({
       PROJECT_PAGE_SIZE,
       selectedAdapter,
       creatorKeyword,
-      creatorOrgKeyword,
-      effectiveSortBy,
-      effectiveSortOrder
+      creatorOrgKeyword
     )
-  }
-  // 点击表头切换排序：未生效→降序；降序→升序；升序→取消（回到该 tab 默认排序）。
-  const cycleSort = (key: DashboardProjectModeProjectSortKey): void => {
-    setExpandedId(null)
-    if (effectiveSortBy !== key) {
-      setSortBy(key)
-      setSortOrder("desc")
-      return
-    }
-    if (effectiveSortOrder === "desc") {
-      setSortBy(key)
-      setSortOrder("asc")
-      return
-    }
-    setSortBy(null)
-    setSortOrder("desc")
   }
 
   const tabs: Array<{ id: ProjectListTab; label: string; count: number }> = [
@@ -1557,25 +922,11 @@ function ProjectListSection({
 
   return (
     <section>
-      {!embedded && (
-        <>
-          <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
-          <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-            项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及展开行的技能、各特性采纳明细与关联
-            Commit 按所选时间范围统计。
-          </p>
-        </>
-      )}
-
-      {pageData?.truncated && pageMatchesFilter && (
-        <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
-          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>
-            匹配的项目数量过多，已超过单次统计上限。列表排序与「对话数 /
-            原始生成行数」等指标仅基于上限内的项目，可能不完整。请用上方的项目名称、创建人、部门或插件筛选缩小范围后再查看。
-          </span>
-        </div>
-      )}
+      <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
+      <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
+        项目、插件、项目状态、特性数为当前状态；对话数、Agent生成行数（原始生成行数）、提交率/入库率，以及展开行的技能、各特性采纳明细与关联
+        Commit 按所选时间范围统计。
+      </p>
 
       <div className="mb-3 flex items-center gap-2 overflow-x-auto px-1 py-1">
         <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border">
@@ -1594,21 +945,19 @@ function ProjectListSection({
             </button>
           ))}
         </div>
-        {!embedded && (
-          <Select value={selectedAdapter || ALL_ADAPTERS_VALUE} onValueChange={changeAdapterName}>
-            <SelectTrigger className="h-8 w-[180px] shrink-0 rounded-md border-border bg-background text-xs">
-              <SelectValue placeholder="按插件筛选" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={ALL_ADAPTERS_VALUE}>全部插件</SelectItem>
-              {adapterOptions.map((name) => (
-                <SelectItem key={name} value={name}>
-                  {name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
+        <Select value={selectedAdapter || ALL_ADAPTERS_VALUE} onValueChange={changeAdapterName}>
+          <SelectTrigger className="h-8 w-[180px] shrink-0 rounded-md border-border bg-background text-xs">
+            <SelectValue placeholder="按插件筛选" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_ADAPTERS_VALUE}>全部插件</SelectItem>
+            {adapterOptions.map((name) => (
+              <SelectItem key={name} value={name}>
+                {name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <ProjectListSearchInput
             value={query}
@@ -1640,53 +989,21 @@ function ProjectListSection({
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-border bg-muted/30 text-muted-foreground">
-              <th
-                className={cn(
-                  PROJECT_LIST_PROJECT_COLUMN_CLASS,
-                  "px-3 py-2 text-left font-medium"
-                )}
-              >
-                项目
-              </th>
+              <th className="px-3 py-2 text-left font-medium">项目</th>
               <th className="px-3 py-2 text-left font-medium">插件</th>
               <th className="px-3 py-2 text-left font-medium">项目状态</th>
-              <SortableTh
-                label="特性数"
-                sortKey="featureCount"
-                activeKey={effectiveSortBy}
-                order={sortOrder}
-                enabled
-                onSort={cycleSort}
-              />
-              <SortableTh
-                label="对话数"
-                sortKey="conversationCount"
-                activeKey={effectiveSortBy}
-                order={sortOrder}
-                enabled={metricSortAllowed}
-                onSort={cycleSort}
-              />
-              <SortableTh
-                label="原始生成行数"
-                sortKey="generatedLines"
-                activeKey={effectiveSortBy}
-                order={sortOrder}
-                enabled={metricSortAllowed}
-                onSort={cycleSort}
+              <th className="px-3 py-2 text-right font-medium">特性数</th>
+              <th className="px-3 py-2 text-right font-medium">对话数</th>
+              <th
+                className="px-3 py-2 text-right font-medium"
                 title="Agent 原始生成行数（未经去重/抵消的原始产出）"
-              />
-              <th className="px-3 py-2 text-right font-medium">提交口径采纳率</th>
-              <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
+              >
+                Agent生成行数
+              </th>
+              <th className="px-3 py-2 text-right font-medium">提交率</th>
+              <th className="px-3 py-2 text-right font-medium">入库率</th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
-              <SortableTh
-                label="创建时间"
-                sortKey="createdAt"
-                activeKey={effectiveSortBy}
-                order={effectiveSortOrder}
-                enabled
-                onSort={cycleSort}
-              />
               <th className="px-3 py-2 text-right font-medium">操作</th>
             </tr>
           </thead>
@@ -1699,17 +1016,14 @@ function ProjectListSection({
                 onToggle={() =>
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
                 }
-                onOpenTraces={(feature, node, status, stageBucket) =>
-                  onOpenTraces(project, feature, node, status, stageBucket)
-                }
+                onOpenTraces={(feature) => onOpenTraces(project, feature)}
                 onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
                 onOpenProjectCommits={(pushedOnly) => onOpenProjectCommits(project, pushedOnly)}
-                loadFeatureNodes={(feature) => loadFeatureNodes(project, feature)}
               />
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={11} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -1719,7 +1033,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={11} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -1727,12 +1041,12 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={12} className="h-[49px]" />
+                  <td colSpan={11} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={11} className="px-3 py-10 text-center text-muted-foreground">
                   {emptyText}
                 </td>
               </tr>
@@ -1811,27 +1125,11 @@ function mergeCodeStats(
     measuredAdoptionRate,
     inclusiveAdoptionRate: adoptionRate(adoptedLines, inclusiveEffectiveGeneratedLines),
     pushedAdoptionRate: adoptionRate(pushedAdoptedLines, pushedEffectiveGeneratedLines),
-    inclusivePushedAdoptionRate: adoptionRate(pushedAdoptedLines, inclusiveEffectiveGeneratedLines),
     adoptionRate: measuredAdoptionRate
   }
 }
 
-/** 合并多份 stage×skill 三桶：逐桶累加对话数、合并代码采纳明细。 */
-function mergeStageBuckets(items: DashboardStageBuckets[]): DashboardStageBuckets {
-  const mergeOne = (
-    pick: (b: DashboardStageBuckets) => DashboardStageBucketStat
-  ): DashboardStageBucketStat => ({
-    conversationCount: items.reduce((acc, b) => acc + pick(b).conversationCount, 0),
-    codeStats: mergeCodeStats(items.map((b) => pick(b).codeStats))
-  })
-  return {
-    pluginConstrained: mergeOne((b) => b.pluginConstrained),
-    vibecoding: mergeOne((b) => b.vibecoding),
-    unattributed: mergeOne((b) => b.unattributed)
-  }
-}
-
-/** 按插件名聚合：累加项目/特性/对话数，合并代码采纳明细与流程阶段三桶。 */
+/** 按插件名聚合：累加项目/特性/对话数，合并代码采纳明细。 */
 function aggregateAdaptersByName(
   adapters: DashboardProjectModeAdapter[]
 ): DashboardProjectModeAdapter[] {
@@ -1849,8 +1147,7 @@ function aggregateAdaptersByName(
       projectCount: group.reduce((acc, a) => acc + a.projectCount, 0),
       featureCount: group.reduce((acc, a) => acc + a.featureCount, 0),
       conversationCount: group.reduce((acc, a) => acc + a.conversationCount, 0),
-      codeStats: mergeCodeStats(group.map((a) => a.codeStats)),
-      stageBuckets: mergeStageBuckets(group.map((a) => a.stageBuckets))
+      codeStats: mergeCodeStats(group.map((a) => a.codeStats))
     })
   }
   return result
@@ -1879,46 +1176,6 @@ const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
   }
 }
 
-/**
- * 用 item.user_id（上传者 SAP id）到全量用户目录解析 {负责人, 部门}。
- * 负责人/部门并不在插件列表响应里——应用市场与 Harness 看板都是靠 user_id 二次查
- * queryAllUser 拿到的，这里复用同一口径（queryAllUser + buildUploaderIdCandidates）。
- */
-async function resolvePluginUploaderProfiles(
-  items: MarketItem[]
-): Promise<Map<string, { userName: string; orgName: string }>> {
-  const result = new Map<string, { userName: string; orgName: string }>()
-  const rawUserIds = Array.from(
-    new Set(items.map((item) => item.user_id?.trim() || "").filter(Boolean))
-  )
-  if (rawUserIds.length === 0) return result
-  if (typeof window.api?.dashboard?.queryAllUser !== "function") return result
-  try {
-    const response = await window.api.dashboard.queryAllUser()
-    if (!response.success || !response.data) return result
-    const allUsers = response.data.filter((user) => user.sapId?.trim())
-    for (const rawUserId of rawUserIds) {
-      const lookupIds = buildUploaderIdCandidates(rawUserId)
-      const target = allUsers.find((user) =>
-        lookupIds.some((lookupId) => user.sapId.includes(lookupId))
-      )
-      if (!target) continue
-      result.set(rawUserId, {
-        userName: target.userName,
-        orgName: formatTopUserOrgName(
-          target.orgName || "",
-          target.upperOrgLv1 || "",
-          target.upperOrgLv0 || ""
-        )
-      })
-    }
-    return result
-  } catch (error) {
-    console.warn("[ProjectModePanel] Failed to resolve plugin uploader profiles:", error)
-    return result
-  }
-}
-
 /** 拉取一次市场插件信息，按插件名建立 name → {场景, 负责人, 部门} 映射。市场不可用时静默降级为空。 */
 function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
   const [infoMap, setInfoMap] = useState<Map<string, PluginMarketInfo>>(new Map())
@@ -1929,27 +1186,23 @@ function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
       setInfoMap(new Map(Object.entries(DEV_MOCK_PLUGIN_MARKET_INFO)))
       return
     }
-    void (async () => {
-      const res = await marketApi
-        .getPlugins({ allowMockOnError: false, silent: true })
-        .catch(() => null)
-      if (cancelled || !res?.success || !res.data) return
-      // 负责人/部门要靠 user_id 二次解析，场景（category）则直接来自列表响应。
-      const profiles = await resolvePluginUploaderProfiles(res.data)
-      if (cancelled) return
-      const next = new Map<string, PluginMarketInfo>()
-      for (const item of res.data) {
-        const name = item.name?.trim()
-        if (!name) continue
-        const profile = item.user_id ? profiles.get(item.user_id.trim()) : undefined
-        next.set(name, {
-          useScenario: item.category?.trim() || OTHER_ADAPTER_SCENARIO,
-          managerName: profile?.userName || "",
-          managerDepartment: profile?.orgName || ""
-        })
-      }
-      setInfoMap(next)
-    })()
+    void marketApi
+      .getPlugins({ allowMockOnError: false, silent: true })
+      .then((res) => {
+        if (cancelled || !res.success || !res.data) return
+        const next = new Map<string, PluginMarketInfo>()
+        for (const item of res.data) {
+          const name = item.name?.trim()
+          if (!name) continue
+          next.set(name, {
+            useScenario: item.category?.trim() || OTHER_ADAPTER_SCENARIO,
+            managerName: item.managerName?.trim() || "",
+            managerDepartment: item.managerDepartment?.trim() || ""
+          })
+        }
+        setInfoMap(next)
+      })
+      .catch(() => {})
     return () => {
       cancelled = true
     }
@@ -1957,151 +1210,24 @@ function usePluginMarketInfo(): Map<string, PluginMarketInfo> {
   return infoMap
 }
 
-/**
- * 插件行内「阶段细分」：懒加载该插件跨用户的按阶段（工作流节点）对话数 + 代码采纳，
- * 跟随面板所选时间范围（range 改变 → loadAggregate 标识变化，展开中会自动重拉）。
- * 已在项目运营概览内（已具备项目模式权限），无需再做权限门禁。阶段归因前向生效，
- * 更早会话不带 nodeId。
- */
-function AdapterStageBreakdown({
-  adapterName,
-  loadAggregate
-}: {
-  adapterName: string
-  loadAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false)
-  const [nodes, setNodes] = useState<DashboardProjectModeFeatureNode[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  // 展开时按当前面板时间范围拉取；range（→ loadAggregate）变化且仍展开时自动重拉。
-  // 不在首个 await 前 setState（满足 react-hooks/set-state-in-effect）；loading 由状态派生。
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    void (async () => {
-      try {
-        const result = await loadAggregate(adapterName)
-        if (!cancelled) {
-          setError(null)
-          setNodes(result)
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [open, adapterName, loadAggregate])
-
-  // 首次展开（无缓存、无错误）显示加载态；range 变化重拉时沿用旧数据直到新数据到达。
-  const loading = open && nodes === null && error === null
-
-  return (
-    <div className="space-y-1.5 pl-5">
-      <button
-        type="button"
-        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-        onClick={() => setOpen((v) => !v)}
-      >
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        阶段细分
-        <InfoHint hint="按工作流节点（阶段）拆分该插件的对话与代码采纳，跨用户，跟随面板所选时间范围。" />
-      </button>
-      {open && (
-        <div className="space-y-1.5 rounded-md border border-border/60 bg-background/60 p-2">
-          {loading && (
-            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-              <Loader2 className="size-3 animate-spin" />
-              加载阶段数据…
-            </div>
-          )}
-          {error && <div className="text-[11px] text-destructive">{error}</div>}
-          {!loading && !error && nodes && nodes.length === 0 && (
-            <div className="text-[11px] text-muted-foreground">暂无阶段数据</div>
-          )}
-          {!loading &&
-            !error &&
-            nodes?.map((node) => (
-              <div
-                key={node.nodeName}
-                className="space-y-1 rounded border border-border/50 px-2 py-1.5"
-              >
-                <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-foreground">
-                  <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    阶段
-                  </span>
-                  <span className="font-medium">{node.nodeName}</span>
-                  <span className="text-muted-foreground">
-                    · {formatNumber(node.conversationCount)} 对话
-                  </span>
-                </span>
-                <FeatureCodeStatsLine codeStats={node.codeStats} />
-                <NodeBreakdownTabs byStatus={node.byStatus} stageBuckets={node.stageBuckets} />
-              </div>
-            ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 function AdapterListSection({
-  adapters,
-  loadPluginAggregate,
-  fetchAdapterProjectPage,
-  onOpenTraces,
-  onOpenFeatureCommits,
-  onOpenProjectCommits,
-  loadFeatureNodes
+  adapters
 }: {
   adapters: DashboardProjectModeAdapter[]
-  loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
-  fetchAdapterProjectPage: (
-    options: DashboardProjectModeProjectPageOptions
-  ) => Promise<DashboardProjectModeProjectPageData>
-  onOpenTraces: (
-    project: DashboardProjectModeProject,
-    feature?: DashboardProjectModeFeature,
-    node?: DashboardProjectModeFeatureNode,
-    status?: string,
-    stageBucket?: StageBucket
-  ) => void
-  onOpenFeatureCommits: (
-    project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
-  ) => void
-  onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
-  loadFeatureNodes: (
-    project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
-  ) => Promise<DashboardProjectModeFeatureNode[]>
 }): React.JSX.Element {
   const [page, setPage] = useState(1)
   const [mode, setMode] = useState<AdapterListMode>("byName")
-  // 点击插件「项目数」弹出的项目列表对应的插件（含版本，byName 模式 version 为空 = 全部版本）；null = 关闭。
-  const [projectsForAdapter, setProjectsForAdapter] = useState<AdapterProjectsTarget | null>(null)
   const marketInfo = usePluginMarketInfo()
-  // 过滤掉对话数与生成代码行数都为 0 的插件（无实际使用，不展示）。
-  const hasAdapterActivity = (a: DashboardProjectModeAdapter): boolean =>
-    a.conversationCount > 0 || (a.codeStats?.generatedLines ?? 0) > 0
-  const versionList = adapters.filter(hasAdapterActivity)
-  const aggregatedByName = aggregateAdaptersByName(adapters).filter(hasAdapterActivity)
-  const versionCount = versionList.length
-  const baseList = mode === "byName" ? aggregatedByName : versionList
-  // 优先展示能在插件市场匹配上的插件（marketInfo 命中），其次再按项目数降序。
-  const sortedAdapters = [...baseList].sort((a, b) => {
-    const aMatched = marketInfo.has(a.name) ? 1 : 0
-    const bMatched = marketInfo.has(b.name) ? 1 : 0
-    return (
-      bMatched - aMatched ||
+  const versionCount = adapters.length
+  const aggregatedByName = aggregateAdaptersByName(adapters)
+  const baseList = mode === "byName" ? aggregatedByName : adapters
+  const sortedAdapters = [...baseList].sort(
+    (a, b) =>
       b.projectCount - a.projectCount ||
       b.conversationCount - a.conversationCount ||
       a.name.localeCompare(b.name) ||
       (a.version ?? "").localeCompare(b.version ?? "")
-    )
-  })
+  )
   const totalPages = Math.max(1, Math.ceil(sortedAdapters.length / ADAPTER_PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
   const pageItems = sortedAdapters.slice(
@@ -2119,8 +1245,8 @@ function AdapterListSection({
       <h2 className="mb-1 text-sm font-semibold text-foreground">插件列表</h2>
       <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
         {mode === "byName"
-          ? "按插件名聚合同名插件的多个版本；优先展示能在插件市场匹配的插件，再按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"
-          : "按插件版本展开；优先展示能在插件市场匹配的插件，再按项目数降序排列，项目数为当前状态，对话数、提交、总量两口径采纳率按所选时间范围统计。"}
+          ? "按插件名聚合同名插件的多个版本；按项目数降序排列，项目数为当前状态，对话数、提交率/入库率按所选时间范围统计。"
+          : "按插件版本展开；按项目数降序排列，项目数为当前状态，对话数、提交率/入库率按所选时间范围统计。"}
       </p>
       <div className="mb-3 flex items-center overflow-hidden rounded-md border border-border w-fit">
         {modeTabs.map((t) => (
@@ -2152,107 +1278,63 @@ function AdapterListSection({
                 return (
                   <div
                     key={`${adapter.name}@${adapter.version ?? ""}`}
-                    className="space-y-2 px-4 py-3 text-sm"
+                    className="flex items-center justify-between gap-3 px-4 py-3 text-sm"
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex min-w-0 flex-col gap-1">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <Plug className="size-3.5 shrink-0 text-muted-foreground" />
-                          <span className="truncate font-medium text-foreground">
-                            {adapter.name}
-                          </span>
-                          {adapter.version && (
-                            <Badge variant="outline" className="normal-case tracking-normal">
-                              {adapter.version}
-                            </Badge>
-                          )}
-                          {info?.useScenario && (
-                            <Badge
-                              variant="secondary"
-                              className="shrink-0 normal-case tracking-normal"
-                            >
-                              {info.useScenario}
-                            </Badge>
-                          )}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-5 text-[11px] text-muted-foreground">
-                          <span>负责人：{info?.managerName || "—"}</span>
-                          <span>部门：{info?.managerDepartment || "—"}</span>
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
-                        {adapter.projectCount > 0 ? (
-                          <button
-                            type="button"
-                            className="group -mx-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 transition-colors hover:bg-primary/10"
-                            title="查看该插件下的项目列表"
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              setProjectsForAdapter({
-                                name: adapter.name,
-                                version: adapter.version,
-                                projectCount: adapter.projectCount
-                              })
-                            }}
-                          >
-                            <span className="text-muted-foreground">项目</span>
-                            <span className="font-semibold text-primary underline decoration-dotted underline-offset-2 group-hover:decoration-solid">
-                              {formatNumber(adapter.projectCount)}
-                            </span>
-                            <ChevronRight className="size-3 text-primary/70 transition-transform group-hover:translate-x-0.5" />
-                          </button>
-                        ) : (
-                          <span>
-                            项目{" "}
-                            <span className="font-medium text-foreground">
-                              {formatNumber(adapter.projectCount)}
-                            </span>
-                          </span>
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Plug className="size-3.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate font-medium text-foreground">{adapter.name}</span>
+                        {adapter.version && (
+                          <Badge variant="outline" className="normal-case tracking-normal">
+                            {adapter.version}
+                          </Badge>
                         )}
-                        <span>
-                          特性{" "}
-                          <span className="font-medium text-foreground">
-                            {formatNumber(adapter.featureCount)}
-                          </span>
-                        </span>
-                        <span>
-                          对话{" "}
-                          <span className="font-medium text-foreground">
-                            {formatNumber(adapter.conversationCount)}
-                          </span>
-                        </span>
-                        <span>
-                          <span className="text-muted-foreground/70">提交口径</span> 提交{" "}
-                          <span className="font-medium text-foreground">
-                            {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
-                          </span>{" "}
-                          · 入库{" "}
-                          <span className="font-medium text-foreground">
-                            {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
-                          </span>
-                        </span>
-                        <span>
-                          <span className="text-muted-foreground/70">总量口径</span> 提交{" "}
-                          <span className="font-medium text-foreground">
-                            {formatPercent(adapter.codeStats?.inclusiveAdoptionRate)}
-                          </span>{" "}
-                          · 入库{" "}
-                          <span className="font-medium text-foreground">
-                            {formatPercent(adapter.codeStats?.inclusivePushedAdoptionRate)}
-                          </span>
-                        </span>
+                        {info?.useScenario && (
+                          <Badge
+                            variant="secondary"
+                            className="shrink-0 normal-case tracking-normal"
+                          >
+                            {info.useScenario}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-5 text-[11px] text-muted-foreground">
+                        <span>负责人：{info?.managerName || "—"}</span>
+                        <span>部门：{info?.managerDepartment || "—"}</span>
                       </div>
                     </div>
-                    {/* 流程阶段口径：插件约束（Harness）/ VibeCoding / 未归因 */}
-                    {!isStageBucketsEmpty(adapter.stageBuckets) && (
-                      <div className="border-t border-border/40 pt-2">
-                        <StageBucketSplit buckets={adapter.stageBuckets} />
-                      </div>
-                    )}
-                    <AdapterStageBreakdown
-                      adapterName={adapter.name}
-                      loadAggregate={loadPluginAggregate}
-                    />
+                    <div className="flex shrink-0 items-center gap-4 text-xs text-muted-foreground">
+                      <span>
+                        项目{" "}
+                        <span className="font-medium text-foreground">
+                          {formatNumber(adapter.projectCount)}
+                        </span>
+                      </span>
+                      <span>
+                        特性{" "}
+                        <span className="font-medium text-foreground">
+                          {formatNumber(adapter.featureCount)}
+                        </span>
+                      </span>
+                      <span>
+                        对话{" "}
+                        <span className="font-medium text-foreground">
+                          {formatNumber(adapter.conversationCount)}
+                        </span>
+                      </span>
+                      <span>
+                        提交率{" "}
+                        <span className="font-medium text-foreground">
+                          {formatPercent(adapter.codeStats?.measuredAdoptionRate)}
+                        </span>
+                      </span>
+                      <span>
+                        入库率{" "}
+                        <span className="font-medium text-foreground">
+                          {formatPercent(adapter.codeStats?.pushedAdoptionRate)}
+                        </span>
+                      </span>
+                    </div>
                   </div>
                 )
               })}
@@ -2284,171 +1366,7 @@ function AdapterListSection({
           </>
         )}
       </div>
-      <AdapterProjectsDialog
-        target={projectsForAdapter}
-        onClose={() => setProjectsForAdapter(null)}
-        fetchPage={fetchAdapterProjectPage}
-        onOpenTraces={onOpenTraces}
-        onOpenFeatureCommits={onOpenFeatureCommits}
-        onOpenProjectCommits={onOpenProjectCommits}
-        loadFeatureNodes={loadFeatureNodes}
-      />
     </section>
-  )
-}
-
-interface AdapterProjectsTarget {
-  name: string
-  version?: string
-  /** 该插件（或版本）当前项目总数，用于弹窗首屏加载态与 tab 计数兜底。 */
-  projectCount: number
-}
-
-interface AdapterProjectsDialogHandlers {
-  fetchPage: (
-    options: DashboardProjectModeProjectPageOptions
-  ) => Promise<DashboardProjectModeProjectPageData>
-  onOpenTraces: (
-    project: DashboardProjectModeProject,
-    feature?: DashboardProjectModeFeature,
-    node?: DashboardProjectModeFeatureNode,
-    status?: string,
-    stageBucket?: StageBucket
-  ) => void
-  onOpenFeatureCommits: (
-    project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
-  ) => void
-  onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
-  loadFeatureNodes: (
-    project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
-  ) => Promise<DashboardProjectModeFeatureNode[]>
-}
-
-/**
- * 点击插件「项目数」弹出的弹窗：直接复用「项目列表」（ProjectListSection）锁定到该插件，
- * 功能与上方主列表一致（双 tab / 搜索 / 排序 / 分页 / 展开行的特性·阶段·Commit·查看对话）。
- */
-function AdapterProjectsDialog({
-  target,
-  onClose,
-  ...handlers
-}: {
-  /** 当前点击的插件（含版本）；null = 关闭。byName 模式 version 为空 = 全部版本。 */
-  target: AdapterProjectsTarget | null
-  onClose: () => void
-} & AdapterProjectsDialogHandlers): React.JSX.Element {
-  return (
-    <Dialog open={Boolean(target)} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="flex max-h-[88vh] w-[95vw] max-w-[1400px] flex-col">
-        <DialogHeader>
-          <DialogTitle>
-            插件「{target?.name}」
-            {target?.version ? (
-              <span className="text-muted-foreground">@{target.version}</span>
-            ) : null}{" "}
-            关联项目
-          </DialogTitle>
-        </DialogHeader>
-        {target ? (
-          // 按「插件名@版本」重挂，切换插件/版本时彻底重置内部 tab/搜索/分页与本地缓存。
-          <AdapterProjectsDialogBody
-            key={`${target.name}@${target.version ?? ""}`}
-            target={target}
-            {...handlers}
-          />
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/** 弹窗内容：自管整页缓存 + 锁定插件的 onPageChange，渲染嵌入式 ProjectListSection。 */
-function AdapterProjectsDialogBody({
-  target,
-  fetchPage,
-  onOpenTraces,
-  onOpenFeatureCommits,
-  onOpenProjectCommits,
-  loadFeatureNodes
-}: { target: AdapterProjectsTarget } & AdapterProjectsDialogHandlers): React.JSX.Element {
-  const [pages, setPages] = useState<
-    Partial<Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>>
-  >({})
-  const [pageLoading, setPageLoading] = useState<
-    Record<DashboardProjectModeProjectStatus, boolean>
-  >({ active: false, archived: false })
-  const [pageError, setPageError] = useState<
-    Partial<Record<DashboardProjectModeProjectStatus, string>>
-  >({})
-
-  const handlePageChange = useCallback(
-    (
-      status: DashboardProjectModeProjectStatus,
-      page: number,
-      keyword: string,
-      pageSize: number,
-      _adapterName: string,
-      creatorKeyword: string,
-      creatorOrgKeyword: string,
-      sortBy?: DashboardProjectModeProjectSortKey | null,
-      sortOrder?: DashboardProjectModeProjectSortOrder
-    ) => {
-      setPageLoading((prev) => ({ ...prev, [status]: true }))
-      setPageError((prev) => ({ ...prev, [status]: undefined }))
-      // 锁定到该插件 + 版本（忽略组件传入的 _adapterName，恒用 target）。
-      fetchPage({
-        status,
-        page,
-        pageSize,
-        keyword,
-        adapterName: target.name,
-        adapterVersion: target.version,
-        creatorKeyword,
-        creatorOrgKeyword,
-        sortBy,
-        sortOrder
-      })
-        .then((data) => setPages((prev) => ({ ...prev, [status]: data })))
-        .catch((e) =>
-          setPageError((prev) => ({
-            ...prev,
-            [status]: e instanceof Error ? e.message : String(e)
-          }))
-        )
-        .finally(() => setPageLoading((prev) => ({ ...prev, [status]: false })))
-    },
-    [fetchPage, target.name, target.version]
-  )
-
-  // tab 计数：已加载用整页 total，未加载兜底用插件项目总数（保证首屏显示加载态而非空表）。
-  const projectCounts: DashboardProjectModeProjectCounts = {
-    total: target.projectCount,
-    active: pages.active?.total ?? target.projectCount,
-    archived: pages.archived?.total ?? 0,
-    totalFeatureCount: 0,
-    activeFeatureCount: 0,
-    archivedFeatureCount: 0
-  }
-
-  return (
-    <div className="-mx-1 min-h-0 flex-1 overflow-auto px-1">
-      <ProjectListSection
-        projectCounts={projectCounts}
-        projectPages={pages}
-        adapterOptions={[]}
-        pageLoading={pageLoading}
-        pageError={pageError}
-        loading={false}
-        onPageChange={handlePageChange}
-        onOpenTraces={onOpenTraces}
-        onOpenFeatureCommits={onOpenFeatureCommits}
-        onOpenProjectCommits={onOpenProjectCommits}
-        loadFeatureNodes={loadFeatureNodes}
-        lockedAdapterName={target.name}
-      />
-    </div>
   )
 }
 
@@ -2456,10 +1374,6 @@ export function ProjectModePanel({
   data,
   loading,
   error,
-  codeSource,
-  codeStatsOverride,
-  codeStatsLoading,
-  onCodeSourceChange,
   headerAction,
   projectPages,
   projectPageLoading,
@@ -2468,29 +1382,16 @@ export function ProjectModePanel({
   onOpenTraces,
   onOpenFeatureCommits,
   onOpenProjectCommits,
-  loadFeatureNodes,
-  loadPluginAggregate,
-  fetchAdapterProjectPage,
   onSkillClick,
   onUserClick,
   onFunnelFirstStageClick,
   onSkillFunnelFirstStageClick,
-  marketSkillKeys = new Set()
+  marketSkillKeys = new Set(),
+  pluginSkillKeys = new Set()
 }: {
   data: DashboardProjectModeData | null
   loading: boolean
   error: string | null
-  /** 「生产效能代码指标」当前选中的 source（null = 全部来源，用 data 自带口径）。 */
-  codeSource: string | null
-  /** 选了具体来源/原生时按 source 换数得到的代码采纳覆盖值；null 表示用 data 自带口径。 */
-  codeStatsOverride: {
-    codeStats: DashboardCodeStats | null
-    skillCodeStats: DashboardCodeStats | null
-  } | null
-  /** source 换数请求在途。 */
-  codeStatsLoading: boolean
-  /** 切换 source 下拉（null = 全部来源）。 */
-  onCodeSourceChange: (source: string | null) => void
   headerAction?: ReactNode
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
@@ -2504,36 +1405,23 @@ export function ProjectModePanel({
     pageSize: number,
     adapterName: string,
     creatorKeyword: string,
-    creatorOrgKeyword: string,
-    sortBy?: DashboardProjectModeProjectSortKey | null,
-    sortOrder?: DashboardProjectModeProjectSortOrder
+    creatorOrgKeyword: string
   ) => void
   onOpenTraces: (
     project: DashboardProjectModeProject,
-    feature?: DashboardProjectModeFeature,
-    node?: DashboardProjectModeFeatureNode,
-    status?: string,
-    stageBucket?: StageBucket
+    feature?: DashboardProjectModeFeature
   ) => void
   onOpenFeatureCommits: (
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => void
   onOpenProjectCommits: (project: DashboardProjectModeProject, pushedOnly?: boolean) => void
-  loadFeatureNodes: (
-    project: DashboardProjectModeProject,
-    feature: DashboardProjectModeFeature
-  ) => Promise<DashboardProjectModeFeatureNode[]>
-  loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
-  /** 插件「项目数」弹窗复用项目列表所需的分页拉取器（按当前时间范围，调用方注入插件名/版本）。 */
-  fetchAdapterProjectPage: (
-    options: DashboardProjectModeProjectPageOptions
-  ) => Promise<DashboardProjectModeProjectPageData>
   onSkillClick?: (skill: string) => void
   onUserClick?: (sapId: string) => void
   onFunnelFirstStageClick?: () => void
   onSkillFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
+  pluginSkillKeys?: Set<string>
 }): React.JSX.Element {
   const adapters = useMemo(() => data?.adapters ?? [], [data?.adapters])
   const adapterOptions = useMemo(
@@ -2562,14 +1450,8 @@ export function ProjectModePanel({
   }
 
   const summary = data?.summary
-  // 「生产效能代码指标」按 source 局部换数：选了具体来源/原生（codeStatsOverride 非空）时
-  // 用 override，否则用 data 自带的整体口径。只影响该区两个子模块与漏斗。
-  const codeStats = codeStatsOverride ? codeStatsOverride.codeStats : (summary?.codeStats ?? null)
-  const skillCodeStats = codeStatsOverride
-    ? codeStatsOverride.skillCodeStats
-    : (summary?.skillCodeStats ?? null)
-  const availableSources = data?.availableSources ?? []
-  const funnelData: CodeAdoptionFunnelData = codeStats ?? EMPTY_FUNNEL_DATA
+  const skillCodeStats = summary?.skillCodeStats
+  const funnelData: CodeAdoptionFunnelData = summary?.codeStats ?? EMPTY_FUNNEL_DATA
   const skillFunnelData: CodeAdoptionFunnelData = skillCodeStats ?? EMPTY_FUNNEL_DATA
   const topSkills = data?.topSkills ?? []
   const bySkillAdoption = data?.bySkillAdoption ?? []
@@ -2586,15 +1468,6 @@ export function ProjectModePanel({
           <h2 className="text-sm font-semibold text-foreground">项目运营概览</h2>
           {headerAction ? <div className="shrink-0">{headerAction}</div> : null}
         </div>
-        {data?.leanTruncated && (
-          <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
-            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>
-              「仅精益项目」命中的项目数量已超过单次统计上限，下方汇总指标（对话数、代码采纳等）可能不完整。请缩小时间范围或叠加部门
-              / 室筛选后再查看。
-            </span>
-          </div>
-        )}
         <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
           <span className="font-medium text-foreground">项目总数 / 特性总数</span>{" "}
           为当前状态（项目快照实时统计，不随时间范围变化）；其余指标按
@@ -2647,104 +1520,73 @@ export function ProjectModePanel({
 
       {/* 生成效能代码指标：项目模式总量 + AutoBizDevOps 约束生成，两个子模块各含卡片与独立漏斗 */}
       <section className="space-y-5">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-1.5">
-            <h2 className="text-sm font-semibold text-foreground">生产效能代码指标</h2>
-            <CodeEfficiencyModelInfo />
-          </div>
-          {/* source 筛选：始终展示，仅收窄本区两个子模块。 */}
-          <div className="flex items-center gap-2">
-            {codeStatsLoading && (
-              <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-            )}
-            <span className="text-[11px] text-muted-foreground">来源</span>
-            <Select
-              value={codeSource ?? CODE_SOURCE_ALL}
-              onValueChange={(v) => onCodeSourceChange(v === CODE_SOURCE_ALL ? null : v)}
-            >
-              <SelectTrigger className="h-7 w-[160px] text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={CODE_SOURCE_ALL}>全部来源</SelectItem>
-                <SelectItem value={CODE_SOURCE_NATIVE}>Git仓库采纳</SelectItem>
-                {availableSources.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {s}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+        <div className="flex items-center gap-1.5">
+          <h2 className="text-sm font-semibold text-foreground">生产效能代码指标</h2>
+          <CodeEfficiencyModelInfo />
         </div>
 
-        {/* 子模块一（项目模式总量）：含 VibeCoding 在内的整体口径 */}
+        {/* 子模块一（项目模式总量）：含 Vibecoding 在内的整体口径 */}
         <div>
           <div className="mb-3 flex items-center gap-1.5">
             <h3 className="text-xs font-semibold text-foreground">项目模式总量</h3>
-            <InfoHint hint="项目模式下产生的全部代码（含 VibeCoding 等未使用 Skill 的对话）。" />
+            <InfoHint hint="项目模式下产生的全部代码（含 Vibecoding 等未使用 Skill 的对话）。" />
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
-            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-5">
+            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-4">
               <StatCard
                 icon={Code2}
                 label="代码生成行数"
-                tag="计数"
-                value={formatLineCount(codeStats?.generatedLines ?? 0)}
+                value={formatLineCount(summary?.codeStats?.generatedLines ?? 0)}
                 color="bg-sky-500"
                 hint={<GeneratedLinesTooltip />}
               />
               <StatCard
                 icon={Gauge}
-                label="总量入库采纳率"
-                tag="总量口径 · 入库"
-                value={formatPercent(codeStats?.inclusivePushedAdoptionRate)}
+                label="入库率"
+                value={formatPercent(summary?.codeStats?.pushedAdoptionRate)}
                 sub={
-                  codeStats
-                    ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)} 行`
-                    : "暂无已 Push 数据"
-                }
-                color="bg-emerald-500"
-                hint={codeStats ? <InclusivePushedAdoptionTooltip data={codeStats} /> : undefined}
-              />
-              <StatCard
-                icon={Gauge}
-                label="总量提交采纳率"
-                tag="总量口径 · 提交"
-                value={formatPercent(codeStats?.inclusiveAdoptionRate)}
-                sub={
-                  codeStats
-                    ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.inclusiveEffectiveGeneratedLines)} 行`
-                    : "暂无代码生成数据"
-                }
-                color="bg-cyan-500"
-                hint={codeStats ? <InclusiveAdoptionTooltip data={codeStats} /> : undefined}
-              />
-              <StatCard
-                icon={Gauge}
-                label="入库采纳率"
-                tag="提交口径 · 已push"
-                value={formatPercent(codeStats?.pushedAdoptionRate)}
-                sub={
-                  codeStats
-                    ? `${formatLineCount(codeStats.pushedAdoptedLines)} / ${formatLineCount(codeStats.pushedEffectiveGeneratedLines)} 行`
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.pushedAdoptedLines)} / ${formatLineCount(summary.codeStats.pushedEffectiveGeneratedLines)} 行`
                     : "暂无已 Push 数据"
                 }
                 color="bg-teal-500"
-                hint={codeStats ? <PushedAdoptionTooltip data={codeStats} /> : undefined}
+                hint={
+                  summary?.codeStats ? (
+                    <PushedAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
               />
               <StatCard
                 icon={Gauge}
-                label="提交采纳率"
-                tag="提交口径 · 对标组织级"
-                value={formatPercent(codeStats?.measuredAdoptionRate)}
+                label="提交率"
+                value={formatPercent(summary?.codeStats?.measuredAdoptionRate)}
                 sub={
-                  codeStats
-                    ? `${formatLineCount(codeStats.adoptedLines)} / ${formatLineCount(codeStats.effectiveGeneratedLines)} 行`
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.effectiveGeneratedLines)} 行`
                     : "暂无代码生成数据"
                 }
                 color="bg-indigo-500"
-                hint={codeStats ? <MeasuredAdoptionTooltip data={codeStats} /> : undefined}
+                hint={
+                  summary?.codeStats ? (
+                    <MeasuredAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="代码总量采纳率"
+                value={formatPercent(summary?.codeStats?.inclusiveAdoptionRate)}
+                sub={
+                  summary?.codeStats
+                    ? `${formatLineCount(summary.codeStats.adoptedLines)} / ${formatLineCount(summary.codeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-cyan-500"
+                hint={
+                  summary?.codeStats ? (
+                    <InclusiveAdoptionTooltip data={summary.codeStats} />
+                  ) : undefined
+                }
               />
             </div>
             <CodeAdoptionFunnel data={funnelData} onFirstStageClick={onFunnelFirstStageClick} />
@@ -2758,11 +1600,10 @@ export function ProjectModePanel({
             <InfoHint hint="仅统计调用了 AutoBizDevOps 插件 Skill 的对话所生成的代码，是项目模式总量的子集。" />
           </div>
           <div className="grid grid-cols-[minmax(0,1fr)_240px] gap-3">
-            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-5">
+            <div className="grid grid-cols-2 gap-3 content-start md:grid-cols-4">
               <StatCard
                 icon={Code2}
                 label="Skill 生成行数"
-                tag="计数"
                 value={formatLineCount(skillCodeStats?.generatedLines ?? 0)}
                 sub="由 Skill 生成的原始行数"
                 color="bg-violet-500"
@@ -2770,40 +1611,7 @@ export function ProjectModePanel({
               />
               <StatCard
                 icon={Gauge}
-                label="总量入库采纳率"
-                tag="总量口径 · 入库"
-                value={formatPercent(skillCodeStats?.inclusivePushedAdoptionRate)}
-                sub={
-                  skillCodeStats
-                    ? `${formatLineCount(skillCodeStats.pushedAdoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
-                    : "暂无已 Push 数据"
-                }
-                color="bg-emerald-500"
-                hint={
-                  skillCodeStats ? (
-                    <InclusivePushedAdoptionTooltip data={skillCodeStats} />
-                  ) : undefined
-                }
-              />
-              <StatCard
-                icon={Gauge}
-                label="总量提交采纳率"
-                tag="总量口径 · 提交"
-                value={formatPercent(skillCodeStats?.inclusiveAdoptionRate)}
-                sub={
-                  skillCodeStats
-                    ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
-                    : "暂无代码生成数据"
-                }
-                color="bg-cyan-500"
-                hint={
-                  skillCodeStats ? <InclusiveAdoptionTooltip data={skillCodeStats} /> : undefined
-                }
-              />
-              <StatCard
-                icon={Gauge}
-                label="入库采纳率"
-                tag="提交口径 · 已push"
+                label="入库率"
                 value={formatPercent(skillCodeStats?.pushedAdoptionRate)}
                 sub={
                   skillCodeStats
@@ -2815,8 +1623,7 @@ export function ProjectModePanel({
               />
               <StatCard
                 icon={Gauge}
-                label="提交采纳率"
-                tag="提交口径 · 对标组织级"
+                label="提交率"
                 value={formatPercent(skillCodeStats?.measuredAdoptionRate)}
                 sub={
                   skillCodeStats
@@ -2826,6 +1633,20 @@ export function ProjectModePanel({
                 color="bg-indigo-500"
                 hint={
                   skillCodeStats ? <MeasuredAdoptionTooltip data={skillCodeStats} /> : undefined
+                }
+              />
+              <StatCard
+                icon={Gauge}
+                label="代码总量采纳率"
+                value={formatPercent(skillCodeStats?.inclusiveAdoptionRate)}
+                sub={
+                  skillCodeStats
+                    ? `${formatLineCount(skillCodeStats.adoptedLines)} / ${formatLineCount(skillCodeStats.inclusiveEffectiveGeneratedLines)} 行`
+                    : "暂无代码生成数据"
+                }
+                color="bg-cyan-500"
+                hint={
+                  skillCodeStats ? <InclusiveAdoptionTooltip data={skillCodeStats} /> : undefined
                 }
               />
             </div>
@@ -2849,18 +1670,6 @@ export function ProjectModePanel({
         onOpenTraces={onOpenTraces}
         onOpenFeatureCommits={onOpenFeatureCommits}
         onOpenProjectCommits={onOpenProjectCommits}
-        loadFeatureNodes={loadFeatureNodes}
-      />
-
-      {/* Adapter (plugin) distribution — 紧随项目列表之后 */}
-      <AdapterListSection
-        adapters={adapters}
-        loadPluginAggregate={loadPluginAggregate}
-        fetchAdapterProjectPage={fetchAdapterProjectPage}
-        onOpenTraces={onOpenTraces}
-        onOpenFeatureCommits={onOpenFeatureCommits}
-        onOpenProjectCommits={onOpenProjectCommits}
-        loadFeatureNodes={loadFeatureNodes}
       />
 
       <ProjectModeAnalyticsSection analytics={data?.analytics} onUserClick={onUserClick} />
@@ -2877,6 +1686,7 @@ export function ProjectModePanel({
             bySkillAdoption={bySkillAdoption}
             onSkillClick={onSkillClick}
             marketSkillKeys={marketSkillKeys}
+            pluginSkillKeys={pluginSkillKeys}
           />
           <ToolRankingPanel
             byTool={tools.byTool}
@@ -2888,6 +1698,9 @@ export function ProjectModePanel({
           />
         </div>
       </section>
+
+      {/* Adapter distribution */}
+      <AdapterListSection adapters={adapters} />
     </div>
   )
 }

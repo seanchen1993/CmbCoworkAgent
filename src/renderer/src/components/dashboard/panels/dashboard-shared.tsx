@@ -8,7 +8,7 @@ import { useState } from "react"
 import { Search, X, Info } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { hasMarketSkill } from "../skill-market"
+import { hasMarketSkill, normalizeMarketSkillKey } from "../skill-market"
 import {
   DEFAULT_SKILL_ADOPTION_SORT,
   SKILL_ADOPTION_SORT_LABELS,
@@ -94,7 +94,7 @@ export function GeneratedLinesTooltip(): React.JSX.Element {
       </div>
       <div className="text-muted-foreground">
         以下文件不纳入统计：非代码文件（如
-        Markdown、JSON、YAML、.properties、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build
+        Markdown、JSON、图片等）、锁文件（package-lock.json、pnpm-lock.yaml、yarn.lock）、压缩/构建产物（.min.js/.min.css、.map）、依赖与构建目录（node_modules、dist、build
         等）。
       </div>
     </div>
@@ -104,7 +104,7 @@ export function GeneratedLinesTooltip(): React.JSX.Element {
 export function PushedAdoptionTooltip({ data }: { data: CodeStatsTooltipData }): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">入库采纳率（已 Push 采纳率）</div>
+      <div className="text-[11px] font-medium text-foreground">入库率（已 Push 采纳率）</div>
       <div className="space-y-1 text-[11px]">
         <TooltipRow
           label="已 Push 采纳行数"
@@ -138,7 +138,7 @@ export function MeasuredAdoptionTooltip({
 }): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">提交采纳率（已 Commit 采纳率）</div>
+      <div className="text-[11px] font-medium text-foreground">提交率（已 Commit 采纳率）</div>
       <div className="space-y-1 text-[11px]">
         <TooltipRow label="采纳行数" value={`${formatExactNumber(data.adoptedLines)} 行`} />
         <TooltipRow
@@ -153,7 +153,6 @@ export function MeasuredAdoptionTooltip({
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
         <div>采纳率 = 采纳行数 / 已测量有效生成行数。</div>
         <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
-        <div>口径等同组织级工具的「代码入库率」，可横向对比。</div>
       </div>
     </div>
   )
@@ -167,7 +166,7 @@ export function InclusiveAdoptionTooltip({
   return (
     <div className="space-y-1.5">
       <div className="text-[11px] font-medium text-foreground">
-        总量提交采纳率（相对全部有效生成）
+        代码总量采纳率（含未提交采纳率）
       </div>
       <div className="space-y-1 text-[11px]">
         <TooltipRow label="采纳行数" value={`${formatExactNumber(data.adoptedLines)} 行`} />
@@ -187,50 +186,6 @@ export function InclusiveAdoptionTooltip({
       <div className="space-y-0.5 text-[10px] text-muted-foreground">
         <div>采纳率 = 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
         <div>已测量有效生成行数已剔除被 agent 自己改写的中间稿部分。</div>
-        <div>
-          分母合计通常小于「代码生成行数」：已提交部分已扣除被 agent
-          改写覆盖/回退的中间稿，未提交部分尚未测量、仍按原始行数计入。
-        </div>
-      </div>
-    </div>
-  )
-}
-
-export function InclusivePushedAdoptionTooltip({
-  data
-}: {
-  data: CodeStatsTooltipData
-}): React.JSX.Element {
-  return (
-    <div className="space-y-1.5">
-      <div className="text-[11px] font-medium text-foreground">
-        总量入库采纳率（已 Push 真实入库率）
-      </div>
-      <div className="space-y-1 text-[11px]">
-        <TooltipRow
-          label="已 Push 采纳行数"
-          value={`${formatExactNumber(data.pushedAdoptedLines)} 行`}
-        />
-        <TooltipRow
-          label="已测量有效生成行数"
-          value={`${formatExactNumber(data.effectiveGeneratedLines)} 行`}
-        />
-        <TooltipRow
-          label="未提交生成行数"
-          value={`${formatExactNumber(data.unmeasuredGeneratedLines)} 行`}
-        />
-        <TooltipRow
-          label="含未提交分母"
-          value={`${formatExactNumber(data.inclusiveEffectiveGeneratedLines)} 行`}
-        />
-      </div>
-      <div className="space-y-0.5 text-[10px] text-muted-foreground">
-        <div>采纳率 = 已 Push 采纳行数 / (已测量有效生成行数 + 未提交生成行数)。</div>
-        <div>Agent 有效产出中最终真实推送入库的比例，分母含未提交，口径最严。</div>
-        <div>
-          分母合计通常小于「代码生成行数」：已提交部分已扣除被 agent
-          改写覆盖/回退的中间稿，未提交部分尚未测量、仍按原始行数计入。
-        </div>
       </div>
     </div>
   )
@@ -241,7 +196,6 @@ export function InclusivePushedAdoptionTooltip({
 // ─────────────────────────────────────────────────────────
 
 export type RankingItem = {
-  id?: string
   name: string
   count: number
 }
@@ -315,7 +269,7 @@ export function SearchableRankingPanel({
   onItemClick?: (name: string) => void
   headerActions?: React.ReactNode
   titleTooltipContent?: React.ReactNode
-  renderNameAddon?: (item: RankingItem) => React.ReactNode
+  renderNameAddon?: (name: string) => React.ReactNode
   className?: string
 }): React.JSX.Element {
   const [query, setQuery] = useState("")
@@ -393,9 +347,7 @@ export function SearchableRankingPanel({
             {visibleItems.map((item, i) => {
               const pct = maxCount > 0 ? (item.count / maxCount) * 100 : 0
               const rank = trimmedQuery
-                ? searchItems.findIndex(
-                    (candidate) => (candidate.id ?? candidate.name) === (item.id ?? item.name)
-                  ) + 1
+                ? searchItems.findIndex((candidate) => candidate.name === item.name) + 1
                 : i + 1
               const content = (
                 <>
@@ -411,7 +363,7 @@ export function SearchableRankingPanel({
                         >
                           {highlightRankingName(item.name, trimmedQuery)}
                         </span>
-                        {renderNameAddon?.(item)}
+                        {renderNameAddon?.(item.name)}
                       </div>
                       <span className="shrink-0 text-[11px] text-muted-foreground">
                         {item.count}
@@ -430,7 +382,7 @@ export function SearchableRankingPanel({
               if (onItemClick) {
                 return (
                   <button
-                    key={item.id ?? item.name}
+                    key={item.name}
                     type="button"
                     className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/50 hover:text-primary focus:outline-none focus:ring-2 focus:ring-ring"
                     onClick={() => onItemClick(item.name)}
@@ -441,7 +393,7 @@ export function SearchableRankingPanel({
               }
 
               return (
-                <div key={item.id ?? item.name} className="flex items-center gap-2">
+                <div key={item.name} className="flex items-center gap-2">
                   {content}
                 </div>
               )
@@ -466,106 +418,97 @@ export interface CodeAdoptionFunnelData {
   inclusiveAdoptionRate: number | null
   measuredAdoptionRate: number | null
   pushedAdoptionRate: number | null
-  /** 已 Push 采纳行 ÷ 有效生成总量（总量口径 · 入库）。 */
-  inclusivePushedAdoptionRate: number | null
-  /** 已 Commit 关联的原始生成行数（未做有效性去重）。 */
+  /** 已 Commit 关联的原始生成行数（未做有效性去重）；「Commit 提交」口径 tab 的第一层基数。 */
   measuredGeneratedLines?: number
 }
 
-type FunnelScopeTab = "total" | "commit"
+type FunnelSourceTab = "agent" | "commit"
 
 type FunnelStage = {
   key: string
   label: string
-  /** 当前漏斗段顶部宽度依据。 */
-  topBasis: number
-  /** 当前漏斗段底部宽度依据。 */
-  bottomBasis: number
-  /** 该口径下「生成」分母行数（副标签展示）。 */
-  generatedLines: number
+  lines: number
   adoptedLines: number
   rate: number | null
   color: string
+  /** 隐藏顶部采纳率百分比（用于「已提交」口径第一层，仅体现原始→有效收窄）。 */
+  hideRate?: boolean
+  /** 覆盖默认「生成 X / 采纳 Y」副标签。 */
+  metricText?: string
+  /** 覆盖默认 hover 提示。 */
+  titleText?: string
 }
 
-const FUNNEL_COMMIT_COLOR = "#3b82f6"
-const FUNNEL_PUSH_COLOR = "#6366f1"
-
-// 代码采纳漏斗：真·漏斗形状（梯形逐级收窄），两层 = 生成 → 已 Commit → 已 Push。
-// 两个口径 tab 切换分母：
-//   - 总量：分母 = 有效生成总量（含未提交）→ 总量提交采纳率 / 总量入库采纳率
-//   - 提交：分母 = 各阶段已落库代码 → 提交采纳率 / 入库采纳率
-// 每段宽度按「上一阶段留存量 → 当前阶段采纳量」绘制，标签为各级采纳率。
+// 代码采纳漏斗：真·漏斗形状（梯形逐级收窄）。
+// 漏斗宽度 = 各级生成行数（全部生成 → 已 Commit → 已 Push），标签 = 各级采纳率（越靠后越高）。
+// enableSourceTabs：开启后可在「Agent 生成 / Commit 提交」两种第一层口径间切换。
 export function CodeAdoptionFunnel({
   data,
   className,
+  enableSourceTabs = false,
   onFirstStageClick
 }: {
   data: CodeAdoptionFunnelData
   className?: string
-  /** 点击总量口径首层下钻：分析「生成了但没提交」的人与原因。 */
+  enableSourceTabs?: boolean
+  /** 点击首层「全部生成」下钻：分析「生成了但没提交」的人与原因。 */
   onFirstStageClick?: () => void
 }): React.JSX.Element {
-  const [scopeTab, setScopeTab] = useState<FunnelScopeTab>("total")
+  const [sourceTab, setSourceTab] = useState<FunnelSourceTab>("commit")
+  const activeTab: FunnelSourceTab = enableSourceTabs ? sourceTab : "agent"
 
-  const stages: FunnelStage[] =
-    scopeTab === "total"
-      ? [
-          {
-            key: "commit",
-            label: "已 Commit",
-            topBasis: data.inclusiveEffectiveGeneratedLines,
-            bottomBasis: data.adoptedLines,
-            generatedLines: data.inclusiveEffectiveGeneratedLines,
-            adoptedLines: data.adoptedLines,
-            rate: data.inclusiveAdoptionRate,
-            color: FUNNEL_COMMIT_COLOR
-          },
-          {
-            key: "push",
-            label: "已 Push",
-            topBasis: data.adoptedLines,
-            bottomBasis: data.pushedAdoptedLines,
-            generatedLines: data.inclusiveEffectiveGeneratedLines,
-            adoptedLines: data.pushedAdoptedLines,
-            rate: data.inclusivePushedAdoptionRate,
-            color: FUNNEL_PUSH_COLOR
-          }
-        ]
-      : [
-          {
-            key: "commit",
-            label: "已 Commit",
-            topBasis: data.effectiveGeneratedLines,
-            bottomBasis: data.adoptedLines,
-            generatedLines: data.effectiveGeneratedLines,
-            adoptedLines: data.adoptedLines,
-            rate: data.measuredAdoptionRate,
-            color: FUNNEL_COMMIT_COLOR
-          },
-          {
-            key: "push",
-            label: "已 Push",
-            topBasis: data.adoptedLines,
-            bottomBasis: data.pushedAdoptedLines,
-            generatedLines: data.pushedEffectiveGeneratedLines,
-            adoptedLines: data.pushedAdoptedLines,
-            rate: data.pushedAdoptionRate,
-            color: FUNNEL_PUSH_COLOR
-          }
-        ]
-  const hasData = stages.some((s) => s.generatedLines > 0 || s.adoptedLines > 0)
-  const BAND_H = 48
-  // 生成量与采纳量可能差异较大，用平方根压缩 + 最小宽度下限，保证每段可见。
-  const maxScaled = Math.max(
-    ...stages.flatMap((s) => [
-      Math.sqrt(Math.max(0, s.topBasis)),
-      Math.sqrt(Math.max(0, s.bottomBasis))
-    ]),
-    1
-  )
-  const halfWidthOf = (basis: number): number =>
-    Math.max(9, (Math.sqrt(Math.max(0, basis)) / maxScaled) * 50)
+  // 第一层随口径切换：Agent 生成 = 全部生成（含未提交的有效行）；
+  // Commit 提交 = 已 Commit 关联的「原始」生成行数（measuredGeneratedLines）。二、三层不变。
+  const measuredGeneratedLines = data.measuredGeneratedLines ?? 0
+  const firstStage: FunnelStage =
+    activeTab === "commit"
+      ? {
+          // 「已提交」口径第一层：体现「原始生成 → 有效生成」的收窄，不展示采纳率。
+          key: "all",
+          label: "Commit 原始生成",
+          lines: measuredGeneratedLines,
+          adoptedLines: data.adoptedLines,
+          rate: null,
+          color: "#06b6d4",
+          hideRate: true,
+          metricText: `原始 ${formatNumber(measuredGeneratedLines)} / 有效 ${formatNumber(data.effectiveGeneratedLines)}`,
+          titleText: `Commit 原始生成：原始 ${formatExactNumber(measuredGeneratedLines)} 行 · 有效 ${formatExactNumber(data.effectiveGeneratedLines)} 行`
+        }
+      : {
+          key: "all",
+          label: "全部生成",
+          lines: data.inclusiveEffectiveGeneratedLines,
+          adoptedLines: data.adoptedLines,
+          rate: data.inclusiveAdoptionRate,
+          color: "#06b6d4"
+        }
+  const stages: FunnelStage[] = [
+    firstStage,
+    {
+      key: "commit",
+      label: "已 Commit",
+      lines: data.effectiveGeneratedLines,
+      adoptedLines: data.adoptedLines,
+      rate: data.measuredAdoptionRate,
+      color: "#3b82f6"
+    },
+    {
+      key: "push",
+      label: "已 Push",
+      lines: data.pushedEffectiveGeneratedLines,
+      adoptedLines: data.pushedAdoptedLines,
+      rate: data.pushedAdoptionRate,
+      color: "#6366f1"
+    }
+  ]
+  const hasData = stages.some((s) => s.lines > 0)
+  const BAND_H = 40
+  // 各级生成行数量级可能相差很大（如全部生成 50k vs 已 Commit 6k）。
+  // 直接线性映射会让后段塌缩成不可见的细条、整体退化成三角形。
+  // 这里用平方根压缩比例，并设最小宽度下限，保证每段可见且仍“逐级收窄”。
+  const maxScaled = Math.max(...stages.map((s) => Math.sqrt(Math.max(0, s.lines))), 1)
+  const halfWidthOf = (lines: number): number =>
+    Math.max(9, (Math.sqrt(Math.max(0, lines)) / maxScaled) * 50)
 
   return (
     <div
@@ -573,32 +516,34 @@ export function CodeAdoptionFunnel({
     >
       <div className="flex items-start justify-between gap-2">
         <h3 className="text-xs font-semibold text-foreground">代码采纳漏斗</h3>
-        <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border">
-          {(
-            [
-              { id: "total", label: "总量" },
-              { id: "commit", label: "提交" }
-            ] as Array<{ id: FunnelScopeTab; label: string }>
-          ).map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                scopeTab === t.id
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:bg-muted/50"
-              }`}
-              onClick={() => setScopeTab(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        {enableSourceTabs ? (
+          <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border">
+            {(
+              [
+                { id: "commit", label: "已提交" },
+                { id: "agent", label: "全量生成" }
+              ] as Array<{ id: FunnelSourceTab; label: string }>
+            ).map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  activeTab === t.id
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted/50"
+                }`}
+                onClick={() => setSourceTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
       <p className="mb-2 mt-1 text-[10px] leading-tight text-muted-foreground">
-        {scopeTab === "total"
-          ? "总量口径：分母为有效生成总量（含未提交），漏斗按生成 → Commit → Push 收窄"
-          : "提交口径：分母为各阶段已落库代码，漏斗按有效生成 → Commit → Push 收窄"}
+        {activeTab === "commit"
+          ? "第一层为已 Commit 的原始 / 有效生成行数；已 Commit、已 Push 标签为采纳率"
+          : "漏斗按各级生成行数依次收窄，标签为各级采纳率"}
       </p>
       {!hasData ? (
         <div className="flex flex-1 items-center justify-center py-6 text-xs text-muted-foreground">
@@ -609,10 +554,11 @@ export function CodeAdoptionFunnel({
           {/* 漏斗形状：纯锥形，撑满左侧空间 */}
           <div className="flex flex-1 flex-col">
             {stages.map((s, i) => {
-              const topHalf = halfWidthOf(s.topBasis)
-              const botHalf = halfWidthOf(s.bottomBasis)
+              const topHalf = halfWidthOf(s.lines)
+              const next = stages[i + 1]
+              const botHalf = next ? halfWidthOf(next.lines) : topHalf * 0.5
               const clip = `polygon(${50 - topHalf}% 0, ${50 + topHalf}% 0, ${50 + botHalf}% 100%, ${50 - botHalf}% 100%)`
-              const clickable = i === 0 && scopeTab === "total" && Boolean(onFirstStageClick)
+              const clickable = i === 0 && Boolean(onFirstStageClick)
               return (
                 <div
                   key={s.key}
@@ -634,7 +580,8 @@ export function CodeAdoptionFunnel({
                   title={
                     clickable
                       ? "点击分析「生成了但没提交」的人与原因"
-                      : `${s.label}：生成 ${formatExactNumber(s.generatedLines)} 行 · 采纳 ${formatExactNumber(s.adoptedLines)} 行 · 采纳率 ${formatPercent(s.rate)}`
+                      : (s.titleText ??
+                        `${s.label}：生成 ${formatExactNumber(s.lines)} 行 · 采纳 ${formatExactNumber(s.adoptedLines)} 行 · 采纳率 ${formatPercent(s.rate)}`)
                   }
                 >
                   <div
@@ -648,7 +595,7 @@ export function CodeAdoptionFunnel({
           {/* 右侧标签：百分比移到此处（带颜色），自身宽度紧贴右边 */}
           <div className="flex shrink-0 flex-col">
             {stages.map((s, i) => {
-              const clickable = i === 0 && scopeTab === "total" && Boolean(onFirstStageClick)
+              const clickable = i === 0 && Boolean(onFirstStageClick)
               return (
                 <div
                   key={s.key}
@@ -679,12 +626,15 @@ export function CodeAdoptionFunnel({
                       style={{ background: s.color }}
                     />
                     {s.label}
-                    <span className="font-semibold" style={{ color: s.color }}>
-                      {formatPercent(s.rate)}
-                    </span>
+                    {s.hideRate ? null : (
+                      <span className="font-semibold" style={{ color: s.color }}>
+                        {formatPercent(s.rate)}
+                      </span>
+                    )}
                   </div>
                   <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted-foreground">
-                    采纳 {formatNumber(s.adoptedLines)} / 生成 {formatNumber(s.generatedLines)}
+                    {s.metricText ??
+                      `采纳 ${formatNumber(s.adoptedLines)} / 生成 ${formatNumber(s.lines)}`}
                   </div>
                 </div>
               )
@@ -701,12 +651,8 @@ export function CodeAdoptionFunnel({
 // ─────────────────────────────────────────────────────────
 
 export interface SkillRankingDatum {
-  id?: string
   skill: string
   count: number
-  sourceRef?: string
-  isPlugin?: boolean
-  pluginName?: string
 }
 
 function SkillUsageTooltip(): React.JSX.Element {
@@ -761,6 +707,11 @@ function SkillRankingTabs({
   )
 }
 
+function hasPluginSkill(pluginSkillKeys: Set<string>, skillName: string): boolean {
+  const key = normalizeMarketSkillKey(skillName)
+  return Boolean(key && pluginSkillKeys.has(key))
+}
+
 function MarketSkillTag(): React.JSX.Element {
   return (
     <span className="shrink-0 rounded-sm border border-emerald-200 bg-emerald-50 px-1 py-px text-[9px] font-medium leading-3 text-emerald-700">
@@ -769,13 +720,10 @@ function MarketSkillTag(): React.JSX.Element {
   )
 }
 
-function PluginSkillTag({ pluginName }: { pluginName?: string }): React.JSX.Element {
+function PluginSkillTag(): React.JSX.Element {
   return (
-    <span
-      className="inline-flex max-w-[120px] shrink-0 items-center rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700"
-      title={pluginName ? `Plugin · ${pluginName}` : "Plugin"}
-    >
-      <span className="truncate">{pluginName ? `Plugin · ${pluginName}` : "Plugin"}</span>
+    <span className="shrink-0 rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700">
+      Plugin
     </span>
   )
 }
@@ -793,8 +741,7 @@ function formatSkillAdoptionSortValue(
   if (
     sortKey === "measuredAdoptionRate" ||
     sortKey === "inclusiveAdoptionRate" ||
-    sortKey === "pushedAdoptionRate" ||
-    sortKey === "inclusivePushedAdoptionRate"
+    sortKey === "pushedAdoptionRate"
   )
     return formatPercent(value)
   if (sortKey === "commitCount" || sortKey === "pushedCommitCount")
@@ -807,13 +754,15 @@ function SkillAdoptionRankingPanel({
   activeTab,
   onTabChange,
   onSkillClick,
-  marketSkillKeys
+  marketSkillKeys,
+  pluginSkillKeys
 }: {
   bySkillAdoption: SkillAdoptionRankingItem[]
   activeTab: SkillRankingTab
   onTabChange: (tab: SkillRankingTab) => void
   onSkillClick?: (skill: string) => void
   marketSkillKeys: Set<string>
+  pluginSkillKeys: Set<string>
 }): React.JSX.Element {
   const [query, setQuery] = useState("")
   const [sortKey, setSortKey] = useState<SkillAdoptionSortKey>(DEFAULT_SKILL_ADOPTION_SORT)
@@ -828,7 +777,6 @@ function SkillAdoptionRankingPanel({
   const statusLabel = trimmedQuery
     ? `匹配 ${visibleItems.length} 项`
     : `按 ${SKILL_ADOPTION_SORT_LABELS[sortKey]}`
-  const getItemKey = (item: SkillAdoptionRankingItem): string => item.id ?? item.sourceRef ?? item.skill
 
   return (
     <div className="flex h-[340px] flex-col rounded-xl border border-border bg-card p-4">
@@ -906,8 +854,7 @@ function SkillAdoptionRankingPanel({
             {visibleItems.map((item) => {
               const primaryValue = getSkillAdoptionSortValue(item, sortKey) ?? 0
               const pct = maxValue > 0 ? (primaryValue / maxValue) * 100 : 0
-              const rank =
-                sortedItems.findIndex((candidate) => getItemKey(candidate) === getItemKey(item)) + 1
+              const rank = sortedItems.findIndex((candidate) => candidate.skill === item.skill) + 1
               const content = (
                 <>
                   <span className="w-7 shrink-0 text-right text-[10px] text-muted-foreground">
@@ -923,24 +870,19 @@ function SkillAdoptionRankingPanel({
                           {highlightRankingName(item.skill, trimmedQuery)}
                         </span>
                         {hasMarketSkill(marketSkillKeys, item.skill) ? <MarketSkillTag /> : null}
-                        {item.isPlugin ? <PluginSkillTag pluginName={item.pluginName} /> : null}
+                        {hasPluginSkill(pluginSkillKeys, item.skill) ? <PluginSkillTag /> : null}
                       </div>
                       <span className="shrink-0 text-[11px] font-medium text-foreground">
                         {formatSkillAdoptionSortValue(item, sortKey)}
                       </span>
                     </div>
                     <div className="mb-1 truncate text-[10px] text-muted-foreground">
-                      <span className="text-muted-foreground/70">提交口径</span> 提交{" "}
-                      {formatNullablePercent(item.measuredAdoptionRate)}
-                      <span className="mx-1 text-border">·</span>入库{" "}
+                      已Commit {formatNullablePercent(item.measuredAdoptionRate)}
+                      <span className="mx-1 text-border">|</span>
+                      含未提交 {formatNullablePercent(item.inclusiveAdoptionRate)}
+                      <span className="mx-1 text-border">|</span>已 Push{" "}
                       {formatNullablePercent(item.pushedAdoptionRate)}
                       <span className="mx-1 text-border">|</span>
-                      <span className="text-muted-foreground/70">总量口径</span> 提交{" "}
-                      {formatNullablePercent(item.inclusiveAdoptionRate)}
-                      <span className="mx-1 text-border">·</span>入库{" "}
-                      {formatNullablePercent(item.inclusivePushedAdoptionRate)}
-                    </div>
-                    <div className="mb-1 truncate text-[10px] text-muted-foreground">
                       采纳 {formatNumber(item.adoptedLines)} 行
                       <span className="mx-1 text-border">|</span>
                       提交 {formatNumber(item.commitCount)} 次
@@ -960,7 +902,7 @@ function SkillAdoptionRankingPanel({
               if (onSkillClick) {
                 return (
                   <button
-                    key={getItemKey(item)}
+                    key={item.skill}
                     type="button"
                     className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/50 hover:text-primary focus:outline-none focus:ring-2 focus:ring-ring"
                     onClick={() => onSkillClick(item.skill)}
@@ -971,7 +913,7 @@ function SkillAdoptionRankingPanel({
               }
 
               return (
-                <div key={getItemKey(item)} className="flex items-center gap-2">
+                <div key={item.skill} className="flex items-center gap-2">
                   {content}
                 </div>
               )
@@ -995,7 +937,8 @@ export function SkillRankingPanel({
   totalSkillCalls,
   bySkillAdoption,
   onSkillClick,
-  marketSkillKeys
+  marketSkillKeys,
+  pluginSkillKeys
 }: {
   bySkill: SkillRankingDatum[]
   bySkillAll: SkillRankingDatum[]
@@ -1004,6 +947,7 @@ export function SkillRankingPanel({
   bySkillAdoption: SkillAdoptionRankingItem[]
   onSkillClick?: (skill: string) => void
   marketSkillKeys: Set<string>
+  pluginSkillKeys: Set<string>
 }): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<SkillRankingTab>("usage")
   if (activeTab === "adoption") {
@@ -1014,25 +958,19 @@ export function SkillRankingPanel({
         onTabChange={setActiveTab}
         onSkillClick={onSkillClick}
         marketSkillKeys={marketSkillKeys}
+        pluginSkillKeys={pluginSkillKeys}
       />
     )
   }
 
   const defaultItems: RankingItem[] = bySkill.map((item) => ({
-    id: item.id,
     name: item.skill,
     count: item.count
   }))
   const searchItems: RankingItem[] = (bySkillAll.length > 0 ? bySkillAll : bySkill).map((item) => ({
-    id: item.id,
     name: item.skill,
     count: item.count
   }))
-  const pluginSkillNames = new Map(
-    [...bySkill, ...bySkillAll]
-      .filter((item) => item.isPlugin)
-      .map((item) => [item.id ?? item.skill, item.pluginName])
-  )
   const totalKinds = searchItems.length > 0 ? searchItems.length : totalSkills
   const totalCalls = searchItems.length > 0 ? sumRankingCounts(searchItems) : totalSkillCalls
 
@@ -1050,12 +988,10 @@ export function SkillRankingPanel({
       onItemClick={onSkillClick}
       headerActions={<SkillRankingTabs activeTab={activeTab} onTabChange={setActiveTab} />}
       titleTooltipContent={<SkillUsageTooltip />}
-      renderNameAddon={(item) => (
+      renderNameAddon={(name) => (
         <>
-          {hasMarketSkill(marketSkillKeys, item.name) ? <MarketSkillTag /> : null}
-          {pluginSkillNames.has(item.id ?? item.name) ? (
-            <PluginSkillTag pluginName={pluginSkillNames.get(item.id ?? item.name)} />
-          ) : null}
+          {hasMarketSkill(marketSkillKeys, name) ? <MarketSkillTag /> : null}
+          {hasPluginSkill(pluginSkillKeys, name) ? <PluginSkillTag /> : null}
         </>
       )}
     />

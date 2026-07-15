@@ -18,11 +18,6 @@ import {
   mergeGoalUserEventsIntoTranscript
 } from "../src/renderer/src/lib/goal-transcript.ts"
 import { buildGoalContinuationPrompt, buildGoalStartPrompt } from "../src/main/agent/goals/goal-manager.ts"
-import {
-  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
-  WORKFLOW_NOTIFICATION_TURN_PROMPT,
-  WORKFLOW_NOTIFICATION_TURN_TRIGGER
-} from "../src/shared/checkpoint-transcript.ts"
 import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../src/shared/goal-events.ts"
 import type { Message, GoalSnapshot } from "../src/renderer/src/types.ts"
 
@@ -775,30 +770,6 @@ function testPersistedGoalUserEventsDoNotDuplicateCheckpointUserMessages(): void
   )
 }
 
-function testGoalUserEventDedupesWhenCheckpointMessageLacksActiveWindow(): void {
-  const commandTime = new Date("2026-05-22T10:00:00.000Z")
-  const baseMessages = [
-    message("persisted-goal-user", "user", "/goal 分析项目", commandTime),
-    message("assistant", "assistant", "收到。", new Date("2026-05-22T10:00:01.000Z"))
-  ]
-  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
-    {
-      event_id: 1,
-      goal_id: "goal-1",
-      active_window_id: "window-1",
-      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 分析项目`,
-      created_at: commandTime
-    }
-  ])
-
-  const visible = mergeGoalUserEventsIntoTranscript(baseMessages, events)
-  assertArrayEqual(
-    visible.map((item) => item.id),
-    ["persisted-goal-user", "assistant"],
-    "goal user event should dedupe a persisted command even if active_window_id was not stored"
-  )
-}
-
 function testGoalEventsStayInGoalUiState(): void {
   const events = goalNoticeEventsToGoalUiEvents("thread-1", [
     {
@@ -844,52 +815,6 @@ function testVisibilityPredicateMatchesTranscriptBuilder(): void {
   )
 }
 
-function testWorkflowPlumbingStaysOutOfCheckpointTranscript(): void {
-  const rows = [
-    message("workflow-trigger", "user", WORKFLOW_NOTIFICATION_TURN_PROMPT),
-    message(
-      "workflow-marker",
-      "user",
-      `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}workflow-run-1]] <task-notification />`
-    ),
-    message("pasted-trigger-prefix", "user", `${WORKFLOW_NOTIFICATION_TURN_TRIGGER} pasted log`),
-    message("assistant", "assistant", "正常 assistant")
-  ]
-
-  assertArrayEqual(
-    rows.filter(isVisibleCheckpointTranscriptMessage).map((item) => item.id),
-    ["pasted-trigger-prefix", "assistant"],
-    "workflow notification plumbing should stay hidden while user-pasted marker-like text remains visible"
-  )
-  assertArrayEqual(
-    buildCheckpointTranscriptForDisplay(rows).map((item) => item.id),
-    ["pasted-trigger-prefix", "assistant"],
-    "checkpoint display builder should share the workflow plumbing filter"
-  )
-}
-
-function testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore(): void {
-  const rawCheckpointMessages = [
-    message("user-1", "user", "用动态工作流实现！"),
-    message("assistant-launch", "assistant", "已启动工作流，结果稍后通知。"),
-    message(
-      "workflow-marker",
-      "user",
-      `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}workflow-run-1]] <task-notification />`
-    ),
-    message("assistant-result", "assistant", "工作流已完成，结果是：只出现一次。")
-  ]
-  const visibleCheckpointMessages = rawCheckpointMessages.filter(isVisibleCheckpointTranscriptMessage)
-
-  assertArrayEqual(
-    buildRestoredCheckpointTranscript(rawCheckpointMessages, visibleCheckpointMessages, []).map(
-      (item) => item.id
-    ),
-    ["user-1", "assistant-launch", "assistant-result"],
-    "restore builder must not consume the assistant after hidden workflow plumbing twice"
-  )
-}
-
 function run(): void {
   const tests = [
     testGoalArtifactsAreNotCheckpointTranscript,
@@ -911,11 +836,8 @@ function run(): void {
     testUnmatchedGoalContinuationPromptStaysHidden,
     testPersistedGoalControlEventsStayOutOfMainTranscript,
     testPersistedGoalUserEventsDoNotDuplicateCheckpointUserMessages,
-    testGoalUserEventDedupesWhenCheckpointMessageLacksActiveWindow,
     testGoalEventsStayInGoalUiState,
-    testVisibilityPredicateMatchesTranscriptBuilder,
-    testWorkflowPlumbingStaysOutOfCheckpointTranscript,
-    testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore
+    testVisibilityPredicateMatchesTranscriptBuilder
   ]
 
   for (const test of tests) {

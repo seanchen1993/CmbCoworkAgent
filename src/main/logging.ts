@@ -1,213 +1,23 @@
-import { appendFile, rename } from "fs/promises"
-import { appendFileSync, existsSync, statSync } from "fs"
-import { app } from "electron"
+import { appendFileSync, existsSync, renameSync, statSync } from "fs"
 import { getMainLogPath, getRendererLogPath } from "./storage"
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024
 
-// ─────────────────────────────────────────────────────────
-// Level filtering
-//
-// Every console.* call in the main process is proxied into writeMainLog, so the
-// cheapest win is to filter low-value lines before they ever reach the queue.
-//
-// In packaged builds DEBUG is *sampled* (keep 1-in-N) rather than dropped: that
-// caps the volume of high-frequency bursts (file watchers, etc.) while still
-// leaving a trail for troubleshooting. INFO/WARN/ERROR are always kept.
-//
-// Setting CMB_LOG_LEVEL pins an explicit floor and disables sampling, so it
-// behaves strictly (e.g. CMB_LOG_LEVEL=DEBUG keeps everything, =WARN drops DEBUG
-// entirely). Dev builds keep everything by default.
-// ─────────────────────────────────────────────────────────
-const LEVEL_ORDER: Record<string, number> = {
-  DEBUG: 10,
-  LOG: 20,
-  INFO: 20,
-  WARN: 30,
-  ERROR: 40
-}
-
-// Keep 1 of every N debug lines while sampling.
-const DEBUG_SAMPLE_RATE = 20
-
-interface LevelPolicy {
-  /** Hard floor: lines at or above this weight are always written. */
-  minLevel: number
-  /** When true, DEBUG (below the floor) is sampled rather than dropped. */
-  sampleDebug: boolean
-}
-
-function resolveLevelPolicy(): LevelPolicy {
-  const env = (process.env.CMB_LOG_LEVEL || "").toUpperCase()
-  if (env && env in LEVEL_ORDER) {
-    // Explicit override → strict, no sampling.
-    return { minLevel: LEVEL_ORDER[env], sampleDebug: false }
-  }
-  let packaged = false
+function rotateIfNeeded(filePath: string): void {
   try {
-    packaged = app.isPackaged
-  } catch {
-    // app not ready / unavailable — fall through to dev default.
-  }
-  return packaged
-    ? { minLevel: LEVEL_ORDER.INFO, sampleDebug: true }
-    : { minLevel: LEVEL_ORDER.DEBUG, sampleDebug: false }
-}
+    if (!existsSync(filePath)) return
+    const stat = statSync(filePath)
+    if (stat.size < MAX_LOG_BYTES) return
 
-const LEVEL_POLICY = resolveLevelPolicy()
-let debugSampleCounter = 0
-
-function isLevelEnabled(level: string): boolean {
-  const weight = LEVEL_ORDER[level.toUpperCase()] ?? LEVEL_ORDER.INFO
-  if (weight >= LEVEL_POLICY.minLevel) return true
-  // Below the floor: only DEBUG gets a sampled trickle (when enabled).
-  if (LEVEL_POLICY.sampleDebug && weight === LEVEL_ORDER.DEBUG) {
-    debugSampleCounter = (debugSampleCounter + 1) % DEBUG_SAMPLE_RATE
-    return debugSampleCounter === 0
-  }
-  return false
-}
-
-// ─────────────────────────────────────────────────────────
-// Async batched writer
-//
-// Lines are buffered in memory and flushed on a short timer with async
-// appendFile, so logging never blocks the main thread during bursty work
-// (builds, dependency installs, branch switches). Rotation uses an in-memory
-// byte counter seeded once with a single statSync, avoiding a statSync per line.
-// ─────────────────────────────────────────────────────────
-const FLUSH_INTERVAL_MS = 250
-const MAX_BUFFER_LINES = 5000
-
-interface LogFileState {
-  buffer: string[]
-  knownSize: number
-  sizeSeeded: boolean
-  flushPromise: Promise<void> | null
-}
-
-const fileStates = new Map<string, LogFileState>()
-let flushTimer: ReturnType<typeof setTimeout> | null = null
-
-function getFileState(filePath: string): LogFileState {
-  let state = fileStates.get(filePath)
-  if (!state) {
-    state = { buffer: [], knownSize: 0, sizeSeeded: false, flushPromise: null }
-    fileStates.set(filePath, state)
-  }
-  return state
-}
-
-function seedSizeOnce(filePath: string, state: LogFileState): void {
-  if (state.sizeSeeded) return
-  state.sizeSeeded = true
-  try {
-    state.knownSize = existsSync(filePath) ? statSync(filePath).size : 0
-  } catch {
-    state.knownSize = 0
-  }
-}
-
-function scheduleFlush(): void {
-  if (flushTimer) return
-  flushTimer = setTimeout(() => {
-    flushTimer = null
-    void flushAll()
-  }, FLUSH_INTERVAL_MS)
-  flushTimer.unref?.()
-}
-
-async function flushFile(filePath: string, state: LogFileState): Promise<void> {
-  if (state.flushPromise) return state.flushPromise
-  if (state.buffer.length === 0) return
-
-  state.flushPromise = (async () => {
-    while (state.buffer.length > 0) {
-      seedSizeOnce(filePath, state)
-      const chunk = state.buffer.join("")
-      state.buffer.length = 0
-
-      // Rotate before appending if this chunk would push us past the cap.
-      if (state.knownSize + Buffer.byteLength(chunk) >= MAX_LOG_BYTES) {
-        try {
-          await rename(filePath, `${filePath}.1`)
-          state.knownSize = 0
-        } catch {
-          // Best effort rotation; if rename fails, keep appending to current file.
-        }
-      }
-
-      try {
-        await appendFile(filePath, chunk, "utf-8")
-        state.knownSize += Buffer.byteLength(chunk)
-      } catch {
-        // Never let file logging crash the app; drop the chunk on persistent failure.
-      }
-    }
-  })().finally(() => {
-    state.flushPromise = null
-    if (state.buffer.length > 0) scheduleFlush()
-  })
-
-  return state.flushPromise
-}
-
-async function flushAll(): Promise<void> {
-  await Promise.all(
-    Array.from(fileStates.entries()).map(([filePath, state]) => flushFile(filePath, state))
-  )
-}
-
-/** Drain buffered and already in-flight log writes during an orderly shutdown. */
-export async function flushLogs(): Promise<void> {
-  if (flushTimer) {
-    clearTimeout(flushTimer)
-    flushTimer = null
-  }
-
-  for (;;) {
-    await flushAll()
-    const pending = Array.from(fileStates.values()).some(
-      (state) => state.buffer.length > 0 || state.flushPromise
-    )
-    if (!pending) return
-  }
-}
-
-/**
- * Synchronously drain all buffered log lines. Registered on process exit so a
- * crash keeps the queued tail where possible. An already in-flight async write
- * cannot be synchronously joined; orderly shutdown uses flushLogs() instead.
- */
-export function flushLogsSync(): void {
-  for (const [filePath, state] of fileStates) {
-    if (state.buffer.length === 0) continue
+    const rotatedPath = `${filePath}.1`
     try {
-      appendFileSync(filePath, state.buffer.join(""), "utf-8")
-      state.buffer.length = 0
+      renameSync(filePath, rotatedPath)
     } catch {
-      // Best effort on shutdown.
+      // Best effort rotation; if rename fails, keep appending to current file.
     }
+  } catch {
+    // Ignore logging failures to avoid impacting app behavior.
   }
-}
-
-let exitHandlerRegistered = false
-function ensureExitHandler(): void {
-  if (exitHandlerRegistered) return
-  exitHandlerRegistered = true
-  process.once("exit", flushLogsSync)
-}
-
-function enqueueLine(filePath: string, level: string, message: string): void {
-  const state = getFileState(filePath)
-  const timestamp = new Date().toISOString()
-  state.buffer.push(`[${timestamp}] [${level}] ${message}\n`)
-  // Bound memory if a flush can't keep up (e.g. disk stall): drop oldest lines.
-  if (state.buffer.length > MAX_BUFFER_LINES) {
-    state.buffer.splice(0, state.buffer.length - MAX_BUFFER_LINES)
-  }
-  ensureExitHandler()
-  scheduleFlush()
 }
 
 function safeStringify(value: unknown, seen = new WeakSet<object>()): string {
@@ -273,9 +83,18 @@ function joinArgs(args: unknown[]): string {
   return args.map((arg) => safeStringify(arg)).join(" ")
 }
 
+function writeLine(filePath: string, level: string, message: string): void {
+  try {
+    rotateIfNeeded(filePath)
+    const timestamp = new Date().toISOString()
+    appendFileSync(filePath, `[${timestamp}] [${level}] ${message}\n`, "utf-8")
+  } catch {
+    // Never let file logging crash the app.
+  }
+}
+
 export function writeMainLog(level: string, args: unknown[]): void {
-  if (!isLevelEnabled(level)) return
-  enqueueLine(getMainLogPath(), level, joinArgs(args))
+  writeLine(getMainLogPath(), level, joinArgs(args))
 }
 
 export function writeRendererLog(
@@ -283,9 +102,8 @@ export function writeRendererLog(
   message: string,
   meta?: { sourceId?: string; line?: number }
 ): void {
-  if (!isLevelEnabled(level)) return
   const suffix = meta?.sourceId || typeof meta?.line === "number"
     ? ` (${meta?.sourceId || "unknown"}:${meta?.line ?? 0})`
     : ""
-  enqueueLine(getRendererLogPath(), level, `${message}${suffix}`)
+  writeLine(getRendererLogPath(), level, `${message}${suffix}`)
 }

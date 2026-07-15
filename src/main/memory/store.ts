@@ -1,9 +1,12 @@
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "fs"
-import { join, dirname, isAbsolute, resolve } from "path"
+import { join, dirname, isAbsolute } from "path"
 import { createHash } from "crypto"
+import { homedir } from "os"
 import { regenerateManifest } from "./manifest"
-import { getGlobalMemoryDir } from "./paths"
+
+const MEMORY_DIR = join(homedir(), ".cmbcoworkagent", "memory")
+const INDEX_DB_PATH = join(MEMORY_DIR, "index.sqlite")
 
 const CHUNK_MAX_CHARS = 600
 const CHUNK_OVERLAP_CHARS = 120
@@ -25,8 +28,6 @@ export interface SearchResult {
   path: string
   startLine: number
   endLine: number
-  score?: number
-  citation?: string
 }
 
 export interface RecallStats {
@@ -34,14 +35,7 @@ export interface RecallStats {
   lastRecalledAt: number | null
 }
 
-export interface SearchOptions {
-  trackRecall?: boolean
-}
-
-function chunkMarkdown(
-  content: string,
-  filePath: string
-): Omit<MemoryChunk, "id" | "createdAt" | "recallCount" | "lastRecalledAt">[] {
+function chunkMarkdown(content: string, filePath: string): Omit<MemoryChunk, "id" | "createdAt" | "recallCount" | "lastRecalledAt">[] {
   const lines = content.split("\n")
   const chunks: Omit<MemoryChunk, "id" | "createdAt" | "recallCount" | "lastRecalledAt">[] = []
   let currentText = ""
@@ -172,26 +166,19 @@ function bm25FromMatchinfo(buf: Uint8Array, k1 = 1.2, b = 0.75): number {
 export class MemoryStore {
   private db: SqlJsDatabase | null = null
   private saveTimer: ReturnType<typeof setTimeout> | null = null
-  private readonly memoryDir: string
-  private readonly indexDbPath: string
-
-  constructor(memoryDir: string = getGlobalMemoryDir()) {
-    this.memoryDir = memoryDir
-    this.indexDbPath = join(memoryDir, "index.sqlite")
-  }
 
   async init(): Promise<void> {
     if (this.db) return
 
-    if (!existsSync(this.memoryDir)) {
-      mkdirSync(this.memoryDir, { recursive: true })
+    if (!existsSync(MEMORY_DIR)) {
+      mkdirSync(MEMORY_DIR, { recursive: true })
     }
 
     const SQL = await initSqlJs()
 
-    if (existsSync(this.indexDbPath)) {
+    if (existsSync(INDEX_DB_PATH)) {
       try {
-        const buffer = readFileSync(this.indexDbPath)
+        const buffer = readFileSync(INDEX_DB_PATH)
         this.db = new SQL.Database(buffer)
       } catch {
         this.db = new SQL.Database()
@@ -223,16 +210,8 @@ export class MemoryStore {
     `)
 
     // Migration: recall tracking columns (silently ignored if they already exist).
-    try {
-      this.db.run(`ALTER TABLE chunks ADD COLUMN recall_count INTEGER DEFAULT 0`)
-    } catch {
-      /* exists */
-    }
-    try {
-      this.db.run(`ALTER TABLE chunks ADD COLUMN last_recalled_at INTEGER`)
-    } catch {
-      /* exists */
-    }
+    try { this.db.run(`ALTER TABLE chunks ADD COLUMN recall_count INTEGER DEFAULT 0`) } catch { /* exists */ }
+    try { this.db.run(`ALTER TABLE chunks ADD COLUMN last_recalled_at INTEGER`) } catch { /* exists */ }
 
     // FTS3 content table — separate from chunks, linked by rowid
     try {
@@ -297,15 +276,11 @@ export class MemoryStore {
     this.scheduleSave()
   }
 
-  search(query: string, limit = 5, options: SearchOptions = {}): SearchResult[] {
+  search(query: string, limit = 5): SearchResult[] {
     if (!this.db) return []
 
     const tokens = tokenize(query)
     if (tokens.length === 0) return []
-
-    const overFetch = Math.min(50, Math.max(limit * 3, limit))
-    const scoreFloorRatio = 0.15
-    const rrfK = 60
 
     type ScoredRow = {
       text: string
@@ -314,32 +289,15 @@ export class MemoryStore {
       endLine: number
       score: number
     }
-    type Candidate = ScoredRow & { rrfScore: number; sourceCount: number }
-    const candidates = new Map<string, Candidate>()
+    const seen = new Set<string>()
+    const allRows: ScoredRow[] = []
 
-    const addRankedRows = (rows: ScoredRow[]): void => {
-      const ranked = rows.filter((row) => row.score > 0).sort((a, b) => b.score - a.score)
-      if (ranked.length === 0) return
-
-      const topScore = ranked[0].score
-      const floored =
-        topScore > 0 ? ranked.filter((row) => row.score >= topScore * scoreFloorRatio) : ranked
-
-      for (const [index, row] of floored.slice(0, overFetch).entries()) {
+    const addRows = (rows: ScoredRow[]): void => {
+      for (const row of rows) {
         const key = `${row.path}:${row.startLine}`
-        const rrfScore = 1 / (rrfK + index + 1)
-        const exactBoost = row.text.toLowerCase().includes(query.toLowerCase()) ? 0.002 : 0
-        const existing = candidates.get(key)
-        if (existing) {
-          existing.rrfScore += rrfScore + exactBoost
-          existing.sourceCount += 1
-          existing.score = Math.max(existing.score, row.score)
-        } else {
-          candidates.set(key, {
-            ...row,
-            rrfScore: rrfScore + exactBoost,
-            sourceCount: 1
-          })
+        if (!seen.has(key)) {
+          seen.add(key)
+          allRows.push(row)
         }
       }
     }
@@ -358,7 +316,7 @@ export class MemoryStore {
             [ftsQuery]
           )
           if (results.length > 0 && results[0].values.length > 0) {
-            addRankedRows(
+            addRows(
               results[0].values.map((row) => ({
                 text: row[0] as string,
                 path: row[1] as string,
@@ -384,10 +342,10 @@ export class MemoryStore {
            ) WHERE score > 0
            ORDER BY score DESC, created_at DESC
            LIMIT ?`,
-          [...likeParams, overFetch]
+          [...likeParams, limit]
         )
         if (results.length > 0 && results[0].values.length > 0) {
-          addRankedRows(
+          addRows(
             results[0].values.map((row) => ({
               text: row[0] as string,
               path: row[1] as string,
@@ -399,68 +357,47 @@ export class MemoryStore {
         }
       }
 
-      if (candidates.size === 0) return []
+      if (allRows.length === 0) return []
 
-      const allRows = Array.from(candidates.values()).sort((a, b) => {
-        const scoreDiff = b.rrfScore - a.rrfScore
-        if (scoreDiff !== 0) return scoreDiff
-        const sourceDiff = b.sourceCount - a.sourceCount
-        if (sourceDiff !== 0) return sourceDiff
-        return b.score - a.score
-      })
+      allRows.sort((a, b) => b.score - a.score)
 
       const topRows = allRows.slice(0, limit)
 
-      if (options.trackRecall !== false) {
-        this.recordRecall(
-          topRows.map((row) => ({
-            path: row.path,
-            startLine: row.startLine
-          }))
-        )
+      // Track which files were recalled so Dream can prioritise frequently-used memories.
+      const now = Date.now()
+      for (const row of topRows) {
+        try {
+          this.db!.run(
+            `UPDATE chunks SET recall_count = recall_count + 1, last_recalled_at = ?
+             WHERE path = ? AND start_line = ?`,
+            [now, row.path, row.startLine]
+          )
+        } catch { /* non-critical */ }
       }
+      this.scheduleSave()
 
-      return topRows.map(({ text, path, startLine, endLine, rrfScore }) => ({
+      return topRows.map(({ text, path, startLine, endLine }) => ({
         text,
         path,
         startLine,
-        endLine,
-        score: rrfScore,
-        citation: `${path}#L${startLine}-${endLine}`
+        endLine
       }))
     } catch {
       return []
     }
   }
 
-  recordRecall(rows: Array<{ path: string; startLine: number }>): void {
-    if (!this.db || rows.length === 0) return
-    const now = Date.now()
-    for (const row of rows) {
-      try {
-        this.db.run(
-          `UPDATE chunks SET recall_count = recall_count + 1, last_recalled_at = ?
-           WHERE path = ? AND start_line = ?`,
-          [now, row.path, row.startLine]
-        )
-      } catch {
-        /* non-critical */
-      }
-    }
-    this.scheduleSave()
-  }
-
   syncMemoryFiles(): void {
     if (!this.db) return
 
-    if (!existsSync(this.memoryDir)) return
+    if (!existsSync(MEMORY_DIR)) return
 
-    const files = readdirSync(this.memoryDir).filter((f) => f.endsWith(".md"))
+    const files = readdirSync(MEMORY_DIR).filter((f) => f.endsWith(".md"))
 
     const diskPaths = new Set<string>()
 
     for (const file of files) {
-      const filePath = join(this.memoryDir, file)
+      const filePath = join(MEMORY_DIR, file)
       diskPaths.add(filePath)
       try {
         const content = readFileSync(filePath, "utf-8")
@@ -516,7 +453,7 @@ export class MemoryStore {
   }
 
   readMemoryFile(filePath: string, from?: number, lines?: number): string {
-    const fullPath = isAbsolute(filePath) ? filePath : join(this.memoryDir, filePath)
+    const fullPath = isAbsolute(filePath) ? filePath : join(MEMORY_DIR, filePath)
     if (!existsSync(fullPath)) return `Error: file not found: ${filePath}`
 
     try {
@@ -533,7 +470,7 @@ export class MemoryStore {
   }
 
   getMemoryDir(): string {
-    return this.memoryDir
+    return MEMORY_DIR
   }
 
   private scheduleSave(): void {
@@ -547,10 +484,10 @@ export class MemoryStore {
   private saveToDisk(): void {
     if (!this.db) return
     try {
-      const dir = dirname(this.indexDbPath)
+      const dir = dirname(INDEX_DB_PATH)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
       const data = this.db.export()
-      writeFileSync(this.indexDbPath, Buffer.from(data))
+      writeFileSync(INDEX_DB_PATH, Buffer.from(data))
     } catch (e) {
       console.error("[MemoryStore] Failed to save index:", e)
     }
@@ -569,21 +506,17 @@ export class MemoryStore {
   }
 }
 
-const memoryStores = new Map<string, MemoryStore>()
+// Global singleton
+let _memoryStore: MemoryStore | null = null
 
-export async function getMemoryStore(
-  memoryDir: string = getGlobalMemoryDir()
-): Promise<MemoryStore> {
-  const key = resolve(memoryDir)
-  let store = memoryStores.get(key)
-  if (!store) {
-    store = new MemoryStore(key)
-    memoryStores.set(key, store)
-    await store.init()
+export async function getMemoryStore(): Promise<MemoryStore> {
+  if (!_memoryStore) {
+    _memoryStore = new MemoryStore()
+    await _memoryStore.init()
     // Bootstrap MEMORY.md only if it doesn't exist yet — once it does,
     // the summarizer LLM owns it and we must not clobber its edits.
     try {
-      const memoryDir = store.getMemoryDir()
+      const memoryDir = _memoryStore.getMemoryDir()
       const memoryMd = join(memoryDir, "MEMORY.md")
       if (!existsSync(memoryMd)) {
         regenerateManifest(memoryDir)
@@ -594,23 +527,14 @@ export async function getMemoryStore(
         e instanceof Error ? e.message : e
       )
     }
-    store.syncMemoryFiles()
+    _memoryStore.syncMemoryFiles()
   }
-  return store
+  return _memoryStore
 }
 
-export async function closeMemoryStore(memoryDir?: string): Promise<void> {
-  if (memoryDir) {
-    const key = resolve(memoryDir)
-    const store = memoryStores.get(key)
-    if (store) {
-      await store.close()
-      memoryStores.delete(key)
-    }
-    return
-  }
-  for (const [key, store] of memoryStores) {
-    await store.close()
-    memoryStores.delete(key)
+export async function closeMemoryStore(): Promise<void> {
+  if (_memoryStore) {
+    await _memoryStore.close()
+    _memoryStore = null
   }
 }

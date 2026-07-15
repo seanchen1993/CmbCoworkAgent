@@ -7,15 +7,6 @@ import { throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput as mergeHookUpdatedInput } from "../hooks/updated-input"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import type { HookScopeController } from "../hooks/scope"
-import { detectToolFailure, hasFailureFired, type ToolFailureSignal } from "../hooks/tool-failure"
-import {
-  formatFailureFuseWarning,
-  shouldAttachFailureFuseFeedback,
-  shouldSendFailureFuseNotice,
-  throwIfFailureFuseHalt,
-  type FailureFuseDecision,
-  type FailureFuseNoticeCallback
-} from "./failure-fuse"
 
 export interface ToolHookMiddlewareOptions {
   workspacePath: string
@@ -27,22 +18,9 @@ export interface ToolHookMiddlewareOptions {
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
-  harnessProjectId?: string
-  harnessAdapterName?: string
-  harnessAdapterVersion?: string
-  harnessNodeName?: string
-  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   skipToolNames?: ReadonlySet<string>
-  onToolFailureDecision?: (input: {
-    toolName: string
-    toolCallId?: string
-    toolArgs: Record<string, unknown>
-    signal: ToolFailureSignal
-  }) => FailureFuseDecision | null
-  onFailureFuseNotice?: FailureFuseNoticeCallback
-  onToolSuccess?: (input: { toolName: string; toolArgs: Record<string, unknown> }) => void
 }
 
 function buildHookContext(
@@ -59,11 +37,6 @@ function buildHookContext(
     systemId: options.systemId,
     pluginWorkspace: options.pluginWorkspace,
     featureId: options.featureId,
-    harnessProjectId: options.harnessProjectId,
-    harnessAdapterName: options.harnessAdapterName,
-    harnessAdapterVersion: options.harnessAdapterVersion,
-    harnessNodeName: options.harnessNodeName,
-    harnessNodeStatus: options.harnessNodeStatus,
     projectCode: options.projectCode,
     projectDir: options.projectDir
   }
@@ -92,21 +65,6 @@ function stringifyToolResult(result: unknown): string {
   }
 }
 
-function getFailureDetectionInput(result: unknown): unknown {
-  if (typeof result === "string") return result
-  if (ToolMessage.isInstance(result)) {
-    const content = stringifyToolResult(result)
-    return result.status === "error"
-      ? {
-          is_error: true,
-          error: content || "tool returned error status"
-        }
-      : content
-  }
-  if (isCommand(result)) return stringifyToolResult(result)
-  return result
-}
-
 function buildPostHookFeedback(postResult: HookResult | null): string | null {
   if (!postResult) return null
   const parts = [
@@ -123,29 +81,6 @@ function buildPostHookFeedback(postResult: HookResult | null): string | null {
       : undefined
   ].filter((item): item is string => Boolean(item))
   return parts.length > 0 ? parts.join("\n\n") : null
-}
-
-function mergeFailureFuseWarning(
-  postResult: HookResult | null,
-  decision: FailureFuseDecision | null
-): HookResult | null {
-  if (!shouldAttachFailureFuseFeedback(decision)) return postResult
-  const warning = formatFailureFuseWarning(decision)
-  if (!postResult) {
-    return {
-      exitCode: null,
-      stdout: "",
-      stderr: "",
-      blocked: false,
-      additionalContext: warning
-    }
-  }
-  return {
-    ...postResult,
-    additionalContext: postResult.additionalContext
-      ? `${postResult.additionalContext}\n\n${warning}`
-      : warning
-  }
 }
 
 function appendFeedbackToToolContent(content: unknown, feedback: string): unknown {
@@ -171,7 +106,11 @@ function appendFeedbackToToolMessage(message: ToolMessage, feedback: string): To
   })
 }
 
-function appendFeedbackToCommand(result: unknown, feedback: string, toolCallId?: string): unknown {
+function appendFeedbackToCommand(
+  result: unknown,
+  feedback: string,
+  toolCallId?: string
+): unknown {
   if (!isCommand(result)) return result
   const command = result as Command<unknown, Record<string, unknown>, string>
   const update = command.update
@@ -197,7 +136,11 @@ function appendFeedbackToCommand(result: unknown, feedback: string, toolCallId?:
   return result
 }
 
-function appendFeedbackToResult(result: unknown, feedback: string, toolCallId?: string): unknown {
+function appendFeedbackToResult(
+  result: unknown,
+  feedback: string,
+  toolCallId?: string
+): unknown {
   if (ToolMessage.isInstance(result)) {
     return appendFeedbackToToolMessage(result, feedback)
   }
@@ -240,7 +183,6 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
 
   return createMiddleware({
     name: "toolHookMiddleware",
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapToolCall: async (request: any, handler: any): Promise<any> => {
       const toolCall = request.toolCall as
         | { id?: string; name?: string; args?: unknown }
@@ -278,30 +220,12 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
       const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
       const result = await handler({
         ...request,
-        toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,
+        toolCall: toolCall ? ({ ...toolCall, args: toolArgs } as any) : toolCall,
         state:
           request.state && typeof request.state === "object" && !Array.isArray(request.state)
-            ? { ...(request.state as Record<string, unknown>) }
+            ? ({ ...(request.state as Record<string, unknown>) } as any)
             : request.state
-      })
-
-      const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
-      const alreadyRecordedThrowFailure = Boolean(
-        signal && toolCall?.id && hasFailureFired(toolCall.id)
-      )
-      const failureFuseDecision =
-        signal && !alreadyRecordedThrowFailure
-          ? (options.onToolFailureDecision?.({
-              toolName,
-              toolCallId: toolCall?.id,
-              toolArgs,
-              signal
-            }) ?? null)
-          : null
-      if (shouldSendFailureFuseNotice(failureFuseDecision)) {
-        options.onFailureFuseNotice?.(failureFuseDecision)
-      }
-      if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
+      } as any)
 
       const postContext: HookContext = {
         ...hookContext,
@@ -320,11 +244,8 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
         )
       }
       throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
-      if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
 
-      const feedback = buildPostHookFeedback(
-        mergeFailureFuseWarning(postResult, failureFuseDecision)
-      )
+      const feedback = buildPostHookFeedback(postResult)
       return feedback ? appendFeedbackToResult(result, feedback, toolCall?.id) : result
     }
   })

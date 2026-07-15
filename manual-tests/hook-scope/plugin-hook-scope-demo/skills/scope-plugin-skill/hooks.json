@@ -6,7 +6,6 @@
     "type": "command",
     "command": "node C:/Users/87624/.cmbcoworkagent/plugins/Hook-Scope-Demo/hook-recorder.cjs plugin-skill-pre",
     "timeout": 8000,
-    "persistAfterInterrupt": true,
     "enabled": true
   },
   {
@@ -16,7 +15,6 @@
     "type": "command",
     "command": "node C:/Users/87624/.cmbcoworkagent/plugins/Hook-Scope-Demo/hook-recorder.cjs plugin-skill-post",
     "timeout": 8000,
-    "persistAfterInterrupt": true,
     "enabled": true
   }
 ]

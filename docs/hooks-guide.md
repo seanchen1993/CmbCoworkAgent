@@ -15,22 +15,22 @@
 
 ## 1. 何时触发：事件清单
 
-| 事件                 | 触发时机                                                                                                | 关键作用                                                                                     |
-| -------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `PreToolUse`         | 工具执行**前**                                                                                          | 拦截危险调用 / 改写参数                                                                      |
-| `PostToolUse`        | 工具执行**后**                                                                                          | 写后校验 / 注入上下文 / 要求 Agent 修订                                                      |
-| `PostToolUseFailure` | 工具调用**失败**（throw / 非零退出 / explicit error / abort / timeout）                                 | 失败告警 / 错误分类观测，**fire-and-forget 不阻断**                                          |
-| `PreSkillUse`        | 技能加载**前**                                                                                          | 技能准入控制                                                                                 |
-| `PostSkillUse`       | 本轮结束阶段，每个使用过的技能各触发一次                                                                | 使用记录 / 收尾审计                                                                          |
-| `UserPromptSubmit`   | 用户消息进入模型**前**                                                                                  | 拦截 / 改写用户输入                                                                          |
-| `Stop`               | 本轮**正常**结束                                                                                        | 最终验收，可要求修订；与 `StopFailure` 互斥                                                  |
-| `StopFailure`        | 本轮因 API 错误**异常**结束                                                                             | 失败告警；matcher 可按 6 种错误分类精确匹配；fire-and-forget                                 |
-| `SubagentStart`      | 父 Agent 发出 `task` tool call 的瞬间，子 Agent 尚未运行                                                | 子代理事前准备；与 `SubagentStop` 通过 `tool_call_id` 配对                                   |
-| `SubagentStop`       | 子 Agent 结束                                                                                           | 父轮的事后检查                                                                               |
-| `Setup`              | 工作区首次会话开始前（matcher=`init`），或用户主动触发"重新初始化工作区"按钮时（matcher=`maintenance`） | 工作区级初始化 / 维护脚本，**per-workspace 去重**（标记文件 `.cmbdevclaw/setup-state.json`） |
-| `Notification`       | 通知（目前唯一触发路径：审批弹窗）                                                                      | matcher=`permission_prompt`，或工具名（向后兼容）                                            |
-| `SessionStart`       | 每个 thread 第一次提问前                                                                                | matcher=`startup`（当前仅此一种 source）                                                     |
-| `SessionEnd`         | 会话结束                                                                                                | matcher=`clear`（删 thread）或 `logout`（应用退出）                                          |
+| 事件 | 触发时机 | 关键作用 |
+|---|---|---|
+| `PreToolUse` | 工具执行**前** | 拦截危险调用 / 改写参数 |
+| `PostToolUse` | 工具执行**后** | 写后校验 / 注入上下文 / 要求 Agent 修订 |
+| `PostToolUseFailure` | 工具调用**失败**（throw / 非零退出 / explicit error / abort / timeout） | 失败告警 / 错误分类观测，**fire-and-forget 不阻断** |
+| `PreSkillUse` | 技能加载**前** | 技能准入控制 |
+| `PostSkillUse` | 本轮结束阶段，每个使用过的技能各触发一次 | 使用记录 / 收尾审计 |
+| `UserPromptSubmit` | 用户消息进入模型**前** | 拦截 / 改写用户输入 |
+| `Stop` | 本轮**正常**结束 | 最终验收，可要求修订；与 `StopFailure` 互斥 |
+| `StopFailure` | 本轮因 API 错误**异常**结束 | 失败告警；matcher 可按 6 种错误分类精确匹配；fire-and-forget |
+| `SubagentStart` | 父 Agent 发出 `task` tool call 的瞬间，子 Agent 尚未运行 | 子代理事前准备；与 `SubagentStop` 通过 `tool_call_id` 配对 |
+| `SubagentStop` | 子 Agent 结束 | 父轮的事后检查 |
+| `Setup` | 工作区首次会话开始前（matcher=`init`），或用户主动触发"重新初始化工作区"按钮时（matcher=`maintenance`） | 工作区级初始化 / 维护脚本，**per-workspace 去重**（标记文件 `.cmbdevclaw/setup-state.json`） |
+| `Notification` | 通知（目前唯一触发路径：审批弹窗） | matcher=`permission_prompt`，或工具名（向后兼容） |
+| `SessionStart` | 每个 thread 第一次提问前 | matcher=`startup`（当前仅此一种 source） |
+| `SessionEnd` | 会话结束 | matcher=`clear`（删 thread）或 `logout`（应用退出） |
 
 **多钩子串行**：同一事件可以挂多个钩子，按数组顺序依次执行。Pre 系列任一阻断即整体阻断；Post 系列把各钩子的输出合并后回灌给 Agent。
 
@@ -47,27 +47,26 @@
 ```jsonc
 {
   "id": "唯一标识，UUID 即可",
-  "event": "PreToolUse", // 必填，见上表
-  "matcher": "execute", // 可选，工具名 / 技能名 / 正则 / "*"
-  "type": "command", // "command"（默认）或 "prompt"
-  "command": "node my-hook.js", // type=command 时必填
-  "prompt": "禁止 X", // type=prompt 时必填（自然语言策略）
-  "modelId": "custom:claude", // type=prompt 时可选，指定哪个模型
-  "fallback": "allow", // type=prompt 时可选：LLM 失败时的兜底，"allow"|"block"
-  "forcedOutcome": "always-halt", // 可选：强制结局，"always-revise"|"always-halt"
-  "forcedReason": "原因文本", // 可选：强制结局时的理由
-  "onBlock": {
-    // 可选：阻断时附加的整改信息
+  "event": "PreToolUse",            // 必填，见上表
+  "matcher": "execute",             // 可选，工具名 / 技能名 / 正则 / "*"
+  "type": "command",                // "command"（默认）或 "prompt"
+  "command": "node my-hook.js",     // type=command 时必填
+  "prompt": "禁止 X",                // type=prompt 时必填（自然语言策略）
+  "modelId": "custom:claude",       // type=prompt 时可选，指定哪个模型
+  "fallback": "allow",              // type=prompt 时可选：LLM 失败时的兜底，"allow"|"block"
+  "forcedOutcome": "always-halt",   // 可选：强制结局，"always-revise"|"always-halt"
+  "forcedReason": "原因文本",        // 可选：强制结局时的理由
+  "onBlock": {                      // 可选：阻断时附加的整改信息
     "reason": "默认理由",
     "systemMessage": "给用户看的提示",
     "additionalContext": "塞给 Agent 的隐藏上下文",
     "requiredSkill": "remediation-skill"
   },
-  "once": false, // 是否本会话只触发一次
-  "persistAfterInterrupt": false, // 仅技能/插件钩子：触发后是否常驻当前线程（可跨重启恢复）
-  "injectUserContext": false, // 可选：注入当前用户身份，默认关闭，见 3.5
-  "timeout": 10000, // 超时毫秒，默认 10000
-  "enabled": true, // 是否启用
+  "once": false,                    // 是否本会话只触发一次
+  "persistAfterInterrupt": false,   // 仅技能/插件钩子：触发后是否常驻整个会话
+  "injectUserContext": false,       // 可选：注入当前用户身份，默认关闭，见 3.5
+  "timeout": 10000,                 // 超时毫秒，默认 10000
+  "enabled": true,                  // 是否启用
   "createdAt": "2026-05-20T00:00:00.000Z",
   "updatedAt": "2026-05-20T00:00:00.000Z"
 }
@@ -81,14 +80,14 @@
 - **含 `| * + ? ^ $ ( ) [ ] { } \` 中任一字符**：当**正则**解析（不是 glob），大小写不敏感
 - **不含上述字符**：当字面量按大小写不敏感**精确匹配**
 
-| 场景                          | 写法                    |
-| ----------------------------- | ----------------------- |
-| 拦所有工具                    | `*` 或留空              |
-| 拦单个工具                    | `execute`               |
-| 拦多个工具                    | `write_file\|edit_file` |
-| 拦所有 MCP 工具               | `mcp__.*`               |
-| 拦某 provider 的所有 MCP 工具 | `mcp__github__.*`       |
-| 拦所有读类技能                | `.*-reader`             |
+| 场景 | 写法 |
+|---|---|
+| 拦所有工具 | `*` 或留空 |
+| 拦单个工具 | `execute` |
+| 拦多个工具 | `write_file\|edit_file` |
+| 拦所有 MCP 工具 | `mcp__.*` |
+| 拦某 provider 的所有 MCP 工具 | `mcp__github__.*` |
+| 拦所有读类技能 | `.*-reader` |
 
 > `.` **不算**正则触发字符——`foo.bar` 视为字面量。理由是工具名常含点（特别是 MCP 工具），避免误判。
 
@@ -96,16 +95,16 @@
 
 PR-16 之后，matcher 对照的不再只是"工具名/技能名"，而是按事件查询对应字段。如果该字段为空（事件无相关上下文），`"*"` 仍匹配，命名 matcher 永远不命中。
 
-| 事件                                                | matcher 对照字段                                                                                                      | 可选值（当前实现）                                                                                        |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `PreToolUse` / `PostToolUse` / `PostToolUseFailure` | `tool_name`                                                                                                           | 工具名                                                                                                    |
-| `PreSkillUse` / `PostSkillUse`                      | `skill_name`                                                                                                          | 技能名                                                                                                    |
-| `SubagentStart` / `SubagentStop`                    | 子 Agent 的 `name` / `id`（subagent_type）                                                                            | `general-purpose`、自定义 subagent 名等                                                                   |
-| `Setup`                                             | `trigger`                                                                                                             | `init` / `maintenance`                                                                                    |
-| `SessionStart`                                      | `source`                                                                                                              | `startup`（当前唯一值）                                                                                   |
-| `SessionEnd`                                        | `reason`                                                                                                              | `clear`（删 thread）/ `logout`（应用退出）                                                                |
-| `Notification`                                      | `notification_type`，**未命中时回退到 `tool_name`**（PR-16 dual-matcher，保留 `matcher: "execute"` 这种 legacy 写法） | `permission_prompt`（当前唯一类型）                                                                       |
-| `StopFailure`                                       | `classifyApiError(error)` 输出（6 种枚举）                                                                            | `authentication_failed` / `invalid_request` / `rate_limit` / `server_error` / `network_error` / `unknown` |
+| 事件 | matcher 对照字段 | 可选值（当前实现） |
+|---|---|---|
+| `PreToolUse` / `PostToolUse` / `PostToolUseFailure` | `tool_name` | 工具名 |
+| `PreSkillUse` / `PostSkillUse` | `skill_name` | 技能名 |
+| `SubagentStart` / `SubagentStop` | 子 Agent 的 `name` / `id`（subagent_type） | `general-purpose`、自定义 subagent 名等 |
+| `Setup` | `trigger` | `init` / `maintenance` |
+| `SessionStart` | `source` | `startup`（当前唯一值） |
+| `SessionEnd` | `reason` | `clear`（删 thread）/ `logout`（应用退出） |
+| `Notification` | `notification_type`，**未命中时回退到 `tool_name`**（PR-16 dual-matcher，保留 `matcher: "execute"` 这种 legacy 写法） | `permission_prompt`（当前唯一类型） |
+| `StopFailure` | `classifyApiError(error)` 输出（6 种枚举） | `authentication_failed` / `invalid_request` / `rate_limit` / `server_error` / `network_error` / `unknown` |
 
 ### 2.1.2 `if` 子句 — matcher 之后的二次过滤
 
@@ -122,13 +121,13 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 
 ### 2.1.3 其他 Phase 2 字段
 
-| 字段            | 说明                                                                                                                                                                                                 |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type: "http"`  | POST 到 url，response body 与 command stdout 同一套 JSON 解析逻辑。无 SSRF 守卫，单机自负其责。`headers` 支持 `$VAR` / `${VAR}` 插值但**仅限 `allowedEnvVars` 白名单**中的变量，未授权变量替换为空串 |
-| `async: true`   | runner 立即返回 `pending` 占位，executor 在后台跑；late 完成时通过 `onHookResult` 回调送给 UI + 日志。**`Setup` 事件拒绝该字段**（init 必须同步等待退出码决定是否写 marker）                         |
-| `shell`         | `"bash"` / `"powershell"` / `"sh"`，覆盖按平台自动挑的默认（Windows=cmd，其它=sh）。需要对应 shell 在 PATH 上                                                                                        |
-| `model`         | type=prompt 时指定哪个模型，对齐 CC 字段名；老配置的 `modelId` 仍读，写入时迁移到 `model`                                                                                                            |
-| `statusMessage` | UI 跑 hook 时显示的状态文字，纯展示                                                                                                                                                                  |
+| 字段 | 说明 |
+|---|---|
+| `type: "http"` | POST 到 url，response body 与 command stdout 同一套 JSON 解析逻辑。无 SSRF 守卫，单机自负其责。`headers` 支持 `$VAR` / `${VAR}` 插值但**仅限 `allowedEnvVars` 白名单**中的变量，未授权变量替换为空串 |
+| `async: true` | runner 立即返回 `pending` 占位，executor 在后台跑；late 完成时通过 `onHookResult` 回调送给 UI + 日志。**`Setup` 事件拒绝该字段**（init 必须同步等待退出码决定是否写 marker） |
+| `shell` | `"bash"` / `"powershell"` / `"sh"`，覆盖按平台自动挑的默认（Windows=cmd，其它=sh）。需要对应 shell 在 PATH 上 |
+| `model` | type=prompt 时指定哪个模型，对齐 CC 字段名；老配置的 `modelId` 仍读，写入时迁移到 `model` |
+| `statusMessage` | UI 跑 hook 时显示的状态文字，纯展示 |
 
 ### 2.1.4 HTTP Hook 有什么用（什么时候用 type=http）
 
@@ -150,14 +149,14 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 
 ### 2.2 type=command vs type=prompt
 
-| 维度     | command                               | prompt                    |
-| -------- | ------------------------------------- | ------------------------- |
-| 执行内容 | 启动子进程跑脚本                      | 调用 LLM 评估自然语言策略 |
-| 输入     | stdin JSON + 一组环境变量             | 策略 + payload 喂给 LLM   |
-| 决策     | 看脚本退出码 / stdout JSON            | LLM 输出 allow / block    |
-| 速度     | 本地几十毫秒                          | 一次网络往返，秒级        |
-| 失败处理 | 非 2 退出码视为"自身报错"，**不阻断** | 看 `fallback` 字段        |
-| 适用     | 程序化规则、外部检查                  | 难以代码化的策略表达      |
+| 维度 | command | prompt |
+|---|---|---|
+| 执行内容 | 启动子进程跑脚本 | 调用 LLM 评估自然语言策略 |
+| 输入 | stdin JSON + 一组环境变量 | 策略 + payload 喂给 LLM |
+| 决策 | 看脚本退出码 / stdout JSON | LLM 输出 allow / block |
+| 速度 | 本地几十毫秒 | 一次网络往返，秒级 |
+| 失败处理 | 非 2 退出码视为"自身报错"，**不阻断** | 看 `fallback` 字段 |
+| 适用 | 程序化规则、外部检查 | 难以代码化的策略表达 |
 
 ---
 
@@ -177,39 +176,39 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 
 按事件追加：
 
-| 字段                                                                | 出现于                                                                                                                                                                                                                              |
-| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool_name`, `tool_input`                                           | Pre/PostToolUse、Pre/PostSkillUse、UserPromptSubmit（`tool_input.message`）                                                                                                                                                         |
-| `tool_response`                                                     | **仅** PostToolUse（已自动 JSON.parse；解析失败时回退为原始字符串）                                                                                                                                                                 |
-| `prompt`                                                            | **仅** UserPromptSubmit                                                                                                                                                                                                             |
-| `skill_name`, `skill_path`, `skill_root`, `skill_trigger_tool_name` | Pre/PostSkillUse                                                                                                                                                                                                                    |
-| `plugin_id`, `plugin_name`, `plugin_root`                           | 工具/技能/钩子归属插件时                                                                                                                                                                                                            |
-| `hook_source_type`, `hook_source_root`, `hook_source_path`          | 钩子来源已知时                                                                                                                                                                                                                      |
-| `subagent`                                                          | **仅** SubagentStop                                                                                                                                                                                                                 |
-| `stop_context`                                                      | **仅** Stop / PostSkillUse —— 包含 `userMessage`、`assistantResponse`、`toolCalls[]`、`usedSkills[]`                                                                                                                                |
-| `user_context`                                                      | **仅当**该钩子开启了 `injectUserContext` 时出现，见 [3.5](#35-注入当前用户身份-injectusercontext)                                                                                                                                   |
-| `transcript_path`                                                   | **Claude Code 兼容字段 — 解析/透传能力已就绪，当前无填充入口**。Runner 的 stdin JSON 与 env 都已支持透传，但没有任何调用方填值，所以脚本目前永远拿不到。后续 PR 在确认 deepagents filesystem backend 的会话历史文件命名约定后填充。 |
-| `permission_mode`                                                   | **仅 Notification 事件填充**。值为 `"yolo"`（YOLO 模式）或 `"approve"`（默认审批模式）。其他事件目前不写出该 key。                                                                                                                  |
-| `agent_id`                                                          | **解析/透传能力已就绪，当前无填充入口**。等待 SubagentStart / 子 Agent 内部 hook 路径接通后填充（属于 PR-04 范围）。                                                                                                                |
+| 字段 | 出现于 |
+|---|---|
+| `tool_name`, `tool_input` | Pre/PostToolUse、Pre/PostSkillUse、UserPromptSubmit（`tool_input.message`） |
+| `tool_response` | **仅** PostToolUse（已自动 JSON.parse；解析失败时回退为原始字符串） |
+| `prompt` | **仅** UserPromptSubmit |
+| `skill_name`, `skill_path`, `skill_root`, `skill_trigger_tool_name` | Pre/PostSkillUse |
+| `plugin_id`, `plugin_name`, `plugin_root` | 工具/技能/钩子归属插件时 |
+| `hook_source_type`, `hook_source_root`, `hook_source_path` | 钩子来源已知时 |
+| `subagent` | **仅** SubagentStop |
+| `stop_context` | **仅** Stop / PostSkillUse —— 包含 `userMessage`、`assistantResponse`、`toolCalls[]`、`usedSkills[]` |
+| `user_context` | **仅当**该钩子开启了 `injectUserContext` 时出现，见 [3.5](#35-注入当前用户身份-injectusercontext) |
+| `transcript_path` | **Claude Code 兼容字段 — 解析/透传能力已就绪，当前无填充入口**。Runner 的 stdin JSON 与 env 都已支持透传，但没有任何调用方填值，所以脚本目前永远拿不到。后续 PR 在确认 deepagents filesystem backend 的会话历史文件命名约定后填充。 |
+| `permission_mode` | **仅 Notification 事件填充**。值为 `"yolo"`（YOLO 模式）或 `"approve"`（默认审批模式）。其他事件目前不写出该 key。 |
+| `agent_id` | **解析/透传能力已就绪，当前无填充入口**。等待 SubagentStart / 子 Agent 内部 hook 路径接通后填充（属于 PR-04 范围）。 |
 
 ### 3.2 环境变量（便利，**大字段会被丢弃**）
 
-| 变量                                    | 含义                                                                                                                                                                                 |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `HOOK_EVENT`                            | 事件名                                                                                                                                                                               |
-| `SESSION_ID`                            | thread id                                                                                                                                                                            |
-| `WORKSPACE_PATH` / `CLAUDE_PROJECT_DIR` | 工作区根（两者完全等价）                                                                                                                                                             |
-| `HOOK_SOURCE_TYPE` / `_ROOT` / `_PATH`  | 钩子自身归属                                                                                                                                                                         |
-| `TOOL_NAME`                             | 工具名                                                                                                                                                                               |
-| `TOOL_ARGS`                             | 工具入参 JSON（**>4096 字符就不下发**）                                                                                                                                              |
-| `TOOL_RESULT`                           | 工具结果 JSON（同 4KB 上限，仅 PostToolUse）                                                                                                                                         |
-| `PLUGIN_ID` / `_NAME` / `_ROOT`         | 仅工具或钩子归属插件时存在。`PLUGIN_ID` 是 `~/.cmbcoworkagent/plugins.json` 里安装时分配的 **UUID**，不是目录名也不是 plugin.json 里的字段；`PLUGIN_NAME` 来自 plugin.json 的 `name` |
-| `SKILL_NAME` / `_PATH` / `_ROOT`        | 仅 Pre/PostSkillUse                                                                                                                                                                  |
-| `USER_PROMPT`                           | 仅 UserPromptSubmit                                                                                                                                                                  |
-| `HOOK_USER_*`                           | **仅当**该钩子开启了 `injectUserContext` 时出现（如 `HOOK_USER_SAP_ID`）；**token 字段永远不进 env**，见 [3.5](#35-注入当前用户身份-injectusercontext)                               |
-| `TRANSCRIPT_PATH`                       | **当前永远不下发**（透传能力已就绪，无填充入口；详见 §3.1 同名字段说明）                                                                                                             |
-| `PERMISSION_MODE`                       | **仅 Notification 事件下发**（值：`yolo` / `approve`）                                                                                                                               |
-| `AGENT_ID`                              | **当前永远不下发**（透传能力已就绪，等子 Agent hook 路径接通后填充）                                                                                                                 |
+| 变量 | 含义 |
+|---|---|
+| `HOOK_EVENT` | 事件名 |
+| `SESSION_ID` | thread id |
+| `WORKSPACE_PATH` / `CLAUDE_PROJECT_DIR` | 工作区根（两者完全等价） |
+| `HOOK_SOURCE_TYPE` / `_ROOT` / `_PATH` | 钩子自身归属 |
+| `TOOL_NAME` | 工具名 |
+| `TOOL_ARGS` | 工具入参 JSON（**>4096 字符就不下发**） |
+| `TOOL_RESULT` | 工具结果 JSON（同 4KB 上限，仅 PostToolUse） |
+| `PLUGIN_ID` / `_NAME` / `_ROOT` | 仅工具或钩子归属插件时存在。`PLUGIN_ID` 是 `~/.cmbcoworkagent/plugins.json` 里安装时分配的 **UUID**，不是目录名也不是 plugin.json 里的字段；`PLUGIN_NAME` 来自 plugin.json 的 `name` |
+| `SKILL_NAME` / `_PATH` / `_ROOT` | 仅 Pre/PostSkillUse |
+| `USER_PROMPT` | 仅 UserPromptSubmit |
+| `HOOK_USER_*` | **仅当**该钩子开启了 `injectUserContext` 时出现（如 `HOOK_USER_SAP_ID`）；**token 字段永远不进 env**，见 [3.5](#35-注入当前用户身份-injectusercontext) |
+| `TRANSCRIPT_PATH` | **当前永远不下发**（透传能力已就绪，无填充入口；详见 §3.1 同名字段说明） |
+| `PERMISSION_MODE` | **仅 Notification 事件下发**（值：`yolo` / `approve`）|
+| `AGENT_ID` | **当前永远不下发**（透传能力已就绪，等子 Agent hook 路径接通后填充）|
 
 ⚠️ **铁律**：要可靠拿到完整工具入参/结果，**必须读 stdin JSON**——超过 4KB 时 env 里直接没有该 key。
 
@@ -224,7 +223,6 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 ### 3.4 PLUGIN_ROOT 何时有值
 
 两种情况之一会触发：
-
 1. **钩子本身住在插件目录里**——无论拦哪个工具，`PLUGIN_*` 都指向钩子所在的插件
 2. **被拦截的工具/技能由插件提供**——全局或工作区钩子拦这种工具时，`PLUGIN_*` 指向被拦截工具所属的插件
 
@@ -249,16 +247,16 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 
 **可选字段**（写在 `include` 里）：
 
-| 字段             | 含义                       | 默认是否注入               |
-| ---------------- | -------------------------- | -------------------------- |
-| `sap_id`         | SAP 工号                   | ✅                         |
-| `yst_id`         | 用户 ID                    | ✅                         |
-| `name`           | 用户名                     | ✅                         |
-| `origin_org_id`  | 机构 ID                    | ✅                         |
-| `org_name`       | 机构名                     | ✅                         |
-| `path_name`      | 组织路径名                 | ✅                         |
-| `origin_path_id` | 组织路径 ID                | ❌ 需在 `include` 显式声明 |
-| `yst_id_token`   | 用户身份 **token**（凭据） | ❌ 需在 `include` 显式声明 |
+| 字段 | 含义 | 默认是否注入 |
+|---|---|---|
+| `sap_id` | SAP 工号 | ✅ |
+| `yst_id` | 用户 ID | ✅ |
+| `name` | 用户名 | ✅ |
+| `origin_org_id` | 机构 ID | ✅ |
+| `org_name` | 机构名 | ✅ |
+| `path_name` | 组织路径名 | ✅ |
+| `origin_path_id` | 组织路径 ID | ❌ 需在 `include` 显式声明 |
+| `yst_id_token` | 用户身份 **token**（凭据） | ❌ 需在 `include` 显式声明 |
 
 > `injectUserContext: true` **不含** token；要 token 必须用对象形式把 `yst_id_token` 写进 `include`。
 
@@ -331,30 +329,30 @@ sys.exit(0)
 
 ### 4.1 退出码（command 钩子）
 
-| 退出码   | 含义                                                               |
-| -------- | ------------------------------------------------------------------ |
-| `0`      | 正常返回；stdout 若是合法 JSON 按结构化字段解析，否则当纯文本注入  |
-| `2`      | **强制阻断**；等价于 `decision=block`，reason 取自 stderr / stdout |
-| 其它非零 | 视为"钩子自身报错"，**不阻断**业务，只打日志                       |
+| 退出码 | 含义 |
+|---|---|
+| `0` | 正常返回；stdout 若是合法 JSON 按结构化字段解析，否则当纯文本注入 |
+| `2` | **强制阻断**；等价于 `decision=block`，reason 取自 stderr / stdout |
+| 其它非零 | 视为"钩子自身报错"，**不阻断**业务，只打日志 |
 
 > ⚠️ shell 里 `echo 'exit 2'` **不会**让进程退出码为 2，那只是 echo 出字面字符串。sh 里写 `exit 2`，Windows 用 `cmd /c "exit 2"`。
 
 ### 4.2 stdout JSON 可识别字段
 
-| 字段                                                                                              | 类型                    | 用途                                                                                                              |
-| ------------------------------------------------------------------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `decision`                                                                                        | `"block"` / `"approve"` | Pre 系列：block=拒绝；Post 系列：block=要求 Agent 修订                                                            |
-| `reason`                                                                                          | string                  | 与 `decision=block` 配套，回灌给 Agent                                                                            |
-| `continue`                                                                                        | boolean                 | **`false` = 直接终止本轮**（优先级最高，压过 `decision`）                                                         |
-| `stopReason`                                                                                      | string                  | 与 `continue=false` 配套，给用户看                                                                                |
-| `updatedInput`                                                                                    | object                  | PreToolUse / UserPromptSubmit：改写工具参数 / 用户消息                                                            |
-| `additionalContext`                                                                               | string                  | 注入 Agent 隐藏上下文                                                                                             |
-| `systemMessage`                                                                                   | string                  | 在 UI 对用户可见                                                                                                  |
-| `requiredSkill`                                                                                   | string                  | 阻断时要求加载某技能作整改指引                                                                                    |
-| `suppressOutput`                                                                                  | boolean                 | PostToolUse：抑制工具原始结果进入上下文                                                                           |
-| `hookSpecificOutput.{additionalContext,updatedInput,permissionDecision,permissionDecisionReason}` | object                  | 兼容嵌套写法                                                                                                      |
-| `hookSpecificOutput.initialUserMessage` / 顶层 `initialUserMessage`                               | string                  | **解析已就位，消费侧待补**——SessionStart hook 可返回此字段，未来会自动作为首条用户消息注入（与 Claude Code 一致） |
-| `hookSpecificOutput.watchPaths` / 顶层 `watchPaths`                                               | string[]                | **解析已就位，消费侧待补**——SessionStart / 未来的 CwdChanged hook 用以注册文件 watcher（与 Claude Code 一致）     |
+| 字段 | 类型 | 用途 |
+|---|---|---|
+| `decision` | `"block"` / `"approve"` | Pre 系列：block=拒绝；Post 系列：block=要求 Agent 修订 |
+| `reason` | string | 与 `decision=block` 配套，回灌给 Agent |
+| `continue` | boolean | **`false` = 直接终止本轮**（优先级最高，压过 `decision`） |
+| `stopReason` | string | 与 `continue=false` 配套，给用户看 |
+| `updatedInput` | object | PreToolUse / UserPromptSubmit：改写工具参数 / 用户消息 |
+| `additionalContext` | string | 注入 Agent 隐藏上下文 |
+| `systemMessage` | string | 在 UI 对用户可见 |
+| `requiredSkill` | string | 阻断时要求加载某技能作整改指引 |
+| `suppressOutput` | boolean | PostToolUse：抑制工具原始结果进入上下文 |
+| `hookSpecificOutput.{additionalContext,updatedInput,permissionDecision,permissionDecisionReason}` | object | 兼容嵌套写法 |
+| `hookSpecificOutput.initialUserMessage` / 顶层 `initialUserMessage` | string | **解析已就位，消费侧待补**——SessionStart hook 可返回此字段，未来会自动作为首条用户消息注入（与 Claude Code 一致）|
+| `hookSpecificOutput.watchPaths` / 顶层 `watchPaths` | string[] | **解析已就位，消费侧待补**——SessionStart / 未来的 CwdChanged hook 用以注册文件 watcher（与 Claude Code 一致）|
 
 ### 4.3 决策优先级（必记）
 
@@ -367,11 +365,11 @@ sys.exit(0)
 
 ### 4.4 forcedOutcome（配置层强制覆盖脚本）
 
-| 值                | 效果                                                           |
-| ----------------- | -------------------------------------------------------------- |
-| 不设              | 完全跟脚本走                                                   |
+| 值 | 效果 |
+|---|---|
+| 不设 | 完全跟脚本走 |
 | `"always-revise"` | 无论脚本输出，强制 `decision=block`（Pre=拒绝，Post=要求修订） |
-| `"always-halt"`   | 无论脚本输出，强制 `continue=false`（直接终止）                |
+| `"always-halt"` | 无论脚本输出，强制 `continue=false`（直接终止） |
 
 配合 `forcedReason` 提供理由。**适合"宁可错杀"的硬红线**——脚本只用来打日志，结局已经由配置锁死。
 
@@ -379,16 +377,16 @@ sys.exit(0)
 
 ## 5. 各事件输出语义对照
 
-| 事件                                     | 普通文本 stdout                    | `decision=block`                                         | `continue=false` |
-| ---------------------------------------- | ---------------------------------- | -------------------------------------------------------- | ---------------- |
-| PreToolUse                               | 追加到 Agent 上下文                | **拒绝工具执行**，feed reason 让 Agent 重试              | 终止本轮         |
-| PostToolUse                              | 追加到 Agent 上下文                | **要求 Agent 重新审视结果**，feed reason                 | 终止本轮         |
-| PreSkillUse                              | 追加到 Agent 上下文                | **拒绝技能加载**                                         | 终止本轮         |
-| PostSkillUse                             | **只入 Hook 执行记录**，不进上下文 | 进入修订流程；blocking 的 `additionalContext` 进修订提示 | 终止本轮         |
-| UserPromptSubmit                         | 追加上下文                         | 拒绝本轮提问                                             | 终止本轮         |
-| Stop                                     | 追加上下文                         | 要求 Agent 修订本轮回复                                  | 终止本轮         |
-| SubagentStop                             | 日志                               | （无效）                                                 | 终止父轮         |
-| Notification / SessionStart / SessionEnd | 日志                               | （无效）                                                 | （无效）         |
+| 事件 | 普通文本 stdout | `decision=block` | `continue=false` |
+|---|---|---|---|
+| PreToolUse | 追加到 Agent 上下文 | **拒绝工具执行**，feed reason 让 Agent 重试 | 终止本轮 |
+| PostToolUse | 追加到 Agent 上下文 | **要求 Agent 重新审视结果**，feed reason | 终止本轮 |
+| PreSkillUse | 追加到 Agent 上下文 | **拒绝技能加载** | 终止本轮 |
+| PostSkillUse | **只入 Hook 执行记录**，不进上下文 | 进入修订流程；blocking 的 `additionalContext` 进修订提示 | 终止本轮 |
+| UserPromptSubmit | 追加上下文 | 拒绝本轮提问 | 终止本轮 |
+| Stop | 追加上下文 | 要求 Agent 修订本轮回复 | 终止本轮 |
+| SubagentStop | 日志 | （无效） | 终止父轮 |
+| Notification / SessionStart / SessionEnd | 日志 | （无效） | （无效） |
 
 > PostSkillUse 的非阻塞 stdout **不会**回灌——这是和 PostToolUse 最大的区别。要在 PostSkillUse 注入上下文，必须走 `decision=block` 路径。
 
@@ -475,7 +473,6 @@ exit 0
 ```
 
 无 `jq` 时退而用 `python3 -c`：
-
 ```bash
 event=$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("hook_event_name",""))' <<<"$raw")
 ```
@@ -525,46 +522,42 @@ sys.exit(0)
 ```js
 #!/usr/bin/env node
 let raw = ""
-process.stdin.on("data", (c) => (raw += c))
+process.stdin.on("data", c => (raw += c))
 process.stdin.on("end", () => {
   // ── 读输入 ───────────────────────────────────────────
   let p = {}
-  try {
-    p = JSON.parse(raw)
-  } catch {}
+  try { p = JSON.parse(raw) } catch {}
 
-  const event = p.hook_event_name ?? ""
-  const tool = p.tool_name ?? ""
-  const session = p.session_id ?? ""
+  const event   = p.hook_event_name ?? ""
+  const tool    = p.tool_name        ?? ""
+  const session = p.session_id       ?? ""
 
   // 嵌套字段 + 缺失防御
-  const input = p.tool_input && typeof p.tool_input === "object" ? p.tool_input : {}
-  const command = String(input.command ?? "")
+  const input    = (p.tool_input && typeof p.tool_input === "object") ? p.tool_input : {}
+  const command  = String(input.command ?? "")
   const filePath = String(input.filePath ?? input.file_path ?? "")
 
   // tool_response：可能是对象，也可能是字符串
   const resp = p.tool_response
-  const ok = resp && typeof resp === "object" ? Boolean(resp.success) : false
+  const ok   = (resp && typeof resp === "object") ? Boolean(resp.success) : false
 
   // MCP 工具名拆解
-  const [, provider, method] = tool.split("__") // mcp__github__create_pr
+  const [, provider, method] = tool.split("__")     // mcp__github__create_pr
 
   // 环境变量
-  const ws = process.env.WORKSPACE_PATH || ""
-  const pluginRt = process.env.PLUGIN_ROOT || ""
+  const ws        = process.env.WORKSPACE_PATH || ""
+  const pluginRt  = process.env.PLUGIN_ROOT || ""
 
   // ── 日志走 stderr ────────────────────────────────────
   console.error(`[hook] event=${event} tool=${tool} provider=${provider ?? "-"}`)
 
   // ── 决策 JSON 走 stdout ──────────────────────────────
   if (provider === "github" && /create|delete|merge|push/i.test(method ?? "")) {
-    process.stdout.write(
-      JSON.stringify({
-        decision: "block",
-        reason: `MCP 写操作 ${tool} 需要复述参数后再执行`,
-        additionalContext: `参数：${JSON.stringify(input)}`
-      })
-    )
+    process.stdout.write(JSON.stringify({
+      decision: "block",
+      reason: `MCP 写操作 ${tool} 需要复述参数后再执行`,
+      additionalContext: `参数：${JSON.stringify(input)}`
+    }))
   }
   process.exit(0)
 })
@@ -589,18 +582,17 @@ exit /b 0
 
 ### 6.6 跨语言对照速查
 
-| 任务           | PowerShell                                                    | Bash+jq                             | Python                                           | Node.js                                     |
-| -------------- | ------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------ | ------------------------------------------- |
-| 读整份 stdin   | `$input \| Out-String`                                        | `cat`                               | `sys.stdin.read()`                               | 累加 `process.stdin.on("data")`             |
-| 解析 JSON      | `\| ConvertFrom-Json`（5.x 不要 `-Depth`）                    | `jq -r '...'`                       | `json.load(sys.stdin)`                           | `JSON.parse(raw)`                           |
-| 取嵌套字段     | `$p.tool_input.command`（先 `.PSObject.Properties[]` 判存在） | `jq -r '.tool_input.command // ""'` | `payload.get("tool_input",{}).get("command","")` | `(p.tool_input ?? {}).command`              |
-| 读 env         | `$env:WORKSPACE_PATH`                                         | `"$WORKSPACE_PATH"`                 | `os.environ.get("WORKSPACE_PATH","")`            | `process.env.WORKSPACE_PATH`                |
-| 写 stderr      | `[Console]::Error.WriteLine(...)`                             | `echo ... >&2`                      | `print(..., file=sys.stderr)`                    | `console.error(...)`                        |
-| 写 stdout JSON | `\| ConvertTo-Json -Compress -Depth 10`                       | `jq -nc '{...}'`                    | `json.dump(..., sys.stdout)`                     | `process.stdout.write(JSON.stringify(...))` |
-| 阻断退出       | `exit 2`                                                      | `exit 2`                            | `sys.exit(2)`                                    | `process.exit(2)`                           |
+| 任务 | PowerShell | Bash+jq | Python | Node.js |
+|---|---|---|---|---|
+| 读整份 stdin | `$input \| Out-String` | `cat` | `sys.stdin.read()` | 累加 `process.stdin.on("data")` |
+| 解析 JSON | `\| ConvertFrom-Json`（5.x 不要 `-Depth`） | `jq -r '...'` | `json.load(sys.stdin)` | `JSON.parse(raw)` |
+| 取嵌套字段 | `$p.tool_input.command`（先 `.PSObject.Properties[]` 判存在） | `jq -r '.tool_input.command // ""'` | `payload.get("tool_input",{}).get("command","")` | `(p.tool_input ?? {}).command` |
+| 读 env | `$env:WORKSPACE_PATH` | `"$WORKSPACE_PATH"` | `os.environ.get("WORKSPACE_PATH","")` | `process.env.WORKSPACE_PATH` |
+| 写 stderr | `[Console]::Error.WriteLine(...)` | `echo ... >&2` | `print(..., file=sys.stderr)` | `console.error(...)` |
+| 写 stdout JSON | `\| ConvertTo-Json -Compress -Depth 10` | `jq -nc '{...}'` | `json.dump(..., sys.stdout)` | `process.stdout.write(JSON.stringify(...))` |
+| 阻断退出 | `exit 2` | `exit 2` | `sys.exit(2)` | `process.exit(2)` |
 
 > ⚠️ 三条铁律（不分语言）：
->
 > 1. **日志只打 stderr**，stdout 是决策通道，混入文本会让 JSON 解析失败 → 退化成纯文本注入。
 > 2. **stdin 是权威**，env 里的 `TOOL_ARGS / TOOL_RESULT` 超过 4KB 就没有，别依赖。
 > 3. **退出码 2 才会阻断**，其它非零都是"钩子自己报错"。要可控阻断请用 stdout JSON 的 `decision` / `continue`。
@@ -696,35 +688,28 @@ exit 0
 `matcher: "mcp__.*"`：
 
 ```js
-const fs = require("fs"),
-  path = require("path")
+const fs = require("fs"), path = require("path")
 let raw = ""
-process.stdin.on("data", (c) => (raw += c))
+process.stdin.on("data", c => raw += c)
 process.stdin.on("end", () => {
   let p = {}
-  try {
-    p = JSON.parse(raw)
-  } catch {}
+  try { p = JSON.parse(raw) } catch {}
 
   const tool = p.tool_name || ""
   const [, provider, method] = tool.split("__")
 
   // 审计落盘
   const logPath = path.join(process.env.WORKSPACE_PATH || ".", ".mcp-audit.log")
-  fs.appendFileSync(
-    logPath,
-    `[${new Date().toISOString()}] ${tool} args=${JSON.stringify(p.tool_input).slice(0, 400)}\n`
-  )
+  fs.appendFileSync(logPath,
+    `[${new Date().toISOString()}] ${tool} args=${JSON.stringify(p.tool_input).slice(0,400)}\n`)
 
   // GitHub 写操作要求 Agent 复述参数后再调用
   if (provider === "github" && /create|delete|merge|close|push/i.test(method || "")) {
-    process.stdout.write(
-      JSON.stringify({
-        decision: "block",
-        reason: `MCP 写操作 ${tool} 已记录，请复述参数并征得用户确认后再调用`,
-        additionalContext: `本次调用参数：${JSON.stringify(p.tool_input)}`
-      })
-    )
+    process.stdout.write(JSON.stringify({
+      decision: "block",
+      reason: `MCP 写操作 ${tool} 已记录，请复述参数并征得用户确认后再调用`,
+      additionalContext: `本次调用参数：${JSON.stringify(p.tool_input)}`
+    }))
   }
   process.exit(0)
 })
@@ -802,16 +787,16 @@ process.stdin.on("end", () => {
 
 - **插件 hook**：`scope.activePluginIds` 里有该 `pluginId` 才参与匹配。`pluginId` 何时进入 active 集合？该插件提供的 MCP 工具被调用、或它提供的技能被读取的那一刻。
 - **技能 hook**：必须 `skillName` + `skillPath` 同时落在 `scope.activeSkillNames` / `activeSkillPaths` 里。技能何时 active？被 `read_file` 读完 SKILL.md 的瞬间。
-- **`persistAfterInterrupt: true`**：让 hook 在 active 后**常驻当前线程**，即便后续没再用对应工具/技能、或应用重启后继续这个线程，也仍然参与匹配。仅救得了"中途断了 / 重启恢复"场景，**救不了"从一开始就需要 fire"的场景**。
+- **`persistAfterInterrupt: true`**：让 hook 在 active 后**常驻整轮**，即便后续没再用对应工具/技能也仍然参与匹配。仅救得了"中途断了"场景，**救不了"从一开始就需要 fire"的场景**。
 
 **实际效果**：把以下事件挂在插件/技能里时，需要清楚它们大概率**永远不会 fire**：
 
-| 事件                                 | 为什么不 fire                                              | 想要的替代位置                                |
-| ------------------------------------ | ---------------------------------------------------------- | --------------------------------------------- |
-| `Setup`（init / maintenance）        | Setup 时 scope 为空（本轮才刚开始）                        | 全局 hooks.json 或工作区 `.cmbdevclaw/hooks/` |
-| `SessionStart`                       | 同上，先于任何工具/技能调用                                | 全局 / 工作区                                 |
-| `Notification`（审批弹窗）           | 通常审批早于任何 MCP 调用                                  | 全局 / 工作区                                 |
-| `UserPromptSubmit`（首轮第一条消息） | 第一条消息时 scope 还是空的；第二条之后只要 active 过就 OK | 全局 / 工作区                                 |
+| 事件 | 为什么不 fire | 想要的替代位置 |
+|---|---|---|
+| `Setup`（init / maintenance） | Setup 时 scope 为空（本轮才刚开始） | 全局 hooks.json 或工作区 `.cmbdevclaw/hooks/` |
+| `SessionStart` | 同上，先于任何工具/技能调用 | 全局 / 工作区 |
+| `Notification`（审批弹窗） | 通常审批早于任何 MCP 调用 | 全局 / 工作区 |
+| `UserPromptSubmit`（首轮第一条消息） | 第一条消息时 scope 还是空的；第二条之后只要 active 过就 OK | 全局 / 工作区 |
 
 **OK 的事件**（前提是该轮已经触达过对应插件/技能）：`PostToolUseFailure`、`PreToolUse` / `PostToolUse` 拦的是自己的工具、`SubagentStart` / `SubagentStop` 涉及该插件、`StopFailure` 已经触达过该插件、`Stop`、`SessionEnd`、`PreSkillUse` / `PostSkillUse` 该技能自身。
 
@@ -874,22 +859,22 @@ def check():
 
 实际见过的坑：
 
-| 症状                                                 | 原因                                           | 修复方向                                                      |
-| ---------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------- |
-| 钩子写了但没生效                                     | `enabled: false` / matcher 写错 / event 写错   | 先把 matcher 设 `"*"` + 最小命令验证能否触发                  |
-| 插件 hook 改了 hooks.json 不生效                     | 插件配置在加载时缓存                           | UI 里停用 → 再启用该插件，或重启 App                          |
-| `echo 'exit 2'` 没阻断                               | echo 不会改退出码                              | 用真正的 `exit 2` 或 `cmd /c "exit 2"`                        |
-| 日志写到了用户目录而不是项目                         | 用了相对路径或进程 cwd                         | 显式拼接 `WORKSPACE_PATH`                                     |
-| `TOOL_ARGS` env 是空的                               | 入参 > 4KB 被丢弃                              | 读 stdin JSON 的 `tool_input`                                 |
-| `tool_response` 是字符串不是对象                     | 上游 JSON 不合法时回退原文                     | 做类型判断再访问字段                                          |
-| 所有工具调用都慢了几秒                               | 挂了 `matcher: "*"` 的 prompt 钩子，每次走 LLM | matcher 收紧 / 改 command 类型 / 关掉                         |
-| stdout 里既输出日志又输出 JSON，JSON 没被识别        | 解析只接受 stdout **整体**是 JSON              | 日志一律打 stderr，stdout 只放最终 JSON                       |
-| PowerShell 脚本 stdin 总是空，但 env 正常            | Windows PS 5.x + `-File` 模式 stdin 不可达     | 改用 `$input` 自动变量                                        |
-| `ConvertFrom-Json -Depth N` 报"找不到参数名称 Depth" | `-Depth` 是 PowerShell 7+ 才加的               | 5.x 上去掉 `-Depth`                                           |
-| 深层 `tool_response` 序列化截断                      | `ConvertTo-Json` 默认 `-Depth 2`               | 显式 `-Depth 10`                                              |
-| PostSkillUse stdout 没进上下文                       | PostSkillUse 非阻塞输出**不回灌**（设计如此）  | 改用 `decision=block` + `additionalContext`，或换 PostToolUse |
-| 钩子阻断不了反被绕过                                 | 非零退出码 ≠ 2 被当成"自身报错"                | 想阻断必须 `exit 2` 或 JSON `decision=block`                  |
-| `PLUGIN_ROOT` 一直为空                               | 钩子在全局且拦的是内置工具                     | 把钩子搬到插件目录，或拦插件提供的工具                        |
+| 症状 | 原因 | 修复方向 |
+|---|---|---|
+| 钩子写了但没生效 | `enabled: false` / matcher 写错 / event 写错 | 先把 matcher 设 `"*"` + 最小命令验证能否触发 |
+| 插件 hook 改了 hooks.json 不生效 | 插件配置在加载时缓存 | UI 里停用 → 再启用该插件，或重启 App |
+| `echo 'exit 2'` 没阻断 | echo 不会改退出码 | 用真正的 `exit 2` 或 `cmd /c "exit 2"` |
+| 日志写到了用户目录而不是项目 | 用了相对路径或进程 cwd | 显式拼接 `WORKSPACE_PATH` |
+| `TOOL_ARGS` env 是空的 | 入参 > 4KB 被丢弃 | 读 stdin JSON 的 `tool_input` |
+| `tool_response` 是字符串不是对象 | 上游 JSON 不合法时回退原文 | 做类型判断再访问字段 |
+| 所有工具调用都慢了几秒 | 挂了 `matcher: "*"` 的 prompt 钩子，每次走 LLM | matcher 收紧 / 改 command 类型 / 关掉 |
+| stdout 里既输出日志又输出 JSON，JSON 没被识别 | 解析只接受 stdout **整体**是 JSON | 日志一律打 stderr，stdout 只放最终 JSON |
+| PowerShell 脚本 stdin 总是空，但 env 正常 | Windows PS 5.x + `-File` 模式 stdin 不可达 | 改用 `$input` 自动变量 |
+| `ConvertFrom-Json -Depth N` 报"找不到参数名称 Depth" | `-Depth` 是 PowerShell 7+ 才加的 | 5.x 上去掉 `-Depth` |
+| 深层 `tool_response` 序列化截断 | `ConvertTo-Json` 默认 `-Depth 2` | 显式 `-Depth 10` |
+| PostSkillUse stdout 没进上下文 | PostSkillUse 非阻塞输出**不回灌**（设计如此） | 改用 `decision=block` + `additionalContext`，或换 PostToolUse |
+| 钩子阻断不了反被绕过 | 非零退出码 ≠ 2 被当成"自身报错" | 想阻断必须 `exit 2` 或 JSON `decision=block` |
+| `PLUGIN_ROOT` 一直为空 | 钩子在全局且拦的是内置工具 | 把钩子搬到插件目录，或拦插件提供的工具 |
 
 ---
 

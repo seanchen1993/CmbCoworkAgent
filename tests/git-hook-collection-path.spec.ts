@@ -8,7 +8,7 @@
 import { execFile } from "child_process"
 import { createHash } from "crypto"
 import { existsSync } from "fs"
-import { mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from "fs/promises"
+import { mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from "fs/promises"
 import { homedir, tmpdir } from "os"
 import { join } from "path"
 import { promisify } from "util"
@@ -243,7 +243,7 @@ async function testGitPanelPathSkipsHookAndUsesDirectStagedCapture(): Promise<vo
     await writeFile(join(repo, "panel.ts"), "export const panelValue = 1\n")
     await git(repo, ["add", "panel.ts"])
 
-    const snapshots = await captureStagedSnapshotsForCommit(repo)
+    const snapshots = captureStagedSnapshotsForCommit(repo)
     assert(snapshots.length === 1, `Git Panel path should directly capture one staged file, got ${snapshots.length}`)
     assert(snapshots[0]?.absPath.endsWith("panel.ts"), `expected panel.ts snapshot, got ${snapshots[0]?.absPath}`)
     assert(
@@ -259,40 +259,6 @@ async function testGitPanelPathSkipsHookAndUsesDirectStagedCapture(): Promise<vo
     const pendingDir = join(repoEventsDir(repo), "pending")
     assert(!existsSync(readyDir) || (await listDirs(readyDir)).length === 0, "Git Panel env should skip hook ready snapshots")
     assert(!existsSync(pendingDir) || (await listDirs(pendingDir)).length === 0, "Git Panel env should skip hook pending snapshots")
-  })
-}
-
-async function testCoreHooksPathInWorkspaceIsNotModified(): Promise<void> {
-  await withTempRepo("git-hook-husky-skip", async (repo) => {
-    await git(repo, ["config", "core.hooksPath", ".husky"])
-    const huskyDir = join(repo, ".husky")
-    const preCommit = join(huskyDir, "pre-commit")
-    const originalHook = `#!/usr/bin/env sh
-. "$(dirname -- "$0")/_/husky.sh"
-
-npm test
-`
-    await mkdir(huskyDir, { recursive: true })
-    await writeFile(preCommit, originalHook)
-
-    const status = await installGitHooks(repo)
-    assert(
-      status.state === "external_hooks_path",
-      `workspace core.hooksPath should be skipped, got ${status.state}`
-    )
-    assert(status.canInstall === false, "workspace core.hooksPath should not be installable")
-    assert(
-      (await readFile(preCommit, "utf-8")) === originalHook,
-      ".husky/pre-commit must not be modified"
-    )
-    assert(
-      !existsSync(`${preCommit}.cmbdevclaw-user`),
-      "should not create a .cmbdevclaw-user backup in .husky"
-    )
-    assert(
-      !existsSync(join(repo, ".git", "hooks", "pre-commit")),
-      "should not install an inert .git/hooks hook"
-    )
   })
 }
 
@@ -370,8 +336,6 @@ async function run(): Promise<void> {
   console.log("PASS external command commit with code_gen is collected through Git hook")
   await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
   console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
-  await testCoreHooksPathInWorkspaceIsNotModified()
-  console.log("PASS workspace core.hooksPath is skipped without modifying .husky")
   await testExternalCommitReconciledWithoutHook()
   console.log("PASS external commit without hook is reconciled and measured")
 }

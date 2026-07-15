@@ -7,7 +7,6 @@ import {
   resolveCoordinatorPath
 } from "./coordinator-worker-paths"
 import type { CoordinatorSelectedSkill } from "./coordinator-mode"
-import { emitAppAttention } from "../app-attention-events"
 
 export type CoordinatorWorkerRole = "implementer" | "verifier"
 export type CoordinatorWorkerStatus = "running" | "completed" | "failed" | "cancelled"
@@ -180,10 +179,6 @@ interface WorkerRestoreOptions {
 
 interface TerminalPersistFailureMetadata {
   persistedResultPath?: string
-}
-
-interface CoordinatorWorkerManagerOptions {
-  onTerminalNotification?: (worker: CoordinatorWorkerSnapshot) => void
 }
 
 function waitOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -1180,12 +1175,7 @@ export class CoordinatorWorkerManager {
   >()
   private readonly preparedScratchpadDirs = new Set<string>()
   private readonly warnedScratchpadDirs = new Set<string>()
-  private readonly onTerminalNotification?: (worker: CoordinatorWorkerSnapshot) => void
   private sequence = 0
-
-  constructor(options: CoordinatorWorkerManagerOptions = {}) {
-    this.onTerminalNotification = options.onTerminalNotification
-  }
 
   startWorker(options: StartWorkerOptions): CoordinatorWorkerSnapshot {
     const parentThreadId = normalizeThreadId(options.parentThreadId)
@@ -2730,7 +2720,6 @@ export class CoordinatorWorkerManager {
     } catch (error) {
       console.warn("[CoordinatorWorker] Failed to persist queued notification state:", error)
     }
-    this.onTerminalNotification?.(toSnapshot(record))
     return notification
   }
 
@@ -3098,13 +3087,4 @@ export class CoordinatorWorkerManager {
   }
 }
 
-export const coordinatorWorkerManager = new CoordinatorWorkerManager({
-  onTerminalNotification: (worker) => {
-    if (worker.status !== "completed" && worker.status !== "failed") return
-    emitAppAttention({
-      kind: worker.status === "failed" ? "task-error" : "task-complete",
-      threadId: worker.parent_thread_id,
-      key: `coordinator-worker:${worker.parent_thread_id}:${worker.worker_id}:${worker.turns}`
-    })
-  }
-})
+export const coordinatorWorkerManager = new CoordinatorWorkerManager()

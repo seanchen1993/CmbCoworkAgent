@@ -18,18 +18,7 @@ import {
   type SavedCodeExecTool
 } from "../../code-exec/saved-tool-store"
 import type { McpCapabilityService, McpCapabilityTool } from "../../mcp/capability-types"
-import {
-  getMcpErrorMessage,
-  getUsefulMcpResultData,
-  projectMcpResultData
-} from "../../mcp/result-utils"
-import {
-  deriveFieldPathsFromJsonSchema,
-  deriveFieldPathsFromValue,
-  hasProjectionOptions,
-  projectResultData,
-  type ResultProjectionOptions
-} from "../../mcp/result-projection"
+import { getMcpErrorMessage, getUsefulMcpResultData } from "../../mcp/result-utils"
 import { renderToolHints } from "../../mcp/type-hints"
 import { getStoredToolExample } from "../../mcp/tool-example-store"
 import {
@@ -42,41 +31,15 @@ import {
   type ToolSearchCaller
 } from "./tool-search/search-strategy"
 import { isHookHaltError } from "../../hooks/halt"
-import { isFailureFuseHaltError } from "../failure-fuse"
 
 const invokeDeferredToolSchema = z.object({
   tool_id: z
     .string()
-    .describe(
-      "Exact deferred-only tool_id returned by search_tool or listed in <deferred-tool-ids>"
-    ),
+    .describe("Exact deferred-only tool_id returned by search_tool or listed in <deferred-tool-ids>"),
   tool_args: z
     .object({})
     .passthrough()
-    .describe(
-      'Tool arguments matching the schema returned by inspect_tool(caller="invoke_deferred_tool")'
-    ),
-  required_fields: z
-    .array(z.string())
-    .max(80)
-    .optional()
-    .describe(
-      "Optional data field paths to keep in the result, e.g. items[].id or data.records[].score"
-    ),
-  max_result_chars: z
-    .number()
-    .int()
-    .positive()
-    .max(200_000)
-    .optional()
-    .describe("Optional maximum characters returned to the model after field projection"),
-  max_array_items: z
-    .number()
-    .int()
-    .positive()
-    .max(1_000)
-    .optional()
-    .describe("Optional maximum items to keep for arrays during projection")
+    .describe("Tool arguments matching the schema returned by inspect_tool(caller=\"invoke_deferred_tool\")")
 })
 
 interface ToolSearchContext {
@@ -97,72 +60,29 @@ type SearchToolEntry = {
   description?: string
 }
 
-function projectionOptionsFromInput(input: {
-  required_fields?: string[]
-  max_result_chars?: number
-  max_array_items?: number
-}): ResultProjectionOptions {
-  return {
-    requiredFields: input.required_fields,
-    maxChars: input.max_result_chars,
-    maxArrayItems: input.max_array_items
-  }
-}
-
-function normalizeStoredExampleDataPath(path: string): string {
-  if (path === "data[]") return "[]"
-  if (path.startsWith("data[].")) return `[]${path.slice("data[]".length)}`
-  if (path.startsWith("data.")) return path.slice("data.".length)
-  return path
-}
-
-function normalizeExampleFieldPaths(example: unknown): string[] {
-  return deriveFieldPathsFromValue(example)
-    .map(normalizeStoredExampleDataPath)
-    .filter((path) => path !== "ok" && path !== "data" && !path.startsWith("error"))
-}
-
-function buildProjectedSuccessPayload(
-  data: unknown,
-  projectionOptions: ResultProjectionOptions,
-  extraMetadata?: Record<string, unknown>
-): Record<string, unknown> {
-  if (!hasProjectionOptions(projectionOptions) && !extraMetadata) {
-    return { ok: true, data }
-  }
-
-  const projected = projectResultData(data, projectionOptions)
-  return {
-    ok: true,
-    data: projected.data,
-    _projection: {
-      ...projected.metadata,
-      ...(extraMetadata ?? {})
-    }
-  }
-}
-
 interface SearchDocCacheEntry {
   snapshot: string
   docs: ToolSearchDoc[]
 }
 
 function buildMcpSearchSnapshot(tools: McpCapabilityTool[]): string {
-  return JSON.stringify(
-    tools.map((tool) => [
-      tool.capabilityId,
-      tool.toolId,
-      tool.toolName,
-      tool.providerDisplayName,
-      tool.providerAlias,
-      tool.description ?? "",
-      tool.visibility
-    ])
-  )
+  return JSON.stringify(tools.map((tool) => ([
+    tool.capabilityId,
+    tool.toolId,
+    tool.toolName,
+    tool.providerDisplayName,
+    tool.providerAlias,
+    tool.description ?? "",
+    tool.visibility
+  ])))
 }
 
 function buildSavedToolSearchSnapshot(tools: SavedCodeExecTool[]): string {
-  return JSON.stringify(tools.map((tool) => [tool.toolId, tool.description, tool.dependencies]))
+  return JSON.stringify(tools.map((tool) => ([
+    tool.toolId,
+    tool.description,
+    tool.dependencies
+  ])))
 }
 
 function getCachedMcpSearchDocs(
@@ -174,11 +94,9 @@ function getCachedMcpSearchDocs(
   if (cache.snapshot === snapshot) return cache.docs
 
   cache.snapshot = snapshot
-  cache.docs = tools.map((tool) =>
-    buildMcpToolSearchDoc(tool, {
-      allowCallers: getMcpToolAllowCallers(tool, options)
-    })
-  )
+  cache.docs = tools.map((tool) => buildMcpToolSearchDoc(tool, {
+    allowCallers: getMcpToolAllowCallers(tool, options)
+  }))
   return cache.docs
 }
 
@@ -263,9 +181,11 @@ async function getMissingSavedToolDependencies(
   return dependencies.filter((dependency) => !availableToolIds.has(dependency))
 }
 
-function createCallerSchema(allowedCallers: ToolSearchCaller[], description: string) {
-  return z
-    .enum(allowedCallers as [ToolSearchCaller, ...ToolSearchCaller[]])
+function createCallerSchema(
+  allowedCallers: ToolSearchCaller[],
+  description: string
+) {
+  return z.enum(allowedCallers as [ToolSearchCaller, ...ToolSearchCaller[]])
     .optional()
     .default(allowedCallers[0])
     .describe(description)
@@ -395,109 +315,90 @@ export function createInspectTool(service: McpCapabilityService, options: ToolSe
   return tool(
     async (input) => {
       const caller = String(input.caller ?? allowedCallers[0])
-      const loadedTools = await Promise.all(
-        input.tool_ids.map(async (idOrAlias) => {
-          const savedTool = getSavedCodeExecTool(idOrAlias, { includeDisabled: true })
-          if (savedTool) {
-            if (!options.savedToolsEnabled) {
-              return {
-                tool_id: savedTool.toolId,
-                source: "saved_tool",
-                allow_callers: ["invoke_deferred_tool"],
-                error: "Saved tools are disabled in settings."
-              }
-            }
-
-            if (!savedTool.enabled) {
-              return {
-                tool_id: savedTool.toolId,
-                source: "saved_tool",
-                allow_callers: ["invoke_deferred_tool"],
-                error: "Saved tool is disabled."
-              }
-            }
-
-            if (caller === "code_exec") {
-              return {
-                tool_id: savedTool.toolId,
-                source: "saved_tool",
-                allow_callers: ["invoke_deferred_tool"],
-                error:
-                  "Saved code_exec tools cannot be called from code_exec. Load the underlying MCP tool instead."
-              }
-            }
-
+      const loadedTools = await Promise.all(input.tool_ids.map(async (idOrAlias) => {
+        const savedTool = getSavedCodeExecTool(idOrAlias, { includeDisabled: true })
+        if (savedTool) {
+          if (!options.savedToolsEnabled) {
             return {
               tool_id: savedTool.toolId,
               source: "saved_tool",
               allow_callers: ["invoke_deferred_tool"],
-              schema: savedTool.inputSchema
+              error: "Saved tools are disabled in settings."
             }
           }
 
-          const resolved = await service.getTool(idOrAlias)
-          if (!resolved) {
+          if (!savedTool.enabled) {
             return {
-              tool_id: idOrAlias,
-              source: "mcp",
-              allow_callers: [],
-              error:
-                caller === "code_exec"
-                  ? "Only MCP tools may be inspected for code_exec. Saved tools, built-in tools, and other non-MCP tools are not allowed."
-                  : "Tool not found"
+              tool_id: savedTool.toolId,
+              source: "saved_tool",
+              allow_callers: ["invoke_deferred_tool"],
+              error: "Saved tool is disabled."
             }
-          }
-
-          if (caller === "invoke_deferred_tool" && resolved.visibility !== "lazy") {
-            return {
-              tool_id: resolved.toolId,
-              source: "mcp",
-              allow_callers: getMcpToolAllowCallers(resolved, options),
-              error:
-                "This MCP tool is already directly callable from the tool list. Call it directly instead of using the deferred workflow."
-            }
-          }
-
-          const loadedTool: Record<string, unknown> = {
-            tool_id: resolved.toolId,
-            source: "mcp",
-            allow_callers: getMcpToolAllowCallers(resolved, options),
-            schema: resolved.inputSchema,
-            output_schema: resolved.outputSchema
-          }
-
-          if (caller === "invoke_deferred_tool") {
-            const fieldHints = deriveFieldPathsFromJsonSchema(resolved.outputSchema)
-            const storedExample = getStoredToolExample(resolved)
-            const exampleFieldPaths = storedExample
-              ? normalizeExampleFieldPaths(storedExample.resultExample)
-              : []
-
-            if (fieldHints.length > 0) loadedTool.field_hints = fieldHints
-            if (exampleFieldPaths.length > 0) loadedTool.example_field_paths = exampleFieldPaths
           }
 
           if (caller === "code_exec") {
-            const storedExample = getStoredToolExample(resolved)
-            const hints = renderToolHints(resolved)
-
-            loadedTool.code_exec = {
-              call_example: hints.callExample,
-              ...(storedExample ? { result_example: storedExample.resultExample } : {})
+            return {
+              tool_id: savedTool.toolId,
+              source: "saved_tool",
+              allow_callers: ["invoke_deferred_tool"],
+              error: "Saved code_exec tools cannot be called from code_exec. Load the underlying MCP tool instead."
             }
           }
 
-          return loadedTool
-        })
-      )
+          return {
+            tool_id: savedTool.toolId,
+            source: "saved_tool",
+            allow_callers: ["invoke_deferred_tool"],
+            schema: savedTool.inputSchema
+          }
+        }
 
-      return JSON.stringify(
-        {
-          loaded_tools: loadedTools
-        },
-        null,
-        2
-      )
+        const resolved = await service.getTool(idOrAlias)
+        if (!resolved) {
+          return {
+            tool_id: idOrAlias,
+            source: "mcp",
+            allow_callers: [],
+            error:
+              caller === "code_exec"
+                ? "Only MCP tools may be inspected for code_exec. Saved tools, built-in tools, and other non-MCP tools are not allowed."
+                : "Tool not found"
+          }
+        }
+
+        if (caller === "invoke_deferred_tool" && resolved.visibility !== "lazy") {
+          return {
+            tool_id: resolved.toolId,
+            source: "mcp",
+            allow_callers: getMcpToolAllowCallers(resolved, options),
+            error: "This MCP tool is already directly callable from the tool list. Call it directly instead of using the deferred workflow."
+          }
+        }
+
+        const loadedTool: Record<string, unknown> = {
+          tool_id: resolved.toolId,
+          source: "mcp",
+          allow_callers: getMcpToolAllowCallers(resolved, options),
+          schema: resolved.inputSchema,
+          output_schema: resolved.outputSchema
+        }
+
+        if (caller === "code_exec") {
+          const storedExample = getStoredToolExample(resolved)
+          const hints = renderToolHints(resolved)
+
+          loadedTool.code_exec = {
+            call_example: hints.callExample,
+            ...(storedExample ? { result_example: storedExample.resultExample } : {})
+          }
+        }
+
+        return loadedTool
+      }))
+
+      return JSON.stringify({
+        loaded_tools: loadedTools
+      }, null, 2)
     },
     {
       name: "inspect_tool",
@@ -521,48 +422,32 @@ export function createInvokeDeferredTool(
 
   return tool(
     async (input) => {
-      const projectionOptions = projectionOptionsFromInput(input)
       const savedTool = getSavedCodeExecTool(input.tool_id, { includeDisabled: true })
       if (savedTool) {
         if (!options.savedToolsEnabled) {
-          return JSON.stringify(
-            {
-              ok: false,
-              error: "Saved tools are disabled in settings."
-            },
-            null,
-            2
-          )
+          return JSON.stringify({
+            ok: false,
+            error: "Saved tools are disabled in settings."
+          }, null, 2)
         }
 
         if (!savedTool.enabled) {
-          return JSON.stringify(
-            {
-              ok: false,
-              error: "Saved tool is disabled."
-            },
-            null,
-            2
-          )
+          return JSON.stringify({
+            ok: false,
+            error: "Saved tool is disabled."
+          }, null, 2)
         }
 
-        const missingDependencies = await getMissingSavedToolDependencies(
-          service,
-          savedTool.dependencies
-        )
+        const missingDependencies = await getMissingSavedToolDependencies(service, savedTool.dependencies)
         if (missingDependencies.length > 0) {
           const dependencyList = missingDependencies.join(", ")
-          return JSON.stringify(
-            {
-              ok: false,
-              error:
-                `Saved tool dependency unavailable: ${dependencyList}. ` +
-                "The underlying MCP connector or tool is not currently enabled. " +
-                "Re-enable the connector, then retry this saved tool."
-            },
-            null,
-            2
-          )
+          return JSON.stringify({
+            ok: false,
+            error:
+              `Saved tool dependency unavailable: ${dependencyList}. ` +
+              "The underlying MCP connector or tool is not currently enabled. " +
+              "Re-enable the connector, then retry this saved tool."
+          }, null, 2)
         }
 
         const result = await engine.execute({
@@ -574,120 +459,60 @@ export function createInvokeDeferredTool(
         })
 
         if (!result.ok) {
-          return JSON.stringify(
-            {
-              ok: false,
-              error: result.error || result.output
-            },
-            null,
-            2
-          )
+          return JSON.stringify({
+            ok: false,
+            error: result.error || result.output
+          }, null, 2)
         }
 
-        const data = parseCodeExecOutputValue(result.output)
-        const requiredFields = projectionOptions.requiredFields?.filter(Boolean) ?? []
-        const requiredFieldsIgnored =
-          requiredFields.length > 0 && (typeof data !== "object" || data === null)
-
-        const savedToolProjectionOptions = requiredFieldsIgnored
-          ? {
-              maxChars: projectionOptions.maxChars,
-              maxArrayItems: projectionOptions.maxArrayItems
-            }
-          : projectionOptions
-
-        return JSON.stringify(
-          buildProjectedSuccessPayload(
-            data,
-            savedToolProjectionOptions,
-            requiredFieldsIgnored
-              ? {
-                  requiredFieldsIgnored: true,
-                  ignoredReason:
-                    "Saved tool output is plain text, so required_fields could not be applied."
-                }
-              : undefined
-          ),
-          null,
-          2
-        )
+        return JSON.stringify({
+          ok: true,
+          data: parseCodeExecOutputValue(result.output)
+        }, null, 2)
       }
 
       const resolvedTool = await service.getTool(input.tool_id)
       if (!resolvedTool) {
-        return JSON.stringify(
-          {
-            ok: false,
-            error: `Tool not found: ${input.tool_id}`
-          },
-          null,
-          2
-        )
+        return JSON.stringify({
+          ok: false,
+          error: `Tool not found: ${input.tool_id}`
+        }, null, 2)
       }
 
       if (resolvedTool.visibility !== "lazy") {
-        return JSON.stringify(
-          {
-            ok: false,
-            error: `Tool ${resolvedTool.toolId} is already directly callable from the tool list. Call it directly instead of using invoke_deferred_tool.`
-          },
-          null,
-          2
-        )
+        return JSON.stringify({
+          ok: false,
+          error: `Tool ${resolvedTool.toolId} is already directly callable from the tool list. Call it directly instead of using invoke_deferred_tool.`
+        }, null, 2)
       }
 
       try {
         const result = await service.invoke(input.tool_id, input.tool_args ?? {})
 
         if (result.isError) {
-          return JSON.stringify(
-            {
-              ok: false,
-              error: getMcpErrorMessage(result)
-            },
-            null,
-            2
-          )
-        }
-
-        if (!hasProjectionOptions(projectionOptions)) {
-          return JSON.stringify(
-            {
-              ok: true,
-              data: getUsefulMcpResultData(result)
-            },
-            null,
-            2
-          )
-        }
-
-        const projected = projectMcpResultData(result, projectionOptions)
-        return JSON.stringify(
-          {
-            ok: true,
-            data: projected.data,
-            _projection: projected.metadata
-          },
-          null,
-          2
-        )
-      } catch (error) {
-        if (isHookHaltError(error) || isFailureFuseHaltError(error)) throw error
-        const message = error instanceof Error ? error.message : String(error)
-        return JSON.stringify(
-          {
+          return JSON.stringify({
             ok: false,
-            error: message
-          },
-          null,
-          2
-        )
+            error: getMcpErrorMessage(result)
+          }, null, 2)
+        }
+
+        return JSON.stringify({
+          ok: true,
+          data: getUsefulMcpResultData(result)
+        }, null, 2)
+      } catch (error) {
+        if (isHookHaltError(error)) throw error
+        const message = error instanceof Error ? error.message : String(error)
+        return JSON.stringify({
+          ok: false,
+          error: message
+        }, null, 2)
       }
     },
     {
       name: "invoke_deferred_tool",
       description:
-        'Execute a deferred-only MCP tool or saved tool by tool_id. You must inspect the tool first with inspect_tool(caller="invoke_deferred_tool") and use the exact returned schema. Do not use this for tools that are already directly callable from the tool list. Returns { ok: true, data } on success or { ok: false, error } on failure.',
+        "Execute a deferred-only MCP tool or saved tool by tool_id. You must inspect the tool first with inspect_tool(caller=\"invoke_deferred_tool\") and use the exact returned schema. Do not use this for tools that are already directly callable from the tool list. Returns { ok: true, data } on success or { ok: false, error } on failure.",
       schema: invokeDeferredToolSchema
     }
   )
@@ -712,13 +537,11 @@ export async function createToolSearchTools(
   if (!shouldInjectInspectTool) return []
 
   if (!needsDeferredBridge) {
-    return [
-      createInspectTool(service, {
-        codeExecRouteEnabled,
-        savedToolsEnabled,
-        deferredRouteEnabled: false
-      })
-    ]
+    return [createInspectTool(service, {
+      codeExecRouteEnabled,
+      savedToolsEnabled,
+      deferredRouteEnabled: false
+    })]
   }
 
   return [

@@ -107,10 +107,6 @@ export function ChatScrollNavigator({
     const nearBottom = scrollHeight - scrollTop - clientHeight < 80
     const viewportAnchor = scrollTop + 24
     const viewportBottomAnchor = scrollTop + clientHeight - 80
-    // Read the viewport rect once instead of once per message.
-    const viewportTop = viewport.getBoundingClientRect().top
-    const topOf = (element: HTMLElement): number =>
-      element.getBoundingClientRect().top - viewportTop + scrollTop
     let currentIndex = -1
 
     for (let index = 0; index < userMessageIds.length; index += 1) {
@@ -118,7 +114,7 @@ export function ChatScrollNavigator({
       const targetElement = userMessageRefs.current.get(messageId)
       if (!targetElement) continue
 
-      const top = topOf(targetElement)
+      const top = getElementTopInViewport(targetElement, viewport)
       if (top <= viewportAnchor) {
         currentIndex = index
       } else {
@@ -132,7 +128,7 @@ export function ChatScrollNavigator({
         const targetElement = userMessageRefs.current.get(messageId)
         if (!targetElement) continue
 
-        const top = topOf(targetElement)
+        const top = getElementTopInViewport(targetElement, viewport)
         if (top <= viewportBottomAnchor) return index
       }
     }
@@ -170,27 +166,16 @@ export function ChatScrollNavigator({
     const viewport = getViewport(scrollContainerRef.current)
     if (!viewport) return
 
-    // Coalesce scroll events to one measurement per frame. The measurement
-    // walks user messages with getBoundingClientRect, so running it on every
-    // raw scroll event is an O(n) layout hotspot on long conversations.
-    let frame: number | null = null
-    const measure = (): void => {
-      frame = null
+    const handleScroll = (): void => {
       if (requestedUserQuestionIndexRef.current !== null) {
         setActiveQuestionIndex(requestedUserQuestionIndexRef.current)
         return
       }
       setActiveQuestionIndex(getCurrentUserQuestionIndex())
     }
-    const handleScroll = (): void => {
-      if (frame === null) frame = window.requestAnimationFrame(measure)
-    }
 
     viewport.addEventListener("scroll", handleScroll)
-    return () => {
-      viewport.removeEventListener("scroll", handleScroll)
-      if (frame !== null) window.cancelAnimationFrame(frame)
-    }
+    return () => viewport.removeEventListener("scroll", handleScroll)
   }, [getCurrentUserQuestionIndex, scrollContainerRef])
 
   useEffect(() => {
@@ -252,12 +237,12 @@ export function ChatScrollNavigator({
     <>
       {children({ hasQuestions, reserveRightSpace, setMessageRef })}
       {hasQuestions && (
-        <div className="pointer-events-none absolute right-0 top-[46%] z-20 hidden -translate-y-1/2 md:block">
+        <div className="pointer-events-none absolute right-2 top-[46%] z-20 hidden -translate-y-1/2 md:block">
           <TooltipProvider delayDuration={120}>
             <div
               onMouseLeave={() => setHoveredIndex(null)}
               className={cn(
-                "pointer-events-auto relative flex max-h-[62vh] w-10 flex-col items-end gap-1 overflow-y-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                "pointer-events-auto relative flex max-h-[62vh] w-12 flex-col items-end gap-1 overflow-y-auto p-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               )}
             >
               {questions.map((question, index) => {

@@ -125,9 +125,7 @@ function readDreamState(memoryDir: string): DreamState {
         sessionsSinceLastRun: raw.sessionsSinceLastRun ?? 0
       }
     }
-  } catch {
-    /* corrupt state — treat as first run */
-  }
+  } catch { /* corrupt state — treat as first run */ }
   return { lastRunAt: 0, factCountAtLastRun: 0, sessionsSinceLastRun: 0 }
 }
 
@@ -260,13 +258,10 @@ function buildDreamPrompt(
       // Strip frontmatter for the body excerpt
       const bodyStart = raw.indexOf("---\n", 4)
       const bodyText = bodyStart !== -1 ? raw.slice(bodyStart + 4).trimStart() : raw
-      body =
-        bodyText.length > MAX_BODY_CHARS_PER_FILE
-          ? bodyText.slice(0, MAX_BODY_CHARS_PER_FILE) + "…"
-          : bodyText
-    } catch {
-      /* unreadable */
-    }
+      body = bodyText.length > MAX_BODY_CHARS_PER_FILE
+        ? bodyText.slice(0, MAX_BODY_CHARS_PER_FILE) + "…"
+        : bodyText
+    } catch { /* unreadable */ }
 
     lines.push(`### ${h.filename}`)
     lines.push(`type: ${h.type} | recall_count: ${recallCount} | age_days: ${ageDays}`)
@@ -283,10 +278,7 @@ function buildDreamPrompt(
 // ─── Response parsing ────────────────────────────────────────────────────────
 function parseOps(raw: string): DreamOp[] {
   let cleaned = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").trim()
-  cleaned = cleaned
-    .replace(/^\s*```(?:json)?\s*/i, "")
-    .replace(/\s*```\s*$/i, "")
-    .trim()
+  cleaned = cleaned.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim()
   const start = cleaned.indexOf("{")
   const end = cleaned.lastIndexOf("}")
   if (start === -1 || end === -1) return []
@@ -372,7 +364,8 @@ function applyMerge(
     filename = generateFactFilename(op.name, type)
   }
   // Avoid collision
-  const isTaken = (name: string) => existingFilenames.has(name) || existsSync(join(memoryDir, name))
+  const isTaken = (name: string) =>
+    existingFilenames.has(name) || existsSync(join(memoryDir, name))
   if (isTaken(filename)) {
     let i = 2
     while (isTaken(filename.replace(/\.md$/, `_${i}.md`))) i++
@@ -415,7 +408,8 @@ function applyCreateMeta(
   if (!filename || !isValidFactFilename(filename, type)) {
     filename = generateFactFilename(op.name, type)
   }
-  const isTaken = (name: string) => existingFilenames.has(name) || existsSync(join(memoryDir, name))
+  const isTaken = (name: string) =>
+    existingFilenames.has(name) || existsSync(join(memoryDir, name))
   if (isTaken(filename)) {
     let i = 2
     while (isTaken(filename.replace(/\.md$/, `_${i}.md`))) i++
@@ -460,9 +454,9 @@ function selectCandidatesForLLM(
     const ageDays = (now - h.mtimeMs) / (1000 * 60 * 60 * 24)
     // Interesting if: 0 recalls + old, or recently modified, or has potential peers
     let score = 0
-    if (recalls === 0 && ageDays > 30) score += 2 // unaccessed + aging
-    if (ageDays < 7) score += 1 // recently updated
-    if (recalls > 5) score += 1 // frequently recalled (merge target)
+    if (recalls === 0 && ageDays > 30) score += 2        // unaccessed + aging
+    if (ageDays < 7) score += 1                           // recently updated
+    if (recalls > 5) score += 1                           // frequently recalled (merge target)
     return { h, score }
   })
 
@@ -475,9 +469,7 @@ let dreamQueue: Promise<void> = Promise.resolve()
 
 export function consolidateMemories(options: ConsolidateOptions): Promise<ConsolidateResult> {
   let resolve!: (r: ConsolidateResult) => void
-  const resultP = new Promise<ConsolidateResult>((res) => {
-    resolve = res
-  })
+  const resultP = new Promise<ConsolidateResult>((res) => { resolve = res })
 
   const next = dreamQueue.then(async () => {
     const result = await consolidateInner(options)
@@ -494,16 +486,12 @@ async function consolidateInner(options: ConsolidateOptions): Promise<Consolidat
   if (!existsSync(memoryDir)) return result
 
   try {
-    const store = await getMemoryStore(memoryDir)
+    const store = await getMemoryStore()
     const recallMap = store.getRecallStats()
 
     const allHeaders = scanMemoryFiles(memoryDir)
     if (allHeaders.length === 0) {
-      writeDreamState(memoryDir, {
-        lastRunAt: Date.now(),
-        factCountAtLastRun: 0,
-        sessionsSinceLastRun: 0
-      })
+      writeDreamState(memoryDir, { lastRunAt: Date.now(), factCountAtLastRun: 0, sessionsSinceLastRun: 0 })
       return result
     }
 
@@ -541,9 +529,7 @@ async function consolidateInner(options: ConsolidateOptions): Promise<Consolidat
           }
           const ageDays = (Date.now() - header.mtimeMs) / (1000 * 60 * 60 * 24)
           if (ageDays < ARCHIVE_MIN_AGE_DAYS) {
-            console.log(
-              `[Dream] Skipping LLM archive of recent file (${Math.floor(ageDays)}d): ${op.filename}`
-            )
+            console.log(`[Dream] Skipping LLM archive of recent file (${Math.floor(ageDays)}d): ${op.filename}`)
             continue
           }
           const ok = archiveFile(memoryDir, op.filename, op.reason)
@@ -576,20 +562,14 @@ async function consolidateInner(options: ConsolidateOptions): Promise<Consolidat
     for (const p of touchedPaths) {
       try {
         if (existsSync(p)) store.addDocument(p, readFileSync(p, "utf-8"))
-      } catch {
-        /* non-critical */
-      }
+      } catch { /* non-critical */ }
     }
     // Remove archived files from the store (they moved to archive/ subdir)
     const afterHeaders = scanMemoryFiles(memoryDir)
     const afterPaths = new Set(afterHeaders.map((h) => h.filePath))
     for (const h of allHeaders) {
       if (!afterPaths.has(h.filePath)) {
-        try {
-          store.removeDocument(h.filePath)
-        } catch {
-          /* non-critical */
-        }
+        try { store.removeDocument(h.filePath) } catch { /* non-critical */ }
       }
     }
 
@@ -597,23 +577,16 @@ async function consolidateInner(options: ConsolidateOptions): Promise<Consolidat
     writeDreamState(memoryDir, {
       lastRunAt: Date.now(),
       factCountAtLastRun: afterHeaders.length,
-      sessionsSinceLastRun: 0 // reset after a successful Dream run
+      sessionsSinceLastRun: 0  // reset after a successful Dream run
     })
 
     console.log(
       `[Dream] Complete — archived: ${result.archived}, merged: ${result.merged}, ` +
-        `created: ${result.created}, skipped: ${result.skipped}`
+      `created: ${result.created}, skipped: ${result.skipped}`
     )
 
     if (result.archived > 0 || result.merged > 0 || result.created > 0) {
-      try {
-        notifyMemoryChanged()
-      } catch (e) {
-        console.warn(
-          "[Dream] Failed to broadcast memory:changed:",
-          e instanceof Error ? e.message : e
-        )
-      }
+      notifyMemoryChanged()
     }
   } catch (e) {
     console.warn("[Dream] Failed:", e instanceof Error ? e.message : e)

@@ -1,9 +1,4 @@
 import type { McpInvocationResult } from "./capability-types"
-import {
-  projectResultData,
-  type ProjectedResult,
-  type ResultProjectionOptions
-} from "./result-projection"
 
 export interface McpCallResultValue {
   ok: boolean
@@ -203,7 +198,7 @@ export function getMcpErrorMessage(result: McpInvocationResult): string {
   return result.text || stringifyUnknown(result.raw)
 }
 
-export function extractUsefulMcpResultData(result: McpInvocationResult): unknown {
+export function getUsefulMcpResultData(result: McpInvocationResult): unknown {
   if (result.structuredContent !== undefined) {
     return result.structuredContent
   }
@@ -222,17 +217,6 @@ export function extractUsefulMcpResultData(result: McpInvocationResult): unknown
   }
 
   return result.raw
-}
-
-export function projectMcpResultData(
-  result: McpInvocationResult,
-  options: ResultProjectionOptions = {}
-): ProjectedResult {
-  return projectResultData(extractUsefulMcpResultData(result), options)
-}
-
-export function getUsefulMcpResultData(result: McpInvocationResult): unknown {
-  return extractUsefulMcpResultData(result)
 }
 
 export function toEagerToolResponse(result: McpInvocationResult): [string | unknown[], unknown[]] {

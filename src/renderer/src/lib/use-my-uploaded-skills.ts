@@ -11,15 +11,12 @@ type UserInfoLite = {
 export interface MyUploadedSkills {
   /** 归一化后的技能 key 集合（去版本号、去后缀、小写），用于和候选的 skill_name 比对。 */
   ownedSkillKeys: Set<string>
-  /** 归一化后的技能 key -> 当前用户在应用市场上传的技能条目。 */
-  ownedSkillItemsByKey: Map<string, MarketItem>
   /** 当前用户在应用市场上传的技能数量。 */
   ownedSkillCount: number
   loading: boolean
 }
 
 const EMPTY_KEYS: Set<string> = new Set()
-const EMPTY_ITEMS_BY_KEY: Map<string, MarketItem> = new Map()
 
 function isUploadedByCurrentUser(item: MarketItem, currentUserCandidates: Set<string>): boolean {
   if (!item.user_id || currentUserCandidates.size === 0) return false
@@ -53,8 +50,6 @@ async function loadCurrentUserCandidates(): Promise<Set<string>> {
  */
 export function useMyUploadedSkills(): MyUploadedSkills {
   const [ownedSkillKeys, setOwnedSkillKeys] = useState<Set<string>>(EMPTY_KEYS)
-  const [ownedSkillItemsByKey, setOwnedSkillItemsByKey] =
-    useState<Map<string, MarketItem>>(EMPTY_ITEMS_BY_KEY)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -69,24 +64,16 @@ export function useMyUploadedSkills(): MyUploadedSkills {
         ])
         if (cancelled) return
         const keys = new Set<string>()
-        const itemsByKey = new Map<string, MarketItem>()
         if (skills.success && skills.data && currentUserCandidates.size > 0) {
           for (const item of skills.data) {
             if (!isUploadedByCurrentUser(item, currentUserCandidates)) continue
-            for (const key of collectSkillKeys(item)) {
-              keys.add(key)
-              if (!itemsByKey.has(key)) itemsByKey.set(key, item)
-            }
+            for (const key of collectSkillKeys(item)) keys.add(key)
           }
         }
         setOwnedSkillKeys(keys)
-        setOwnedSkillItemsByKey(itemsByKey)
       } catch (error) {
         console.warn("[useMyUploadedSkills] failed to resolve uploaded skills:", error)
-        if (!cancelled) {
-          setOwnedSkillKeys(EMPTY_KEYS)
-          setOwnedSkillItemsByKey(EMPTY_ITEMS_BY_KEY)
-        }
+        if (!cancelled) setOwnedSkillKeys(EMPTY_KEYS)
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -104,7 +91,7 @@ export function useMyUploadedSkills(): MyUploadedSkills {
   }, [])
 
   return useMemo(
-    () => ({ ownedSkillKeys, ownedSkillItemsByKey, ownedSkillCount: ownedSkillKeys.size, loading }),
-    [ownedSkillItemsByKey, ownedSkillKeys, loading]
+    () => ({ ownedSkillKeys, ownedSkillCount: ownedSkillKeys.size, loading }),
+    [ownedSkillKeys, loading]
   )
 }

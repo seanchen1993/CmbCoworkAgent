@@ -23,21 +23,6 @@ export type AgentAutoCommitStatus =
   | "failed"
   | "needs_confirmation"
 
-export interface AgentAutoCommitRepoResult {
-  repoPath: string
-  displayPath: string
-  status: Exclude<AgentAutoCommitStatus, "disabled" | "needs_confirmation">
-  message?: string
-  commitMessage?: string
-  commitHash?: string
-  committedFiles?: string[]
-  skippedFiles?: string[]
-  warnings?: string[]
-  reasons?: string[]
-  pushed?: boolean
-  pushError?: string
-}
-
 export interface AgentAutoCommitResult {
   status: AgentAutoCommitStatus
   message?: string
@@ -51,6 +36,4 @@ export interface AgentAutoCommitResult {
   pushed?: boolean
   /** Error message from the push attempt, if it failed. Commit still succeeded. */
   pushError?: string
-  /** Per-repository result for a workspace that contains multiple Git repositories. */
-  repoResults?: AgentAutoCommitRepoResult[]
 }

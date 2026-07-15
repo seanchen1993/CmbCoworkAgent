@@ -18,7 +18,9 @@ export function normalizeSkillIdentifierText(raw: string): string {
 }
 
 export function normalizeSkillQueryName(raw: string): string {
-  return normalizeSkillIdentifierText(raw).replace(SKILL_VERSION_QUERY_SUFFIX_RE, "").trim()
+  return normalizeSkillIdentifierText(raw)
+    .replace(SKILL_VERSION_QUERY_SUFFIX_RE, "")
+    .trim()
 }
 
 export function parseSkillIdentifier(skill: string): { name: string; version?: string } {
@@ -48,7 +50,10 @@ export function parseSkillNameVersionIdentifier(
   }
 }
 
-export function ensureVersionedSkillIdentifier(skill: string, version?: string | null): string {
+export function ensureVersionedSkillIdentifier(
+  skill: string,
+  version?: string | null
+): string {
   const parsed = parseSkillIdentifier(skill)
   if (!parsed.name) return ""
   return `${parsed.name}-${parsed.version ?? normalizeSkillVersion(version)}`
@@ -63,71 +68,20 @@ export function stripYamlQuotes(value: string): string {
 }
 
 /**
- * Strip a YAML inline comment from a scalar: an unquoted `#` preceded by start
- * or whitespace begins a comment (`read_only # note` → `read_only`). Respects
- * quotes so `"a # b"` keeps the `#`. Without this, `workload: read_only # x` was
- * read as the literal `read_only # x` (≠ the `read_only` enum), silently widening
- * a restricted agent to full — a real privilege bug, so strip it here.
- */
-export function stripYamlInlineComment(value: string): string {
-  let inSingle = false
-  let inDouble = false
-  for (let i = 0; i < value.length; i++) {
-    const c = value[i]
-    if (c === "'" && !inDouble) inSingle = !inSingle
-    else if (c === '"' && !inSingle) inDouble = !inDouble
-    else if (c === "#" && !inSingle && !inDouble && (i === 0 || /\s/.test(value[i - 1]))) {
-      return value.slice(0, i)
-    }
-  }
-  return value
-}
-
-/**
- * Minimal YAML frontmatter parser for `key: value` scalars plus single-level
- * block sequences. A key whose inline value is empty and is followed by
- * `  - item` lines is collected into a comma-joined string, so consumers that
- * comma-split (e.g. agent `tools`/`disallowedTools`) treat these equivalently:
- *   tools: Read, Bash        →  "Read, Bash"
- *   tools: [Read, Bash]      →  "[Read, Bash]"  (caller strips brackets)
- *   tools:\n  - Read\n  - Bash → "Read, Bash"
- * Single-line scalar fields take the inline branch and are unaffected.
+ * Minimal YAML frontmatter parser (only key: value pairs).
+ * Does not handle nested structures or YAML syntax beyond simple scalars.
  */
 export function parseYamlFrontmatter(content: string): Record<string, string> {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/)
   if (!match) return {}
 
   const result: Record<string, string> = {}
-  const lines = match[1].split("\n")
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
+  for (const line of match[1].split("\n")) {
     const colonIdx = line.indexOf(":")
     if (colonIdx <= 0) continue
     const key = line.slice(0, colonIdx).trim()
-    if (!key) continue
-    const inlineValue = stripYamlInlineComment(line.slice(colonIdx + 1)).trim()
-    if (inlineValue) {
-      result[key] = stripYamlQuotes(inlineValue)
-      continue
-    }
-    // Empty inline value: look ahead for a block sequence (`- item` lines). Skip
-    // interspersed comment/blank lines (a `# comment` between the key and its
-    // items previously aborted the scan → empty value → silent full-tools widening).
-    const items: string[] = []
-    let j = i + 1
-    for (; j < lines.length; j++) {
-      if (/^\s*#/.test(lines[j]) || /^\s*$/.test(lines[j])) continue
-      const itemMatch = lines[j].match(/^\s*-\s+(.+)$/)
-      if (!itemMatch) break
-      const item = stripYamlQuotes(stripYamlInlineComment(itemMatch[1]).trim())
-      if (item) items.push(item)
-    }
-    if (items.length > 0) {
-      result[key] = items.join(", ")
-      i = j - 1 // consume the item lines we just folded in
-    } else {
-      result[key] = ""
-    }
+    const value = stripYamlQuotes(line.slice(colonIdx + 1).trim())
+    if (key) result[key] = value
   }
   return result
 }

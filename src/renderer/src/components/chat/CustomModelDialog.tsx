@@ -19,8 +19,6 @@ interface CustomModelDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-type ThinkingEffort = "high" | "max"
-
 interface CustomConfig {
   id?: string
   name: string
@@ -33,9 +31,6 @@ interface CustomConfig {
   topPInput: string
   topKInput: string
   interleavedThinking: boolean
-  enableThinking: boolean
-  enableThinkingEffort: boolean
-  thinkingEffort: ThinkingEffort
   tier: "premium" | "economy"
 }
 
@@ -67,9 +62,6 @@ interface CustomModelItem {
   topP: number
   topK: number
   interleavedThinking?: boolean
-  enableThinking?: boolean
-  enableThinkingEffort?: boolean
-  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -88,12 +80,6 @@ const FALLBACK_LIMITS: TokenLimits = {
   minTopK: 0,
   maxTopK: 1_000
 }
-
-const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
-const THINKING_EFFORT_OPTIONS: Array<{ value: ThinkingEffort; label: string }> = [
-  { value: "high", label: "High" },
-  { value: "max", label: "Max" }
-]
 
 function ParameterLabel({
   children,
@@ -233,9 +219,6 @@ export function CustomModelDialog({
     topPInput: String(FALLBACK_LIMITS.defaultTopP),
     topKInput: String(FALLBACK_LIMITS.defaultTopK),
     interleavedThinking: false,
-    enableThinking: false,
-    enableThinkingEffort: false,
-    thinkingEffort: DEFAULT_THINKING_EFFORT,
     tier: "premium"
   })
   const [showKey, setShowKey] = useState(false)
@@ -304,9 +287,6 @@ export function CustomModelDialog({
               interleavedThinking:
                 resolvedExisting.interleavedThinking ??
                 defaultInterleavedThinkingForModel(resolvedExisting.model),
-              enableThinking: resolvedExisting.enableThinking === true,
-              enableThinkingEffort: resolvedExisting.enableThinkingEffort === true,
-              thinkingEffort: resolvedExisting.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
               tier: resolvedExisting.tier ?? "premium"
             })
             setHasExisting(true)
@@ -324,9 +304,6 @@ export function CustomModelDialog({
               topPInput: String(limits.defaultTopP),
               topKInput: String(limits.defaultTopK),
               interleavedThinking: false,
-              enableThinking: false,
-              enableThinkingEffort: false,
-              thinkingEffort: DEFAULT_THINKING_EFFORT,
               tier: "premium"
             })
             setHasExisting(false)
@@ -363,9 +340,6 @@ export function CustomModelDialog({
       topKInput: String(picked.topK ?? tokenLimits.defaultTopK),
       interleavedThinking:
         picked.interleavedThinking ?? defaultInterleavedThinkingForModel(picked.model),
-      enableThinking: picked.enableThinking === true,
-      enableThinkingEffort: picked.enableThinkingEffort === true,
-      thinkingEffort: picked.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
       tier: picked.tier ?? "premium"
     })
     setHasExisting(true)
@@ -447,10 +421,7 @@ export function CustomModelDialog({
         maxOutputTokens: parsedMaxOutputTokens,
         temperature: parsedTemperature,
         topP: parsedTopP,
-        topK: parsedTopK,
-        enableThinking: config.enableThinking,
-        enableThinkingEffort: config.enableThinking && config.enableThinkingEffort,
-        thinkingEffort: config.thinkingEffort
+        topK: parsedTopK
       })
       setTestResult(result)
     } catch (e) {
@@ -513,9 +484,6 @@ export function CustomModelDialog({
         temperature: parsedTemperature,
         topP: parsedTopP,
         topK: parsedTopK,
-        enableThinking: config.enableThinking,
-        enableThinkingEffort: config.enableThinking && config.enableThinkingEffort,
-        thinkingEffort: config.thinkingEffort,
         interleavedThinking: config.interleavedThinking,
         tier: config.tier
       })
@@ -546,13 +514,7 @@ export function CustomModelDialog({
           ),
           temperatureInput: String(updated.temperature ?? tokenLimits.defaultTemperature),
           topPInput: String(updated.topP ?? tokenLimits.defaultTopP),
-          topKInput: String(updated.topK ?? tokenLimits.defaultTopK),
-          interleavedThinking:
-            updated.interleavedThinking ?? defaultInterleavedThinkingForModel(updated.model),
-          enableThinking: updated.enableThinking === true,
-          enableThinkingEffort: updated.enableThinkingEffort === true,
-          thinkingEffort: updated.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
-          tier: updated.tier ?? "premium"
+          topKInput: String(updated.topK ?? tokenLimits.defaultTopK)
         }))
         setHasExisting(true)
         setHasExistingKey(updated.hasApiKey)
@@ -607,9 +569,6 @@ export function CustomModelDialog({
           topKInput: String(fallback.topK ?? tokenLimits.defaultTopK),
           interleavedThinking:
             fallback.interleavedThinking ?? defaultInterleavedThinkingForModel(fallback.model),
-          enableThinking: fallback.enableThinking === true,
-          enableThinkingEffort: fallback.enableThinkingEffort === true,
-          thinkingEffort: fallback.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
           tier: fallback.tier ?? "premium"
         })
         setHasExisting(true)
@@ -633,9 +592,6 @@ export function CustomModelDialog({
           topPInput: String(tokenLimits.defaultTopP),
           topKInput: String(tokenLimits.defaultTopK),
           interleavedThinking: false,
-          enableThinking: false,
-          enableThinkingEffort: false,
-          thinkingEffort: DEFAULT_THINKING_EFFORT,
           tier: "premium"
         })
         setHasExisting(false)
@@ -679,9 +635,6 @@ export function CustomModelDialog({
                     topPInput: String(tokenLimits.defaultTopP),
                     topKInput: String(tokenLimits.defaultTopK),
                     interleavedThinking: false,
-                    enableThinking: false,
-                    enableThinkingEffort: false,
-                    thinkingEffort: DEFAULT_THINKING_EFFORT,
                     tier: "premium"
                   })
                   setHasExisting(false)
@@ -760,10 +713,8 @@ export function CustomModelDialog({
                   onChange={(e) => {
                     const nextModel = e.target.value
                     setConfig((c) => {
-                      const currentInterleavedDefault = defaultInterleavedThinkingForModel(c.model)
-                      const nextInterleavedDefault = defaultInterleavedThinkingForModel(nextModel)
-                      const currentEnableThinkingDefault = defaultInterleavedThinkingForModel(c.model)
-                      const nextEnableThinkingDefault = defaultInterleavedThinkingForModel(nextModel)
+                      const currentDefault = defaultInterleavedThinkingForModel(c.model)
+                      const nextDefault = defaultInterleavedThinkingForModel(nextModel)
                       const currentSamplingDefault = defaultSamplingForModel(c.model, tokenLimits)
                       const nextSamplingDefault = defaultSamplingForModel(nextModel, tokenLimits)
                       const shouldUseNextSamplingDefault =
@@ -777,13 +728,9 @@ export function CustomModelDialog({
                         model: nextModel,
                         ...(shouldUseNextSamplingDefault ? nextSamplingDefault : {}),
                         interleavedThinking:
-                          c.interleavedThinking === currentInterleavedDefault
-                            ? nextInterleavedDefault
-                            : c.interleavedThinking,
-                        enableThinking:
-                          c.enableThinking === currentEnableThinkingDefault
-                            ? nextEnableThinkingDefault
-                            : c.enableThinking
+                          c.interleavedThinking === currentDefault
+                            ? nextDefault
+                            : c.interleavedThinking
                       }
                     })
                     setTestResult(null)
@@ -913,107 +860,6 @@ export function CustomModelDialog({
               </div>
 
               <div className="space-y-1">
-                <ParameterLabel explanation="开启后，支持的模型会在回答前进行更充分的推理，并可在对话中展示思考内容。是否生效取决于模型能力，例如 deepseek-flash 支持思考开关和思考强度。">
-                  思考模式
-                </ParameterLabel>
-                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
-                  <div>
-                    <div className="text-sm text-foreground">
-                      {config.enableThinking ? "已开启" : "已关闭"}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={config.enableThinking}
-                    onClick={() =>
-                      setConfig((c) => ({
-                        ...c,
-                        enableThinking: !c.enableThinking,
-                        ...(c.enableThinking
-                          ? { interleavedThinking: false, enableThinkingEffort: false }
-                          : {})
-                      }))
-                    }
-                    className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
-                      config.enableThinking ? "bg-primary" : "bg-muted-foreground/30"
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
-                        config.enableThinking ? "translate-x-4" : "translate-x-0"
-                      )}
-                    />
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <ParameterLabel explanation="部分模型或服务支持额外指定思考强度；不支持时关闭即可，只保留思考模式。开启后可选择 High 或 Max。">
-                  思考强度
-                </ParameterLabel>
-                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
-                  <div>
-                    <div className="text-sm text-foreground">
-                      {config.enableThinking && config.enableThinkingEffort ? "已开启" : "已关闭"}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={config.enableThinking && config.enableThinkingEffort}
-                    disabled={!config.enableThinking}
-                    onClick={() => {
-                      setConfig((c) => ({ ...c, enableThinkingEffort: !c.enableThinkingEffort }))
-                      setTestResult(null)
-                    }}
-                    className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
-                      !config.enableThinking
-                        ? "cursor-not-allowed bg-muted-foreground/20"
-                        : config.enableThinkingEffort
-                          ? "cursor-pointer bg-primary"
-                          : "cursor-pointer bg-muted-foreground/30"
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
-                        config.enableThinking && config.enableThinkingEffort
-                          ? "translate-x-4"
-                          : "translate-x-0"
-                      )}
-                    />
-                  </button>
-                </div>
-                <div className="flex gap-2">
-                  {THINKING_EFFORT_OPTIONS.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      disabled={!config.enableThinking || !config.enableThinkingEffort}
-                      onClick={() => {
-                        setConfig((c) => ({ ...c, thinkingEffort: option.value }))
-                        setTestResult(null)
-                      }}
-                      className={cn(
-                        "flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45",
-                        config.enableThinking &&
-                          config.enableThinkingEffort &&
-                          config.thinkingEffort === option.value
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "border-border text-muted-foreground hover:bg-muted disabled:hover:bg-transparent"
-                      )}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">交错思考</label>
                 <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
                   <div>
@@ -1025,17 +871,12 @@ export function CustomModelDialog({
                     type="button"
                     role="switch"
                     aria-checked={config.interleavedThinking}
-                    disabled={!config.enableThinking}
                     onClick={() =>
                       setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
                     }
                     className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
-                      !config.enableThinking
-                        ? "cursor-not-allowed bg-muted-foreground/20"
-                        : config.interleavedThinking
-                          ? "cursor-pointer bg-primary"
-                          : "cursor-pointer bg-muted-foreground/30"
+                      "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
+                      config.interleavedThinking ? "bg-primary" : "bg-muted-foreground/30"
                     )}
                   >
                     <span

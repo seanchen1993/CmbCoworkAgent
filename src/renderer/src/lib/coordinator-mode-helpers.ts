@@ -17,15 +17,8 @@ export function isCoordinatorModeMetadata(metadata: unknown): boolean {
     return false
   }
   const record = metadata as Record<string, unknown>
-  if (isExplicitNormalModeMetadata(record) || isWorkflowModeMetadata(record)) {
+  if (isExplicitNormalModeMetadata(record)) {
     return false
   }
   return record.agentMode === "coordinator" || truthyCoordinatorFlag(record.coordinatorMode)
-}
-
-export function isWorkflowModeMetadata(metadata: unknown): boolean {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return false
-  }
-  return (metadata as Record<string, unknown>).agentMode === "workflow"
 }

@@ -22,8 +22,6 @@ type OpenIdeResult = {
   mode: OpenIdeMode
 }
 
-const FOLLOW_UP_OPEN_DELAY_MS = 500
-
 const IDE_LABELS: Record<SupportedIde, string> = {
   idea: "IntelliJ IDEA",
   vscode: "VS Code",
@@ -39,14 +37,9 @@ const MAC_APP_NAMES: Record<SupportedIde, string[]> = {
 const MAC_APP_BINARIES: Record<string, string> = {
   "IntelliJ IDEA.app": "idea",
   "IntelliJ IDEA CE.app": "idea",
-  "IntelliJ IDEA Community Edition.app": "idea",
   "Visual Studio Code.app": "Electron",
   "Visual Studio Code - Insiders.app": "Electron",
   "WebStorm.app": "webstorm"
-}
-
-function isJetBrainsIde(ide: SupportedIde): boolean {
-  return ide === "idea" || ide === "webstorm"
 }
 
 function getIdeCommandCandidates(ide: SupportedIde): string[] {
@@ -135,23 +128,7 @@ function resolveLaunchTargetFromExplicitOverride(ide: SupportedIde): string | nu
 }
 
 function getMacAppExecutablePath(appPath: string): string {
-  const executableName = MAC_APP_BINARIES[appPath.split("/").pop() || ""]
-  return join(appPath, "Contents", "MacOS", executableName)
-}
-
-function getMacAppBundlePath(pathValue: string): string | null {
-  if (process.platform !== "darwin") return null
-
-  const trimmed = trimWrappingQuotes(pathValue)
-  if (!trimmed) return null
-  if (trimmed.endsWith(".app")) return trimmed
-
-  const marker = "/Contents/MacOS/"
-  const markerIndex = trimmed.lastIndexOf(marker)
-  if (markerIndex <= 0) return null
-
-  const appPath = trimmed.slice(0, markerIndex)
-  return appPath.endsWith(".app") ? appPath : null
+  return join(appPath, "Contents", "MacOS", MAC_APP_BINARIES[appPath.split("/").pop() || ""] || "")
 }
 
 function findMacInstalledApps(appName: string): string[] {
@@ -276,30 +253,16 @@ function getConfiguredLauncher(ide: SupportedIde): IdeLauncher {
     throw new Error(`尚未配置 ${IDE_LABELS[ide]} 的启动路径，请重新选择 IDE 并保存路径。`)
   }
 
-  const macAppPath =
-    process.platform === "darwin"
-      ? executablePath.endsWith(".app")
-        ? executablePath
-        : getMacAppBundlePath(executablePath)
-      : null
-
-  if (macAppPath) {
-    const appExecutable = getMacAppExecutablePath(macAppPath)
-    if (!existsSync(macAppPath) || !existsSync(appExecutable)) {
+  if (process.platform === "darwin" && executablePath.endsWith(".app")) {
+    const appExecutable = getMacAppExecutablePath(executablePath)
+    if (!existsSync(executablePath) || !existsSync(appExecutable)) {
       throw new Error(`已保存的 ${IDE_LABELS[ide]} 应用路径无效，请重新选择 IDE。`)
     }
 
-    if (isJetBrainsIde(ide)) {
-      return {
-        label: macAppPath,
-        command: appExecutable
-      }
-    }
-
     return {
-      label: macAppPath,
+      label: executablePath,
       command: "/usr/bin/open",
-      argsPrefix: ["-a", macAppPath, "--args"]
+      argsPrefix: ["-a", executablePath, "--args"]
     }
   }
 
@@ -325,49 +288,13 @@ function shouldTreatNonZeroExitAsSuccess(command: string): boolean {
   )
 }
 
-function logOpenInIde(
-  stage: string,
-  detail: Record<string, unknown>
-): void {
-  const message = Object.entries(detail)
-    .filter(([, value]) => value !== undefined)
-    .map(([key, value]) => {
-      if (Array.isArray(value)) return `${key}=${value.join(" ")}`
-      if (typeof value === "string") {
-        return `${key}=${/\s/.test(value) ? JSON.stringify(value) : value}`
-      }
-      return `${key}=${String(value)}`
-    })
-    .join(" ")
-
-  console.log(message.length > 0 ? `[OpenInIde] ${stage} ${message}` : `[OpenInIde] ${stage}`)
-}
-
 function spawnDetached(launcher: IdeLauncher, args: string[]): Promise<void> {
-  return spawnDetachedWithPrefix(launcher, launcher.argsPrefix, args)
-}
-
-function spawnDetachedWithPrefix(
-  launcher: IdeLauncher,
-  argsPrefix: string[] | undefined,
-  args: string[]
-): Promise<void> {
-  const shell = shouldUseShell(launcher.command)
-  const launchPreview = [launcher.command, ...(argsPrefix ?? []), ...args]
-    .map((value) => (/\s/.test(value) ? JSON.stringify(value) : value))
-    .join(" ")
-
-  logOpenInIde("spawn", {
-    cmd: launchPreview,
-    shell: shell ? true : undefined
-  })
-
   return new Promise((resolve, reject) => {
-    const child = spawn(launcher.command, [...(argsPrefix || []), ...args], {
+    const child = spawn(launcher.command, [...(launcher.argsPrefix || []), ...args], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
-      shell
+      shell: shouldUseShell(launcher.command)
     })
 
     let settled = false
@@ -379,33 +306,17 @@ function spawnDetachedWithPrefix(
 
     const timer = setTimeout(() => {
       child.unref()
-      logOpenInIde("spawn-ok", {
-        via: "timeout",
-        cmd: launchPreview
-      })
       settle(resolve)
     }, 700)
 
     child.once("error", (error) => {
       clearTimeout(timer)
-      logOpenInIde("spawn-fail", {
-        cmd: launchPreview,
-        error: error.message
-      })
       settle(() => reject(error))
     })
 
     child.once("exit", (code) => {
       clearTimeout(timer)
-      const treatedAsSuccess =
-        code === 0 || code === null || shouldTreatNonZeroExitAsSuccess(launcher.command)
-
-      logOpenInIde(treatedAsSuccess ? "spawn-ok" : "spawn-fail", {
-        cmd: launchPreview,
-        code
-      })
-
-      if (treatedAsSuccess) {
+      if (code === 0 || code === null || shouldTreatNonZeroExitAsSuccess(launcher.command)) {
         child.unref()
         settle(resolve)
         return
@@ -419,23 +330,11 @@ function buildWorkspaceArgs(_ide: SupportedIde, workspacePath: string): string[]
   return [workspacePath]
 }
 
-function buildWorkspaceAndFileArgs(
-  _ide: SupportedIde,
-  workspacePath: string,
-  filePath: string
-): string[] {
-  return [workspacePath, filePath]
-}
-
 function buildFileArgs(_ide: SupportedIde, filePath: string): string[] {
   return [filePath]
 }
 
-function buildFileAtLineArgs(
-  ide: SupportedIde,
-  filePath: string,
-  line: number,
-): string[] {
+function buildFileAtLineArgs(ide: SupportedIde, filePath: string, line: number): string[] {
   if (ide === "vscode") return ["-g", `${filePath}:${line}`]
   return ["--line", String(line), filePath]
 }
@@ -446,15 +345,6 @@ async function openWorkspace(
   workspacePath: string
 ): Promise<void> {
   await spawnDetached(launcher, buildWorkspaceArgs(ide, workspacePath))
-}
-
-async function openWorkspaceAndFile(
-  launcher: IdeLauncher,
-  ide: SupportedIde,
-  workspacePath: string,
-  filePath: string
-): Promise<void> {
-  await spawnDetached(launcher, buildWorkspaceAndFileArgs(ide, workspacePath, filePath))
 }
 
 async function openFile(launcher: IdeLauncher, ide: SupportedIde, filePath: string): Promise<void> {
@@ -470,39 +360,28 @@ async function openFileAtLine(
   await spawnDetached(launcher, buildFileAtLineArgs(ide, filePath, line))
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 export async function openIde(request: OpenIdeRequest): Promise<OpenIdeResult> {
   const workspacePath = normalize(request.workspacePath)
   const filePath = request.filePath ? normalize(request.filePath) : undefined
   const line = typeof request.line === "number" && request.line > 0 ? request.line : undefined
   const launcher = getConfiguredLauncher(request.ide)
   const failures: string[] = []
-  let workspaceOpened = false
-  let fileOpened = false
 
-  logOpenInIde("request", {
-    ide: request.ide,
-    launcher: launcher.label,
-    command: launcher.command,
-    workspace: workspacePath,
-    file: filePath,
-    line
-  })
-
-  if (filePath && isJetBrainsIde(request.ide)) {
+  if (filePath && line) {
     try {
-      logOpenInIde("action", {
-        mode: line ? "workspace+file-then-line" : "workspace+file",
-        workspace: workspacePath,
-        file: filePath,
-        line
-      })
-      await openWorkspaceAndFile(launcher, request.ide, workspacePath, filePath)
-      workspaceOpened = true
-      fileOpened = true
+      await openFileAtLine(launcher, request.ide, filePath, line)
+      return { editor: launcher.label, mode: "workspace+file+line" }
+    } catch (error) {
+      failures.push(
+        `${launcher.label} (workspace+file+line): ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
+
+  if (filePath) {
+    try {
+      await openFile(launcher, request.ide, filePath)
+      return { editor: launcher.label, mode: "workspace+file" }
     } catch (error) {
       failures.push(
         `${launcher.label} (workspace+file): ${error instanceof Error ? error.message : String(error)}`
@@ -510,66 +389,16 @@ export async function openIde(request: OpenIdeRequest): Promise<OpenIdeResult> {
     }
   }
 
-  if (!workspaceOpened) {
-    try {
-      logOpenInIde("action", {
-        mode: "workspace",
-        workspace: workspacePath,
-        file: filePath,
-        line
-      })
-      await openWorkspace(launcher, request.ide, workspacePath)
-      workspaceOpened = true
-    } catch (error) {
-      failures.push(
-        `${launcher.label} (workspace): ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
-  }
-
-  if (!workspaceOpened) {
-    throw new Error(
-      `无法打开 IDE。已尝试 ${launcher.label}，并按 workspace+file / workspace 顺序降级。${failures.join("；")}`
-    )
-  }
-
-  if (!filePath) {
-    return { editor: launcher.label, mode: "workspace" }
-  }
-
-  if (line) {
-    try {
-      logOpenInIde("action", {
-        mode: "file-at-line-after-workspace",
-        file: filePath,
-        line
-      })
-      await delay(FOLLOW_UP_OPEN_DELAY_MS)
-      await openFileAtLine(launcher, request.ide, filePath, line)
-      return { editor: launcher.label, mode: "workspace+file+line" }
-    } catch (error) {
-      failures.push(
-        `${launcher.label} (file+line after workspace): ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
-  }
-
-  if (fileOpened) {
-    return { editor: launcher.label, mode: "workspace+file" }
-  }
-
   try {
-    logOpenInIde("action", {
-      mode: "file-after-workspace",
-      file: filePath
-    })
-    await openFile(launcher, request.ide, filePath)
-    return { editor: launcher.label, mode: "workspace+file" }
+    await openWorkspace(launcher, request.ide, workspacePath)
+    return { editor: launcher.label, mode: "workspace" }
   } catch (error) {
     failures.push(
-      `${launcher.label} (file after workspace): ${error instanceof Error ? error.message : String(error)}`
+      `${launcher.label} (workspace): ${error instanceof Error ? error.message : String(error)}`
     )
   }
 
-  return { editor: launcher.label, mode: "workspace" }
+  throw new Error(
+    `无法打开 IDE。已尝试 ${launcher.label}，并按 workspace+file+line / workspace+file / workspace 顺序降级。${failures.join("；")}`
+  )
 }

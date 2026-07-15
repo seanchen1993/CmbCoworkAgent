@@ -177,13 +177,8 @@ export function shouldJudgeSkillWorthiness(mode: SkillProposalMode): boolean {
   return mode === "mode_b_llm"
 }
 
-export function shouldEvaluateSkillProposalWindow(
-  toolCallCount: number,
-  threshold: number,
-  turnCount: number,
-  turnThreshold: number
-): boolean {
-  return toolCallCount >= threshold && turnCount >= turnThreshold
+export function shouldEvaluateSkillProposalWindow(toolCallCount: number, threshold: number): boolean {
+  return toolCallCount >= threshold
 }
 
 /**

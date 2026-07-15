@@ -31,9 +31,7 @@ import {
   EyeOff,
   Loader2,
   Copy,
-  Check,
-  ShieldCheck,
-  Eye
+  Check
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -42,32 +40,22 @@ import { useShallow } from "zustand/react/shallow"
 import {
   useThreadState,
   useThreadStream,
-  type CoordinatorWorkerView
+  type CoordinatorWorkerView,
+  type SubagentInternalLogEntry
 } from "@/lib/thread-context"
+import { hasSubagentToolActivity } from "@/lib/thread-state-helpers"
 import { getFileType } from "@/lib/file-types"
-import {
-  hasLoadedWorkspaceFiles,
-  loadWorkspaceFilesDeduped,
-  markWorkspaceFilesStale
-} from "@/lib/workspace-file-load"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
-import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
-import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { getRightPanelSkillPathSegments } from "@/components/panels/skill-tree-path"
-import {
-  getSystemConstraintsLoadCounts,
-  SystemConstraintsPanel
-} from "@/components/panels/SystemConstraintsPanel"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
 type SkillHookMetadata = Awaited<ReturnType<typeof window.api.hooks.skills.list>>[number]
-type RightPanelSkillMarketInfo = Pick<MarketItem, "name" | "chinese_name">
 type DisplayHook = HookConfig & {
   source: "global" | "workspace" | "plugin" | "skill"
   pluginId?: string
@@ -94,7 +82,6 @@ const PREVIEW_MAX_HEIGHT = "100vh"
 type PanelHeights = {
   tasks: number
   files: number
-  systemConstraints: number
   agents: number
   skills: number
   plugins: number
@@ -152,33 +139,14 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
     (e: React.MouseEvent) => {
       e.preventDefault()
       startYRef.current = e.clientY
-      let frame: number | null = null
-      let latestDelta = 0
-
-      const flushDrag = (): void => {
-        frame = null
-        onDrag(latestDelta)
-      }
-
-      const scheduleDrag = (delta: number): void => {
-        latestDelta = delta
-        if (frame === null) {
-          frame = window.requestAnimationFrame(flushDrag)
-        }
-      }
 
       const handleMouseMove = (e: MouseEvent): void => {
         // Calculate total delta from drag start
         const totalDelta = e.clientY - startYRef.current
-        scheduleDrag(totalDelta)
+        onDrag(totalDelta)
       }
 
       const handleMouseUp = (): void => {
-        if (frame !== null) {
-          window.cancelAnimationFrame(frame)
-          frame = null
-          onDrag(latestDelta)
-        }
         document.removeEventListener("mousemove", handleMouseMove)
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""
@@ -207,7 +175,6 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 interface RightPanelProps {
   threadId?: string | null
   moduleMode: "work" | "preview" | "git"
-  showSystemConstraints?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
@@ -225,7 +192,6 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 export function RightPanel({
   threadId,
   moduleMode,
-  showSystemConstraints = false,
   onRequestPreviewMode,
   onRequestWorkMode,
   onPreviewFullscreenChange
@@ -233,7 +199,6 @@ export function RightPanel({
   const {
     currentThreadId: storeCurrentThreadId,
     pluginVersion,
-    rightPanelWorkRequest,
     skillGenerationByThread,
     setSkillGenerationPhase
   } =
@@ -241,7 +206,6 @@ export function RightPanel({
       useShallow((s) => ({
         currentThreadId: s.currentThreadId,
         pluginVersion: s.pluginVersion,
-        rightPanelWorkRequest: s.rightPanelWorkRequest,
         // Subscribe to the whole map so we re-render when any thread's card changes
         skillGenerationByThread: s.skillGenerationByThread,
         setSkillGenerationPhase: s.setSkillGenerationPhase
@@ -263,12 +227,8 @@ export function RightPanel({
     () => threadState?.coordinatorWorkers ?? [],
     [threadState?.coordinatorWorkers]
   )
-  const systemConstraintCounts = getSystemConstraintsLoadCounts(
-    showSystemConstraints ? threadState?.harnessAgentmdLoadStatus : null
-  )
   const runningSubagentIdsRef = useRef<Set<string>>(new Set())
   const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
-  const handledWorkRequestIdsRef = useRef<Set<number>>(new Set())
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
@@ -280,7 +240,6 @@ export function RightPanel({
   const prevStreamLoadingRef = useRef(false)
   const [tasksOpen, setTasksOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
-  const [systemConstraintsOpen, setSystemConstraintsOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [pluginsOpen, setPluginsOpen] = useState(false)
@@ -289,9 +248,6 @@ export function RightPanel({
   const [lspConfig, setLspConfig] = useState<LspConfig | null>(null)
   const [lspStatus, setLspStatus] = useState<LspStatus | null>(null)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
-  const [marketSkillMap, setMarketSkillMap] = useState<Record<string, RightPanelSkillMarketInfo>>(
-    {}
-  )
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
   const [hooks, setHooks] = useState<DisplayHook[]>([])
@@ -333,39 +289,6 @@ export function RightPanel({
   useEffect(() => {
     let cancelled = false
 
-    const loadMarketSkills = async (): Promise<void> => {
-      try {
-        const res = await marketApi.getSkills()
-        if (!res.success || !res.data || cancelled) return
-
-        const next: Record<string, RightPanelSkillMarketInfo> = {}
-        for (const item of res.data) {
-          const normalized = normalizeRightPanelSkillName(item.name)
-          if (!normalized) continue
-          next[normalized] = {
-            name: item.name,
-            chinese_name: item.chinese_name
-          }
-        }
-
-        if (!cancelled) {
-          setMarketSkillMap(next)
-        }
-      } catch (error) {
-        console.warn("[RightPanel] Failed to load market skills:", error)
-      }
-    }
-
-    void loadMarketSkills()
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-
     const loadLspSummary = async (): Promise<void> => {
       try {
         const cfg = await window.api.lsp.getConfig()
@@ -399,19 +322,6 @@ export function RightPanel({
       setAgentsOpen(true)
     }
   }, [skillGenerationAgent.phase])
-
-  useEffect(() => {
-    setSystemConstraintsOpen(false)
-  }, [currentThreadId])
-
-  useEffect(() => {
-    if (!showSystemConstraints) return
-    if (rightPanelWorkRequest?.target !== "systemConstraints") return
-    if (rightPanelWorkRequest.threadId !== currentThreadId) return
-    if (handledWorkRequestIdsRef.current.has(rightPanelWorkRequest.id)) return
-    handledWorkRequestIdsRef.current.add(rightPanelWorkRequest.id)
-    setSystemConstraintsOpen(true)
-  }, [currentThreadId, rightPanelWorkRequest, showSystemConstraints])
 
   // Auto-open once when an ordinary task subagent starts.
   useEffect(() => {
@@ -728,7 +638,6 @@ export function RightPanel({
   // Store content heights in pixels (null = auto/equal distribution)
   const [tasksHeight, setTasksHeight] = useState<number | null>(null)
   const [filesHeight, setFilesHeight] = useState<number | null>(null)
-  const [systemConstraintsHeight, setSystemConstraintsHeight] = useState<number | null>(null)
   const [agentsHeight, setAgentsHeight] = useState<number | null>(null)
   const [skillsHeight, setSkillsHeight] = useState<number | null>(null)
   const [pluginsHeight, setPluginsHeight] = useState<number | null>(null)
@@ -739,7 +648,6 @@ export function RightPanel({
   const dragStartHeights = useRef<{
     tasks: number
     files: number
-    systemConstraints: number
     agents: number
     skills: number
     plugins: number
@@ -756,17 +664,15 @@ export function RightPanel({
     const openPanels = [
       tasksOpen,
       filesOpen,
-      showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
       pluginsOpen,
       hooksOpen,
       lspOpen
     ]
-    const sectionCount = showSystemConstraints ? 8 : 7
-    let used = HEADER_HEIGHT * sectionCount
+    let used = HEADER_HEIGHT * 7
     // Fixed visual gaps between section blocks
-    used += SECTION_GAP * (sectionCount - 1)
+    used += SECTION_GAP * 6
 
     // Count handles between consecutive open panels
     let handles = 0
@@ -778,18 +684,7 @@ export function RightPanel({
     used += HANDLE_HEIGHT * handles
 
     return Math.max(0, totalHeight - used)
-  }, [
-    moduleMode,
-    tasksOpen,
-    filesOpen,
-    showSystemConstraints,
-    systemConstraintsOpen,
-    agentsOpen,
-    skillsOpen,
-    pluginsOpen,
-    hooksOpen,
-    lspOpen
-  ])
+  }, [moduleMode, tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
 
   // Get current heights for each panel's content area
   const getContentHeights = useCallback(() => {
@@ -797,7 +692,6 @@ export function RightPanel({
     const openCount = [
       tasksOpen,
       filesOpen,
-      showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
       pluginsOpen,
@@ -806,16 +700,7 @@ export function RightPanel({
     ].filter(Boolean).length
 
     if (openCount === 0) {
-      return {
-        tasks: 0,
-        files: 0,
-        systemConstraints: 0,
-        agents: 0,
-        skills: 0,
-        plugins: 0,
-        hooks: 0,
-        lsp: 0
-      }
+      return { tasks: 0, files: 0, agents: 0, skills: 0, plugins: 0, hooks: 0, lsp: 0 }
     }
 
     const defaultHeight = available / openCount
@@ -823,10 +708,6 @@ export function RightPanel({
     return {
       tasks: tasksOpen ? (tasksHeight ?? defaultHeight) : 0,
       files: filesOpen ? (filesHeight ?? defaultHeight) : 0,
-      systemConstraints:
-        showSystemConstraints && systemConstraintsOpen
-          ? (systemConstraintsHeight ?? defaultHeight)
-          : 0,
       agents: agentsOpen ? (agentsHeight ?? defaultHeight) : 0,
       skills: skillsOpen ? (skillsHeight ?? defaultHeight) : 0,
       plugins: pluginsOpen ? (pluginsHeight ?? defaultHeight) : 0,
@@ -837,8 +718,6 @@ export function RightPanel({
     getAvailableContentHeight,
     tasksOpen,
     filesOpen,
-    showSystemConstraints,
-    systemConstraintsOpen,
     agentsOpen,
     skillsOpen,
     pluginsOpen,
@@ -846,7 +725,6 @@ export function RightPanel({
     lspOpen,
     tasksHeight,
     filesHeight,
-    systemConstraintsHeight,
     agentsHeight,
     skillsHeight,
     pluginsHeight,
@@ -1185,28 +1063,17 @@ export function RightPanel({
   useEffect(() => {
     setTasksHeight(null)
     setFilesHeight(null)
-    setSystemConstraintsHeight(null)
     setAgentsHeight(null)
     setSkillsHeight(null)
     setPluginsHeight(null)
     setHooksHeight(null)
     setLspHeight(null)
-  }, [
-    tasksOpen,
-    filesOpen,
-    systemConstraintsOpen,
-    agentsOpen,
-    skillsOpen,
-    pluginsOpen,
-    hooksOpen,
-    lspOpen
-  ])
+  }, [tasksOpen, filesOpen, agentsOpen, skillsOpen, pluginsOpen, hooksOpen, lspOpen])
 
   // Calculate heights in an effect (refs can't be accessed during render)
   const [heights, setHeights] = useState<PanelHeights>({
     tasks: 0,
     files: 0,
-    systemConstraints: 0,
     agents: 0,
     skills: 0,
     plugins: 0,
@@ -1221,7 +1088,6 @@ export function RightPanel({
     moduleMode === "work" &&
     !tasksOpen &&
     !filesOpen &&
-    !(showSystemConstraints && systemConstraintsOpen) &&
     !agentsOpen &&
     !skillsOpen &&
     !pluginsOpen &&
@@ -1326,9 +1192,7 @@ export function RightPanel({
           </div>
 
           {/* Resize handle after TASKS */}
-          {tasksOpen && (filesOpen || (!showSystemConstraints && agentsOpen)) && (
-            <ResizeHandle onDrag={handleTasksResize} />
-          )}
+          {tasksOpen && (filesOpen || agentsOpen) && <ResizeHandle onDrag={handleTasksResize} />}
 
           {/* FILES */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
@@ -1347,33 +1211,7 @@ export function RightPanel({
           </div>
 
           {/* Resize handle after FILES */}
-          {!showSystemConstraints && filesOpen && agentsOpen && (
-            <ResizeHandle onDrag={handleFilesResize} />
-          )}
-
-          {showSystemConstraints && (
-            <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
-              <SectionHeader
-                title="系统约束"
-                icon={ShieldCheck}
-                detail={
-                  <span className="text-xs text-muted-foreground tabular-nums">
-                    {systemConstraintCounts.loaded}/{systemConstraintCounts.total}
-                  </span>
-                }
-                isOpen={systemConstraintsOpen}
-                onToggle={() => setSystemConstraintsOpen((prev) => !prev)}
-              />
-              {systemConstraintsOpen && (
-                <div
-                  className="overflow-auto right-panel-scroll"
-                  style={{ height: heights.systemConstraints }}
-                >
-                  <SystemConstraintsPanel state={threadState?.harnessAgentmdLoadStatus} />
-                </div>
-              )}
-            </div>
-          )}
+          {filesOpen && agentsOpen && <ResizeHandle onDrag={handleFilesResize} />}
 
           {/* AGENTS */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
@@ -1409,12 +1247,7 @@ export function RightPanel({
             />
             {skillsOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.skills }}>
-                <SkillsContent
-                  skills={skills}
-                  disabledSkills={disabledSkills}
-                  marketSkillMap={marketSkillMap}
-                  threadId={currentThreadId}
-                />
+                <SkillsContent skills={skills} disabledSkills={disabledSkills} />
               </div>
             )}
           </div>
@@ -1764,87 +1597,45 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
         if (cancelled) return
         setWorkspacePath(path)
 
-        if (!path) return
-
-        if (hasLoadedWorkspaceFiles(threadId, path)) {
-          // A cached tree may have missed changes while its watcher was evicted.
-          // Re-arm the watcher and refresh once only when it had to be recreated.
-          const watcherResult = await window.api.workspace.ensureWatching(threadId)
-          if (cancelled || !watcherResult.success || !watcherResult.restarted) return
-          markWorkspaceFilesStale(threadId, path)
-        }
-
-        // No successful scan for this exact thread/path, or the watcher was
-        // recreated after eviction. Share an in-flight background scan.
-        const result = await loadWorkspaceFilesDeduped(threadId, path)
-        if (cancelled) return
-        // Guard against writing a stale scan (workspace switched mid-load):
-        // only accept results that match the path we resolved.
-        if (result.success && result.files && result.workspacePath === path) {
-          setWorkspaceFiles(result.files)
+        // If a folder is linked, load files from disk
+        if (path) {
+          const result = await window.api.workspace.loadFromDisk(threadId)
+          if (cancelled) return
+          if (result.success && result.files) {
+            setWorkspaceFiles(result.files)
+          }
         }
       }
     }
-    void loadWorkspace().catch((error) => {
-      if (!cancelled) {
-        console.error("[FilesContent] Failed to load workspace files:", error)
-      }
-    })
+    loadWorkspace()
 
     return () => {
       cancelled = true
     }
-    // The effect intentionally initializes once per thread. Successful scan
-    // state is tracked by threadId + workspacePath instead of array length, so
-    // an empty workspace is still considered loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
 
   // Listen for file changes from the workspace watcher
   useEffect(() => {
     if (!threadId || !setWorkspaceFiles) return
-    // Guards against an in-flight callback (started before a workspace switch)
-    // writing back after the effect re-ran for the new path. The closure's
-    // `workspacePath === result.workspacePath` check passes for the old path,
-    // so a flag set in cleanup is required to actually discard the stale write.
-    let cancelled = false
 
     const cleanup = window.api.workspace.onFilesChanged(async (data) => {
-      // Only reload if the event is for the current thread and its workspace.
-      if (data.threadId !== threadId) return
-      if (workspacePath && data.workspacePath && data.workspacePath !== workspacePath) return
-
-      const targetPath = workspacePath ?? data.workspacePath
-      if (!targetPath) return
-
-      console.log("[FilesContent] Files changed, reloading...", {
-        threadId: data.threadId,
-        workspacePath: data.workspacePath
-      })
-      // A real file-change notification requests one trailing pass if another
-      // scan is already in progress, so changes that landed mid-scan are kept.
-      markWorkspaceFilesStale(threadId, targetPath)
-      try {
-        const result = await loadWorkspaceFilesDeduped(threadId, targetPath, {
-          requestTrailingRescan: true
+      // Only reload if the event is for the current thread
+      if (data.threadId === threadId) {
+        console.log("[FilesContent] Files changed, reloading...", {
+          threadId: data.threadId,
+          workspacePath: data.workspacePath
         })
-        if (cancelled) return
-        if (result.success && result.files && result.workspacePath === targetPath) {
+        const result = await window.api.workspace.loadFromDisk(threadId)
+        if (result.success && result.files) {
           setWorkspaceFiles(result.files)
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error("[FilesContent] Failed to refresh workspace files:", error)
         }
       }
     })
 
-    return () => {
-      cancelled = true
-      cleanup()
-    }
+    return cleanup
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, workspacePath])
+  }, [threadId])
 
   return (
     <div className="flex flex-col h-full">
@@ -2514,6 +2305,9 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   const threadState = useThreadState(threadId)
   const subagents = threadState?.subagents ?? []
   const coordinatorWorkers = threadState?.coordinatorWorkers ?? []
+  const subagentToolCallCount = threadState?.subagentToolCallCount ?? 0
+  const subagentInternalLogs = threadState?.subagentInternalLogs ?? []
+  const hasRunningSubagent = subagents.some((subagent) => subagent.status === "running")
   const hasRunningCoordinatorWorker = coordinatorWorkers.some(
     (worker) => worker.status === "running"
   )
@@ -2537,15 +2331,17 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   }, [canMutateCurrentThreadState, threadId, skillRetryContext, setSkillGenerationPhase])
 
   useEffect(() => {
-    if (!hasRunningCoordinatorWorker) return
+    if (!hasRunningSubagent && !hasRunningCoordinatorWorker) return
     const timer = window.setInterval(() => setSharedNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [hasRunningCoordinatorWorker])
+  }, [hasRunningSubagent, hasRunningCoordinatorWorker])
 
   if (
     subagents.length === 0 &&
     coordinatorWorkers.length === 0 &&
-    !hasSkillGen
+    !hasSkillGen &&
+    subagentToolCallCount === 0 &&
+    subagentInternalLogs.length === 0
   ) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
@@ -2558,6 +2354,15 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
 
   return (
     <div className="p-3 space-y-3">
+      {hasSubagentToolActivity(subagentToolCallCount, subagentInternalLogs) && (
+        <SubagentCurrentToolCard
+          logs={subagentInternalLogs}
+          toolCallCount={subagentToolCallCount}
+          hasRunningSubagent={hasRunningSubagent}
+          nowMs={sharedNowMs}
+        />
+      )}
+
       {/* Virtual skill generation card — shown above regular subagents */}
       {hasSkillGen && (
         <SkillGenerationCard
@@ -2580,7 +2385,7 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
         />
       )}
       {subagents.map((agent) => (
-        <SubagentCard key={agent.id} subagent={agent} threadId={threadId} />
+        <SubagentCard key={agent.id} subagent={agent} />
       ))}
       {coordinatorWorkers.map((worker) => (
         <CoordinatorWorkerCard
@@ -2910,10 +2715,233 @@ function resolveCoordinatorWorkerPreviewPath(
   return undefined
 }
 
+function SubagentCurrentToolCard({
+  logs,
+  toolCallCount,
+  hasRunningSubagent,
+  nowMs
+}: {
+  logs: SubagentInternalLogEntry[]
+  toolCallCount: number
+  hasRunningSubagent: boolean
+  nowMs: number
+}): React.JSX.Element {
+  const [showProcess, setShowProcess] = useState(false)
+  // Thinking entries are shown in the per-subagent card; keep this card tool-only
+  // (including `currentLog`, so thinking text is never mistaken for a tool input).
+  const toolLogs = logs.filter((entry) => entry.kind !== "assistant")
+  const currentLog =
+    [...toolLogs].reverse().find((log) => log.toolCallId || log.toolName) ?? toolLogs.at(-1)
+  const isToolWaiting = currentLog
+    ? currentLog.status !== "completed" && currentLog.result === undefined
+    : toolCallCount > 0
+  const isAwaitingNextStep =
+    hasRunningSubagent &&
+    !!currentLog &&
+    currentLog.status === "completed" &&
+    currentLog.result !== undefined
+  const isMissingFinalResult = !hasRunningSubagent && isToolWaiting && !!currentLog
+  const isActive = hasRunningSubagent && (isToolWaiting || isAwaitingNextStep || !currentLog)
+  const lastActivityMs =
+    hasRunningSubagent && currentLog?.createdAt
+      ? Math.max(0, nowMs - new Date(currentLog.createdAt).getTime())
+      : null
+  const lastActivityLabel = lastActivityMs === null ? null : formatCompactElapsed(lastActivityMs)
+  const inputSummary = summarizeSubagentToolInput(currentLog)
+  const resultSummary = summarizeSubagentToolResult(
+    currentLog,
+    hasRunningSubagent,
+    lastActivityLabel
+  )
+
+  return (
+    <div className="rounded-2xl border border-border/70 bg-gradient-to-br from-background to-muted/30 p-3 text-xs shadow-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
+          {isActive ? (
+            <Loader2 className="size-3.5 animate-spin text-sky-600 dark:text-sky-400" />
+          ) : isMissingFinalResult ? (
+            <AlertCircle className="size-3.5 text-amber-600 dark:text-amber-400" />
+          ) : (
+            <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+          )}
+          <span className="truncate font-medium text-foreground">
+            {isToolWaiting
+              ? "子代理执行中"
+              : isAwaitingNextStep
+                ? "子代理整理中"
+                : hasRunningSubagent
+                  ? "子代理运行中"
+                  : "子代理最近步骤"}
+          </span>
+        </span>
+        <Badge variant="outline">{toolCallCount} 次</Badge>
+      </div>
+
+      <div className="mt-3 rounded-xl border border-border/50 bg-background/75 px-3 py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex min-w-0 items-center gap-2 font-medium text-sky-700 dark:text-sky-300">
+            <Code2 className="size-3.5 shrink-0" />
+            <span className="truncate">{currentLog?.toolName || "等待工具调用"}</span>
+          </span>
+          <span
+            className={cn(
+              "shrink-0 rounded-full px-2 py-0.5 text-[10px]",
+              isMissingFinalResult
+                ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                : isActive
+                  ? "bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                  : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+            )}
+          >
+            {isMissingFinalResult
+              ? "未收到返回"
+              : isToolWaiting
+                ? "Waiting"
+                : isAwaitingNextStep
+                  ? "等待下一步"
+                  : "已返回"}
+          </span>
+        </div>
+
+        <div className="mt-2 space-y-1.5 text-[11px] leading-relaxed text-muted-foreground">
+          <div className="truncate">
+            <span className="text-foreground/70">输入：</span>
+            {inputSummary}
+          </div>
+          <div className="truncate">
+            <span className="text-foreground/70">状态：</span>
+            {resultSummary}
+          </div>
+        </div>
+      </div>
+
+      {/* Phase 2 (A1'): expandable real-time subagent process — thinking text,
+          tool calls and tool results. Collapsed by default so the card stays a
+          quiet status line; expand to follow the full interior as it streams. */}
+      {toolLogs.length > 0 && (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setShowProcess((value) => !value)}
+            className="text-[11px] font-medium text-sky-700 hover:underline dark:text-sky-300"
+          >
+            {showProcess ? "收起工具执行" : `展开工具执行（${toolLogs.length}）`}
+          </button>
+          {showProcess && (
+            <div className="mt-2 max-h-64 space-y-1.5 overflow-y-auto rounded-xl border border-border/50 bg-background/60 px-3 py-2">
+              {toolLogs.map((entry) => {
+                const body = entry.kind === "tool_result" ? entry.result : entry.content
+                const marker =
+                  entry.kind === "assistant" ? "💭 " : entry.kind === "tool_result" ? "↩ " : "🔧 "
+                return (
+                  <div key={entry.id} className="text-[11px] leading-relaxed">
+                    <div className="font-medium text-foreground/80">
+                      {marker}
+                      {entry.title}
+                    </div>
+                    {body && (
+                      <div className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">
+                        {body}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function summarizeSubagentToolInput(log?: SubagentInternalLogEntry): string {
+  if (!log) return "等待子代理开始执行"
+
+  const raw = log.content?.trim()
+  if (!raw) return "无明显输入"
+
+  const parsed = parseMaybeJson(raw)
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const data = parsed as Record<string, unknown>
+    const path = firstString(data.file_path, data.path)
+    const command = firstString(data.command)
+    const pattern = firstString(data.pattern, data.query)
+
+    if (command) return `命令：${compactInline(command)}`
+    if (path) return `路径：${compactPath(path)}`
+    if (pattern) return `搜索：${compactInline(pattern)}`
+  }
+
+  return compactInline(raw)
+}
+
+function summarizeSubagentToolResult(
+  log: SubagentInternalLogEntry | undefined,
+  hasRunningSubagent: boolean,
+  lastActivityLabel: string | null
+): string {
+  if (!log) {
+    return hasRunningSubagent ? "等待首次工具调用" : "尚未开始"
+  }
+  if (log.status !== "completed" && log.result === undefined) {
+    if (!hasRunningSubagent) {
+      return "子代理已结束，但该工具返回事件未收到"
+    }
+    return "等待工具返回，若长时间停留说明卡在当前工具"
+  }
+
+  if (hasRunningSubagent) {
+    return lastActivityLabel
+      ? `工具已返回，等待子代理继续 · ${lastActivityLabel}无新工具`
+      : "工具已返回，等待子代理继续"
+  }
+
+  const result = log.result?.trim()
+  if (!result) return "已返回，无详细输出"
+  if (/\[command succeeded with exit code 0\]/i.test(result)) return "执行成功"
+  const exitCodeMatch = result.match(/exit code (\d+)/i)
+  if (exitCodeMatch) return `命令结束，退出码 ${exitCodeMatch[1]}`
+  if (/error|failed|not found/i.test(result)) return compactInline(firstLine(result))
+  if (result.length > 160) return `已返回，输出约 ${result.length} 字符`
+  return compactInline(firstLine(result))
+}
+
+function parseMaybeJson(value: string): unknown | null {
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim()
+  }
+  return null
+}
+
+function firstLine(value: string): string {
+  return (
+    value
+      .split(/\r?\n/)
+      .find((line) => line.trim())
+      ?.trim() ?? ""
+  )
+}
+
 function compactInline(value: string): string {
   const compacted = value.replace(/\s+/g, " ").trim()
   if (compacted.length <= 96) return compacted
   return `${compacted.slice(0, 46)}...${compacted.slice(-32)}`
+}
+
+function compactPath(value: string): string {
+  const compacted = value.replace(/\s+/g, " ").trim()
+  if (compacted.length <= 72) return compacted
+  return `...${compacted.slice(-69)}`
 }
 
 function safeDateMs(value: string | undefined): number {
@@ -3021,35 +3049,6 @@ function countRightPanelTreeSkills(node: RightPanelSkillTreeNode): number {
   )
 }
 
-function normalizeRightPanelSkillName(value?: string): string {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-}
-
-function resolveRightPanelSkillMarketInfo(
-  skill: SkillMetadata,
-  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
-): RightPanelSkillMarketInfo | undefined {
-  if (skill.pluginId || skill.pluginName) return undefined
-  if (skill.source !== "user") return undefined
-  return marketSkillMap[normalizeRightPanelSkillName(skill.name)]
-}
-
-function getRightPanelSkillDisplayName(
-  skill: SkillMetadata,
-  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
-): string {
-  const marketInfo = resolveRightPanelSkillMarketInfo(skill, marketSkillMap)
-  if (!marketInfo) return skill.name
-
-  const marketChinese = marketInfo.chinese_name?.trim()
-  if (marketChinese) return marketChinese
-
-  const metadataChinese = skill.metadata?.chinese_name?.trim()
-  return metadataChinese || skill.name
-}
-
 function splitRightPanelSkillsByEnabled(
   skills: SkillMetadata[],
   disabledSkills: ReadonlySet<string>
@@ -3067,14 +3066,10 @@ function splitRightPanelSkillsByEnabled(
 
 function SkillsContent({
   skills,
-  disabledSkills,
-  marketSkillMap,
-  threadId
+  disabledSkills
 }: {
   skills: SkillMetadata[]
   disabledSkills: Set<string>
-  marketSkillMap: Record<string, RightPanelSkillMarketInfo>
-  threadId?: string | null
 }): React.JSX.Element {
   const [expandedTreeNodes, setExpandedTreeNodes] = useState<Set<string>>(new Set())
   const toggleTreeNode = useCallback((nodeKey: string) => {
@@ -3085,23 +3080,6 @@ function SkillsContent({
       return next
     })
   }, [])
-  const openSkillPreview = useCallback(
-    (skill: SkillMetadata) => {
-      if (!threadId) {
-        toast.error("当前线程不可用，无法预览技能文件")
-        return
-      }
-      if (!skill.path) {
-        toast.error("未找到技能文件路径")
-        return
-      }
-      emitOpenResourcePreview({
-        threadId,
-        filePath: skill.path
-      })
-    },
-    [threadId]
-  )
 
   if (skills.length === 0) {
     return (
@@ -3152,9 +3130,6 @@ function SkillsContent({
             0
           )
           const childrenExpanded = expandedTreeNodes.has(node.key)
-          const displayName = node.skill
-            ? getRightPanelSkillDisplayName(node.skill, marketSkillMap)
-            : node.label
           return (
             <div key={node.key} className="space-y-2">
               {node.skill ? (
@@ -3174,33 +3149,8 @@ function SkillsContent({
                         disabled && "text-muted-foreground line-through"
                       )}
                     >
-                      {displayName}
+                      {node.skill.name}
                     </span>
-                    <IconPopoverButton
-                      icon={<Eye className="size-3.5" />}
-                      popoverContent="可以预览完整信息"
-                      aria-label="预览完整技能信息"
-                      className="shrink-0 rounded-md p-1"
-                      stopPropagation
-                      onClick={() => {
-                        if (!node.skill) return
-                        openSkillPreview(node.skill)
-                      }}
-                    />
-                    {(node.skill.pluginName || node.skill.pluginId) && (
-                      <div className="mt-1 flex min-w-0 items-center gap-1">
-                        <Badge
-                          variant="outline"
-                          className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
-                          title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
-                        >
-                        <span className="truncate">
-                          插件
-                        </span>
-                        </Badge>
-                      </div>
-                    )}
-
                     {childCount > 0 && (
                       <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
                         <Folder className="mr-1 size-2.5" />
@@ -3213,7 +3163,19 @@ function SkillsContent({
                       </Badge>
                     )}
                   </div>
-
+                  {(node.skill.pluginName || node.skill.pluginId) && (
+                    <div className="mt-1 flex min-w-0 items-center gap-1">
+                      <Badge
+                        variant="outline"
+                        className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
+                        title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
+                      >
+                        <span className="truncate">
+                          插件 · {node.skill.pluginName ?? node.skill.pluginId}
+                        </span>
+                      </Badge>
+                    </div>
+                  )}
                   {node.skill.description && (
                     <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                       {node.skill.description}
@@ -3473,111 +3435,6 @@ const TOOL_LABEL: Record<string, string> = {
   manage_skill: "技能管理"
 }
 
-type HookSourceGroup = {
-  key: string
-  sourceLabel: string
-  title: string
-  detail?: string
-  fullPath?: string
-  badgeClassName: string
-  priority: number
-  hooks: DisplayHook[]
-}
-
-function getHookSummary(hook: DisplayHook): string {
-  if (hook.type === "prompt") return hook.prompt ?? ""
-  if (hook.type === "http") return hook.url ?? ""
-  return hook.command ?? ""
-}
-
-function getCompactPath(pathValue?: string): string | undefined {
-  if (!pathValue) return undefined
-  const normalized = pathValue.replace(/\\/g, "/").replace(/\/+$/, "")
-  const parts = normalized.split("/").filter(Boolean)
-  if (parts.length <= 2) return normalized
-  return parts.slice(-2).join("/")
-}
-
-function getHookSourcePath(hook: DisplayHook): string | undefined {
-  return hook.hookPath ?? hook.hookSourcePath
-}
-
-function getHookSourceGroupInfo(hook: DisplayHook): Omit<HookSourceGroup, "hooks"> {
-  const sourcePath = getHookSourcePath(hook)
-  const compactPath = getCompactPath(sourcePath)
-
-  if (hook.source === "workspace") {
-    return {
-      key: `workspace:${sourcePath ?? "current"}`,
-      sourceLabel: "工作区",
-      title: compactPath ?? "当前工作区",
-      fullPath: sourcePath,
-      badgeClassName: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
-      priority: 0
-    }
-  }
-
-  if (hook.source === "global") {
-    return {
-      key: "global",
-      sourceLabel: "全局",
-      title: "全局 hooks.json",
-      detail: compactPath,
-      fullPath: sourcePath,
-      badgeClassName: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
-      priority: 1
-    }
-  }
-
-  if (hook.source === "plugin") {
-    const title = hook.pluginName ?? hook.pluginId ?? compactPath ?? "未命名插件"
-    return {
-      key: `plugin:${hook.pluginId ?? hook.pluginName ?? sourcePath ?? "unknown"}`,
-      sourceLabel: "插件",
-      title,
-      detail: compactPath,
-      fullPath: sourcePath,
-      badgeClassName: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
-      priority: 2
-    }
-  }
-
-  const isPluginSkillHook = Boolean(hook.pluginName || hook.pluginId)
-  const skillTitle = hook.skillName ?? compactPath ?? "未命名技能"
-  const pluginLabel = hook.pluginName ?? hook.pluginId
-  return {
-    key: `${isPluginSkillHook ? "plugin-skill" : "skill"}:${
-      hook.pluginId ?? hook.pluginName ?? ""
-    }:${hook.skillPath ?? hook.skillName ?? sourcePath ?? "unknown"}`,
-    sourceLabel: isPluginSkillHook ? "插件技能" : "技能",
-    title: isPluginSkillHook && pluginLabel ? `${pluginLabel} · ${skillTitle}` : skillTitle,
-    detail: compactPath,
-    fullPath: sourcePath,
-    badgeClassName: isPluginSkillHook
-      ? "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400"
-      : "bg-teal-500/15 text-teal-600 dark:text-teal-400",
-    priority: isPluginSkillHook ? 3 : 4
-  }
-}
-
-function buildHookSourceGroups(hooks: DisplayHook[]): HookSourceGroup[] {
-  const groups = new Map<string, HookSourceGroup>()
-
-  for (const hook of hooks) {
-    const info = getHookSourceGroupInfo(hook)
-    const existing = groups.get(info.key)
-    if (existing) {
-      existing.hooks.push(hook)
-    } else {
-      groups.set(info.key, { ...info, hooks: [hook] })
-    }
-  }
-
-  return Array.from(groups.values()).sort(
-    (a, b) => a.priority - b.priority || a.title.localeCompare(b.title, "zh-Hans-CN")
-  )
-}
-
 function HooksContent({
   hooks,
   onChange
@@ -3595,10 +3452,8 @@ function HooksContent({
     )
   }
 
-  const enabledHooks = hooks.filter((h) => h.enabled)
-  const disabledHooks = hooks.filter((h) => !h.enabled)
-  const enabledGroups = buildHookSourceGroups(enabledHooks)
-  const disabledGroups = buildHookSourceGroups(disabledHooks)
+  const enabled = hooks.filter((h) => h.enabled)
+  const disabled = hooks.filter((h) => !h.enabled)
 
   const handleToggle = async (hook: DisplayHook): Promise<void> => {
     try {
@@ -3619,7 +3474,7 @@ function HooksContent({
     // A plugin-owned skill hook: source="skill" but with pluginName / pluginId set.
     // Show its origin (plugin → skill) so users can tell it apart from a stand-alone skill hook.
     const isPluginSkillHook = isSkillHook && Boolean(hook.pluginName || hook.pluginId)
-    const summary = getHookSummary(hook)
+    const summary = isPrompt ? (hook.prompt ?? "") : (hook.command ?? "")
     const ownerLabel = isPluginHook
       ? hook.pluginName
       : isPluginSkillHook && hook.skillName
@@ -3738,70 +3593,18 @@ function HooksContent({
     )
   }
 
-  const renderHookGroup = (group: HookSourceGroup): React.JSX.Element => {
-    return (
-      <details
-        key={group.key}
-        className="group/source space-y-2 border-t border-border/60 pt-2 first:border-t-0 first:pt-0"
-        open
-      >
-        <summary
-          className="flex cursor-pointer list-none items-center justify-between gap-2 px-1"
-          title={group.fullPath}
-        >
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            <ChevronRight className="size-3 shrink-0 text-muted-foreground transition-transform group-open/source:rotate-90" />
-            <span
-              className={cn(
-                "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                group.badgeClassName
-              )}
-            >
-              {group.sourceLabel}
-            </span>
-            <span className="min-w-0 truncate text-xs font-medium text-foreground/90">
-              {group.title}
-            </span>
-          </div>
-          <Badge
-            variant="outline"
-            className="h-5 shrink-0 text-[10px]"
-            title={`${group.hooks.length} 个 Hook`}
-          >
-            {group.hooks.length}
-          </Badge>
-        </summary>
-        {group.detail && group.detail !== group.title && (
-          <div
-            className="min-w-0 truncate px-6 text-[10px] text-muted-foreground"
-            title={group.fullPath}
-          >
-            {group.detail}
-          </div>
-        )}
-        <div className="space-y-2">{group.hooks.map(renderHookCard)}</div>
-      </details>
-    )
-  }
-
   return (
     <div className="p-3 space-y-2">
-      {enabledGroups.map(renderHookGroup)}
-      {disabledGroups.length > 0 && (
-        <details
-          className="group/disabled rounded-sm border border-border/70 bg-muted/20 px-2 py-2"
-          open={enabledGroups.length === 0}
-        >
+      {enabled.length > 0 && enabled.map(renderHookCard)}
+      {disabled.length > 0 && (
+        <details className="rounded-sm border border-border/70 bg-muted/20 px-2 py-2">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <ChevronRight className="size-3 shrink-0 transition-transform group-open/disabled:rotate-90" />
-              <span>已禁用</span>
-            </span>
-            <Badge variant="outline" className="h-5 shrink-0 text-[10px]">
-              {disabledHooks.length}
+            <span>已禁用</span>
+            <Badge variant="outline" className="text-[10px] h-5">
+              {disabled.length}
             </Badge>
           </summary>
-          <div className="space-y-2 pt-2">{disabledGroups.map(renderHookGroup)}</div>
+          <div className="space-y-2 pt-2">{disabled.map(renderHookCard)}</div>
         </details>
       )}
     </div>

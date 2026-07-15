@@ -7,11 +7,6 @@ export type CheckpointVisibleMessageTimeTarget = {
   start_at?: Date
   end_at?: Date
 }
-export type CheckpointPersistedMessageTimeTarget = {
-  id: string
-  created_at: Date
-  start_at?: Date
-}
 
 const toDate = (value: string | undefined): Date | undefined => {
   if (!value) return undefined
@@ -48,28 +43,6 @@ export function restoreRawCheckpointMessageTime(params: {
 }
 
 const offsetDate = (date: Date, offsetMs: number): Date => new Date(date.getTime() + offsetMs)
-
-const validDate = (date: Date | undefined): Date | undefined => {
-  return date && Number.isFinite(date.getTime()) ? date : undefined
-}
-
-export function latestPersistedCheckpointMessageAt(
-  visibleCheckpointMessages: readonly Pick<CheckpointVisibleMessageTimeTarget, "id">[],
-  persistedMessages: readonly CheckpointPersistedMessageTimeTarget[]
-): Date | undefined {
-  const checkpointMessageIds = new Set(
-    visibleCheckpointMessages.map((message) => message.id).filter(Boolean)
-  )
-  if (checkpointMessageIds.size === 0) return undefined
-
-  let latest: Date | undefined
-  for (const message of persistedMessages) {
-    if (!checkpointMessageIds.has(message.id)) continue
-    const candidate = validDate(message.start_at) ?? validDate(message.created_at)
-    if (candidate && (!latest || candidate > latest)) latest = candidate
-  }
-  return latest
-}
 
 export function restoreVisibleCheckpointMessageTimes<T extends CheckpointVisibleMessageTimeTarget>(
   messages: T[],

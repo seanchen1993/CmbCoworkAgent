@@ -182,11 +182,7 @@ async function testSlashParsing(): Promise<void> {
   const withMessyAttachmentName = parseGoalSlashCommand(
     '/goal summarize escaped attachment\n\n<attachment filename="line&#10;break &amp; docs.txt" type="text/plain" size="4">\ndata\n</attachment>'
   )
-  assertEqual(
-    withMessyAttachmentName.type,
-    "set",
-    "goal parser should set with messy attachment name"
-  )
+  assertEqual(withMessyAttachmentName.type, "set", "goal parser should set with messy attachment name")
   if (withMessyAttachmentName.type === "set") {
     assert(
       withMessyAttachmentName.context?.transportSummary?.includes("line break & docs.txt"),
@@ -364,13 +360,13 @@ async function testSlashParsing(): Promise<void> {
 
   const transportPayload = extractGoalTransportPayload(
     [
-      "/goal summarize README",
-      "",
+      '/goal summarize README',
+      '',
       '<attachment filename="notes.txt" type="text/plain" size="4">',
-      "data",
-      "</attachment>",
-      "",
-      "<CMBDEVCLAW-SKILL-USE-V1><name>docs</name><path>/tmp/SKILL.md</path></CMBDEVCLAW-SKILL-USE-V1>"
+      'data',
+      '</attachment>',
+      '',
+      '<CMBDEVCLAW-SKILL-USE-V1><name>docs</name><path>/tmp/SKILL.md</path></CMBDEVCLAW-SKILL-USE-V1>'
     ].join("\n")
   )
   assert(
@@ -401,11 +397,7 @@ async function testGoalLifecycle(): Promise<void> {
       transportSummary: "显式技能：docs"
     }
   })
-  assertEqual(
-    skillGoal.objective,
-    "use selected skill",
-    "context summary should not pollute objective"
-  )
+  assertEqual(skillGoal.objective, "use selected skill", "context summary should not pollute objective")
   assertEqual(
     skillGoal.context.explicitSkill?.path,
     "/tmp/SKILL.md",
@@ -429,11 +421,7 @@ async function testGoalLifecycle(): Promise<void> {
 }
 
 async function testDisplayGoalPausedReasonNormalizesInternalCodes(): Promise<void> {
-  assertEqual(
-    displayGoalPausedReason("user-paused"),
-    "已手动暂停。",
-    "user-paused should be friendly"
-  )
+  assertEqual(displayGoalPausedReason("user-paused"), "已手动暂停。", "user-paused should be friendly")
   assertEqual(
     displayGoalPausedReason("user-cancelled"),
     "你已取消当前运行。",
@@ -749,7 +737,10 @@ function testGoalContinuationPreservesExplicitSkillHookContext(): void {
 }
 
 async function testNonGoalPromptRewriteStillReplacesPromptDirectly(): Promise<void> {
-  const rewritten = applyPromptRewritePreservingGoalMarker("hello world", "rewritten plain prompt")
+  const rewritten = applyPromptRewritePreservingGoalMarker(
+    "hello world",
+    "rewritten plain prompt"
+  )
   assertEqual(
     rewritten,
     "rewritten plain prompt",
@@ -819,10 +810,7 @@ async function testStatusLineIsActionable(): Promise<void> {
 
   manager.pause("thread-status", "user-paused")
   const pausedStatus = manager.statusLine("thread-status")
-  assert(
-    pausedStatus.includes("暂停原因：已手动暂停。"),
-    "paused status should translate internal reasons"
-  )
+  assert(pausedStatus.includes("暂停原因：已手动暂停。"), "paused status should translate internal reasons")
   manager.resume("thread-status")
 
   manager.recordJudgeDecision("thread-status", {
@@ -1193,7 +1181,8 @@ function testCurrentTurnAssistantResponseDoesNotFallBackToPreviousTurn(): void {
   assertEqual(
     getCurrentTurnAssistantResponse({
       assistantText: previous,
-      currentTurnAssistantStart: previous.length
+      currentTurnAssistantStart: previous.length,
+      lastFinalText: ""
     }),
     "",
     "current-turn response extraction should not fall back to previous assistant text"
@@ -1202,116 +1191,21 @@ function testCurrentTurnAssistantResponseDoesNotFallBackToPreviousTurn(): void {
   assertEqual(
     getCurrentTurnAssistantResponse({
       assistantText: `${previous}<think>hidden</think>\n本轮可见回复`,
-      currentTurnAssistantStart: previous.length
+      currentTurnAssistantStart: previous.length,
+      lastFinalText: ""
     }),
     "本轮可见回复",
     "current-turn response extraction should slice from the current turn boundary and strip thinking"
   )
 
-  // AE-1 regression: a turn that ends with only this-turn reasoning before the
-  // boundary (i.e. no new final text after it) must return EMPTY — it must not
-  // resurrect any prior-turn final answer. The function intentionally has no
-  // cross-turn backfill, so the only signal is the current-turn slice.
   assertEqual(
     getCurrentTurnAssistantResponse({
-      assistantText: `${previous}本轮工具阶段，无最终文本`,
-      currentTurnAssistantStart: `${previous}本轮工具阶段，无最终文本`.length
-    }),
-    "",
-    "an empty current-turn slice must stay empty — no stale prior-turn final leaks in (AE-1)"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: `${previous}本轮流式草稿`,
+      assistantText: previous,
       currentTurnAssistantStart: previous.length,
-      lastFinalText: "本轮 values 快照最终回复"
+      lastFinalText: "最终回复优先"
     }),
-    "本轮 values 快照最终回复",
-    "current-turn values snapshot should take precedence over an incomplete streaming draft"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "",
-      currentTurnAssistantStart: 0,
-      lastFinalText: "values-only 最终回复"
-    }),
-    "values-only 最终回复",
-    "values-only final answer should still be visible to the goal evaluator"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "<think>unfinished hidden reasoning",
-      currentTurnAssistantStart: 0
-    }),
-    "<think>unfinished hidden reasoning",
-    "unclosed think text without a standalone opening tag should be preserved as visible text"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "<think>\nunfinished hidden reasoning",
-      currentTurnAssistantStart: 0
-    }),
-    "",
-    "unclosed think-only output with a standalone opening tag should be treated as empty assistant response"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "<think> 标签是字面量说明，后续内容不能被删。",
-      currentTurnAssistantStart: 0
-    }),
-    "<think> 标签是字面量说明，后续内容不能被删。",
-    "literal think tag at the start of visible text should not erase the answer"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "<think>标签是字面量说明",
-      currentTurnAssistantStart: 0
-    }),
-    "<think>标签是字面量说明",
-    "literal think tag followed by text should not erase the answer"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "<think>: literal label",
-      currentTurnAssistantStart: 0
-    }),
-    "<think>: literal label",
-    "literal think tag followed by punctuation should not erase the answer"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "<think>：字面量说明",
-      currentTurnAssistantStart: 0
-    }),
-    "<think>：字面量说明",
-    "literal think tag followed by full-width punctuation should not erase the answer"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "请在文档中展示字面量 <think> 标签，并保留后续说明。",
-      currentTurnAssistantStart: 0
-    }),
-    "请在文档中展示字面量 <think> 标签，并保留后续说明。",
-    "literal unclosed think tags inside visible text should not erase the answer"
-  )
-
-  assertEqual(
-    getCurrentTurnAssistantResponse({
-      assistantText: "",
-      currentTurnAssistantStart: 0,
-      lastFinalText: "最终回复包含字面量 <think> 标签和后续说明。"
-    }),
-    "最终回复包含字面量 <think> 标签和后续说明。",
-    "values final text should preserve literal unclosed think tags inside visible text"
+    "最终回复优先",
+    "explicit current final response should still win when present"
   )
 }
 

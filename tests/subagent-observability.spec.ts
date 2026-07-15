@@ -64,16 +64,6 @@ async function testTransportCountsHiddenSubagentTools(): Promise<void> {
   assertIncludes(transport, 'type: "subagent_tool_count"', "transport emits aggregate count event")
   assertIncludes(transport, 'type: "subagent_log_reset"', "transport resets subagent logs per run")
   assertIncludes(transport, 'type: "subagent_log_entry"', "transport emits subagent log entries")
-  assertIncludes(
-    transport,
-    'type: "subagent_transcript_message"',
-    "transport emits full subagent transcript messages"
-  )
-  assertIncludes(
-    transport,
-    "private subagentToolOwnerIds",
-    "transport tracks ownership for late subagent tool results"
-  )
   assertIncludes(transport, 'kind: "tool_result"', "transport logs hidden subagent tool results")
   assertIncludes(transport, 'status: "waiting"', "transport marks tool calls as waiting")
   assertIncludes(transport, 'status: "completed"', "transport marks tool results as completed")
@@ -103,9 +93,6 @@ async function testTransportCountsHiddenSubagentTools(): Promise<void> {
 async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   const threadStateHelpers = await readProjectFile("src/renderer/src/lib/thread-state-helpers.ts")
-  const subagentTranscripts = await readProjectFile("src/renderer/src/lib/subagent-transcripts.ts")
-  const subagentState = await readProjectFile("src/renderer/src/lib/subagent-state.ts")
-  const streamConverter = await readProjectFile("src/main/agent/stream-converter.ts")
 
   assertIncludes(
     threadContext,
@@ -116,11 +103,6 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
     threadContext,
     "subagentInternalLogs: SubagentInternalLogEntry[]",
     "thread state exposes internal logs"
-  )
-  assertIncludes(
-    threadContext,
-    "subagentTranscripts: Record<string, Message[]>",
-    "thread state exposes full subagent transcripts"
   )
   assertIncludes(
     threadContext,
@@ -145,11 +127,6 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "subagentTranscripts: {}",
-    "thread state defaults subagent transcripts to empty"
-  )
-  assertIncludes(
-    threadContext,
     "coordinatorWorkers: []",
     "thread state defaults coordinator workers to empty"
   )
@@ -162,106 +139,6 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
     threadContext,
     'case "subagent_log_entry"',
     "thread context handles internal log events"
-  )
-  assertIncludes(
-    threadContext,
-    'case "subagent_transcript_message"',
-    "thread context handles full subagent transcript events"
-  )
-  assertIncludes(
-    threadContext,
-    "upsertTranscriptMessages",
-    "thread context merges subagent transcript updates"
-  )
-  assertIncludes(
-    threadContext,
-    "subagentTranscriptsRef",
-    "thread context keeps a synchronous subagent transcript ref to avoid batched update loss"
-  )
-  assertIncludes(
-    subagentTranscripts,
-    'SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY = "subagentTranscripts"',
-    "subagent transcript helper stores transcripts in thread values"
-  )
-  assertIncludes(
-    subagentTranscripts,
-    "getSubagentTranscriptsFromThreadValues",
-    "subagent transcript helper restores persisted transcripts"
-  )
-  assertIncludes(
-    subagentTranscripts,
-    "serializeSubagentTranscripts",
-    "subagent transcript helper serializes transcripts before persistence"
-  )
-  assertIncludes(
-    subagentTranscripts,
-    "mergeTranscriptToolCalls",
-    "subagent transcript helper merges assistant tool calls by id"
-  )
-  assertIncludes(
-    threadContext,
-    "scheduleSubagentTranscriptsPersist",
-    "thread context debounces subagent transcript persistence"
-  )
-  assertIncludes(
-    threadContext,
-    "[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: serializeSubagentTranscripts(subset)",
-    "thread context persists transcript snapshots through thread values"
-  )
-  assertIncludes(
-    threadContext,
-    "subagentTranscriptDirtyIdsRef",
-    "thread context persists only the subagents that changed since the last persist"
-  )
-  assertIncludes(
-    threadContext,
-    "persistedSubagentTranscripts = getSubagentTranscriptsFromThreadValues(",
-    "thread context reads persisted transcripts while loading history"
-  )
-  assertIncludes(
-    threadContext,
-    "clearSchedulerStreamingForThread",
-    "thread context clears all scheduler stream accumulators for a thread"
-  )
-  assertIncludes(
-    threadContext,
-    "const subagentPrefix = `${threadId}:subagent:`",
-    "thread context targets subagent accumulator keys during cleanup"
-  )
-  assertIncludes(
-    threadContext,
-    "key.startsWith(subagentPrefix)",
-    "thread context removes subagent accumulator keys during cleanup"
-  )
-  assertIncludes(
-    threadContext,
-    "finalizeRunningSubagentsForStoppedStream",
-    "thread context finalizes running subagents when the parent stream stops"
-  )
-  assertIncludes(
-    threadContext,
-    'status: "cancelled" as const',
-    "thread context marks still-running subagents as cancelled on parent stop"
-  )
-  assertIncludes(
-    threadContext,
-    "resolveIncomingSubagentStatus",
-    "thread context prevents late stale subagent snapshots from restoring running"
-  )
-  assertIncludes(
-    subagentState,
-    "isTerminalSubagentStatus(input.existingStatus)",
-    "subagent state preserves terminal statuses over stale running snapshots"
-  )
-  assertIncludes(
-    streamConverter,
-    "isError?: boolean",
-    "scheduler stream converter exposes tool-message error state"
-  )
-  assertIncludes(
-    streamConverter,
-    "...(isToolMessageError(kwargs) ? { isError: true } : {})",
-    "scheduler stream converter forwards failed subagent tool results"
   )
   assertIncludes(
     threadContext,
@@ -400,6 +277,7 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
     "runningCoordinatorWorkerRunKeysRef.current = runningKeys",
     "right panel stores the latest coordinator run keys after auto-open checks"
   )
+  assertIncludes(rightPanel, "subagentToolCallCount", "right panel reads aggregate tool count")
   assertIncludes(
     rightPanel,
     "CoordinatorWorkerCard",
@@ -446,15 +324,16 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
     "right panel passes the shared clock into live activity cards"
   )
   assertIncludes(rightPanel, "safeDateMs", "right panel guards invalid worker timestamps")
-  assertNotIncludes(
+  assertIncludes(rightPanel, "SubagentCurrentToolCard", "right panel renders current tool card")
+  assertIncludes(
     rightPanel,
-    "SubagentCurrentToolCard",
-    "right panel no longer renders the redundant aggregate subagent tool-status card"
+    "toolCallCount={subagentToolCallCount}",
+    "right panel merges count into current tool card"
   )
-  assertNotIncludes(
+  assertIncludes(
     rightPanel,
-    "hasSubagentToolActivity",
-    "right panel no longer shows a separate subagent current-tool activity box"
+    "hasRunningSubagent={hasRunningSubagent}",
+    "right panel passes subagent running state"
   )
   assertNotIncludes(
     rightPanel,
@@ -471,47 +350,31 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
     "useRef(Date.now())",
     "right panel no longer snapshots completion timing by calling Date.now during render"
   )
-  assertNotIncludes(
+  assertIncludes(
     rightPanel,
     "hasRunningSubagent && currentLog?.createdAt",
-    "right panel no longer computes aggregate subagent activity timing"
+    "current tool card only derives live elapsed time while the subagent is still running"
   )
-  assertNotIncludes(
-    rightPanel,
-    "子代理执行中",
-    "right panel removes redundant subagent activity label"
-  )
-  assertNotIncludes(
-    rightPanel,
-    "子代理整理中",
-    "right panel removes redundant subagent thinking label"
-  )
-  assertNotIncludes(rightPanel, "等待下一步", "right panel removes aggregate subagent step label")
-  assertNotIncludes(
-    rightPanel,
-    "summarizeSubagentToolInput",
-    "right panel removes aggregate subagent tool input summarizer"
-  )
-  assertNotIncludes(
-    rightPanel,
-    "summarizeSubagentToolResult",
-    "right panel removes aggregate subagent tool result summarizer"
-  )
-  assertNotIncludes(
+  assertIncludes(rightPanel, "子代理执行中", "right panel labels running subagent activity")
+  assertIncludes(rightPanel, "子代理整理中", "right panel labels post-tool model work")
+  assertIncludes(rightPanel, "等待下一步", "right panel shows waiting for next subagent step")
+  assertIncludes(rightPanel, "summarizeSubagentToolInput", "right panel summarizes tool input")
+  assertIncludes(rightPanel, "summarizeSubagentToolResult", "right panel summarizes tool result")
+  assertIncludes(
     rightPanel,
     "等待工具返回，若长时间停留说明卡在当前工具",
-    "right panel removes aggregate subagent waiting explanation"
+    "right panel explains tool waiting state"
   )
-  assertNotIncludes(
+  assertIncludes(
     rightPanel,
     "工具已返回，等待子代理继续",
-    "right panel removes aggregate subagent model-waiting explanation"
+    "right panel explains model waiting state after tool return"
   )
-  assertNotIncludes(rightPanel, "未收到返回", "right panel removes aggregate missing-result label")
-  assertNotIncludes(
+  assertIncludes(rightPanel, "未收到返回", "right panel labels missing late tool result")
+  assertIncludes(
     rightPanel,
     "子代理已结束，但该工具返回事件未收到",
-    "right panel removes aggregate stale missing-result explanation"
+    "right panel explains stale missing result"
   )
   assertIncludes(
     rightPanel,
@@ -526,100 +389,8 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   assertIncludes(rightPanel, "打开工具流", "right panel exposes a tool-flow entrypoint")
   assertIncludes(
     rightPanel,
-    "<SubagentCard key={agent.id} subagent={agent} threadId={threadId} />",
-    "right panel passes the panel thread id into subagent cards"
-  )
-  assertIncludes(
-    rightPanel,
     "查看消息、工具参数和执行结果",
     "right panel explains the worker tool-flow drawer content"
-  )
-
-  const subagentPanel = await readProjectFile(
-    "src/renderer/src/components/panels/SubagentPanel.tsx"
-  )
-  const appStore = await readProjectFile("src/renderer/src/lib/store.ts")
-  const app = await readProjectFile("src/renderer/src/App.tsx")
-  const subagentStreamPanel = await readProjectFile(
-    "src/renderer/src/components/chat/SubagentStreamPanel.tsx"
-  )
-
-  assertIncludes(subagentPanel, "打开完整记录", "subagent card exposes full transcript entrypoint")
-  assertNotIncludes(
-    subagentPanel,
-    "getSubagentTranscriptDisplayStats",
-    "subagent card no longer renders a transcript entry count"
-  )
-  assertNotIncludes(
-    subagentPanel,
-    "} 条",
-    "subagent card should not display a transcript message count badge"
-  )
-  assertIncludes(
-    subagentPanel,
-    "openSubagentFocusView",
-    "subagent card opens the focused transcript view"
-  )
-  assertIncludes(
-    appStore,
-    "subagentFocusView: SubagentFocusView | null",
-    "store tracks focused subagent view"
-  )
-  assertIncludes(app, "<SubagentStreamPanel />", "app renders the subagent transcript split panel")
-  assertIncludes(
-    subagentStreamPanel,
-    "子代理完整记录",
-    "subagent transcript panel has a dedicated header"
-  )
-  assertIncludes(
-    subagentStreamPanel,
-    "MessageBubble",
-    "subagent transcript panel reuses chat message rendering"
-  )
-  assertIncludes(
-    subagentStreamPanel,
-    "currentSubagent?.status ??",
-    "subagent transcript panel prefers live subagent status over the opening snapshot"
-  )
-  assertIncludes(
-    subagentStreamPanel,
-    "const parentIsRunning = focusedStream.isLoading || threadState?.scheduledTaskLoading === true",
-    "subagent transcript panel checks the parent run before showing a live status"
-  )
-  assertIncludes(
-    subagentStreamPanel,
-    'const isRunning = effectiveStatus === "running" && parentIsRunning',
-    "subagent transcript panel cannot keep spinning after the parent run stops"
-  )
-  assertIncludes(
-    subagentStreamPanel,
-    "isAtBottomRef",
-    "subagent transcript panel tracks whether the user is already at the bottom"
-  )
-  assertIncludes(
-    subagentStreamPanel,
-    'viewport.addEventListener("scroll", updateIsAtBottom',
-    "subagent transcript panel updates the auto-scroll guard from user scrolling"
-  )
-  assertIncludes(
-    subagentStreamPanel,
-    "if (!viewport || !isAtBottomRef.current) return",
-    "subagent transcript panel only auto-scrolls while the user is pinned to the bottom"
-  )
-  assertIncludes(
-    subagentStreamPanel,
-    "hasUserAfterHeadByIndex",
-    "subagent transcript panel precomputes user-after flags instead of scanning per message"
-  )
-  assertNotIncludes(
-    subagentStreamPanel,
-    "messages.slice(index + 1).some",
-    "subagent transcript panel avoids quadratic user-after scans"
-  )
-  assertNotIncludes(
-    subagentStreamPanel,
-    'currentSubagent?.status === "running" || subagentFocusView?.status === "running"',
-    "subagent transcript panel should not keep showing running from stale focus status"
   )
 }
 

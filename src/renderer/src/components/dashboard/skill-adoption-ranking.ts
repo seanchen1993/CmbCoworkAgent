@@ -2,17 +2,12 @@ export type SkillAdoptionSortKey =
   | "measuredAdoptionRate"
   | "inclusiveAdoptionRate"
   | "pushedAdoptionRate"
-  | "inclusivePushedAdoptionRate"
   | "adoptedLines"
   | "commitCount"
   | "pushedCommitCount"
 
 export interface SkillAdoptionRankingItem {
-  id?: string
   skill: string
-  sourceRef?: string
-  isPlugin?: boolean
-  pluginName?: string
   generatedLines: number
   measuredGeneratedLines: number
   effectiveGeneratedLines: number
@@ -26,17 +21,15 @@ export interface SkillAdoptionRankingItem {
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
   pushedAdoptionRate: number | null
-  inclusivePushedAdoptionRate: number | null
   commitCount: number
 }
 
 export const DEFAULT_SKILL_ADOPTION_SORT: SkillAdoptionSortKey = "measuredAdoptionRate"
 
 export const SKILL_ADOPTION_SORT_LABELS: Record<SkillAdoptionSortKey, string> = {
-  measuredAdoptionRate: "提交采纳率",
-  inclusiveAdoptionRate: "总量提交采纳率",
-  pushedAdoptionRate: "入库采纳率",
-  inclusivePushedAdoptionRate: "总量入库采纳率",
+  measuredAdoptionRate: "已Commit采纳率",
+  inclusiveAdoptionRate: "含未提交采纳率",
+  pushedAdoptionRate: "已 Push 采纳率",
   adoptedLines: "采纳代码行数",
   commitCount: "提交次数",
   pushedCommitCount: "Push 次数"
@@ -61,15 +54,16 @@ export function sortSkillAdoptionItems(
     if (aValue !== null && bValue === null) return -1
     if (aValue !== null && bValue !== null && aValue !== bValue) return bValue - aValue
     if (a.adoptedLines !== b.adoptedLines) return b.adoptedLines - a.adoptedLines
-    return `${a.skill}${a.pluginName ?? ""}`.localeCompare(
-      `${b.skill}${b.pluginName ?? ""}`,
-      "zh-CN"
-    )
+    return a.skill.localeCompare(b.skill, "zh-CN")
   })
 }
 
 function normalizeRankingLookup(value: string): string {
-  return value.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim()
+  return value
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
 }
 
 export function matchesSkillAdoptionQuery(name: string, query: string): boolean {
@@ -78,9 +72,7 @@ export function matchesSkillAdoptionQuery(name: string, query: string): boolean 
 
   const rawQuery = trimmed.toLowerCase()
   const normalizedQuery = normalizeRankingLookup(trimmed)
-  return (
-    name.toLowerCase().includes(rawQuery) || normalizeRankingLookup(name).includes(normalizedQuery)
-  )
+  return name.toLowerCase().includes(rawQuery) || normalizeRankingLookup(name).includes(normalizedQuery)
 }
 
 export function filterSkillAdoptionItems(
@@ -89,10 +81,5 @@ export function filterSkillAdoptionItems(
 ): SkillAdoptionRankingItem[] {
   const trimmed = query.trim()
   if (!trimmed) return items
-  return items.filter((item) =>
-    matchesSkillAdoptionQuery(
-      item.pluginName ? `${item.skill} ${item.pluginName}` : item.skill,
-      trimmed
-    )
-  )
+  return items.filter((item) => matchesSkillAdoptionQuery(item.skill, trimmed))
 }

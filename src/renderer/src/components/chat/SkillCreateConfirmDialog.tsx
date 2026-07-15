@@ -6,7 +6,7 @@
  * content before approving or rejecting.
  */
 
-import React, { useEffect, useState } from "react"
+import React, { useState } from "react"
 import { Sparkles, ChevronDown, ChevronUp, CheckCircle2, XCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
@@ -16,6 +16,7 @@ import {
   DialogTitle,
   DialogDescription
 } from "@/components/ui/dialog"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 
 export interface SkillConfirmRequest {
@@ -28,7 +29,7 @@ export interface SkillConfirmRequest {
 
 interface SkillCreateConfirmDialogProps {
   request: SkillConfirmRequest | null
-  onApprove: (requestId: string, content: string) => void
+  onApprove: (requestId: string) => void
   onReject: (requestId: string) => void
 }
 
@@ -38,16 +39,8 @@ export function SkillCreateConfirmDialog({
   onReject
 }: SkillCreateConfirmDialogProps): React.JSX.Element | null {
   const [showContent, setShowContent] = useState(false)
-  const [draftContent, setDraftContent] = useState("")
-
-  useEffect(() => {
-    setShowContent(false)
-    setDraftContent(request?.content ?? "")
-  }, [request?.requestId, request?.content])
 
   if (!request) return null
-
-  const canApprove = draftContent.trim().length > 0
 
   return (
     <Dialog open={!!request} onOpenChange={(open) => {
@@ -82,27 +75,24 @@ export function SkillCreateConfirmDialog({
             </div>
           </div>
 
-          {/* Editable SKILL.md draft */}
+          {/* Expandable SKILL.md preview */}
           <div className="rounded-lg border overflow-hidden">
             <button
               className="w-full flex items-center justify-between px-3 py-2 text-xs text-muted-foreground hover:bg-muted/40 transition-colors"
               onClick={() => setShowContent((v) => !v)}
             >
-              <span>查看/编辑完整 SKILL.md 草稿</span>
+              <span>查看完整 SKILL.md 内容</span>
               {showContent
                 ? <ChevronUp className="w-3.5 h-3.5" />
                 : <ChevronDown className="w-3.5 h-3.5" />
               }
             </button>
             {showContent && (
-              <div className="border-t">
-                <textarea
-                  value={draftContent}
-                  onChange={(event) => setDraftContent(event.target.value)}
-                  spellCheck={false}
-                  className="h-72 w-full resize-y bg-background p-3 font-mono text-xs leading-relaxed text-foreground/90 outline-none focus:ring-1 focus:ring-primary/40"
-                />
-              </div>
+              <ScrollArea className="max-h-56 border-t">
+                <pre className="p-3 text-xs font-mono whitespace-pre-wrap break-words text-foreground/80 leading-relaxed">
+                  {request.content}
+                </pre>
+              </ScrollArea>
             )}
           </div>
 
@@ -128,8 +118,7 @@ export function SkillCreateConfirmDialog({
           <Button
             size="sm"
             className="gap-1.5"
-            disabled={!canApprove}
-            onClick={() => onApprove(request.requestId, draftContent)}
+            onClick={() => onApprove(request.requestId)}
           >
             <CheckCircle2 className="w-3.5 h-3.5" />
             保存技能

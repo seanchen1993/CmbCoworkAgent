@@ -125,7 +125,7 @@ async function seedPausedGoalThread(threadId: string): Promise<void> {
     updatedAt: now
   })
   await db.flush()
-  await db.closeDatabase()
+  db.closeDatabase()
 }
 
 function log(message: string): void {

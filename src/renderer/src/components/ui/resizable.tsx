@@ -14,33 +14,14 @@ export function ResizeHandle({ onDrag }: ResizeHandleProps) {
     (e: React.MouseEvent) => {
       e.preventDefault()
       startXRef.current = e.clientX
-      let frame: number | null = null
-      let latestDelta = 0
-
-      const flushDrag = (): void => {
-        frame = null
-        onDrag(latestDelta)
-      }
-
-      const scheduleDrag = (delta: number): void => {
-        latestDelta = delta
-        if (frame === null) {
-          frame = window.requestAnimationFrame(flushDrag)
-        }
-      }
 
       const handleMouseMove = (e: MouseEvent) => {
         // Calculate total delta from drag start
         const totalDelta = e.clientX - startXRef.current
-        scheduleDrag(totalDelta)
+        onDrag(totalDelta)
       }
 
       const handleMouseUp = () => {
-        if (frame !== null) {
-          window.cancelAnimationFrame(frame)
-          frame = null
-          onDrag(latestDelta)
-        }
         document.removeEventListener("mousemove", handleMouseMove)
         document.removeEventListener("mouseup", handleMouseUp)
         document.body.style.cursor = ""

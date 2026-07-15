@@ -1,44 +1,8 @@
 import type { MarketApiResponse, MarketItem, MarketItemType } from "../../../api/market"
 
 const MOCK_CREATED_AT = "2026-01-01T00:00:00.000Z"
-const MOCK_UPDATED_AT_OFFSET_MS = 1000 * 60 * 60 * 6
 
-type MarketExtraJson = {
-  updated_at?: string
-  [key: string]: unknown
-}
-
-function buildMockUpdatedAt(createdAt: string): string {
-  const timestamp = new Date(createdAt).getTime()
-  if (Number.isNaN(timestamp)) return MOCK_CREATED_AT
-  return new Date(timestamp + MOCK_UPDATED_AT_OFFSET_MS).toISOString()
-}
-
-function appendUpdatedAtToExtraJson(extraJson: string | undefined, updatedAt: string): string | undefined {
-  if (!extraJson?.trim()) return extraJson
-
-  try {
-    const parsed = JSON.parse(extraJson) as MarketExtraJson
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return extraJson
-    return JSON.stringify({
-      ...parsed,
-      updated_at: parsed.updated_at || updatedAt
-    })
-  } catch {
-    return extraJson
-  }
-}
-
-function withMockUpdatedFields(item: MarketItem): MarketItem {
-  const updatedAt = item.updated_at || buildMockUpdatedAt(item.created_at)
-  return {
-    ...item,
-    updated_at: updatedAt,
-    extra_json: appendUpdatedAtToExtraJson(item.extra_json, updatedAt)
-  }
-}
-
-const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
+export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
   orgSkill: [],
   skill: [
     {
@@ -53,10 +17,7 @@ const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       ip: "127.0.0.1",
       description: "代码质量、规范和风险审查技能。",
       filename: "代码审查.zip",
-      created_at: MOCK_CREATED_AT,
-      extra_json: JSON.stringify({
-        grayUserIds: ["10010001", "10001"]
-      })
+      created_at: MOCK_CREATED_AT
     },
     {
       name: "需求分析",
@@ -70,10 +31,7 @@ const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       ip: "127.0.0.1",
       description: "需求理解、拆解和验收点整理技能。",
       filename: "需求分析.zip",
-      created_at: MOCK_CREATED_AT,
-      extra_json: JSON.stringify({
-        grayUserIds: ["1293078", "10001"]
-      })
+      created_at: MOCK_CREATED_AT
     },
     {
       name: "接口设计",
@@ -621,10 +579,7 @@ const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       tag: "认证",
       featured: "官方推荐",
       version: "1.0.0",
-      user_id: "10010001 / 郑凯 / 数据平台部",
-      extra_json: JSON.stringify({
-        grayUserIds: ["10010001"]
-      })
+      user_id: "10010001 / 郑凯 / 数据平台部"
     },
     {
       name: "mock-jira-mcp",
@@ -661,11 +616,7 @@ const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       tag: "认证",
       featured: "热门",
       version: "1.0.0",
-      user_id: "10010001 / 郑凯 / 数据平台部",
-      extra_json: JSON.stringify({
-        skills: ["mock-card-render", "mock-command-helper"],
-        grayUserIds: ["10010001", "293088"]
-      })
+      user_id: "10010001 / 郑凯 / 数据平台部"
     },
     {
       name: "mock-plugin-ci-helper",
@@ -676,10 +627,7 @@ const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       created_at: MOCK_CREATED_AT,
       category: "工程化",
       featured: "官方推荐",
-      version: "2.0.0",
-      extra_json: JSON.stringify({
-        skills: ["mock-ci-analyzer"]
-      })
+      version: "2.0.0"
     },
     {
       name: "mock-plugin-release-note",
@@ -694,13 +642,6 @@ const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
     }
   ]
 }
-
-export const MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = Object.fromEntries(
-  Object.entries(BASE_MOCK_MARKET_DATA).map(([type, items]) => [
-    type,
-    items.map((item) => withMockUpdatedFields(item))
-  ])
-) as Record<MarketItemType, MarketItem[]>
 
 export const getMarketMockResponse = (type: MarketItemType): MarketApiResponse => {
   return {
