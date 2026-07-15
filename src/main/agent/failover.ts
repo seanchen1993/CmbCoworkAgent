@@ -78,6 +78,80 @@ const NETWORK_MESSAGE_TOKENS = [
   "timeout"
 ]
 
+const STREAM_DISCONNECT_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT"
+])
+const STREAM_DISCONNECT_MESSAGE_RE =
+  /\bterminated\b|\bstream\b.*\b(closed|disconnected|terminated|reset)\b|\b(premature close|body stream|other side closed|socket hang up|connection reset)\b/i
+
+type ErrorLike = {
+  name?: unknown
+  message?: unknown
+  code?: unknown
+  cause?: unknown
+}
+
+function asErrorLike(value: unknown): ErrorLike | null {
+  if (!value || (typeof value !== "object" && typeof value !== "function")) return null
+  return value as ErrorLike
+}
+
+function isAbortLikeError(error: unknown): boolean {
+  const detail = asErrorLike(error)
+  if (!detail) return false
+  const name = typeof detail.name === "string" ? detail.name : ""
+  const code = typeof detail.code === "string" ? detail.code : ""
+  const message = typeof detail.message === "string" ? detail.message.toLowerCase() : ""
+  return (
+    name === "AbortError" ||
+    code === "ABORT_ERR" ||
+    message.includes("aborted") ||
+    message.includes("user abort") ||
+    message.includes("controller is already closed")
+  )
+}
+
+/**
+ * Match errors emitted while an established response body/SSE stream is being
+ * consumed. Generic API classification also sees arbitrary tool output, so a
+ * bare string such as "terminated" must not become a network error.
+ */
+export function isStreamDisconnectLikeError(error: unknown): boolean {
+  const visited = new Set<object>()
+  const chain: ErrorLike[] = []
+  let current: unknown = error
+  while (true) {
+    const detail = asErrorLike(current)
+    if (!detail || visited.has(detail as object)) break
+    visited.add(detail as object)
+    chain.push(detail)
+    current = detail.cause
+  }
+
+  // A provider may wrap an AbortError in TypeError("terminated"). Cancellation
+  // wins over every disconnect-looking wrapper in the chain.
+  if (chain.some((detail) => isAbortLikeError(detail))) return false
+
+  for (const detail of chain) {
+    const code = typeof detail.code === "string" ? detail.code : ""
+    if (STREAM_DISCONNECT_CODES.has(code)) return true
+
+    // classifyApiError also receives plain tool-result objects. Only real Error
+    // instances may opt into message-based stream matching; plain objects still
+    // need an explicit network code.
+    const message = typeof detail.message === "string" ? detail.message : ""
+    if (detail instanceof Error && STREAM_DISCONNECT_MESSAGE_RE.test(message)) return true
+  }
+
+  return false
+}
+
 /**
  * Map an arbitrary error value to one of six coarse buckets. Order matters:
  * status code > rate-limit text > server text > network code/text > unknown.
@@ -102,6 +176,7 @@ export function classifyApiError(error: unknown): ApiErrorCode {
 
   const code = (error as { code?: unknown }).code
   if (typeof code === "string" && NETWORK_CODES.has(code)) return "network_error"
+  if (isStreamDisconnectLikeError(error)) return "network_error"
 
   const msg = (error instanceof Error ? error.message : String(error)).toLowerCase()
   if (RATE_LIMIT_MESSAGE_TOKENS.some((t) => msg.includes(t))) return "rate_limit"
@@ -162,15 +237,9 @@ export function isRetryableApiError(error: unknown): boolean {
   if (!error) return false
 
   // AbortError — user cancelled, not retryable
-  if (error instanceof Error) {
-    if (
-      error.name === "AbortError" ||
-      error.message.includes("aborted") ||
-      error.message.includes("Controller is already closed")
-    ) {
-      return false
-    }
-  }
+  if (isAbortLikeError(error)) return false
+
+  if (isStreamDisconnectLikeError(error)) return true
 
   // Check HTTP status code (may be on error.status, error.response?.status, etc.)
   const status = getStatusCode(error)
@@ -356,7 +425,8 @@ export function extractErrorDetail(
 ): ApiErrorDetail {
   const status = fetchDetail?.status ?? getStatusCode(error) ?? statusFromMessage(error)
   const info = getStatusInfo(status)
-  const code = info?.category ?? classifyApiError(error)
+  const code =
+    info?.category ?? (typeof status === "number" ? classifyApiError({ status }) : classifyApiError(error))
   const requestId = fetchDetail?.requestId ?? getRequestId(error)
   const providerMessage = cleanProviderMessage(error)
   // Prefer the fetch-layer raw body (schema-independent), then the SDK's parsed

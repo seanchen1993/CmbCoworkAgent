@@ -4,6 +4,7 @@ export interface LiveStreamMessage {
   id?: string
   type?: string
   content?: string | unknown[]
+  reasoning?: string
   tool_calls?: Message["tool_calls"]
   tool_call_id?: string
   name?: string
@@ -31,14 +32,20 @@ export function mergeLiveStreamMessages(
     const existingContentPriority = existing?.content_priority ?? 0
     const incomingContentPriority = message.content_priority ?? 0
     const hasToolCallsField = Object.prototype.hasOwnProperty.call(message, "tool_calls")
+    const hasAuthoritativeIncomingContent =
+      incomingContentPriority > 0 && incomingContentPriority >= existingContentPriority
     const shouldUseIncomingContent =
-      hasUsefulStreamContent(message.content) &&
-      incomingContentPriority >= existingContentPriority
+      hasAuthoritativeIncomingContent ||
+      (hasUsefulStreamContent(message.content) &&
+        incomingContentPriority >= existingContentPriority)
     merged.set(message.id, {
       ...existing,
       ...message,
       content: shouldUseIncomingContent ? message.content : (existing?.content ?? message.content),
-      content_priority: Math.max(existingContentPriority, incomingContentPriority),
+      reasoning: message.reasoning ?? existing?.reasoning,
+      content_priority: shouldUseIncomingContent
+        ? Math.max(existingContentPriority, incomingContentPriority)
+        : existingContentPriority,
       tool_calls: hasToolCallsField ? message.tool_calls : existing?.tool_calls,
       tool_call_id: message.tool_call_id ?? existing?.tool_call_id,
       name: message.name ?? existing?.name
@@ -69,6 +76,28 @@ export function mergeLiveStreamMessages(
   }
 
   return Array.from(merged.values())
+}
+
+export function replaceLiveStreamMessageId(
+  messages: LiveStreamMessage[],
+  fromId: string,
+  toId: string
+): LiveStreamMessage[] {
+  if (!fromId || !toId || fromId === toId) return messages
+  const sourceIndex = messages.findIndex((message) => message.id === fromId)
+  if (sourceIndex < 0) return messages
+
+  const targetIndex = messages.findIndex((message) => message.id === toId)
+  const source = { ...messages[sourceIndex], id: toId }
+  const target = targetIndex >= 0 ? messages[targetIndex] : undefined
+  const canonical = target ? mergeLiveStreamMessages([source], [target])[0] : source
+  const insertionIndex = targetIndex >= 0 ? Math.min(sourceIndex, targetIndex) : sourceIndex
+
+  return messages.flatMap((message, index) => {
+    if (index === insertionIndex) return [canonical]
+    if (message.id === fromId || message.id === toId) return []
+    return [message]
+  })
 }
 
 function hasLiveStreamMessageId(message: LiveStreamMessage): message is LiveStreamMessage & {

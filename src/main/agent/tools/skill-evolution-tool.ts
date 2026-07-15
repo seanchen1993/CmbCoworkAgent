@@ -57,7 +57,7 @@ function notifyRenderer(channel: string, payload?: unknown): void {
 //   1. Tool calls requestSkillConfirmation() — sends IPC event to renderer
 //      with the proposed skill details (name, description, content preview).
 //   2. Renderer shows a dialog; user clicks Approve or Reject.
-//   3. Renderer calls ipcRenderer.invoke("skill:confirmResponse", { requestId, approved })
+//   3. Renderer calls ipcRenderer.invoke("skill:confirmResponse", { requestId, approved, content })
 //   4. Main process resolves the pending Promise and returns the decision.
 // ─────────────────────────────────────────────────────────
 
@@ -70,12 +70,17 @@ export interface SkillConfirmRequest {
   content: string
 }
 
+export interface SkillConfirmResponse {
+  approved: boolean
+  content?: string
+}
+
 // ─────────────────────────────────────────────────────────
 // Generic pending-response helper
 // ─────────────────────────────────────────────────────────
 
 /** Generic map of pending one-shot IPC responses keyed by requestId */
-const _pendingResponses = new Map<string, (value: boolean) => void>()
+const _pendingResponses = new Map<string, (value: unknown) => void>()
 
 let _responseHandlerRegistered = false
 function ensureResponseHandler(): void {
@@ -92,28 +97,32 @@ function ensureResponseHandler(): void {
     }
   })
 
-  ipcMain.handle("skill:confirmResponse", (_event, { requestId, approved }: { requestId: string; approved: boolean }) => {
+  ipcMain.handle("skill:confirmResponse", (_event, { requestId, approved, content }: { requestId: string; approved: boolean; content?: string }) => {
     console.log(`[SkillEvolution] Received confirmation response: ${requestId} approved=${approved}`)
     const resolve = _pendingResponses.get(requestId)
     if (resolve) {
       _pendingResponses.delete(requestId)
-      resolve(approved)
+      resolve({ approved, content })
     }
   })
 }
 
-function waitForResponse(requestId: string, timeoutMs = 5 * 60 * 1000): Promise<boolean> {
+function waitForResponse<T>(
+  requestId: string,
+  fallback: T,
+  timeoutMs = 5 * 60 * 1000
+): Promise<T> {
   ensureResponseHandler()
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       _pendingResponses.delete(requestId)
       console.warn(`[SkillEvolution] Response timed out for requestId: ${requestId}`)
-      resolve(false)
+      resolve(fallback)
     }, timeoutMs)
 
     _pendingResponses.set(requestId, (value) => {
       clearTimeout(timer)
-      resolve(value)
+      resolve(value as T)
     })
   })
 }
@@ -129,6 +138,8 @@ export interface SkillIntentRequest {
   summary: string
   /** Number of tool calls made */
   toolCallCount: number
+  /** Number of conversation turns in the proposal window */
+  turnCount: number
   /** Trigger source for this suggestion */
   mode: "mode_a_rule" | "mode_b_llm"
   /** Optional model recommendation reason for Mode B */
@@ -142,10 +153,10 @@ export interface SkillIntentRequest {
  * from the current conversation.  Returns true if they click "Yes".
  */
 export async function requestSkillIntent(req: SkillIntentRequest): Promise<boolean> {
-  const promise = waitForResponse(req.requestId)
+  const promise = waitForResponse<boolean>(req.requestId, false)
   notifyRenderer("skill:intentRequest", req)
   console.log(
-    `[SkillEvolution] Sent intent request: ${req.requestId} mode=${req.mode} toolCallCount=${req.toolCallCount}`
+    `[SkillEvolution] Sent intent request: ${req.requestId} mode=${req.mode} turnCount=${req.turnCount} toolCallCount=${req.toolCallCount}`
   )
   return promise
 }
@@ -160,8 +171,10 @@ export async function requestSkillIntent(req: SkillIntentRequest): Promise<boole
  *
  * Exported so the auto-trigger path in agent.ts can reuse the same flow.
  */
-export async function requestSkillConfirmation(req: SkillConfirmRequest): Promise<boolean> {
-  const promise = waitForResponse(req.requestId)
+export async function requestSkillConfirmation(
+  req: SkillConfirmRequest
+): Promise<SkillConfirmResponse> {
+  const promise = waitForResponse<SkillConfirmResponse>(req.requestId, { approved: false })
   notifyRenderer("skill:confirmRequest", req)
   console.log(
     `[SkillEvolution] Sent confirmation request: ${req.requestId} for skill "${req.name}" (${req.skillId})`
@@ -369,7 +382,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           // ── Human confirmation gate ──────────────────────
           const requestId = uuid()
           console.log(`[SkillEvolution] Requesting user confirmation for skill: "${input.name}" (${requestId})`)
-          const approved = await requestSkillConfirmation({
+          const decision = await requestSkillConfirmation({
             threadId: context.threadId ?? "",
             requestId,
             skillId,
@@ -378,7 +391,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
             content: input.content
           })
 
-          if (!approved) {
+          if (!decision.approved) {
             console.log(`[SkillEvolution] User rejected skill creation: "${input.name}"`)
             return JSON.stringify({
               success: false,
@@ -390,7 +403,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           // ────────────────────────────────────────────────
 
           mkdirSync(skillDir, { recursive: true })
-          writeFileSync(join(skillDir, "SKILL.md"), input.content, "utf-8")
+          writeFileSync(join(skillDir, "SKILL.md"), decision.content ?? input.content, "utf-8")
           clearDisabledSkillsForSkillDir(skillDir)
 
           // Invalidate skills cache so runtime picks up the new skill next invocation

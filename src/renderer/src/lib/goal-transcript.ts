@@ -1,4 +1,5 @@
 import type { GoalEvent, Message } from "@/types"
+import { isWorkflowPlumbingTranscriptContent } from "../../../shared/checkpoint-transcript"
 import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../../shared/goal-events"
 import { isGoalClearAlias, splitGoalTransportPayload } from "../../../shared/goal-slash"
 import { isInternalGoalPromptMessage, type GoalNoticeEvent } from "./goal-notice-messages"
@@ -22,7 +23,11 @@ export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "conten
 export function isVisibleCheckpointTranscriptMessage(
   message: Pick<Message, "role" | "content">
 ): boolean {
-  return !isInternalGoalPromptMessage(message) && !isGoalTranscriptArtifact(message)
+  return (
+    !isInternalGoalPromptMessage(message) &&
+    !isGoalTranscriptArtifact(message) &&
+    !isWorkflowPlumbingTranscriptContent(message.content)
+  )
 }
 
 export function buildCheckpointTranscriptForDisplay(messages: Message[]): Message[] {
@@ -229,14 +234,14 @@ function findMatchingGoalUserEventMessage(
   }
 }
 
-const sameGoalCommandMessage = (left: Message, right: Message): boolean => {
+export const sameGoalCommandMessage = (left: Message, right: Message): boolean => {
   if (left.role !== "user" || right.role !== "user") return false
   if (typeof left.content !== "string" || typeof right.content !== "string") return false
   if (normalizedGoalCommandContent(left.content) !== normalizedGoalCommandContent(right.content)) {
     return false
   }
-  if (left.active_window_id || right.active_window_id) {
-    return !!left.active_window_id && !!right.active_window_id && left.active_window_id === right.active_window_id
+  if (left.active_window_id && right.active_window_id) {
+    return left.active_window_id === right.active_window_id
   }
   if (left.goal_id && right.goal_id) return left.goal_id === right.goal_id
 
@@ -303,9 +308,11 @@ export function buildRestoredCheckpointTranscript(
     }
 
     if (isGoalTranscriptArtifact(rawMessage)) continue
+    if (isWorkflowPlumbingTranscriptContent(rawMessage.content)) continue
 
     const visibleMessage = visibleCheckpointMessages[visibleIndex] ?? rawMessage
     visibleIndex += 1
+    if (restored.some((message) => sameGoalCommandMessage(message, visibleMessage))) continue
     restored.push(visibleMessage)
   }
 

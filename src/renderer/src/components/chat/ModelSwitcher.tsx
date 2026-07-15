@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, memo } from "react"
 import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
@@ -19,14 +19,16 @@ interface ModelSwitcherProps {
   threadId: string
 }
 
-export function ModelSwitcher({ threadId }: ModelSwitcherProps): React.JSX.Element {
+export const ModelSwitcher = memo(ModelSwitcherImpl)
+
+function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [customDialogOpen, setCustomDialogOpen] = useState(false)
   const [dialogModelId, setDialogModelId] = useState<string | undefined>(undefined)
   const [routingMode, setRoutingMode] = useState<"auto" | "pinned">("pinned")
 
   const { models, loadModels, loadProviders } = useAppStore()
-  const { currentModel, setCurrentModel, routingResult } = useCurrentThread(threadId)
+  const { currentModel, restoreCurrentModel, setCurrentModel, routingResult } = useCurrentThread(threadId)
 
   // Load global routing mode on mount
   useEffect(() => {
@@ -66,12 +68,14 @@ export function ModelSwitcher({ threadId }: ModelSwitcherProps): React.JSX.Eleme
         | undefined
       const effectiveModel = routingState?.lastResolvedModelId || (metadata.model as string) || ""
       if (effectiveModel) {
-        setCurrentModel(effectiveModel)
+        // Hydration only restores the model used by the current view. Persisting here
+        // would turn a read-only session open into an updated_at change.
+        restoreCurrentModel(effectiveModel)
       }
       setMetadataLoaded(true)
     })
     return () => { cancelled = true }
-  }, [threadId, setCurrentModel])
+  }, [threadId, restoreCurrentModel])
 
   useEffect(() => {
     if (models.length === 0 || !metadataLoaded) return

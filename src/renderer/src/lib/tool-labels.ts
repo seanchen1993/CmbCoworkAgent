@@ -13,7 +13,6 @@ const TOOL_LABELS: Record<string, string> = {
   read_worker_state: "等待子代理结果",
   cancel_worker: "取消子代理",
   git_push: "Git 推送",
-  browser_playwright: "Playwright 浏览器操作",
   code_exec: "编程式工具调用",
   request_user_input: "请求用户输入",
   invoke_deferred_tool: "调用延迟加载的工具",

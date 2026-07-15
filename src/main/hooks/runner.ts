@@ -11,6 +11,7 @@ import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
 import { getCustomModelConfigs, getHookLoggingConfig, getUserInfo } from "../storage"
 import { persistHookResultRecord } from "./log-record"
+import { trackEvent } from "../services/event-reporter"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -90,6 +91,32 @@ export interface HookContext {
   pluginWorkspace?: string
   /** Harness feature identifier exposed to hooks as FEATURE_ID. */
   featureId?: string
+  /**
+   * Harness project stable id (= `properties.harnessProjectId` on code-adoption
+   * events) for the project this conversation is bound to. Exposed to hooks as
+   * `HARNESS_PROJECT_ID` env and `harness_project_id` in stdin JSON. Lets an
+   * external code-adoption reporter (running as a DevClaw hook) tag its
+   * self-reported events with the same project id the dashboard aggregates on,
+   * so they surface in 项目运营概览. Empty for non-project-mode conversations.
+   */
+  harnessProjectId?: string
+  /**
+   * Bound adapter name / version (= `properties.harnessAdapterName` /
+   * `properties.harnessAdapterVersion` on code-adoption events). Exposed to hooks
+   * as `HARNESS_ADAPTER_NAME` / `HARNESS_ADAPTER_VERSION` env and
+   * `harness_adapter_name` / `harness_adapter_version` in stdin JSON. Lets an
+   * external reporter tag self-reported events so they show in the dashboard's
+   * per-adapter adoption breakdown. Empty for non-project-mode conversations.
+   */
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  /**
+   * Harness workflow node name/status current at turn start. Exposed to hooks as
+   * `HARNESS_NODE_NAME` / `HARNESS_NODE_STATUS` env and `harness_node_name` /
+   * `harness_node_status` in stdin JSON.
+   */
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   /** Harness project code exposed to hooks as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to hooks as PROJECT_DIR. */
@@ -354,6 +381,11 @@ function buildHookEnv(
   if (context.pluginOutputDir) env.PLUGIN_OUTPUT_DIR = context.pluginOutputDir
   if (context.pluginWorkspace) env.PLUGIN_WORKSPACE = context.pluginWorkspace
   if (context.featureId) env.FEATURE_ID = context.featureId
+  if (context.harnessProjectId) env.HARNESS_PROJECT_ID = context.harnessProjectId
+  if (context.harnessAdapterName) env.HARNESS_ADAPTER_NAME = context.harnessAdapterName
+  if (context.harnessAdapterVersion) env.HARNESS_ADAPTER_VERSION = context.harnessAdapterVersion
+  if (context.harnessNodeName) env.HARNESS_NODE_NAME = context.harnessNodeName
+  if (context.harnessNodeStatus) env.HARNESS_NODE_STATUS = context.harnessNodeStatus
   if (context.projectCode) env.PROJECT_CODE = context.projectCode
   if (context.projectDir) env.PROJECT_DIR = context.projectDir
   if (context.sessionId) env.SESSION_ID = context.sessionId
@@ -390,6 +422,11 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.pluginRoot) payload.plugin_root = context.pluginRoot
   if (context.pluginWorkspace) payload.plugin_workspace = context.pluginWorkspace
   if (context.featureId) payload.feature_id = context.featureId
+  if (context.harnessProjectId) payload.harness_project_id = context.harnessProjectId
+  if (context.harnessAdapterName) payload.harness_adapter_name = context.harnessAdapterName
+  if (context.harnessAdapterVersion) payload.harness_adapter_version = context.harnessAdapterVersion
+  if (context.harnessNodeName) payload.harness_node_name = context.harnessNodeName
+  if (context.harnessNodeStatus) payload.harness_node_status = context.harnessNodeStatus
   if (context.projectCode) payload.project_code = context.projectCode
   if (context.projectDir) payload.project_dir = context.projectDir
   if (context.toolResult !== undefined) {
@@ -419,7 +456,31 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.skillTriggerToolName) payload.skill_trigger_tool_name = context.skillTriggerToolName
   if (context.subagent) payload.subagent = context.subagent
   if (context.stopContext) payload.stop_context = context.stopContext
-  return JSON.stringify(payload)
+  return stringifyAsciiJson(payload)
+}
+
+/**
+ * Serialize the hook stdin payload as ASCII-only JSON (non-ASCII → \uXXXX).
+ *
+ * stdin bytes are written UTF-8 (Node's string default in `child.stdin.end`),
+ * but on Chinese Windows the interpreters that read them — Python's
+ * `sys.stdin.read()` (cp936/GBK via locale), PowerShell's `[Console]::In`
+ * (OEM codepage), cmd — default to the system ANSI/OEM codepage, not UTF-8.
+ * Any non-ASCII field (Chinese prompts, tool args, block reasons) therefore
+ * comes back as mojibake or throws UnicodeDecodeError. Escaping every code unit
+ * >= U+0080 to \uXXXX keeps the payload pure ASCII — a common subset of UTF-8
+ * and every legacy codepage — so the bytes are identical regardless of the
+ * encoding the script assumes, and every JSON parser restores the real code
+ * points. Surrogate pairs are emitted as two \uXXXX escapes, which is valid JSON.
+ */
+function stringifyAsciiJson(payload: unknown): string {
+  const json = JSON.stringify(payload)
+  let out = ""
+  for (let i = 0; i < json.length; i++) {
+    const code = json.charCodeAt(i)
+    out += code > 0x7f ? "\\u" + code.toString(16).padStart(4, "0") : json[i]
+  }
+  return out
 }
 
 function isBlockingResult(result: HookResult): boolean {
@@ -1280,6 +1341,27 @@ function recordHookResult(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): void {
+  // Operational telemetry: emit unconditionally (independent of the hook-logging
+  // switch that gates persistHookResultRecord), so we always know hooks really
+  // ran and whether one blocked a risky operation. Payload kept minimal because
+  // this is the chokepoint for every hook on every event (incl. per-tool-call
+  // PostToolUse). Skip the async "pending" placeholder — its real result is
+  // recorded separately when the background run completes — so each execution
+  // emits exactly once.
+  if (result.asyncStatus !== "pending") {
+    try {
+      trackEvent("hook.executed", "hook", {
+        event,
+        hookType: hook.type ?? "command",
+        blocked: isBlockingResult(result),
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        source: hook.hookSourceType ?? "global"
+      })
+    } catch (e) {
+      console.warn("[event] failed to emit hook.executed:", e)
+    }
+  }
   persistHookResultRecord(event, hook, result, context.turnId)
   onHookResult?.(event, hook, result)
 }

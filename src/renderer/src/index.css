@@ -350,6 +350,9 @@
   font-weight: 400;
   letter-spacing: 0.005em;
 }
+.streaming-markdown .language-bash{
+  white-space: break-spaces;
+}
 
 .streaming-markdown p {
   margin-bottom: 0.75em;
@@ -415,7 +418,7 @@
   color: #333333;
   font-family: "SF Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
   font-size: 0.86em;
-  white-space: break-spaces;
+  white-space: normal !important;
 }
 
 .streaming-markdown-code-block {

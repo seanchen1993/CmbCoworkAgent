@@ -8,12 +8,85 @@ if (process.platform === "linux") {
 
 import { join } from "path"
 import { existsSync, rmSync } from "fs"
-import { writeMainLog, writeRendererLog } from "./logging"
+import { writeMainLog, writeRendererLog, flushLogs, flushLogsSync } from "./logging"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
+import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
+import {
+  clearAppAttention,
+  disposeAppTray,
+  initializeAppTray,
+  isAppQuitting,
+  isAppTrayAvailable,
+  requestAppAttention,
+  setAppQuitting,
+  showPendingAppAttention,
+  shouldHideMainWindowOnClose
+} from "./app-tray"
+import { setAppAttentionHandler } from "./app-attention-events"
+import {
+  APP_ATTENTION_CHANNEL,
+  isRendererAppAttentionPayload
+} from "../shared/app-attention"
+import type {
+  CloseToTrayPromptAction,
+  CloseToTrayPromptEvent
+} from "../shared/close-to-tray"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
+const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
+const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
+const EVENT_CATEGORIES = new Set<EventCategory>([
+  "skill",
+  "git",
+  "code_adoption",
+  "harness",
+  "heartbeat",
+  "memory",
+  "hook",
+  "chatx",
+  "workspace"
+])
+
+function isCloseToTrayPromptResponse(
+  payload: unknown
+): payload is { requestId: number; action: CloseToTrayPromptAction } {
+  if (!payload || typeof payload !== "object") return false
+  // 使用 in 操作符进行属性存在性检查，比 as 断言更安全
+  if (!("requestId" in payload) || !("action" in payload)) return false
+  const record = payload as Record<string, unknown>
+  return (
+    typeof record.requestId === "number" &&
+    (record.action === "minimize-to-tray" ||
+      record.action === "direct-close" ||
+      record.action === "cancel")
+  )
+}
+
+function isTrackEventPayload(payload: unknown): payload is {
+  eventName: string
+  eventCategory: EventCategory
+  properties?: Record<string, unknown>
+} {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false
+  const record = payload as Record<string, unknown>
+  if (
+    typeof record.eventName !== "string" ||
+    !record.eventName.trim() ||
+    typeof record.eventCategory !== "string" ||
+    !EVENT_CATEGORIES.has(record.eventCategory as EventCategory)
+  ) {
+    return false
+  }
+  return (
+    record.properties === undefined ||
+    (!!record.properties &&
+      typeof record.properties === "object" &&
+      !Array.isArray(record.properties))
+  )
+}
 
 function getConsoleLevelName(level: number): string {
   switch (level) {
@@ -122,11 +195,25 @@ process.stderr.on("error", (err: NodeJS.ErrnoException) => {
 process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
   if (err.code === "EPIPE") return // silently ignore broken pipe
   console.error("[Main] Uncaught exception:", err)
+  // Persist the buffered tail (incl. this error) in case the process dies next.
+  flushLogsSync()
 })
 process.on("unhandledRejection", (reason) => {
   console.error("[Main] Unhandled rejection:", reason)
 })
+
+// Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
+// does not fire Node's `exit` event, so flush the log tail before quitting.
+// `once` lets a second signal fall through to default force-kill if quit hangs.
+const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
+  console.warn(`[Main] received ${signal}, flushing logs and quitting`)
+  flushLogsSync()
+  app.quit()
+}
+process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
+process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
+import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
@@ -176,10 +263,10 @@ import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { startFeatureGatePrefetch, stopFeatureGatePrefetch } from "./feature-gates"
 import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
+import type { EventCategory } from "./services/event-reporter"
 import {
   configurePetWindow,
   createPetWindow,
@@ -189,6 +276,9 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
+let closeToTrayPromptOpen = false
+let closeToTrayPromptRequestId = 0
+let closeToTrayPromptTimer: NodeJS.Timeout | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -290,6 +380,55 @@ function applyMacDockIcon(): void {
 
 // getLocalIP moved to ./net-utils — imported above
 
+function hideMainWindowToTray(window: BrowserWindow): void {
+  if (window.isDestroyed()) return
+  window.hide()
+  showPendingAppAttention()
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.hide()
+  }
+}
+
+function clearCloseToTrayPromptState(): void {
+  closeToTrayPromptOpen = false
+  if (closeToTrayPromptTimer) {
+    clearTimeout(closeToTrayPromptTimer)
+    closeToTrayPromptTimer = null
+  }
+}
+
+function requestHideMainWindowToTray(window: BrowserWindow): void {
+  if (closeToTrayPromptOpen) {
+    if (!window.isDestroyed()) window.focus()
+    return
+  }
+
+  closeToTrayPromptOpen = true
+  closeToTrayPromptRequestId += 1
+  const requestId = closeToTrayPromptRequestId
+  closeToTrayPromptTimer = setTimeout(() => {
+    if (closeToTrayPromptRequestId === requestId) {
+      console.warn("[Main] Close-to-tray prompt timed out")
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const event: CloseToTrayPromptEvent = {
+          type: "dismiss",
+          requestId,
+          reason: "timeout"
+        }
+        mainWindow.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
+      }
+      clearCloseToTrayPromptState()
+    }
+  }, CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS)
+  window.focus()
+  const event: CloseToTrayPromptEvent = {
+    type: "open",
+    requestId,
+    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘"
+  }
+  window.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
+}
+
 function createWindow(): void {
   const devWindowIcon = process.platform === "win32" && isDev ? getDevWindowsIconPath() : undefined
 
@@ -315,6 +454,9 @@ function createWindow(): void {
     applyMacDockIcon()
   })
 
+  mainWindow.on("focus", clearAppAttention)
+  mainWindow.on("blur", showPendingAppAttention)
+
   mainWindow.on("unresponsive", () => {
     console.warn("[Main] BrowserWindow became unresponsive")
   })
@@ -333,6 +475,7 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    clearCloseToTrayPromptState()
     console.error("[Main] Renderer failed to load:", {
       errorCode,
       errorDescription,
@@ -340,7 +483,12 @@ function createWindow(): void {
     })
   })
 
+  mainWindow.webContents.on("did-start-loading", () => {
+    clearCloseToTrayPromptState()
+  })
+
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    clearCloseToTrayPromptState()
     console.error("[Main] Renderer process gone:", details)
   })
 
@@ -369,10 +517,16 @@ function createWindow(): void {
     }
   }
 
-  mainWindow.on("close", () => {
+  mainWindow.on("close", (event) => {
     console.warn("[Main] Main window close requested", {
       pet: getPetWindowDebugInfo()
     })
+    if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
+      event.preventDefault()
+      if (mainWindow) {
+        requestHideMainWindowToTray(mainWindow)
+      }
+    }
   })
 
   mainWindow.on("closed", () => {
@@ -380,6 +534,7 @@ function createWindow(): void {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
+    clearCloseToTrayPromptState()
     mainWindow = null
     if (process.platform !== "darwin") {
       app.quit()
@@ -393,6 +548,7 @@ function createWindow(): void {
  * 供单实例唤起、宠物窗口交互等入口复用，覆盖主窗口被销毁、最小化和隐藏三种情况。
  */
 function ensureMainWindowVisible(): BrowserWindow | null {
+  clearAppAttention()
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow()
     return mainWindow
@@ -482,8 +638,9 @@ if (!gotTheLock) {
     }
 
     // Periodically upsert Harness Board project/feature status into the event
-    // index. Writes directly to ES (VITE_ES_NODES); no-ops when ES is not
-    // configured, so it does not depend on the trace upload base URL.
+    // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
+    // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
+    // configured.
     startHarnessStatusReporter()
 
     // Initialize database
@@ -500,6 +657,7 @@ if (!gotTheLock) {
 
     // Register IPC handlers
     registerAgentHandlers(ipcMain)
+    registerWorkflowHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
     registerModelHandlers(ipcMain)
     registerSkillsHandlers(ipcMain)
@@ -533,13 +691,45 @@ if (!gotTheLock) {
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
 
+    ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (
+        event.sender.id !== mainWindow.webContents.id ||
+        !isRendererAppAttentionPayload(payload)
+      )
+        return
+      // Main-process sources own persistent state and keys. Strip renderer keys so
+      // a compromised renderer cannot overwrite or resolve an approval/input entry.
+      requestAppAttention({ kind: payload.kind, threadId: payload.threadId })
+    })
+
+    ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (event.sender.id !== mainWindow.webContents.id) return
+      if (!isCloseToTrayPromptResponse(payload)) return
+      if (!closeToTrayPromptOpen || payload.requestId !== closeToTrayPromptRequestId) return
+
+      clearCloseToTrayPromptState()
+      if (payload.action === "minimize-to-tray") {
+        hideMainWindowToTray(mainWindow)
+      } else if (payload.action === "direct-close") {
+        // app.quit() 会触发 before-quit → will-quit 事件链，
+        // 其中会执行 fireSessionEndAll（中断活跃 agent 运行）、
+        // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
+        app.quit()
+      }
+    })
+
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
       mainLogForwardingEnabled = Boolean(enabled)
     })
 
     // Track event handler for client-side telemetry
-    ipcMain.handle("track-event", async (_event, payload: any) => {
+    ipcMain.handle("track-event", async (_event, payload: unknown) => {
       try {
+        if (!isTrackEventPayload(payload)) {
+          return { success: false }
+        }
         const { eventName, eventCategory, properties } = payload
         trackEvent(eventName, eventCategory, properties)
         return { success: true }
@@ -615,6 +805,14 @@ if (!gotTheLock) {
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
 
     createWindow()
+    setAppAttentionHandler(requestAppAttention)
+    await initializeAppTray({
+      getMainWindow: () => mainWindow,
+      showMainWindow: () => {
+        ensureMainWindowVisible()
+        applyMacDockIcon()
+      }
+    })
     createPetWindow()
 
     // Start scheduled task scheduler and heartbeat service
@@ -623,7 +821,6 @@ if (!gotTheLock) {
     startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
-    startFeatureGatePrefetch(3000)
     markFullBackupCleanupReady(selfCheckResult)
 
     // ── Keep Awake ──
@@ -636,9 +833,8 @@ if (!gotTheLock) {
     })
 
     app.on("activate", () => {
-      if (!mainWindow || mainWindow.isDestroyed()) {
-        createWindow()
-      }
+      ensureMainWindowVisible()
+      applyMacDockIcon()
       createPetWindow()
     })
   })
@@ -658,6 +854,7 @@ if (!gotTheLock) {
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
   app.on("before-quit", (event) => {
+    setAppQuitting(true)
     console.warn("[Main] before-quit", {
       sessionEndDone,
       hasActiveSessions: hasActiveSessions(),
@@ -691,6 +888,8 @@ if (!gotTheLock) {
     }
     quitting = true
     e.preventDefault()
+    setAppAttentionHandler(null)
+    disposeAppTray()
     applyKeepAwake(false)
     disposeAllTerminals()
     LocalSandbox.killAll()
@@ -701,7 +900,6 @@ if (!gotTheLock) {
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
     stopUpdateChecker()
-    stopFeatureGatePrefetch()
     try {
       shutdownAdoptionTracker()
     } catch (err) {
@@ -714,24 +912,56 @@ if (!gotTheLock) {
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ])
 
-    // Single-fire exit guard so timeout + finally don't both call app.exit
-    let exited = false
-    const doExit = (): void => {
-      if (exited) return
-      exited = true
-      flush()
+    const CLEANUP_TIMEOUT_MS = 10_000
+    const FORCE_FLUSH_GRACE_MS = 2_000
+    const HARD_EXIT_TIMEOUT_MS = CLEANUP_TIMEOUT_MS + FORCE_FLUSH_GRACE_MS + 500
+
+    let exitStarted = false
+    let cancelHardExit: (() => void) | null = null
+
+    const exitImmediately = (): void => {
+      if (cancelHardExit) {
+        cancelHardExit()
+        cancelHardExit = null
+      }
       app.exit(0)
     }
 
-    // Give async cleanup up to 10s, then force quit
+    const doExit = async (force: boolean): Promise<void> => {
+      if (exitStarted) return
+      exitStarted = true
+
+      if (force) {
+        // Cleanup already exceeded its budget. Give persistence a short bounded
+        // grace period, but never let a stalled disk keep the process alive.
+        await Promise.all([
+          waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
+          waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
+        ])
+      } else {
+        await flush()
+        await flushLogs()
+      }
+      exitImmediately()
+    }
+
+    // Independent hard deadline: even if cleanup finishes just before its timer
+    // and the normal async flush then stalls, the process still exits.
+    cancelHardExit = scheduleHardDeadline(() => {
+      console.error("[Main] Hard exit deadline reached")
+      flushLogsSync()
+      exitImmediately()
+    }, HARD_EXIT_TIMEOUT_MS)
+
+    // Give async cleanup up to 10s, then switch to bounded best-effort flushes.
     const forceTimer = setTimeout(() => {
       console.warn("[Main] Cleanup timeout, force quitting")
-      doExit()
-    }, 10_000)
+      void doExit(true)
+    }, CLEANUP_TIMEOUT_MS)
 
     cleanup.finally(() => {
       clearTimeout(forceTimer)
-      doExit()
+      void doExit(false)
     })
   })
 }

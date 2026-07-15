@@ -1,7 +1,14 @@
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
-import type { Thread, ModelConfig, Provider, Message } from "@/types"
-import { findFirstChatThread, isHarnessFeatureThread } from "./thread-classification"
+import type {
+  Thread,
+  ModelConfig,
+  Provider,
+  Message,
+  ForkableCheckpoint,
+  ThreadForkParams
+} from "@/types"
+import { findFirstChatThread, isHarnessProjectModeThread } from "./thread-classification"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -106,6 +113,104 @@ function isSameWorkerAssistantText(a: Message, b: Message): boolean {
   return first.includes(second) || second.includes(first)
 }
 
+function areWorkerContentsCompatible(
+  a: Message["content"] | undefined,
+  b: Message["content"] | undefined
+): boolean {
+  const first = contentSignatureKey(a).trim()
+  const second = contentSignatureKey(b).trim()
+  if (!first || !second) return true
+  return first === second || first.includes(second) || second.includes(first)
+}
+
+type WorkerToolCall = NonNullable<Message["tool_calls"]>[number]
+
+function hasWorkerToolArgs(args: WorkerToolCall["args"] | undefined): boolean {
+  return !!args && Object.keys(args).length > 0
+}
+
+function isSameWorkerToolCallIdentity(
+  left: WorkerToolCall,
+  right: WorkerToolCall,
+  index: number
+): boolean {
+  if (left.id || right.id) return !!left.id && left.id === right.id
+  return left.name === right.name && index >= 0
+}
+
+function findWorkerToolCallMatch(
+  toolCalls: WorkerToolCall[],
+  target: WorkerToolCall,
+  fallbackIndex: number,
+  usedIndexes?: Set<number>
+): { call: WorkerToolCall; index: number } | undefined {
+  if (target.id) {
+    const index = toolCalls.findIndex(
+      (toolCall, candidateIndex) =>
+        !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
+    )
+    return index >= 0 ? { call: toolCalls[index], index } : undefined
+  }
+
+  if (
+    fallbackIndex >= 0 &&
+    fallbackIndex < toolCalls.length &&
+    !usedIndexes?.has(fallbackIndex) &&
+    isSameWorkerToolCallIdentity(toolCalls[fallbackIndex], target, fallbackIndex)
+  ) {
+    return { call: toolCalls[fallbackIndex], index: fallbackIndex }
+  }
+
+  const index = toolCalls.findIndex(
+    (toolCall, candidateIndex) =>
+      !usedIndexes?.has(candidateIndex) &&
+      !toolCall.id &&
+      toolCall.name === target.name
+  )
+  return index >= 0 ? { call: toolCalls[index], index } : undefined
+}
+
+function areWorkerToolCallsCompatible(
+  left: Message["tool_calls"] | undefined,
+  right: Message["tool_calls"] | undefined
+): boolean {
+  if (!left?.length || !right?.length || left.length !== right.length) return false
+  const usedIndexes = new Set<number>()
+  for (let index = 0; index < right.length; index += 1) {
+    const match = findWorkerToolCallMatch(left, right[index], index, usedIndexes)
+    if (!match) return false
+    usedIndexes.add(match.index)
+  }
+  return true
+}
+
+function isCompatibleWorkerAssistantToolReplay(a: Message, b: Message): boolean {
+  if (a.role !== "assistant" || b.role !== "assistant") return false
+  if (!isWorkerSnapshotPair(a, b)) return false
+  if (!areWorkerToolCallsCompatible(a.tool_calls, b.tool_calls)) return false
+  return areWorkerContentsCompatible(a.content, b.content)
+}
+
+function isCompatibleWorkerToolResultReplay(a: Message, b: Message): boolean {
+  if (a.role !== "tool" || b.role !== "tool") return false
+  if (!isWorkerSnapshotPair(a, b)) return false
+  if (!a.tool_call_id || a.tool_call_id !== b.tool_call_id) return false
+  if (a.name && b.name && a.name !== b.name) return false
+  return areWorkerContentsCompatible(a.content, b.content)
+}
+
+function findCompatibleWorkerReplayIndex(
+  messages: Message[],
+  message: Message
+): number | undefined {
+  const index = messages.findIndex(
+    (item) =>
+      isCompatibleWorkerAssistantToolReplay(item, message) ||
+      isCompatibleWorkerToolResultReplay(item, message)
+  )
+  return index >= 0 ? index : undefined
+}
+
 function findSameWorkerAssistantTextIndex(
   messages: Message[],
   message: Message
@@ -142,6 +247,53 @@ function pruneWorkerFocusMessages(messages: Message[]): Message[] {
   return messages.slice(-MAX_WORKER_FOCUS_MESSAGES)
 }
 
+function reorderWorkerFocusMessagesByIncomingOrder(
+  messages: Message[],
+  incomingIndexes: number[]
+): Message[] {
+  const incomingIndexSet = new Set<number>()
+  const incomingOrderedMessages: Message[] = []
+  for (const index of incomingIndexes) {
+    if (index < 0 || index >= messages.length || incomingIndexSet.has(index)) continue
+    incomingIndexSet.add(index)
+    incomingOrderedMessages.push(messages[index])
+  }
+  if (incomingOrderedMessages.length <= 1) return messages
+
+  const firstIncomingIndex = Math.min(...incomingIndexSet)
+  const prefix: Message[] = []
+  const suffix: Message[] = []
+  messages.forEach((message, index) => {
+    if (incomingIndexSet.has(index)) return
+    if (index < firstIncomingIndex) prefix.push(message)
+    else suffix.push(message)
+  })
+  return [...prefix, ...incomingOrderedMessages, ...suffix]
+}
+
+function mergeWorkerToolCalls(
+  existing: Message["tool_calls"] | undefined,
+  incoming: Message["tool_calls"] | undefined
+): Message["tool_calls"] | undefined {
+  if (!incoming?.length) return existing
+  if (!existing?.length) return incoming
+  if (!areWorkerToolCallsCompatible(existing, incoming)) return incoming
+
+  const usedIndexes = new Set<number>()
+  return incoming.map((incomingToolCall, index) => {
+    const match = findWorkerToolCallMatch(existing, incomingToolCall, index, usedIndexes)
+    if (match) usedIndexes.add(match.index)
+    const existingToolCall = match?.call
+    return {
+      ...(existingToolCall ?? incomingToolCall),
+      ...incomingToolCall,
+      args: hasWorkerToolArgs(incomingToolCall.args)
+        ? incomingToolCall.args
+        : (existingToolCall?.args ?? incomingToolCall.args)
+    }
+  })
+}
+
 function resolveWorkerFocusContent(
   existingMessage: Message,
   incomingMessage: Message
@@ -176,6 +328,10 @@ function preferIncomingContent(
   return incoming ?? ""
 }
 
+type WorkerFocusAppendOptions = {
+  orderedSnapshot?: boolean
+}
+
 type EvolutionTab = "candidates" | "traces" | "review"
 type MainView =
   | "thread"
@@ -194,7 +350,7 @@ function resolveChatThreadId(threads: Thread[], preferredThreadId?: string | nul
   const preferredThread = preferredThreadId
     ? threads.find((thread) => thread.thread_id === preferredThreadId)
     : null
-  if (preferredThread && !isHarnessFeatureThread(preferredThread)) {
+  if (preferredThread && !isHarnessProjectModeThread(preferredThread)) {
     return preferredThread.thread_id
   }
   return findFirstChatThread(threads)?.thread_id ?? null
@@ -219,6 +375,30 @@ export interface WorkerFocusView {
   status?: "running" | "completed" | "failed" | "cancelled"
 }
 
+export interface SubagentFocusView {
+  threadId: string
+  subagentId: string
+  name: string
+  description: string
+  status?: "pending" | "running" | "completed" | "failed" | "cancelled"
+}
+
+export interface RightPanelWorkRequest {
+  id: number
+  target: "systemConstraints"
+  threadId: string
+}
+
+/** Focus on one dynamic-workflow subagent's live tool stream. Keyed by the PARENT
+ * threadId (the live panel's thread) + the run's agentIndex. Display-only. */
+export interface WorkflowAgentFocusView {
+  threadId: string
+  runId: string
+  agentIndex: number
+  label: string
+  status?: "running" | "completed" | "error" | "cached"
+}
+
 interface AppState {
   // Main content view routing
   mainView: MainView
@@ -240,6 +420,7 @@ interface AppState {
   // Sidebar state
   sidebarCollapsed: boolean
   rightPanelCollapsed: boolean
+  rightPanelWorkRequest: RightPanelWorkRequest | null
 
   // Split view for inspecting a single coordinator worker stream.
   workerFocusView: WorkerFocusView | null
@@ -248,7 +429,29 @@ interface AppState {
   openWorkerFocusView: (view: WorkerFocusView) => void
   closeWorkerFocusView: () => void
   appendWorkerFocusMessage: (workerThreadId: string, message: Message) => void
-  appendWorkerFocusMessages: (workerThreadId: string, messages: Message[]) => void
+  appendWorkerFocusMessages: (
+    workerThreadId: string,
+    messages: Message[],
+    options?: WorkerFocusAppendOptions
+  ) => void
+
+  // Split view for inspecting a short-lived task subagent transcript.
+  subagentFocusView: SubagentFocusView | null
+  openSubagentFocusView: (view: SubagentFocusView) => void
+  closeSubagentFocusView: () => void
+
+  // Split view for inspecting one dynamic-workflow subagent's live tool stream
+  // (display-only; fed by the best-effort main-process values tap).
+  workflowAgentFocusView: WorkflowAgentFocusView | null
+  /** The CURRENTLY-FOCUSED agent's raw `snapshotMessages` (a single agent, on demand).
+   * Loaded by the panel — live frames while the agent runs, or its persisted sidecar
+   * when finished — and released (null) on switch/close, so only the agent you are
+   * actually viewing costs any memory. */
+  workflowAgentFocusSnapshot: unknown
+  openWorkflowAgentFocusView: (view: WorkflowAgentFocusView) => void
+  closeWorkflowAgentFocusView: () => void
+  /** Set/replace the focused agent's raw snapshot (latest-wins), or null to release. */
+  setWorkflowAgentFocusSnapshot: (snapshot: unknown) => void
 
   // Kanban view state
   showKanbanView: boolean
@@ -283,6 +486,8 @@ interface AppState {
     metadata?: Record<string, unknown>,
     options?: ThreadNavigationOptions
   ) => Promise<Thread>
+  forkThread: (params: ThreadForkParams, options?: ThreadNavigationOptions) => Promise<Thread>
+  listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
   selectThread: (threadId: string, options?: ThreadNavigationOptions) => Promise<void>
   deleteThread: (threadId: string) => Promise<void>
   updateThread: (threadId: string, updates: Partial<Thread>) => Promise<void>
@@ -303,6 +508,7 @@ interface AppState {
   setSidebarCollapsed: (collapsed: boolean) => void
   toggleRightPanel: () => void
   setRightPanelCollapsed: (collapsed: boolean) => void
+  requestOpenRightPanelSystemConstraints: (threadId: string) => void
 
   // Kanban actions
   setShowKanbanView: (show: boolean) => void
@@ -395,9 +601,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
+  rightPanelWorkRequest: null,
   workerFocusView: null,
   workerFocusMessagesThreadId: null,
   workerFocusMessages: [],
+  subagentFocusView: null,
+  workflowAgentFocusView: null,
+  workflowAgentFocusSnapshot: null,
   mainView: "thread",
   showKanbanView: false,
   showSubagentsInKanban: true,
@@ -429,8 +639,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const threads = await window.api.threads.list()
     set({ threads })
 
-    // Select the first chat thread if none selected. Harness feature threads
-    // are rendered inside project mode and should not become the default chat.
+    // Select the first chat thread if none selected. Project-mode threads are
+    // rendered inside the harness board and should not become the default chat.
     if (!get().currentThreadId) {
       const firstChatThread = findFirstChatThread(threads)
       if (firstChatThread) {
@@ -456,12 +666,44 @@ export const useAppStore = create<AppState>((set, get) => ({
             mainView: "thread" as const,
             workerFocusView: null,
             workerFocusMessagesThreadId: null,
-            workerFocusMessages: []
+            workerFocusMessages: [],
+            subagentFocusView: null,
+            workflowAgentFocusView: null
           })
       // skillGenerationByThread is NOT reset here: new threads start with no entry
       // in the map, so the card is naturally absent without discarding other threads' state.
     }))
     return thread
+  },
+
+  forkThread: async (params: ThreadForkParams, options?: ThreadNavigationOptions) => {
+    const response = await window.api.threads.fork(params)
+    const thread = response.thread
+    set((state) => ({
+      threads: [thread, ...state.threads.filter((item) => item.thread_id !== thread.thread_id)],
+      currentThreadId: thread.thread_id,
+      ...(options?.preserveView
+        ? {}
+        : {
+            showKanbanView: false,
+            showHarnessBoardView: false,
+            showCustomizeView: false,
+            showClaudeCodeView: false,
+            showDashboardView: false,
+            previousThreadId: null,
+            mainView: "thread" as const,
+            workerFocusView: null,
+            workerFocusMessagesThreadId: null,
+            workerFocusMessages: [],
+            subagentFocusView: null,
+            workflowAgentFocusView: null
+          })
+    }))
+    return thread
+  },
+
+  listForkableCheckpoints: async (threadId: string) => {
+    return window.api.threads.listForkableCheckpoints(threadId)
   },
 
   selectThread: async (threadId: string, options?: ThreadNavigationOptions) => {
@@ -479,7 +721,9 @@ export const useAppStore = create<AppState>((set, get) => ({
             mainView: "thread" as const,
             workerFocusView: null,
             workerFocusMessagesThreadId: null,
-            workerFocusMessages: []
+            workerFocusMessages: [],
+            subagentFocusView: null,
+            workflowAgentFocusView: null
           })
       // skillGenerationByThread is NOT cleared here: each thread retains its own card
       // state so switching back to a thread shows the card exactly as it was left.
@@ -511,6 +755,16 @@ export const useAppStore = create<AppState>((set, get) => ({
                 workerFocusView: null,
                 workerFocusMessagesThreadId: null,
                 workerFocusMessages: []
+              }
+            : {}),
+          ...(state.subagentFocusView?.threadId === threadId
+            ? {
+                subagentFocusView: null
+              }
+            : {}),
+          ...(state.workflowAgentFocusView?.threadId === threadId
+            ? {
+                workflowAgentFocusView: null
               }
             : {})
         }
@@ -575,11 +829,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ rightPanelCollapsed: collapsed })
   },
 
+  requestOpenRightPanelSystemConstraints: (threadId: string) => {
+    set((state) => ({
+      rightPanelCollapsed: false,
+      rightPanelWorkRequest: {
+        id: (state.rightPanelWorkRequest?.id ?? 0) + 1,
+        target: "systemConstraints",
+        threadId
+      }
+    }))
+  },
+
   openWorkerFocusView: (view) => {
     set({
       workerFocusView: view,
       workerFocusMessagesThreadId: view.workerThreadId,
-      workerFocusMessages: []
+      workerFocusMessages: [],
+      subagentFocusView: null,
+      workflowAgentFocusView: null
     })
   },
 
@@ -591,11 +858,59 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
+  openSubagentFocusView: (view) => {
+    set({
+      subagentFocusView: view,
+      workerFocusView: null,
+      workerFocusMessagesThreadId: null,
+      workerFocusMessages: [],
+      workflowAgentFocusView: null
+    })
+  },
+
+  closeSubagentFocusView: () => {
+    set({ subagentFocusView: null })
+  },
+
+  openWorkflowAgentFocusView: (view) => {
+    // Mutually exclusive with the worker/subagent foci so only one stream panel shows.
+    // The panel loads THIS agent on demand (live frames if running, the persisted sidecar
+    // if finished) and releases it on switch/close, so only the agent you're viewing holds
+    // memory.
+    set((state) => {
+      const prev = state.workflowAgentFocusView
+      const sameAgent =
+        !!prev &&
+        prev.threadId === view.threadId &&
+        prev.runId === view.runId &&
+        prev.agentIndex === view.agentIndex
+      return {
+        workflowAgentFocusView: view,
+        // Reset to the loading state (`undefined`) only when switching to a DIFFERENT
+        // agent. Re-clicking the SAME open agent keeps its loaded snapshot so it can't get
+        // stuck on a stale "loading" note (the effect won't re-run for an unchanged key).
+        ...(sameAgent ? {} : { workflowAgentFocusSnapshot: undefined }),
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: [],
+        subagentFocusView: null
+      }
+    })
+  },
+
+  closeWorkflowAgentFocusView: () => {
+    set({ workflowAgentFocusView: null, workflowAgentFocusSnapshot: null })
+  },
+
+  setWorkflowAgentFocusSnapshot: (snapshot) => {
+    set({ workflowAgentFocusSnapshot: snapshot })
+  },
+
   appendWorkerFocusMessage: (workerThreadId, message) => {
     get().appendWorkerFocusMessages(workerThreadId, [message])
   },
 
-  appendWorkerFocusMessages: (workerThreadId, messages) => {
+  appendWorkerFocusMessages: (workerThreadId, messages, options) => {
     if (messages.length === 0) return
     set((state) => {
       if (state.workerFocusView?.workerThreadId !== workerThreadId) return {}
@@ -603,6 +918,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         state.workerFocusMessagesThreadId === workerThreadId ? state.workerFocusMessages : []
 
       const next = [...existingMessages]
+      const incomingResolvedIndexes: number[] = []
       const indexById = new Map(next.map((item, index) => [item.id, index]))
       const liveIndexesBySignature = new Map<string, number[]>()
       const snapshotIndexesBySignature = new Map<string, number[]>()
@@ -649,6 +965,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 signature
               )
             : undefined) ??
+          findCompatibleWorkerReplayIndex(next, message) ??
           findSameWorkerAssistantTextIndex(next, message)
         if (existingIndex === undefined) {
           indexById.set(message.id, next.length)
@@ -662,6 +979,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             indexes.push(next.length)
             snapshotIndexesBySignature.set(signature, indexes)
           }
+          incomingResolvedIndexes.push(next.length)
           next.push(message)
           continue
         }
@@ -673,17 +991,18 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...message,
           id,
           content: resolveWorkerFocusContent(existing, message),
-          tool_calls:
-            message.tool_calls && message.tool_calls.length > 0
-              ? message.tool_calls
-              : existing.tool_calls,
+          tool_calls: mergeWorkerToolCalls(existing.tool_calls, message.tool_calls),
           status: message.status ?? existing.status,
           is_error: message.is_error ?? existing.is_error
         }
         indexById.set(id, existingIndex)
         indexById.set(message.id, existingIndex)
+        incomingResolvedIndexes.push(existingIndex)
       }
-      const prunedMessages = pruneWorkerFocusMessages(next)
+      const orderedMessages = options?.orderedSnapshot
+        ? reorderWorkerFocusMessagesByIncomingOrder(next, incomingResolvedIndexes)
+        : next
+      const prunedMessages = pruneWorkerFocusMessages(orderedMessages)
       return {
         workerFocusMessagesThreadId: workerThreadId,
         workerFocusMessages: prunedMessages
@@ -707,7 +1026,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -751,7 +1072,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -781,7 +1104,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         previousThreadId: prev,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -814,7 +1139,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         previousThreadId: prev,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -840,7 +1167,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         mainView: "customize",
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
     } else {
       const restored = get().previousThreadId
@@ -887,7 +1216,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -902,7 +1233,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: false,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -918,7 +1251,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         showDashboardView: false,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -937,7 +1272,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -955,7 +1292,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }
@@ -973,7 +1312,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentThreadId: null,
         workerFocusView: null,
         workerFocusMessagesThreadId: null,
-        workerFocusMessages: []
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
       })
       return
     }

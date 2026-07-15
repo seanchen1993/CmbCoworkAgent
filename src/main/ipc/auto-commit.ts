@@ -1,21 +1,27 @@
 import type { IpcMain } from "electron"
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "../types"
 import {
-  getAgentAutoCommitSettings,
   getAgentAutoCommitWorkspaceCard,
   saveAgentAutoCommitSettings,
   saveAgentAutoCommitWorkspaceCard
 } from "../storage"
 
+const AUTO_COMMIT_DISABLED_SETTINGS: AgentAutoCommitSettings = {
+  mode: "off",
+  push: false,
+  messageStrategy: "prompt"
+}
+
 export function registerAutoCommitHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("autoCommit:getSettings", async (): Promise<AgentAutoCommitSettings> => {
-    return getAgentAutoCommitSettings()
+    return AUTO_COMMIT_DISABLED_SETTINGS
   })
 
   ipcMain.handle(
     "autoCommit:saveSettings",
     async (_event, updates: Partial<AgentAutoCommitSettings>): Promise<AgentAutoCommitSettings> => {
-      return saveAgentAutoCommitSettings(updates)
+      saveAgentAutoCommitSettings({ ...updates, mode: "off", push: false })
+      return AUTO_COMMIT_DISABLED_SETTINGS
     }
   )
 

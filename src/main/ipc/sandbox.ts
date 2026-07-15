@@ -15,6 +15,7 @@ import {
   setSandboxNuxCompleted
 } from "../storage"
 import { pendingApprovals } from "../agent/runtime"
+import { isFailureFuseUserNoticeEnabled } from "../agent/failure-fuse"
 import type { ApprovalDecision, ApprovalRequest } from "../types"
 
 const CODEX_HOME = join(homedir(), ".codex")
@@ -652,6 +653,48 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
     notifyChanged()
   })
 
+  ipcMain.handle("sandbox:getFailureFuseDebug", async (): Promise<boolean> => {
+    return process.env.CMB_AGENT_FAIL_FAST === "1"
+  })
+
+  ipcMain.handle("sandbox:getFailureFuseWarning", async (): Promise<boolean> => {
+    return isFailureFuseUserNoticeEnabled()
+  })
+
+  ipcMain.handle("sandbox:getFailureFuseModelFeedback", async (): Promise<boolean> => {
+    return process.env.CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK === "1"
+  })
+
+  ipcMain.handle("sandbox:setFailureFuseWarning", async (_event, enabled: boolean): Promise<void> => {
+    if (typeof enabled !== "boolean") throw new Error(`Invalid failure fuse warning value: ${enabled}`)
+    if (enabled) {
+      process.env.CMB_AGENT_FAILURE_FUSE_WARN = "1"
+    } else {
+      process.env.CMB_AGENT_FAILURE_FUSE_WARN = "0"
+    }
+    notifyChanged()
+  })
+
+  ipcMain.handle("sandbox:setFailureFuseModelFeedback", async (_event, enabled: boolean): Promise<void> => {
+    if (typeof enabled !== "boolean") throw new Error(`Invalid failure fuse model feedback value: ${enabled}`)
+    if (enabled) {
+      process.env.CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK = "1"
+    } else {
+      delete process.env.CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK
+    }
+    notifyChanged()
+  })
+
+  ipcMain.handle("sandbox:setFailureFuseDebug", async (_event, enabled: boolean): Promise<void> => {
+    if (typeof enabled !== "boolean") throw new Error(`Invalid failure fuse debug value: ${enabled}`)
+    if (enabled) {
+      process.env.CMB_AGENT_FAIL_FAST = "1"
+    } else {
+      delete process.env.CMB_AGENT_FAIL_FAST
+    }
+    notifyChanged()
+  })
+
   ipcMain.handle("sandbox:getPendingApprovals", async (_event, threadId: string): Promise<ApprovalRequest[]> => {
     if (typeof threadId !== "string" || !threadId.trim()) return []
     return Array.from(pendingApprovals.values())
@@ -764,7 +807,6 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
           return
         }
       }
-      pendingApprovals.delete(decision.requestId)
       pending.resolve(decision)
     } else {
       console.warn("[Sandbox] Received approval decision for unknown request:", decision.requestId)

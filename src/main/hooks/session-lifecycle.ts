@@ -20,6 +20,11 @@ interface StartedSession {
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
   hookScope?: HookScopeController
@@ -42,7 +47,18 @@ export async function fireSessionStartOnce(
   turnId?: string,
   pluginOutputDir?: string,
   systemId?: string,
-  harnessContext?: Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode" | "projectDir">
+  harnessContext?: Pick<
+    HookContext,
+    | "pluginWorkspace"
+    | "featureId"
+    | "harnessProjectId"
+    | "harnessAdapterName"
+    | "harnessAdapterVersion"
+    | "harnessNodeName"
+    | "harnessNodeStatus"
+    | "projectCode"
+    | "projectDir"
+  >
 ): Promise<void> {
   const existing = startedSessions.get(threadId)
   if (existing) {
@@ -52,6 +68,12 @@ export async function fireSessionStartOnce(
       systemId: systemId ?? existing.systemId,
       pluginWorkspace: harnessContext?.pluginWorkspace ?? existing.pluginWorkspace,
       featureId: harnessContext?.featureId ?? existing.featureId,
+      harnessProjectId: harnessContext?.harnessProjectId ?? existing.harnessProjectId,
+      harnessAdapterName: harnessContext?.harnessAdapterName ?? existing.harnessAdapterName,
+      harnessAdapterVersion:
+        harnessContext?.harnessAdapterVersion ?? existing.harnessAdapterVersion,
+      harnessNodeName: harnessContext?.harnessNodeName ?? existing.harnessNodeName,
+      harnessNodeStatus: harnessContext?.harnessNodeStatus ?? existing.harnessNodeStatus,
       projectCode: harnessContext?.projectCode ?? existing.projectCode,
       projectDir: harnessContext?.projectDir ?? existing.projectDir,
       hookScope: hookScope ?? existing.hookScope
@@ -64,6 +86,11 @@ export async function fireSessionStartOnce(
     systemId,
     pluginWorkspace: harnessContext?.pluginWorkspace,
     featureId: harnessContext?.featureId,
+    harnessProjectId: harnessContext?.harnessProjectId,
+    harnessAdapterName: harnessContext?.harnessAdapterName,
+    harnessAdapterVersion: harnessContext?.harnessAdapterVersion,
+    harnessNodeName: harnessContext?.harnessNodeName,
+    harnessNodeStatus: harnessContext?.harnessNodeStatus,
     projectCode: harnessContext?.projectCode,
     projectDir: harnessContext?.projectDir,
     hookScope
@@ -179,6 +206,11 @@ export async function fireSessionEnd(
     systemId: started.systemId,
     pluginWorkspace: started.pluginWorkspace,
     featureId: started.featureId,
+    harnessProjectId: started.harnessProjectId,
+    harnessAdapterName: started.harnessAdapterName,
+    harnessAdapterVersion: started.harnessAdapterVersion,
+    harnessNodeName: started.harnessNodeName,
+    harnessNodeStatus: started.harnessNodeStatus,
     projectCode: started.projectCode,
     projectDir: started.projectDir,
     sessionId: threadId,
@@ -218,6 +250,11 @@ export async function fireSessionEndAll(
         systemId: session.systemId,
         pluginWorkspace: session.pluginWorkspace,
         featureId: session.featureId,
+        harnessProjectId: session.harnessProjectId,
+        harnessAdapterName: session.harnessAdapterName,
+        harnessAdapterVersion: session.harnessAdapterVersion,
+        harnessNodeName: session.harnessNodeName,
+        harnessNodeStatus: session.harnessNodeStatus,
         projectCode: session.projectCode,
         projectDir: session.projectDir,
         // PR-16 follow-up — before-quit drain → CC `reason: "logout"`.

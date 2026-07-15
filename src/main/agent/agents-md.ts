@@ -2,6 +2,7 @@ import { constants as fsConstants, type Stats } from "fs"
 import { lstat, open, realpath, stat } from "fs/promises"
 import { homedir } from "os"
 import { dirname, isAbsolute, join, relative, resolve } from "path"
+import type { HarnessAgentmdLoadStatusItem } from "../../shared/harness-board-types"
 
 export const DEFAULT_AGENTS_FILENAME = "AGENTS.md"
 export const LOCAL_AGENTS_OVERRIDE_FILENAME = "AGENTS.override.md"
@@ -10,6 +11,10 @@ export const DEFAULT_GLOBAL_AGENTS_MAX_BYTES = DEFAULT_AGENTS_MAX_BYTES
 const AGENTS_PROJECT_SEPARATOR = "\n\n--- project-doc ---\n\n"
 const UTF8_READ_PADDING_BYTES = 4
 const GLOBAL_AGENTS_SECTION_TITLE = "# Global AGENTS.md instructions"
+const TRUNCATED_AGENTS_PROMPT_NOTICE =
+  "[truncated to fit prompt budget]\n[read the full AGENTS.md at the path above before making changes covered by it]"
+const OMITTED_AGENTS_PROMPT_NOTICE =
+  "[not injected because the AGENTS.md prompt budget was exceeded; read the AGENTS.md file at the path above before making changes covered by it]"
 
 export interface AgentsPromptEntry {
   path: string
@@ -31,11 +36,71 @@ interface ReadAgentsFileResult {
   bytesRead: number
 }
 
-export interface AgentsPromptResult {
+interface BaseAgentsPromptResult {
   prompt: string | null
   projectRoot: string
   loadedPaths: string[]
   truncated: boolean
+}
+
+export interface AgentsPromptResult extends BaseAgentsPromptResult {
+  type: "workspace"
+}
+
+export interface AgentsWorkspacePromptSection {
+  cwd: string
+  projectRoot: string
+  loadedPaths: string[]
+}
+
+export interface AgentsPromptForWorkspacesOptions {
+  primaryWorkspacePath: string
+  additionalWorkspacePaths?: string[]
+  includeGlobal?: boolean
+}
+
+export interface AgentsPromptForWorkspacesResult extends BaseAgentsPromptResult {
+  type: "workspaces"
+  workspaceSections: AgentsWorkspacePromptSection[]
+}
+
+export type AgentsPromptRuntimeResult = AgentsPromptResult | AgentsPromptForWorkspacesResult
+
+export function buildAgentsPromptLoadStatusItems(
+  agentsPrompt: AgentsPromptRuntimeResult
+): HarnessAgentmdLoadStatusItem[] {
+  if (agentsPrompt.type === "workspaces") {
+    const workspaceLoadedPaths = new Set(
+      agentsPrompt.workspaceSections.flatMap((section) => section.loadedPaths)
+    )
+    const globalItems = agentsPrompt.loadedPaths
+      .filter((path) => !workspaceLoadedPaths.has(path))
+      .map((path) => ({
+        deployUnitId: "CMBDevClaw",
+        path,
+        loaded: true,
+        source: "local",
+        message: ""
+      }))
+    const workspaceItems = agentsPrompt.workspaceSections.flatMap((section) =>
+      section.loadedPaths.map((path) => ({
+        deployUnitId: section.cwd,
+        path,
+        loaded: true,
+        source: "local",
+        message: ""
+      }))
+    )
+    return [...globalItems, ...workspaceItems]
+  }
+
+  return agentsPrompt.loadedPaths.map((path) => ({
+    deployUnitId: agentsPrompt.projectRoot,
+    path,
+    loaded: true,
+    source: "local",
+    message: ""
+  }))
 }
 
 export interface AgentsPromptBudgetOptions {
@@ -275,15 +340,22 @@ async function readAgentsFilePrefix(
 
 async function readFirstAvailableAgentsFile(
   file: AgentsFileReference,
-  maxBytes: number
+  maxBytes: number,
+  seenReadPaths?: Set<string>
 ): Promise<{ file: AgentsFileReference; content: ReadAgentsFileResult } | null> {
   const candidates = [file, ...(file.fallbackFiles ?? [])]
 
   for (const candidate of candidates) {
+    if (seenReadPaths?.has(candidate.readPath)) {
+      continue
+    }
+
     try {
+      const content = await readAgentsFilePrefix(candidate, maxBytes)
+      seenReadPaths?.add(candidate.readPath)
       return {
         file: candidate,
-        content: await readAgentsFilePrefix(candidate, maxBytes)
+        content
       }
     } catch (error) {
       console.warn("[AGENTS] Failed to read AGENTS file:", candidate.path, error)
@@ -404,6 +476,15 @@ export async function readAgentsFiles(
       : typeof thirdArg === "string"
         ? thirdArg
         : undefined
+  return readAgentsFilesInternal(files, maxBytes, sectionTitle)
+}
+
+async function readAgentsFilesInternal(
+  files: AgentsFileReference[],
+  maxBytes: number,
+  sectionTitle?: string,
+  seenReadPaths?: Set<string>
+): Promise<{ entries: AgentsPromptEntry[]; truncated: boolean }> {
   const entries: AgentsPromptEntry[] = []
   let truncated = false
   let remainingBytes = maxBytes
@@ -414,7 +495,7 @@ export async function readAgentsFiles(
       break
     }
 
-    const readResult = await readFirstAvailableAgentsFile(file, remainingBytes)
+    const readResult = await readFirstAvailableAgentsFile(file, remainingBytes, seenReadPaths)
     if (!readResult) {
       continue
     }
@@ -488,13 +569,70 @@ function renderAgentsPromptSection(title: string, entries: AgentsPromptEntry[]):
     lines.push(entry.content)
     if (entry.truncated) {
       lines.push("")
-      lines.push("[truncated to fit prompt budget]")
+      lines.push(TRUNCATED_AGENTS_PROMPT_NOTICE)
     }
     lines.push("")
   }
   lines.push("</INSTRUCTIONS>")
 
   return lines.join("\n")
+}
+
+interface WorkspaceAgentsPromptEntries {
+  cwd: string
+  projectRoot: string
+  entries: AgentsPromptEntry[]
+}
+
+function appendOmittedAgentsPromptPlaceholders(
+  originalEntries: AgentsPromptEntry[],
+  fittedEntries: AgentsPromptEntry[]
+): AgentsPromptEntry[] {
+  const fittedPaths = new Set(fittedEntries.map((entry) => entry.path))
+  const omittedEntries = originalEntries
+    .filter((entry) => !fittedPaths.has(entry.path))
+    .map((entry) => ({
+      ...entry,
+      content: OMITTED_AGENTS_PROMPT_NOTICE,
+      truncated: false
+    }))
+
+  return [...fittedEntries, ...omittedEntries]
+}
+
+function appendOmittedWorkspaceSectionPlaceholders(
+  originalSections: WorkspaceAgentsPromptEntries[],
+  fittedSections: WorkspaceAgentsPromptEntries[]
+): WorkspaceAgentsPromptEntries[] {
+  return originalSections.map((originalSection, index) => {
+    const fittedSection = fittedSections[index] ?? {
+      cwd: originalSection.cwd,
+      projectRoot: originalSection.projectRoot,
+      entries: []
+    }
+
+    return {
+      ...fittedSection,
+      entries: appendOmittedAgentsPromptPlaceholders(
+        originalSection.entries,
+        fittedSection.entries
+      )
+    }
+  })
+}
+
+function renderAgentsPromptForWorkspaceSections(
+  globalEntries: AgentsPromptEntry[],
+  workspaceSections: WorkspaceAgentsPromptEntries[]
+): string | null {
+  const promptSections = [
+    renderAgentsPromptSection(GLOBAL_AGENTS_SECTION_TITLE, globalEntries),
+    ...workspaceSections.map((section) =>
+      renderAgentsPromptSection(getProjectAgentsSectionTitle(section.cwd), section.entries)
+    )
+  ].filter((section): section is string => Boolean(section))
+
+  return promptSections.length > 0 ? promptSections.join(AGENTS_PROJECT_SEPARATOR) : null
 }
 
 function doesRenderedSectionFit(
@@ -648,6 +786,140 @@ function fitEntriesToTotalBudget(
   }
 }
 
+function fitWorkspaceSectionsToSectionBudget(
+  workspaceSections: WorkspaceAgentsPromptEntries[],
+  maxBytes: number
+): { workspaceSections: WorkspaceAgentsPromptEntries[]; truncated: boolean } {
+  const fittedSections: WorkspaceAgentsPromptEntries[] = []
+  let bytesUsed = 0
+  let hasRenderedSection = false
+  let truncated = false
+  const separatorBytes = Buffer.byteLength(AGENTS_PROJECT_SEPARATOR, "utf8")
+
+  for (let index = 0; index < workspaceSections.length; index += 1) {
+    const section = workspaceSections[index]
+    if (section.entries.length === 0) {
+      fittedSections.push(section)
+      continue
+    }
+
+    const separatorBudget = hasRenderedSection ? separatorBytes : 0
+    const sectionMaxBytes = maxBytes - bytesUsed - separatorBudget
+    if (sectionMaxBytes <= 0) {
+      fittedSections.push({ ...section, entries: [] })
+      truncated = true
+      for (let restIndex = index + 1; restIndex < workspaceSections.length; restIndex += 1) {
+        const restSection = workspaceSections[restIndex]
+        if (restSection.entries.length > 0) {
+          truncated = true
+        }
+        fittedSections.push({ ...restSection, entries: [] })
+      }
+      break
+    }
+
+    const fittedSection = fitEntriesToSectionBudget(
+      getProjectAgentsSectionTitle(section.cwd),
+      section.entries,
+      sectionMaxBytes
+    )
+    const nextSection = { ...section, entries: fittedSection.entries }
+    fittedSections.push(nextSection)
+
+    const sectionPrompt = renderAgentsPromptSection(
+      getProjectAgentsSectionTitle(section.cwd),
+      fittedSection.entries
+    )
+    if (sectionPrompt) {
+      bytesUsed += separatorBudget + Buffer.byteLength(sectionPrompt, "utf8")
+      hasRenderedSection = true
+    }
+
+    if (fittedSection.truncated || fittedSection.entries.length < section.entries.length) {
+      truncated = true
+      for (let restIndex = index + 1; restIndex < workspaceSections.length; restIndex += 1) {
+        const restSection = workspaceSections[restIndex]
+        if (restSection.entries.length > 0) {
+          truncated = true
+        }
+        fittedSections.push({ ...restSection, entries: [] })
+      }
+      break
+    }
+  }
+
+  return { workspaceSections: fittedSections, truncated }
+}
+
+function fitWorkspaceSectionsToTotalBudget(
+  globalEntries: AgentsPromptEntry[],
+  workspaceSections: WorkspaceAgentsPromptEntries[],
+  maxBytes: number
+): {
+  globalEntries: AgentsPromptEntry[]
+  workspaceSections: WorkspaceAgentsPromptEntries[]
+  truncated: boolean
+} {
+  if (maxBytes <= 0) {
+    return {
+      globalEntries: [],
+      workspaceSections: workspaceSections.map((section) => ({ ...section, entries: [] })),
+      truncated:
+        globalEntries.length > 0 || workspaceSections.some((section) => section.entries.length > 0)
+    }
+  }
+
+  const currentPrompt = renderAgentsPromptForWorkspaceSections(globalEntries, workspaceSections)
+  if (!currentPrompt || Buffer.byteLength(currentPrompt, "utf8") <= maxBytes) {
+    return { globalEntries, workspaceSections, truncated: false }
+  }
+
+  const fittedWorkspaceSections = fitWorkspaceSectionsToSectionBudget(workspaceSections, maxBytes)
+  const projectPrompt = renderAgentsPromptForWorkspaceSections(
+    [],
+    fittedWorkspaceSections.workspaceSections
+  )
+
+  if (!projectPrompt) {
+    const fittedGlobal = fitEntriesToSectionBudget(
+      GLOBAL_AGENTS_SECTION_TITLE,
+      globalEntries,
+      maxBytes
+    )
+    return {
+      globalEntries: fittedGlobal.entries,
+      workspaceSections: fittedWorkspaceSections.workspaceSections,
+      truncated: fittedWorkspaceSections.truncated || fittedGlobal.truncated
+    }
+  }
+
+  const projectBytes = Buffer.byteLength(projectPrompt, "utf8")
+  if (projectBytes >= maxBytes) {
+    return {
+      globalEntries: [],
+      workspaceSections: fittedWorkspaceSections.workspaceSections,
+      truncated: true
+    }
+  }
+
+  const separatorBytes = Buffer.byteLength(AGENTS_PROJECT_SEPARATOR, "utf8")
+  const globalMaxBytes = maxBytes - projectBytes - separatorBytes
+  const fittedGlobal = fitEntriesToSectionBudget(
+    GLOBAL_AGENTS_SECTION_TITLE,
+    globalEntries,
+    globalMaxBytes
+  )
+
+  return {
+    globalEntries: fittedGlobal.entries,
+    workspaceSections: fittedWorkspaceSections.workspaceSections,
+    truncated:
+      fittedWorkspaceSections.truncated ||
+      fittedGlobal.truncated ||
+      fittedGlobal.entries.length < globalEntries.length
+  }
+}
+
 export function renderAgentsPrompt(
   cwd: string,
   projectEntries: AgentsPromptEntry[],
@@ -694,6 +966,7 @@ export async function loadAgentsPromptForWorkspace(
       : fitEntriesToTotalBudget(cwd, projectResult.entries, globalResult.entries, totalMaxBytes)
 
   return {
+    type: "workspace",
     prompt: renderAgentsPrompt(
       cwd,
       totalBudgetResult.projectEntries,
@@ -704,5 +977,87 @@ export async function loadAgentsPromptForWorkspace(
       (entry) => entry.path
     ),
     truncated: globalResult.truncated || projectResult.truncated || totalBudgetResult.truncated
+  }
+}
+
+export async function loadAgentsPromptForWorkspaces(
+  options: AgentsPromptForWorkspacesOptions,
+  budget: AgentsPromptBudget = {
+    globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
+    projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES
+  }
+): Promise<AgentsPromptForWorkspacesResult> {
+  const { globalMaxBytes, projectMaxBytes, totalMaxBytes } = normalizeAgentsPromptBudget(budget)
+  const seenReadPaths = new Set<string>()
+  const primaryCwd = await normalizeWorkspacePath(options.primaryWorkspacePath)
+  const additionalWorkspacePaths = options.additionalWorkspacePaths ?? []
+  const normalizedAdditionalWorkspacePaths = await Promise.all(
+    additionalWorkspacePaths
+      .map((workspacePath) => workspacePath.trim())
+      .filter(Boolean)
+      .map((workspacePath) => normalizeWorkspacePath(workspacePath))
+  )
+  const workspacePaths = Array.from(new Set([primaryCwd, ...normalizedAdditionalWorkspacePaths]))
+  const workspaceSections: WorkspaceAgentsPromptEntries[] = []
+
+  const globalResult =
+    options.includeGlobal === false
+      ? { entries: [], truncated: false }
+      : await readAgentsFilesInternal(
+          await discoverGlobalAgentsFiles(),
+          globalMaxBytes,
+          GLOBAL_AGENTS_SECTION_TITLE,
+          seenReadPaths
+        )
+
+  let projectTruncated = false
+  for (const cwd of workspacePaths) {
+    const projectRoot = await findProjectRootByGitMarker(cwd)
+    const projectPaths = await discoverAgentsFiles(projectRoot, cwd)
+    const projectResult = await readAgentsFilesInternal(
+      projectPaths,
+      projectMaxBytes,
+      getProjectAgentsSectionTitle(cwd),
+      seenReadPaths
+    )
+    projectTruncated = projectTruncated || projectResult.truncated
+    workspaceSections.push({
+      cwd,
+      projectRoot,
+      entries: projectResult.entries
+    })
+  }
+
+  const totalBudgetResult =
+    totalMaxBytes == null
+      ? {
+          globalEntries: globalResult.entries,
+          workspaceSections,
+          truncated: false
+        }
+      : fitWorkspaceSectionsToTotalBudget(globalResult.entries, workspaceSections, totalMaxBytes)
+  const promptGlobalEntries = appendOmittedAgentsPromptPlaceholders(
+    globalResult.entries,
+    totalBudgetResult.globalEntries
+  )
+  const promptWorkspaceSections = appendOmittedWorkspaceSectionPlaceholders(
+    workspaceSections,
+    totalBudgetResult.workspaceSections
+  )
+
+  return {
+    type: "workspaces",
+    prompt: renderAgentsPromptForWorkspaceSections(promptGlobalEntries, promptWorkspaceSections),
+    projectRoot: promptWorkspaceSections[0]?.projectRoot ?? primaryCwd,
+    loadedPaths: [
+      ...promptGlobalEntries,
+      ...promptWorkspaceSections.flatMap((section) => section.entries)
+    ].map((entry) => entry.path),
+    truncated: globalResult.truncated || projectTruncated || totalBudgetResult.truncated,
+    workspaceSections: promptWorkspaceSections.map((section) => ({
+      cwd: section.cwd,
+      projectRoot: section.projectRoot,
+      loadedPaths: section.entries.map((entry) => entry.path)
+    }))
   }
 }
