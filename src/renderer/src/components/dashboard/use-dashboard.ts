@@ -37,14 +37,30 @@ export interface OverviewData {
   codeMeasuredAdoptionRate: number | null
   codeInclusiveAdoptionRate: number | null
   codePushedAdoptionRate: number | null
+  /** 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。端到端「真实入库」口径，领导主看。 */
+  codeInclusivePushedAdoptionRate: number | null
   codeAdoptionRate: number | null
   totalSkills: number
   totalTools: number
   totalSkillCalls: number
   totalToolCalls: number
   trend: Array<{ time: string; count: number; users: number }>
-  bySkill: Array<{ skill: string; count: number }>
-  bySkillAll: Array<{ skill: string; count: number }>
+  bySkill: Array<{
+    id?: string
+    skill: string
+    count: number
+    sourceRef?: string
+    isPlugin?: boolean
+    pluginName?: string
+  }>
+  bySkillAll: Array<{
+    id?: string
+    skill: string
+    count: number
+    sourceRef?: string
+    isPlugin?: boolean
+    pluginName?: string
+  }>
   bySkillAdoption: SkillAdoptionRankingItem[]
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
@@ -61,6 +77,7 @@ export interface ModelStatsData {
   }>
   byTier: Array<{ tier: string; count: number }>
   byLayer: Array<{ layer: string; count: number }>
+  smartByTier: Array<{ tier: string; count: number }>
 }
 
 export interface UserStatsData {
@@ -125,9 +142,12 @@ export interface DashboardTraceDetail {
   modelName?: string
   outcome: string
   totalToolCalls: number
+  modelCallCount: number
+  userInputRequestCount: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  appVersion?: string
   usedSkills: string[]
   evolvedSkills: string[]
   triggerSource?: string
@@ -178,6 +198,48 @@ export interface DashboardCommitDetailsData {
   items: DashboardCommitDetail[]
 }
 
+export interface DashboardNonGitAdoptionReportItem {
+  eventId: string
+  eventTime: string
+  generatedAt: string
+  pushedAt?: string
+  measuredAt?: string
+  userName: string
+  sapId?: string
+  ystId?: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  userIp?: string
+  source?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  genEventId?: string
+  threadId?: string
+  threadIds: string[]
+  fileHint?: string
+  tool?: string
+  language?: string
+  modelName?: string
+  measureSource?: string
+  verdict?: string
+  pushed: boolean
+  usedSkills: string[]
+  generatedLineCount: number
+  effectiveGeneratedLineCount: number
+  adoptedLineCount: number
+  adoptionRate: number | null
+}
+
+export interface DashboardNonGitAdoptionReportsData {
+  total: number
+  page: number
+  pageSize: number
+  items: DashboardNonGitAdoptionReportItem[]
+}
+
 /** 一行采纳溯源：一个 `code_adopt` 事件 + 按 genEventId 关联的 `code_gen` 元数据。 */
 export interface DashboardCommitAdoptionPair {
   genEventId: string
@@ -189,6 +251,8 @@ export interface DashboardCommitAdoptionPair {
   modelName: string | null
   generatedAt: string | null
   verdict: string | null
+  /** 仅 verdict=superseded：作废原因 same_path_rewrite | agent_rm，供溯源展示。 */
+  reason: string | null
   generatedLineCount: number | null
   effectiveGeneratedLineCount: number | null
   adoptedLineCount: number | null
@@ -243,6 +307,8 @@ export interface DashboardCodeStats {
   measuredAdoptionRate: number | null
   inclusiveAdoptionRate: number | null
   pushedAdoptionRate: number | null
+  /** 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。端到端「真实入库」口径，领导主看。 */
+  inclusivePushedAdoptionRate: number | null
   adoptionRate: number | null
 }
 
@@ -304,6 +370,60 @@ export interface DashboardUserDetail {
   traceTriggerScope?: DashboardTraceTriggerScope
 }
 
+/**
+ * 技能贡献奖候选（逐 Skill）：跨室使用数 + 整体 AI 代码入库率。
+ * skillKey 与前端传入的「个人构建」技能名一致，供 join 应用市场展示字段（构建者等）。
+ */
+export interface DashboardAwardSkillContribution {
+  skillKey: string
+  /** 使用过该技能的去重室（upperOrgLv1）数；评分标准①「跨 ≥2 室」。 */
+  crossOrgCount: number
+  /** 使用过该技能的去重用户数。 */
+  userCount: number
+  /** 该技能的调用（trace）数。 */
+  callCount: number
+  /** 该技能命中代码的整体入库统计（含 inclusivePushedAdoptionRate）。 */
+  codeStats: DashboardCodeStats | null
+}
+
+/** 技能应用奖榜（逐个人）：深度使用指标 + 个人 AI 代码入库率。不自动排名。 */
+export interface DashboardAwardUserApplication {
+  sapId: string
+  ystId?: string
+  userName: string
+  orgName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+  callCount: number
+  /** 用过的去重技能种类数。 */
+  skillCount: number
+  /** 用技能的总次数（含同技能重复）。 */
+  skillUsageCount: number
+  toolCallCount: number
+  threadCount: number
+  featureCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+/** 团队标杆奖一行（室级或其下组级）。贡献技能数 / 覆盖室数由前端按市场作者归属补齐。 */
+export interface DashboardAwardTeamBenchmarkRow {
+  shi: string
+  /** 组（upperOrgLv0）；室级行为空。 */
+  group?: string
+  usageCount: number
+  userCount: number
+  /** 本行（室/组）人均使用次数。 */
+  perCapitaUsage: number
+  /** 总量人均使用次数（全员基线），每行相同。 */
+  totalPerCapitaUsage: number
+  /** 本行内使用次数超过「本行人均」的用户数。 */
+  aboveAvgUserCount: number
+  skillUsageCount: number
+  distinctSkillsUsed: number
+  codeStats: DashboardCodeStats | null
+  children?: DashboardAwardTeamBenchmarkRow[]
+}
+
 export interface DashboardProjectModeFeature {
   slug: string
   title: string
@@ -315,9 +435,41 @@ export interface DashboardProjectModeFeature {
   codeStats?: DashboardCodeStats | null
 }
 
+/** Sub-row of a stage: conversations + code adoption for one node status (进行中/已完成/...). */
+export interface DashboardProjectModeNodeStatus {
+  status: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+/** Per-stage (workflow node) breakdown of a feature: conversations + code adoption. */
+export interface DashboardProjectModeFeatureNode {
+  /** Human-readable stage name (group-label, e.g. "Dev-代码实现"); no raw node id. */
+  nodeName: string
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+  /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
+  byStatus: DashboardProjectModeNodeStatus[]
+  /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
+  stageBuckets: DashboardStageBuckets
+}
+
+/** Cross-user aggregate for a single plugin (adapter), surfaced in the plugin list. */
+export interface DashboardPluginAggregate {
+  adapterName: string
+  conversationCount: number
+  projectCount: number
+  codeStats: DashboardCodeStats | null
+  byNode: DashboardProjectModeFeatureNode[]
+}
+
 export interface DashboardProjectModeSkillCount {
+  id?: string
   skill: string
+  sourceRef?: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 export interface DashboardProjectModeToolUsage {
@@ -355,6 +507,25 @@ export interface DashboardProjectModeAnalytics {
   byAdapter: DashboardProjectModeAdapterShareItem[]
 }
 
+/** One stage×skill bucket: conversation count + code adoption stats. */
+export interface DashboardStageBucketStat {
+  conversationCount: number
+  codeStats: DashboardCodeStats | null
+}
+
+/**
+ * Project-mode work split by stage×skill attribution (流程内/插件约束 vs VibeCoding),
+ * complementing the Skill-usage口径. See src/shared/harness-stage-bucket.ts.
+ */
+export interface DashboardStageBuckets {
+  /** 进行中阶段 + 调用了插件 Skill —— 真正受插件流程约束。 */
+  pluginConstrained: DashboardStageBucketStat
+  /** 未受插件约束的自由产出：进行中但未用 Skill（绕过插件），或已完成阶段后的产出。 */
+  vibecoding: DashboardStageBucketStat
+  /** 其余阶段状态或无阶段状态的历史数据。 */
+  unattributed: DashboardStageBucketStat
+}
+
 export interface DashboardProjectModeProject {
   projectId: string
   name: string
@@ -370,6 +541,7 @@ export interface DashboardProjectModeProject {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
   featureCount: number
@@ -378,6 +550,7 @@ export interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 export type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -391,6 +564,14 @@ export interface DashboardProjectModeProjectCounts {
   archivedFeatureCount: number
 }
 
+export type DashboardProjectModeProjectSortKey =
+  | "featureCount"
+  | "createdAt"
+  | "conversationCount"
+  | "generatedLines"
+  | "archivedAt"
+export type DashboardProjectModeProjectSortOrder = "asc" | "desc"
+
 export interface DashboardProjectModeProjectPageData {
   projects: DashboardProjectModeProject[]
   total: number
@@ -401,17 +582,30 @@ export interface DashboardProjectModeProjectPageData {
   adapterName: string
   creatorKeyword: string
   creatorOrgKeyword: string
+  sortBy: DashboardProjectModeProjectSortKey | null
+  sortOrder: DashboardProjectModeProjectSortOrder
+  /**
+   * True when more projects matched than the metric-sort enumeration cap, so the
+   * ranking + total only cover the first N projects and the list / metrics are
+   * incomplete. Always false on the snapshot-paginated path.
+   */
+  truncated: boolean
 }
 
 export interface DashboardProjectModeProjectPageOptions {
   upperOrgLv1?: string | string[] | null
+  fromLeanOnly?: boolean | null
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
   keyword?: string | null
   adapterName?: string | null
+  /** 配合 adapterName 精确到插件版本（「按版本」口径点击项目数）；空 = 不限版本。 */
+  adapterVersion?: string | null
   creatorKeyword?: string | null
   creatorOrgKeyword?: string | null
+  sortBy?: DashboardProjectModeProjectSortKey | null
+  sortOrder?: DashboardProjectModeProjectSortOrder | null
 }
 
 export interface DashboardProjectModeAdapter {
@@ -421,6 +615,7 @@ export interface DashboardProjectModeAdapter {
   featureCount: number
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  stageBuckets: DashboardStageBuckets
 }
 
 export interface DashboardProjectModeData {
@@ -447,6 +642,10 @@ export interface DashboardProjectModeData {
   projectCounts: DashboardProjectModeProjectCounts
   projectPage: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
+  /** 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整；开关关闭时恒为 false。 */
+  leanTruncated: boolean
+  /** 当前范围内出现过的外部上报来源（properties.source 去重值，字典序）；供生产效能代码指标 source 下拉。 */
+  availableSources?: string[]
 }
 
 export interface DashboardProjectModeTracesOptions {
@@ -459,6 +658,12 @@ export interface DashboardProjectModeTracesOptions {
   viewMode?: DashboardTraceViewMode
   triggerScope?: DashboardTraceTriggerScope
   featureSlug?: string
+  /** Scope traces to a single workflow stage (group-label), e.g. "Dev-代码实现". */
+  nodeName?: string
+  /** Further scope traces within a stage by node status (进行中/已完成/...). */
+  nodeStatus?: string
+  /** stage×skill 桶过滤（插件约束（Harness）/ VibeCoding / 未归因），用于按桶查看对话。 */
+  stageBucket?: "plugin_constrained" | "vibecoding" | "unattributed"
 }
 
 export interface DashboardProjectModeTracesData {
@@ -481,30 +686,29 @@ export interface ProductivityData {
   avgCommitsPerUser: number
 }
 
-export interface FeedbackData {
-  totalLikes: number
-  totalDislikes: number
-  totalLikeUsers: number
-  totalDislikeUsers: number
-  totalFeedbacks: number
-  likeRate: number
-  dislikeRate: number
-  byDislikeType: Array<{
-    type: string
-    label: string
-    count: number
-  }>
-  trend: Array<{
-    time: string
-    likes: number
-    dislikes: number
-  }>
-  recentComments: Array<{
-    time: string
-    type: string
-    typeLabel: string
-    text: string
-  }>
+export type AdvancedFeatureTone = "good" | "bad" | "warn" | "neutral"
+
+export interface AdvancedFeatureItem {
+  label: string
+  count: number
+  tone: AdvancedFeatureTone
+}
+
+export interface AdvancedFeatureCard {
+  key: string
+  label: string
+  /** Core-usage count headlined on the card. */
+  value: number
+  valueLabel: string
+  /** One-line value-result summary. */
+  hint: string
+  /** Outcome / value breakdown. */
+  items: AdvancedFeatureItem[]
+}
+
+export interface AdvancedFeaturesData {
+  cards: AdvancedFeatureCard[]
+  source: "es" | "mock"
 }
 
 export interface DashboardSkillEvalRun {
@@ -920,6 +1124,77 @@ export function navigateRange(
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+type OverviewSkillUsageItem = OverviewData["bySkillAll"][number]
+
+function parsePluginSkillFromSourceRef(
+  ref: unknown
+): { id: string; sourceRef: string; skill: string; pluginName: string } | null {
+  if (typeof ref !== "string" || !ref.startsWith("plugin:")) return null
+  const rest = ref.slice("plugin:".length)
+  const separatorIndex = rest.indexOf("/")
+  if (separatorIndex <= 0 || separatorIndex >= rest.length - 1) return null
+  try {
+    const pluginId = decodeURIComponent(rest.slice(0, separatorIndex))
+    const rawSkillAndQuery = rest.slice(separatorIndex + 1)
+    const queryIndex = rawSkillAndQuery.indexOf("?")
+    const rawSkill = queryIndex >= 0 ? rawSkillAndQuery.slice(0, queryIndex) : rawSkillAndQuery
+    const rawQuery = queryIndex >= 0 ? rawSkillAndQuery.slice(queryIndex + 1) : ""
+    const query = new URLSearchParams(rawQuery)
+    const skill = decodeURIComponent(rawSkill)
+    return {
+      id: `plugin:${encodeURIComponent(pluginId)}/${encodeURIComponent(skill)}`,
+      sourceRef: ref,
+      skill,
+      pluginName: query.get("name")?.trim() || pluginId
+    }
+  } catch {
+    return null
+  }
+}
+
+function parsePluginSkillSourceBuckets(rawBuckets: any): OverviewSkillUsageItem[] {
+  const result = new Map<string, OverviewSkillUsageItem>()
+  const buckets = Array.isArray(rawBuckets) ? rawBuckets : []
+  for (const bucket of buckets) {
+    const parsed = parsePluginSkillFromSourceRef(bucket?.key)
+    if (!parsed) continue
+    const count = Number(bucket?.doc_count ?? 0) || 0
+    const existing = result.get(parsed.id)
+    if (existing) {
+      existing.count += count
+    } else {
+      result.set(parsed.id, {
+        id: parsed.id,
+        sourceRef: parsed.sourceRef,
+        skill: parsed.skill,
+        count,
+        isPlugin: true,
+        pluginName: parsed.pluginName
+      })
+    }
+  }
+  return Array.from(result.values())
+}
+
+function combineSkillUsageBuckets(rawSkillBuckets: any, rawSourceBuckets: any): OverviewSkillUsageItem[] {
+  const pluginItems = parsePluginSkillSourceBuckets(rawSourceBuckets)
+  const pluginCountsBySkill = new Map<string, number>()
+  for (const item of pluginItems) {
+    pluginCountsBySkill.set(item.skill, (pluginCountsBySkill.get(item.skill) ?? 0) + item.count)
+  }
+
+  const result: OverviewSkillUsageItem[] = [...pluginItems]
+  const buckets = Array.isArray(rawSkillBuckets) ? rawSkillBuckets : []
+  for (const bucket of buckets) {
+    const skill = String(bucket?.key || "")
+    if (!skill) continue
+    const count = Math.max(0, (Number(bucket?.doc_count ?? 0) || 0) - (pluginCountsBySkill.get(skill) ?? 0))
+    if (count > 0) result.push({ id: skill, skill, count })
+  }
+
+  return result.sort((a, b) => b.count - a.count || a.skill.localeCompare(b.skill, "zh-CN"))
+}
+
 /** 根据粒度将 ES 返回的 ISO 时间串格式化为可读刻度 */
 function formatTrendTime(isoStr: string, granularity: Granularity): string {
   const d = new Date(isoStr)
@@ -1004,11 +1279,19 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codePushedEffectiveGeneratedLines > 0
       ? codePushedAdoptedLines / codePushedEffectiveGeneratedLines
       : null
+  const codeInclusivePushedAdoptionRate =
+    codeInclusiveEffectiveGeneratedLines > 0
+      ? codePushedAdoptedLines / codeInclusiveEffectiveGeneratedLines
+      : null
   const codeAdoptionRate = codeMeasuredAdoptionRate
   const totalSkills = aggs.total_skills?.value ?? 0
   const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
   const totalToolCalls = aggs.total_tool_calls?.value ?? 0
+  const combinedSkillItems = combineSkillUsageBuckets(
+    aggs.by_skill_all?.buckets ?? aggs.by_skill?.buckets ?? [],
+    aggs.skill_source?.buckets
+  )
 
   const trend: OverviewData["trend"] = (aggs.trend?.buckets ?? []).map((b: any) => ({
     time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
@@ -1016,19 +1299,9 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     users: b.users?.value ?? 0
   }))
 
-  const bySkill: OverviewData["bySkill"] = (aggs.by_skill?.buckets ?? []).map((b: any) => ({
-    skill: b.key || "unknown",
-    count: b.doc_count
-  }))
+  const bySkill: OverviewData["bySkill"] = combinedSkillItems.slice(0, 20)
 
-  const bySkillAll: OverviewData["bySkillAll"] = (
-    aggs.by_skill_all?.buckets ??
-    aggs.by_skill?.buckets ??
-    []
-  ).map((b: any) => ({
-    skill: b.key || "unknown",
-    count: b.doc_count
-  }))
+  const bySkillAll: OverviewData["bySkillAll"] = combinedSkillItems
 
   const bySkillAdoption: OverviewData["bySkillAdoption"] = (
     aggs.code_by_skill_adoption?.buckets ?? []
@@ -1036,8 +1309,14 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     const measuredAdoptionRate = b.measured_adoption_rate?.value
     const inclusiveAdoptionRate = b.inclusive_adoption_rate?.value
     const pushedAdoptionRate = b.pushed_adoption_rate?.value
+    const inclusivePushedAdoptionRate = b.inclusive_pushed_adoption_rate?.value
     return {
       skill: b.key || "unknown",
+      ...(b.id?.value ? { id: b.id.value } : {}),
+      ...(b.source_ref?.value ? { sourceRef: b.source_ref.value } : {}),
+      ...(b.is_plugin?.value === true
+        ? { isPlugin: true, pluginName: b.plugin_name?.value }
+        : {}),
       generatedLines: b.generated_lines?.value ?? 0,
       measuredGeneratedLines: b.measured_generated_lines?.value ?? 0,
       effectiveGeneratedLines: b.effective_generated_lines?.value ?? 0,
@@ -1052,6 +1331,8 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
       inclusiveAdoptionRate:
         typeof inclusiveAdoptionRate === "number" ? inclusiveAdoptionRate : null,
       pushedAdoptionRate: typeof pushedAdoptionRate === "number" ? pushedAdoptionRate : null,
+      inclusivePushedAdoptionRate:
+        typeof inclusivePushedAdoptionRate === "number" ? inclusivePushedAdoptionRate : null,
       commitCount: b.commit_count?.value ?? 0
     }
   })
@@ -1103,6 +1384,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codePushedCommitCount,
     codeMeasuredAdoptionRate,
     codeInclusiveAdoptionRate,
+    codeInclusivePushedAdoptionRate,
     codePushedAdoptionRate,
     codeAdoptionRate,
     totalSkills,
@@ -1140,7 +1422,19 @@ function parseModelStats(raw: any): ModelStatsData {
     count: b.doc_count
   }))
 
-  return { byModel, byTier, byLayer }
+  const smartByTier: ModelStatsData["smartByTier"] = (
+    aggs.smart_by_tier?.by_tier?.buckets ?? []
+  ).map((b: any) => ({
+    tier: b.key,
+    count: b.doc_count
+  }))
+
+  return {
+    byModel,
+    byTier,
+    byLayer,
+    smartByTier
+  }
 }
 
 function normalizeMetricValue(value: unknown): string {
@@ -1331,79 +1625,6 @@ function parseProductivity(raw: any, granularity: Granularity, range: TimeRange)
   }
 }
 
-const DISLIKE_TYPE_LABELS: Record<string, string> = {
-  slow: "太慢了",
-  not_helpful: "内容不相关",
-  inaccurate: "信息不准确",
-  unclear: "表述不清楚",
-  unsafe: "包含不安全内容",
-  other: "其他原因"
-}
-
-function formatCommentTime(isoStr: string): string {
-  const d = new Date(isoStr)
-  if (isNaN(d.getTime())) return isoStr
-  const mm = String(d.getMonth() + 1).padStart(2, "0")
-  const dd = String(d.getDate()).padStart(2, "0")
-  const hh = String(d.getHours()).padStart(2, "0")
-  const min = String(d.getMinutes()).padStart(2, "0")
-  return `${mm}-${dd} ${hh}:${min}`
-}
-
-function parseFeedback(raw: any, granularity: Granularity): FeedbackData {
-  const aggs = raw?.aggregations ?? {}
-  const totalLikes = aggs.total_likes?.doc_count ?? 0
-  const totalDislikes = aggs.total_dislikes?.doc_count ?? 0
-  const totalLikeUsers = aggs.total_likes?.unique_users?.value ?? 0
-  const totalDislikeUsers = aggs.total_dislikes?.unique_users?.value ?? 0
-  const totalFeedbacks = totalLikes + totalDislikes
-
-  const dislikeBuckets = aggs.dislike_by_type?.buckets ?? {}
-  const byDislikeType: FeedbackData["byDislikeType"] = Object.entries(dislikeBuckets)
-    .map(([type, value]) => ({
-      type,
-      label: DISLIKE_TYPE_LABELS[type] ?? type,
-      count: (value as { doc_count?: number }).doc_count ?? 0
-    }))
-    .sort((a, b) => b.count - a.count)
-
-  const trend: FeedbackData["trend"] = (aggs.trend?.buckets ?? []).map((b: any) => ({
-    time: formatTrendTime(b.key_as_string ?? new Date(b.key).toISOString(), granularity),
-    likes: b.likes?.doc_count ?? 0,
-    dislikes: b.dislikes?.doc_count ?? 0
-  }))
-
-  const recentCommentsHits = aggs.recent_dislike_comments?.latest?.hits?.hits ?? []
-  const recentComments: FeedbackData["recentComments"] = recentCommentsHits
-    .map((hit: any) => {
-      const source = hit?._source ?? {}
-      const properties = source.properties ?? {}
-      const text = String(properties.dislikeText ?? "").trim()
-      const type = String(properties.dislikeType ?? properties.feedbackId ?? "other")
-      const typeLabel = String(properties.dislikeTypeLabel ?? DISLIKE_TYPE_LABELS[type] ?? type)
-      return {
-        time: formatCommentTime(String(source.eventTime ?? "")),
-        type,
-        typeLabel,
-        text
-      }
-    })
-    .filter((item: { text: string }) => Boolean(item.text))
-
-  return {
-    totalLikes,
-    totalDislikes,
-    totalLikeUsers,
-    totalDislikeUsers,
-    totalFeedbacks,
-    likeRate: totalFeedbacks > 0 ? totalLikes / totalFeedbacks : 0,
-    dislikeRate: totalFeedbacks > 0 ? totalDislikes / totalFeedbacks : 0,
-    byDislikeType,
-    trend,
-    recentComments
-  }
-}
-
 function numberValue(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value
   if (typeof value === "string" && value.trim()) {
@@ -1411,6 +1632,36 @@ function numberValue(value: unknown): number {
     if (Number.isFinite(parsed)) return parsed
   }
   return 0
+}
+
+// Backend (fetchAdvancedFeatures / makeMockAdvancedFeatures) already returns the
+// final structured shape, so this is a defensive validator rather than a parser.
+function parseAdvancedFeatures(raw: unknown): AdvancedFeaturesData {
+  const root = (raw ?? {}) as Record<string, unknown>
+  const rawCards = Array.isArray(root.cards) ? root.cards : []
+  const validTones = new Set<AdvancedFeatureTone>(["good", "bad", "warn", "neutral"])
+  const cards: AdvancedFeatureCard[] = rawCards.map((entry) => {
+    const card = (entry ?? {}) as Record<string, unknown>
+    const rawItems = Array.isArray(card.items) ? card.items : []
+    const items: AdvancedFeatureItem[] = rawItems.map((it) => {
+      const item = (it ?? {}) as Record<string, unknown>
+      const tone = item.tone as AdvancedFeatureTone
+      return {
+        label: String(item.label ?? ""),
+        count: numberValue(item.count),
+        tone: validTones.has(tone) ? tone : "neutral"
+      }
+    })
+    return {
+      key: String(card.key ?? ""),
+      label: String(card.label ?? ""),
+      value: numberValue(card.value),
+      valueLabel: String(card.valueLabel ?? ""),
+      hint: String(card.hint ?? ""),
+      items
+    }
+  })
+  return { cards, source: root.source === "es" ? "es" : "mock" }
 }
 
 function parseSkillEvalChecks(raw: any): DashboardSkillEvalRun["checks"] {
@@ -1459,9 +1710,12 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
     ...(raw.modelName ? { modelName: String(raw.modelName) } : {}),
     outcome: String(raw.outcome ?? "unknown"),
     totalToolCalls: numberValue(raw.totalToolCalls),
+    modelCallCount: numberValue(raw.modelCallCount),
+    userInputRequestCount: numberValue(raw.userInputRequestCount),
     totalInputTokens: numberValue(raw.totalInputTokens),
     totalOutputTokens: numberValue(raw.totalOutputTokens),
     totalTokens: numberValue(raw.totalTokens),
+    ...(raw.appVersion ? { appVersion: String(raw.appVersion) } : {}),
     usedSkills: Array.isArray(raw.usedSkills) ? raw.usedSkills.map(String) : [],
     evolvedSkills: Array.isArray(raw.evolvedSkills) ? raw.evolvedSkills.map(String) : [],
     ...(raw.triggerSource ? { triggerSource: String(raw.triggerSource) } : {}),
@@ -1827,6 +2081,8 @@ export function useDashboard() {
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
   // 顶部「室筛选」支持多选 LV1 组织；空数组表示全部。
   const [selectedOrgLv1List, setSelectedOrgLv1List] = useState<string[]>([])
+  // 项目运营概览「仅精益项目」全局开关：仅统计绑定了企业（精益）项目的项目。
+  const [fromLeanProjectsOnly, setFromLeanProjectsOnly] = useState(false)
   const [loading, setLoading] = useState(false)
   const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [skillEvalLoading, setSkillEvalLoading] = useState(false)
@@ -1836,7 +2092,7 @@ export function useDashboard() {
   const [modelStats, setModelStats] = useState<ModelStatsData | null>(null)
   const [userStats, setUserStats] = useState<UserStatsData | null>(null)
   const [productivity, setProductivity] = useState<ProductivityData | null>(null)
-  const [feedback, setFeedback] = useState<FeedbackData | null>(null)
+  const [advancedFeatures, setAdvancedFeatures] = useState<AdvancedFeaturesData | null>(null)
   const [skillEval, setSkillEval] = useState<DashboardSkillEvalSummary | null>(null)
   const [projectMode, setProjectMode] = useState<DashboardProjectModeData | null>(null)
   const [projectModeProjectPages, setProjectModeProjectPages] = useState<
@@ -1850,6 +2106,14 @@ export function useDashboard() {
   >({})
   const [projectModeLoading, setProjectModeLoading] = useState(false)
   const [projectModeError, setProjectModeError] = useState<string | null>(null)
+  // 「生产效能代码指标」source 局部筛选：当前选中的来源（null = 全部，用 projectMode 自带口径），
+  // 以及按 source 换数得到的代码采纳覆盖值（仅替换该区两个子模块，不动其它面板维度）。
+  const [projectModeCodeSource, setProjectModeCodeSource] = useState<string | null>(null)
+  const [projectModeCodeStatsOverride, setProjectModeCodeStatsOverride] = useState<{
+    codeStats: DashboardCodeStats | null
+    skillCodeStats: DashboardCodeStats | null
+  } | null>(null)
+  const [projectModeCodeStatsLoading, setProjectModeCodeStatsLoading] = useState(false)
   // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
   const [orgOptions, setOrgOptions] = useState<string[]>([])
 
@@ -1858,6 +2122,7 @@ export function useDashboard() {
   const skillEvalFetchIdRef = useRef(0)
   const orgOptionsFetchIdRef = useRef(0)
   const projectModeFetchIdRef = useRef(0)
+  const projectModeCodeStatsFetchIdRef = useRef(0)
   const projectModeProjectPageFetchIdRef = useRef<
     Record<DashboardProjectModeProjectStatus, number>
   >({ active: 0, archived: 0 })
@@ -1869,12 +2134,12 @@ export function useDashboard() {
 
     const orgOpts = { upperOrgLv1: orgList }
     try {
-      const [ovRes, msRes, usRes, prRes, fbRes] = await Promise.all([
+      const [ovRes, msRes, usRes, prRes, afRes] = await Promise.all([
         window.api.dashboard.overview(r, g, orgOpts),
         window.api.dashboard.modelStats(r, g, orgOpts),
         window.api.dashboard.userStats(r, g, orgOpts),
         window.api.dashboard.productivity(r, g, orgOpts),
-        window.api.dashboard.feedback(r, g, orgOpts)
+        window.api.dashboard.advancedFeatures(r, g, orgOpts)
       ])
 
       // Stale check
@@ -1884,14 +2149,14 @@ export function useDashboard() {
       if (!msRes.success) throw new Error(msRes.error ?? "获取模型数据失败")
       if (!usRes.success) throw new Error(usRes.error ?? "获取用户数据失败")
       if (!prRes.success) throw new Error(prRes.error ?? "获取生产力数据失败")
-      if (!fbRes.success) throw new Error(fbRes.error ?? "获取反馈数据失败")
+      if (!afRes.success) throw new Error(afRes.error ?? "获取高级特性数据失败")
 
       setOverview(parseOverview(ovRes.data, g))
       setModelStats(parseModelStats(msRes.data))
       setProductivity(parseProductivity(prRes.data, g, r))
       // 仅选中单个组织时 userStats 进入 LV0 下钻视图，否则按 LV1 展示。
       setUserStats(parseUserStats(usRes.data, orgList.length === 1 ? orgList[0] : null))
-      setFeedback(parseFeedback(fbRes.data, g))
+      setAdvancedFeatures(parseAdvancedFeatures(afRes.data))
     } catch (e) {
       if (id !== fetchIdRef.current) return
       setError(e instanceof Error ? e.message : String(e))
@@ -1921,33 +2186,77 @@ export function useDashboard() {
     []
   )
 
-  const fetchProjectMode = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
-    const id = ++projectModeFetchIdRef.current
-    setProjectModeLoading(true)
-    setProjectModeError(null)
+  const fetchProjectMode = useCallback(
+    async (r: TimeRange, g: Granularity, orgList: string[], leanOnly = false) => {
+      const id = ++projectModeFetchIdRef.current
+      setProjectModeLoading(true)
+      setProjectModeError(null)
+      // 时间/组织/精益口径变了：source 候选会变，回到「全部来源」并作废在途的换数请求。
+      projectModeCodeStatsFetchIdRef.current += 1
+      setProjectModeCodeSource(null)
+      setProjectModeCodeStatsOverride(null)
+      setProjectModeCodeStatsLoading(false)
 
-    try {
-      const result = await window.api.dashboard.projectMode(r, g, { upperOrgLv1: orgList })
-      if (id !== projectModeFetchIdRef.current) return
-      if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
-      const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
-      projectModeProjectPageFetchIdRef.current.active += 1
-      projectModeProjectPageFetchIdRef.current.archived += 1
-      setProjectMode(nextProjectMode)
-      setProjectModeProjectPages(
-        nextProjectMode?.projectPage
-          ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
-          : {}
-      )
-      setProjectModeProjectPageError({})
-      setProjectModeProjectPageLoading({ active: false, archived: false })
-    } catch (e) {
-      if (id !== projectModeFetchIdRef.current) return
-      setProjectModeError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
-    }
-  }, [])
+      try {
+        const result = await window.api.dashboard.projectMode(r, g, {
+          upperOrgLv1: orgList,
+          fromLeanOnly: leanOnly
+        })
+        if (id !== projectModeFetchIdRef.current) return
+        if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
+        const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
+        projectModeProjectPageFetchIdRef.current.active += 1
+        projectModeProjectPageFetchIdRef.current.archived += 1
+        setProjectMode(nextProjectMode)
+        setProjectModeProjectPages(
+          nextProjectMode?.projectPage
+            ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
+            : {}
+        )
+        setProjectModeProjectPageError({})
+        setProjectModeProjectPageLoading({ active: false, archived: false })
+      } catch (e) {
+        if (id !== projectModeFetchIdRef.current) return
+        setProjectModeError(e instanceof Error ? e.message : String(e))
+      } finally {
+        if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
+      }
+    },
+    []
+  )
+
+  // 「生产效能代码指标」source 下拉切换：null（全部）→ 清 override 回退 projectMode 自带口径；
+  // 具体来源/原生哨兵 → 走专用轻量接口换数，仅替换该区两个子模块。带版本号防竞态。
+  const selectProjectModeCodeSource = useCallback(
+    async (source: string | null) => {
+      setProjectModeCodeSource(source)
+      if (!source) {
+        projectModeCodeStatsFetchIdRef.current += 1
+        setProjectModeCodeStatsOverride(null)
+        setProjectModeCodeStatsLoading(false)
+        return
+      }
+      const id = ++projectModeCodeStatsFetchIdRef.current
+      setProjectModeCodeStatsLoading(true)
+      try {
+        const result = await window.api.dashboard.projectModeCodeStats(
+          range,
+          { upperOrgLv1: selectedOrgLv1List, fromLeanOnly: fromLeanProjectsOnly },
+          source
+        )
+        if (id !== projectModeCodeStatsFetchIdRef.current) return
+        if (!result.success) throw new Error(result.error ?? "获取代码指标失败")
+        setProjectModeCodeStatsOverride(result.data ?? null)
+      } catch {
+        // 换数失败不阻断面板：清掉 override 回退全部口径（错误已在主进程日志记录）。
+        if (id !== projectModeCodeStatsFetchIdRef.current) return
+        setProjectModeCodeStatsOverride(null)
+      } finally {
+        if (id === projectModeCodeStatsFetchIdRef.current) setProjectModeCodeStatsLoading(false)
+      }
+    },
+    [range, selectedOrgLv1List, fromLeanProjectsOnly]
+  )
 
   const fetchProjectModeProjectPage = useCallback(
     async (
@@ -1957,7 +2266,9 @@ export function useDashboard() {
       pageSize: number,
       adapterName: string,
       creatorKeyword: string,
-      creatorOrgKeyword: string
+      creatorOrgKeyword: string,
+      sortBy: DashboardProjectModeProjectSortKey | null = null,
+      sortOrder: DashboardProjectModeProjectSortOrder = "desc"
     ) => {
       const id = ++projectModeProjectPageFetchIdRef.current[status]
       setProjectModeProjectPageLoading((current) => ({ ...current, [status]: true }))
@@ -1966,13 +2277,16 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.projectModeProjects(range, {
           upperOrgLv1: selectedOrgLv1List,
+          fromLeanOnly: fromLeanProjectsOnly,
           status,
           page,
           pageSize,
           keyword,
           adapterName,
           creatorKeyword,
-          creatorOrgKeyword
+          creatorOrgKeyword,
+          sortBy,
+          sortOrder
         })
         if (id !== projectModeProjectPageFetchIdRef.current[status]) return
         if (!result.success) throw new Error(result.error ?? "获取项目列表失败")
@@ -1991,7 +2305,7 @@ export function useDashboard() {
         }
       }
     },
-    [range, selectedOrgLv1List]
+    [range, selectedOrgLv1List, fromLeanProjectsOnly]
   )
 
   const fetchSkillEvalPage = useCallback(
@@ -2219,6 +2533,8 @@ export function useDashboard() {
     granularity,
     range,
     selectedOrgLv1List,
+    fromLeanProjectsOnly,
+    setFromLeanProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,
@@ -2228,11 +2544,15 @@ export function useDashboard() {
     modelStats,
     userStats,
     productivity,
-    feedback,
+    advancedFeatures,
     skillEval,
     projectMode,
     projectModeLoading,
     projectModeError,
+    projectModeCodeSource,
+    projectModeCodeStatsOverride,
+    projectModeCodeStatsLoading,
+    selectProjectModeCodeSource,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,

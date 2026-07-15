@@ -24,18 +24,21 @@
  *   ~/.cmbcoworkagent/adoption-index.sqlite
  *     └─ gen_events                ← lookup index for commit-time L3
  *
- *   Retention: 7 days / 100 MB hard cap.
+ *   Retention: 14 days / 100 MB hard cap.
  */
 
 import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises"
-import { existsSync, mkdirSync } from "fs"
-import { dirname, extname, join, relative, resolve as resolvePath } from "path"
+import { existsSync, mkdirSync, statSync } from "fs"
+import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
 import { randomUUID } from "crypto"
-import { execFileSync } from "child_process"
+import { execFile, execFileSync } from "child_process"
+import { promisify } from "util"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import { getOpenworkDir } from "../storage"
 import { ensureVersionedSkillIdentifier } from "../utils/skill-identifiers"
+import { normalizeSkillSourceRefs } from "../utils/skill-source"
+import { extractShellFileOps } from "../agent/exec-policy"
 import { trackEvent } from "./event-reporter"
 import {
   closeAdoptionIndex,
@@ -44,11 +47,14 @@ import {
   getGenRowByEventId,
   initializeAdoptionIndex,
   insertGenEvent,
+  listPendingGenPaths,
   markMeasured,
+  updateGenFilePath,
   deleteOlderThan,
   deleteMeasuredOlderThan,
   trimToRowCap,
-  vacuumAdoptionIndex
+  vacuumAdoptionIndex,
+  type GenIndexRow
 } from "./adoption-index"
 
 // ─────────────────────────────────────────────────────────
@@ -59,7 +65,9 @@ import {
 // against a future git commit. Older rows are dropped by retention. (Previously
 // also doubled as the L2 timer window — L2 has been removed, this is now purely
 // "how long do we keep a baseline around for commit-time attribution".)
-const GEN_ATTRIBUTION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+// Bumped 7 → 14 days to catch slower-to-commit work; worst-case footprint is
+// still bounded by DISK_HARD_CAP_BYTES + INDEX_MAX_ROWS, not by the window.
+const GEN_ATTRIBUTION_WINDOW_MS = 14 * 24 * 60 * 60 * 1000
 // Slack added to a commit's creation time when using it as an upper bound on
 // eligible gen rows. Covers git's 1-second committer-time granularity (a gen
 // written in the same wall-clock second as the commit must not be floored out)
@@ -75,12 +83,15 @@ const MAX_CONTEXT_ENTRIES = 32 // bound in-memory context size
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024 // cap git show output per staged file
 
 // sqlite index safeguards — keep the on-disk file bounded even under abuse
-// Already-measured rows are kept for the full attribution window (7 days) so the
+// Already-measured rows are kept for the full attribution window (14 days) so the
 // local line-level 溯源 reader can still recover stored per-line hashes for any
-// commit inside that window. (Was 3 days — bumped to align with
-// GEN_ATTRIBUTION_WINDOW_MS; INDEX_MAX_ROWS still caps total growth.)
-const INDEX_MEASURED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-const INDEX_MAX_ROWS = 5000 // hard row cap (oldest measured dropped first)
+// commit inside that window. (Kept aligned with GEN_ATTRIBUTION_WINDOW_MS;
+// INDEX_MAX_ROWS still caps total growth.)
+const INDEX_MEASURED_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
+// Row cap doubled (5000 → 10000) alongside the 7 → 14 day window so heavy users
+// get a window that is genuinely 14 days rather than being silently truncated by
+// the cap. 10000 rows is still a tiny sql.js file loaded fully into memory.
+const INDEX_MAX_ROWS = 10000 // hard row cap (oldest measured dropped first)
 const INDEX_VACUUM_EVERY_N_SWEEPS = 12 // VACUUM cadence (12 × 5min = 1h)
 
 const CODE_EXTENSIONS = new Set<string>([
@@ -128,10 +139,11 @@ const CODE_EXTENSIONS = new Set<string>([
   "proto",
   "graphql",
   "tf",
-  // Config (user said xml/yaml are legitimate config code)
-  "xml",
-  "yaml",
-  "yml"
+  // Config
+  // NOTE: yaml/yml and .properties are intentionally NOT tracked — they are
+  // config/serialization formats whose churn is mostly mechanical and would
+  // distort code-adoption stats. xml stays (legitimate config code).
+  "xml"
 ])
 
 const EXCLUDED_PATH_SEGMENTS = [
@@ -170,6 +182,8 @@ export interface AdoptionContext {
    * `primarySkill` field has been removed because it was merely `usedSkills[0]`).
    */
   usedSkills?: string[]
+  /** Source refs for plugin-owned usedSkills, format: "plugin:<pluginId>/<skillIdentifier>". */
+  skillSource?: string[]
   /**
    * Harness Board attribution (project-mode conversations only). Carried onto
    * the emitted code_gen/code_adopt events so the dashboard can slice adoption
@@ -177,6 +191,14 @@ export interface AdoptionContext {
    */
   harnessProjectId?: string
   harnessFeatureSlug?: string
+  /**
+   * Harness Board workflow stage name (group-label, e.g. "Dev-代码实现") current at
+   * gen time, so emitted code_gen/code_adopt events can be sliced by stage.
+   * Forward-only; no raw node id.
+   */
+  harnessNodeName?: string
+  /** Stage status at gen time (group-label's node status, e.g. 进行中/已完成). Forward-only. */
+  harnessNodeStatus?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
 }
@@ -309,6 +331,57 @@ export function isCodeFile(filePath: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────────
+// git work-tree gate
+//
+// code_gen is only reported for files that live inside a git work tree. Files
+// generated outside any git repo can never reach a commit, so our commit-driven
+// measurement never closes the loop on them — they would sit forever as "100%
+// uncommitted" noise. Such files are also where external platforms (e.g.
+// tag-dev / data-dev) own reporting via their own hook; gating here keeps the two
+// producers from double-counting the same generation, with the partition keyed
+// purely on a signal we own (git membership) — no coordination with that hook.
+//
+// Strict semantics: only a positive "true" from `--is-inside-work-tree` counts.
+// A missing repo, a git error, or git being unavailable all resolve to false
+// (skip). The result is cached per directory so the hot path spawns git at most
+// once per directory for the whole session. Trade-off: if git is ever
+// unavailable, code_gen reporting stops entirely — acceptable, since git is a
+// hard dependency of the rest of the app.
+// ─────────────────────────────────────────────────────────
+
+const GIT_WORKTREE_CACHE_MAX = 256
+const gitWorkTreeCache = new Map<string, boolean>()
+
+function isInsideGitWorkTree(absPath: string): boolean {
+  const dir = dirname(absPath)
+  const cached = gitWorkTreeCache.get(dir)
+  if (cached !== undefined) return cached
+
+  let inside = false
+  try {
+    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: dir,
+      encoding: "utf-8",
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"]
+    })
+    inside = out.trim() === "true"
+  } catch {
+    // Not a repo / git error / git missing — treat as outside a work tree.
+    inside = false
+  }
+
+  // Bounded cache (Map preserves insertion order → evict oldest first).
+  if (!gitWorkTreeCache.has(dir) && gitWorkTreeCache.size >= GIT_WORKTREE_CACHE_MAX) {
+    const oldest = gitWorkTreeCache.keys().next().value
+    if (oldest !== undefined) gitWorkTreeCache.delete(oldest)
+  }
+  gitWorkTreeCache.set(dir, inside)
+  return inside
+}
+
+// ─────────────────────────────────────────────────────────
 // Line hashing (FNV-1a 32-bit) + normalisation
 // ─────────────────────────────────────────────────────────
 
@@ -341,7 +414,6 @@ export function countNonBlankLines(content: string): number {
   }
   return count
 }
-
 
 function computeLineHashes(content: string): Uint32Array {
   const lines = content.split(/\r?\n/)
@@ -390,10 +462,9 @@ function subtractLineHashMultiset(source: Uint32Array, subtract: Uint32Array): U
   return new Uint32Array(kept)
 }
 
-export function buildAdoptionLineBaseline(input: Pick<
-  RecordGenInput,
-  "tool" | "generatedContent" | "oldString" | "occurrences"
->): AdoptionLineBaseline {
+export function buildAdoptionLineBaseline(
+  input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
+): AdoptionLineBaseline {
   const generationOccurrences = getGenerationOccurrenceCount(input)
   const rawGeneratedLineHashes = repeatLineHashes(
     computeLineHashes(input.generatedContent),
@@ -484,8 +555,7 @@ function deriveDeletedLineCount(input: RecordGenInput): number {
   if (occurrences === 0) return 0
 
   const oldNonBlank = countNonBlankLines(input.oldString)
-  const newNonBlank =
-    typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
+  const newNonBlank = typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
   return Math.max(0, oldNonBlank - newNonBlank) * occurrences
 }
 
@@ -499,6 +569,24 @@ function normalizeUsedSkills(skills: unknown): string[] {
     if (identifier) normalized.add(identifier)
   }
   return Array.from(normalized)
+}
+
+function parseStoredSkills(value: string | null): string[] {
+  if (!value) return []
+  try {
+    return normalizeUsedSkills(JSON.parse(value) as unknown)
+  } catch {
+    return []
+  }
+}
+
+function parseStoredSkillSource(value: string | null, usedSkills: string[]): string[] {
+  if (!value) return []
+  try {
+    return normalizeSkillSourceRefs(JSON.parse(value) as unknown, usedSkills)
+  } catch {
+    return []
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -605,7 +693,7 @@ async function enforceRetention(): Promise<void> {
   }
 
   // ── Index-side retention guards ─────────────────────────
-  // 1. Drop any row older than the 7-day window (safety net; normally empty).
+  // 1. Drop any row older than the 14-day window (safety net; normally empty).
   try {
     deleteOlderThan(cutoff)
   } catch {
@@ -696,6 +784,15 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       ? resolvePath(input.workspacePath, input.filePath)
       : resolvePath(input.filePath)
 
+    // git-gate: only report generations that live inside a git work tree (see
+    // isInsideGitWorkTree). Non-git files never reach a commit and are where
+    // external platforms own reporting via their own hook — skipping them here
+    // avoids double-counting and removes events that could never close the loop.
+    if (!isInsideGitWorkTree(absPath)) {
+      console.log(`[AdoptionTracker] recordGen skip — not in a git work tree: ${input.filePath}`)
+      return
+    }
+
     const relPath = input.workspacePath
       ? relative(input.workspacePath, absPath).replace(/\\/g, "/")
       : absPath.replace(/\\/g, "/")
@@ -742,9 +839,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     const hashes = baseline.generatedLineHashes
     const oldLineHashes = baseline.supersededLineHashes
     if (hashes.length === 0 && oldLineHashes.length === 0) {
-      console.log(
-        `[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`
-      )
+      console.log(`[AdoptionTracker] recordGen skip — empty after normalization: ${input.filePath}`)
       return
     }
     const fingerprint = generationFingerprint(input.generatedContent, generationOccurrences)
@@ -783,6 +878,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
     const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+    const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
     insertGenEvent({
       event_id: eventId,
       file_path: absPath,
@@ -793,13 +889,17 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       old_line_hashes: oldLineHashes.length > 0 ? packLineHashes(oldLineHashes) : null,
       created_at: createdAt,
       measured: 0,
+      tool: input.tool,
       used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
+      skill_source: skillSource.length > 0 ? JSON.stringify(skillSource) : null,
       thread_id: input.threadId || null,
       trace_id: ctx.traceId ?? null,
       model_id: ctx.modelId ?? null,
       model_name: ctx.modelName ?? null,
       harness_project_id: ctx.harnessProjectId ?? null,
       harness_feature_slug: ctx.harnessFeatureSlug ?? null,
+      harness_node_name: ctx.harnessNodeName ?? null,
+      harness_node_status: ctx.harnessNodeStatus ?? null,
       harness_adapter_name: ctx.harnessAdapterName ?? null,
       harness_adapter_version: ctx.harnessAdapterVersion ?? null
     })
@@ -816,10 +916,13 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       lineCount: reportedLineCount,
       deletedLineCount,
       usedSkills,
+      ...(skillSource.length > 0 ? { skillSource } : {}),
       modelId: ctx.modelId ?? null,
       modelName: ctx.modelName ?? null,
       harnessProjectId: ctx.harnessProjectId ?? null,
       harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+      harnessNodeName: ctx.harnessNodeName ?? null,
+      harnessNodeStatus: ctx.harnessNodeStatus ?? null,
       harnessAdapterName: ctx.harnessAdapterName ?? null,
       harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
       // note: filePath / content / fingerprint intentionally withheld
@@ -853,6 +956,7 @@ function emitSkippedLargeAtGen(args: {
   const language = extname(absPath).slice(1).toLowerCase() || null
   const deletedLineCount = deriveDeletedLineCount(input)
   const usedSkills = normalizeUsedSkills(ctx.usedSkills)
+  const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
 
   // L1 — record that the agent generated code (metadata only, no path/content)
   trackEvent("code_gen", "code_adoption", {
@@ -866,10 +970,13 @@ function emitSkippedLargeAtGen(args: {
     lineCount,
     deletedLineCount,
     usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
     harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessNodeName: ctx.harnessNodeName ?? null,
+    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
     createdAt: new Date(createdAt).toISOString(),
@@ -896,10 +1003,13 @@ function emitSkippedLargeAtGen(args: {
     // ES can aggregate adoption rates (including the skipped_large bucket)
     // uniformly — otherwise these rows look like they have no skill.
     usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
     modelName: ctx.modelName ?? null,
     harnessProjectId: ctx.harnessProjectId ?? null,
     harnessFeatureSlug: ctx.harnessFeatureSlug ?? null,
+    harnessNodeName: ctx.harnessNodeName ?? null,
+    harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null
   })
@@ -932,6 +1042,87 @@ interface MeasureOpts {
 function resolveMaxGenCreatedAt(commitTimeMs?: number): number | undefined {
   if (typeof commitTimeMs !== "number" || !Number.isFinite(commitTimeMs)) return undefined
   return commitTimeMs + COMMIT_ATTRIBUTION_TOLERANCE_MS
+}
+
+/** Why a pending generation was voided (effective/adopted = 0). Carried on the
+ *  `superseded` code_adopt purely so the 溯源 view can explain the 0. */
+export type SupersedeReason =
+  | "same_path_rewrite" // a newer write_file recreated the file at the same path
+  | "agent_rm" // the agent deleted the file (rm / git rm) before it was committed
+
+/**
+ * Emit a terminal `superseded` code_adopt that voids an older generation:
+ * effective/adopted = 0, so the discarded draft stops inflating the
+ * adoption-rate denominator, while still emitting an adopt event so the gen is
+ * not later miscounted as "generated but never committed" by the
+ * uncommitted-analysis anti-join.
+ *
+ * Two triggers share this primitive (`reason` distinguishes them for display):
+ *   - `same_path_rewrite`: a newer write_file recreated the file from scratch
+ *     (write_file only succeeds on a non-existent path), so none of the older
+ *     draft's lines survived. Inferred at commit time. `measureSource =
+ *     git_commit`, carries the commit's sha.
+ *   - `agent_rm`: the agent deleted the file before it was ever committed.
+ *     Driven in real time by shell-op monitoring. `measureSource =
+ *     agent_file_op`, no commit (commitSha = null).
+ */
+async function emitSupersededAdopt(
+  pending: GenIndexRow,
+  generatedLineCount: number,
+  commitSha: string | null,
+  reason: SupersedeReason,
+  measureSource: "git_commit" | "agent_file_op" = "git_commit"
+): Promise<void> {
+  const adoptEventId = `a_${randomUUID()}`
+  const measuredAt = Date.now()
+  await appendJsonl({
+    t: "adopt",
+    eventId: adoptEventId,
+    genEventId: pending.event_id,
+    verdict: "superseded",
+    reason,
+    generatedLineCount,
+    effectiveGeneratedLineCount: 0,
+    adoptedLineCount: 0,
+    measureSource,
+    measuredAt,
+    commitSha
+  })
+
+  const usedSkills = parseStoredSkills(pending.used_skills)
+  const skillSource = parseStoredSkillSource(pending.skill_source, usedSkills)
+
+  trackEvent("code_adopt", "code_adoption", {
+    schemaVersion: 1,
+    eventId: adoptEventId,
+    genEventId: pending.event_id,
+    threadId: pending.thread_id ?? null,
+    traceId: pending.trace_id ?? null,
+    verdict: "superseded",
+    reason,
+    generatedLineCount,
+    effectiveGeneratedLineCount: 0,
+    adoptedLineCount: 0,
+    measureSource,
+    measureLatencyMs: measuredAt - pending.created_at,
+    generatedAt: new Date(pending.created_at).toISOString(),
+    measuredAt: new Date(measuredAt).toISOString(),
+    commitSha,
+    usedSkills,
+    ...(skillSource.length > 0 ? { skillSource } : {}),
+    modelId: pending.model_id ?? null,
+    modelName: pending.model_name ?? null,
+    harnessProjectId: pending.harness_project_id ?? null,
+    harnessFeatureSlug: pending.harness_feature_slug ?? null,
+    harnessNodeName: pending.harness_node_name ?? null,
+    harnessNodeStatus: pending.harness_node_status ?? null,
+    harnessAdapterName: pending.harness_adapter_name ?? null,
+    harnessAdapterVersion: pending.harness_adapter_version ?? null
+  })
+
+  console.log(
+    `[AdoptionTracker] measure verdict=superseded reason=${reason} genEventId=${pending.event_id} generatedLines=${generatedLineCount} commitSha=${commitSha ?? "none"}`
+  )
 }
 
 /**
@@ -996,10 +1187,30 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       }
     }
 
+    let sawFullRewrite = false
     for (const pending of pendingRows) {
-      let verdict: "deleted" | "committed" | "skipped_large" = "committed"
-
       const storedHashes = pending.line_hashes ? unpackLineHashes(pending.line_hashes) : null
+
+      // A newer full-file write_file already recreated this file from scratch
+      // (write_file only succeeds on a non-existent path), so every older
+      // generation's lines are gone. Emit a terminal `superseded` verdict
+      // (0 effective / 0 adopted) instead of letting the discarded draft inflate
+      // the adoption-rate denominator. We still emit an adopt event so the gen is
+      // not later miscounted as "generated but never committed".
+      if (sawFullRewrite) {
+        if (storedHashes && storedHashes.length > 0) {
+          await emitSupersededAdopt(
+            pending,
+            storedHashes.length,
+            opts?.commitSha ?? null,
+            "same_path_rewrite"
+          )
+        }
+        markMeasured(pending.event_id)
+        continue
+      }
+
+      let verdict: "deleted" | "committed" | "skipped_large" = "committed"
       if (!storedHashes || storedHashes.length === 0) {
         // No net-new baseline. This can be a legitimate supersession-only
         // edit (for example an agent deleting a previously generated line).
@@ -1056,15 +1267,8 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
       // Pull attribution columns that were persisted at gen time, so cloud ES
       // can aggregate adoption rates by skill / model without a two-step join
       // against code_gen via genEventId.
-      let usedSkills: string[] = []
-      if (pending.used_skills) {
-        try {
-          const parsed = JSON.parse(pending.used_skills) as unknown
-          usedSkills = normalizeUsedSkills(parsed)
-        } catch {
-          // corrupt row — treat as no skill attribution
-        }
-      }
+      const usedSkills = parseStoredSkills(pending.used_skills)
+      const skillSource = parseStoredSkillSource(pending.skill_source, usedSkills)
 
       trackEvent("code_adopt", "code_adoption", {
         schemaVersion: 1,
@@ -1082,10 +1286,13 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
         measuredAt: new Date(measuredAt).toISOString(),
         commitSha: opts?.commitSha ?? null,
         usedSkills,
+        ...(skillSource.length > 0 ? { skillSource } : {}),
         modelId: pending.model_id ?? null,
         modelName: pending.model_name ?? null,
         harnessProjectId: pending.harness_project_id ?? null,
         harnessFeatureSlug: pending.harness_feature_slug ?? null,
+        harnessNodeName: pending.harness_node_name ?? null,
+        harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
         harnessAdapterVersion: pending.harness_adapter_version ?? null
       })
@@ -1101,6 +1308,10 @@ async function doMeasureFile(filePath: string, opts?: MeasureOpts): Promise<void
           // corrupt row — keep measuring older rows without supersession hints
         }
       }
+
+      // Once we pass a full-file write_file (rows are newest-first), every older
+      // row is a pre-rewrite draft that cannot have survived — void it next.
+      if (pending.tool === "write_file") sawFullRewrite = true
     }
   } catch (e) {
     console.warn("[AdoptionTracker] doMeasureFile failed:", e)
@@ -1202,13 +1413,41 @@ export interface StagedSnapshot {
   stagedContent: Buffer | null
 }
 
+const execFileAsync = promisify(execFile)
+
+// Bound how many `git show` blob reads run at once so a large staged set can't
+// spawn dozens of git processes simultaneously.
+const GIT_SHOW_CONCURRENCY = 4
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight at once, preserving index.
+ */
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  let next = 0
+  const workerCount = Math.min(Math.max(1, limit), items.length)
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const idx = next++
+      if (idx >= items.length) return
+      await fn(items[idx], idx)
+    }
+  })
+  await Promise.all(workers)
+}
+
 /**
  * Capture staged snapshots right BEFORE `git commit` runs. The commit clears
  * the index, so callers must invoke this after `git add` and before `git commit`.
  *
  * Never throws; failures only skip adoption measurement for that commit.
  */
-export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnapshot[] {
+export async function captureStagedSnapshotsForCommit(
+  workingDir: string
+): Promise<StagedSnapshot[]> {
   try {
     // Resolve the git root — git diff --cached returns paths relative to the
     // top-level working tree, NOT the -C directory. When the -C directory is a
@@ -1216,31 +1455,39 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
     // relPath) would duplicate path segments and fail to match gen events later.
     let gitRoot = workingDir
     try {
-      gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-        encoding: "utf-8",
-        cwd: workingDir,
-        timeout: 5000,
-        maxBuffer: 1024 * 1024
-      }).trim()
+      gitRoot = (
+        await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+          encoding: "utf-8",
+          cwd: workingDir,
+          timeout: 5000,
+          maxBuffer: 1024 * 1024,
+          windowsHide: true
+        })
+      ).stdout.trim()
     } catch {
       // Fallback to workingDir — best-effort
     }
 
-    const raw = execFileSync("git", ["diff", "--cached", "--name-status", "-z"], {
-      encoding: "utf-8",
-      cwd: workingDir,
-      timeout: 5000,
-      maxBuffer: 1024 * 1024
-    })
+    const raw = (
+      await execFileAsync("git", ["diff", "--cached", "--name-status", "-z"], {
+        encoding: "utf-8",
+        cwd: workingDir,
+        timeout: 5000,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true
+      })
+    ).stdout
     if (!raw) {
       console.log(`[AdoptionTracker] pre-commit capture: no staged files in ${workingDir}`)
       return []
     }
 
-    const snapshots: StagedSnapshot[] = []
+    // Parse the staged list first (cheap, order-sensitive), then read blobs with
+    // bounded concurrency below.
+    type StagedEntry = { absPath: string; relPath: string; deleted: boolean }
+    const entries: StagedEntry[] = []
     let totalStaged = 0
     let skippedNonCode = 0
-    let capturedCode = 0
     // Output format with -z:
     //   Normal:      <STATUS>\0<path>\0
     //   Rename/copy: <Rnnn|Cnnn>\0<old>\0<new>\0
@@ -1262,29 +1509,43 @@ export function captureStagedSnapshotsForCommit(workingDir: string): StagedSnaps
       totalStaged++
       const absPath = resolvePath(gitRoot, relPath)
       if (status === "D") {
-        snapshots.push({ absPath, stagedContent: null })
-        capturedCode++
+        entries.push({ absPath, relPath, deleted: true })
         continue
       }
       if (!isCodeFile(absPath)) {
         skippedNonCode++
         continue
       }
+      entries.push({ absPath, relPath, deleted: false })
+    }
 
+    // Read each staged blob concurrently (bounded). Holes (failed reads) are
+    // filtered out afterwards; order is preserved to match the staged list.
+    const slots: (StagedSnapshot | undefined)[] = new Array(entries.length)
+    await mapWithConcurrency(entries, GIT_SHOW_CONCURRENCY, async (entry, idx) => {
+      if (entry.deleted) {
+        slots[idx] = { absPath: entry.absPath, stagedContent: null }
+        return
+      }
       try {
-        const stagedContent = execFileSync("git", ["show", `:${relPath}`], {
-          cwd: workingDir,
-          timeout: 5000,
-          maxBuffer: STAGED_BLOB_MAX_BYTES
-        })
-        snapshots.push({ absPath, stagedContent })
-        capturedCode++
+        const stagedContent = (
+          await execFileAsync("git", ["show", `:${entry.relPath}`], {
+            encoding: "buffer",
+            cwd: workingDir,
+            timeout: 5000,
+            maxBuffer: STAGED_BLOB_MAX_BYTES,
+            windowsHide: true
+          })
+        ).stdout
+        slots[idx] = { absPath: entry.absPath, stagedContent }
       } catch {
         // Binary / too-large / other failure — skip silently.
       }
-    }
+    })
+
+    const snapshots = slots.filter((s): s is StagedSnapshot => s !== undefined)
     console.log(
-      `[AdoptionTracker] pre-commit capture: totalStaged=${totalStaged} codeFiles=${capturedCode} skippedNonCode=${skippedNonCode} gitRoot=${gitRoot}`
+      `[AdoptionTracker] pre-commit capture: totalStaged=${totalStaged} codeFiles=${snapshots.length} skippedNonCode=${skippedNonCode} gitRoot=${gitRoot}`
     )
     return snapshots
   } catch (e) {
@@ -1348,6 +1609,156 @@ export function hasPendingGenerationsForCommit(
     if (findPendingGensForFile(snap.absPath, minCreated, maxCreated).length > 0) return true
   }
   return false
+}
+
+// ─────────────────────────────────────────────────────────
+// Agent shell file ops (rm / mv) — keep pending generations honest when the
+// agent deletes or relocates a generated file BEFORE it is committed.
+//
+// Attribution is keyed by absolute file path, so a path change between gen time
+// and commit time orphans the pending generation: it never gets a code_adopt
+// and is later miscounted as "generated but never committed" (phantom 0%
+// adoption), even though the code lives on. write_file refuses to overwrite, so
+// an agent "rewrite/move" ALWAYS deletes the old path first via an explicit
+// shell command — which we observe here:
+//
+//   • rm / git rm  → the generated code was discarded at that path. Void the
+//     pending gen (superseded / agent_rm, effective=0), mirroring the same-path
+//     write→delete→write supersession but driven by an explicit delete.
+//   • mv / git mv  → the generated code moved. Transfer the pending gen's
+//     file_path so commit-time attribution finds it at its new home.
+//
+// Only AGENT commands flow through LocalSandbox.execute → here; a human deleting
+// or moving a file in their own editor is intentionally NOT intercepted (that is
+// a genuine rejection/relocation and must keep its real outcome). Side-effect
+// only; never throws; acts only on exit code 0.
+// ─────────────────────────────────────────────────────────
+
+function pathHasGlobMeta(p: string): boolean {
+  return /[*?[\]{}]/.test(p)
+}
+
+/** True when `candidate` equals `base` or is nested under it. Both absolute,
+ *  both produced by `resolvePath` so separators already agree per-platform.
+ *  Exported for unit testing. */
+export function isPathAtOrUnder(candidate: string, base: string): boolean {
+  if (candidate === base) return true
+  return candidate.startsWith(base.endsWith(sep) ? base : base + sep)
+}
+
+/**
+ * Called by LocalSandbox after a shell command finishes. Reacts to agent rm/mv
+ * so generations relocated/deleted before commit are not orphaned. Returns
+ * immediately; work happens in a background microtask. Never throws.
+ */
+export function recordShellFileOps(command: string, cwd: string, exitCode: number | null): void {
+  if (!initialized) return
+  if (exitCode !== 0 || !command) return
+  queueMicrotask(() => {
+    doRecordShellFileOps(command, cwd).catch((e) => {
+      console.warn("[AdoptionTracker] recordShellFileOps unexpected error:", e)
+    })
+  })
+}
+
+async function doRecordShellFileOps(command: string, cwd: string): Promise<void> {
+  try {
+    const ops = extractShellFileOps(command)
+    if (ops.length === 0) return
+    const baseDir = cwd ? resolvePath(cwd) : process.cwd()
+    for (const op of ops) {
+      if (op.op === "rm") {
+        for (const raw of op.paths) {
+          if (!raw || pathHasGlobMeta(raw)) continue
+          const target = resolvePath(baseDir, raw)
+          // Only void when the path is actually gone. Guards `git rm --cached`
+          // (un-tracks but keeps the file), `rm`/`git rm`/`git mv` dry-runs
+          // (`-n`), and any flag we don't model — if it still exists it was not
+          // deleted, so the generation must not be voided.
+          if (existsSync(target)) continue
+          await voidPendingGensUnderPath(target)
+        }
+      } else if (op.op === "mv" && op.dest && !pathHasGlobMeta(op.dest)) {
+        const destAbs = resolvePath(baseDir, op.dest)
+        for (const raw of op.paths) {
+          if (!raw || pathHasGlobMeta(raw)) continue
+          const srcAbs = resolvePath(baseDir, raw)
+          // Only transfer when the move actually happened: source gone AND
+          // destination present. Guards `mv -n` no-clobber skips and `git mv -n`
+          // dry-runs (source untouched), and mangled/unresolved paths.
+          if (existsSync(srcAbs) || !existsSync(destAbs)) continue
+          transferPendingGensUnderPath(srcAbs, resolveMvFinalBase(srcAbs, destAbs))
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[AdoptionTracker] doRecordShellFileOps failed:", e)
+  }
+}
+
+/**
+ * Resolve the base path an `mv SRC DEST` actually lands SRC at, disambiguating
+ * "rename SRC → DEST" from "move SRC into directory DEST". Runs post-`mv`, so
+ * DEST exists; if DEST is a directory AND DEST/basename(SRC) now exists, SRC was
+ * moved inside it; otherwise SRC was renamed to DEST. Best-effort.
+ * Exported for unit testing.
+ */
+export function resolveMvFinalBase(srcAbs: string, destAbs: string): string {
+  try {
+    if (existsSync(destAbs) && statSync(destAbs).isDirectory()) {
+      const inside = join(destAbs, basename(srcAbs))
+      if (existsSync(inside)) return inside
+    }
+  } catch {
+    // fall through to rename semantics
+  }
+  return destAbs
+}
+
+/** Void every pending gen at or under `prefixAbs` (an agent-deleted file/dir). */
+async function voidPendingGensUnderPath(prefixAbs: string): Promise<void> {
+  const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  let pending: { event_id: string; file_path: string }[]
+  try {
+    pending = listPendingGenPaths(minCreated)
+  } catch {
+    return
+  }
+  for (const { event_id, file_path } of pending) {
+    if (!isPathAtOrUnder(file_path, prefixAbs)) continue
+    const row = getGenRowByEventId(event_id)
+    if (!row || row.measured) continue
+    const storedHashes = row.line_hashes ? unpackLineHashes(row.line_hashes) : null
+    const generatedLineCount = storedHashes ? storedHashes.length : 0
+    if (generatedLineCount > 0) {
+      await emitSupersededAdopt(row, generatedLineCount, null, "agent_rm", "agent_file_op")
+    }
+    markMeasured(event_id)
+    console.log(
+      `[AdoptionTracker] agent rm voided pending gen: eventId=${event_id} file=${file_path} generatedLines=${generatedLineCount}`
+    )
+  }
+}
+
+/** Transfer pending gens at or under `srcAbs` to `finalBase` (an agent mv). */
+function transferPendingGensUnderPath(srcAbs: string, finalBase: string): void {
+  if (srcAbs === finalBase) return
+  const minCreated = Date.now() - GEN_ATTRIBUTION_WINDOW_MS
+  let pending: { event_id: string; file_path: string }[]
+  try {
+    pending = listPendingGenPaths(minCreated)
+  } catch {
+    return
+  }
+  for (const { event_id, file_path } of pending) {
+    if (!isPathAtOrUnder(file_path, srcAbs)) continue
+    // Suffix is "" for an exact-file move, "/sub/x.ts" for a dir move.
+    const newPath = finalBase + file_path.slice(srcAbs.length)
+    updateGenFilePath(event_id, newPath)
+    console.log(
+      `[AdoptionTracker] agent mv transferred pending gen: eventId=${event_id} ${file_path} -> ${newPath}`
+    )
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1446,19 +1857,22 @@ export async function readLocalCommitAdoptionLines(
         results.push({
           genEventId,
           available: false,
-          reason: "本地无该生成记录或哈希已过期（仅当前机器近 7 天可逐行）"
+          reason: "本地无该生成记录或哈希已过期（仅当前机器近 14 天可逐行）"
         })
         continue
       }
       const absPath = row.file_path
       let gitRoot: string
       try {
-        gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-          encoding: "utf-8",
-          cwd: dirname(absPath),
-          timeout: 5000,
-          maxBuffer: 1024 * 1024
-        }).trim()
+        gitRoot = (
+          await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+            encoding: "utf-8",
+            cwd: dirname(absPath),
+            timeout: 5000,
+            maxBuffer: 1024 * 1024,
+            windowsHide: true
+          })
+        ).stdout.trim()
       } catch {
         results.push({ genEventId, available: false, reason: "无法定位本地 git 仓库" })
         continue
@@ -1466,11 +1880,15 @@ export async function readLocalCommitAdoptionLines(
       const relPath = relative(gitRoot, absPath).replace(/\\/g, "/")
       let blob: Buffer
       try {
-        blob = execFileSync("git", ["show", `${sha}:${relPath}`], {
-          cwd: gitRoot,
-          timeout: 5000,
-          maxBuffer: STAGED_BLOB_MAX_BYTES
-        })
+        blob = (
+          await execFileAsync("git", ["show", `${sha}:${relPath}`], {
+            encoding: "buffer",
+            cwd: gitRoot,
+            timeout: 5000,
+            maxBuffer: STAGED_BLOB_MAX_BYTES,
+            windowsHide: true
+          })
+        ).stdout
       } catch {
         results.push({
           genEventId,

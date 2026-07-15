@@ -1,9 +1,22 @@
 import type { HookConfig } from "./hooks/types"
+import type {
+  ForkableCheckpoint as SharedForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
+  ThreadForkOverrides as SharedThreadForkOverrides,
+  ThreadForkParams as SharedThreadForkParams,
+  ThreadForkResponse as SharedThreadForkResponse
+} from "../shared/checkpoint-forkability"
+
+export type {
+  ForkBoundarySource,
+  ForkUnstableReason
+} from "../shared/checkpoint-forkability"
 
 export type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
+  AgentAutoCommitRepoResult,
   AgentAutoCommitSettings,
   AgentAutoCommitWorkspaceCard,
   AgentAutoCommitStatus
@@ -21,7 +34,7 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
-  agentMode?: "normal" | "coordinator"
+  agentMode?: "normal" | "coordinator" | "workflow"
   coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string
@@ -37,7 +50,7 @@ export interface AgentResumeParams {
     }
   }
   modelId?: string
-  agentMode?: "normal" | "coordinator"
+  agentMode?: "normal" | "coordinator" | "workflow"
 }
 
 export interface AgentInterruptParams {
@@ -60,6 +73,12 @@ export interface ThreadValuesMergeParams {
   threadId: string
   patch: Record<string, unknown>
 }
+
+export type ThreadForkOverrides = SharedThreadForkOverrides
+export type ThreadForkParams = SharedThreadForkParams
+export type ThreadForkResponse = SharedThreadForkResponse<Thread>
+export type ThreadForkCheckpointForMessageParams = SharedThreadForkCheckpointForMessageParams
+export type ForkableCheckpoint = SharedForkableCheckpoint
 
 // Workspace IPC
 export interface WorkspaceSetParams {
@@ -125,7 +144,7 @@ export interface Subagent {
   id: string
   name: string
   description: string
-  status: "pending" | "running" | "completed" | "failed"
+  status: "pending" | "running" | "completed" | "failed" | "cancelled"
   startedAt?: Date
   completedAt?: Date
   toolCallId?: string
@@ -134,6 +153,8 @@ export interface Subagent {
   currentTool?: string
   /** ISO timestamp of the subagent's most recent interior activity (heartbeat). */
   lastActivityAt?: string
+  /** Registration order (0-based). Used to match LangGraph checkpoint_ns index (e.g. "tools:0"). */
+  spawnIndex?: number
 }
 
 // Stream events from agent
@@ -154,8 +175,18 @@ export interface Message {
   id: string
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  content_priority?: number
+  reasoning?: string
   tool_calls?: ToolCall[]
+  tool_call_id?: string
+  name?: string
+  status?: string
+  is_error?: boolean
+  goal_id?: string | null
+  active_window_id?: string | null
   created_at: Date
+  start_at?: Date
+  end_at?: Date
 }
 
 export interface ContentBlock {
@@ -283,6 +314,45 @@ export interface McpConnectorUpsert {
   enabled?: boolean
   advanced?: McpConnectorAdvanced
   lazyLoad?: boolean // true = lazy load tools, false/undefined = load all tools
+}
+
+export type McpImportConflict = "existing" | "duplicate"
+export type McpImportConflictStrategy = "update" | "rename" | "skip"
+
+export interface McpImportPreviewConnector {
+  name: string
+  sourceName?: string
+  kind: McpConnectorKind
+  url?: string
+  command?: string
+  args?: string[]
+  hasHeaders: boolean
+  hasEnv: boolean
+  enabled: boolean
+  lazyLoad: boolean
+  conflict?: McpImportConflict
+  existingId?: string
+}
+
+export interface McpImportPreviewResult {
+  connectors: McpImportPreviewConnector[]
+  errors: string[]
+}
+
+export interface McpImportConfigRequest {
+  rawJson: string
+  autoEnable?: boolean
+}
+
+export interface McpImportConfigApplyRequest extends McpImportConfigRequest {
+  conflictStrategy?: McpImportConflictStrategy
+}
+
+export interface McpImportApplyResult {
+  created: Array<{ id: string; name: string }>
+  updated: Array<{ id: string; name: string }>
+  skipped: Array<{ name: string; reason: string }>
+  errors: string[]
 }
 
 // Scheduled Task types
@@ -628,6 +698,8 @@ export interface ApprovalRequest extends HITLRequest {
   suggestedCommitFilePaths?: string[]
   /** For git_commit: cwd that explicit pathspecs are relative to (after git -C) */
   suggestedCommitFileBasePath?: string
+  /** For git_commit/git_push: Git working directory resolved from cd / git -C. */
+  suggestedGitWorktreePath?: string
   /** For git_commit: where suggestedCommitFilePaths came from */
   suggestedCommitFileSelectionSource?: "pathspec" | "staged"
   filePath?: string // target file path (for write_file/edit_file operations)

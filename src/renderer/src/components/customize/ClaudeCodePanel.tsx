@@ -315,7 +315,8 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
         rows: session.xterm.rows,
         claudeModelId: session.claudeModelId,
         syncSkills: session.syncSkills,
-        syncMemory: session.syncMemory
+        syncMemory: session.syncMemory,
+        launchSource: session.restarting ? "restart" : "select_dir"
       })
     } finally {
       clearTimeout(slowStartTimer)

@@ -25,6 +25,12 @@ trace_evolver_service/
 # Codex local files
 .codex/
 tests/screenshots/
+.hook-scope-log/
+
+# OMC local runtime/cache state
+.omc/project-memory.json
+.omc/state/
+.omc/sessions/
 
 # Java LSP VSIX bundles (downloaded via scripts/download-jdtls.sh)
 resources/lsp-vsix/*.vsix
@@ -32,9 +38,9 @@ resources/lsp-vsix/*.vsix
 # Claude Code local session artifacts
 .cmbdevclaw/
 AGENTS.md
-claude-code-source-code-main
-
-
 claude-code-source-code-main/
-EnsoAI-main/
 .github/
+EnsoAI-main/
+output/
+.playwright-cli/
+git.md

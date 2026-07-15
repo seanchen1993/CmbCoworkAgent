@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from "react"
 import { Loader2, AlertCircle, FileCode } from "lucide-react"
-import { useCurrentThread } from "@/lib/thread-context"
+import { useThreadState } from "@/lib/thread-context"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
 import { CodeViewer } from "./CodeViewer"
 import { ImageViewer } from "./ImageViewer"
@@ -12,7 +12,7 @@ import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
 
 interface FileViewerProps {
   filePath: string
-  threadId: string
+  threadId?: string
   externalFullPath?: string
   htmlFillHeight?: boolean
   reloadToken?: number
@@ -60,13 +60,17 @@ export function FileViewer({
   reloadToken,
   previewMode
 }: FileViewerProps): React.JSX.Element | null {
-  const { fileContents, setFileContents } = useCurrentThread(threadId)
+  const threadState = useThreadState(threadId ?? null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [binaryContent, setBinaryContent] = useState<string | null>(null)
+  const [externalTextContent, setExternalTextContent] = useState<string | undefined>()
   const [fileSize, setFileSize] = useState<number | undefined>()
   const cacheKey = externalFullPath || filePath
   const displayPath = externalFullPath || filePath
+  const fileContents = threadState?.fileContents ?? {}
+  const setThreadFileContents = threadState?.setFileContents
+  const content = externalFullPath ? externalTextContent : fileContents[cacheKey]
 
   // Get file type info
   const fileName = displayPath.split("/").pop() || displayPath
@@ -82,9 +86,11 @@ export function FileViewer({
       // HTML 依赖读取统一走 preload 暴露的 API，避免 file:// 直链受限。
       const result = externalFullPath
         ? await window.api.workspace.readExternalFile(resolvedPath)
-        : await window.api.workspace.readFile(threadId, resolvedPath)
+        : threadId
+          ? await window.api.workspace.readFile(threadId, resolvedPath)
+          : null
 
-      if (result.success && typeof result.content === "string") {
+      if (result?.success && typeof result.content === "string") {
         return result.content
       }
 
@@ -93,13 +99,11 @@ export function FileViewer({
     [externalFullPath, threadId]
   )
 
-  // Get cached content or load it
-  const content = fileContents[cacheKey]
-
   // Reset state when filePath changes
   useEffect(() => {
     setError(null)
     setBinaryContent(null)
+    setExternalTextContent(undefined)
     setFileSize(undefined)
   }, [cacheKey, reloadToken])
 
@@ -118,11 +122,18 @@ export function FileViewer({
       setError(null)
 
       try {
+        if (!externalFullPath && !threadId) {
+          setError("Missing thread id for workspace file preview")
+          return
+        }
+
         if (isBinary) {
           // Read as binary file (base64)
           const result = externalFullPath
             ? await window.api.workspace.readExternalBinaryFile(externalFullPath)
-            : await window.api.workspace.readBinaryFile(threadId, filePath)
+            : threadId
+              ? await window.api.workspace.readBinaryFile(threadId, filePath)
+              : { success: false, error: "Missing thread id for workspace file preview" }
           if (result.success && result.content !== undefined) {
             setBinaryContent(result.content)
             setFileSize(result.size)
@@ -134,9 +145,15 @@ export function FileViewer({
           // Read as text file
           const result = externalFullPath
             ? await window.api.workspace.readExternalFile(externalFullPath)
-            : await window.api.workspace.readFile(threadId, filePath)
+            : threadId
+              ? await window.api.workspace.readFile(threadId, filePath)
+              : { success: false, error: "Missing thread id for workspace file preview" }
           if (result.success && result.content !== undefined) {
-            setFileContents(cacheKey, result.content)
+            if (externalFullPath) {
+              setExternalTextContent(result.content)
+            } else {
+              setThreadFileContents?.(cacheKey, result.content)
+            }
             setFileSize(result.size)
             lastLoadedReloadTokenRef.current = reloadToken
           } else {
@@ -156,7 +173,7 @@ export function FileViewer({
     filePath,
     content,
     binaryContent,
-    setFileContents,
+    setThreadFileContents,
     isBinary,
     externalFullPath,
     cacheKey,

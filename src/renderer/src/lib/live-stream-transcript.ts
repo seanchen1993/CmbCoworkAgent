@@ -16,6 +16,12 @@ export function liveStreamMessageToStoreMessage(
     id: streamMessage.id,
     role,
     content: normalizeLiveStreamMessageContent(streamMessage.content),
+    ...(typeof streamMessage.content_priority === "number"
+      ? { content_priority: streamMessage.content_priority }
+      : {}),
+    ...(role === "assistant" && streamMessage.reasoning
+      ? { reasoning: streamMessage.reasoning }
+      : {}),
     tool_calls: streamMessage.tool_calls,
     ...(role === "tool" && streamMessage.tool_call_id
       ? { tool_call_id: streamMessage.tool_call_id }

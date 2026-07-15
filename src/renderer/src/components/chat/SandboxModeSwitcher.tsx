@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react"
 import {
   Check,
   ChevronDown,
@@ -126,7 +126,9 @@ function getOptionIconTone(option: SandboxModeOption): string {
   return "bg-sky-100 text-sky-600 dark:bg-sky-500/15 dark:text-sky-300"
 }
 
-export function SandboxModeSwitcher({
+export const SandboxModeSwitcher = memo(SandboxModeSwitcherImpl)
+
+function SandboxModeSwitcherImpl({
   onOpenSettings
 }: SandboxModeSwitcherProps): JSX.Element | null {
   if (!isWindowsPlatform()) {
