@@ -13,7 +13,6 @@ import {
   Circle,
   CircleDashed,
   CircleHelp,
-  CircleX,
   FileText,
   FolderOpen,
   GitBranch,
@@ -35,7 +34,8 @@ import {
   SkipForward,
   Trash2,
   Workflow,
-  Zap
+  Zap,
+  CircleCheckBig
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -123,7 +123,7 @@ import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
 const harnessActionButtonClassName =
   "cursor-pointer group relative overflow-hidden rounded-md shadow-sm transition-all duration-200 hover:-translate-y-px hover:shadow-md"
 const harnessPageHeaderClassName =
-  "min-h-[50px] max-h-[80px] shrink-0 border-b border-border/80 bg-background/80 p-4 backdrop-blur-xl app-no-drag"
+  "min-h-[50px] max-h-[80px] shrink-0 border-b border-border/80 bg-background/80 p-2 backdrop-blur-xl app-no-drag"
 const harnessPageHeaderContentClassName =
   "flex h-full items-start justify-between gap-4"
 const harnessPageHeaderActionsClassName = "flex shrink-0 items-center gap-2"
@@ -1495,7 +1495,7 @@ function HarnessMetricCard({
   tone?: "neutral" | "info" | "nominal" | "warning"
 }): React.JSX.Element {
   return (
-    <div className="group relative overflow-hidden rounded-lg border border-border/80 bg-background/80 px-3 py-2.5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-md">
+    <div className="w-[150px] group relative overflow-hidden rounded-md border border-border/75 bg-background/80 px-2 py-1.5 shadow-sm transition-colors duration-200 hover:border-primary/25 hover:bg-background">
       <div
         aria-hidden="true"
         className={cn(
@@ -1506,17 +1506,19 @@ function HarnessMetricCard({
           tone === "neutral" && "bg-border-emphasis"
         )}
       />
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className={harnessKickerClassName}>{label}</div>
-          <div className="mt-1.5 text-xl font-semibold tracking-tight text-foreground">{value}</div>
-          <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={hint}>
+          <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground/80">
+            {label}
+          </div>
+          <div className="mt-0.5 text-base font-semibold tracking-tight text-foreground">{value}</div>
+          <div className="truncate text-[10px] text-muted-foreground" title={hint}>
             {hint}
           </div>
         </div>
         <div
           className={cn(
-            "flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/40 transition-transform duration-200 group-hover:scale-105",
+            "flex size-6 shrink-0 items-center justify-center rounded-md border bg-muted/35",
             tone === "info" && "border-status-info/25 text-status-info",
             tone === "nominal" && "border-status-nominal/25 text-status-nominal",
             tone === "warning" && "border-status-warning/25 text-status-warning",
@@ -1545,69 +1547,63 @@ function HarnessBoardOverview({
     : 0
 
   return (
-    <section className={cn(harnessSurfaceClassName, "relative overflow-hidden p-4 -mt-3")}>
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute -right-14 -top-18 size-48 rounded-full bg-status-info/10 blur-3xl"
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute -bottom-20 left-10 size-44 rounded-full bg-primary/10 blur-3xl"
-      />
-      <div className="relative flex min-w-0 flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div className="min-w-0">
-          <div className={harnessKickerClassName}>Operational cockpit</div>
-          <h1 className="mt-1.5 text-xl font-semibold tracking-tight text-foreground">
-            项目协作看板
-          </h1>
-          <p className="mt-1.5 max-w-2xl text-xs leading-5 text-muted-foreground">
-            聚合系统、项目和特性执行状态，优先暴露进行中与风险项，帮助你快速判断下一步该进入哪个项目。
+    <section className={cn(harnessSurfaceClassName, "overflow-hidden p-3 -mt-2")}>
+      <div className="flex justify-between items-center">
+        <div className="min-w-0 space-y-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="flex size-7 shrink-0 items-center justify-center rounded-md border border-status-info/20 bg-status-info/10 text-status-info">
+              <Workflow className="size-3.5" />
+            </div>
+            <h1 className="truncate text-lg font-semibold tracking-tight text-foreground">项目协作看板</h1>
+          </div>
+          <p className="mt-1 max-w-xl text-[11px] leading-4 text-muted-foreground">
+            聚合项目、特性和风险状态，帮助快速定位当前最值得推进的项目。
           </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          {trimmedQuery ? (
-            <span className="rounded-full border border-primary/25 bg-primary/10 px-3 py-1 text-primary">
-              当前筛选：{trimmedQuery}
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+            {trimmedQuery ? (
+              <span className="rounded-full border border-primary/25 bg-primary/10 px-2.5 py-0.5 text-primary">
+                当前筛选：{trimmedQuery}
+              </span>
+            ) : (
+              <span className="rounded-full border border-border/80 bg-background/70 px-2.5 py-0.5">
+                展示全部项目
+              </span>
+            )}
+            <span className="rounded-full border border-border/80 bg-background/70 px-2.5 py-0.5">
+              匹配 {visibleProjectCount} / {stats.totalProjects}
             </span>
-          ) : (
-            <span className="rounded-full border border-border/80 bg-background/70 px-3 py-1">
-              展示全部项目
-            </span>
-          )}
-          <span className="rounded-full border border-border/80 bg-background/70 px-3 py-1">
-            匹配 {visibleProjectCount} / {stats.totalProjects}
-          </span>
+          </div>
         </div>
-      </div>
-      <div className="relative mt-3 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
-        <HarnessMetricCard
-          label="活跃项目"
-          value={stats.activeProjects}
-          hint={`${stats.activeSystems} 个活跃系统 · ${stats.archivedProjects} 个归档`}
-          icon={<Workflow className="size-4" />}
-          tone="info"
-        />
-        <HarnessMetricCard
-          label="特性总量"
-          value={stats.totalFeatures}
-          hint={`${stats.activeFeatures} 个正在推进`}
-          icon={<CircleDashed className="size-4" />}
-          tone="neutral"
-        />
-        <HarnessMetricCard
-          label="完成率"
-          value={`${completionRate}%`}
-          hint={`${stats.completedFeatures} / ${stats.totalFeatures || 0} 个特性已完成`}
-          icon={<CheckCircle2 className="size-4" />}
-          tone="nominal"
-        />
-        <HarnessMetricCard
-          label="需关注"
-          value={stats.riskFeatures + stats.incompatibleProjects}
-          hint={`${stats.riskFeatures} 个风险特性 · ${stats.incompatibleProjects} 个插件提醒`}
-          icon={<ShieldAlert className="size-4" />}
-          tone="warning"
-        />
+        <div className="grid grid-cols-4 gap-1.5">
+          <HarnessMetricCard
+            label="活跃项目"
+            value={stats.activeProjects}
+            hint={`${stats.activeSystems} 个活跃系统 · ${stats.archivedProjects} 个归档`}
+            icon={<Workflow className="size-4" />}
+            tone="info"
+          />
+          <HarnessMetricCard
+            label="特性总量"
+            value={stats.totalFeatures}
+            hint={`${stats.activeFeatures} 个正在推进`}
+            icon={<CircleDashed className="size-4" />}
+            tone="neutral"
+          />
+          <HarnessMetricCard
+            label="完成率"
+            value={`${completionRate}%`}
+            hint={`${stats.completedFeatures} / ${stats.totalFeatures || 0} 个特性已完成`}
+            icon={<CheckCircle2 className="size-4" />}
+            tone="nominal"
+          />
+          <HarnessMetricCard
+            label="需关注"
+            value={stats.riskFeatures + stats.incompatibleProjects}
+            hint={`${stats.riskFeatures} 个风险特性 · ${stats.incompatibleProjects} 个插件提醒`}
+            icon={<ShieldAlert className="size-4" />}
+            tone="warning"
+          />
+        </div>
       </div>
     </section>
   )
@@ -1627,7 +1623,7 @@ function HarnessProjectPhaseFlow({
           className={cn(
             "grid w-full gap-2.5",
             isCompactFlow
-              ? "min-w-[1198px] grid-cols-[repeat(9,minmax(0,1fr))]"
+              ? "grid-cols-[repeat(9,minmax(0,1fr))]"
               : "md:grid-cols-[repeat(5,minmax(0,1fr))]"
           )}
         >
@@ -1666,7 +1662,7 @@ function HarnessProjectPhaseFlow({
                 >
                   <div
                     className={cn(
-                      "flex size-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-all duration-200",
+                      "flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-all duration-200",
                       isDone && "bg-status-nominal text-white",
                       step.tone === "upcoming" && "bg-gray-200 text-muted-foreground"
                     )}
@@ -4442,6 +4438,99 @@ function SystemSection({
   )
 }
 
+function ArchivedProjectsTable({
+  projects,
+  detailsByProjectId,
+  onOpenProject
+}: {
+  projects: HarnessProjectListItem[]
+  detailsByProjectId: Record<string, HarnessProjectDetailViewModel>
+  onOpenProject: (projectId: string) => void
+}): React.JSX.Element {
+  const archivedStatus: HarnessStatus = { label: "已归档", uiKind: "archived" }
+
+  if (projects.length === 0) {
+    return (
+      <div className="rounded-xl border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground">
+        暂无归档项目。
+      </div>
+    )
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-border/70 ">
+      <div className="max-h-[476px] overflow-y-auto">
+        <table className="w-full table-fixed border-collapse text-xs">
+          <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/85">
+            <tr className="border-b border-border/70 text-left text-[11px] text-muted-foreground">
+              <th className="px-3 py-2 font-medium w-[24%]">项目</th>
+              <th className="px-3 py-2 font-medium w-[14%]">项目编号</th>
+              <th className="px-3 py-2 font-medium w-[24%]">所属系统</th>
+              <th className="px-3 py-2 font-medium w-[18%]">工作区</th>
+              <th className="px-3 py-2 font-medium w-[10%]">特性</th>
+              <th className="px-3 py-2 font-medium w-[10%]">状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            {projects.map((project) => {
+              const detail = detailsByProjectId[project.projectId]
+              const projectRootPath = resolveProjectRootPath(project)
+
+              return (
+                <tr
+                  key={project.projectId}
+                  role="button"
+                  tabIndex={0}
+                  className="h-11 cursor-pointer border-b border-border/60 text-foreground transition-colors hover:bg-muted/30 focus-visible:bg-muted/30 focus-visible:outline-none last:border-b-0"
+                  onClick={() => onOpenProject(project.projectId)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault()
+                      onOpenProject(project.projectId)
+                    }
+                  }}
+                >
+                  <td className="px-3 py-0 align-middle">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate font-medium">{project.name}</span>
+                      {project.projectFromLean && (
+                        <span className="shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+                          精益之星
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-3 py-0 align-middle text-muted-foreground">
+                    <span className="block truncate" title={project.projectCode}>
+                      {project.projectCode || "-"}
+                    </span>
+                  </td>
+                  <td className="px-3 py-0 align-middle text-muted-foreground">
+                    <span className="block truncate" title={`${project.systemId} ${project.systemName}`}>
+                      {project.systemId || "-"} / {project.systemName || "-"}
+                    </span>
+                  </td>
+                  <td className="px-3 py-0 align-middle text-muted-foreground">
+                    <span className="block truncate" title={projectRootPath}>
+                      {getWorkspaceName(projectRootPath)}
+                    </span>
+                  </td>
+                  <td className="px-3 py-0 align-middle text-muted-foreground">
+                    {detail ? detail.runs.length : "-"}
+                  </td>
+                  <td className="px-3 py-0 align-middle">
+                    <StatusPill status={archivedStatus} />
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function artifactCanOpenInFileManager(
   path: string | null,
   artifactType: HarnessArtifactType,
@@ -5035,20 +5124,23 @@ function buildLeanstarProjectReviewUrl(projectCode: string): string {
   )
 }
 
-function ProjectReviewTooltipContent({
+function ProjectReviewCard({
   review
 }: {
   review: HarnessProjectReviewItem
 }): React.JSX.Element {
   return (
-    <div className="min-w-0">
-      <div className="border-b border-border/70 px-3 py-2">
-        <div className="line-clamp-2 text-sm font-semibold leading-5 text-foreground">
-          {review.title || "-"}
-        </div>
+    <article className="min-w-0 rounded-lg border border-border/70 bg-muted/[0.18] px-3 py-2.5">
+      <div className="border-b border-border/70 pb-2">
+       <div className="flex items-center gap-2 justify-between">
+         <div className="line-clamp-2 text-sm font-semibold leading-5 text-foreground flex-1">
+           {review.title || "-"}
+         </div>
+         <CircleCheckBig className="size-4 shrink-0 text-green-500" />
+       </div>
       </div>
-      <dl className="grid gap-1.5 px-3 py-2 text-xs leading-5">
-        {PROJECT_REVIEW_HEADERS.map(([key, label]) => (
+      <dl className="grid gap-1.5 pt-2 text-xs leading-5">
+        {PROJECT_REVIEW_HEADERS.filter(([key]) => key !== "title").map(([key, label]) => (
           <div key={key} className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] gap-2">
             <dt className="text-muted-foreground">{label}</dt>
             <dd className="min-w-0 whitespace-normal break-words font-medium text-foreground [overflow-wrap:anywhere]">
@@ -5057,7 +5149,7 @@ function ProjectReviewTooltipContent({
           </div>
         ))}
       </dl>
-    </div>
+    </article>
   )
 }
 
@@ -5085,46 +5177,12 @@ function ProjectReviewSummary({
       : false
   const result = reviewState.kind === "loaded" && isCurrentProject ? reviewState.result : null
   const reviews = result?.reviews ?? []
-  const hasReviewResult = Boolean(result?.tokenConfigured)
   const metricBoxClassName = "rounded-lg border border-border/70 bg-muted/[0.18] px-3 py-2.5"
 
   return (
     <div className="space-y-3 text-xs">
-      <section className="rounded-xl border border-border/70 bg-background/90 px-3 py-3 ">
-        <div className="flex items-center justify-between gap-2">
-          {hasReviewResult && (
-            <span className="flex shrink-0 items-center gap-1">
-              {reviews.length > 0 ? (
-                <TooltipProvider delayDuration={150}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span tabIndex={0} className="inline-flex">
-                        <CheckCircle2 className="size-3.5 text-status-nominal" aria-label="存在评审记录" />
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="z-[70] max-w-72">
-                      已有项目评审流程，请确认详设文档已存在。
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              ) : (
-                <TooltipProvider delayDuration={150}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span tabIndex={0} className="inline-flex">
-                        <CircleX className="size-3.5 text-destructive" aria-label="无评审记录" />
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="z-[70] max-w-72">
-                      在进入 ST 流程之前发起评审并上传文档以避免 NC
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
-            </span>
-          )}
-        </div>
-        <div className="mt-3">
+      <section className="">
+        <div className="mt-1">
           {!normalizedProjectCode ? (
             <div className={cn(metricBoxClassName, "leading-5 text-muted-foreground")}>-</div>
           ) : !isCurrentProject || reviewState.kind === "loading" ? (
@@ -5159,33 +5217,11 @@ function ProjectReviewSummary({
               发起项目评审流程
             </button>
           ) : (
-            <TooltipProvider delayDuration={120}>
-              <ul className="space-y-2">
-                {reviews.map((review, index) => (
-                  <li key={`${review.title}:${index}`} className="min-w-0">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <div
-                          tabIndex={0}
-                          className="group flex min-w-0 cursor-default items-center rounded-lg border border-border/70 bg-muted/[0.18] px-3 py-2.5 transition-colors hover:border-border hover:bg-muted/35 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                        >
-                          <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-                            {review.title || "-"}
-                          </span>
-                        </div>
-                      </TooltipTrigger>
-                      <TooltipContent
-                        side="right"
-                        align="start"
-                        className="z-[70] w-80 max-w-[min(20rem,calc(100vw-2rem))] p-0"
-                      >
-                        <ProjectReviewTooltipContent review={review} />
-                      </TooltipContent>
-                    </Tooltip>
-                  </li>
-                ))}
-              </ul>
-            </TooltipProvider>
+            <div className="space-y-2">
+              {reviews.map((review, index) => (
+                <ProjectReviewCard key={`${review.title}:${index}`} review={review} />
+              ))}
+            </div>
           )}
         </div>
       </section>
@@ -5487,7 +5523,7 @@ function ProjectDetailPage({
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        <main className="flex h-full min-h-0 w-full flex-col gap-4 p-4">
+        <main className="flex h-full min-h-0 w-full flex-col gap-4 p-2">
           {pluginCompatibilityMessage && (
             <div className="flex items-start gap-2 rounded-xl border border-status-warning/30 bg-status-warning/10 px-4 py-3 text-sm text-status-warning shadow-sm">
               <ShieldAlert className="mt-0.5 size-4 shrink-0" />
@@ -5548,7 +5584,7 @@ function ProjectDetailPage({
                       {getWorkspaceName(projectRootPath)}
                     </strong>
                   </span>
-                  <EnterpriseProjectDetailSummary entry={enterpriseProjectDetail} />
+                  {/*<EnterpriseProjectDetailSummary entry={enterpriseProjectDetail} />*/}
                   <span className="shrink-0 rounded-full border border-border/70 bg-muted/35 px-2 py-0.5 text-[11px] text-muted-foreground">
                     特性{" "}
                     <strong className="font-medium text-foreground">
@@ -5992,10 +6028,10 @@ function FeatureDetailPage({
           key={node.id}
           title={node.label}
           className={cn(
-            "group/node relative w-full rounded-lg border px-0 shadow-xs transition-all duration-200 sm:w-[180px]",
+            "group/node flex h-[104px] min-w-0 flex-col rounded-xl border bg-background/75  transition-all duration-200",
             selected
-              ? "border-status-info/35 bg-background/70 shadow-md"
-              : "border-border/80 bg-background/70 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-background/80 hover:shadow-md"
+              ? "border-status-info/35 shadow-md ring-1 ring-status-info/10"
+              : "border-border/80 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-background/85 hover:shadow-md"
           )}
         >
           <button
@@ -6005,51 +6041,65 @@ function FeatureDetailPage({
             }}
             aria-pressed={selected}
             className={cn(
-              "flex w-full cursor-pointer items-start gap-2 rounded-lg px-2.5 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              skippable ? "pr-[82px]" : ""
+              "flex min-h-0 w-full flex-1 cursor-pointer flex-col justify-between gap-2 rounded-t-xl px-2.5 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             )}
           >
-            <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] font-semibold">{node.label}</span>
-              <span className="mt-1 block truncate text-[11px] text-muted-foreground">
-                {node.status.label}
-              </span>
-              <span className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                <span className="rounded-full border border-border/70 bg-muted/40 px-2 py-0.5">
-                  {node.artifacts.length} 产物
+            <span className="flex min-w-0 items-start gap-2">
+              <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
+              <span className="min-w-0 flex-1">
+                <span className="block line-clamp-2 text-[12px] font-semibold leading-[1.35]">
+                  {node.label}
                 </span>
-                <span className="rounded-full border border-border/70 bg-muted/40 px-2 py-0.5">
-                  {node.hooks.length} 事件
+                <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                  {node.status.label}
                 </span>
               </span>
             </span>
+            <div className="flex items-center justify-between">
+               <span className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+              <span className="rounded-full border border-border/70 bg-muted/40 px-1.5 py-0.5">
+                {node.artifacts.length} 产物
+              </span>
+              <span className="rounded-full border border-border/70 bg-muted/40 px-1.5 py-0.5">
+                {node.hooks.length} 事件
+              </span>
+            </span>
+              <div
+                className={cn(
+                  "mt-auto flex  items-end ",
+                  skippable ? "border-t border-border/60" : "border-t border-transparent"
+                )}
+              >
+                {skippable && (
+                  <TooltipProvider delayDuration={150}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-6 w-full gap-1 rounded-md border-status-info/30 bg-background/95 px-2 text-[10px] shadow-sm"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void handleSkipNode(node)
+                          }}
+                          disabled={skippingNodeId !== null}
+                        >
+                          {skipping ? <Loader2 className="size-3 animate-spin" /> : <SkipForward className="size-3" />}
+                          跳过当前节点
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="z-[70] max-w-72">
+                        跳过当前节点，不再产生对应阶段产物
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+              </div>
+            </div>
+
           </button>
-          {skippable && (
-            <TooltipProvider delayDuration={150}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="absolute right-1.5 top-1.5 h-6 gap-1 rounded-full border-status-info/30 bg-background/95 px-2 text-[11px] shadow-sm"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      void handleSkipNode(node)
-                    }}
-                    disabled={skippingNodeId !== null}
-                  >
-                    {skipping ? <Loader2 className="size-3 animate-spin" /> : <SkipForward className="size-3" />}
-                    跳过
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="z-[70] max-w-72">
-                  跳过当前节点，不再产生对应阶段产物
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          )}
+
         </div>
       )
     }
@@ -6083,7 +6133,7 @@ function FeatureDetailPage({
                     aria-pressed={selected}
                     title={group.label}
                     className={cn(
-                      "group/stage flex min-w-0 min-h-[96px] cursor-pointer flex-col gap-2 rounded-xl border px-3 py-3 text-left shadow-sm transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      "group/stage flex min-w-0 min-h-[96px] cursor-pointer flex-col gap-2 rounded-xl border px-3 py-3 text-left  transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       selected
                         ? "border-status-info/60 bg-status-info/10 shadow-md"
                         : "border-border/80 bg-background/70 hover:-translate-y-0.5 hover:border-primary/45 hover:shadow-md"
@@ -6120,7 +6170,7 @@ function FeatureDetailPage({
                 {selectedGroup.nodes.length} 个节点
               </div>
             </div>
-            <div className="mt-2.5 flex flex-wrap gap-2">
+            <div className="mt-2.5 grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2.5">
               {selectedGroup.nodes.map((node) => renderStageNodeButton(node))}
             </div>
           </section>
@@ -6129,7 +6179,7 @@ function FeatureDetailPage({
     }
 
     return (
-      <div className="flex flex-wrap gap-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2.5">
         {detail.run.nodes.map((node) => renderStageNodeButton(node))}
       </div>
     )
@@ -6277,7 +6327,7 @@ function FeatureDetailPage({
           </div>
         </div>
       ) : (
-        <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-3">
+        <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2">
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             <section className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}>
               <video
@@ -7819,6 +7869,20 @@ export function HarnessBoardView({
     () => buildHarnessBoardStats(projects, detailsByProjectId),
     [detailsByProjectId, projects]
   )
+  const archivedProjects = useMemo(
+    () =>
+      archivedSystemGroups
+        .flatMap((group) => group.projects)
+        .slice()
+        .sort((left, right) =>
+          `${left.systemId}:${left.name}`.localeCompare(`${right.systemId}:${right.name}`, "zh-CN")
+        ),
+    [archivedSystemGroups]
+  )
+  const archivedProjectCount = useMemo(
+    () => archivedProjects.length,
+    [archivedProjects]
+  )
 
   const visibleProjectCount = useMemo(
     () =>
@@ -9117,11 +9181,11 @@ export function HarnessBoardView({
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索项目、系统编号或特性"
                 aria-label="搜索项目、系统编号或特性"
-                className="h-6 border-0 bg-transparent px-0 shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
+                className="h-5 border-0 bg-transparent px-0 shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0"
               />
             </div>
           </div>
-          <div className={cn(harnessPageHeaderActionsClassName, "pt-5")}>
+          <div className={cn(harnessPageHeaderActionsClassName, "pt-2")}>
             <Button
               variant="ghost"
               size="sm"
@@ -9151,7 +9215,7 @@ export function HarnessBoardView({
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <main className="w-full space-y-7 p-4">
+        <main className="w-full space-y-7 p-2">
           {loadError && (
             <div className="flex items-start gap-2 rounded-xl border border-status-critical/30 bg-status-critical/10 px-4 py-3 text-sm text-status-critical shadow-sm">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
@@ -9252,54 +9316,30 @@ export function HarnessBoardView({
                     </div>
 
                   )}
-
-                  <Tabs defaultValue="archived" className={cn(harnessSurfaceClassName, "overflow-hidden p-4")}>
+                  <section className={cn(harnessSurfaceClassName, "overflow-hidden p-3")}>
                     <div className="flex min-w-0 items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className={harnessKickerClassName}>Archived lane</div>
-                        <div className="mt-1 text-base font-semibold">归档项目</div>
+                        <div className="mt-1 text-sm font-semibold">归档项目</div>
                       </div>
-                      <div className="flex items-center gap-3">
-                        <TabsList className="h-auto rounded-full border border-border/80 bg-background/70 p-1">
-                          <TabsTrigger value="archived" className="gap-2 rounded-full px-3 data-[state=active]:bg-background">
-                            <Archive className="size-4" />
-                            归档项目
-                          </TabsTrigger>
-                        </TabsList>
-                        <div className="rounded-full border border-border/70 bg-background/70 px-3 py-1 text-xs text-muted-foreground">
-                          {archivedSystemGroups.reduce((count, group) => count + group.projects.length, 0)} 个项目
-                        </div>
+                      <div className="rounded-full border border-border/70 bg-background/70 px-2.5 py-0.5 text-[11px] text-muted-foreground">
+                        {archivedProjectCount} 个项目
                       </div>
                     </div>
-                    <TabsContent value="archived" className="mt-4 space-y-6">
-                      {archivedSystemGroups.length === 0 ? (
-                        <div className="rounded-2xl border border-dashed border-border/80 bg-background/80 px-4 py-10 text-center text-sm text-muted-foreground">
+                    <div className="mt-3">
+                      {archivedProjects.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-border/70 bg-background/70 px-4 py-8 text-center text-sm text-muted-foreground">
                           {query.trim() ? "没有匹配的归档项目或 feature。" : "暂无归档项目。"}
                         </div>
                       ) : (
-                        archivedSystemGroups.map((group) => (
-                          <SystemSection
-                            key={group.systemCode}
-                            group={group}
-                            detailsByProjectId={detailsByProjectId}
-                            loadingDetailIds={loadingDetailIds}
-                            archivingProjectId={archivingProjectId}
-                            deletingProjectId={deletingProjectId}
-                            pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
-                            updatingPluginNames={updatingPluginNames}
-                            onEditProject={handleEditProject}
-                            onArchiveProject={requestArchiveProject}
-                            onDeleteProject={requestDeleteProject}
-                            onUpdateProjectPlugin={(project, updateInfo) =>
-                              void handleUpdateProjectPlugin(project, updateInfo)
-                            }
-                            onProjectVisible={handleProjectCardVisible}
-                            onOpenProject={openProjectDetail}
-                          />
-                        ))
+                        <ArchivedProjectsTable
+                          projects={archivedProjects}
+                          detailsByProjectId={detailsByProjectId}
+                          onOpenProject={openProjectDetail}
+                        />
                       )}
-                    </TabsContent>
-                  </Tabs>
+                    </div>
+                  </section>
                 </div>
               )}
             </TabsContent>
