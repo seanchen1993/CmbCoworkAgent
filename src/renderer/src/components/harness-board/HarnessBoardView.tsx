@@ -5992,7 +5992,7 @@ function FeatureDetailPage({
           key={node.id}
           title={node.label}
           className={cn(
-            "group/node relative w-full rounded-lg border px-0 shadow-xs transition-all duration-200 sm:w-[220px]",
+            "group/node relative w-full rounded-lg border px-0 shadow-xs transition-all duration-200 sm:w-[180px]",
             selected
               ? "border-status-info/35 bg-background/70 shadow-md"
               : "border-border/80 bg-background/70 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-background/80 hover:shadow-md"
@@ -6318,8 +6318,7 @@ function FeatureDetailPage({
                     )}
                   </div>
                   <p className="mt-1.5 max-w-3xl text-xs leading-5 text-muted-foreground">
-                    {detail.project.name} · {detail.run.slug}
-                    {detail.run.source?.label ? ` · ${detail.run.source.label}` : ""}
+                    {detail.run.source?.label ? `${detail.run.source.label}` : ""}
                   </p>
                   <div className="mt-3 max-w-xl">
                     <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
