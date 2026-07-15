@@ -5328,6 +5328,7 @@ function ProjectDetailPage({
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
   const runs = detail?.runs ?? []
+  const activeCount = runs.filter((run) => run.overallStatus.uiKind === "active").length
   const archived = project.lifecycle.status === "archived"
   const phaseSteps: HarnessProjectPhaseStep[] = archived
     ? [
