@@ -1204,6 +1204,9 @@ const ATTACH_FILE_POPOVER_CONTENT = (
 const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
+/** 输入框正文硬上限(字符数)。超过则拒绝发送并提示,防止病态超长输入。
+ * 取值与附件总字符上限(MAX_TOTAL_CHARS)一致,均为 24000。 */
+const MAX_INPUT_CHARS = 24_000
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
 const CHAT_REPORT_RETRY_DELAY_MS = 1_000
@@ -3971,6 +3974,14 @@ export function ChatContainer({
     )
       return
 
+    // 硬上限:正文超过 MAX_INPUT_CHARS 字符时拒绝发送并提示,保留输入不清空。
+    if (trimmedInput.length > MAX_INPUT_CHARS) {
+      setError(
+        `消息长度 ${trimmedInput.length.toLocaleString()} 字符,超过上限 ${MAX_INPUT_CHARS.toLocaleString()} 字符。请精简后再发送,或将长内容作为文件上传。`
+      )
+      return
+    }
+
     const goalControlWithPendingTransport =
       hasPendingGoalTransportPayload &&
       isGoalSlashTransportSensitiveControlCommandInput(trimmedInput)
@@ -6319,7 +6330,7 @@ export function ChatContainer({
               onHarnessSessionCreated={onHarnessSessionCreated}
             />
             {goalUi.goal && (
-              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-20")}>
+              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-[20px]")}>
                 <GoalStatusPanel
                   goalUi={goalUi}
                   open={goalDetailsOpen}
