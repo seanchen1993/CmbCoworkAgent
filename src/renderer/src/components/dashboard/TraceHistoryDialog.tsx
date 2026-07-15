@@ -15,7 +15,9 @@ import {
   Hash,
   Info,
   Loader2,
+  Maximize2,
   MessageCircleQuestion,
+  Minimize2,
   Tag,
   Timer,
   Wrench
@@ -788,6 +790,7 @@ export function TraceExplorer({
   defaultViewMode = "thread",
   onViewModeChange,
   showViewModeToggle = true,
+  allowFullscreen = true,
   loadThreadTraces,
   className
 }: {
@@ -804,11 +807,13 @@ export function TraceExplorer({
   defaultViewMode?: DashboardTraceViewMode
   onViewModeChange?: (mode: DashboardTraceViewMode) => void
   showViewModeToggle?: boolean
+  allowFullscreen?: boolean
   loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
   className?: string
 }): React.JSX.Element {
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
   const [localViewMode, setLocalViewMode] = useState<DashboardTraceViewMode>(defaultViewMode)
+  const [fullscreen, setFullscreen] = useState(false)
   // 按 threadId 缓存「完整 thread」拉取结果，避免重复请求。
   const [threadTraceCache, setThreadTraceCache] = useState<Record<string, DashboardTraceDetail[]>>(
     {}
@@ -937,8 +942,48 @@ export function TraceExplorer({
         ? [selectedTrace.appVersion]
         : []
   const metricAppVersionLabel = metricAppVersions.length > 0 ? metricAppVersions.join("、") : "—"
-  if (loading) {
+
+  const fullscreenToggle = allowFullscreen && !fullscreen && (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="gap-1.5"
+      onClick={() => setFullscreen(true)}
+      title="全屏查看会话记录"
+    >
+      <Maximize2 className="size-3.5" />
+      全屏
+    </Button>
+  )
+
+  const wrapFullscreen = (content: React.JSX.Element): React.JSX.Element => {
+    if (!fullscreen) return content
     return (
+      <Dialog open onOpenChange={(open) => !open && setFullscreen(false)}>
+        <DialogContent className="left-0 top-0 flex h-dvh w-dvw max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-0 p-0 shadow-none sm:rounded-none [&>button]:hidden">
+          <DialogTitle className="sr-only">{title} · 全屏查看</DialogTitle>
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="absolute right-4 top-3 z-20 size-8 bg-background shadow-sm"
+              onClick={() => setFullscreen(false)}
+              title="退出全屏"
+              aria-label="退出全屏"
+            >
+              <Minimize2 className="size-4" />
+            </Button>
+            {content}
+          </div>
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  if (loading) {
+    return wrapFullscreen(
       <div className={cn("flex min-h-[360px] flex-1 items-center justify-center", className)}>
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
       </div>
@@ -946,7 +991,7 @@ export function TraceExplorer({
   }
 
   if (error) {
-    return (
+    return wrapFullscreen(
       <div
         className={cn(
           "flex min-h-[360px] flex-1 items-center justify-center px-6 text-sm text-destructive",
@@ -959,11 +1004,16 @@ export function TraceExplorer({
   }
 
   if (traces.length === 0) {
-    return (
+    return wrapFullscreen(
       <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
         {showCodeStats && <SkillCodeStatsBar stats={codeStats} />}
         <section className="flex min-h-0 flex-1 flex-col bg-background">
-          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3">
+          <div
+            className={cn(
+              "flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3",
+              fullscreen && "pr-14"
+            )}
+          >
             <div>
               <h3 className="text-xs font-semibold text-foreground">{title}</h3>
               <p className="text-[10px] text-muted-foreground">{subtitle}</p>
@@ -973,6 +1023,7 @@ export function TraceExplorer({
                 <TraceViewModeToggle value={activeViewMode} onChange={handleViewModeChange} />
               )}
               {headerRight}
+              {fullscreenToggle}
             </div>
           </div>
           <div className="flex flex-1 items-center justify-center px-6 py-12 text-sm text-muted-foreground">
@@ -983,11 +1034,39 @@ export function TraceExplorer({
     )
   }
 
-  return (
+  const conversationContent = (
+    <>
+      {selectedTrace && !selectedTrace.rawAvailable && (
+        <div className="mb-3 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"}
+        </div>
+      )}
+      {selectedTrace ? (
+        activeViewMode === "thread" && selectedThreadGroup ? (
+          <TraceThreadConversation
+            traces={selectedThreadGroup.traces}
+            className={fullscreen ? "min-h-0 flex-1" : undefined}
+            loading={threadLoading}
+            fillAvailableHeight={fullscreen}
+            selectedTraceId={selectedTrace.traceId}
+          />
+        ) : (
+          <TraceConversation trace={selectedTrace} />
+        )
+      ) : null}
+    </>
+  )
+
+  return wrapFullscreen(
     <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
       {showCodeStats && <SkillCodeStatsBar stats={codeStats} />}
       <section className="flex min-h-0 flex-1 flex-col bg-background">
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3">
+        <div
+          className={cn(
+            "flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3",
+            fullscreen && "pr-14"
+          )}
+        >
           <div>
             <h3 className="text-xs font-semibold text-foreground">{title}</h3>
             <p className="text-[10px] text-muted-foreground">{subtitle}</p>
@@ -997,6 +1076,7 @@ export function TraceExplorer({
               <TraceViewModeToggle value={activeViewMode} onChange={handleViewModeChange} />
             )}
             {headerRight}
+            {fullscreenToggle}
           </div>
         </div>
         <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)]">
@@ -1113,26 +1193,13 @@ export function TraceExplorer({
               </div>
             )}
 
-            <ScrollArea className="min-h-0 flex-1">
-              <div className="p-4">
-                {selectedTrace && !selectedTrace.rawAvailable && (
-                  <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-                    {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"}
-                  </div>
-                )}
-                {selectedTrace ? (
-                  activeViewMode === "thread" && selectedThreadGroup ? (
-                    <TraceThreadConversation
-                      traces={selectedThreadGroup.traces}
-                      loading={threadLoading}
-                      selectedTraceId={selectedTrace.traceId}
-                    />
-                  ) : (
-                    <TraceConversation trace={selectedTrace} />
-                  )
-                ) : null}
-              </div>
-            </ScrollArea>
+            {fullscreen && activeViewMode === "thread" && selectedThreadGroup ? (
+              <div className="flex min-h-0 flex-1 flex-col p-4">{conversationContent}</div>
+            ) : (
+              <ScrollArea className="min-h-0 flex-1">
+                <div className="p-4">{conversationContent}</div>
+              </ScrollArea>
+            )}
           </div>
         </div>
       </section>

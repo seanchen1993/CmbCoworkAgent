@@ -611,12 +611,15 @@ export function TraceThreadConversation({
   className,
   title = "Thread 对话还原",
   loading = false,
+  fillAvailableHeight = false,
   selectedTraceId
 }: {
   traces: TraceConversationSource[]
   className?: string
   title?: string
   loading?: boolean
+  /** Let the message list consume its parent's remaining height instead of using the compact 360px cap. */
+  fillAvailableHeight?: boolean
   /** When set, the matching trace's messages are highlighted and scrolled into view. */
   selectedTraceId?: string | null
 }): React.JSX.Element {
@@ -644,7 +647,13 @@ export function TraceThreadConversation({
   }
 
   return (
-    <section className={cn("space-y-3 rounded-lg border border-border bg-card/50 px-4 py-3", className)}>
+    <section
+      className={cn(
+        "rounded-lg border border-border bg-card/50 px-4 py-3",
+        fillAvailableHeight ? "flex min-h-0 flex-col gap-3" : "space-y-3",
+        className
+      )}
+    >
       <div className="flex items-center justify-between gap-3">
         <div>
           <h4 className="text-xs font-semibold text-foreground">{title}</h4>
@@ -656,7 +665,13 @@ export function TraceThreadConversation({
         </div>
       </div>
 
-      <div ref={scrollRef} className="max-h-[360px] space-y-3 overflow-y-auto pr-1">
+      <div
+        ref={scrollRef}
+        className={cn(
+          "space-y-3 overflow-y-auto pr-1",
+          fillAvailableHeight ? "min-h-0 flex-1" : "max-h-[360px]"
+        )}
+      >
         {conversation.messages.map((message, index) => {
           const isSelected = !!selectedTraceId && message.traceId === selectedTraceId
           return (
