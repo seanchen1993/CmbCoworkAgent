@@ -17,6 +17,10 @@ function assertIncludes(source: string, expected: string, message: string): void
   assert(source.includes(expected), `${message}: expected to find ${expected}`)
 }
 
+function assertNotIncludes(source: string, unexpected: string, message: string): void {
+  assert(!source.includes(unexpected), `${message}: did not expect to find ${unexpected}`)
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const runtimeSource = readFileSync(join(__dirname, "../src/main/agent/runtime.ts"), "utf8")
 const workflowSubagentSource = readFileSync(
@@ -27,6 +31,11 @@ const traceCollectorSource = readFileSync(
   join(__dirname, "../src/main/agent/trace/collector.ts"),
   "utf8"
 )
+const soloTaskTraceSource = readFileSync(
+  join(__dirname, "../src/main/agent/trace/solo-task.ts"),
+  "utf8"
+)
+const agentIpcSource = readFileSync(join(__dirname, "../src/main/ipc/agent.ts"), "utf8")
 const adoptionTrackerSource = readFileSync(
   join(__dirname, "../src/main/services/adoption-tracker.ts"),
   "utf8"
@@ -180,6 +189,61 @@ function testSubagentTraceSidecarIsolation(): void {
   )
 }
 
+function testSoloTaskTracePartitioning(): void {
+  assertIncludes(
+    runtimeSource,
+    "configurable: {",
+    "Solo task owner id should propagate into subagent middleware runtime config"
+  )
+  assertIncludes(
+    runtimeSource,
+    'soloTaskTraceManager?.finishTask(ownerId, "success", result)',
+    "Solo task trace should finish alongside the owning task invocation"
+  )
+  assertIncludes(
+    soloTaskTraceSource,
+    'traceKind: "subagent"',
+    "Solo task should create a linked subagent trace"
+  )
+  assertIncludes(
+    soloTaskTraceSource,
+    "finishTraceInBackground",
+    "Solo task trace persistence should remain non-blocking"
+  )
+  assertIncludes(
+    agentIpcSource,
+    "!isCapturedSoloTaskMessage",
+    "root trace steps should exclude child events only after child capture is active"
+  )
+  assertIncludes(
+    agentIpcSource,
+    "_soloTaskToolCallIds.has(toolCallId)",
+    "root trace tool results should exclude task-subagent interior calls"
+  )
+
+  const runtimeAccountingIndex = agentIpcSource.indexOf("const usageForRunAccounting")
+  const childTracePartitionIndex = agentIpcSource.indexOf(
+    "if (isAI && isSoloTaskAiMessage)",
+    runtimeAccountingIndex
+  )
+  assert(
+    runtimeAccountingIndex >= 0 && childTracePartitionIndex > runtimeAccountingIndex,
+    "runtime token accounting should happen before child/root trace partitioning"
+  )
+
+  const finalMessagesStart = agentIpcSource.indexOf("const finalMsgs =")
+  const finalMessagesEnd = agentIpcSource.indexOf("const last =", finalMessagesStart)
+  assert(
+    finalMessagesStart >= 0 && finalMessagesEnd > finalMessagesStart,
+    "final response selector should be present"
+  )
+  assertNotIncludes(
+    agentIpcSource.slice(finalMessagesStart, finalMessagesEnd),
+    "_soloTaskAiMessageIds",
+    "trace partitioning must not alter the runtime final-response selector"
+  )
+}
+
 function run(): void {
   testCoordinatorWorkerWritesToolCallCount()
   console.log("PASS coordinator worker toolCallCount wiring")
@@ -191,6 +255,8 @@ function run(): void {
   console.log("PASS subagent adoption attribution wiring")
   testSubagentTraceSidecarIsolation()
   console.log("PASS subagent trace sidecar isolation")
+  testSoloTaskTracePartitioning()
+  console.log("PASS Solo task child/root trace partitioning")
 }
 
 run()

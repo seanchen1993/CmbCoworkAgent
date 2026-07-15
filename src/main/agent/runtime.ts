@@ -243,6 +243,7 @@ import {
   runTraceSideEffect,
   type TraceCollector
 } from "./trace/collector"
+import { SOLO_TASK_OWNER_METADATA_KEY, type SoloTaskTraceManager } from "./trace/solo-task"
 import type { TraceContext, TraceOutcome } from "./trace/types"
 
 function isAbortError(error: unknown): boolean {
@@ -1395,7 +1396,7 @@ function appendRegistrySubagentAccessDescription(
  * Mirrored as a literal in electron-transport.ts and stream-converter.ts; the
  * renderer cannot import from main, so keep the three in sync.
  */
-export const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
+export const SUBAGENT_OWNER_METADATA_KEY = SOLO_TASK_OWNER_METADATA_KEY
 
 /**
  * Wrap deepagents' internal `task` tool so each subagent invocation stamps its
@@ -1406,7 +1407,10 @@ export const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
  * with the ToolCall as input re-establishes `config.toolCall` inside it (see
  * @langchain/core tools `invoke`), preserving its Command/result contract.
  */
-function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): DynamicStructuredTool {
+function wrapTaskToolWithOwnerMetadata(
+  taskTool: DynamicStructuredTool,
+  soloTaskTraceManager?: SoloTaskTraceManager
+): DynamicStructuredTool {
   return tool(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async (input: Record<string, unknown>, config: any) => {
@@ -1414,12 +1418,42 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
       const patchedConfig = ownerId
         ? {
             ...config,
-            metadata: { ...(config?.metadata ?? {}), [SUBAGENT_OWNER_METADATA_KEY]: ownerId }
+            metadata: { ...(config?.metadata ?? {}), [SUBAGENT_OWNER_METADATA_KEY]: ownerId },
+            configurable: {
+              ...(config?.configurable ?? {}),
+              [SUBAGENT_OWNER_METADATA_KEY]: ownerId
+            }
           }
         : config
-      // Pass the ToolCall as input so the original re-derives config.toolCall.id
-      // and returns its Command (state update + task ToolMessage) unchanged.
-      return taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+      const taskInput =
+        config?.toolCall?.args && typeof config.toolCall.args === "object"
+          ? (config.toolCall.args as Record<string, unknown>)
+          : input
+      if (ownerId) {
+        soloTaskTraceManager?.startTask({
+          ownerId,
+          description:
+            typeof taskInput.description === "string" ? taskInput.description : undefined,
+          subagentType:
+            typeof taskInput.subagent_type === "string" ? taskInput.subagent_type : undefined
+        })
+      }
+      try {
+        // Pass the ToolCall as input so the original re-derives config.toolCall.id
+        // and returns its Command (state update + task ToolMessage) unchanged.
+        const result = await taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+        if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", result)
+        return result
+      } catch (error) {
+        if (ownerId) {
+          soloTaskTraceManager?.finishTask(
+            ownerId,
+            isAbortError(error) ? "cancelled" : "error",
+            error
+          )
+        }
+        throw error
+      }
     },
     {
       name: taskTool.name,
@@ -1434,10 +1468,15 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
  * Replace the `task` tool inside a subagent middleware with the owner-stamping
  * wrapper, leaving the middleware's wrapModelCall (task system prompt) intact.
  */
-function stampSubagentOwnerMetadata<T>(middleware: T): T {
+function stampSubagentOwnerMetadata<T>(
+  middleware: T,
+  soloTaskTraceManager?: SoloTaskTraceManager
+): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
-    mw.tools = mw.tools.map((t) => (t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t))
+    mw.tools = mw.tools.map((t) =>
+      t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager) : t
+    )
   }
   return middleware
 }
@@ -1493,6 +1532,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
     threadId,
+    soloTaskTraceManager,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
@@ -1947,6 +1987,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
+    ...(soloTaskTraceManager ? [soloTaskTraceManager.middleware] : []),
     // FIRST for the same reason as the main agent: reject recovered-malformed
     // calls before any tool lifecycle (hooks/fuse/task-mmd) can observe them.
     createMalformedToolCallGuardMiddleware(),
@@ -2134,7 +2175,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 subagents: availableSubagents,
                 generalPurposeAgent: false,
                 systemPrompt: taskSystemPrompt
-              } as Parameters<typeof createSubAgentMiddleware>[0])
+              } as Parameters<typeof createSubAgentMiddleware>[0]),
+              soloTaskTraceManager
             )
           ]
         : []),
@@ -3489,6 +3531,8 @@ export interface CreateAgentRuntimeOptions {
   agentMode?: AgentMode
   /** Parent/root trace context used to link async worker and workflow subagent traces. */
   traceContext?: TraceContext
+  /** Solo-mode sidecar that records each synchronous task subagent as its own linked trace. */
+  soloTaskTraceManager?: SoloTaskTraceManager
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
   /** Optional filesystem access limits for leaf runtimes: coordinator async
@@ -3597,6 +3641,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     memoryEnabled: inheritedMemoryEnabled,
     agentMode = "normal",
     traceContext,
+    soloTaskTraceManager,
     disableSubagents = false,
     onHookResult,
     onFailureFuseNotice,
@@ -5472,6 +5517,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       maxLength: 2000
     },
     threadId: options.threadId,
+    soloTaskTraceManager,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
     onFailureFuseNotice,
