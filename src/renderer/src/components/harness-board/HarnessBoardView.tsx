@@ -17,6 +17,7 @@ import {
   FileText,
   FolderOpen,
   GitBranch,
+  Hammer,
   Info,
   Loader2,
   Maximize2,
@@ -1086,6 +1087,73 @@ function StatusPill({ status, tooltip }: { status: HarnessStatus; tooltip?: stri
   )
 }
 
+function isAdapterLoadedStatus(status?: HarnessStatus | null): status is HarnessStatus {
+  return status?.uiKind === "ok" && status.label.trim().endsWith("已加载")
+}
+
+function AdapterLoadedTag({ status }: { status: HarnessStatus }): React.JSX.Element {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            tabIndex={0}
+            className={cn(
+              "inline-flex h-6 shrink-0 items-center gap-1 rounded border px-2 text-[11px] font-medium",
+              statusTone(status)
+            )}
+            aria-label={status.label}
+          >
+            <Hammer className="size-3.5" />
+            已加载
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-80">
+          {status.label}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function ProjectPluginUpdateButton({
+  pluginUpdateInfo,
+  updatingPlugin,
+  onClick
+}: {
+  pluginUpdateInfo: MarketPluginUpdateInfo
+  updatingPlugin: boolean
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <UpdateVersionTooltip
+      typeLabel="插件"
+      installedVersion={pluginUpdateInfo.installedVersion}
+      currentVersion={pluginUpdateInfo.currentVersion}
+    >
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="market-update-bounce h-7 gap-1 rounded-lg border-[#78d7cb] bg-[#e5fbf7] px-3 text-xs text-[#0f766e] hover:bg-[#d4f7f0] disabled:cursor-not-allowed disabled:opacity-70"
+        disabled={updatingPlugin}
+        onClick={(event) => {
+          event.stopPropagation()
+          onClick()
+        }}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        {updatingPlugin ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : (
+          <Zap className="size-3" />
+        )}
+        {updatingPlugin ? "更新中" : "可更新"}
+      </Button>
+    </UpdateVersionTooltip>
+  )
+}
+
 function statusIcon(status: HarnessStatus): React.JSX.Element {
   if (status.uiKind === "pending") {
     return <CircleDashed className="size-4 text-muted-foreground" />
@@ -1437,7 +1505,7 @@ function HarnessMetricCard({
   tone?: "neutral" | "info" | "nominal" | "warning"
 }): React.JSX.Element {
   return (
-    <div className="group relative overflow-hidden rounded-xl border border-border/80 bg-background/80 px-4 py-3 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-md">
+    <div className="group relative overflow-hidden rounded-lg border border-border/80 bg-background/80 px-3 py-2.5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-md">
       <div
         aria-hidden="true"
         className={cn(
@@ -1451,14 +1519,14 @@ function HarnessMetricCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className={harnessKickerClassName}>{label}</div>
-          <div className="mt-2 text-2xl font-semibold tracking-tight text-foreground">{value}</div>
-          <div className="mt-1 truncate text-xs text-muted-foreground" title={hint}>
+          <div className="mt-1.5 text-xl font-semibold tracking-tight text-foreground">{value}</div>
+          <div className="mt-0.5 truncate text-[11px] text-muted-foreground" title={hint}>
             {hint}
           </div>
         </div>
         <div
           className={cn(
-            "flex size-9 shrink-0 items-center justify-center rounded-xl border bg-muted/40 transition-transform duration-200 group-hover:scale-105",
+            "flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/40 transition-transform duration-200 group-hover:scale-105",
             tone === "info" && "border-status-info/25 text-status-info",
             tone === "nominal" && "border-status-nominal/25 text-status-nominal",
             tone === "warning" && "border-status-warning/25 text-status-warning",
@@ -1487,22 +1555,22 @@ function HarnessBoardOverview({
     : 0
 
   return (
-    <section className={cn(harnessSurfaceClassName, "relative overflow-hidden p-5")}>
+    <section className={cn(harnessSurfaceClassName, "relative overflow-hidden p-4 -mt-3")}>
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute -right-16 -top-20 size-56 rounded-full bg-status-info/10 blur-3xl"
+        className="pointer-events-none absolute -right-14 -top-18 size-48 rounded-full bg-status-info/10 blur-3xl"
       />
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute -bottom-24 left-10 size-52 rounded-full bg-primary/10 blur-3xl"
+        className="pointer-events-none absolute -bottom-20 left-10 size-44 rounded-full bg-primary/10 blur-3xl"
       />
-      <div className="relative flex min-w-0 flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+      <div className="relative flex min-w-0 flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div className="min-w-0">
           <div className={harnessKickerClassName}>Operational cockpit</div>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
+          <h1 className="mt-1.5 text-xl font-semibold tracking-tight text-foreground">
             项目协作看板
           </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+          <p className="mt-1.5 max-w-2xl text-xs leading-5 text-muted-foreground">
             聚合系统、项目和特性执行状态，优先暴露进行中与风险项，帮助你快速判断下一步该进入哪个项目。
           </p>
         </div>
@@ -1521,7 +1589,7 @@ function HarnessBoardOverview({
           </span>
         </div>
       </div>
-      <div className="relative mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="relative mt-3 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
         <HarnessMetricCard
           label="活跃项目"
           value={stats.activeProjects}
@@ -4051,9 +4119,11 @@ function ProjectBadgeRow({
       <span className="text-xs mx-1 text-gray-500">
         / {project.projectCode}
       </span>
-      <span
-        className=" shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
-                  精益之星</span>
+      {project.projectFromLean && (
+        <span className="shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+          精益之星
+        </span>
+      )}
     </div>
   )
 }
@@ -4143,7 +4213,7 @@ function ProjectCard({
       role="button"
       tabIndex={0}
       className={cn(
-        "mt-2 group relative w-[390px] flex-none cursor-pointer overflow-hidden rounded-2xl border border-border/80 bg-background-elevated/90 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-primary/40 hover:shadow-[0_18px_45px_rgb(41_37_36/0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "mt-2 group relative w-[360px] flex-none cursor-pointer overflow-hidden rounded-xl border border-border/80 bg-background-elevated/90 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-primary/40 hover:shadow-[0_18px_45px_rgb(41_37_36/0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         archived && "bg-muted/45 opacity-85"
       )}
       onClick={() => onOpenProject(project.projectId)}
@@ -4171,97 +4241,68 @@ function ProjectCard({
         aria-hidden="true"
         className="pointer-events-none absolute -right-14 -top-16 size-36 rounded-full bg-primary/10 opacity-0 blur-3xl transition-opacity duration-300 group-hover:opacity-100"
       />
-      <div className="relative p-4">
-        <div className="flex min-w-0 items-start justify-between gap-3">
+      <div className="relative p-3">
+        <div className="flex min-w-0 items-start justify-between gap-2">
           <div className="flex">
             <div className="min-w-0">
               <ProjectBadgeRow project={project}>
-                <h2 className="truncate text-base font-semibold">{project.name}</h2>
+                <h2 className="truncate text-[15px] font-semibold">{project.name}</h2>
               </ProjectBadgeRow>
-              <div className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
+              <div className="mt-1.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
                 {project.description}
               </div>
             </div></div>
-          <div className="flex shrink-0 flex-col items-end gap-1.5">
-            <div className="flex items-center gap-1">
-              <ProjectActionMenu
-                project={project}
-                archiving={archiving}
-                deleting={deleting}
-                onEdit={() => onEditProject(project)}
-                onArchive={() => onArchiveProject(project)}
-                onDelete={() => onDeleteProject(project)}
-              />
-            </div>
-            {pluginUpdateInfo && (
-              <UpdateVersionTooltip
-                typeLabel="插件"
-                installedVersion={pluginUpdateInfo.installedVersion}
-                currentVersion={pluginUpdateInfo.currentVersion}
-              >
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="market-update-bounce h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0] disabled:cursor-not-allowed disabled:opacity-70"
-                  disabled={updatingPlugin}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onUpdatePlugin(project, pluginUpdateInfo)
-                  }}
-                  onKeyDown={(event) => event.stopPropagation()}
-                >
-                  {updatingPlugin ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : (
-                    <Zap className="size-3" />
-                  )}
-                  {updatingPlugin ? "更新中" : "可更新"}
-                </Button>
-              </UpdateVersionTooltip>
-            )}
+          <div className="flex shrink-0 items-center gap-1">
+            <ProjectActionMenu
+              project={project}
+              archiving={archiving}
+              deleting={deleting}
+              onEdit={() => onEditProject(project)}
+              onArchive={() => onArchiveProject(project)}
+              onDelete={() => onDeleteProject(project)}
+            />
           </div>
         </div>
 
-        <div className="mt-4 rounded-xl border border-border/70 bg-muted/25 p-3">
+        <div className="mt-3 rounded-lg border border-border/70 bg-muted/25 p-2.5">
           {archived ? (
-            <div className="flex min-h-[58px] flex-wrap items-center gap-2">
+            <div className="flex min-h-[48px] flex-wrap items-center gap-1.5">
               {pluginCompatibilityMessage && (
                 <StatusPill status={pluginCompatibilityStatus} tooltip={pluginCompatibilityMessage} />
               )}
               <StatusPill status={archivedStatus} />
             </div>
           ) : pluginCompatibilityMessage ? (
-            <div className="flex min-h-[58px] items-center">
+            <div className="flex min-h-[48px] items-center">
               <StatusPill status={pluginCompatibilityStatus} tooltip={pluginCompatibilityMessage} />
             </div>
           ) : detailError && detail?.projectState ? (
-            <div className="flex min-h-[58px] items-center">
+            <div className="flex min-h-[48px] items-center">
               <StatusPill status={detail.projectState} tooltip={detailError} />
             </div>
           ) : (
-            <div className="grid grid-cols-4 gap-2">
-              <div className="min-w-0 text-xs text-muted-foreground">
+            <div className="grid grid-cols-4 gap-1.5">
+              <div className="min-w-0 text-[11px] text-muted-foreground">
                 特性
-                <strong className="mt-1 block text-base text-foreground">
+                <strong className="mt-0.5 block text-sm text-foreground">
                   {loading || !detail ? "-" : runs.length}
                 </strong>
               </div>
-              <div className="min-w-0 text-xs text-muted-foreground">
+              <div className="min-w-0 text-[11px] text-muted-foreground">
                 进行中
-                <strong className="mt-1 block text-base text-status-info">
+                <strong className="mt-0.5 block text-sm text-status-info">
                   {loading || !detail ? "-" : activeCount}
                 </strong>
               </div>
-              <div className="min-w-0 text-xs text-muted-foreground">
+              <div className="min-w-0 text-[11px] text-muted-foreground">
                 完成
-                <strong className="mt-1 block text-base text-status-nominal">
+                <strong className="mt-0.5 block text-sm text-status-nominal">
                   {loading || !detail ? "-" : doneCount}
                 </strong>
               </div>
-              <div className="min-w-0 text-xs text-muted-foreground">
+              <div className="min-w-0 text-[11px] text-muted-foreground">
                 风险
-                <strong className="mt-1 block text-base text-status-warning">
+                <strong className="mt-0.5 block text-sm text-status-warning">
                   {loading || !detail ? "-" : riskCount}
                 </strong>
               </div>
@@ -4269,22 +4310,32 @@ function ProjectCard({
           )}
         </div>
 
-        <div className="mt-3 flex min-w-0 items-center justify-between gap-3 border-t border-border/70 pt-3 text-xs text-muted-foreground">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <FolderOpen className="size-3.5 shrink-0" />
+        <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2 border-t border-border/70 pt-2.5 text-[11px] text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-1">
+            <FolderOpen className="size-3 shrink-0" />
             <span className="truncate" title={projectRootPath}>
               {getWorkspaceName(projectRootPath)}
             </span>
-            <span
-              className="max-w-28 truncate rounded-full border border-border/80 bg-muted/70 px-2.5 py-1 text-[11px] text-muted-foreground"
-              title={project.harnessAdapter.name}
-            >
-              {project.harnessAdapter.name}
-            </span>
+            {/*<span*/}
+            {/*  className="max-w-28 truncate rounded-full border border-border/80 bg-muted/70 px-2.5 py-1 text-[11px] text-muted-foreground"*/}
+            {/*  title={project.harnessAdapter.name}*/}
+            {/*>*/}
+            {/*  {project.harnessAdapter.name}*/}
+            {/*</span>*/}
           </div>
-          {projectStatus && (
-            <StatusPill status={projectStatus} tooltip={detail?.error ?? pluginCompatibilityMessage} />
-          )}
+          {pluginUpdateInfo ? (
+            <ProjectPluginUpdateButton
+              pluginUpdateInfo={pluginUpdateInfo}
+              updatingPlugin={updatingPlugin}
+              onClick={() => onUpdatePlugin(project, pluginUpdateInfo)}
+            />
+          ) : projectStatus ? (
+            isAdapterLoadedStatus(projectStatus) ? (
+              <AdapterLoadedTag status={projectStatus} />
+            ) : (
+              <StatusPill status={projectStatus} tooltip={detail?.error ?? pluginCompatibilityMessage} />
+            )
+          ) : null}
         </div>
       </div>
     </article>
@@ -4352,9 +4403,12 @@ function SystemSection({
     <section className={cn(harnessSurfaceClassName, "space-y-4 overflow-hidden p-4")}>
       <div className="flex min-w-0 flex-wrap items-end justify-between gap-4">
         <div className="min-w-0">
-          <div className={harnessKickerClassName}>System cluster</div>
-          <h2 className="mt-1 truncate text-xl font-semibold tracking-tight">{group.systemCode}</h2>
-          <div className="mt-1 truncate text-sm text-muted-foreground">{group.systemName}</div>
+          <div className={'flex space-x-2 items-center'}>
+            <h2 className="mt-1 truncate text-xl font-semibold tracking-tight">{group.systemCode}</h2>
+            <div className="mt-1 truncate text-sm text-muted-foreground">{group.systemName}</div>
+          </div>
+
+
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="rounded-full border border-border/80 bg-background/70 px-3 py-1">
@@ -4577,7 +4631,7 @@ function StageArtifactPanel({
 }): React.JSX.Element {
   return (
     <section className={cn(harnessSurfaceClassName, "shrink-0 overflow-hidden")}>
-      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/70 px-4 py-3">
+      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/70 px-3 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
           <FileText className="size-4 text-muted-foreground" />
           <div className="min-w-0">
@@ -4589,7 +4643,7 @@ function StageArtifactPanel({
         </span>
       </div>
       {node.artifacts.length === 0 ? (
-        <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+        <div className="px-3 py-8 text-center text-sm text-muted-foreground">
           当前阶段暂无产物。
         </div>
       ) : (
@@ -4654,17 +4708,17 @@ function FeatureDeployUnitsPanel({
   deployUnits: HarnessDeployUnitMapping[]
 }): React.JSX.Element {
   return (
-    <section className="rounded-md border border-border bg-background">
-      <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3 text-sm font-semibold">
+    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-background")}>
+      <div className="flex min-w-0 items-center gap-2 border-b border-border/70 px-4 py-3 text-sm font-semibold">
         <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
         <span className="truncate">当前特性绑定的发布单元</span>
       </div>
       {deployUnits.length === 0 ? (
-        <div className="px-3 py-6 text-sm text-muted-foreground">当前特性没有绑定发布单元。</div>
+        <div className="px-4 py-8 text-sm text-muted-foreground">当前特性没有绑定发布单元。</div>
       ) : (
-        <div className="divide-y divide-border">
+        <div className="divide-y divide-border/70">
           {deployUnits.map((deployUnit) => (
-            <div key={deployUnit.deployUnitIdMapping} className="px-3 py-3">
+            <div key={deployUnit.deployUnitIdMapping} className="px-4 py-3">
               <div className="truncate text-sm font-medium" title={deployUnit.deployUnitId}>
                 {deployUnit.deployUnitId}
               </div>
@@ -5957,7 +6011,7 @@ function FeatureDetailPage({
           key={node.id}
           title={node.label}
           className={cn(
-            "group/node relative w-[230px] rounded-xl border px-0 shadow-xs transition-all duration-200",
+            "group/node relative w-full rounded-lg border px-0 shadow-xs transition-all duration-200 sm:w-[220px]",
             selected
               ? "border-status-info/35 bg-background/70 shadow-md"
               : "border-border/80 bg-background/70 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-background/80 hover:shadow-md"
@@ -5970,17 +6024,17 @@ function FeatureDetailPage({
             }}
             aria-pressed={selected}
             className={cn(
-              "flex w-full cursor-pointer items-start gap-2 rounded-xl px-3 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "flex w-full cursor-pointer items-start gap-2 rounded-lg px-2.5 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               skippable ? "pr-[82px]" : ""
             )}
           >
             <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-semibold">{node.label}</span>
+              <span className="block truncate text-[13px] font-semibold">{node.label}</span>
               <span className="mt-1 block truncate text-[11px] text-muted-foreground">
                 {node.status.label}
               </span>
-              <span className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground">
+              <span className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
                 <span className="rounded-full border border-border/70 bg-muted/40 px-2 py-0.5">
                   {node.artifacts.length} 产物
                 </span>
@@ -5998,7 +6052,7 @@ function FeatureDetailPage({
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="absolute right-2 top-2 h-7 gap-1 rounded-full border-status-info/30 bg-background/95 px-2 text-xs shadow-sm"
+                    className="absolute right-1.5 top-1.5 h-6 gap-1 rounded-full border-status-info/30 bg-background/95 px-2 text-[11px] shadow-sm"
                     onClick={(event) => {
                       event.stopPropagation()
                       void handleSkipNode(node)
@@ -6021,9 +6075,8 @@ function FeatureDetailPage({
 
     if (nodeGroups.length > 0 && selectedGroup) {
       return (
-        <div className="space-y-3">
-          <div className="-mx-1 overflow-x-auto pb-2">
-            <div className="flex w-max gap-3 px-1">
+        <div className="space-y-2.5">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
               {nodeGroups.map((group) => {
                 const selected = selectedGroup.key === group.key
                 const currentNode =
@@ -6049,7 +6102,7 @@ function FeatureDetailPage({
                     aria-pressed={selected}
                     title={group.label}
                     className={cn(
-                      "group/stage flex h-[112px] w-[240px] flex-none cursor-pointer flex-col gap-2 rounded-2xl border px-3.5 py-3.5 text-left shadow-sm transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      "group/stage flex min-w-0 min-h-[96px] cursor-pointer flex-col gap-2 rounded-xl border px-3 py-3 text-left shadow-sm transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       selected
                         ? "border-status-info/60 bg-status-info/10 shadow-md"
                         : "border-border/80 bg-background/70 hover:-translate-y-0.5 hover:border-primary/45 hover:shadow-md"
@@ -6058,7 +6111,7 @@ function FeatureDetailPage({
                     <div className="flex min-w-0 items-start gap-2">
                       {currentNode ? statusIcon(currentNode.status) : <Circle className="size-4 text-muted-foreground" />}
                       <div className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-semibold">{group.label}</span>
+                        <span className="block truncate text-[13px] font-semibold">{group.label}</span>
                         <span className="mt-1 block truncate text-[11px] text-muted-foreground">
                           {currentNode?.label ?? "暂无节点"}
                         </span>
@@ -6074,20 +6127,19 @@ function FeatureDetailPage({
                   </button>
                 )
               })}
-            </div>
           </div>
 
-          <section className={cn(harnessSurfaceClassName, "p-4")}>
-            <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+          <section className={cn(harnessSurfaceClassName, "p-3")}>
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-2.5">
               <div className="min-w-0">
                 <div className={harnessKickerClassName}>Selected stage</div>
-                <div className="mt-1 truncate text-base font-semibold">{selectedGroup.label}</div>
+                <div className="mt-1 truncate text-sm font-semibold">{selectedGroup.label}</div>
               </div>
-              <div className="rounded-full border border-border/70 bg-background/70 px-3 py-1 text-xs text-muted-foreground">
+              <div className="rounded-full border border-border/70 bg-background/70 px-2.5 py-1 text-[11px] text-muted-foreground">
                 {selectedGroup.nodes.length} 个节点
               </div>
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
+            <div className="mt-2.5 flex flex-wrap gap-2">
               {selectedGroup.nodes.map((node) => renderStageNodeButton(node))}
             </div>
           </section>
@@ -6244,13 +6296,13 @@ function FeatureDetailPage({
           </div>
         </div>
       ) : (
-        <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-4">
+        <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-3">
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <section className={cn(harnessSurfaceClassName, "isolate relative mb-5 overflow-hidden p-5")}>
+            <section className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}>
               <video
                 aria-hidden="true"
                 autoPlay
-                className="pointer-events-none absolute -top-10 right-0 z-0 h-auto w-[400px] max-w-[82%] object-contain opacity-45 saturate-125 motion-reduce:hidden"
+                className="pointer-events-none absolute -top-8 right-0 z-0 h-auto w-[340px] max-w-[78%] object-contain opacity-40 saturate-125 motion-reduce:hidden"
                 loop
                 muted
                 playsInline
@@ -6268,28 +6320,28 @@ function FeatureDetailPage({
               <div className="relative z-10 min-w-0">
                 <div className="min-w-0">
                   <div className={harnessKickerClassName}>Feature cockpit</div>
-                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
-                    <h2 className="truncate text-2xl font-semibold tracking-tight">
+                  <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-2">
+                    <h2 className="truncate text-xl font-semibold tracking-tight">
                       {detail.run.title}
                     </h2>
                     <StatusPill status={featureOverallStatus} />
                     {unbound && (
-                      <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2.5 py-1 text-xs text-status-warning">
+                      <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
                         未绑定会话
                       </span>
                     )}
                     {detail.adapterSnapshot.mock && (
-                      <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2.5 py-1 text-xs text-status-warning">
+                      <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
                         Mock
                       </span>
                     )}
                   </div>
-                  <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+                  <p className="mt-1.5 max-w-3xl text-xs leading-5 text-muted-foreground">
                     {detail.project.name} · {detail.run.slug}
                     {detail.run.source?.label ? ` · ${detail.run.source.label}` : ""}
                   </p>
-                  <div className="mt-4 max-w-xl">
-                    <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                  <div className="mt-3 max-w-xl">
+                    <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
                       <span>整体进度</span>
                       <span>{featureProgressPercent}%</span>
                     </div>
@@ -6299,15 +6351,15 @@ function FeatureDetailPage({
               </div>
             </section>
 
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-              <div className="min-w-0 space-y-4">
-                <section className={cn(harnessSurfaceClassName, "space-y-4 p-4")}>
-                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+              <div className="min-w-0 space-y-3">
+                <section className={cn(harnessSurfaceClassName, "space-y-3 p-3")}>
+                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-2.5">
                     <div className="min-w-0">
                       <div className={harnessKickerClassName}>Execution timeline</div>
-                      <div className="mt-1 text-base font-semibold">阶段流程</div>
+                      <div className="mt-1 text-sm font-semibold">阶段流程</div>
                     </div>
-                    <div className="rounded-full border border-border/70 bg-background/70 px-3 py-1 text-xs text-muted-foreground">
+                    <div className="rounded-full border border-border/70 bg-background/70 px-2.5 py-1 text-[11px] text-muted-foreground">
                       当前：{selectedNode?.label ?? "暂无阶段"}
                     </div>
                   </div>
@@ -6320,39 +6372,39 @@ function FeatureDetailPage({
                     workspacePath={detail.project.projectRootPath}
                   />
                 ) : (
-                  <section className="rounded-2xl border border-dashed border-border/80 bg-background/80 px-3 py-10 text-center text-sm text-muted-foreground shadow-sm">
+                  <section className="rounded-xl border border-dashed border-border/80 bg-background/80 px-3 py-8 text-center text-sm text-muted-foreground shadow-sm">
                     暂无阶段数据。
                   </section>
                 )}
               </div>
 
-              <aside className="min-w-0 space-y-4">
-                <section className={cn(harnessSurfaceClassName, "p-4")}>
+              <aside className="min-w-0 space-y-3">
+                <section className={cn(harnessSurfaceClassName, "p-3")}>
                   <div className={harnessKickerClassName}>Current stage</div>
-                  <div className="mt-3 flex min-w-0 items-start gap-3">
-                    <div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl border border-status-info/20 bg-status-info/10">
+                  <div className="mt-2.5 flex min-w-0 items-start gap-2.5">
+                    <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border border-status-info/20 bg-status-info/10">
                       {selectedNode ? statusIcon(selectedNode.status) : <Circle className="size-4 text-muted-foreground" />}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-semibold">
+                      <div className="truncate text-[13px] font-semibold">
                         {selectedNode?.label ?? "暂无阶段"}
                       </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
+                      <div className="mt-1 text-[11px] text-muted-foreground">
                         {selectedNode?.status.label ?? "等待阶段数据"}
                       </div>
                     </div>
                     {selectedNode && <StatusPill status={selectedNode.status} />}
                   </div>
-                  <div className="mt-4 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
-                    <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-2">
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
+                    <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
                       产物
-                      <strong className="mt-1 block text-base text-foreground">
+                      <strong className="mt-0.5 block text-sm text-foreground">
                         {selectedNode?.artifacts.length ?? 0}
                       </strong>
                     </div>
-                    <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-2">
+                    <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
                       事件
-                      <strong className="mt-1 block text-base text-foreground">
+                      <strong className="mt-0.5 block text-sm text-foreground">
                         {selectedNodeHooks.length}
                       </strong>
                     </div>
@@ -6363,7 +6415,7 @@ function FeatureDetailPage({
                 <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
 
                 <section className={cn(harnessSurfaceClassName, "overflow-hidden")}>
-                  <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/70 px-4 py-3">
+                  <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/70 px-3 py-2.5">
                     <div className="flex min-w-0 items-center gap-2">
                       <Workflow className="size-4 shrink-0 text-muted-foreground" />
                       <span className="truncate text-sm font-semibold">运行事件</span>
@@ -6383,7 +6435,7 @@ function FeatureDetailPage({
                       ))}
                     </div>
                   ) : (
-                    <div className="px-4 py-8 text-sm text-muted-foreground">
+                    <div className="px-3 py-7 text-sm text-muted-foreground">
                       当前阶段暂无运行事件。
                     </div>
                   )}
@@ -9115,14 +9167,6 @@ export function HarnessBoardView({
 
       <ScrollArea className="min-h-0 flex-1">
         <main className="w-full space-y-7 p-4">
-          {!loadingProjects && projects.length > 0 && (
-            <HarnessBoardOverview
-              stats={boardStats}
-              query={query}
-              visibleProjectCount={visibleProjectCount}
-            />
-          )}
-
           {loadError && (
             <div className="flex items-start gap-2 rounded-xl border border-status-critical/30 bg-status-critical/10 px-4 py-3 text-sm text-status-critical shadow-sm">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
@@ -9192,26 +9236,36 @@ export function HarnessBoardView({
                       {query.trim() ? "没有匹配的活跃项目或 feature。" : "暂无活跃项目。"}
                     </div>
                   ) : (
-                    activeSystemGroups.map((group) => (
-                      <SystemSection
-                        key={group.systemCode}
-                        group={group}
-                        detailsByProjectId={detailsByProjectId}
-                        loadingDetailIds={loadingDetailIds}
-                        archivingProjectId={archivingProjectId}
-                        deletingProjectId={deletingProjectId}
-                        pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
-                        updatingPluginNames={updatingPluginNames}
-                        onEditProject={handleEditProject}
-                        onArchiveProject={requestArchiveProject}
-                        onDeleteProject={requestDeleteProject}
-                        onUpdateProjectPlugin={(project, updateInfo) =>
-                          void handleUpdateProjectPlugin(project, updateInfo)
-                        }
-                        onProjectVisible={handleProjectCardVisible}
-                        onOpenProject={openProjectDetail}
-                      />
-                    ))
+                    <div>
+                      {!loadingProjects && projects.length > 0 && (
+                        <HarnessBoardOverview
+                          stats={boardStats}
+                          query={query}
+                          visibleProjectCount={visibleProjectCount}
+                        />
+                      )}
+                      <div  className={'mt-2 space-y-2'}>{ activeSystemGroups.map((group) => (
+                        <SystemSection
+                          key={group.systemCode}
+                          group={group}
+                          detailsByProjectId={detailsByProjectId}
+                          loadingDetailIds={loadingDetailIds}
+                          archivingProjectId={archivingProjectId}
+                          deletingProjectId={deletingProjectId}
+                          pluginUpdateInfoByProjectId={projectPluginUpdateInfoById}
+                          updatingPluginNames={updatingPluginNames}
+                          onEditProject={handleEditProject}
+                          onArchiveProject={requestArchiveProject}
+                          onDeleteProject={requestDeleteProject}
+                          onUpdateProjectPlugin={(project, updateInfo) =>
+                            void handleUpdateProjectPlugin(project, updateInfo)
+                          }
+                          onProjectVisible={handleProjectCardVisible}
+                          onOpenProject={openProjectDetail}
+                        />
+                      ))}</div>
+                    </div>
+
                   )}
 
                   <Tabs defaultValue="archived" className={cn(harnessSurfaceClassName, "overflow-hidden p-4")}>
