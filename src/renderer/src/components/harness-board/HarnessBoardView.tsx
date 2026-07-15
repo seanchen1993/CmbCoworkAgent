@@ -4691,11 +4691,11 @@ function FeatureDeployUnitsPanel({
         <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
         <span className="truncate">当前特性绑定的发布单元</span>
       </div>
-      {deployUnits.length === 0 ? (
+      {deployUnits?.length === 0 ? (
         <div className="px-4 py-8 text-sm text-muted-foreground">当前特性没有绑定发布单元。</div>
       ) : (
         <div className="divide-y divide-border/70">
-          {deployUnits.map((deployUnit) => (
+          {deployUnits?.map((deployUnit) => (
             <div key={deployUnit.deployUnitIdMapping} className="px-4 py-3">
               <div className="truncate text-sm font-medium" title={deployUnit.deployUnitId}>
                 {deployUnit.deployUnitId}
@@ -5642,7 +5642,7 @@ function ProjectDetailPage({
                       </div>
                     ) : (
                       <ScrollArea className="min-h-0 flex-1">
-                        <div className="mt-1 grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pr-3">
+                        <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3 pr-2">
                           {runs.map((run) => (
                             <FeatureCard
                               key={run.slug}
