@@ -6,16 +6,21 @@ import { downloadUpdate, type DownloadProgress } from "./downloader"
 import { installAsarUpdate, installFullUpdate } from "./installer"
 import { rollbackToPrevious, isRollbackAvailable } from "./rollback"
 import { notifyAlways } from "../services/notify"
+import {
+  isSelfTestUpdateSource,
+  resolveUpdateSource,
+  type UpdateSourceInfo
+} from "./channel-config"
 
 // Module state
 let checkInterval: ReturnType<typeof setInterval> | null = null
 let initialCheckTimer: ReturnType<typeof setTimeout> | null = null
 let lastCheckResult: UpdateCheckResult | null = null
+let lastUpdateSource: UpdateSourceInfo | null = null
 let downloadedFilePath: string | null = null
 let updateStatus: "idle" | "available" | "downloading" | "downloaded" | "error" = "idle"
 let lastDownloadProgress: DownloadProgress | null = null
 let lastErrorMessage: string | null = null
-
 
 function getUpdateServerUrl(): string {
   const url = (import.meta.env.VITE_UPDATE_SERVER_URL as string) || ""
@@ -23,6 +28,23 @@ function getUpdateServerUrl(): string {
     console.warn("[Updater] VITE_UPDATE_SERVER_URL is not configured")
   }
   return url
+}
+
+function getActiveUpdateSource(): UpdateSourceInfo {
+  return resolveUpdateSource(getUpdateServerUrl())
+}
+
+function getUpdateSourcePayload(source: UpdateSourceInfo | null): UpdateSourceInfo | null {
+  return source ? { ...source } : null
+}
+
+function logUpdateSourceIfNeeded(source: UpdateSourceInfo): void {
+  if (!isSelfTestUpdateSource(source)) return
+  console.warn(
+    `[Updater] SELFTEST update source enabled: manifest=${source.manifestFile}` +
+      ` baseUrl=${source.baseUrl || "(not configured)"}` +
+      (source.expiresAt ? ` expiresAt=${source.expiresAt}` : "")
+  )
 }
 
 /**
@@ -41,17 +63,20 @@ function broadcast(channel: string, data: unknown): void {
  */
 async function performDownload(silent: boolean): Promise<void> {
   if (!lastCheckResult) return
-  const baseUrl = getUpdateServerUrl()
-  if (!baseUrl) return
+  const source = lastUpdateSource ?? getActiveUpdateSource()
+  lastUpdateSource = source
+  if (!source.baseUrl) return
 
   updateStatus = "downloading"
   lastDownloadProgress = null
   lastErrorMessage = null
-  console.log(`[Updater] ${silent ? "Background" : "Manual"} download starting: ${lastCheckResult.downloadFile}`)
+  console.log(
+    `[Updater] ${silent ? "Background" : "Manual"} download starting: ${lastCheckResult.downloadFile}`
+  )
 
   try {
     downloadedFilePath = await downloadUpdate(
-      baseUrl,
+      source.baseUrl,
       lastCheckResult.downloadFile,
       lastCheckResult.downloadSha256,
       lastCheckResult.downloadSize,
@@ -66,10 +91,12 @@ async function performDownload(silent: boolean): Promise<void> {
     console.log("[Updater] Download complete:", downloadedFilePath)
     broadcast("update:downloaded", {
       version: lastCheckResult.version,
+      targetVersion: lastCheckResult.targetVersion,
       updateType: lastCheckResult.updateType,
       releaseNotes: lastCheckResult.releaseNotes,
       size: lastCheckResult.downloadSize,
-      mandatory: lastCheckResult.mandatory
+      mandatory: lastCheckResult.mandatory,
+      source: getUpdateSourcePayload(lastUpdateSource)
     })
   } catch (err) {
     updateStatus = "error"
@@ -85,25 +112,29 @@ async function performDownload(silent: boolean): Promise<void> {
  * Perform update check and notify renderer if update is available.
  */
 async function performCheck(manual: boolean): Promise<UpdateCheckResult | null> {
-  const baseUrl = getUpdateServerUrl()
-  if (!baseUrl) {
+  const source = getActiveUpdateSource()
+  lastUpdateSource = source
+  if (!source.baseUrl) {
     if (manual) throw new Error("更新服务器地址未配置")
     return null
   }
+  logUpdateSourceIfNeeded(source)
 
   try {
-    const result = await checkForUpdate(baseUrl)
+    const result = await checkForUpdate(source.baseUrl, { manifestFile: source.manifestFile })
     lastCheckResult = result
 
     if (result) {
       updateStatus = "available"
       broadcast("update:available", {
         version: result.version,
+        targetVersion: result.targetVersion,
         updateType: result.updateType,
         releaseNotes: result.releaseNotes,
         size: result.downloadSize,
         mandatory: result.mandatory,
-        autoDownloading: !manual
+        autoDownloading: !manual,
+        source: getUpdateSourcePayload(source)
       })
       console.log(`[Updater] Update available: v${result.version} (${result.updateType})`)
 
@@ -134,17 +165,24 @@ export function registerUpdaterHandlers(): void {
   ipcMain.handle("update:check", async () => {
     // If download is already in progress or done, don't hit the server again —
     // just return the known state so the UI can restore the correct stage.
-    if ((updateStatus === "downloading" || updateStatus === "downloaded" || updateStatus === "error") && lastCheckResult) {
+    if (
+      (updateStatus === "downloading" ||
+        updateStatus === "downloaded" ||
+        updateStatus === "error") &&
+      lastCheckResult
+    ) {
       return {
         hasUpdate: true,
         version: lastCheckResult.version,
+        targetVersion: lastCheckResult.targetVersion,
         updateType: lastCheckResult.updateType,
         releaseNotes: lastCheckResult.releaseNotes,
         size: lastCheckResult.downloadSize,
         mandatory: lastCheckResult.mandatory,
         currentStatus: updateStatus,
         currentProgress: lastDownloadProgress,
-        currentError: lastErrorMessage
+        currentError: lastErrorMessage,
+        source: getUpdateSourcePayload(lastUpdateSource)
       }
     }
 
@@ -153,15 +191,17 @@ export function registerUpdaterHandlers(): void {
       ? {
           hasUpdate: true,
           version: result.version,
+          targetVersion: result.targetVersion,
           updateType: result.updateType,
           releaseNotes: result.releaseNotes,
           size: result.downloadSize,
           mandatory: result.mandatory,
           currentStatus: "available" as const,
           currentProgress: null,
-          currentError: null
+          currentError: null,
+          source: getUpdateSourcePayload(lastUpdateSource)
         }
-      : { hasUpdate: false }
+      : { hasUpdate: false, source: getUpdateSourcePayload(lastUpdateSource) }
   })
 
   // Start downloading the update (manual trigger)
@@ -188,11 +228,11 @@ export function registerUpdaterHandlers(): void {
     // Network failure here is NOT a reason to block install: the user may simply
     // be offline. We only abort when the server clearly disagrees.
     if (lastCheckResult.channel === "staging") {
-      const baseUrl = getUpdateServerUrl()
-      if (baseUrl) {
+      const source = lastUpdateSource ?? getActiveUpdateSource()
+      if (source.baseUrl) {
         let recheck: UpdateCheckResult | null | undefined
         try {
-          recheck = await checkForUpdate(baseUrl)
+          recheck = await checkForUpdate(source.baseUrl, { manifestFile: source.manifestFile })
         } catch (err) {
           console.warn("[Updater] Staging re-validation network error, proceeding:", err)
           recheck = undefined
@@ -206,7 +246,11 @@ export function registerUpdaterHandlers(): void {
                 `expected v${expected.version} sha=${expected.downloadSha256.slice(0, 8)}, ` +
                 `got ${recheck ? `${recheck.channel} v${recheck.version} sha=${recheck.downloadSha256.slice(0, 8)} (${recheck.grayReason})` : "null"}`
             )
-            try { unlinkSync(downloadedFilePath) } catch { /* file may already be gone */ }
+            try {
+              unlinkSync(downloadedFilePath)
+            } catch {
+              /* file may already be gone */
+            }
             downloadedFilePath = null
             lastCheckResult = null
             updateStatus = "idle"
@@ -225,7 +269,13 @@ export function registerUpdaterHandlers(): void {
       if (lastCheckResult.updateType === "asar") {
         installAsarUpdate(downloadedFilePath, lastCheckResult.version)
       } else {
-        installFullUpdate(downloadedFilePath, lastCheckResult.version)
+        installFullUpdate(
+          downloadedFilePath,
+          lastCheckResult.version,
+          lastCheckResult.targetVersion,
+          lastCheckResult.channel,
+          lastCheckResult.minVersion
+        )
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "安装失败"
@@ -243,6 +293,7 @@ export function registerUpdaterHandlers(): void {
     // and needs it to broadcast update:downloaded with the right info
     if (updateStatus !== "downloading") {
       lastCheckResult = null
+      lastUpdateSource = null
     }
     updateStatus = "idle"
     lastDownloadProgress = null
@@ -252,8 +303,8 @@ export function registerUpdaterHandlers(): void {
 
   // Rollback to previous version
   ipcMain.handle("update:rollback", async () => {
-    const baseUrl = getUpdateServerUrl()
-    await rollbackToPrevious(baseUrl)
+    const source = lastUpdateSource ?? getActiveUpdateSource()
+    await rollbackToPrevious(source.baseUrl)
     // App will quit after this
   })
 
@@ -264,6 +315,7 @@ export function registerUpdaterHandlers(): void {
       update: lastCheckResult
         ? {
             version: lastCheckResult.version,
+            targetVersion: lastCheckResult.targetVersion,
             updateType: lastCheckResult.updateType,
             releaseNotes: lastCheckResult.releaseNotes,
             size: lastCheckResult.downloadSize,
@@ -272,7 +324,8 @@ export function registerUpdaterHandlers(): void {
         : null,
       progress: lastDownloadProgress,
       errorMessage: lastErrorMessage,
-      canRollback: isRollbackAvailable()
+      canRollback: isRollbackAvailable(),
+      source: getUpdateSourcePayload(lastCheckResult ? lastUpdateSource : getActiveUpdateSource())
     }
   })
 
