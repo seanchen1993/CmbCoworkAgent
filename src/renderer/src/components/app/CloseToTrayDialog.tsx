@@ -9,22 +9,6 @@ import {
   type CloseToTrayPromptOpenEvent
 } from "../../../../shared/close-to-tray"
 
-function waitForNextPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    let settled = false
-    const finish = (): void => {
-      if (settled) return
-      settled = true
-      window.clearTimeout(timeout)
-      resolve()
-    }
-    const timeout = window.setTimeout(finish, 250)
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(finish)
-    })
-  })
-}
-
 export function CloseToTrayDialog(): React.JSX.Element | null {
   const [request, setRequest] = useState<CloseToTrayPromptOpenEvent | null>(null)
   const [rememberChoice, setRememberChoice] = useState(false)
@@ -53,9 +37,7 @@ export function CloseToTrayDialog(): React.JSX.Element | null {
       }
 
       const shouldRemember = activeRequest.rememberChoiceAllowed && rememberChoice
-      void waitForNextPaint().then(() => {
-        window.electron.respondCloseToTrayPrompt(activeRequest.requestId, action, shouldRemember)
-      })
+      window.electron.respondCloseToTrayPrompt(activeRequest.requestId, action, shouldRemember)
     },
     [rememberChoice]
   )

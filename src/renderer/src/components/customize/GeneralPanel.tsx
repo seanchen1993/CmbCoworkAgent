@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Loader2, Settings2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -16,18 +16,24 @@ export function GeneralPanel(): React.JSX.Element {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const closeBehaviorRevisionRef = useRef(0)
   const trayAreaName = window.electron.process.platform === "darwin" ? "菜单栏" : "系统托盘"
 
   const loadCloseBehavior = useCallback(async (): Promise<void> => {
+    const revision = ++closeBehaviorRevisionRef.current
     setLoading(true)
     setError(null)
     setCloseBehavior(null)
     try {
       const behavior = await window.electron.getWindowCloseBehavior()
-      setCloseBehavior(behavior)
+      if (closeBehaviorRevisionRef.current === revision) {
+        setCloseBehavior(behavior)
+      }
     } catch (loadError) {
       console.error("[GeneralPanel] Failed to load window close behavior:", loadError)
-      setError("无法读取关闭窗口设置，请稍后重试。")
+      if (closeBehaviorRevisionRef.current === revision) {
+        setError("无法读取关闭窗口设置，请稍后重试。")
+      }
     } finally {
       setLoading(false)
     }
@@ -37,21 +43,35 @@ export function GeneralPanel(): React.JSX.Element {
     void loadCloseBehavior()
   }, [loadCloseBehavior])
 
+  useEffect(() => {
+    return window.electron.onWindowCloseBehaviorChanged((behavior) => {
+      closeBehaviorRevisionRef.current += 1
+      setCloseBehavior(behavior)
+      setLoading(false)
+      setError(null)
+    })
+  }, [])
+
   const handleCloseBehaviorChange = useCallback(
     async (value: string): Promise<void> => {
       if (!isWindowCloseBehavior(value) || closeBehavior === null || value === closeBehavior) return
       const previousBehavior = closeBehavior
+      const revision = ++closeBehaviorRevisionRef.current
       setCloseBehavior(value)
       setSaving(true)
       setError(null)
       try {
         const savedBehavior = await window.electron.setWindowCloseBehavior(value)
-        setCloseBehavior(savedBehavior)
+        if (closeBehaviorRevisionRef.current === revision) {
+          setCloseBehavior(savedBehavior)
+        }
         toast.success("关闭窗口设置已保存")
       } catch (saveError) {
         console.error("[GeneralPanel] Failed to save window close behavior:", saveError)
-        setCloseBehavior(previousBehavior)
-        setError("保存失败，设置未更改。")
+        if (closeBehaviorRevisionRef.current === revision) {
+          setCloseBehavior(previousBehavior)
+          setError("保存失败，设置未更改。")
+        }
       } finally {
         setSaving(false)
       }

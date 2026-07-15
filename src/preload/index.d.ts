@@ -112,6 +112,7 @@ interface ElectronAPI {
   ) => void
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
+  onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void

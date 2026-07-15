@@ -106,6 +106,16 @@ describe("close prompt state", () => {
 describe("close behavior UI integration", () => {
   const rendererMain = readRepositoryFile("src/renderer/src/main.tsx")
   const app = readRepositoryFile("src/renderer/src/App.tsx")
+  const mainProcess = readRepositoryFile("src/main/index.ts")
+  const agentIpc = readRepositoryFile("src/main/ipc/agent.ts")
+  const workflowManager = readRepositoryFile("src/main/agent/workflow/run-manager.ts")
+  const coordinatorManager = readRepositoryFile(
+    "src/main/agent/coordinator-worker-manager.ts"
+  )
+  const scheduler = readRepositoryFile("src/main/services/scheduler.ts")
+  const heartbeat = readRepositoryFile("src/main/services/heartbeat.ts")
+  const chatx = readRepositoryFile("src/main/services/chatx.ts")
+  const preload = readRepositoryFile("src/preload/index.ts")
   const dialog = readRepositoryFile("src/renderer/src/components/app/CloseToTrayDialog.tsx")
   const generalPanel = readRepositoryFile("src/renderer/src/components/customize/GeneralPanel.tsx")
   const customizeView = readRepositoryFile(
@@ -137,6 +147,40 @@ describe("close behavior UI integration", () => {
     expect(generalPanel.includes("disabled={loading || saving || closeBehavior === null}")).toBe(
       true
     )
+  })
+
+  it("synchronizes remembered prompt choices with an already-mounted settings panel", () => {
+    expect(mainProcess.includes("saveWindowCloseBehavior(rememberedBehavior)")).toBe(true)
+    expect(mainProcess.includes("WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL")).toBe(true)
+    expect(preload.includes("onWindowCloseBehaviorChanged")).toBe(true)
+    expect(preload.includes("isWindowCloseBehavior(behavior)")).toBe(true)
+    expect(generalPanel.includes("onWindowCloseBehaviorChanged")).toBe(true)
+    expect(generalPanel.includes("closeBehaviorRevisionRef.current === revision")).toBe(true)
+  })
+
+  it("protects every agent task owner and drains them before SessionEnd", () => {
+    expect(agentIpc.includes("workflowRunManager.hasActiveRuns()")).toBe(true)
+    expect(agentIpc.includes("coordinatorWorkerManager.hasRunningWorkers()")).toBe(true)
+    expect(agentIpc.includes("LocalSandbox.hasActiveProcesses()")).toBe(true)
+    expect(workflowManager.includes("cancelAllAndWait")).toBe(true)
+    expect(coordinatorManager.includes("cancelAllWorkersAndWait")).toBe(true)
+    expect(scheduler.includes("hasActiveScheduledTaskRuns")).toBe(true)
+    expect(scheduler.includes("stopSchedulerAndWait")).toBe(true)
+    expect(heartbeat.includes("stopHeartbeatAndWait")).toBe(true)
+    expect(chatx.includes("shuttingDown = true")).toBe(true)
+    expect(mainProcess.includes("shutdownAllAgentTasks(5_000)")).toBe(true)
+    expect(mainProcess.includes("stopSchedulerAndWait(5_000)")).toBe(true)
+    expect(mainProcess.includes("stopHeartbeatAndWait(5_000)")).toBe(true)
+    expect(mainProcess.indexOf("shutdownAllAgentTasks(5_000)")).toBeLessThan(
+      mainProcess.indexOf("await fireSessionEndAll(5_000")
+    )
+  })
+
+  it("blocks quit re-entry and rechecks work after an asynchronous warning", () => {
+    expect(mainProcess.includes("if (sessionEndInProgress)")).toBe(true)
+    expect(mainProcess.match(/needsActiveRunConfirmation\(\)/g)?.length).toBeGreaterThanOrEqual(2)
+    expect(mainProcess.match(/!isAppTrayAvailable\(\)/g)?.length).toBeGreaterThanOrEqual(2)
+    expect(dialog.includes("waitForNextPaint")).toBe(false)
   })
 
   it("exposes every behavior and a discoverable reset entry", () => {

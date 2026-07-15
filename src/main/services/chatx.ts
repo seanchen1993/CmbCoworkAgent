@@ -93,6 +93,7 @@ const runningChats = new Set<string>()
 const activeAbortControllers = new Map<string, AbortController>()
 const threadIdToChatKey = new Map<string, string>()
 const messageQueues = new Map<string, ChatXInboundMessage[]>()
+let shuttingDown = false
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -658,6 +659,10 @@ function scheduleReconnect(): void {
 // ── Public API ───────────────────────────────────────────────────────────────
 
 export function startChatX(): void {
+  if (shuttingDown) {
+    console.warn("[ChatX] Ignoring start request while the application is quitting")
+    return
+  }
   console.log("[ChatX] Starting ChatX service")
   stopped = false
   reconnectAttempts = 0
@@ -703,6 +708,21 @@ export function stopChatX(): void {
   }
   messageQueues.clear()
   cleanup()
+}
+
+/** Stop accepting ChatX work and wait briefly for active handlers to close
+ * their checkpointers. The owner-managed running set is intentionally retained
+ * until each handler's finally block completes. */
+export async function stopChatXAndWait(timeoutMs = 5_000): Promise<void> {
+  shuttingDown = true
+  stopChatX()
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (runningChats.size > 0 && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+  }
+  if (runningChats.size > 0) {
+    console.warn(`[ChatX] Timed out waiting for ${runningChats.size} active chat(s) to settle`)
+  }
 }
 
 /** Cancel a running ChatX conversation by threadId. Returns true if found and cancelled. */

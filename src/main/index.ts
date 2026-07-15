@@ -32,7 +32,8 @@ import {
   isWindowCloseBehavior,
   resolveWindowCloseRequest,
   type CloseToTrayPromptReason,
-  type CloseToTrayPromptEvent
+  type CloseToTrayPromptEvent,
+  type WindowCloseBehavior
 } from "../shared/close-to-tray"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
@@ -41,6 +42,7 @@ const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
 const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
 const EVENT_CATEGORIES = new Set<EventCategory>([
@@ -204,8 +206,9 @@ process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
 process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 import {
   disposeAllAgentThreadStates,
-  hasAnyActiveAgentRuns,
-  registerAgentHandlers
+  hasAnyActiveAgentTasks,
+  registerAgentHandlers,
+  shutdownAllAgentTasks
 } from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
@@ -247,9 +250,19 @@ import {
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
 import { getAllThreads, initializeDatabase, flush } from "./db"
-import { startScheduler, stopScheduler } from "./services/scheduler"
-import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
-import { hasActiveChatXRuns, startChatX, stopChatX } from "./services/chatx"
+import {
+  hasActiveScheduledTaskRuns,
+  startScheduler,
+  stopScheduler,
+  stopSchedulerAndWait
+} from "./services/scheduler"
+import {
+  isHeartbeatRunning,
+  startHeartbeat,
+  stopHeartbeat,
+  stopHeartbeatAndWait
+} from "./services/heartbeat"
+import { hasActiveChatXRuns, startChatX, stopChatX, stopChatXAndWait } from "./services/chatx"
 import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
@@ -402,15 +415,29 @@ function clearCloseToTrayPromptState(): void {
 }
 
 function hasActiveForegroundRuns(): boolean {
-  return hasAnyActiveAgentRuns() || hasActiveChatXRuns()
+  return (
+    hasAnyActiveAgentTasks() ||
+    hasActiveChatXRuns() ||
+    hasActiveScheduledTaskRuns() ||
+    isHeartbeatRunning()
+  )
+}
+
+function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
+  const savedBehavior = setWindowCloseBehavior(behavior)
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, savedBehavior)
+  }
+  return savedBehavior
 }
 
 function requestWindowCloseChoice(
   window: BrowserWindow,
   reason: CloseToTrayPromptReason
 ): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return
   if (closeToTrayPromptOpen) {
-    if (!window.isDestroyed()) window.focus()
+    window.focus()
     return
   }
 
@@ -423,7 +450,7 @@ function requestWindowCloseChoice(
   closeToTrayPromptTimer = setTimeout(() => {
     if (closeToTrayPromptRequestId === requestId) {
       console.warn("[Main] Close-to-tray prompt timed out")
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
         const event: CloseToTrayPromptEvent = {
           type: "dismiss",
           requestId,
@@ -754,7 +781,7 @@ if (!gotTheLock) {
       if (!isWindowCloseBehavior(behavior)) {
         throw new Error("Invalid window close behavior")
       }
-      return setWindowCloseBehavior(behavior)
+      return saveWindowCloseBehavior(behavior)
     })
 
     ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
@@ -766,6 +793,10 @@ if (!gotTheLock) {
       const promptWindow = mainWindow
       const promptReason = closeToTrayPromptReason
       const rememberChoiceAllowed = closeToTrayPromptRememberChoiceAllowed
+      const needsActiveRunConfirmation = (): boolean =>
+        payload.action === "direct-close" &&
+        promptReason !== "active-runs" &&
+        hasActiveForegroundRuns()
 
       if (payload.action === "minimize-to-tray" && !isAppTrayAvailable()) {
         clearCloseToTrayPromptState()
@@ -775,11 +806,7 @@ if (!gotTheLock) {
 
       // A background ChatX message can start while the ordinary close prompt is
       // open. Upgrade to the non-suppressible safety prompt before quitting.
-      if (
-        payload.action === "direct-close" &&
-        promptReason !== "active-runs" &&
-        hasActiveForegroundRuns()
-      ) {
+      if (needsActiveRunConfirmation()) {
         clearCloseToTrayPromptState()
         requestWindowCloseChoice(promptWindow, "active-runs")
         return
@@ -789,7 +816,7 @@ if (!gotTheLock) {
       const rememberedBehavior = closePromptActionToBehavior(payload.action)
       if (rememberChoiceAllowed && payload.rememberChoice && rememberedBehavior) {
         try {
-          setWindowCloseBehavior(rememberedBehavior)
+          saveWindowCloseBehavior(rememberedBehavior)
         } catch (error) {
           console.warn("[Main] Failed to remember window close behavior:", error)
           rememberError = error
@@ -800,10 +827,22 @@ if (!gotTheLock) {
 
       const performAction = (): void => {
         if (payload.action === "minimize-to-tray") {
+          // The native save-failure warning may outlive the tray. Never hide
+          // the only main window after its recovery entry point disappeared.
+          if (!isAppTrayAvailable() && !promptWindow.isDestroyed()) {
+            requestWindowCloseChoice(promptWindow, "tray-unavailable")
+            return
+          }
           if (!promptWindow.isDestroyed()) hideMainWindowToTray(promptWindow)
         } else if (payload.action === "direct-close") {
+          // The save-failure warning is asynchronous. A task can start while it
+          // is open, so repeat the safety check immediately before the real quit.
+          if (needsActiveRunConfirmation() && !promptWindow.isDestroyed()) {
+            requestWindowCloseChoice(promptWindow, "active-runs")
+            return
+          }
           // app.quit() 会触发 before-quit → will-quit 事件链，
-          // 其中会执行 fireSessionEndAll（中断活跃 agent 运行）、
+          // 其中会先中断并等待活跃任务，再执行 fireSessionEndAll，
           // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
           app.quit()
         }
@@ -961,26 +1000,60 @@ if (!gotTheLock) {
   // then re-issue app.quit(). will-quit fires during teardown — async hook spawns
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
+  let sessionEndInProgress = false
   app.on("before-quit", (event) => {
-    setAppQuitting(true)
+    const activeSessions = hasActiveSessions()
+    const activeTasks = hasActiveForegroundRuns()
     console.warn("[Main] before-quit", {
       sessionEndDone,
-      hasActiveSessions: hasActiveSessions(),
+      sessionEndInProgress,
+      hasActiveSessions: activeSessions,
+      hasActiveTasks: activeTasks,
       pet: getPetWindowDebugInfo()
     })
-    if (sessionEndDone) return
-    if (!hasActiveSessions()) {
+    if (sessionEndDone) {
+      setAppQuitting(true)
+      return
+    }
+    if (sessionEndInProgress) {
+      // fireSessionEndAll clears its session map before awaiting hooks. A second
+      // quit request must not observe the empty map and bypass the in-flight drain.
+      event.preventDefault()
+      return
+    }
+    if (!activeSessions && !activeTasks) {
       sessionEndDone = true
+      setAppQuitting(true)
       return
     }
     event.preventDefault()
-    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
-      .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
-      .finally(() => disposeAllAgentThreadStates())
-      .finally(() => {
+    sessionEndInProgress = true
+    void (async () => {
+      try {
+        const shutdownResults = await Promise.allSettled([
+          shutdownAllAgentTasks(5_000),
+          stopChatXAndWait(5_000),
+          stopSchedulerAndWait(5_000),
+          stopHeartbeatAndWait(5_000)
+        ])
+        for (const result of shutdownResults) {
+          if (result.status === "rejected") {
+            console.warn("[Main] Active task shutdown error:", result.reason)
+          }
+        }
+        await fireSessionEndAll(5_000, (threadId) =>
+          makeBroadcastHookResultCallback(`agent:stream:${threadId}`)
+        )
+      } catch (error) {
+        console.warn("[Main] SessionEnd hooks error:", error)
+      } finally {
+        disposeAllAgentThreadStates()
         sessionEndDone = true
+        sessionEndInProgress = false
+        setAppQuitting(true)
         app.quit()
-      })
+      }
+    })()
   })
 
   let quitting = false
