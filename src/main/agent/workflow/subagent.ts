@@ -295,7 +295,13 @@ async function runOnce(
       configurable: { thread_id: threadId },
       callbacks: [],
       signal: controller.signal,
-      streamMode: ["values"] as Array<"values">,
+      // "messages" is subscribed for its side effect, not for display: it attaches
+      // LangGraph's StreamMessagesHandler (lc_prefer_streaming), which switches the
+      // underlying HTTP call to SSE. Without it the request is non-streaming and the
+      // 60s first-byte watchdog in createRetryingFetch kills any model turn whose
+      // generation exceeds 60s (e.g. write_file of a large file). consumeValuesStream
+      // skips non-"values" chunks, so the token stream is otherwise ignored.
+      streamMode: ["values", "messages"] as Array<"values" | "messages">,
       recursionLimit: 1000
     }
     const stopAfterStructuredAccepted =
