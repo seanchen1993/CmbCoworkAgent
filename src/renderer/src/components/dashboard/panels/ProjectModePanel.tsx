@@ -1178,19 +1178,21 @@ function ProjectRow({
             <div className="font-mono text-[10px] text-muted-foreground">{creatorId}</div>
           ) : null}
         </td>
-        <td className="px-3 py-2 text-muted-foreground">{creatorDepartment}</td>
-        <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">{createdAt}</td>
-        <td className="px-3 py-2 text-right">
+        <td className="break-words px-3 py-2 text-muted-foreground">{creatorDepartment}</td>
+        <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground tabular-nums">
+          {createdAt}
+        </td>
+        <td className="whitespace-nowrap px-3 py-2 text-right">
           <button
             type="button"
-            className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+            className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
             disabled={project.conversationCount === 0}
             onClick={(event) => {
               event.stopPropagation()
               onOpenTraces()
             }}
           >
-            <MessagesSquare className="size-3.5" />
+            <MessagesSquare className="size-3.5 shrink-0" />
             查看对话
           </button>
         </td>
@@ -1701,7 +1703,29 @@ function ProjectListSection({
           effectiveLoading && "opacity-70"
         )}
       >
-        <table className="w-full min-w-[1560px] text-xs">
+        <table className="w-full min-w-[1920px] table-fixed text-xs">
+          {/*
+           * Keep column allocation deterministic across macOS and Windows.
+           * With table-layout:auto, CJK body text has a one-glyph min-content
+           * width, so Chromium may collapse the department/action columns before
+           * the horizontal scroller is needed. The fixed grid makes overflow land
+           * on the existing scroll container instead of turning text vertical.
+           */}
+          <colgroup>
+            <col className="w-[300px]" />
+            <col className="w-[220px]" />
+            <col className="w-[90px]" />
+            <col className="w-[72px]" />
+            <col className="w-[76px]" />
+            <col className="w-[110px]" />
+            <col className="w-[160px]" />
+            <col className="w-[160px]" />
+            <col className="w-[178px]" />
+            <col className="w-[110px]" />
+            <col className="w-[210px]" />
+            <col className="w-[140px]" />
+            <col className="w-[94px]" />
+          </colgroup>
           <thead>
             <tr className="whitespace-nowrap border-b border-border bg-muted/30 text-muted-foreground">
               <th
