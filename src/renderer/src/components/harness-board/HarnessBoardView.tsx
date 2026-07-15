@@ -315,7 +315,7 @@ interface HarnessBoardStats {
   incompatibleProjects: number
 }
 
-type HarnessProjectPhaseTone = "done" | "current" | "upcoming"
+type HarnessProjectPhaseTone = "done" | "upcoming"
 
 interface HarnessProjectPhaseStep {
   id: string
@@ -344,24 +344,14 @@ function buildEnterpriseProjectPhaseSteps(currentPhaseStatus: string): HarnessPr
   )
 
   return ENTERPRISE_PROJECT_PHASE_SEQUENCE.map((phaseStatus, index) => {
-    const tone: HarnessProjectPhaseTone =
-      currentIndex === -1 ? "upcoming" : index < currentIndex ? "done" : index === currentIndex ? "current" : "upcoming"
+    const completed = currentIndex !== -1 && index <= currentIndex
 
     return {
       id: `enterprise-phase-${index + 1}`,
       order: index + 1,
       title: phaseStatus,
-      statusLabel:
-        currentIndex === -1
-          ? normalizedPhaseStatus
-            ? "未匹配"
-            : "待同步"
-          : index < currentIndex
-            ? "已完成"
-            : index === currentIndex
-              ? "当前阶段"
-              : "待开始",
-      tone
+      statusLabel: completed ? "已完成" : "未完成",
+      tone: completed ? "done" : "upcoming"
     }
   })
 }
@@ -1631,19 +1621,18 @@ function HarnessProjectPhaseFlow({
   const isCompactFlow = steps.length > 5
 
   return (
-    <section className="w-full shrink-0 rounded-2xl border border-border/80  p-4 shadow-sx bg-background-elevated/80 ">
-      <div className="flex flex-col gap-3 overflow-x-auto pb-1">
+    <section className="w-full shrink-0 rounded-2xl border border-border/80 bg-background-elevated/80 p-3 shadow-sx">
+      <div className="overflow-x-auto pb-1">
         <div
           className={cn(
-            "grid gap-5",
+            "grid w-full gap-2.5",
             isCompactFlow
-              ? "min-w-max grid-flow-col auto-cols-[minmax(128px,144px)]"
+              ? "min-w-[1198px] grid-cols-[repeat(9,minmax(0,1fr))]"
               : "md:grid-cols-[repeat(5,minmax(0,1fr))]"
           )}
         >
           {steps.map((step, index) => {
             const isDone = step.tone === "done"
-            const isCurrent = step.tone === "current"
             const isLast = index === steps.length - 1
 
             return (
@@ -1651,23 +1640,16 @@ function HarnessProjectPhaseFlow({
                 {!isLast && (
                   <div
                     aria-hidden="true"
-                    className="pointer-events-none absolute left-[calc(100%-10px)] top-1/2 z-20 hidden -translate-y-1/2 md:flex"
+                    className="pointer-events-none absolute left-[calc(100%-7px)] top-1/2 z-20 hidden -translate-y-1/2 min-[1198px]:flex"
                   >
                     <div
                       className={cn(
-                        "flex h-9 w-10 items-center justify-center",
+                        "flex h-7 w-6 items-center justify-center",
                         isDone && "text-status-nominal",
-                        isCurrent && "text-status-info",
                         step.tone === "upcoming" && "text-muted-foreground"
                       )}
                     >
-                      <ArrowRight
-                        className={cn(
-                          "size-5",
-                          isCurrent && "animate-[harness-phase-arrow_1.15s_ease-in-out_infinite]"
-                        )}
-                        strokeWidth={2.6}
-                      />
+                      <ArrowRight className="size-4" strokeWidth={2.6} />
                     </div>
                   </div>
                 )}
@@ -1675,30 +1657,27 @@ function HarnessProjectPhaseFlow({
                 <button
                   type="button"
                   className={cn(
-                    "relative z-10 flex w-full min-w-0 items-center gap-3 rounded-xl border px-2.5 py-2.5 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    isCurrent
-                      ? "border-status-info/35 bg-status-info/[0.06] shadow-[0_6px_16px_rgb(37_99_235/0.08)]"
-                      : "border-border/100 bg-background/100 hover:border-status-info/20 hover:bg-background",
-                    isDone && "border-status-nominal/20 bg-status-nominal/[0.04]"
+                    "relative z-10 flex w-full min-w-0 items-center gap-2 rounded-xl border px-2 py-2 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    isDone
+                      ? "border-status-nominal/20 bg-status-nominal/[0.04]"
+                      : "border-border/100 bg-background/100 hover:border-status-info/20 hover:bg-background"
                   )}
                   title={`${step.title} ${step.statusLabel}`}
                 >
                   <div
                     className={cn(
-                      "flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold transition-all duration-200",
+                      "flex size-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-all duration-200",
                       isDone && "bg-status-nominal text-white",
-                      isCurrent && "bg-status-info text-white ring-4 ring-status-info/10",
                       step.tone === "upcoming" && "bg-gray-200 text-muted-foreground"
                     )}
                   >
-                    {isDone ? <Check className="size-4" /> : step.order}
+                    {isDone ? <Check className="size-3.5" /> : step.order}
                   </div>
                   <div className="min-w-0 flex-1">
                     <div
                       className={cn(
-                        "truncate text-[12px] font-semibold tracking-tight",
+                        "truncate text-[11px] font-semibold tracking-tight",
                         isDone && "text-status-nominal",
-                        isCurrent && "text-status-info",
                         step.tone === "upcoming" && "text-foreground"
                       )}
                     >
@@ -1706,9 +1685,8 @@ function HarnessProjectPhaseFlow({
                     </div>
                     <div
                       className={cn(
-                        "mt-1 text-[11px]",
+                        "mt-0.5 text-[10px]",
                         isDone && "text-status-nominal/80",
-                        isCurrent && "text-status-info",
                         step.tone === "upcoming" && "text-muted-foreground"
                       )}
                     >
@@ -4708,7 +4686,7 @@ function FeatureDeployUnitsPanel({
   deployUnits: HarnessDeployUnitMapping[]
 }): React.JSX.Element {
   return (
-    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-background")}>
+    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-white")}>
       <div className="flex min-w-0 items-center gap-2 border-b border-border/70 px-4 py-3 text-sm font-semibold">
         <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
         <span className="truncate">当前特性绑定的发布单元</span>
@@ -5107,22 +5085,16 @@ function ProjectReviewSummary({
       : false
   const result = reviewState.kind === "loaded" && isCurrentProject ? reviewState.result : null
   const reviews = result?.reviews ?? []
-  const [reviewsExpanded, setReviewsExpanded] = useState(false)
-
-  useEffect(() => {
-    setReviewsExpanded(false)
-  }, [normalizedProjectCode])
-
   const hasReviewResult = Boolean(result?.tokenConfigured)
+  const metricBoxClassName = "rounded-lg border border-border/70 bg-muted/[0.18] px-3 py-2.5"
 
   return (
-    <div className="mt-4 space-y-2 text-xs">
-      <div className="flex items-center justify-between gap-2 font-medium text-muted-foreground">
-        <span>项目评审情况</span>
-        {hasReviewResult && (
-          <span className="flex shrink-0 items-center gap-1">
-            {reviews.length > 0 ? (
-              <>
+    <div className="space-y-3 text-xs">
+      <section className="rounded-xl border border-border/70 bg-background/90 px-3 py-3 ">
+        <div className="flex items-center justify-between gap-2">
+          {hasReviewResult && (
+            <span className="flex shrink-0 items-center gap-1">
+              {reviews.length > 0 ? (
                 <TooltipProvider delayDuration={150}>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -5135,90 +5107,88 @@ function ProjectReviewSummary({
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
-                <button
-                  type="button"
-                  className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  title={reviewsExpanded ? "收起评审结果" : "展开评审结果"}
-                  aria-label={reviewsExpanded ? "收起评审结果" : "展开评审结果"}
-                  aria-expanded={reviewsExpanded}
-                  onClick={() => setReviewsExpanded((expanded) => !expanded)}
-                >
-                  <ChevronDown className={cn("size-3 transition-transform", reviewsExpanded && "rotate-180")} />
-                </button>
-              </>
-            ) : (
-              <TooltipProvider delayDuration={150}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span tabIndex={0} className="inline-flex">
-                      <CircleX className="size-3.5 text-destructive" aria-label="无评审记录" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top" className="z-[70] max-w-72">
-                    在进入 ST 流程之前发起评审并上传文档以避免 NC
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
-          </span>
-        )}
-      </div>
-      {!normalizedProjectCode ? (
-        <div className="leading-5 text-muted-foreground">-</div>
-      ) : !isCurrentProject || reviewState.kind === "loading" ? (
-        <div className="flex items-center gap-1.5 text-muted-foreground">
-          <Loader2 className="size-3 animate-spin" />
-          查询中
-        </div>
-      ) : reviewState.kind === "error" ? (
-        <div className="leading-5 text-status-warning">{reviewState.message}</div>
-      ) : result && !result.tokenConfigured ? (
-        <button
-          type="button"
-          className="rounded-sm text-left font-medium text-status-warning underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          onClick={onOpenLeanTokenSettings}
-        >
-          请配置精益平台 token
-        </button>
-      ) : reviews.length === 0 ? (
-        <button
-          type="button"
-          className="rounded-sm text-left font-medium text-primary/85 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          onClick={openReviewPage}
-        >
-          发起项目评审流程
-        </button>
-      ) : (
-        reviewsExpanded && (
-          <TooltipProvider delayDuration={120}>
-            <ul className="space-y-1">
-              {reviews.map((review, index) => (
-                <li key={`${review.title}:${index}`} className="min-w-0">
+              ) : (
+                <TooltipProvider delayDuration={150}>
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <div
-                        tabIndex={0}
-                        className="group flex min-w-0 cursor-default items-center rounded-md border border-transparent bg-muted/20 py-1.5 pr-2 transition-colors hover:border-border hover:bg-muted/45 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      >
-                        <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-                          {review.title || "-"}
-                        </span>
-                      </div>
+                      <span tabIndex={0} className="inline-flex">
+                        <CircleX className="size-3.5 text-destructive" aria-label="无评审记录" />
+                      </span>
                     </TooltipTrigger>
-                    <TooltipContent
-                      side="right"
-                      align="start"
-                      className="z-[70] w-80 max-w-[min(20rem,calc(100vw-2rem))] p-0"
-                    >
-                      <ProjectReviewTooltipContent review={review} />
+                    <TooltipContent side="top" className="z-[70] max-w-72">
+                      在进入 ST 流程之前发起评审并上传文档以避免 NC
                     </TooltipContent>
                   </Tooltip>
-                </li>
-              ))}
-            </ul>
-          </TooltipProvider>
-        )
-      )}
+                </TooltipProvider>
+              )}
+            </span>
+          )}
+        </div>
+        <div className="mt-3">
+          {!normalizedProjectCode ? (
+            <div className={cn(metricBoxClassName, "leading-5 text-muted-foreground")}>-</div>
+          ) : !isCurrentProject || reviewState.kind === "loading" ? (
+            <div className={cn(metricBoxClassName, "flex items-center gap-1.5 text-muted-foreground")}>
+              <Loader2 className="size-3 animate-spin" />
+              查询中
+            </div>
+          ) : reviewState.kind === "error" ? (
+            <div className={cn(metricBoxClassName, "leading-5 text-status-warning")}>
+              {reviewState.message}
+            </div>
+          ) : result && !result.tokenConfigured ? (
+            <button
+              type="button"
+              className={cn(
+                metricBoxClassName,
+                "w-full text-left font-medium text-status-warning underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              )}
+              onClick={onOpenLeanTokenSettings}
+            >
+              请配置精益平台 token
+            </button>
+          ) : reviews.length === 0 ? (
+            <button
+              type="button"
+              className={cn(
+                metricBoxClassName,
+                "w-full text-left font-medium text-primary/85 underline-offset-4 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              )}
+              onClick={openReviewPage}
+            >
+              发起项目评审流程
+            </button>
+          ) : (
+            <TooltipProvider delayDuration={120}>
+              <ul className="space-y-2">
+                {reviews.map((review, index) => (
+                  <li key={`${review.title}:${index}`} className="min-w-0">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div
+                          tabIndex={0}
+                          className="group flex min-w-0 cursor-default items-center rounded-lg border border-border/70 bg-muted/[0.18] px-3 py-2.5 transition-colors hover:border-border hover:bg-muted/35 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        >
+                          <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+                            {review.title || "-"}
+                          </span>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent
+                        side="right"
+                        align="start"
+                        className="z-[70] w-80 max-w-[min(20rem,calc(100vw-2rem))] p-0"
+                      >
+                        <ProjectReviewTooltipContent review={review} />
+                      </TooltipContent>
+                    </Tooltip>
+                  </li>
+                ))}
+              </ul>
+            </TooltipProvider>
+          )}
+        </div>
+      </section>
     </div>
   )
 }
@@ -5379,6 +5349,8 @@ function ProjectDetailPage({
   project,
   detail,
   enterpriseProjectDetail,
+  pluginUpdateInfo,
+  updatingPlugin,
   projectReviewState,
   loading,
   creatingFeature,
@@ -5388,12 +5360,15 @@ function ProjectDetailPage({
   onOpenSystemConstraintUpdate,
   onRefresh,
   onEditProject,
+  onUpdatePlugin,
   onOpenLeanTokenSettings,
   onOpenFeature
 }: {
   project: HarnessProjectListItem
   detail?: HarnessProjectDetailViewModel
   enterpriseProjectDetail?: EnterpriseProjectDetailCacheEntry
+  pluginUpdateInfo?: MarketPluginUpdateInfo | null
+  updatingPlugin: boolean
   projectReviewState: ProjectReviewState
   loading: boolean
   creatingFeature: boolean
@@ -5406,6 +5381,7 @@ function ProjectDetailPage({
   ) => void
   onRefresh: (projectId: string) => void
   onEditProject: (project: HarnessProjectListItem) => void
+  onUpdatePlugin: (project: HarnessProjectListItem, updateInfo: MarketPluginUpdateInfo) => void
   onOpenLeanTokenSettings: () => void
   onOpenFeature: (projectId: string, slug: string) => void
 }): React.JSX.Element {
@@ -5416,6 +5392,7 @@ function ProjectDetailPage({
     enterpriseProjectDetail?.kind === "hit" ? enterpriseProjectDetail.project.phaseStatus : ""
   )
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
+  const projectStatus = detail?.projectState
   const projectRootPath = resolveProjectRootPath(project)
   const openProjectWorkspaceInFileManager = useCallback((): void => {
     void openPathInFileManager(projectRootPath, "无法打开项目工作区")
@@ -5518,8 +5495,8 @@ function ProjectDetailPage({
             </div>
           )}
           <div className="min-h-0 flex-1 overflow-hidden">
-            <div className="flex h-full min-h-0 flex-col gap-3">
-              <section className={cn(harnessSurfaceClassName, "overflow-hidden px-3 py-2")}>
+            <div className="flex h-full min-h-0 flex-col gap-2">
+              <section className={cn(harnessSurfaceClassName, "overflow-hidden p-3")}>
                 <div className="flex min-w-0 items-center gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                   <div className="flex size-8 shrink-0 items-center justify-center rounded-xl border border-status-info/20 bg-status-info/10 text-status-info">
                     <Workflow className="size-4" />
@@ -5530,13 +5507,18 @@ function ProjectDetailPage({
                   >
                     {project.name}
                   </h2>
-                  {pluginCompatibilityMessage ? (
-                    <StatusPill
-                      status={boardCompatibilityStatus(project.boardCompatibility)}
-                      tooltip={pluginCompatibilityMessage}
+                  {pluginUpdateInfo ? (
+                    <ProjectPluginUpdateButton
+                      pluginUpdateInfo={pluginUpdateInfo}
+                      updatingPlugin={updatingPlugin}
+                      onClick={() => onUpdatePlugin(project, pluginUpdateInfo)}
                     />
-                  ) : detail?.projectState ? (
-                    <StatusPill status={detail.projectState} tooltip={detail.error} />
+                  ) : projectStatus ? (
+                    isAdapterLoadedStatus(projectStatus) ? (
+                      <AdapterLoadedTag status={projectStatus} />
+                    ) : (
+                      <StatusPill status={projectStatus} tooltip={detail?.error ?? pluginCompatibilityMessage} />
+                    )
                   ) : (
                     <span className="shrink-0 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
                       {loading ? "同步中" : "暂无状态"}
@@ -5599,7 +5581,6 @@ function ProjectDetailPage({
                   <div className=" flex min-h-0 flex-1 flex-col rounded-2xl border border-border/80  p-4 shadow-sm bg-background-elevated/80 ">
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                       <div>
-                        <div className={harnessKickerClassName}>Feature workspace</div>
                         <div className="mt-1 text-base font-semibold">特性列表</div>
                       </div>
                       <div className="rounded-full border border-border/70 bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
@@ -9058,6 +9039,8 @@ export function HarnessBoardView({
           project={selectedProject}
           detail={selectedProjectDetail}
           enterpriseProjectDetail={selectedEnterpriseProjectDetail}
+          pluginUpdateInfo={projectPluginUpdateInfoById.get(selectedProject.projectId)}
+          updatingPlugin={updatingPluginNames.has(selectedProject.harnessAdapter.name)}
           projectReviewState={projectReviewState}
           loading={loadingDetailIds.has(selectedProject.projectId)}
           creatingFeature={creatingFeatureProjectId === selectedProject.projectId}
@@ -9069,6 +9052,9 @@ export function HarnessBoardView({
           }}
           onRefresh={(projectId) => void loadProjectDetail(projectId)}
           onEditProject={handleEditProject}
+          onUpdatePlugin={(project, updateInfo) => {
+            void handleUpdateProjectPlugin(project, updateInfo)
+          }}
           onOpenLeanTokenSettings={handleOpenDeployUnitSettings}
           onOpenFeature={openFeatureDetail}
         />
