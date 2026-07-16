@@ -29,13 +29,13 @@
 }
 ```
 
-每个模型只有 `baseUrl` 和 `model` 必填。`id` 省略时由 `model` 生成；`apiKey` 省略或为空时，从本机私有配置读取 `CMB_BUILTIN_MODEL_API_KEY`。读取顺序为进程环境变量优先，其次是 `~/.cmbcoworkagent/.env`：
+每个模型只有 `baseUrl` 和 `model` 必填。`id` 省略时由 `model` 生成；`apiKey` 省略或为空时，依次读取进程环境变量 `CMB_BUILTIN_MODEL_API_KEY`、`~/.cmbcoworkagent/.env`，最后使用客户端内置的加密兜底凭据：
 
 ```dotenv
 CMB_BUILTIN_MODEL_API_KEY=<由凭据管理系统注入，不要提交到 Git>
 ```
 
-源码和安装产物不包含默认密钥字面量。后台和本机都未提供密钥时，模型仍会展示，但状态为不可用。其余可选字段为：`name`、`maxTokens`、`maxOutputTokens`、`temperature`、`topP`、`topK`、`interleavedThinking`、`enableThinking`、`enableThinkingEffort`、`thinkingEffort`、`tier` 和 `enabled`。
+源码和安装产物不包含默认密钥字面量，但内置密文及其本地解密逻辑仍可被有能力分析客户端的人还原，因此这只是防止明文泄漏，不是安全边界。进程环境变量和本机配置可随时覆盖内置值，用于密钥轮换。其余可选字段为：`name`、`maxTokens`、`maxOutputTokens`、`temperature`、`topP`、`topK`、`interleavedThinking`、`enableThinking`、`enableThinkingEffort`、`thinkingEffort`、`tier` 和 `enabled`。
 
 建议后台清单不下发 `apiKey`，生产密钥通过凭据管理系统注入并定期轮换；只有配置通道具备完整访问控制时，才考虑在后台清单提供密钥。
 

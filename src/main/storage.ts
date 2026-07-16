@@ -60,6 +60,7 @@ import {
   getPluginSkillSearchSources,
   readPluginManifest
 } from "./plugins/manifest"
+import { getBundledBuiltinModelApiKey } from "./models/builtin-credential"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
@@ -253,16 +254,13 @@ function writeEnvFile(env: Record<string, string>): void {
   writeFileSync(getEnvFilePath(), lines.join("\n") + "\n")
 }
 
-/**
- * Resolve the managed-model credential from machine-local configuration only.
- * This value must never have a source-code or build-time fallback because that
- * would embed the credential in Git history and the packaged main bundle.
- */
+/** Resolve the managed-model credential, keeping runtime values overridable. */
 export function getBuiltinModelApiKey(): string | undefined {
   const processValue = process.env[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
   if (processValue) return processValue
   const localValue = parseEnvFile()[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
-  return localValue || undefined
+  if (localValue) return localValue
+  return getBundledBuiltinModelApiKey()
 }
 
 // Skills directory — bundled with the app at project root /skills/
