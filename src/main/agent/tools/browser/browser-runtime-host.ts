@@ -53,6 +53,7 @@ export interface BrowserRuntimeNodeReplHost {
   markBootstrapFailed(error: unknown): void
   markBootstrapping(): void
   markReady(): void
+  ready(): Promise<void>
   resetTurnOutput(): void
 }
 
@@ -546,6 +547,9 @@ export function createBrowserRuntimeNodeReplHost(
     },
     markReady(): void {
       updateToolState({ bootstrapState: "ready", error: undefined })
+    },
+    ready(): Promise<void> {
+      return nativePipeBridge.ready()
     },
     resetTurnOutput(): void {
       state.lastWrite = undefined

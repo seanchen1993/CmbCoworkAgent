@@ -1,8 +1,10 @@
 import { EventEmitter } from "events"
+import { createServer, type Server, type Socket } from "net"
 import { endianness } from "os"
 import {
   ensureOfficialBrowserUsePipeDiscoveryPathSync,
-  removeOfficialBrowserUsePipeDiscoveryPathSync
+  removeOfficialBrowserUsePipeDiscoveryPathSync,
+  shouldUseBrowserNativePipeDiscoveryServer
 } from "./browser-platform"
 
 export interface BrowserNativePipeTransport {
@@ -177,11 +179,83 @@ export class BrowserNativePipeConnection
 
 export class BrowserNativePipeBridge {
   readonly pipePath: string
+  private readonly discoveryReady: Promise<void>
+  private discoveryServer: Server | null = null
+  private readonly discoverySockets = new Set<Socket>()
 
   constructor(private readonly options: BrowserNativePipeBridgeOptions) {
     this.pipePath = options.pipePath
     ensureOfficialBrowserUsePipeDiscoveryPathSync(options.pipePath)
+    this.discoveryReady = this.createDiscoveryServer()
     console.log(`[BrowserRuntime] iab backend registered for ${options.sessionId}.`)
+  }
+
+  private createDiscoveryServer(): Promise<void> {
+    if (!shouldUseBrowserNativePipeDiscoveryServer(this.options.pipePath)) {
+      return Promise.resolve()
+    }
+
+    const server = createServer((socket) => this.attachDiscoverySocket(socket))
+    this.discoveryServer = server
+    return new Promise((resolve) => {
+      const logError = (error: Error): void => {
+        console.warn(
+          `[BrowserRuntime] windows native pipe failed for ${this.options.sessionId}: ${errorMessage(error)}.`
+        )
+      }
+      const onReady = (): void => {
+        server.off("error", onInitialError)
+        server.on("error", logError)
+        resolve()
+      }
+      const onInitialError = (error: Error): void => {
+        server.off("listening", onReady)
+        logError(error)
+        resolve()
+      }
+      server.once("listening", onReady)
+      server.once("error", onInitialError)
+      try {
+        server.listen(this.options.pipePath)
+      } catch (error) {
+        server.off("listening", onReady)
+        server.off("error", onInitialError)
+        logError(error instanceof Error ? error : new Error(String(error)))
+        resolve()
+      }
+    })
+  }
+
+  private attachDiscoverySocket(socket: Socket): void {
+    const connection = new BrowserNativePipeConnection(this.options.backend, this.options.pipePath)
+    const closeConnection = (): void => connection.end()
+    this.discoverySockets.add(socket)
+
+    socket.on("data", (chunk) => {
+      connection.write(chunk)
+    })
+    socket.once("end", closeConnection)
+    socket.once("close", () => {
+      this.discoverySockets.delete(socket)
+      closeConnection()
+    })
+    socket.once("error", closeConnection)
+
+    connection.on("data", (chunk: Uint8Array) => {
+      if (!socket.destroyed) socket.write(chunk)
+    })
+    connection.once("close", () => {
+      if (!socket.destroyed) socket.end()
+    })
+    connection.once("error", (error) => {
+      socket.destroy(error instanceof Error ? error : undefined)
+    })
+
+    console.log(`[BrowserRuntime] native pipe connected for ${this.options.sessionId}.`)
+  }
+
+  ready(): Promise<void> {
+    return this.discoveryReady
   }
 
   async createConnection(pipePath: string): Promise<BrowserNativePipeConnection> {
@@ -195,6 +269,12 @@ export class BrowserNativePipeBridge {
 
   dispose(): void {
     removeOfficialBrowserUsePipeDiscoveryPathSync(this.pipePath)
+    for (const socket of this.discoverySockets) {
+      socket.destroy()
+    }
+    this.discoverySockets.clear()
+    this.discoveryServer?.close()
+    this.discoveryServer = null
   }
 }
 

@@ -463,6 +463,7 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 - `nodeRepl.nativePipe.createConnection(path)` 已接入真实 JSON-RPC framed transport，不再抛 Phase 1 的 backend 未实现错误。
 - `agent.browsers.list()` 可以通过官方 `browser-client.mjs` 的 backend discovery 发现 `iab`。
 - `agent.browsers.get("iab")` 可以返回官方 Browser 对象。
+- Windows 上 iab backend discovery 已接入真实 named pipe listener：`BrowserNativePipeBridge` 会为 `\\.\pipe\codex-browser-use-...` 路径启动可枚举的 named pipe server，避免官方 runtime 在 `agent.browsers.getForUrl(...)` 时枚举不到任何 backend 并报 `No browser is available`。
 - `browser.tabs.new()`、`browser.tabs.list()`、`tab.goto("about:blank")`、`tab.url()`、`tab.title()`、`tab.screenshot()` 的最小官方 smoke 已接通。
 - 外部 `https://...` origin 访问已接入宿主 approval：官方 `nodeRepl.createElicitation(...)` 会转成 app 的 approval card，用户批准后返回官方需要的 `{ action: "accept" }`。
 - `nodeRepl.config.readToml/writeToml` 已提供内存配置存储，支持官方 runtime 记录 Browser origin 允许策略。
@@ -483,7 +484,7 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 - 登录、表单提交、文件上传、支付、删除、发布、CAPTCHA 等敏感操作还没有接入更细粒度的专用 approval 流程。
 - 基础点击、输入、按键、移动、滚动、拖拽、双击已完成 adapter 级自动化验证；真实 Electron BrowserService 端仍需要按本文档的人工验收话术验证。
 - DOM CUA、Playwright locator 子集、下载、上传不在当前部分完成范围内。
-- Windows 和 Linux 的真实 backend discovery、打开页面、截图验收还未完成。
+- Windows 和 Linux 的真实整机验收仍需要按本文档人工执行；自动化测试已覆盖 Windows named pipe 路径判断和 discovery server 启用条件。
 - Chrome/extension backend 不属于 Phase 2，仍在 Phase 3。
 
 ### 验证方式
@@ -494,6 +495,7 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 
 ```bash
 npx vitest run src/main/browser/browser-official-backend-adapter.test.ts src/main/agent/tools/browser/browser-plugin-runtime-tool.test.ts src/main/browser/browser-plugin.test.ts
+npx vitest run src/main/browser/browser-platform.test.ts src/main/agent/tools/browser/browser-runtime-host.test.ts
 npm run typecheck
 ```
 
@@ -507,6 +509,8 @@ npm run typecheck
 - `browser plugin official runtime tool > lets the official browser client discover the iab backend through native pipe` 通过。
 - `browser plugin official runtime tool > supports the official iab tab smoke path without the legacy shim` 通过。
 - `browser plugin official runtime tool > uses approval before the official iab backend navigates to an external origin` 通过。
+- `browser platform native pipe paths > uses discoverable official named pipe paths for Windows iab backends` 通过。
+- `browser runtime host native pipe > connects external Browser namespace pipes for Chrome extension backends` 通过。
 - `npm run typecheck` 无 TypeScript 错误。
 
 #### 真实 official iab smoke
@@ -582,6 +586,27 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 - 当前 URL 是 `about:blank`。
 - 页面截图成功，且截图字节数大于 0。
 
+#### Windows getForUrl 人工验收
+
+1. 在 Windows 上用 `npm run dev` 启动桌面 app。
+2. 打开一个普通任务。
+3. 在任务输入框发给大模型：
+
+   ```text
+   请用内置浏览器访问 http://localhost:8888/register.html。如果出现访问权限确认卡片，我会手动点击允许。即使本机 8888 服务没有启动，也请告诉我是否已经选择到 In-app Browser、当前 tab id、URL 或导航错误。不要改用 Chrome，也不要验证上传、下载或外部网站。
+   ```
+
+4. 看 `npm run dev` 所在终端的主进程日志。
+
+成功标准：主进程终端出现：
+
+```text
+[BrowserRuntime] iab backend registered for <sessionId>.
+[BrowserRuntime] native pipe connected for <sessionId>.
+```
+
+同时大模型返回不应包含 `No browser is available`。如果本机没有启动 `localhost:8888`，页面连接失败可以接受；这条验收只确认 `getForUrl(...)` 能在 Windows 上发现并选择 iab backend。
+
 #### 基础 CUA 人工验收
 
 1. 用 `npm run dev` 启动桌面 app。
@@ -643,6 +668,7 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 - 看到 `[Runtime] Browser plugin runtime injected: <pluginRoot>.`，但没看到 `[BrowserRuntime] official runtime bootstrapping for`：大模型没有调用 `mcp__node_repl__js` Browser runtime tool。
 - 看到 `[BrowserRuntime] official runtime ready for`，但没看到 `[BrowserRuntime] iab backend registered for`：host 创建时没有注册 Phase 2 iab backend，检查 `src/main/agent/tools/browser/browser-runtime-host.ts`。
 - 看到 `[BrowserRuntime] iab backend registered for`，但没看到 `[BrowserRuntime] native pipe connected for`：官方 runtime 没有触发 backend discovery。确认验收代码里调用了 `agent.browsers.list()` 或 `agent.browsers.get("iab")`。
+- Windows 上 `agent.browsers.getForUrl(...)` 报 `No browser is available`：说明官方 runtime 枚举 `\\.\pipe\` 时没有发现当前 iab backend。检查 `src/main/browser/browser-native-pipe-server.ts` 是否为 Windows named pipe 启动了 discovery server，`src/main/browser/browser-platform.ts` 的 `getOfficialBrowserUseIabPipePath(..., "win32")` 是否生成 `\\.\pipe\codex-browser-use-cmb-iab-...`，以及调用是否发生在桌面 app 的 Browser runtime tool 中；脱离 `nodeRepl.requestMeta` 和 iab host 手动调用 `setupBrowserRuntime(...)` 不会注册内置浏览器。
 - `Browser Use rejected this action ... The user has requested that https://example.com should not be used`：通常是当前会话或用户策略禁止了该域名，或 approval card 被拒绝/取消。不要绕过该策略；换用用户允许的测试域名，检查是否出现对应的 `browser access <origin>` approval card，并确认主进程日志里是否出现 `[BrowserRuntime] elicitation resolved for`。
 - 没看到 approval card：确认 Browser tool 是从桌面 app 正常任务里调用的；直接在无 `requestApproval` 的测试脚本里访问外部 URL 会 fail closed。
 - 基础 CUA 验收里 `title` 不是 `type+scroll+double+drag`：先确认 Browser 面板是否打开，页面是否显示本地输入框和测试区域；如果页面打开但 title 没变，检查 `src/main/browser/browser-official-backend-adapter.ts` 的 `moveMouse`、`Input.dispatchMouseEvent`、`Input.synthesizeScrollGesture`、`Input.insertText`、`Input.dispatchKeyEvent` 映射，以及 `src/main/browser/browser-service.ts` 的 `moveMouse(...)`、`mouseDown(...)`、`mouseUp(...)`、`scroll(...)`。
@@ -1817,9 +1843,9 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 
 5. `BrowserNativePipeBridge.createConnection(...)`
 
-   作用：创建 JSON-RPC framed connection，并把请求交给 `BrowserOfficialBackendAdapter.handleRequest(...)`。
+   作用：创建 JSON-RPC framed connection，并把请求交给 `BrowserOfficialBackendAdapter.handleRequest(...)`。Windows 上 `BrowserNativePipeBridge` 还会启动真实 named pipe listener，让官方 runtime 枚举 `\\.\pipe\codex-browser-use-...` 时能发现 iab backend；macOS/Linux 继续用 `/tmp/codex-browser-use/...` marker 文件配合内存连接。
 
-   为什么需要它：这是 official runtime 和宿主 backend 的协议隔离层，后续接 Chrome external pipe 也走同一类边界。
+   为什么需要它：这是 official runtime 和宿主 backend 的协议隔离层，后续接 Chrome external pipe 也走同一类边界；Windows named pipe 不能靠普通文件 marker 被枚举，必须有真实 listener，否则 `agent.browsers.getForUrl(...)` 会在 backend 列表为空时返回 `No browser is available`。
 
 6. `BrowserOfficialBackendAdapter.createTab()` / `ensureTab()`
 

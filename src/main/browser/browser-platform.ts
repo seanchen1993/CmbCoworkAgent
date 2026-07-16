@@ -38,6 +38,13 @@ export function isSupportedNativePipePath(pipePath: string): boolean {
   return getNativePipeKind(pipePath) !== "unknown"
 }
 
+export function shouldUseBrowserNativePipeDiscoveryServer(
+  pipePath: string,
+  targetPlatform: NodeJS.Platform = process.platform
+): boolean {
+  return targetPlatform === "win32" && getNativePipeKind(pipePath) === "windows-named-pipe"
+}
+
 export function getOfficialBrowserUsePipeBasePath(
   targetPlatform: NodeJS.Platform = process.platform
 ): string {

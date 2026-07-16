@@ -1,6 +1,6 @@
 import { EventEmitter } from "events"
 import { randomUUID } from "crypto"
-import { createConnection, type Socket } from "net"
+import { createConnection, createServer, type Server, type Socket } from "net"
 import { join } from "path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { getOfficialBrowserUsePipeBasePath } from "../../../browser/browser-platform"
@@ -17,6 +17,12 @@ vi.mock("net", () => ({
     socket.destroy = vi.fn() as unknown as Socket["destroy"]
     queueMicrotask(() => socket.emit("connect"))
     return socket
+  }),
+  createServer: vi.fn(() => {
+    const server = new EventEmitter() as Server
+    server.listen = vi.fn(() => server) as unknown as Server["listen"]
+    server.close = vi.fn(() => server) as unknown as Server["close"]
+    return server
   })
 }))
 
@@ -66,6 +72,7 @@ describe("browser runtime host native pipe", () => {
     const socket = await globals.nodeRepl.nativePipe.createConnection(pipePath)
 
     expect(createConnection).toHaveBeenCalledWith(pipePath)
+    expect(createServer).not.toHaveBeenCalled()
     expect(socket.write("ping")).toBe(true)
   })
 

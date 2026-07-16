@@ -101,11 +101,15 @@ async function ensureOfficialRuntime(
 
   session.host.markBootstrapping()
   console.log(`[BrowserRuntime] official runtime bootstrapping for ${context.threadId ?? "unbound"}.`)
-  session.setupPromise = setupOfficialBrowserRuntime({
-    clientPath: context.plugin.clientPath,
-    globals: session.host.globals,
-    budget: session.host.budget
-  })
+  session.setupPromise = session.host
+    .ready()
+    .then(() =>
+      setupOfficialBrowserRuntime({
+        clientPath: context.plugin.clientPath,
+        globals: session.host.globals,
+        budget: session.host.budget
+      })
+    )
     .then(() => {
       session.host.markReady()
       console.log(`[BrowserRuntime] official runtime ready for ${context.threadId ?? "unbound"}.`)
