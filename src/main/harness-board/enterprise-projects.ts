@@ -10,6 +10,12 @@ import type {
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelItem,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryItem,
+  HarnessPipelineQueryResult,
   HarnessProjectReviewInput,
   HarnessProjectReviewItem,
   HarnessProjectReviewResult
@@ -46,6 +52,24 @@ interface DeployUnitQueryResponse {
     pages?: number
     current?: number
   }
+}
+
+interface PipelineQueryResponse {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: {
+    records?: unknown[]
+    total?: number
+    size?: number
+    current?: number
+    pages?: number
+  }
+}
+
+interface PipelineLabelQueryResponse {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: unknown[]
 }
 
 interface LeanstarReviewSummaryResponse {
@@ -96,6 +120,14 @@ function getEnterpriseProjectListUrl(): string {
 
 function getDeployUnitQueryUrl(): string {
   return (import.meta.env.VITE_DEPLOY_UNIT_QUERY_URL as string | undefined)?.trim() || ""
+}
+
+function getPipelineQueryUrl(): string {
+  return (import.meta.env.VITE_PIPELINE_QUERY_URL as string | undefined)?.trim() || ""
+}
+
+function getPipelineLabelQueryUrl(): string {
+  return (import.meta.env.VITE_PIPELINE_LABEL_QUERY_URL as string | undefined)?.trim() || ""
 }
 
 function getLeanstarReviewGatewayUrl(): string {
@@ -200,6 +232,38 @@ function normalizeDeployUnitSearchItem(value: unknown): HarnessDeployUnitSearchI
     deployUnit,
     ownerId: normalizeText(value.ownerId),
     ownerName: normalizeText(value.ownerName)
+  }
+}
+
+function normalizePipelineQueryItem(value: unknown): HarnessPipelineQueryItem | null {
+  if (!isObject(value)) return null
+
+  const pipeline = normalizeText(value.pipeline)
+  if (!pipeline) return null
+
+  return {
+    pipeline,
+    pipelineAlias: normalizeText(value.pipelineAlias),
+    env: normalizeText(value.env),
+    branch: normalizeText(value.branch),
+    latestBuildStatus: normalizeText(value.latestBuildStatus),
+    latestCompletedTime: normalizeText(value.latestCompletedTime)
+  }
+}
+
+function normalizePipelineLabelItem(value: unknown): HarnessPipelineLabelItem | null {
+  if (!isObject(value)) return null
+
+  const pipelineName = normalizeText(value.pipelineName)
+  if (!pipelineName) return null
+
+  return {
+    pipelineName,
+    pipelineNumber: numberValue(value.pipelineNumber),
+    status: normalizeText(value.status),
+    startDate: normalizeText(value.startDate),
+    label: normalizeText(value.label),
+    triggerUser: normalizeText(value.triggerUser)
   }
 }
 
@@ -308,6 +372,47 @@ function normalizeDeployUnitSearchResponse(
     total,
     hasMore: total > deployUnits.length || pages > current
   }
+}
+
+function normalizePipelineQueryResponse(
+  response: PipelineQueryResponse
+): HarnessPipelineQueryResult {
+  if (response.returnCode !== ENTERPRISE_PROJECT_SUCCESS_CODE) {
+    throw new Error(response.errorMsg || "流水线查询失败")
+  }
+
+  const records = Array.isArray(response.body?.records) ? response.body.records : []
+  const pipelines = records
+    .map((item) => normalizePipelineQueryItem(item))
+    .filter((item): item is HarnessPipelineQueryItem => item !== null)
+  const total = numberValue(response.body?.total)
+  const size = numberValue(response.body?.size)
+  const current = numberValue(response.body?.current)
+  const pages = numberValue(response.body?.pages)
+
+  return {
+    pipelines,
+    total,
+    size,
+    current,
+    pages,
+    hasMore: pages > current
+  }
+}
+
+function normalizePipelineLabelQueryResponse(
+  response: PipelineLabelQueryResponse
+): HarnessPipelineLabelQueryResult {
+  if (response.returnCode !== ENTERPRISE_PROJECT_SUCCESS_CODE) {
+    throw new Error(response.errorMsg || "流水线标签查询失败")
+  }
+
+  const records = Array.isArray(response.body) ? response.body : []
+  const labels = records
+    .map((item) => normalizePipelineLabelItem(item))
+    .filter((item): item is HarnessPipelineLabelItem => item !== null)
+
+  return { labels }
 }
 
 function makeMockEnterpriseProjectSearchResult(): HarnessEnterpriseProjectSearchResult {
@@ -554,6 +659,104 @@ export async function searchDeployUnits(
   } finally {
     clearTimeout(timeout)
     console.log(`[HarnessBoard] [deploy_unit_search] ${requestSucceeded ? "success" : "failed"}`)
+  }
+}
+
+export async function queryPipelines(
+  input: HarnessPipelineQueryInput
+): Promise<HarnessPipelineQueryResult> {
+  const queryUrl = getPipelineQueryUrl()
+  if (!queryUrl) {
+    throw new Error("未配置流水线查询地址")
+  }
+
+  const requestPayload: HarnessPipelineQueryInput = {
+    deployUnit: normalizeText(input.deployUnit),
+    env: normalizeText(input.env),
+    orgId: normalizeText(input.orgId),
+    pageNumber: numberValue(input.pageNumber),
+    pageSize: numberValue(input.pageSize),
+    pipelineTerm: normalizeText(input.pipelineTerm),
+    productTerm: normalizeText(input.productTerm)
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+
+  try {
+    logHarnessHttpRequest(
+      "pipeline_query",
+      "POST",
+      queryUrl,
+      `input=${JSON.stringify(requestPayload)}`
+    )
+    const response = await fetch(queryUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(requestPayload),
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      throw new Error("流水线查询失败")
+    }
+
+    const json = (await response.json()) as PipelineQueryResponse
+    return normalizePipelineQueryResponse(json)
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("流水线查询超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+export async function queryPipelineLabels(
+  input: HarnessPipelineLabelQueryInput
+): Promise<HarnessPipelineLabelQueryResult> {
+  const pipelineName = normalizeText(input.pipelineName)
+  if (!pipelineName) {
+    return { labels: [] }
+  }
+
+  const queryUrl = getPipelineLabelQueryUrl()
+  if (!queryUrl) {
+    throw new Error("未配置流水线标签查询地址")
+  }
+
+  const requestUrl = new URL(queryUrl)
+  requestUrl.searchParams.set("pipelineName", pipelineName)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+
+  try {
+    logHarnessHttpRequest(
+      "pipeline_label_query",
+      "GET",
+      requestUrl.toString(),
+      `pipelineName=${pipelineName}`
+    )
+    const response = await fetch(requestUrl, {
+      method: "GET",
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      throw new Error("流水线标签查询失败")
+    }
+
+    const json = (await response.json()) as PipelineLabelQueryResponse
+    return normalizePipelineLabelQueryResponse(json)
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("流水线标签查询超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
   }
 }
 

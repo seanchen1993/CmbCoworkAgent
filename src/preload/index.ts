@@ -66,6 +66,10 @@ import type {
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
@@ -3217,6 +3221,18 @@ const api = {
         "harnessBoard:searchDeployUnits",
         input
       ) as Promise<HarnessDeployUnitSearchResult>,
+    queryPipelines: (input: HarnessPipelineQueryInput): Promise<HarnessPipelineQueryResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:queryPipelines",
+        input
+      ) as Promise<HarnessPipelineQueryResult>,
+    queryPipelineLabels: (
+      input: HarnessPipelineLabelQueryInput
+    ): Promise<HarnessPipelineLabelQueryResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:queryPipelineLabels",
+        input
+      ) as Promise<HarnessPipelineLabelQueryResult>,
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ): Promise<HarnessEnterpriseProjectDetailResult> =>

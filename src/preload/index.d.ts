@@ -62,6 +62,10 @@ import type {
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
@@ -2309,6 +2313,10 @@ interface CustomAPI {
     searchDeployUnits: (
       input: HarnessDeployUnitSearchInput
     ) => Promise<HarnessDeployUnitSearchResult>
+    queryPipelines: (input: HarnessPipelineQueryInput) => Promise<HarnessPipelineQueryResult>
+    queryPipelineLabels: (
+      input: HarnessPipelineLabelQueryInput
+    ) => Promise<HarnessPipelineLabelQueryResult>
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>

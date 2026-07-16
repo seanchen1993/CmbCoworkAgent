@@ -234,6 +234,51 @@ export interface HarnessDeployUnitSearchResult {
   hasMore: boolean
 }
 
+export interface HarnessPipelineQueryInput {
+  deployUnit: string
+  env: string
+  orgId: string
+  pageNumber: number
+  pageSize: number
+  pipelineTerm: string
+  productTerm: string
+}
+
+export interface HarnessPipelineQueryItem {
+  pipeline: string
+  pipelineAlias: string
+  env: string
+  branch: string
+  latestBuildStatus: string
+  latestCompletedTime: string
+}
+
+export interface HarnessPipelineQueryResult {
+  pipelines: HarnessPipelineQueryItem[]
+  total: number
+  size: number
+  current: number
+  pages: number
+  hasMore: boolean
+}
+
+export interface HarnessPipelineLabelQueryInput {
+  pipelineName: string
+}
+
+export interface HarnessPipelineLabelItem {
+  pipelineName: string
+  pipelineNumber: number
+  status: string
+  startDate: string
+  label: string
+  triggerUser: string
+}
+
+export interface HarnessPipelineLabelQueryResult {
+  labels: HarnessPipelineLabelItem[]
+}
+
 export interface HarnessEnterpriseProjectDetailInput {
   prjCodeList: string[]
 }

@@ -25,6 +25,8 @@ import {
 import {
   getEnterpriseProjectDetails,
   getProjectReviews,
+  queryPipelineLabels,
+  queryPipelines,
   searchDeployUnits,
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
@@ -38,6 +40,10 @@ import type {
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessProjectDetailViewModel,
@@ -135,6 +141,23 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       input: HarnessDeployUnitSearchInput
     ): Promise<HarnessDeployUnitSearchResult> => {
       return searchDeployUnits(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:queryPipelines",
+    async (_event, input: HarnessPipelineQueryInput): Promise<HarnessPipelineQueryResult> => {
+      return queryPipelines(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:queryPipelineLabels",
+    async (
+      _event,
+      input: HarnessPipelineLabelQueryInput
+    ): Promise<HarnessPipelineLabelQueryResult> => {
+      return queryPipelineLabels(input)
     }
   )
 
