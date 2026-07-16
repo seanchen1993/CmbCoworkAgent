@@ -7,6 +7,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Eye,
   Wrench,
   Copy,
@@ -574,6 +575,9 @@ interface MessageBubbleProps {
   userSendTimeLabel?: string | null
 }
 
+/** 用户消息折叠阈值:收起态最大高度(px)。超过才出现"显示更多"。 */
+const USER_MESSAGE_COLLAPSED_MAX_PX = 260
+
 function MessageBubbleImpl({
   message,
   previousMessage,
@@ -602,6 +606,10 @@ function MessageBubbleImpl({
   const [dislikedMessageId, setDislikedMessageId] = useState<string | null>(null)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
   const [reasoningOpen, setReasoningOpen] = useState(false)
+  // 超长用户消息折叠:默认收起,测量到内容超过阈值才显示"显示更多/收起"。
+  const [userContentExpanded, setUserContentExpanded] = useState(false)
+  const [userContentOverflow, setUserContentOverflow] = useState(false)
+  const userContentRef = useRef<HTMLDivElement>(null)
   const autoOpenedReasoningForMessageRef = useRef<string | null>(null)
   const autoCollapsedReasoningForMessageRef = useRef<string | null>(null)
   const isUser = message.role === "user"
@@ -636,6 +644,24 @@ function MessageBubbleImpl({
       console.log(message, "message///")
     }
   }, [message])
+
+  // 测量用户消息内容高度,超过阈值才启用折叠。气泡宽度是 max-w-[80%],会随窗口/
+  // 侧栏开合变化,因此除内容变化外还用 ResizeObserver 在宽度变化时重测——否则窄时
+  // 测得溢出、变宽后内容已放得下,遮罩/按钮仍会残留。scrollHeight 始终是完整内容高度
+  // (不受 maxHeight 截断影响),且 setState 幂等,不会造成观察循环。
+  useEffect(() => {
+    if (message.role !== "user") return
+    const el = userContentRef.current
+    if (!el) return
+    const measure = (): void => {
+      setUserContentOverflow(el.scrollHeight > USER_MESSAGE_COLLAPSED_MAX_PX + 8)
+    }
+    measure()
+    if (typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(() => measure())
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [message.role, message.content])
 
   useEffect(() => {
     if (!isStreaming || !reasoningText) return
@@ -924,7 +950,40 @@ function MessageBubbleImpl({
                 : "bg-primary/10"
             )}
           >
-            {content}
+            <div
+              ref={userContentRef}
+              className={cn(
+                "relative min-w-0 max-w-full overflow-hidden",
+                userContentOverflow && !userContentExpanded && "[mask-image:linear-gradient(to_bottom,black_60%,transparent)]"
+              )}
+              style={
+                userContentOverflow && !userContentExpanded
+                  ? { maxHeight: USER_MESSAGE_COLLAPSED_MAX_PX }
+                  : undefined
+              }
+            >
+              {content}
+            </div>
+            {userContentOverflow && (
+              <button
+                type="button"
+                onClick={() => setUserContentExpanded((prev) => !prev)}
+                className="mt-1.5 inline-flex items-center gap-1 text-xs text-muted-foreground/80 transition-colors hover:text-foreground"
+                aria-expanded={userContentExpanded}
+              >
+                {userContentExpanded ? (
+                  <>
+                    <ChevronUp className="size-3.5" />
+                    收起
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="size-3.5" />
+                    显示更多
+                  </>
+                )}
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             {userSendTimeLabel && (

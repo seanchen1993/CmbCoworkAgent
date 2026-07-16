@@ -1549,6 +1549,10 @@ interface CustomAPI {
       cardNumber?: string
     ) => Promise<AgentAutoCommitWorkspaceCard>
   }
+  expertAgents: {
+    list: () => Promise<import("../shared/expert-agent-types").ExpertAgentEntry[]>
+    setEnabled: (name: string, enabled: boolean) => Promise<string[]>
+  }
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
   }

@@ -237,6 +237,7 @@ import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
@@ -744,6 +745,7 @@ if (!gotTheLock) {
     registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
+    registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
