@@ -282,6 +282,17 @@ export interface Message {
   end_at?: Date
   goal_id?: string | null
   active_window_id?: string | null
+  /** Renderer-only bounded Solo-subagent preview; not authoritative transcript text. */
+  is_bounded_preview?: boolean
+}
+
+export interface SubagentTranscriptPreviewState {
+  messageId: string
+  totalChars: number
+  retainedChars: number
+  omittedChars: number
+  truncated: boolean
+  updatedAt: number
 }
 
 export interface GoalEvent {

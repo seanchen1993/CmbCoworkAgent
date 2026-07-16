@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import type { SubagentTranscriptRunSummary } from "../shared/subagent-transcript"
 import {
   isWindowCloseBehavior,
   type CloseToTrayPromptAction,
@@ -481,6 +482,15 @@ const api = {
         prompt: string | null
         updatedAt: number | null
       }>
+    },
+    getSubagentTranscriptSummary: (
+      threadId: string,
+      subagentId: string
+    ): Promise<SubagentTranscriptRunSummary | null> => {
+      return ipcRenderer.invoke("agent:subagent-transcript-summary", {
+        threadId,
+        subagentId
+      }) as Promise<SubagentTranscriptRunSummary | null>
     }
   },
   workflows: {

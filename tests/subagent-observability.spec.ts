@@ -67,7 +67,7 @@ async function testTransportCountsHiddenSubagentTools(): Promise<void> {
   assertIncludes(
     transport,
     'type: "subagent_transcript_message"',
-    "transport emits full subagent transcript messages"
+    "transport emits bounded subagent transcript previews"
   )
   assertIncludes(
     transport,
@@ -120,7 +120,7 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   assertIncludes(
     threadContext,
     "subagentTranscripts: Record<string, Message[]>",
-    "thread state exposes full subagent transcripts"
+    "thread state exposes subagent transcript previews"
   )
   assertIncludes(
     threadContext,
@@ -166,7 +166,7 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   assertIncludes(
     threadContext,
     'case "subagent_transcript_message"',
-    "thread context handles full subagent transcript events"
+    "thread context handles subagent transcript preview events"
   )
   assertIncludes(
     threadContext,
@@ -544,7 +544,7 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
     "src/renderer/src/components/chat/SubagentStreamPanel.tsx"
   )
 
-  assertIncludes(subagentPanel, "打开完整记录", "subagent card exposes full transcript entrypoint")
+  assertIncludes(subagentPanel, "打开运行记录", "subagent card exposes transcript entrypoint")
   assertNotIncludes(
     subagentPanel,
     "getSubagentTranscriptDisplayStats",
@@ -568,8 +568,28 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   assertIncludes(app, "<SubagentStreamPanel />", "app renders the subagent transcript split panel")
   assertIncludes(
     subagentStreamPanel,
-    "子代理完整记录",
-    "subagent transcript panel has a dedicated header"
+    "子代理实时预览",
+    "subagent transcript panel labels the bounded live view accurately"
+  )
+  assertIncludes(
+    subagentStreamPanel,
+    "子代理历史快照",
+    "subagent transcript panel labels the bounded historical view accurately"
+  )
+  assertIncludes(
+    subagentStreamPanel,
+    "完整记录已保存",
+    "subagent transcript panel surfaces durable main-process persistence"
+  )
+  assertIncludes(
+    subagentStreamPanel,
+    "主进程只保存了部分记录",
+    "subagent transcript panel surfaces explicit partial persistence"
+  )
+  assertIncludes(
+    subagentStreamPanel,
+    "完整记录保存失败",
+    "subagent transcript panel surfaces storage failures"
   )
   assertIncludes(
     subagentStreamPanel,

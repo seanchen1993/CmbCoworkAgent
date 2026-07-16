@@ -6,6 +6,7 @@
  * the need for a second parsing layer on the client.
  */
 import type { Subagent } from "../types"
+import { SUBAGENT_OWNER_METADATA_KEY } from "../../shared/subagent-owner"
 
 // ---------------------------------------------------------------------------
 // Standardised event types broadcast from scheduler → renderer
@@ -196,11 +197,6 @@ function extractTaskUuid(ns: string): string | undefined {
   const match = /(?:^|[:|])tools:([^|:]+)/.exec(ns)
   return match?.[1]
 }
-
-// Mirrors runtime.ts SUBAGENT_OWNER_METADATA_KEY (kept as a literal to avoid
-// importing the heavy runtime module). Backend stamps the owning task
-// tool_call_id onto every subagent-interior chunk for deterministic attribution.
-const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
 
 // ---------------------------------------------------------------------------
 // StreamConverter

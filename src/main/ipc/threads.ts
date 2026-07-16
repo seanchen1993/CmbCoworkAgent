@@ -56,6 +56,7 @@ import {
 } from "../agent/coordinator-worker-manager"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
+import { getSubagentTranscriptStore } from "../agent/subagent-transcript-store"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
@@ -2249,6 +2250,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     // After dbDeleteThread succeeds the thread is gone for good and the
     // tombstone must stay, whatever the later best-effort cleanups do.
     let workspacePath: string | undefined
+    let subagentTranscriptsPreviouslyRetired: boolean | undefined
     try {
       // Fallback workspace capture BEFORE cancelAndWait (which settles and
       // removes the active entry): if the thread's metadata lost its
@@ -2307,6 +2309,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }
       await waitForCleanupBestEffort()
 
+      // Fence the append-only Solo-subagent writer before the metadata row is
+      // deleted. A late stream delta must not recreate transcript files after
+      // the cold-path purge below.
+      subagentTranscriptsPreviouslyRetired = getSubagentTranscriptStore().retireThread(threadId)
+
       // Delete from our metadata store — the point of no return.
       dbDeleteThread(threadId)
       // Incarnation boundary crossed: permanently silence every store/snapshot
@@ -2323,6 +2330,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // tombstone must roll back, because it alone would silently poison future
       // workflow use of the surviving thread until restart.
       rollbackWorkflowThreadDisposal(threadId, priorDisposalMark)
+      if (subagentTranscriptsPreviouslyRetired !== undefined) {
+        getSubagentTranscriptStore().restoreThread(threadId, subagentTranscriptsPreviouslyRetired)
+      }
       throw e
     }
     // Drop the in-memory flush-failed snapshots only AFTER the point of no
@@ -2376,6 +2386,16 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       console.log("[Threads] Deleted workflow checkpoints", { deletedWorkflowCheckpoints })
     } catch (e) {
       console.warn("[Threads] Failed to delete workflow checkpoints:", e)
+    }
+
+    // Keep the checkpointer retire+synchronous sweeps above atomic. The Solo
+    // transcript writer was already fenced before DB deletion, so its async
+    // flush-and-purge is safe on this later cold-path segment.
+    try {
+      await getSubagentTranscriptStore().purgeThread(threadId)
+      console.log("[Threads] Purged Solo subagent transcripts")
+    } catch (e) {
+      console.warn("[Threads] Failed to purge Solo subagent transcripts:", e)
     }
 
     coordinatorWorkerManager.forgetThread(threadId)

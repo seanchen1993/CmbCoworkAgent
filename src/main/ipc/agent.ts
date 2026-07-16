@@ -16,6 +16,8 @@ import {
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
+import { getSubagentTranscriptStore } from "../agent/subagent-transcript-store"
+import { recordSubagentTranscriptStreamChunk } from "../agent/subagent-transcript-recorder"
 import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import { addThreadGoalEvent, getThread, updateThread, upsertThreadMessages } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
@@ -1691,16 +1693,36 @@ function isTerminalStreamPayload(payload: unknown): boolean {
 }
 
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
+  const send = (): void => {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) return
+    try {
+      window.webContents.send(channel, payload)
+    } catch (error) {
+      console.warn("[Agent] Failed to send stream event:", error)
+    }
+  }
+
   if (isTerminalStreamPayload(payload)) {
     const threadId = threadIdFromAgentStreamChannel(channel)
-    if (threadId) flushPendingStreamTranscriptMessages(threadId)
+    if (threadId) {
+      flushPendingStreamTranscriptMessages(threadId)
+      const terminalType = (payload as { type: "done" | "error" }).type
+      getSubagentTranscriptStore().markThreadRuns(
+        threadId,
+        terminalType === "error" ? "failed" : "interrupted"
+      )
+      // The terminal event is the UI's durability boundary: do not let the
+      // renderer claim completion before all preceding child deltas reach disk.
+      void getSubagentTranscriptStore()
+        .flushThread(threadId)
+        .catch((error) => {
+          console.warn("[SubagentTranscript] terminal flush failed:", error)
+        })
+        .finally(send)
+      return
+    }
   }
-  if (window.isDestroyed() || window.webContents.isDestroyed()) return
-  try {
-    window.webContents.send(channel, payload)
-  } catch (error) {
-    console.warn("[Agent] Failed to send stream event:", error)
-  }
+  send()
 }
 
 function sendHookNotice(window: BrowserWindow, channel: string, message: string): void {
@@ -3040,6 +3062,7 @@ function persistStreamTranscriptChunk(
   payload: unknown,
   options: { deferFlush?: boolean } = {}
 ): string | null {
+  recordSubagentTranscriptStreamChunk(threadId, mode, payload)
   if (shouldSkipMainTranscriptStreamPayload(mode, payload, threadId)) return null
   const message = persistedMessageFromStreamPayload(payload)
   if (!message) return null
@@ -3970,6 +3993,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.info(`[Goal] Paused ${pausedCount} active goal(s) left from a previous runtime.`)
     }
   }
+
+  ipcMain.handle(
+    "agent:subagent-transcript-summary",
+    async (_event, payload: { threadId?: string; subagentId?: string }) => {
+      const threadId = payload?.threadId?.trim()
+      const subagentId = payload?.subagentId?.trim()
+      if (!threadId || !subagentId) return null
+      return getSubagentTranscriptStore().getRunSummary(threadId, subagentId)
+    }
+  )
 
   ipcMain.handle(
     "agent:coordinator-workers",
@@ -9198,6 +9231,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           LocalSandbox.cancelBackgroundTasks(threadId)
           controller.abort()
           flushPendingStreamTranscriptMessages(threadId)
+          getSubagentTranscriptStore().markThreadRuns(threadId, "cancelled")
+          await getSubagentTranscriptStore()
+            .flushThread(threadId)
+            .catch((error) => {
+              console.warn("[SubagentTranscript] cancellation flush failed:", error)
+            })
           // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
           // A user can cancel and immediately send another message; the next invoke must wait
           // for checkpoint/sandbox cleanup before opening a replacement stream.

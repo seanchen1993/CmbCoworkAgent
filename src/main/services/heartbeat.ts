@@ -21,6 +21,8 @@ import {
   updateThread as dbUpdateThread
 } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
+import { recordSubagentTranscriptStreamChunk } from "../agent/subagent-transcript-recorder"
+import { getSubagentTranscriptStore } from "../agent/subagent-transcript-store"
 import { notifyIfBackground } from "./notify"
 import { emitAppAttention } from "../app-attention-events"
 import { trackEvent } from "./event-reporter"
@@ -408,6 +410,7 @@ async function executeHeartbeat(): Promise<void> {
       if (controller.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
       const serialized = JSON.parse(JSON.stringify(data))
+      recordSubagentTranscriptStreamChunk(threadId, mode, serialized)
       const events = converter.processChunk(mode, serialized)
       for (const evt of events) {
         broadcastToChannel(channel, evt)
@@ -416,6 +419,16 @@ async function executeHeartbeat(): Promise<void> {
         }
       }
     }
+
+    getSubagentTranscriptStore().markThreadRuns(
+      threadId,
+      controller.signal.aborted ? "cancelled" : "interrupted"
+    )
+    await getSubagentTranscriptStore()
+      .flushThread(threadId)
+      .catch((flushError) => {
+        console.warn("[Heartbeat] Failed to flush Solo subagent transcripts:", flushError)
+      })
 
     broadcastToChannel(channel, { type: "done" })
 
@@ -477,6 +490,12 @@ async function executeHeartbeat(): Promise<void> {
     const isAbort =
       error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
     const message = isAbort ? "Cancelled" : error instanceof Error ? error.message : String(error)
+    getSubagentTranscriptStore().markThreadRuns(threadId, isAbort ? "cancelled" : "failed")
+    await getSubagentTranscriptStore()
+      .flushThread(threadId)
+      .catch((flushError) => {
+        console.warn("[Heartbeat] Failed to flush Solo subagent transcripts:", flushError)
+      })
     broadcastToChannel(channel, { type: "done" })
     saveHeartbeatConfig({
       lastRunAt: new Date().toISOString(),

@@ -50,6 +50,7 @@ import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping
 } from "../../shared/harness-board-types"
+import { SUBAGENT_OWNER_METADATA_KEY } from "../../shared/subagent-owner"
 import {
   createAgent,
   createMiddleware,
@@ -1383,10 +1384,9 @@ function appendRegistrySubagentAccessDescription(
  * independent of concurrency or chunk ordering. The value is the parent `task`
  * tool_call_id (== the subagent id used by the UI).
  *
- * Mirrored as a literal in electron-transport.ts and stream-converter.ts; the
- * renderer cannot import from main, so keep the three in sync.
+ * Shared with the renderer/main-process recorder through subagent-owner.ts.
  */
-export const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
+export { SUBAGENT_OWNER_METADATA_KEY } from "../../shared/subagent-owner"
 
 /**
  * Wrap deepagents' internal `task` tool so each subagent invocation stamps its

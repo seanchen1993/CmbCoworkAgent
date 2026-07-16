@@ -660,7 +660,10 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
     )
 
     const directHumanSideChannelMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
-      streamMessageEvent(humanMessage("Continue with the redirected worker instructions"), {}) as never,
+      streamMessageEvent(
+        humanMessage("Continue with the redirected worker instructions"),
+        {}
+      ) as never,
       "thread-123"
     )
     assert(
@@ -678,8 +681,7 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
     )
     assert(
       directPlainUserSideChannelMessages.some(
-        (message) =>
-          message.role === "user" && message.content === "User-shaped live worker prompt"
+        (message) => message.role === "user" && message.content === "User-shaped live worker prompt"
       ),
       "worker side-channel should recognize live plain user-shaped messages"
     )
@@ -794,8 +796,7 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       "thread-123"
     )
     assert(
-      overlappingFinal.find((message) => message.role === "assistant")?.content ===
-        "Controller 层",
+      overlappingFinal.find((message) => message.role === "assistant")?.content === "Controller 层",
       "worker side-channel should merge overlapping assistant chunks without duplicating text"
     )
 
@@ -1186,19 +1187,20 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       workerId: "worker-1",
       workerThreadId: "thread-123__worker__worker-1"
     })
-    const firstTurnRepeatedToolId = repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
-      {
-        ...(streamMessageEvent(
-          aiMessage({
-            id: "reused-tool-call-message",
-            toolCalls: [{ id: "reused-tool-call-id", name: "read_file" }]
-          }),
-          {}
-        ) as object),
-        workerTurn: 1
-      } as never,
-      "thread-123"
-    )
+    const firstTurnRepeatedToolId =
+      repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessage({
+              id: "reused-tool-call-message",
+              toolCalls: [{ id: "reused-tool-call-id", name: "read_file" }]
+            }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
     const secondTurnRepeatedToolId =
       repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
         {
@@ -1219,21 +1221,22 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
     const secondTurnAssistantMessage = secondTurnRepeatedToolId.find(
       (message) => message.role === "assistant"
     )
-    const firstTurnRepeatedToolResult = repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
-      {
-        ...(streamMessageEvent(
-          toolMessage({
-            id: "reused-tool-result-message",
-            name: "read_file",
-            toolCallId: "reused-tool-call-id",
-            content: "turn one result"
-          }),
-          {}
-        ) as object),
-        workerTurn: 1
-      } as never,
-      "thread-123"
-    )
+    const firstTurnRepeatedToolResult =
+      repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            toolMessage({
+              id: "reused-tool-result-message",
+              name: "read_file",
+              toolCallId: "reused-tool-call-id",
+              content: "turn one result"
+            }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
     const secondTurnRepeatedToolResult =
       repeatedToolIdAcrossTurnsTransport.convertFocusedCoordinatorWorkerIPCEvent(
         {
@@ -1251,7 +1254,9 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
         } as never,
         "thread-123"
       )
-    const firstTurnToolMessage = firstTurnRepeatedToolResult.find((message) => message.role === "tool")
+    const firstTurnToolMessage = firstTurnRepeatedToolResult.find(
+      (message) => message.role === "tool"
+    )
     const secondTurnToolResultId = secondTurnRepeatedToolResult.find(
       (message) => message.role === "tool"
     )
@@ -1496,7 +1501,8 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       .getState()
       .workerFocusMessages.filter((message) => message.role === "tool")
     assert(
-      liveFirstTools.length === 1 && liveFirstTools[0]?.id === "tool-id-less-live-tool-call-read_file",
+      liveFirstTools.length === 1 &&
+        liveFirstTools[0]?.id === "tool-id-less-live-tool-call-read_file",
       "worker focus store should merge snapshot tool result replay into the existing live tool result"
     )
 
@@ -1842,7 +1848,7 @@ async function testCoordinatorToolCallChunksHandleCumulativeProviderArgs(): Prom
         toolCallChunks: [
           {
             id: "start-worker-repeated-suffix",
-            args: 'foo'
+            args: "foo"
           }
         ]
       }),
@@ -2537,7 +2543,10 @@ async function testCoordinatorValuesSnapshotWithoutProviderIdDoesNotReplayWrappe
     | undefined
 
   assert(messageEvents.length === 0, "wrapped values snapshot must not be appended as a delta")
-  assert(snapshotMessage?.content === wrappedSnapshot, "snapshot should preserve full final content")
+  assert(
+    snapshotMessage?.content === wrappedSnapshot,
+    "snapshot should preserve full final content"
+  )
 }
 
 async function testCoordinatorValuesSnapshotWithSameProviderIdDoesNotReplayWrappedLiveText(): Promise<void> {
@@ -2568,7 +2577,10 @@ async function testCoordinatorValuesSnapshotWithSameProviderIdDoesNotReplayWrapp
 
   assert(messageEvents.length === 0, "wrapped values snapshot must not be appended as a delta")
   assert(snapshotMessage?.id === "same-ai-id", "snapshot should keep the same provider id")
-  assert(snapshotMessage?.content === wrappedSnapshot, "snapshot should preserve full final content")
+  assert(
+    snapshotMessage?.content === wrappedSnapshot,
+    "snapshot should preserve full final content"
+  )
 }
 
 async function testCoordinatorValuesSnapshotDoesNotAppendRepeatedFullTextSuffix(): Promise<void> {
@@ -2632,10 +2644,8 @@ async function testCoordinatorValuesSnapshotKeepsSubsequentReplayGrowth(): Promi
       aiMessage({ id: "same-ai-id", content: secondSnapshot })
     ])
   )
-  const replacement = customEvents(
-    secondValuesEvents,
-    "coordinator_ai_snapshot_message"
-  )[0]?.assistantMessage as { id?: string; content?: string } | undefined
+  const replacement = customEvents(secondValuesEvents, "coordinator_ai_snapshot_message")[0]
+    ?.assistantMessage as { id?: string; content?: string } | undefined
 
   assert(
     replacement?.id === "same-ai-id" && replacement.content === secondSnapshot,
@@ -2905,7 +2915,9 @@ async function testCoordinatorValuesSnapshotKeepsPostToolAssistantSeparateAfterP
 
   const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
   const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
-  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+  const aiMessages = messageEvents.flatMap(
+    (event) => event.data as Array<{ id?: string; content?: string }>
+  )
 
   assert(snapshotEvents.length === 0, "short prefix matches should not replace the live assistant")
   assert(
@@ -2950,7 +2962,9 @@ async function testCoordinatorValuesSnapshotDoesNotLetEarlierExactShortReplaySte
 
   const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
   const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
-  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+  const aiMessages = messageEvents.flatMap(
+    (event) => event.data as Array<{ id?: string; content?: string }>
+  )
 
   assert(snapshotEvents.length === 0, "exact short replay should not trigger replacement")
   assert(
@@ -2994,7 +3008,9 @@ async function testCoordinatorValuesSnapshotKeepsIdenticalPostToolAssistantSepar
 
   const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
   const snapshotEvents = customEvents(valuesModeEvents, "coordinator_ai_snapshot_message")
-  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+  const aiMessages = messageEvents.flatMap(
+    (event) => event.data as Array<{ id?: string; content?: string }>
+  )
 
   assert(snapshotEvents.length === 0, "exact same-text replay should not trigger replacement")
   assert(
@@ -3036,7 +3052,9 @@ async function testCoordinatorValuesSnapshotDoesNotMergeAcrossToolBoundaryAfterE
   )
 
   const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
-  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+  const aiMessages = messageEvents.flatMap(
+    (event) => event.data as Array<{ id?: string; content?: string }>
+  )
 
   assert(
     !aiMessages.some((message) => message.id === "provider-ai-1"),
@@ -3047,7 +3065,9 @@ async function testCoordinatorValuesSnapshotDoesNotMergeAcrossToolBoundaryAfterE
     "the assistant after the tool boundary should remain a distinct provider message"
   )
   assert(
-    !aiMessages.some((message) => message.id === "live-ai" && message.content === "\n\n下面给出结论。"),
+    !aiMessages.some(
+      (message) => message.id === "live-ai" && message.content === "\n\n下面给出结论。"
+    ),
     "the tool-after assistant must not be merged into the pre-tool live message"
   )
 }
@@ -3082,7 +3102,9 @@ async function testCoordinatorValuesSnapshotDoesNotMergeAcrossToolBoundaryAfterG
   )
 
   const messageEvents = valuesModeEvents.filter((event) => event.event === "messages")
-  const aiMessages = messageEvents.flatMap((event) => event.data as Array<{ id?: string; content?: string }>)
+  const aiMessages = messageEvents.flatMap(
+    (event) => event.data as Array<{ id?: string; content?: string }>
+  )
 
   assert(
     aiMessages.some(
@@ -3091,7 +3113,9 @@ async function testCoordinatorValuesSnapshotDoesNotMergeAcrossToolBoundaryAfterG
     "pre-tool growth should update the live assistant"
   )
   assert(
-    aiMessages.some((message) => message.id === "provider-ai-2" && message.content === postToolText),
+    aiMessages.some(
+      (message) => message.id === "provider-ai-2" && message.content === postToolText
+    ),
     "post-tool assistant after a growth candidate should remain a distinct provider message"
   )
   assert(
@@ -3157,7 +3181,11 @@ async function testSubagentThinkingStreamingAccumulation(): Promise<void> {
       aiMessage({
         id: "main-ai-1",
         toolCalls: [
-          { id: "task-1", name: "task", args: { subagent_type: "implementer", description: "think" } }
+          {
+            id: "task-1",
+            name: "task",
+            args: { subagent_type: "implementer", description: "think" }
+          }
         ]
       }),
       { langgraph_node: "agent" }
@@ -3196,6 +3224,74 @@ async function testSubagentThinkingStreamingAccumulation(): Promise<void> {
     messageEvents(lastEvents).length === 0,
     "subagent thinking must not leak into the main chat stream"
   )
+
+  const repeatedEvents = feed("world")
+  const repeatedEntry = asRecord(
+    customEvents(repeatedEvents, "subagent_log_entry").filter(
+      (data) => asRecord(data.entry).kind === "assistant"
+    )[0].entry
+  )
+  assert(
+    repeatedEntry.content === "hello worldworld",
+    "identical consecutive AIMessageChunk deltas must both be preserved"
+  )
+}
+
+async function testSubagentThinkingPreviewKeepsMovingTailPastLimit(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-long-preview",
+        toolCalls: [
+          {
+            id: "task-long-preview",
+            name: "task",
+            args: { subagent_type: "implementer", description: "long output" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const metadata = {
+    langgraph_checkpoint_ns: "agent:tools:task-long-preview",
+    cmb_subagent_owner_tool_call_id: "task-long-preview"
+  }
+  const feed = (content: string): SdkEvent[] =>
+    convert(
+      transport,
+      streamMessageEvent(aiMessageChunk({ id: "subagent-ai-long-preview", content }), metadata)
+    )
+
+  feed("A".repeat(9_000))
+  feed("B".repeat(9_000))
+  const sentinel = "__TAIL_CONTINUES__"
+  const lastEvents = feed(sentinel)
+  const transcript = customEvents(lastEvents, "subagent_transcript_message")[0]
+  assert(transcript, "long subagent output should keep emitting transcript updates")
+  const message = asRecord(transcript.subagentMessage)
+  const preview = asRecord(transcript.transcriptPreview)
+  const content = String(message.content)
+
+  assert(content.startsWith("A".repeat(100)), "long preview should preserve its head")
+  assert(content.endsWith(sentinel), "long preview should preserve and update its latest tail")
+  assert(
+    content.includes("实时预览省略"),
+    "long preview should contain an explicit omission marker"
+  )
+  assert(preview.truncated === true, "long preview metadata should report truncation")
+  assert(
+    preview.totalChars === 18_000 + sentinel.length,
+    `preview should report the full observed length, got ${String(preview.totalChars)}`
+  )
+  assert(
+    typeof preview.omittedChars === "number" && preview.omittedChars > 0,
+    "preview should report the omitted character count"
+  )
+  assert(content.length < 17_000, "renderer preview memory should remain bounded")
 }
 
 async function testOwnerMetadataAttributesConcurrentSubagentsDeterministically(): Promise<void> {
@@ -3264,6 +3360,107 @@ async function testOwnerMetadataAttributesConcurrentSubagentsDeterministically()
   )
 }
 
+async function testConcurrentIdlessThinkingIsOwnerScoped(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-idless-thinking",
+        toolCalls: [
+          { id: "task-1", name: "task", args: { description: "First" } },
+          { id: "task-2", name: "task", args: { description: "Second" } }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const metadata = (owner: string) => ({
+    langgraph_checkpoint_ns: "agent:tools:shared-runtime|model:1",
+    [ownerKey]: owner
+  })
+  const firstEvents = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ content: "AAA" }), metadata("task-1"))
+  )
+  const secondEvents = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ content: "BBB" }), metadata("task-2"))
+  )
+  const firstTranscript = customEvents(firstEvents, "subagent_transcript_message")[0]
+  const secondTranscript = customEvents(secondEvents, "subagent_transcript_message")[0]
+  assert(firstTranscript?.subagentId === "task-1", "first id-less chunk should target task-1")
+  assert(secondTranscript?.subagentId === "task-2", "second id-less chunk should target task-2")
+
+  const firstMessage = asRecord(firstTranscript.subagentMessage)
+  const secondMessage = asRecord(secondTranscript.subagentMessage)
+  assert(firstMessage.content === "AAA", "task-1 should retain only its own thinking text")
+  assert(secondMessage.content === "BBB", "task-2 should retain only its own thinking text")
+  assert(
+    firstMessage.id !== secondMessage.id,
+    "concurrent owner-scoped transcript messages must have distinct ids"
+  )
+}
+
+async function testIdlessThinkingStartsFreshAfterToolBoundary(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+  const metadata = {
+    langgraph_checkpoint_ns: "agent:tools:one-runtime|model:1",
+    [ownerKey]: "task-1"
+  }
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-idless-boundary",
+        toolCalls: [{ id: "task-1", name: "task", args: { description: "Boundary" } }]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const first = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ id: "child-first", content: "before" }), metadata)
+  )
+  const continuation = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ content: " more" }), metadata)
+  )
+  convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({ name: "read_file", toolCallId: "inner-1", content: "result" }),
+      metadata
+    )
+  )
+  const afterTool = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ content: "after" }), metadata)
+  )
+
+  const firstMessage = asRecord(
+    customEvents(first, "subagent_transcript_message")[0].subagentMessage
+  )
+  const continuedMessage = asRecord(
+    customEvents(continuation, "subagent_transcript_message")[0].subagentMessage
+  )
+  const afterMessage = asRecord(
+    customEvents(afterTool, "subagent_transcript_message")[0].subagentMessage
+  )
+  assert(
+    firstMessage.id === continuedMessage.id && continuedMessage.content === "before more",
+    "an id-less continuation should remain attached to the preceding identified assistant"
+  )
+  assert(
+    afterMessage.id !== firstMessage.id && afterMessage.content === "after",
+    "an id-less assistant after a tool result must start a fresh transcript message"
+  )
+}
+
 async function testSubagentIdlessContinuationChunksStitchArgsByIndex(): Promise<void> {
   const transport = new ElectronIPCTransport()
   const ownerKey = "cmb_subagent_owner_tool_call_id"
@@ -3296,14 +3493,20 @@ async function testSubagentIdlessContinuationChunksStitchArgsByIndex(): Promise<
 
   // First chunk carries id+name+index; continuations carry only index + an args
   // fragment (no id/name) — exactly the real provider shape.
-  convert(transport, streamMessageEvent(chunk([{ id: "inner-1", name: "ls", args: "", index: 0 }]), {
-    langgraph_checkpoint_ns: ns,
-    [ownerKey]: "task-1"
-  }))
-  convert(transport, streamMessageEvent(chunk([{ args: '{"path":', index: 0 }]), {
-    langgraph_checkpoint_ns: ns,
-    [ownerKey]: "task-1"
-  }))
+  convert(
+    transport,
+    streamMessageEvent(chunk([{ id: "inner-1", name: "ls", args: "", index: 0 }]), {
+      langgraph_checkpoint_ns: ns,
+      [ownerKey]: "task-1"
+    })
+  )
+  convert(
+    transport,
+    streamMessageEvent(chunk([{ args: '{"path":', index: 0 }]), {
+      langgraph_checkpoint_ns: ns,
+      [ownerKey]: "task-1"
+    })
+  )
   const finalEvents = convert(
     transport,
     streamMessageEvent(chunk([{ args: '"src"}', index: 0 }]), {
@@ -3320,7 +3523,10 @@ async function testSubagentIdlessContinuationChunksStitchArgsByIndex(): Promise<
     name?: string
     args?: Record<string, unknown>
   }>
-  assert(toolCalls?.[0]?.name === "ls", "stitched tool call should keep its name from the first chunk")
+  assert(
+    toolCalls?.[0]?.name === "ls",
+    "stitched tool call should keep its name from the first chunk"
+  )
   assert(
     toolCalls?.[0]?.args?.path === "src",
     "id-less continuation chunks must stitch streamed args back by index (RAW ARGUMENTS must not stay {})"
@@ -3355,15 +3561,21 @@ async function testConcurrentSubagentsStreamingIndexZeroDoNotCrossContaminate():
   const nsA = "tools:uuid-a|model_request:1"
   const nsB = "tools:uuid-b|model_request:1"
   const sendA = (chunks: Parameters<typeof chunkMsg>[1]): SdkEvent[] =>
-    convert(transport, streamMessageEvent(chunkMsg("msg-a", chunks), {
-      langgraph_checkpoint_ns: nsA,
-      [ownerKey]: "task-1"
-    }))
+    convert(
+      transport,
+      streamMessageEvent(chunkMsg("msg-a", chunks), {
+        langgraph_checkpoint_ns: nsA,
+        [ownerKey]: "task-1"
+      })
+    )
   const sendB = (chunks: Parameters<typeof chunkMsg>[1]): SdkEvent[] =>
-    convert(transport, streamMessageEvent(chunkMsg("msg-b", chunks), {
-      langgraph_checkpoint_ns: nsB,
-      [ownerKey]: "task-2"
-    }))
+    convert(
+      transport,
+      streamMessageEvent(chunkMsg("msg-b", chunks), {
+        langgraph_checkpoint_ns: nsB,
+        [ownerKey]: "task-2"
+      })
+    )
 
   // Both subagents stream their tool call with index 0, interleaved — exactly
   // the real provider behaviour that previously corrupted both args.
@@ -3377,14 +3589,12 @@ async function testConcurrentSubagentsStreamingIndexZeroDoNotCrossContaminate():
   const lastA = sendA([{ args: "", index: 0 }]) // trailing flush for A
 
   const aMsg = asRecord(
-    customEvents(lastA, "subagent_transcript_message").find(
-      (e) => e.subagentId === "task-1"
-    )?.subagentMessage as Record<string, unknown>
+    customEvents(lastA, "subagent_transcript_message").find((e) => e.subagentId === "task-1")
+      ?.subagentMessage as Record<string, unknown>
   )
   const bMsg = asRecord(
-    customEvents(lastB, "subagent_transcript_message").find(
-      (e) => e.subagentId === "task-2"
-    )?.subagentMessage as Record<string, unknown>
+    customEvents(lastB, "subagent_transcript_message").find((e) => e.subagentId === "task-2")
+      ?.subagentMessage as Record<string, unknown>
   )
   const aCalls = aMsg.tool_calls as Array<{ name?: string; args?: Record<string, unknown> }>
   const bCalls = bMsg.tool_calls as Array<{ name?: string; args?: Record<string, unknown> }>
@@ -3424,10 +3634,13 @@ async function testSubagentDeltaArgsPreserveRepeatedFragments(): Promise<void> {
     kwargs: { id: msgId, content: "", tool_call_chunks: chunks }
   })
   const send = (chunks: Parameters<typeof chunk>[0]): SdkEvent[] =>
-    convert(transport, streamMessageEvent(chunk(chunks), {
-      langgraph_checkpoint_ns: ns,
-      [ownerKey]: "task-1"
-    }))
+    convert(
+      transport,
+      streamMessageEvent(chunk(chunks), {
+        langgraph_checkpoint_ns: ns,
+        [ownerKey]: "task-1"
+      })
+    )
 
   // Stream args {"query":""} as deltas: the two quotes of the empty-string value
   // arrive as identical consecutive fragments. They must NOT be deduped away.
@@ -3469,7 +3682,10 @@ function testWorkflowSnapshotConverterSurvivesCorruptToolCalls(): void {
     } catch (error) {
       assert(false, `corrupt tool_calls (${label}) must not throw, got ${(error as Error).message}`)
     }
-    assert(Array.isArray(messages), `converter returns a Message[] for ${label} (degraded, not crashed)`)
+    assert(
+      Array.isArray(messages),
+      `converter returns a Message[] for ${label} (degraded, not crashed)`
+    )
   }
   // A bogus string element must be DROPPED, not surfaced to MessageBubble as a fake tool call.
   const out = transport.convertWorkflowAgentValuesSnapshot([mk(["NOTACALL"])], "wfagent:wf_x:0")
@@ -3490,6 +3706,10 @@ async function run(): Promise<void> {
   console.log("PASS electron transport preserves repeated delta arg fragments")
   await testOwnerMetadataAttributesConcurrentSubagentsDeterministically()
   console.log("PASS electron transport attributes concurrent subagents via owner metadata")
+  await testConcurrentIdlessThinkingIsOwnerScoped()
+  console.log("PASS electron transport owner-scopes concurrent id-less thinking")
+  await testIdlessThinkingStartsFreshAfterToolBoundary()
+  console.log("PASS electron transport rotates id-less thinking at tool boundaries")
   await testSubagentIdlessContinuationChunksStitchArgsByIndex()
   console.log("PASS electron transport stitches id-less subagent arg chunks by index")
   await testPrefixedNamespaceRoutesConcurrentSubagentInternals()
@@ -3570,6 +3790,8 @@ async function run(): Promise<void> {
   console.log("PASS electron transport values-mode subagent lifecycle")
   await testSubagentThinkingStreamingAccumulation()
   console.log("PASS electron transport accumulates streamed subagent thinking")
+  await testSubagentThinkingPreviewKeepsMovingTailPastLimit()
+  console.log("PASS electron transport keeps a moving subagent tail past the preview limit")
 }
 
 run().catch((error: Error) => {

@@ -116,6 +116,30 @@ async function testAssistantToolCallsBackfillEmptyArgs(): Promise<void> {
   )
 }
 
+async function testBoundedPreviewAlwaysReplacesOlderTail(): Promise<void> {
+  const older = assistantMessage({ id: "assistant-preview", content: "head OLD-TAIL" })
+  older.is_bounded_preview = true
+  const newer = assistantMessage({ id: "assistant-preview", content: "head NEW" })
+  newer.is_bounded_preview = true
+  const merged = mergeSubagentTranscripts({ "sub-1": [older] }, "sub-1", [newer])
+  assert(
+    merged["sub-1"]?.[0]?.content === "head NEW",
+    "a bounded preview must replace its older tail even when the new render string is shorter"
+  )
+}
+
+async function testBoundedPreviewCanShrinkBackToCompleteText(): Promise<void> {
+  const older = assistantMessage({ id: "assistant-preview", content: "head … OLD-TAIL" })
+  older.is_bounded_preview = true
+  const newer = assistantMessage({ id: "assistant-preview", content: "short" })
+  newer.is_bounded_preview = false
+  const merged = mergeSubagentTranscripts({ "sub-1": [older] }, "sub-1", [newer])
+  assert(
+    merged["sub-1"]?.[0]?.content === "short",
+    "an authoritative preview update must replace stale truncated text after it shrinks"
+  )
+}
+
 async function testDisplayStatsCountVisibleTranscriptEntries(): Promise<void> {
   const messages = [
     assistantMessage({
@@ -220,7 +244,10 @@ async function testOversizedContentIsClampedHeadAndTail(): Promise<void> {
   const text = stored as string
   assert(text.length < huge.length, "oversized content should be clamped")
   assert(text.startsWith("AAAA"), "clamped content should keep the head")
-  assert(text.includes("省略") && text.endsWith("ZZZEND"), "clamped content should keep a tail marker")
+  assert(
+    text.includes("省略") && text.endsWith("ZZZEND"),
+    "clamped content should keep a tail marker"
+  )
 }
 
 async function testPerSubagentByteBudgetDropsOldest(): Promise<void> {
@@ -257,6 +284,10 @@ async function run(): Promise<void> {
   console.log("PASS subagent transcript assistant tool-call merge")
   await testAssistantToolCallsBackfillEmptyArgs()
   console.log("PASS subagent transcript assistant tool-call arg backfill")
+  await testBoundedPreviewAlwaysReplacesOlderTail()
+  console.log("PASS subagent transcript keeps bounded preview tails moving")
+  await testBoundedPreviewCanShrinkBackToCompleteText()
+  console.log("PASS subagent transcript replaces a truncated preview with shorter complete text")
   await testDisplayStatsCountVisibleTranscriptEntries()
   console.log("PASS subagent transcript display stats")
   await testPersistedTranscriptsRestore()

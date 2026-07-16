@@ -250,6 +250,7 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
     ...incoming,
     id: existing.id,
     content:
+      typeof incoming.is_bounded_preview === "boolean" ||
       incomingContentLength >= existingContentLength
         ? (incoming.content ?? existing.content)
         : (existing.content ?? incoming.content),
@@ -324,6 +325,9 @@ function revivePersistedSubagentMessage(value: unknown): Message | null {
     ...(typeof value.name === "string" && { name: value.name }),
     ...(typeof value.status === "string" && { status: value.status }),
     ...(typeof value.is_error === "boolean" && { is_error: value.is_error }),
+    ...(typeof value.is_bounded_preview === "boolean" && {
+      is_bounded_preview: value.is_bounded_preview
+    }),
     created_at: revivePersistedDate(value.created_at),
     ...(value.start_at !== undefined && { start_at: revivePersistedDate(value.start_at) }),
     ...(value.end_at !== undefined && { end_at: revivePersistedDate(value.end_at) })
