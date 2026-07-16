@@ -6163,7 +6163,7 @@ function FeatureDetailPage({
                 {selectedGroup.nodes.length} 个节点
               </div>
             </div>
-            <div className="mt-2.5 grid grid-cols-1 gap-4">
+            <div className="mt-2.5 grid grid-cols-3 gap-4">
               {selectedGroup.nodes.map((node) => renderStageNodeButton(node))}
             </div>
           </section>
@@ -6172,7 +6172,7 @@ function FeatureDetailPage({
     }
 
     return (
-      <div className="grid grid-cols-1 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         {detail.run.nodes.map((node) => renderStageNodeButton(node))}
       </div>
     )
