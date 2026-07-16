@@ -179,14 +179,40 @@ async function testTraceSidecarFailureIsolation(): Promise<void> {
         return pendingFinish
       }
     } as unknown as TraceCollector
-    finishTraceInBackground(pendingTracer, "success", undefined, "TraceTest")
+    let beforeFinishRan = false
+    finishTraceInBackground(pendingTracer, "success", undefined, "TraceTest", () => {
+      beforeFinishRan = true
+    })
     assert(
-      !finishStarted,
-      "background trace completion should not execute inline on the agent completion stack"
+      !beforeFinishRan && !finishStarted,
+      "background trace preparation and completion should not execute inline on the agent completion stack"
     )
     await new Promise<void>((resolve) => setImmediate(resolve))
-    assert(finishStarted, "background trace completion should start on the scheduled event-loop turn")
+    assert(
+      beforeFinishRan,
+      "background trace preparation should run on the scheduled event-loop turn"
+    )
+    assert(
+      finishStarted,
+      "background trace completion should start on the scheduled event-loop turn"
+    )
     resolveFinish({} as AgentTrace)
+
+    let finishAfterPrepareFailureStarted = false
+    const prepareFailureTracer = {
+      finish: async () => {
+        finishAfterPrepareFailureStarted = true
+        return {} as AgentTrace
+      }
+    } as unknown as TraceCollector
+    finishTraceInBackground(prepareFailureTracer, "success", undefined, "TraceTest", () => {
+      throw new Error("injected pre-finish trace preparation failure")
+    })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert(
+      finishAfterPrepareFailureStarted,
+      "a failed background trace preparation should not prevent trace completion"
+    )
 
     const throwingFinishTracer = {
       finish: () => {

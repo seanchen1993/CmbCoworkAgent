@@ -13,7 +13,7 @@ import {
   runTraceSideEffect,
   type TraceCollector
 } from "../trace/collector"
-import type { TraceContext, TraceOutcome } from "../trace/types"
+import type { TraceContext, TraceNodeStatus, TraceOutcome } from "../trace/types"
 import { setAdoptionContext } from "../../services/adoption-tracker"
 import { validateJsonSchemaValue } from "./json-schema"
 import {
@@ -47,6 +47,7 @@ const STRUCTURED_OUTPUT_EXAMPLE_ARRAY_MAX_ITEMS = 16
 const STRUCTURED_OUTPUT_EXAMPLE_MAX_NODES = 256
 const STRUCTURED_OUTPUT_EXAMPLE_MAX_CHARS = 4_000
 const STRUCTURED_OUTPUT_STRINGIFY_MAX_OBJECT_KEYS = 256
+const WORKFLOW_TRACE_TOOL_ARGS_PARSE_MAX_CHARS = 100_000
 const STRUCTURED_OUTPUT_EXAMPLE_UNAVAILABLE = Symbol("structured_output_example_unavailable")
 const STRUCTURED_OUTPUT_NO_SINGLE_VALUE = Symbol("structured_output_no_single_value")
 const PROVIDER_SCHEMA_DROPPED_ANNOTATIONS = new Set([
@@ -604,7 +605,10 @@ async function runOnce(
           traceTerminalRecorded = true
         }
       })
-      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow")
+      const traceSnapshot = latestSnapshot
+      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow", () => {
+        recordWorkflowTraceToolDetails(tracerToFinish, traceSnapshot)
+      })
     }
     if (timeoutTimer) clearTimeout(timeoutTimer)
     request.signal.removeEventListener("abort", onParentAbort)
@@ -1807,9 +1811,13 @@ export async function consumeValuesStream(
 interface MessageLike {
   additional_kwargs?: { tool_calls?: unknown[] }
   content?: unknown
+  name?: unknown
+  status?: unknown
   kwargs?: {
     additional_kwargs?: { tool_calls?: unknown[] }
     content?: unknown
+    name?: unknown
+    status?: unknown
     tool_calls?: unknown[]
     invalid_tool_calls?: unknown[]
     tool_call_id?: unknown
@@ -1994,6 +2002,123 @@ function extractFinalAssistantReasoning(snapshot: unknown): string {
   return ""
 }
 
+interface WorkflowNormalizedToolCall {
+  toolCallId?: string
+  name: string
+  input?: unknown
+}
+
+export interface WorkflowTraceToolDetail extends WorkflowNormalizedToolCall {
+  output?: unknown
+  status: TraceNodeStatus
+}
+
+function workflowTraceToolCallName(toolCall: unknown): string {
+  if (!isPlainRecord(toolCall)) return "unknown"
+  const fn = isPlainRecord(toolCall.function) ? toolCall.function : undefined
+  let name = ""
+  if (typeof toolCall.name === "string") name = toolCall.name
+  else if (typeof fn?.name === "string") name = fn.name
+  return name.trim() || "unknown"
+}
+
+function workflowTraceToolCallInput(toolCall: unknown): unknown {
+  if (!isPlainRecord(toolCall)) return undefined
+  if (Object.prototype.hasOwnProperty.call(toolCall, "args")) return toolCall.args
+  const fn = isPlainRecord(toolCall.function) ? toolCall.function : undefined
+  if (!fn || !Object.prototype.hasOwnProperty.call(fn, "arguments")) return undefined
+  const args = fn.arguments
+  if (typeof args !== "string") return args
+  const trimmed = args.trim()
+  if (
+    !trimmed ||
+    trimmed.length > WORKFLOW_TRACE_TOOL_ARGS_PARSE_MAX_CHARS ||
+    (!trimmed.startsWith("{") && !trimmed.startsWith("["))
+  ) {
+    return args
+  }
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return args
+  }
+}
+
+function extractWorkflowNormalizedToolCalls(snapshot: unknown): WorkflowNormalizedToolCall[] {
+  const details: WorkflowNormalizedToolCall[] = []
+  const seenIds = new Set<string>()
+  for (const message of snapshotMessages(snapshot)) {
+    if (!isAiMessage(message)) continue
+    for (const call of messageNormalizedToolCalls(message)) {
+      const id = toolCallId(call)
+      if (id) {
+        if (seenIds.has(id)) continue
+        seenIds.add(id)
+      }
+      const input = workflowTraceToolCallInput(call)
+      details.push({
+        ...(id ? { toolCallId: id } : {}),
+        name: workflowTraceToolCallName(call),
+        ...(input !== undefined ? { input } : {})
+      })
+    }
+  }
+  return details
+}
+
+function workflowTraceToolResultStatus(message: MessageLike): TraceNodeStatus {
+  const status = message.status ?? message.kwargs?.status
+  if (status === "error") return "error"
+  if (status === "cancelled") return "cancelled"
+  if (status === "unknown") return "unknown"
+  return "success"
+}
+
+/**
+ * Recover the tools that actually executed from a Workflow agent's cumulative
+ * values snapshot. Only normalized/actionable AI tool calls are included;
+ * malformed calls from additional_kwargs/invalid_tool_calls are intentionally
+ * excluded because the runtime never executed them.
+ */
+export function extractWorkflowTraceToolDetails(snapshot: unknown): WorkflowTraceToolDetail[] {
+  const resultsByCallId = new Map<string, { output?: unknown; status: TraceNodeStatus }>()
+  for (const message of snapshotMessages(snapshot)) {
+    if (!isToolMessage(message)) continue
+    const id = toolMessageToolCallId(message)
+    if (!id) continue
+    const output = message.content ?? message.kwargs?.content
+    resultsByCallId.set(id, {
+      ...(output !== undefined ? { output } : {}),
+      status: workflowTraceToolResultStatus(message)
+    })
+  }
+
+  return extractWorkflowNormalizedToolCalls(snapshot).map((call) => {
+    const result = call.toolCallId ? resultsByCallId.get(call.toolCallId) : undefined
+    return {
+      ...call,
+      ...(result && result.output !== undefined ? { output: result.output } : {}),
+      status: result?.status ?? "unknown"
+    }
+  })
+}
+
+function recordWorkflowTraceToolDetails(tracer: TraceCollector, snapshot: unknown): void {
+  for (const tool of extractWorkflowTraceToolDetails(snapshot)) {
+    const toolNodeId = tracer.addToolNode({
+      name: tool.name,
+      ...(tool.input !== undefined ? { input: tool.input } : {}),
+      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {})
+    })
+    tracer.addToolResultNode({
+      parentId: toolNodeId,
+      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
+      ...(tool.output !== undefined ? { output: tool.output } : {}),
+      status: tool.status
+    })
+  }
+}
+
 /**
  * Sums reported output tokens across assistant messages; falls back to a
  * chars/4 estimate when the provider reports no usage (common on mid-tier
@@ -2028,20 +2153,7 @@ export function extractOutputTokens(snapshot: unknown, text: string): number {
 }
 
 function extractWorkflowToolCallCount(snapshot: unknown): number {
-  let count = 0
-  const seenIds = new Set<string>()
-  for (const message of snapshotMessages(snapshot)) {
-    if (!isAiMessage(message)) continue
-    for (const call of messageNormalizedToolCalls(message)) {
-      const id = toolCallId(call)
-      if (id) {
-        if (seenIds.has(id)) continue
-        seenIds.add(id)
-      }
-      count += 1
-    }
-  }
-  return count
+  return extractWorkflowNormalizedToolCalls(snapshot).length
 }
 
 /**

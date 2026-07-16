@@ -1037,12 +1037,16 @@ export function finishTraceInBackground(
   tracer: TraceCollector,
   outcome: TraceOutcome,
   errorMessage?: string,
-  scope = "Tracer"
+  scope = "Tracer",
+  beforeFinish?: () => void
 ): void {
   // Defer the whole finish call, not just its returned promise. Async functions
   // execute synchronously until their first await, so calling finish inline
   // would still add telemetry work to the child-run completion path.
   setImmediate(() => {
+    if (beforeFinish) {
+      runTraceSideEffect(`${scope} pre-finish`, beforeFinish)
+    }
     try {
       void tracer.finish(outcome, errorMessage).catch((error) => {
         console.warn(`[${scope}] background trace finish failed:`, error)

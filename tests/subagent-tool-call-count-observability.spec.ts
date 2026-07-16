@@ -72,7 +72,7 @@ function testWorkflowSubagentWritesToolCallCount(): void {
   )
   assertIncludes(
     workflowSubagentSource,
-    "for (const call of messageNormalizedToolCalls(message))",
+    "return extractWorkflowNormalizedToolCalls(snapshot).length",
     "workflow subagent should count actionable tool calls rather than invalid/raw artifacts"
   )
   assertIncludes(
@@ -89,6 +89,21 @@ function testWorkflowSubagentWritesToolCallCount(): void {
     workflowSubagentSource,
     "!traceTerminalRecorded && toolCallCount > 0",
     "workflow subagent should preserve tool-call count when it fails or is cancelled"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    "export function extractWorkflowTraceToolDetails",
+    "workflow subagent should recover detailed tool calls from its final snapshot"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    "tracer.addToolNode({",
+    "workflow subagent should persist tool names and inputs as trace nodes"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    "tracer.addToolResultNode({",
+    "workflow subagent should persist matched tool results as trace nodes"
   )
 }
 
@@ -161,8 +176,13 @@ function testSubagentTraceSidecarIsolation(): void {
   )
   assertIncludes(
     workflowSubagentSource,
-    'finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow")',
-    "workflow trace completion should run in the background"
+    "recordWorkflowTraceToolDetails(tracerToFinish, traceSnapshot)",
+    "workflow tool-detail extraction should run as background trace preparation"
+  )
+  assertIncludes(
+    traceCollectorSource,
+    "runTraceSideEffect(`${scope} pre-finish`, beforeFinish)",
+    "background trace preparation should be isolated from trace completion"
   )
   assert(
     !runtimeSource.includes("await workerTracer.finish("),
