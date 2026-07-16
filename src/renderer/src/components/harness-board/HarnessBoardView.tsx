@@ -4697,8 +4697,19 @@ function ProjectConstraintSyncPanel({
 
   return (
     <section className="rounded-md border border-border bg-background shadow-sm">
-      <div className="border-b border-border px-4 py-3">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-sm font-semibold text-foreground">拉取公共系统约束</h2>
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto min-w-0 px-0 py-0 text-xs"
+          onClick={() => {
+            void window.electron.openExternal("https://doc.cmbchina.com/f/v?id=zfGMOW")
+          }}
+        >
+          知识库使用指引
+        </Button>
       </div>
       <div className="space-y-3 p-4">
         {adapters.length === 0 ? (
