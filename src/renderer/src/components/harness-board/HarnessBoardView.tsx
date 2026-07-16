@@ -5179,18 +5179,10 @@ function ProjectReviewSummary({
       {hasReviewResult && (
         <div className="flex items-center">
           {reviews.length > 0 ? (
-            <TooltipProvider delayDuration={150}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span tabIndex={0} className="inline-flex">
-                    <CheckCircle2 className="size-3.5 text-status-nominal" aria-label="存在评审记录" />
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="z-[70] max-w-72">
-                  已有项目评审流程，请确认详设文档已存在。
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <div className="flex items-start gap-1.5 text-status-nominal">
+              <CheckCircle2 className="size-3.5 text-status-nominal" aria-label="存在评审记录" />
+              <span>已有项目评审流程，请确认详设文档已存在。</span>
+            </div>
           ) : (
             <div className="flex items-start gap-1.5 text-destructive">
               <TriangleAlert  className="mt-0.5 size-3.5 shrink-0" />
