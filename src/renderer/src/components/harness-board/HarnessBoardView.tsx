@@ -343,7 +343,9 @@ function buildEnterpriseProjectPhaseSteps(currentPhaseStatus: string): HarnessPr
     (phaseStatus) => phaseStatus === normalizedPhaseStatus
   )
 
-  return ENTERPRISE_PROJECT_PHASE_SEQUENCE.map((phaseStatus, index) => {
+  return ENTERPRISE_PROJECT_PHASE_SEQUENCE
+    .filter((phaseStatus) => phaseStatus !== '上线中' && phaseStatus !== '结项中')
+    .map((phaseStatus, index) => {
     const completed = currentIndex !== -1 && index <= currentIndex
 
     return {
@@ -1614,19 +1616,10 @@ function HarnessProjectPhaseFlow({
 }: {
   steps: HarnessProjectPhaseStep[]
 }): React.JSX.Element {
-  const isCompactFlow = steps.length > 5
-
   return (
     <section className="w-full shrink-0 rounded-2xl border border-border/80 bg-background-elevated/80 p-3 shadow-sx">
       <div className="overflow-x-auto pb-1">
-        <div
-          className={cn(
-            "grid w-full gap-2.5",
-            isCompactFlow
-              ? "grid-cols-[repeat(9,minmax(0,1fr))]"
-              : "md:grid-cols-[repeat(5,minmax(0,1fr))]"
-          )}
-        >
+        <div className="grid w-full grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-6">
           {steps.map((step, index) => {
             const isDone = step.tone === "done"
             const isLast = index === steps.length - 1
@@ -1636,7 +1629,7 @@ function HarnessProjectPhaseFlow({
                 {!isLast && (
                   <div
                     aria-hidden="true"
-                    className="pointer-events-none absolute left-[calc(100%-7px)] top-1/2 z-20 hidden -translate-y-1/2 min-[1198px]:flex"
+                    className="pointer-events-none absolute left-[calc(100%-0px)] top-1/2 z-20 hidden -translate-y-1/2 min-[1198px]:flex"
                   >
                     <div
                       className={cn(
@@ -1653,7 +1646,7 @@ function HarnessProjectPhaseFlow({
                 <button
                   type="button"
                   className={cn(
-                    "relative z-10 flex w-full min-w-0 items-center gap-2 rounded-xl border px-2 py-2 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "relative z-10 flex w-full min-w-0 items-center gap-4 rounded-xl border px-2 py-2 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     isDone
                       ? "border-status-nominal/20 bg-status-nominal/[0.04]"
                       : "border-border/100 bg-background/100 hover:border-status-info/20 hover:bg-background"
@@ -6170,7 +6163,7 @@ function FeatureDetailPage({
                 {selectedGroup.nodes.length} 个节点
               </div>
             </div>
-            <div className="mt-2.5 grid grid-cols-3 gap-2.5">
+            <div className="mt-2.5 grid grid-cols-1 gap-4">
               {selectedGroup.nodes.map((node) => renderStageNodeButton(node))}
             </div>
           </section>
@@ -6179,7 +6172,7 @@ function FeatureDetailPage({
     }
 
     return (
-      <div className="grid grid-cols-3 gap-2.5">
+      <div className="grid grid-cols-1 gap-4">
         {detail.run.nodes.map((node) => renderStageNodeButton(node))}
       </div>
     )
