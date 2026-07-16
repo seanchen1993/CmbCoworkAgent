@@ -4090,7 +4090,7 @@ function ProjectBadgeRow({
   return (
     <div className="flex min-w-0 items-center">
       {children}
-      <span className="text-xs mx-1 text-gray-500">
+      <span className="text-xs mx-1 text-gray-500 max-w-[100px] truncate">
         / {project.projectCode}
       </span>
       {project.projectFromLean && (
@@ -4220,7 +4220,7 @@ function ProjectCard({
           <div className="flex">
             <div className="min-w-0">
               <ProjectBadgeRow project={project}>
-                <h2 className="truncate text-[15px] font-semibold">{project.name}</h2>
+                <h2 className="truncate text-[15px] font-semibold max-w-[150px]">{project.name}</h2>
               </ProjectBadgeRow>
               <div className="mt-1.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
                 {project.description}
@@ -6028,7 +6028,7 @@ function FeatureDetailPage({
           key={node.id}
           title={node.label}
           className={cn(
-            "group/node flex h-[104px] min-w-0 flex-col rounded-xl border bg-background/75  transition-all duration-200",
+            "group/node flex h-[104px] min-w-0  flex-col rounded-xl border bg-background/75  transition-all duration-200",
             selected
               ? "border-status-info/35 shadow-md ring-1 ring-status-info/10"
               : "border-border/80 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-background/85 hover:shadow-md"
@@ -6170,7 +6170,7 @@ function FeatureDetailPage({
                 {selectedGroup.nodes.length} 个节点
               </div>
             </div>
-            <div className="mt-2.5 grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2.5">
+            <div className="mt-2.5 grid grid-cols-3 gap-2.5">
               {selectedGroup.nodes.map((node) => renderStageNodeButton(node))}
             </div>
           </section>
@@ -6179,16 +6179,11 @@ function FeatureDetailPage({
     }
 
     return (
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2.5">
+      <div className="grid grid-cols-3 gap-2.5">
         {detail.run.nodes.map((node) => renderStageNodeButton(node))}
       </div>
     )
   }
-
-  const activeSessionThread = activeSessionThreadIdForView
-    ? threadsById.get(activeSessionThreadIdForView) ?? null
-    : null
-  const activeSessionWorkspacePath = getThreadWorkspacePath(activeSessionThread)
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-gradient-to-br from-background via-background to-muted/70">
@@ -6263,43 +6258,16 @@ function FeatureDetailPage({
       </div>
 
       {activeSessionThreadIdForView ? (
-        <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-6">
-          <section className={cn(harnessSurfaceClassName, "flex min-h-0 flex-1 flex-col overflow-hidden p-3")}>
-            <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/70 px-2 pb-3">
-              <div className="min-w-0">
-                <div className={harnessKickerClassName}>Session workspace</div>
-                <div className="mt-1 truncate text-sm font-semibold">
-                  {activeSessionThread?.title || "特性会话"}
-                </div>
-                {activeSessionWorkspacePath && (
-                  <div className="mt-1 truncate text-xs text-muted-foreground" title={activeSessionWorkspacePath}>
-                    {getWorkspaceName(activeSessionWorkspacePath)}
-                  </div>
-                )}
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="gap-2"
-                onClick={handleBackToFeature}
-              >
-                <ArrowLeft className="size-4" />
-                返回特性
-              </Button>
-            </div>
-            <div className="min-h-0 flex-1 pt-3">
-              <FeatureConversationPanel
-                threadId={activeSessionThreadIdForView}
-                readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话" : null}
-                hasPendingGitDiffNotice={hasPendingGitDiffNotice}
-                onHarnessSessionCreated={handleContextReminderSessionCreated}
-                onRequestOpenGitPanel={onRequestOpenGitPanel}
-                onDismissGitChangeNotice={onDismissGitChangeNotice}
-                onThreadGitStatusChange={onThreadGitStatusChange}
-              />
-            </div>
-          </section>
+        <div className="flex min-h-0 flex-1 flex-col pt-3">
+          <FeatureConversationPanel
+            threadId={activeSessionThreadIdForView}
+            readOnlyReason={projectDeleted ? "项目已删除，仅可查看历史会话" : null}
+            hasPendingGitDiffNotice={hasPendingGitDiffNotice}
+            onHarnessSessionCreated={handleContextReminderSessionCreated}
+            onRequestOpenGitPanel={onRequestOpenGitPanel}
+            onDismissGitChangeNotice={onDismissGitChangeNotice}
+            onThreadGitStatusChange={onThreadGitStatusChange}
+          />
         </div>
       ) : projectDeleted ? (
         <div className="flex w-full flex-1 items-center justify-center p-6">
