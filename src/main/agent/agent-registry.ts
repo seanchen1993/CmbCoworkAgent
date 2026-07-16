@@ -427,7 +427,7 @@ export const BUILT_IN_AGENT_PROFILES: readonly AgentProfile[] = [
       'Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.',
     systemPrompt: EXPLORE_PROMPT,
     source: "built-in",
-    disallowedTools: ["write_file", "edit_file"],
+    disallowedTools: ["write_file", "edit_file", "write_todos"],
     shellAccess: "read_only"
   },
   {
