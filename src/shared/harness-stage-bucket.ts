@@ -25,6 +25,18 @@ export const STAGE_IN_PROGRESS_LABEL = "进行中"
 export const STAGE_DONE_LABEL = "已完成"
 
 /**
+ * Whether a human-readable workflow group-label represents the Code stage.
+ * Adapter workflows may localize or prefix the label, so accept both a `code`
+ * token (`Code`, `Dev-Code`) and Chinese code labels (`Dev-代码实现`).
+ */
+export function isHarnessCodeStageNodeName(value: string | null | undefined): boolean {
+  const normalized = value?.normalize("NFKC").trim() ?? ""
+  if (!normalized) return false
+  if (normalized.includes("代码")) return true
+  return /(?:^|[^a-z0-9])code(?:$|[^a-z0-9])/i.test(normalized)
+}
+
+/**
  * Classify one turn's / code event's (stage status, skill-presence) into a bucket.
  *  - 进行中 + 有 Skill 归因 → plugin_constrained（阶段进行中且实际调用插件）
  *  - 进行中 + 无 Skill 归因 → vibecoding（阶段开着但绕过插件，本质是自由产出）

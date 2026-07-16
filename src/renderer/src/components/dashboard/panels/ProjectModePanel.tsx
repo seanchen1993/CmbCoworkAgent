@@ -1122,7 +1122,6 @@ function ProjectRow({
         <td className="px-3 py-2 text-muted-foreground">
           {lifecycleLabel(project.lifecycleStatus)}
         </td>
-        <td className="px-3 py-2 text-right tabular-nums">{formatNumber(project.featureCount)}</td>
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
         </td>
@@ -1167,6 +1166,22 @@ function ProjectRow({
               onActivate={() => onOpenProjectCommits(true)}
               title={pushTraceTitle}
             />
+          </div>
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <div className="flex flex-col items-end gap-0.5">
+            <div>
+              <span className="mr-1 text-muted-foreground">会话</span>
+              <span className="font-medium text-foreground">
+                {formatNumber(project.codeStageConversationCount)}
+              </span>
+            </div>
+            <div>
+              <span className="mr-1 text-muted-foreground">Feature</span>
+              <span className="font-medium text-foreground">
+                {formatNumber(project.featureCount)}
+              </span>
+            </div>
           </div>
         </td>
         <td className="px-3 py-2 text-right tabular-nums">
@@ -1626,8 +1641,8 @@ function ProjectListSection({
         <>
           <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-            项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及
-            Harness / VibeCoding
+            项目、插件、项目状态、Feature 数为当前状态；对话数、Code
+            阶段会话数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
             流程采纳率按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
           </p>
         </>
@@ -1703,7 +1718,7 @@ function ProjectListSection({
           effectiveLoading && "opacity-70"
         )}
       >
-        <table className="w-full min-w-[1920px] table-fixed text-xs">
+        <table className="w-full min-w-[2000px] table-fixed text-xs">
           {/*
            * Keep column allocation deterministic across macOS and Windows.
            * With table-layout:auto, CJK body text has a one-glyph min-content
@@ -1715,11 +1730,11 @@ function ProjectListSection({
             <col className="w-[300px]" />
             <col className="w-[220px]" />
             <col className="w-[90px]" />
-            <col className="w-[72px]" />
             <col className="w-[76px]" />
             <col className="w-[110px]" />
             <col className="w-[160px]" />
             <col className="w-[160px]" />
+            <col className="w-[142px]" />
             <col className="w-[178px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
@@ -1739,14 +1754,6 @@ function ProjectListSection({
               <th className="px-3 py-2 text-left font-medium">插件</th>
               <th className="px-3 py-2 text-left font-medium">项目状态</th>
               <SortableTh
-                label="特性数"
-                sortKey="featureCount"
-                activeKey={effectiveSortBy}
-                order={sortOrder}
-                enabled
-                onSort={cycleSort}
-              />
-              <SortableTh
                 label="对话数"
                 sortKey="conversationCount"
                 activeKey={effectiveSortBy}
@@ -1765,6 +1772,32 @@ function ProjectListSection({
               />
               <th className="px-3 py-2 text-right font-medium">提交口径采纳率</th>
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="Code 阶段会话数按所选时间范围统计；Feature 数为项目当前值"
+              >
+                <div>Code阶段会话数</div>
+                <button
+                  type="button"
+                  onClick={() => cycleSort("featureCount")}
+                  title="按 Feature 数排序"
+                  className={cn(
+                    "ml-auto inline-flex items-center gap-1 transition-colors hover:text-foreground",
+                    effectiveSortBy === "featureCount" ? "text-foreground" : "text-muted-foreground"
+                  )}
+                >
+                  <span>Feature数</span>
+                  {effectiveSortBy === "featureCount" ? (
+                    effectiveSortOrder === "asc" ? (
+                      <ArrowUp className="size-3 shrink-0" />
+                    ) : (
+                      <ArrowDown className="size-3 shrink-0" />
+                    )
+                  ) : (
+                    <ArrowUpDown className="size-3 shrink-0 opacity-40" />
+                  )}
+                </button>
+              </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
                 title="按流程阶段归因拆分的总量口径提交采纳率"

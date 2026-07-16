@@ -48,6 +48,7 @@ import {
   STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
+  isHarnessCodeStageNodeName,
   type StageBucket
 } from "../../shared/harness-stage-bucket"
 
@@ -8246,7 +8247,9 @@ function makeMockStageBuckets(
 
 function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
   // stageBuckets is derived from each draft's totals after assembly (see below).
-  const projectDrafts: Array<Omit<ProjectModeProjectView, "stageBuckets">> = [
+  const projectDrafts: Array<
+    Omit<ProjectModeProjectView, "stageBuckets" | "codeStageConversationCount">
+  > = [
     {
       projectId: "proj-cmb-cowork",
       name: "CmbCowork Agent",
@@ -8501,6 +8504,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
   // 由各项目自身的代码/对话总量派生 stage×skill 三桶（DEV 演示用）。
   const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => ({
     ...project,
+    codeStageConversationCount: Math.round(project.conversationCount * 0.4),
     lifecycleCreatedAt:
       project.lifecycleCreatedAt ??
       new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
@@ -10406,6 +10410,8 @@ interface ProjectModeProjectView {
   systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  /** Conversations whose current workflow node belongs to the Code stage. */
+  codeStageConversationCount: number
   hasError: boolean
   features: ProjectModeFeatureView[]
   topSkills: ProjectModeSkillCount[]
@@ -11051,6 +11057,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
         : undefined,
     featureCount: asNumber(props.featureCount, features.length),
     conversationCount: 0,
+    codeStageConversationCount: 0,
     hasError: typeof props.error === "string" && props.error.length > 0,
     features,
     topSkills: [],
@@ -11854,6 +11861,16 @@ async function fetchProjectModeUsage(
   }
 }
 
+function countCodeStageConversations(rawBuckets: unknown): number {
+  if (!Array.isArray(rawBuckets)) return 0
+  return rawBuckets.reduce((total, bucket) => {
+    const item = asRecord(bucket)
+    return isHarnessCodeStageNodeName(asString(item.key))
+      ? total + asNumber(item.doc_count)
+      : total
+  }, 0)
+}
+
 async function fetchProjectModePageUsage(
   projectIds: string[],
   range: TimeRange,
@@ -11861,13 +11878,22 @@ async function fetchProjectModePageUsage(
   access: DashboardAccessContext
 ): Promise<{
   perProject: Map<string, number>
+  perProjectCodeStage: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
   perProjectStageConversations: Map<string, Record<StageBucket, number>>
 }> {
   const perProject = new Map<string, number>()
+  const perProjectCodeStage = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
   const perProjectStageConversations = new Map<string, Record<StageBucket, number>>()
-  if (projectIds.length === 0) return { perProject, perProjectSkills, perProjectStageConversations }
+  if (projectIds.length === 0) {
+    return {
+      perProject,
+      perProjectCodeStage,
+      perProjectSkills,
+      perProjectStageConversations
+    }
+  }
 
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
   const body = {
@@ -11886,6 +11912,7 @@ async function fetchProjectModePageUsage(
         aggs: {
           skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } },
+          by_node: { terms: { field: "harnessNodeName", size: 100 } },
           ...stageBucketTraceAggs()
         }
       }
@@ -11893,13 +11920,21 @@ async function fetchProjectModePageUsage(
   }
   const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
   const buckets = asRecord(asRecord(raw.aggregations).by_project).buckets
-  if (!Array.isArray(buckets)) return { perProject, perProjectSkills, perProjectStageConversations }
+  if (!Array.isArray(buckets)) {
+    return {
+      perProject,
+      perProjectCodeStage,
+      perProjectSkills,
+      perProjectStageConversations
+    }
+  }
 
   for (const bucket of buckets) {
     const b = asRecord(bucket)
     const key = asString(b.key)
     if (!key) continue
     perProject.set(key, asNumber(b.doc_count))
+    perProjectCodeStage.set(key, countCodeStageConversations(asRecord(b.by_node).buckets))
     perProjectSkills.set(
       key,
       combineSkillCountBuckets(
@@ -11911,7 +11946,7 @@ async function fetchProjectModePageUsage(
     perProjectStageConversations.set(key, parseStageBucketConversations(b))
   }
 
-  return { perProject, perProjectSkills, perProjectStageConversations }
+  return { perProject, perProjectCodeStage, perProjectSkills, perProjectStageConversations }
 }
 
 /**
@@ -12305,6 +12340,7 @@ async function fetchProjectModeProjectPage(
     projects: sliced.projects.map((project) => ({
       ...project,
       conversationCount: usage.perProject.get(project.projectId) ?? 0,
+      codeStageConversationCount: usage.perProjectCodeStage.get(project.projectId) ?? 0,
       topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
       codeStats: code.byProject.get(project.projectId) ?? null,
       stageBuckets: buildStageBuckets(

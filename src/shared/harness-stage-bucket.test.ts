@@ -11,12 +11,28 @@
 import { describe, expect, it } from "vitest"
 import {
   classifyHarnessStageBucket,
+  isHarnessCodeStageNodeName,
   STAGE_BUCKET_LABELS,
   STAGE_BUCKET_ORDER,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
   type StageBucket
 } from "./harness-stage-bucket"
+
+describe("isHarnessCodeStageNodeName", () => {
+  it("recognizes localized and prefixed Code-stage labels", () => {
+    for (const label of ["Code", "Dev-Code", "DEV / CODE", "Dev-代码实现", "代码开发"]) {
+      expect(isHarnessCodeStageNodeName(label)).toBe(true)
+    }
+  })
+
+  it("does not classify unrelated or substring-only node names as Code", () => {
+    for (const label of ["Dev-行为规格", "Dev-技术设计", "Decode", "VibeCoding", ""]) {
+      expect(isHarnessCodeStageNodeName(label)).toBe(false)
+    }
+    expect(isHarnessCodeStageNodeName(null)).toBe(false)
+  })
+})
 
 describe("classifyHarnessStageBucket", () => {
   it("进行中 + skill → plugin_constrained", () => {
