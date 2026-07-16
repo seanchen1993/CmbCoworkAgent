@@ -82,6 +82,7 @@ function allFilesystemTools(): FakeTool[] {
     fakeTool("task_output"),
     fakeTool("code_exec"),
     fakeTool("save_code_exec_tool"),
+    fakeTool("mcp__node_repl__js"),
     fakeTool("invoke_deferred_tool"),
     fakeTool("grep")
   ]
@@ -100,6 +101,7 @@ async function testReadOnlyWorkerToolSurface(): Promise<void> {
     "edit_file",
     "code_exec",
     "save_code_exec_tool",
+    "mcp__node_repl__js",
     "invoke_deferred_tool"
   ]) {
     assertNoTool(tools, name, "read_only worker")
@@ -123,6 +125,7 @@ async function testVerifyWorkerToolSurface(): Promise<void> {
   assertNoTool(tools, "edit_file", "verify worker")
   assertNoTool(tools, "code_exec", "verify worker")
   assertNoTool(tools, "save_code_exec_tool", "verify worker")
+  assertNoTool(tools, "mcp__node_repl__js", "verify worker")
   assertNoTool(tools, "invoke_deferred_tool", "verify worker")
   assertHasTool(tools, "execute", "verify worker")
   assertHasTool(tools, "task_output", "verify worker")
@@ -151,6 +154,7 @@ async function testScopedWriteWorkerToolSurfaceAndGuard(): Promise<void> {
         fakeTool("execute"),
         fakeTool("task_output"),
         fakeTool("save_code_exec_tool"),
+        fakeTool("mcp__node_repl__js"),
         fakeTool("read_file")
       ],
       {
@@ -163,6 +167,7 @@ async function testScopedWriteWorkerToolSurfaceAndGuard(): Promise<void> {
     assertNoTool(tools, "execute", "scoped write worker")
     assertNoTool(tools, "task_output", "scoped write worker")
     assertNoTool(tools, "save_code_exec_tool", "scoped write worker")
+    assertNoTool(tools, "mcp__node_repl__js", "scoped write worker")
     assertHasTool(tools, "write_file", "scoped write worker")
     assertHasTool(tools, "edit_file", "scoped write worker")
     assertHasTool(tools, "read_file", "scoped write worker")
@@ -362,6 +367,7 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
     fakeTool("inspect_tool"),
     fakeTool("invoke_deferred_tool"),
     fakeTool("code_exec"),
+    fakeTool("mcp__node_repl__js"),
     fakeTool("read_file"),
     fakeTool("execute")
   ]
@@ -375,6 +381,7 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   assertNoTool(readOnlyTools, "inspect_tool", "read_only final tools")
   assertNoTool(readOnlyTools, "invoke_deferred_tool", "read_only final tools")
   assertNoTool(readOnlyTools, "code_exec", "read_only final tools")
+  assertNoTool(readOnlyTools, "mcp__node_repl__js", "read_only final tools")
   // execute is KEPT for read-only final tools (gated read-only per command).
   assertHasTool(readOnlyTools, "execute", "read_only final tools")
   assertHasTool(readOnlyTools, "read_file", "read_only final tools")
@@ -388,6 +395,7 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   assertNoTool(verifyTools, "inspect_tool", "verify final tools")
   assertNoTool(verifyTools, "invoke_deferred_tool", "verify final tools")
   assertNoTool(verifyTools, "code_exec", "verify final tools")
+  assertNoTool(verifyTools, "mcp__node_repl__js", "verify final tools")
   assertHasTool(verifyTools, "execute", "verify final tools")
   assertHasTool(verifyTools, "read_file", "verify final tools")
 
@@ -400,6 +408,7 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   assertNoTool(scopedWriteTools, "inspect_tool", "scoped write final tools")
   assertNoTool(scopedWriteTools, "invoke_deferred_tool", "scoped write final tools")
   assertNoTool(scopedWriteTools, "code_exec", "scoped write final tools")
+  assertNoTool(scopedWriteTools, "mcp__node_repl__js", "scoped write final tools")
   assertNoTool(scopedWriteTools, "execute", "scoped write final tools")
   assertHasTool(scopedWriteTools, "read_file", "scoped write final tools")
 
@@ -410,6 +419,7 @@ async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
   })
   assertHasTool(unrestrictedWriteTools, "search_tool", "whole-workspace write final tools")
   assertHasTool(unrestrictedWriteTools, "code_exec", "whole-workspace write final tools")
+  assertHasTool(unrestrictedWriteTools, "mcp__node_repl__js", "whole-workspace write final tools")
 }
 
 async function run(): Promise<void> {

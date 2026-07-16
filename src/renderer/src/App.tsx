@@ -80,6 +80,14 @@ async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
   } catch { /* migration is best-effort */ }
 }
 
+function getBrowserSessionId(threadId: string): string {
+  return `thread-${threadId}`
+}
+
+function formatAppError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 const LEFT_MIN = 200
 const LEFT_MAX = 400
 const LEFT_DEFAULT = 280
@@ -168,6 +176,7 @@ function App(): React.JSX.Element {
     rightPanelCollapsed,
     toggleRightPanel,
     rightPanelWorkRequest,
+    setRightPanelCollapsed,
     setPendingEvolution,
     workerFocusView,
     subagentFocusView,
@@ -188,6 +197,7 @@ function App(): React.JSX.Element {
       rightPanelCollapsed: state.rightPanelCollapsed,
       toggleRightPanel: state.toggleRightPanel,
       rightPanelWorkRequest: state.rightPanelWorkRequest,
+      setRightPanelCollapsed: state.setRightPanelCollapsed,
       setPendingEvolution: state.setPendingEvolution,
       workerFocusView: state.workerFocusView,
       subagentFocusView: state.subagentFocusView,
@@ -207,6 +217,7 @@ function App(): React.JSX.Element {
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
+  const lastVisibleBrowserSessionIdRef = useRef<string | null>(null)
 
   const [zoomLevel, setZoomLevel] = useState(1)
   const [bus, setBus] = useState(true)
@@ -516,6 +527,57 @@ function App(): React.JSX.Element {
     : false
   const showRightPanelModuleControls =
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
+  const activeBrowserSessionId = activeRightPanelThreadId
+    ? getBrowserSessionId(activeRightPanelThreadId)
+    : null
+  const isBrowserPanelVisible =
+    rightModule === "browser" &&
+    !rightPanelCollapsed &&
+    !isAgentFocusActive &&
+    ((mainView === "thread" && Boolean(currentThreadId)) ||
+      (mainView === "harness" && Boolean(harnessSessionThreadId)))
+
+  const detachBrowserSession = useCallback((sessionId: string, reason: string) => {
+    console.info(`[App] Detaching Browser session ${sessionId} because ${reason}.`)
+    void window.api.browser.detach(sessionId).catch((error) => {
+      console.error(`[App] Browser session ${sessionId} detach failed: ${formatAppError(error)}.`)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (isBrowserPanelVisible && activeBrowserSessionId) {
+      const previousSessionId = lastVisibleBrowserSessionIdRef.current
+      if (previousSessionId && previousSessionId !== activeBrowserSessionId) {
+        detachBrowserSession(previousSessionId, "the active thread changed")
+      }
+      lastVisibleBrowserSessionIdRef.current = activeBrowserSessionId
+      return
+    }
+
+    const sessionId = lastVisibleBrowserSessionIdRef.current
+    if (!sessionId) return
+    lastVisibleBrowserSessionIdRef.current = null
+    detachBrowserSession(sessionId, "the Browser panel is hidden")
+  }, [activeBrowserSessionId, detachBrowserSession, isBrowserPanelVisible])
+
+  useEffect(() => {
+    return window.api.browser.onPanelRequest((request) => {
+      if (mainView !== "thread" && mainView !== "harness") return
+      const requestedThreadId = request.threadId ?? null
+      const activeThreadId = mainView === "harness" ? harnessSessionThreadId : currentThreadId
+      if (requestedThreadId && activeThreadId && requestedThreadId !== activeThreadId) return
+      if (requestedThreadId && !activeThreadId) return
+      setRightPanelCollapsed(false)
+      selectBrowserModule()
+      console.info(`[App] Showing Browser panel for ${requestedThreadId || activeThreadId || "active thread"}.`)
+    })
+  }, [
+    currentThreadId,
+    harnessSessionThreadId,
+    mainView,
+    selectBrowserModule,
+    setRightPanelCollapsed
+  ])
 
   const selectGitModule = useCallback(() => {
     if (activeRightPanelThreadId) {

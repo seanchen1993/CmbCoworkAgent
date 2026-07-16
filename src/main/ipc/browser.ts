@@ -1,5 +1,6 @@
 import type { BrowserWindow, IpcMain } from "electron"
 import { BrowserService } from "../browser/browser-service"
+import { setGlobalBrowserService } from "../browser/browser-service-registry"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
@@ -12,23 +13,28 @@ export function registerBrowserHandlers(
   getMainWindow: () => BrowserWindow | null
 ): BrowserService {
   const browserService = new BrowserService(getMainWindow)
+  setGlobalBrowserService(browserService)
 
-  ipcMain.handle("browser:attach", (_event, sessionId: string, options?: BrowserAttachOptions) =>
-    browserService.attach(sessionId, options)
-  )
+  ipcMain.handle("browser:attach", (_event, sessionId: string, options?: BrowserAttachOptions) => {
+    return browserService.attach(sessionId, options)
+  })
 
-  ipcMain.handle("browser:detach", (_event, sessionId: string) => browserService.detach(sessionId))
+  ipcMain.handle("browser:detach", (_event, sessionId: string) => {
+    return browserService.detach(sessionId)
+  })
 
   ipcMain.handle(
     "browser:setBounds",
-    (_event, sessionId: string, bounds: BrowserBounds, visible?: boolean) =>
-      browserService.setBounds(sessionId, bounds, visible)
+    (_event, sessionId: string, bounds: BrowserBounds, visible?: boolean) => {
+      return browserService.setBounds(sessionId, bounds, visible)
+    }
   )
 
   ipcMain.handle(
     "browser:navigate",
-    (_event, sessionId: string, url: string, options?: BrowserNavigateOptions) =>
-      browserService.navigate(sessionId, url, options)
+    async (_event, sessionId: string, url: string, options?: BrowserNavigateOptions) => {
+      return browserService.navigate(sessionId, url, options)
+    }
   )
 
   ipcMain.handle("browser:goBack", (_event, sessionId: string) => browserService.goBack(sessionId))

@@ -77,9 +77,6 @@ export function FileViewer({
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
   const lastLoadedReloadTokenRef = useRef<number | undefined>(undefined)
 
-  // Get cached content or load it
-  const content = fileContents[cacheKey]
-
   // Reset state when filePath changes
   useEffect(() => {
     setError(null)

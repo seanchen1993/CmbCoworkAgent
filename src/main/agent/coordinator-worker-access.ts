@@ -35,6 +35,7 @@ const directWriteToolNames = new Set(["write_file", "edit_file"])
 const deferredExecutionToolNames = new Set([
   "code_exec",
   "save_code_exec_tool",
+  "mcp__node_repl__js",
   "invoke_deferred_tool"
 ])
 const deferredDiscoveryToolNames = new Set(["search_tool", "inspect_tool"])
@@ -44,7 +45,7 @@ const ownedFileGuardToolNames = new Set(["write_file", "edit_file"])
 // never gets these regardless of its shell tier — parity with coordinator
 // workers (which disable scheduler/skill-evolution and block code-exec) and with
 // CC, whose subagent tool allowlist excludes them.
-const adHocExecutionToolNames = new Set(["code_exec", "save_code_exec_tool"])
+const adHocExecutionToolNames = new Set(["code_exec", "save_code_exec_tool", "mcp__node_repl__js"])
 const orchestrationToolNames = new Set(["manage_scheduler", "manage_skill"])
 // The deferred-execution bridge. invoke_deferred_tool can run saved code_exec
 // tools (arbitrary LOCAL code) and deferred MCP tools (possible writes), so it is

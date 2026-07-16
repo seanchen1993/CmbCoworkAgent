@@ -243,6 +243,7 @@ import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { registerBrowserHandlers } from "./ipc/browser"
+import { setGlobalBrowserService } from "./browser/browser-service-registry"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -282,6 +283,13 @@ let closeToTrayPromptOpen = false
 let closeToTrayPromptRequestId = 0
 let closeToTrayPromptTimer: NodeJS.Timeout | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
+
+function disposeBrowserServiceForMainWindow(reason: string): void {
+  const disposedSessionId = browserService?.disposeAll() ?? null
+  if (disposedSessionId) {
+    console.info(`[Main] Disposed BrowserView session ${disposedSessionId} because ${reason}.`)
+  }
+}
 
 function cleanupLegacySkillEvalRecords(): void {
   const roots = new Set(
@@ -489,8 +497,14 @@ function createWindow(): void {
     clearCloseToTrayPromptState()
   })
 
+  mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (!isMainFrame || isInPlace) return
+    disposeBrowserServiceForMainWindow("the renderer started navigation")
+  })
+
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     clearCloseToTrayPromptState()
+    disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
   })
 
@@ -536,6 +550,7 @@ function createWindow(): void {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
+    disposeBrowserServiceForMainWindow("the main window closed")
     clearCloseToTrayPromptState()
     mainWindow = null
     if (process.platform !== "darwin") {
@@ -896,6 +911,7 @@ if (!gotTheLock) {
     applyKeepAwake(false)
     browserService?.disposeAll()
     browserService = null
+    setGlobalBrowserService(null)
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()

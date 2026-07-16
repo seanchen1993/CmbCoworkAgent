@@ -96,12 +96,14 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import { BROWSER_PANEL_REQUEST_CHANNEL } from "../shared/browser-types"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
   BrowserClickTarget,
   BrowserDomResult,
   BrowserNavigateOptions,
+  BrowserPanelRequest,
   BrowserScreenshotResult,
   BrowserState
 } from "../shared/browser-types"
@@ -1980,22 +1982,26 @@ const api = {
       ipcRenderer.invoke("taskCards:list", query) as Promise<TaskCardsListResult>
   },
   browser: {
-    attach: (sessionId: string, options?: BrowserAttachOptions): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:attach", sessionId, options) as Promise<BrowserState>,
-    detach: (sessionId: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:detach", sessionId) as Promise<BrowserState>,
+    attach: (sessionId: string, options?: BrowserAttachOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:attach", sessionId, options) as Promise<BrowserState>
+    },
+    detach: (sessionId: string): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:detach", sessionId) as Promise<BrowserState>
+    },
     setBounds: (
       sessionId: string,
       bounds: BrowserBounds,
       visible?: boolean
-    ): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:setBounds", sessionId, bounds, visible) as Promise<BrowserState>,
+    ): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setBounds", sessionId, bounds, visible) as Promise<BrowserState>
+    },
     navigate: (
       sessionId: string,
       url: string,
       options?: BrowserNavigateOptions
-    ): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:navigate", sessionId, url, options) as Promise<BrowserState>,
+    ): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:navigate", sessionId, url, options) as Promise<BrowserState>
+    },
     goBack: (sessionId: string): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:goBack", sessionId) as Promise<BrowserState>,
     goForward: (sessionId: string): Promise<BrowserState> =>
@@ -2026,6 +2032,15 @@ const api = {
       ipcRenderer.on(channel, handler)
       return () => {
         ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void): (() => void) => {
+      const handler = (_: unknown, request: BrowserPanelRequest): void => {
+        callback(request)
+      }
+      ipcRenderer.on(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_PANEL_REQUEST_CHANNEL, handler)
       }
     }
   },

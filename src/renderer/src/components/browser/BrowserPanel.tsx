@@ -43,6 +43,7 @@ const EMPTY_STATE: BrowserState = {
   created: false,
   consoleEntries: []
 }
+const BOUNDS_POSITION_POLL_MS = 1000
 
 function getSessionId(threadId?: string | null): string {
   return `thread-${threadId || "unbound"}`
@@ -50,6 +51,30 @@ function getSessionId(threadId?: string | null): string {
 
 function isSameBounds(a: BrowserBounds | null, b: BrowserBounds): boolean {
   return Boolean(a && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height)
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function getLastConsoleEntryId(entries: BrowserConsoleEntry[]): string | undefined {
+  return entries.length > 0 ? entries[entries.length - 1]?.id : undefined
+}
+
+function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
+  return (
+    a.sessionId === b.sessionId &&
+    a.url === b.url &&
+    a.title === b.title &&
+    a.isLoading === b.isLoading &&
+    a.canGoBack === b.canGoBack &&
+    a.canGoForward === b.canGoForward &&
+    a.visible === b.visible &&
+    a.created === b.created &&
+    (a.error ?? "") === (b.error ?? "") &&
+    a.consoleEntries.length === b.consoleEntries.length &&
+    getLastConsoleEntryId(a.consoleEntries) === getLastConsoleEntryId(b.consoleEntries)
+  )
 }
 
 export function BrowserPanel({
@@ -62,6 +87,8 @@ export function BrowserPanel({
   const sessionId = useMemo(() => getSessionId(threadId), [threadId])
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastBoundsRef = useRef<BrowserBounds | null>(null)
+  const hasVisibleBoundsRef = useRef(false)
+  const isSessionCreatedRef = useRef(false)
   const isUrlFocusedRef = useRef(false)
   const lastInitialNavigationRef = useRef<string | null>(null)
   const consoleScrollerRef = useRef<HTMLDivElement>(null)
@@ -73,10 +100,17 @@ export function BrowserPanel({
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
 
+  const applyBrowserState = useCallback((nextState: BrowserState) => {
+    isSessionCreatedRef.current = nextState.created
+    setState((current) => (browserStatesEqual(current, nextState) ? current : nextState))
+  }, [])
+
   useEffect(() => {
+    isSessionCreatedRef.current = false
     setState({ ...EMPTY_STATE, sessionId })
     setUrlInput("")
     lastBoundsRef.current = null
+    hasVisibleBoundsRef.current = false
     lastInitialNavigationRef.current = null
     setCopiedConsole(false)
     setConsoleOpen(false)
@@ -85,15 +119,16 @@ export function BrowserPanel({
 
   useEffect(() => {
     return window.api.browser.onState(sessionId, (nextState) => {
-      setState(nextState)
+      applyBrowserState(nextState)
       if (!isUrlFocusedRef.current) {
         setUrlInput(nextState.url)
       }
     })
-  }, [sessionId])
+  }, [applyBrowserState, sessionId])
 
   const syncBounds = useCallback(
-    (force = false) => {
+    () => {
+      if (!isSessionCreatedRef.current) return
       const element = viewportRef.current
       if (!element) return
       const rect = element.getBoundingClientRect()
@@ -104,40 +139,54 @@ export function BrowserPanel({
         height: Math.round(rect.height)
       }
       const visible = rect.width >= 8 && rect.height >= 8
-      if (!force && isSameBounds(lastBoundsRef.current, bounds)) return
+      if (!visible && hasVisibleBoundsRef.current) {
+        return
+      }
+      if (isSameBounds(lastBoundsRef.current, bounds)) return
       lastBoundsRef.current = bounds
+      if (visible) hasVisibleBoundsRef.current = true
       void window.api.browser
         .setBounds(sessionId, bounds, visible)
-        .then(setState)
+        .then(applyBrowserState)
         .catch((error) => {
-          console.error("[BrowserPanel] Failed to sync bounds:", error)
+          console.error(`[BrowserPanel] Bounds sync failed: ${formatError(error)}`)
         })
     },
-    [sessionId]
+    [applyBrowserState, sessionId]
   )
 
   useEffect(() => {
     let cancelled = false
     let frame: number | null = null
+    const timers: number[] = []
 
-    const scheduleSync = (force = false): void => {
+    const scheduleSync = (): void => {
       if (frame !== null) return
       frame = window.requestAnimationFrame(() => {
         frame = null
-        if (!cancelled) syncBounds(force)
+        if (!cancelled) syncBounds()
       })
     }
 
+    const scheduleStabilizedSync = (): void => {
+      scheduleSync()
+      for (const delay of [50, 150, 300, 600, 1000]) {
+        timers.push(window.setTimeout(scheduleSync, delay))
+      }
+    }
+
+    console.info(`[BrowserPanel] Attaching Browser session ${sessionId}.`)
     window.api.browser
-      .attach(sessionId, { workspacePath })
+      .attach(sessionId, { workspacePath, visible: false })
       .then((nextState) => {
         if (cancelled) return
-        setState(nextState)
+        applyBrowserState(nextState)
         if (!isUrlFocusedRef.current) setUrlInput(nextState.url)
-        scheduleSync(true)
+        scheduleStabilizedSync()
+        console.info(`[BrowserPanel] Browser session ${sessionId} attached.`)
       })
       .catch((error) => {
-        console.error("[BrowserPanel] Failed to attach browser:", error)
+        console.error(`[BrowserPanel] Browser attach failed: ${formatError(error)}`)
         toast.error("内置浏览器启动失败")
       })
 
@@ -150,17 +199,39 @@ export function BrowserPanel({
 
     return () => {
       cancelled = true
+      for (const timer of timers) window.clearTimeout(timer)
       observer.disconnect()
       window.removeEventListener("resize", handleResize)
       window.removeEventListener("scroll", handleScroll, true)
       if (frame !== null) {
         window.cancelAnimationFrame(frame)
       }
-      void window.api.browser.detach(sessionId).catch((error) => {
-        console.error("[BrowserPanel] Failed to detach browser:", error)
-      })
+      void window.api.browser
+        .detach(sessionId)
+        .catch((error) => {
+          console.error(`[BrowserPanel] Browser detach failed: ${formatError(error)}`)
+        })
     }
-  }, [sessionId, syncBounds, workspacePath])
+  }, [applyBrowserState, sessionId, syncBounds, workspacePath])
+
+  useEffect(() => {
+    if (!state.created) return
+    const frame = window.requestAnimationFrame(syncBounds)
+    const timer = window.setTimeout(syncBounds, 120)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.clearTimeout(timer)
+    }
+  }, [consoleOpen, isFullscreen, state.created, state.isLoading, state.url, syncBounds])
+
+  useEffect(() => {
+    if (!state.created) return
+    // ResizeObserver misses pure position shifts, but BrowserView bounds are window-relative.
+    const interval = window.setInterval(() => syncBounds(), BOUNDS_POSITION_POLL_MS)
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [state.created, syncBounds])
 
   useEffect(() => {
     if (!isUrlFocused) {
@@ -205,10 +276,11 @@ export function BrowserPanel({
     if (lastInitialNavigationRef.current === key) return
     lastInitialNavigationRef.current = key
 
+    console.info(`[BrowserPanel] Opening initial URL ${target}.`)
     window.api.browser
       .navigate(sessionId, target, { workspacePath })
       .then((nextState) => {
-        setState(nextState)
+        applyBrowserState(nextState)
         if (nextState.error) {
           setUrlInput(target)
           toast.error(nextState.error)
@@ -217,12 +289,13 @@ export function BrowserPanel({
         if (!isUrlFocusedRef.current) {
           setUrlInput(nextState.url || target)
         }
+        console.info(`[BrowserPanel] Initial URL opened as ${nextState.url || target}.`)
       })
       .catch((error) => {
-        console.error("[BrowserPanel] Failed to open preview URL:", error)
+        console.error(`[BrowserPanel] Initial URL open failed: ${formatError(error)}`)
         toast.error("HTML 预览加载失败")
       })
-  }, [initialUrl, reloadToken, sessionId, workspacePath])
+  }, [applyBrowserState, initialUrl, reloadToken, sessionId, workspacePath])
 
   const navigate = useCallback(
     async (event?: React.FormEvent) => {
@@ -231,19 +304,20 @@ export function BrowserPanel({
       if (!target) return
       try {
         const nextState = await window.api.browser.navigate(sessionId, target, { workspacePath })
-        setState(nextState)
+        applyBrowserState(nextState)
         if (nextState.error) {
           setUrlInput(target)
           toast.error(nextState.error)
           return
         }
         setUrlInput(nextState.url || target)
+        console.info(`[BrowserPanel] Navigated to ${nextState.url || target}.`)
       } catch (error) {
-        console.error("[BrowserPanel] Navigate failed:", error)
+        console.error(`[BrowserPanel] Navigation failed: ${formatError(error)}`)
         toast.error("页面加载失败")
       }
     },
-    [sessionId, urlInput, workspacePath]
+    [applyBrowserState, sessionId, urlInput, workspacePath]
   )
 
   const captureScreenshot = useCallback(async () => {
@@ -260,7 +334,7 @@ export function BrowserPanel({
       link.click()
       toast.success("截图已生成")
     } catch (error) {
-      console.error("[BrowserPanel] Screenshot failed:", error)
+      console.error(`[BrowserPanel] Screenshot failed: ${formatError(error)}`)
       toast.error("截图失败")
     } finally {
       setIsCapturing(false)
@@ -283,7 +357,7 @@ export function BrowserPanel({
       }, 1500)
       toast.success("Console 内容已复制")
     } catch (error) {
-      console.error("[BrowserPanel] Copy console failed:", error)
+      console.error(`[BrowserPanel] Copy console failed: ${formatError(error)}`)
       toast.error("复制 Console 内容失败")
     }
   }, [state.consoleEntries])
@@ -291,12 +365,12 @@ export function BrowserPanel({
   const clearConsole = useCallback(() => {
     void window.api.browser
       .clearConsole(sessionId)
-      .then(setState)
+      .then(applyBrowserState)
       .catch((error) => {
-        console.error("[BrowserPanel] Clear console failed:", error)
+        console.error(`[BrowserPanel] Clear console failed: ${formatError(error)}`)
         toast.error("清空控制台失败")
       })
-  }, [sessionId])
+  }, [applyBrowserState, sessionId])
 
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
@@ -314,7 +388,7 @@ export function BrowserPanel({
           title="后退"
           aria-label="后退"
           disabled={!state.canGoBack}
-          onClick={() => void window.api.browser.goBack(sessionId).then(setState)}
+          onClick={() => void window.api.browser.goBack(sessionId).then(applyBrowserState)}
         >
           <ArrowLeft className="size-4" strokeWidth={1.8} />
         </button>
@@ -324,7 +398,7 @@ export function BrowserPanel({
           title="前进"
           aria-label="前进"
           disabled={!state.canGoForward}
-          onClick={() => void window.api.browser.goForward(sessionId).then(setState)}
+          onClick={() => void window.api.browser.goForward(sessionId).then(applyBrowserState)}
         >
           <ArrowRight className="size-4" strokeWidth={1.8} />
         </button>
@@ -338,7 +412,7 @@ export function BrowserPanel({
               state.isLoading
                 ? window.api.browser.stop(sessionId)
                 : window.api.browser.reload(sessionId)
-            ).then(setState)
+            ).then(applyBrowserState)
           }
         >
           {state.isLoading ? (

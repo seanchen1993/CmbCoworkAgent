@@ -98,6 +98,7 @@ import type {
   BrowserClickTarget,
   BrowserDomResult,
   BrowserNavigateOptions,
+  BrowserPanelRequest,
   BrowserScreenshotResult,
   BrowserState
 } from "../shared/browser-types"
@@ -1572,6 +1573,7 @@ interface CustomAPI {
     typeText: (sessionId: string, text: string) => Promise<BrowserState>
     press: (sessionId: string, keyCode: string) => Promise<BrowserState>
     onState: (sessionId: string, callback: (state: BrowserState) => void) => () => void
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
   }
   lsp: {
     getConfig: () => Promise<LspConfig>

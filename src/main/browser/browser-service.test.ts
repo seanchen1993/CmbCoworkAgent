@@ -28,6 +28,17 @@ describe("browser file path guards", () => {
     rmSync(workspaceRoot, { recursive: true, force: true })
   })
 
+  it("normalizes slash-prefixed workspace files into file URLs when no absolute file exists", () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "cmb-browser-url-root-"))
+    const htmlPath = join(workspaceRoot, "pages", "index.html")
+    mkdirSync(join(workspaceRoot, "pages"), { recursive: true })
+    writeFileSync(htmlPath, "<h1>ok</h1>")
+    expect(normalizeUrlInput("/pages/index.html", workspaceRoot)).toBe(
+      `file://${htmlPath.replace(/\\/g, "/")}`
+    )
+    rmSync(workspaceRoot, { recursive: true, force: true })
+  })
+
   it("allows file URLs regardless of workspace binding", () => {
     expect(getUrlPermissionError("file:///D:/repo/app/index.html", "D:\\repo\\app")).toBeNull()
     expect(getUrlPermissionError("file:///D:/repo/other/index.html", "D:\\repo\\app")).toBeNull()

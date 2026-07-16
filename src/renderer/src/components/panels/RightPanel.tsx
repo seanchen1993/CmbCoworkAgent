@@ -1249,8 +1249,8 @@ export function RightPanel({
     !lspOpen
   const browserPreviewUrl = useMemo(() => {
     if (!previewPath || !isHtmlPreviewPath(previewPath)) return null
-    return resolvePreviewPaths(previewPath, threadState?.workspacePath ?? null).fullPath
-  }, [previewPath, threadState?.workspacePath])
+    return previewPath
+  }, [previewPath])
 
   return (
     <aside

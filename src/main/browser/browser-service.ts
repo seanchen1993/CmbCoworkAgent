@@ -1,7 +1,15 @@
-import { BrowserWindow, WebContentsView, type Rectangle, type WebContents } from "electron"
+import {
+  BrowserWindow,
+  WebContentsView,
+  type MouseInputEvent,
+  type MouseWheelInputEvent,
+  type Rectangle,
+  type WebContents
+} from "electron"
 import { existsSync } from "fs"
 import { posix, resolve, win32 } from "path"
 import { pathToFileURL } from "url"
+import { BROWSER_PANEL_REQUEST_CHANNEL } from "../../shared/browser-types"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
@@ -9,8 +17,11 @@ import type {
   BrowserConsoleEntry,
   BrowserConsoleLevel,
   BrowserDomResult,
+  BrowserMouseButton,
+  BrowserMousePoint,
   BrowserNavigateOptions,
   BrowserRenderedState,
+  BrowserScrollTarget,
   BrowserScreenshotResult,
   BrowserState
 } from "../../shared/browser-types"
@@ -22,6 +33,7 @@ const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
 
 interface BrowserSession {
   id: string
+  isAttached: boolean
   view: WebContentsView
   workspacePath: string | null
   consoleEntries: BrowserConsoleEntry[]
@@ -40,6 +52,35 @@ function normalizeBounds(bounds: BrowserBounds): Rectangle {
     width: Math.max(0, Math.round(bounds.width)),
     height: Math.max(0, Math.round(bounds.height))
   }
+}
+
+function rectanglesEqual(a: Rectangle, b: Rectangle): boolean {
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+}
+
+function formatBounds(bounds: Rectangle | BrowserBounds): string {
+  return `${bounds.x},${bounds.y} ${bounds.width}x${bounds.height}`
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function normalizeMousePoint(point: BrowserMousePoint): BrowserMousePoint {
+  return {
+    x: Math.max(0, Math.round(point.x)),
+    y: Math.max(0, Math.round(point.y))
+  }
+}
+
+function normalizeClickCount(clickCount: number | undefined): number {
+  return typeof clickCount === "number" && Number.isFinite(clickCount) && clickCount > 0
+    ? Math.round(clickCount)
+    : 1
+}
+
+function finiteDelta(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0
 }
 
 type PathApi = typeof posix
@@ -76,6 +117,16 @@ export function normalizeUrlInput(input: string, workspacePath: string | null): 
 
   if (/^https?:\/\//i.test(value) || /^file:\/\//i.test(value)) {
     return value
+  }
+
+  if (workspacePath && value.startsWith("/") && !existsSync(value)) {
+    const candidate = getPathApi(workspacePath, value).resolve(
+      workspacePath,
+      value.replace(/^\/+/, "")
+    )
+    if (existsSync(candidate)) {
+      return filesystemPathToFileUrl(candidate)
+    }
   }
 
   if (isAbsoluteFilesystemPath(value)) {
@@ -154,13 +205,26 @@ export class BrowserService {
     const window = this.getUsableWindow()
 
     if (this.activeSession && this.activeSession.id !== sessionId) {
+      console.info(`[BrowserService] Disposing Browser session ${this.activeSession.id} before attaching ${sessionId}.`)
       const disposedSessionId = this.disposeActiveSession()
       if (disposedSessionId) this.emitState(disposedSessionId)
     }
 
+    const existingSession = this.getActiveSession(sessionId)
     const session = this.ensureActiveSession(sessionId, options.workspacePath ?? null)
-    window.contentView.addChildView(session.view)
-    session.view.setVisible(true)
+    if (!session.isAttached) {
+      window.contentView.addChildView(session.view)
+      session.isAttached = true
+    }
+    const requestedVisible = options.visible ?? true
+    const shouldUpdateVisibility = !existingSession || requestedVisible
+    const previousVisible = session.view.getVisible()
+    if (shouldUpdateVisibility) {
+      if (previousVisible !== requestedVisible) session.view.setVisible(requestedVisible)
+    }
+    if (requestedVisible && (!existingSession || !previousVisible)) {
+      this.invalidateSession(session)
+    }
 
     if (options.initialUrl && !session.view.webContents.getURL()) {
       void this.navigate(sessionId, options.initialUrl, options)
@@ -168,26 +232,47 @@ export class BrowserService {
       this.emitState(sessionId)
     }
 
-    return this.getState(sessionId)
+    const state = this.getState(sessionId)
+    console.info(`[BrowserService] Attached Browser session ${sessionId} visible=${state.visible}.`)
+    return state
   }
 
   detach(sessionId: string): BrowserState {
-    if (this.activeSession?.id === sessionId) {
-      this.disposeActiveSession()
-    }
+    if (this.activeSession?.id !== sessionId) return this.getState(sessionId)
+    this.disposeActiveSession()
     this.emitState(sessionId)
-    return this.getState(sessionId)
+    const state = this.getState(sessionId)
+    console.info(`[BrowserService] Detached Browser session ${sessionId}.`)
+    return state
   }
 
   setBounds(sessionId: string, bounds: BrowserBounds, visible = true): BrowserState {
     const session = this.getActiveSession(sessionId)
-    if (!session) return this.getState(sessionId)
+    if (!session) {
+      console.warn(`[BrowserService] Ignored bounds for inactive Browser session ${sessionId}.`)
+      return this.getState(sessionId)
+    }
 
     const nextBounds = normalizeBounds(bounds)
-    session.view.setBounds(nextBounds)
-    session.view.setVisible(visible && nextBounds.width > 0 && nextBounds.height > 0)
+    const nextVisible = visible && nextBounds.width > 0 && nextBounds.height > 0
+    const currentBounds = session.view.getBounds()
+    const currentVisible = session.view.getVisible()
+    const boundsChanged = !rectanglesEqual(currentBounds, nextBounds)
+    const visibilityChanged = currentVisible !== nextVisible
+
+    if (!boundsChanged && !visibilityChanged) {
+      return this.getState(sessionId)
+    }
+
+    if (boundsChanged) session.view.setBounds(nextBounds)
+    if (visibilityChanged) session.view.setVisible(nextVisible)
+    if (nextVisible && (boundsChanged || visibilityChanged)) {
+      this.invalidateSession(session)
+    }
     this.emitState(sessionId)
-    return this.getState(sessionId)
+    const state = this.getState(sessionId)
+    console.info(`[BrowserService] Updated Browser bounds for ${sessionId} to ${formatBounds(nextBounds)} visible=${nextVisible}.`)
+    return state
   }
 
   async navigate(
@@ -196,7 +281,10 @@ export class BrowserService {
     options: BrowserNavigateOptions = {}
   ): Promise<BrowserState> {
     const session = this.getActiveSession(sessionId)
-    if (!session) return this.getState(sessionId)
+    if (!session) {
+      console.warn(`[BrowserService] Ignored navigation for inactive Browser session ${sessionId}.`)
+      return this.getState(sessionId)
+    }
 
     if (options.workspacePath !== undefined) {
       session.workspacePath = options.workspacePath ?? null
@@ -206,6 +294,7 @@ export class BrowserService {
     const permissionError = getUrlPermissionError(url, session.workspacePath)
     if (permissionError) {
       session.error = permissionError
+      console.warn(`[BrowserService] Navigation blocked for ${sessionId}: ${permissionError}.`)
       this.emitState(sessionId)
       return this.getState(sessionId)
     }
@@ -214,12 +303,15 @@ export class BrowserService {
       session.error = undefined
       await session.view.webContents.loadURL(url)
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = formatError(error)
       session.error = message
+      console.error(`[BrowserService] Navigation failed for ${sessionId}: ${message}.`)
     }
 
     this.emitState(sessionId)
-    return this.getState(sessionId)
+    const state = this.getState(sessionId)
+    console.info(`[BrowserService] Navigated ${sessionId} to ${state.url || url}.`)
+    return state
   }
 
   goBack(sessionId: string): BrowserState {
@@ -287,6 +379,16 @@ export class BrowserService {
     }
   }
 
+  async evaluateInPage<T = unknown>(sessionId: string, script: string): Promise<T> {
+    const session = this.requireSession(sessionId)
+    return (await session.view.webContents.executeJavaScript(script, false)) as T
+  }
+
+  requestPanel(sessionId: string, threadId?: string): void {
+    const window = this.getUsableWindow()
+    window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, { sessionId, threadId })
+  }
+
   async click(sessionId: string, target: BrowserClickTarget): Promise<BrowserState> {
     const session = this.requireSession(sessionId)
     const point = await this.resolveClickPoint(session.view.webContents, target)
@@ -305,6 +407,79 @@ export class BrowserService {
       y: point.y,
       button: "left",
       clickCount: 1
+    })
+    return this.getState(sessionId)
+  }
+
+  async moveMouse(sessionId: string, point: BrowserMousePoint): Promise<BrowserState> {
+    const session = this.requireSession(sessionId)
+    const normalized = normalizeMousePoint(point)
+    session.view.webContents.focus()
+    this.sendMouseInput(session.view.webContents, {
+      type: "mouseMove",
+      x: normalized.x,
+      y: normalized.y
+    })
+    return this.getState(sessionId)
+  }
+
+  async mouseDown(
+    sessionId: string,
+    point: BrowserMousePoint,
+    button: BrowserMouseButton = "left",
+    clickCount?: number
+  ): Promise<BrowserState> {
+    const session = this.requireSession(sessionId)
+    const normalized = normalizeMousePoint(point)
+    session.view.webContents.focus()
+    this.sendMouseInput(session.view.webContents, {
+      type: "mouseDown",
+      x: normalized.x,
+      y: normalized.y,
+      button,
+      clickCount: normalizeClickCount(clickCount)
+    })
+    return this.getState(sessionId)
+  }
+
+  async mouseUp(
+    sessionId: string,
+    point: BrowserMousePoint,
+    button: BrowserMouseButton = "left",
+    clickCount?: number
+  ): Promise<BrowserState> {
+    const session = this.requireSession(sessionId)
+    const normalized = normalizeMousePoint(point)
+    session.view.webContents.focus()
+    this.sendMouseInput(session.view.webContents, {
+      type: "mouseUp",
+      x: normalized.x,
+      y: normalized.y,
+      button,
+      clickCount: normalizeClickCount(clickCount)
+    })
+    return this.getState(sessionId)
+  }
+
+  async scroll(sessionId: string, target: BrowserScrollTarget): Promise<BrowserState> {
+    const session = this.requireSession(sessionId)
+    const point = normalizeMousePoint(target)
+    const deltaX = finiteDelta(target.deltaX)
+    const deltaY = finiteDelta(target.deltaY)
+    session.view.webContents.focus()
+    this.sendMouseInput(session.view.webContents, {
+      type: "mouseMove",
+      x: point.x,
+      y: point.y
+    })
+    this.sendMouseWheelInput(session.view.webContents, {
+      type: "mouseWheel",
+      x: point.x,
+      y: point.y,
+      deltaX,
+      deltaY,
+      hasPreciseScrollingDeltas: true,
+      canScroll: true
     })
     return this.getState(sessionId)
   }
@@ -356,9 +531,10 @@ export class BrowserService {
     }
   }
 
-  disposeAll(): void {
+  disposeAll(): string | null {
     const disposedSessionId = this.disposeActiveSession()
     if (disposedSessionId) this.emitState(disposedSessionId)
+    return disposedSessionId
   }
 
   private ensureActiveSession(sessionId: string, workspacePath: string | null): BrowserSession {
@@ -383,6 +559,7 @@ export class BrowserService {
 
     const session: BrowserSession = {
       id: sessionId,
+      isAttached: false,
       view,
       workspacePath,
       consoleEntries: [],
@@ -392,6 +569,7 @@ export class BrowserService {
     this.activeSession = session
     this.configureSessionGuards(session)
     this.bindWebContentsEvents(session)
+    console.info(`[BrowserService] Created Browser session ${sessionId}.`)
     return session
   }
 
@@ -412,8 +590,14 @@ export class BrowserService {
       session.consoleEntries = []
       emit()
     })
-    webContents.on("did-stop-loading", emit)
-    webContents.on("page-title-updated", emit)
+    webContents.on("did-stop-loading", () => {
+      this.invalidateSession(session)
+      emit()
+      console.info(`[BrowserService] Loaded Browser session ${session.id}.`)
+    })
+    webContents.on("page-title-updated", (_event, _title) => {
+      emit()
+    })
     webContents.on("console-message", (_event, level, message, line, sourceId) => {
       session.consoleEntries = appendBrowserConsoleEntry(session.consoleEntries, {
         id: `${session.id}:${session.nextConsoleEntryId++}`,
@@ -432,6 +616,7 @@ export class BrowserService {
         session.error = permissionError
       }
       emit()
+      console.info(`[BrowserService] Browser session ${session.id} reached ${url}.`)
     })
     webContents.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
       if (isMainFrame) emit()
@@ -450,8 +635,15 @@ export class BrowserService {
         if (!isMainFrame || errorCode === -3) return
         session.error = `${errorDescription}${validatedURL ? `: ${validatedURL}` : ""}`
         emit()
+        console.error(`[BrowserService] Browser load failed for ${session.id}: ${session.error}.`)
       }
     )
+    webContents.on("render-process-gone", (_event, details) => {
+      console.error(`[BrowserService] Browser renderer ended for ${session.id}: ${details.reason}.`)
+    })
+    webContents.on("destroyed", () => {
+      console.info(`[BrowserService] Browser webContents destroyed for ${session.id}.`)
+    })
     webContents.setWindowOpenHandler((details) => {
       const permissionError = getUrlPermissionError(details.url, session.workspacePath)
       if (!permissionError) {
@@ -495,6 +687,16 @@ export class BrowserService {
     return this.activeSession?.id === sessionId ? this.activeSession : null
   }
 
+  private invalidateSession(session: BrowserSession): void {
+    const webContents = session.view.webContents
+    if (webContents.isDestroyed()) return
+    try {
+      webContents.invalidate()
+    } catch (error) {
+      console.warn(`[BrowserService] Browser invalidate failed for ${session.id}: ${formatError(error)}.`)
+    }
+  }
+
   private disposeActiveSession(): string | null {
     const session = this.activeSession
     if (!session) return null
@@ -506,8 +708,9 @@ export class BrowserService {
     if (window && !window.isDestroyed()) {
       try {
         window.contentView.removeChildView(session.view)
+        session.isAttached = false
       } catch (error) {
-        console.warn("[BrowserService] Failed to detach browser view:", error)
+        console.warn(`[BrowserService] Browser view detach failed for ${session.id}: ${formatError(error)}.`)
       }
     }
 
@@ -516,9 +719,10 @@ export class BrowserService {
         session.view.webContents.close({ waitForBeforeUnload: false })
       }
     } catch (error) {
-      console.warn("[BrowserService] Failed to close browser session:", error)
+      console.warn(`[BrowserService] Browser close failed for ${session.id}: ${formatError(error)}.`)
     }
 
+    console.info(`[BrowserService] Disposed Browser session ${session.id}.`)
     return session.id
   }
 
@@ -591,5 +795,13 @@ export class BrowserService {
       throw new Error(`Element not found or not clickable: ${selector}`)
     }
     return { x: point.x, y: point.y }
+  }
+
+  private sendMouseInput(webContents: WebContents, event: MouseInputEvent): void {
+    webContents.sendInputEvent(event)
+  }
+
+  private sendMouseWheelInput(webContents: WebContents, event: MouseWheelInputEvent): void {
+    webContents.sendInputEvent(event)
   }
 }

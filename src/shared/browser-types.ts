@@ -29,18 +29,38 @@ export interface BrowserState {
   error?: string
 }
 
+export const BROWSER_PANEL_REQUEST_CHANNEL = "browser:panel-request"
+
+export interface BrowserPanelRequest {
+  sessionId: string
+  threadId?: string
+}
+
 export interface BrowserNavigateOptions {
   workspacePath?: string | null
 }
 
 export interface BrowserAttachOptions extends BrowserNavigateOptions {
   initialUrl?: string | null
+  visible?: boolean
 }
 
 export interface BrowserClickTarget {
   x?: number
   y?: number
   selector?: string
+}
+
+export type BrowserMouseButton = "left" | "middle" | "right"
+
+export interface BrowserMousePoint {
+  x: number
+  y: number
+}
+
+export interface BrowserScrollTarget extends BrowserMousePoint {
+  deltaX?: number
+  deltaY?: number
 }
 
 export interface BrowserRenderedState {
@@ -61,5 +81,22 @@ export interface BrowserScreenshotResult {
 export interface BrowserDomResult {
   success: boolean
   state?: BrowserRenderedState
+  error?: string
+}
+
+export type BrowserRuntime = "official"
+export type BrowserBackend = "iab" | "chrome"
+export type BrowserBootstrapState = "idle" | "bootstrapping" | "ready" | "failed"
+
+export interface BrowserToolState {
+  runtime: BrowserRuntime
+  bootstrapState: BrowserBootstrapState
+  backend?: BrowserBackend
+  browserId?: string
+  currentUrl?: string
+  title?: string
+  openTabIds?: string[]
+  selectedTabId?: string
+  screenshotUrl?: string
   error?: string
 }

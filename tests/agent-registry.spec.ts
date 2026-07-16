@@ -684,6 +684,7 @@ function testRegistryAgentBlockedTools(): void {
     "edit_file",
     "code_exec",
     "save_code_exec_tool",
+    "mcp__node_repl__js",
     "manage_scheduler",
     "manage_skill",
     "invoke_deferred_tool",
@@ -703,8 +704,11 @@ function testRegistryAgentBlockedTools(): void {
 
   const vf = registryAgentBlockedTools(["write_file", "edit_file"], "full") // verify-like
   assert(
-    vf.has("code_exec") && vf.has("manage_scheduler") && vf.has("manage_skill"),
-    "verify blocks code-exec + orchestration meta tools"
+    vf.has("code_exec") &&
+      vf.has("mcp__node_repl__js") &&
+      vf.has("manage_scheduler") &&
+      vf.has("manage_skill"),
+    "verify blocks code-exec/browser-js + orchestration meta tools"
   )
   assert(!vf.has("execute"), "verify keeps execute (full shell)")
   assert(
@@ -714,8 +718,11 @@ function testRegistryAgentBlockedTools(): void {
 
   const wr = registryAgentBlockedTools([], "full") // write custom agent
   assert(
-    wr.has("code_exec") && wr.has("manage_scheduler") && wr.has("manage_skill"),
-    "even a write subagent blocks code-exec + orchestration meta tools"
+    wr.has("code_exec") &&
+      wr.has("mcp__node_repl__js") &&
+      wr.has("manage_scheduler") &&
+      wr.has("manage_skill"),
+    "even a write subagent blocks code-exec/browser-js + orchestration meta tools"
   )
   assert(
     !wr.has("write_file") && !wr.has("invoke_deferred_tool"),
@@ -1807,6 +1814,10 @@ function testDisallowedToolsCoversNonFsTools(): void {
   assert(normalizeToolName("memory_search") === "memory_search", "memory_search recognized")
   assert(normalizeToolName("code_exec") === "code_exec", "code_exec recognized")
   assert(
+    normalizeToolName("mcp__node_repl__js") === "mcp__node_repl__js",
+    "mcp__node_repl__js recognized"
+  )
+  assert(
     normalizeToolName("invoke_deferred_tool") === "invoke_deferred_tool",
     "invoke_deferred_tool recognized"
   )
@@ -1846,6 +1857,7 @@ function testAllowlistBlocksNonFsSideEffectTools(): void {
       "inspect_tool",
       "code_exec",
       "save_code_exec_tool",
+      "mcp__node_repl__js",
       "manage_scheduler",
       "manage_skill"
     ]) {
