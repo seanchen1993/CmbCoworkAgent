@@ -1,6 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import { getCustomModelConfigs, getModelByTier, type CustomModelConfig } from "../../storage"
+import type { CustomModelConfig } from "../../storage"
+import { getModelByTier, getModelConfigByRef, getModelConfigs } from "../../models/registry"
 import { resolveModel } from "../../routing"
 import { renderTaskMmdCompilePrompt } from "./prompts"
 import {
@@ -64,23 +65,26 @@ function ellipsize(value: string, maxChars: number): string {
 }
 
 function readableToolName(toolName: string): string {
-  return toolName
-    .replace(/^(functions|mcp__[.\w-]+)\./, "")
-    .replace(/_/g, " ")
+  return toolName.replace(/^(functions|mcp__[.\w-]+)\./, "").replace(/_/g, " ")
 }
 
 function extractPathBasename(text: string): string | null {
   const normalized = text.replace(/\\\\/g, "\\")
   const pathPattern =
     /(?:[A-Za-z]:\\|\.{1,2}[\\/]|[\\/])(?:[^\s"'`<>|{}[\],;:)]+[\\/])*[^\s"'`<>|{}[\],;:)]+/g
-  const relativePathPattern =
-    /(?:[A-Za-z0-9_.-]+[\\/]){1,}[A-Za-z0-9_.-]+\.[A-Za-z0-9]+/g
+  const relativePathPattern = /(?:[A-Za-z0-9_.-]+[\\/]){1,}[A-Za-z0-9_.-]+\.[A-Za-z0-9]+/g
   const matches = [
     ...(normalized.match(pathPattern) ?? []),
     ...(normalized.match(relativePathPattern) ?? [])
   ]
   const candidate = matches
-    .map((pathValue) => pathValue.split(/[\\/]+/).filter(Boolean).pop() ?? "")
+    .map(
+      (pathValue) =>
+        pathValue
+          .split(/[\\/]+/)
+          .filter(Boolean)
+          .pop() ?? ""
+    )
     .find((basename) => basename.length > 0)
   return candidate || null
 }
@@ -119,12 +123,6 @@ function tierLabel(tier: "economy" | "premium"): string {
   return tier === "economy" ? "经济" : "高级"
 }
 
-function cfgIdFromResolvedModelId(resolvedModelId: string): string {
-  return resolvedModelId.startsWith("custom:")
-    ? resolvedModelId.slice("custom:".length)
-    : resolvedModelId
-}
-
 function buildCompileModelInfo(
   requestedTier: "economy" | "premium",
   cfg: CustomModelConfig | null,
@@ -154,7 +152,7 @@ async function resolveTaskMmdCompileModel(
   threadId: string
 ): Promise<{ cfg: CustomModelConfig | null; info: TaskMmdCompileModelInfo }> {
   const settings = getTaskMmdSettings()
-  const configs = getCustomModelConfigs()
+  const configs = getModelConfigs()
   const requestedTier = settings.compileModelTier
   const exact = configs.find((item) => (item.tier ?? "premium") === requestedTier) ?? null
 
@@ -180,7 +178,7 @@ async function resolveTaskMmdCompileModel(
         routingMode: "auto"
       })
       routingReason = result.routeReason
-      const routed = configs.find((item) => item.id === cfgIdFromResolvedModelId(result.resolvedModelId))
+      const routed = getModelConfigByRef(result.resolvedModelId)
       if (routed) {
         return {
           cfg: routed,
@@ -278,7 +276,8 @@ async function runCompile(threadId: string, reason: string): Promise<void> {
           lastError = `${backoffError} Used fallback graph.`
         }
       } else {
-        lastError = "No configured model is available for task map compilation. Used fallback graph."
+        lastError =
+          "No configured model is available for task map compilation. Used fallback graph."
       }
     } catch (error) {
       backoffError = error instanceof Error ? error.message : String(error)

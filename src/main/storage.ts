@@ -64,6 +64,7 @@ const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
 const CUSTOM_API_KEY_PREFIX = "CUSTOM_API_KEY__"
+const BUILTIN_MODEL_API_KEY_ENV_NAME = "CMB_BUILTIN_MODEL_API_KEY"
 
 export function getOpenworkDir(): string {
   if (!existsSync(OPENWORK_DIR)) {
@@ -250,6 +251,18 @@ function writeEnvFile(env: Record<string, string>): void {
     .filter((entry) => entry[1])
     .map(([k, v]) => `${k}=${v}`)
   writeFileSync(getEnvFilePath(), lines.join("\n") + "\n")
+}
+
+/**
+ * Resolve the managed-model credential from machine-local configuration only.
+ * This value must never have a source-code or build-time fallback because that
+ * would embed the credential in Git history and the packaged main bundle.
+ */
+export function getBuiltinModelApiKey(): string | undefined {
+  const processValue = process.env[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
+  if (processValue) return processValue
+  const localValue = parseEnvFile()[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
+  return localValue || undefined
 }
 
 // Skills directory — bundled with the app at project root /skills/
@@ -1020,6 +1033,20 @@ export interface CustomModelConfig {
   tier?: "premium" | "economy"
 }
 
+export interface BuiltinModelOverride {
+  name?: string
+  maxTokens?: number
+  maxOutputTokens?: number
+  temperature?: number
+  topP?: number
+  topK?: number
+  interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
+  tier?: "premium" | "economy"
+}
+
 export interface UserInfoConfig {
   sapId?: string //8
   ystId?: string //6
@@ -1184,7 +1211,10 @@ function resolveInterleavedThinkingSetting(
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
 }
 
-function resolveEnableThinkingSetting(enableThinking: unknown, interleavedThinking: unknown): boolean {
+function resolveEnableThinkingSetting(
+  enableThinking: unknown,
+  interleavedThinking: unknown
+): boolean {
   if (typeof enableThinking === "boolean") return enableThinking
   return interleavedThinking === true
 }
@@ -1361,6 +1391,39 @@ function getSettingsStore(): Store {
   return _settingsStore
 }
 
+const BUILTIN_MODEL_OVERRIDES_KEY = "builtinModelOverrides"
+
+export function getBuiltinModelOverrides(): Record<string, BuiltinModelOverride> {
+  const raw = getSettingsStore().get(BUILTIN_MODEL_OVERRIDES_KEY, {}) as unknown
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  return raw as Record<string, BuiltinModelOverride>
+}
+
+export function setBuiltinModelOverride(id: string, override: BuiltinModelOverride): void {
+  const normalizedId = id.trim()
+  if (!normalizedId) throw new Error("内置模型 ID 不能为空")
+  const current = getBuiltinModelOverrides()
+  getSettingsStore().set(BUILTIN_MODEL_OVERRIDES_KEY, {
+    ...current,
+    [normalizedId]: override
+  })
+}
+
+export function resetBuiltinModelOverride(id: string): void {
+  const current = getBuiltinModelOverrides()
+  if (!(id in current)) return
+  delete current[id]
+  getSettingsStore().set(BUILTIN_MODEL_OVERRIDES_KEY, current)
+}
+
+export function getStoredDefaultModelId(): string {
+  return String(getSettingsStore().get("defaultModel", "") || "").trim()
+}
+
+export function setStoredDefaultModelId(modelId: string): void {
+  getSettingsStore().set("defaultModel", modelId.trim())
+}
+
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
 
 export function getWindowCloseBehavior(): WindowCloseBehavior {
@@ -1509,10 +1572,7 @@ function toPublicConfig(
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
     enableThinking,
-    enableThinkingEffort: resolveThinkingEffortEnabled(
-      enableThinking,
-      config.enableThinkingEffort
-    ),
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, config.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
       config.interleavedThinking,
@@ -1543,10 +1603,7 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
       topP: normalizeTopP(item.topP),
       topK: normalizeTopK(item.topK),
       enableThinking,
-      enableThinkingEffort: resolveThinkingEffortEnabled(
-        enableThinking,
-        item.enableThinkingEffort
-      ),
+      enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, item.enableThinkingEffort),
       interleavedThinking: resolveInterleavedThinkingSetting(
         item.model,
         item.interleavedThinking,
@@ -1578,10 +1635,7 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
     enableThinking,
-    enableThinkingEffort: resolveThinkingEffortEnabled(
-      enableThinking,
-      record.enableThinkingEffort
-    ),
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, record.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
       record.interleavedThinking,
@@ -1654,10 +1708,7 @@ export function upsertCustomModelConfig(
     topP: validatedTopP,
     topK: validatedTopK,
     enableThinking,
-    enableThinkingEffort: resolveThinkingEffortEnabled(
-      enableThinking,
-      config.enableThinkingEffort
-    ),
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, config.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
       config.interleavedThinking,

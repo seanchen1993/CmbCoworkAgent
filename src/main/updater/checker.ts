@@ -3,6 +3,7 @@ import http from "http"
 import https from "https"
 import { getUserInfo, type UserInfoConfig } from "../storage"
 import type { FeatureGatesConfig } from "../../shared/feature-gates"
+import type { RemoteModelCatalog } from "../../shared/model-catalog"
 import { evaluateStaging } from "./gray-release"
 import { compareSemver } from "./semver"
 import { DEFAULT_UPDATE_MANIFEST_FILE } from "./channel-config"
@@ -93,6 +94,8 @@ export interface LatestJson {
   staging?: StagingBlock
   /** Optional app feature gates. Independent from updater gray-release staging. */
   featureGates?: FeatureGatesConfig
+  /** Optional managed model catalog. Independent from app-update staging. */
+  modelCatalog?: RemoteModelCatalog
 }
 
 export type UpdateType = "asar" | "full"

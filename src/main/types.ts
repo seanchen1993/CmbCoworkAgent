@@ -7,10 +7,7 @@ import type {
   ThreadForkResponse as SharedThreadForkResponse
 } from "../shared/checkpoint-forkability"
 
-export type {
-  ForkBoundarySource,
-  ForkUnstableReason
-} from "../shared/checkpoint-forkability"
+export type { ForkBoundarySource, ForkUnstableReason } from "../shared/checkpoint-forkability"
 
 export type {
   AgentAutoCommitMessageStrategy,
@@ -119,7 +116,7 @@ export interface Run {
 }
 
 // Provider configuration
-export type ProviderId = "custom"
+export type ProviderId = "builtin" | "custom"
 
 export interface Provider {
   id: ProviderId
@@ -135,6 +132,9 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  source: ProviderId
+  origin?: "remote" | "fallback"
+  maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
 }

@@ -15,7 +15,6 @@ import {
   deleteThreadCheckpoint,
   getEnabledSkillsSources,
   getEnabledSkillMiddlewareSources,
-  getCustomModelConfigs,
   getUserInfo,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   getSkillEvolutionTurnThreshold as getStoredSkillEvolutionTurnThreshold,
@@ -31,6 +30,7 @@ import {
   getDisabledSkillDirs,
   getGlobalRoutingMode
 } from "../storage"
+import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 
 import { ChatOpenAI } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
@@ -2391,8 +2391,7 @@ ${shellGuidance}
 `
         : ""
 
-  const memorySection =
-    options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
+  const memorySection = options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
   return (
     workingDirSection +
     backgroundExecSection +
@@ -3692,11 +3691,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
   if (runtimePolicy.isProjectMode) {
-    const envValue = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
+    const envValue =
+      (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
     console.log(
       `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"}, ${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
     )
-    const memoryEnvValue = (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
+    const memoryEnvValue =
+      (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
     console.log(
       `[Runtime] Project mode memory enabled: ${isProjectModeMemoryEnabled()} (${PROJECT_MODE_MEMORY_ENV}=${memoryEnvValue})`
     )
@@ -3723,16 +3724,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       onHookSkippedFactory?.(event)
     )
 
-  const selectedModelId = modelId?.startsWith("custom:")
-    ? modelId.slice("custom:".length)
-    : undefined
-
-  const allCustomConfigs = getCustomModelConfigs()
-  const customConfig = selectedModelId
-    ? allCustomConfigs.find((item) => item.id === selectedModelId) ||
-      allCustomConfigs.find((item) => item.model === selectedModelId) ||
-      null
-    : (allCustomConfigs[0] ?? null)
+  const customConfig = modelId ? getModelConfigByRef(modelId) : getAvailableModelConfigOrDefault()
   if (!customConfig) {
     throw new Error("Custom model not configured. Please configure a model in Settings.")
   }
@@ -3756,12 +3748,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     // `model: custom:foo` resolves fine under a workflow agentType but SILENTLY
     // inherits the main model for a Solo task subagent.
     const lookup = stripCustomModelPrefix(profileModel)
-    const cfg =
-      allCustomConfigs.find((item) => item.id === lookup) ||
-      allCustomConfigs.find((item) => item.model === lookup)
+    const cfg = getModelConfigByRef(profileModel) ?? getModelConfigByRef(lookup)
     if (!cfg) {
       console.warn(
-        `[Runtime] Registry agent model "${profileModel}" not found in custom model configs; inheriting main model.`
+        `[Runtime] Registry agent model "${profileModel}" not found in model configs; inheriting main model.`
       )
       return undefined
     }
@@ -4113,7 +4103,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
     }
   } else if (enableAgentsPrompt && normalizedHarnessAgentsPrompt) {
-    console.log("[Runtime] Workspace AGENTS.md prompt injection suppressed by Harness AGENTS.md prompt")
+    console.log(
+      "[Runtime] Workspace AGENTS.md prompt injection suppressed by Harness AGENTS.md prompt"
+    )
   } else {
     console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
   }
@@ -4135,8 +4127,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     systemPrompt += "\n\n" + combinedAgentsPrompt
   }
   const combinedAgentsPromptPreview =
-    [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") ||
-    undefined
+    [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
   if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
     onAgentsPromptLoadStatus({
       items: agentsPromptLoadStatusItems,

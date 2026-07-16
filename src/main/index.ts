@@ -22,10 +22,7 @@ import {
   showPendingAppAttention
 } from "./app-tray"
 import { setAppAttentionHandler } from "./app-attention-events"
-import {
-  APP_ATTENTION_CHANNEL,
-  isRendererAppAttentionPayload
-} from "../shared/app-attention"
+import { APP_ATTENTION_CHANNEL, isRendererAppAttentionPayload } from "../shared/app-attention"
 import {
   closePromptActionToBehavior,
   isCloseToTrayPromptResponse,
@@ -124,7 +121,8 @@ function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): strin
           }
         }
         if (typeof nestedValue === "symbol") return nestedValue.toString()
-        if (typeof nestedValue === "function") return `[Function ${nestedValue.name || "anonymous"}]`
+        if (typeof nestedValue === "function")
+          return `[Function ${nestedValue.name || "anonymous"}]`
         if (nestedValue && typeof nestedValue === "object") {
           if (seen.has(nestedValue)) return "[Circular]"
           seen.add(nestedValue)
@@ -270,6 +268,7 @@ import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
+import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import {
   getOpenworkDir,
@@ -299,8 +298,8 @@ const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function cleanupLegacySkillEvalRecords(): void {
   const roots = new Set(
-    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter(
-      (value): value is string => Boolean(value)
+    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter((value): value is string =>
+      Boolean(value)
     )
   )
 
@@ -432,10 +431,7 @@ function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBeha
   return savedBehavior
 }
 
-function requestWindowCloseChoice(
-  window: BrowserWindow,
-  reason: CloseToTrayPromptReason
-): void {
+function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
   if (window.isDestroyed() || window.webContents.isDestroyed()) return
   if (closeToTrayPromptOpen) {
     window.focus()
@@ -491,7 +487,9 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
+    autoHideMenuBar: ![".166", ".147", ".216", ".215", ".225", "201.99"].some((ip) =>
+      getLocalIP().includes(ip)
+    ) // 自动隐藏菜单栏
   })
 
   mainWindow.on("ready-to-show", () => {
@@ -537,22 +535,22 @@ function createWindow(): void {
     console.error("[Main] Renderer process gone:", details)
   })
 
-  mainWindow.webContents.on('did-finish-load', () => {
+  mainWindow.webContents.on("did-finish-load", () => {
     const version = app.getVersion()
-    console.log('version---------------', version)
-    console.log('getLocalIP', getLocalIP())
+    console.log("version---------------", version)
+    console.log("getLocalIP", getLocalIP())
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('version', version)
-      mainWindow.webContents.send('ip', getLocalIP())
+      mainWindow.webContents.send("version", version)
+      mainWindow.webContents.send("ip", getLocalIP())
     }
   })
 
   // HMR for renderer based on electron-vite cli
   if (isDev && process.env["ELECTRON_RENDERER_URL"]) {
-    console.log('local render')
+    console.log("local render")
     mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"])
   } else {
-    console.log('url render')
+    console.log("url render")
     // mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
     const renderUrl = import.meta.env.VITE_RENDER_URL
     if (!renderUrl) {
@@ -628,7 +626,8 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
     if (!thread.metadata) continue
     try {
       const metadata = JSON.parse(thread.metadata)
-      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
+      const workspacePath =
+        typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
       if (!workspacePath) continue
       const key = workspacePath.toLowerCase()
       if (seen.has(key)) continue
@@ -751,10 +750,7 @@ if (!gotTheLock) {
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
-      if (
-        event.sender.id !== mainWindow.webContents.id ||
-        !isRendererAppAttentionPayload(payload)
-      )
+      if (event.sender.id !== mainWindow.webContents.id || !isRendererAppAttentionPayload(payload))
         return
       // Main-process sources own persistent state and keys. Strip renderer keys so
       // a compromised renderer cannot overwrite or resolve an approval/input entry.
@@ -953,6 +949,7 @@ if (!gotTheLock) {
     // Expose result to renderer — renderer polls this on mount to show update toast
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
 
+    const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
@@ -963,6 +960,11 @@ if (!gotTheLock) {
       }
     })
     createPetWindow()
+
+    // Background services can execute immediately on startup. Wait for the
+    // initial catalog request so due work never runs against a temporary
+    // fallback merely because the remote manifest was still loading.
+    await initialModelCatalogLoad
 
     // Start scheduled task scheduler and heartbeat service
     startScheduler()
@@ -1082,6 +1084,7 @@ if (!gotTheLock) {
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
+    stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
     try {
       shutdownAdoptionTracker()
