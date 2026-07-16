@@ -40,6 +40,7 @@ import {
   readOnlyShellExecutionContext,
   type SkillHookContextProvider
 } from "./local-sandbox"
+import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
@@ -317,6 +318,26 @@ export function hasPendingWorkflowApproval(parentThreadId: string, runId?: strin
   }
   return false
 }
+
+/**
+ * True when the given runtime thread (or a nested child of it, delimiter-fenced
+ * so `w1` cannot match `w10`) is blocked on a pending user approval. The
+ * coordinator worker manager's inactivity watchdog uses this — via the probe
+ * wired below, not a direct import (this module imports the manager, so the
+ * manager importing back would be a cycle) — to treat an approval-blocked
+ * worker as WAITING rather than hung, mirroring hasPendingWorkflowApproval's
+ * role for the workflow engine watchdog.
+ */
+export function hasPendingApprovalForRuntimeThread(runtimeThreadId: string): boolean {
+  for (const approval of pendingApprovals.values()) {
+    if (approvalMatchesRuntimeThread(approval.runtimeThreadId, runtimeThreadId)) {
+      return true
+    }
+  }
+  return false
+}
+
+coordinatorWorkerManager.setWorkerApprovalProbe(hasPendingApprovalForRuntimeThread)
 
 // ─── Tool concurrency: AsyncRWLock (writer-preferring) ──────────────────────
 //

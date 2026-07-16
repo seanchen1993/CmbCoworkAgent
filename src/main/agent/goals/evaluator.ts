@@ -22,7 +22,7 @@ const GOAL_ASSISTANT_RESPONSE_MAX_BUDGET_CHARS = 12_000
 const APPROX_CHARS_PER_TOKEN = 4
 const GOAL_EVIDENCE_MIN_ITEM_CHARS = 1_500
 const GOAL_EVIDENCE_MAX_ITEM_CHARS = 8_000
-export const GOAL_EVALUATOR_TIMEOUT_MS = 60_000
+export const GOAL_EVALUATOR_TIMEOUT_MS = 120_000
 
 const IMPORTANT_EVIDENCE_LINE =
   /\b(BUILD SUCCESS|BUILD FAILURE|FAILED|FAILURE|ERROR|Exception|PASS|passed|tests?|mvn test|pnpm test|npm test|yarn test|pytest|vitest|jest|diff --git|@@|changed|modified|created|deleted|log\.)\b|(?:^|\s)[\w./-]+\.(?:ts|tsx|js|jsx|java|kt|py|json|md|xml|yml|yaml|go|rs|cpp|c|h)\b/i
@@ -95,6 +95,59 @@ export function shouldPauseGoalForEmptyTurn(input: GoalEvaluationInput): boolean
     input.toolCalls.length === 0 &&
     (!input.toolEvidence || input.toolEvidence.length === 0)
   )
+}
+
+/**
+ * Whether the goal continuation loop must DEFER this sub-turn instead of
+ * evaluating/nagging: true when background work is still RUNNING for the thread —
+ * a dynamic workflow run (workflowRunManager.isActive) or a coordinator/agent-team
+ * worker (coordinatorWorkerManager.hasRunningWorkersForThread). The working agent
+ * that launched it is waiting for a result that can only arrive on a later,
+ * dedicated notification turn — so evaluating now would judge an incomplete goal
+ * and inject a "keep working" nag every sub-turn until the turn budget is burned
+ * (the exact "空催 while the notification hasn't arrived" failure). Defer means:
+ * end the turn, leave the goal ACTIVE, do NOT consume a turn; the notification
+ * turn re-drives the goal (via GoalManager.getActive) once the result lands.
+ *
+ * The caller composes the signal (see agent.ts) from several predicates — NOT
+ * plain isBusyForThread. isBusyForThread counts the notification a turn is
+ * CURRENTLY delivering as "busy", which would make that very delivery turn defer
+ * itself and the goal could never complete. Every leg here is instead built to
+ * exclude "the batch this turn is delivering", so it is deadlock-safe:
+ *   - workflow / worker RUNNING (isActive / hasRunningWorkersForThread).
+ *   - worker terminal, notification ENQUEUED but not yet delivered
+ *     (hasAutoRunnableNotifications) — a coordinator notification turn
+ *     drainNotifications() its batch out of the queue BEFORE this check, so the
+ *     batch being delivered is not counted.
+ *   - worker terminal, notification NOT yet enqueued — the terminalPersistPromise
+ *     span (hasTerminalWorkerAwaitingNotificationForThread). enqueueNotification
+ *     sets notificationEnqueued on its first line, so a worker whose notification
+ *     already exists (incl. the one being delivered) is not counted.
+ *   - workflow terminal, result pending delivery
+ *     (hasDeliverablePendingNotificationExcept, excluding the { runId, startedAt }
+ *     of the run THIS delivery turn is reporting). Excluded by instance identity,
+ *     not turn-type or runId alone: only one workflow is ACTIVE per thread, but a
+ *     BACKLOG of terminal pending notifications can exist, and a resume REUSES the
+ *     runId — so the fence excludes just the current-delivery instance while still
+ *     catching an OTHER pending run (partial-evidence guard).
+ * suppress_notification_auto_run / dismissal workers are excluded so a result
+ * that will never auto-deliver cannot defer the goal forever.
+ *
+ * Coverage & the deliberately-unchased residual: for coordinators this covers
+ * every OBSERVABLE done-but-undelivered state (the only uncovered span — between
+ * status flipping terminal and terminalPersistPromise being set — is SYNCHRONOUS
+ * JS, so no other turn's check can interleave into it). For workflow one narrow
+ * OBSERVABLE residual remains and is intentionally NOT chased: the flush window
+ * between run-manager active.delete() and the pending notification being
+ * registered (only reachable by a near-instant workflow on its own launch turn).
+ * It is async-flush-brief and self-correcting — the result still arrives on a
+ * later notification turn and re-drives the goal — so closing it (a run-manager
+ * "terminal-but-unregistered" predicate) is not worth the added surface. Claim it
+ * as "all observable pending states covered except that micro-window", never as
+ * "the entire timeline".
+ */
+export function shouldDeferGoalForActiveBackgroundWork(isBackgroundWorkRunning: boolean): boolean {
+  return isBackgroundWorkRunning
 }
 
 function stripThinkBlocks(text: string): string {
@@ -536,13 +589,34 @@ export async function evaluateGoalWithModel(
     configuration: { baseURL: config.baseUrl },
     maxTokens: Math.min(config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, 1200),
     temperature: Math.min(config.temperature ?? DEFAULT_TEMPERATURE, 0.1),
-    maxRetries: 0
+    maxRetries: 0,
+    // 与主链路 buildCustomChatOpenAI 对齐:显式关闭 thinking,不把开关留给
+    // 网关默认值。裁决输出是 ≤1200 token 的 JSON,思维链只会拖慢到撞总时长闸门。
+    // 两套 provider 约定都发:enable_thinking 是 deepseek/Qwen 的开关,
+    // thinking.type 是 glm(智谱 bigmodel)的开关——只发前者时 glm 会忽略、
+    // 思维链照开(实测裁决因此慢到 30~112s)。
+    modelKwargs: {
+      chat_template_kwargs: { enable_thinking: false },
+      thinking: { type: "disabled" }
+    }
   })
 
   const linkedSignal = createLinkedAbortSignal(options.abortSignal)
-  const invokeWithFreshTimeout = async (messages: Array<SystemMessage | HumanMessage>) => {
+  const invokeWithFreshTimeout = async (
+    messages: Array<SystemMessage | HumanMessage>,
+    label: "judge" | "judge-retry"
+  ) => {
     const timeoutError = new Error(`Goal evaluator timed out after ${GOAL_EVALUATOR_TIMEOUT_MS}ms.`)
     let timeout: ReturnType<typeof setTimeout> | undefined
+    // The evaluator uses a bare ChatOpenAI (no createRetryingFetch), so its model
+    // calls are otherwise invisible in logs. Time each attempt so slow judgments
+    // (thinking left on, big evidence prompt, busy gateway) are diagnosable without
+    // querying the goal DB.
+    const promptChars = messages.reduce((sum, m) => sum + extractTextContent(m.content).length, 0)
+    const startedAt = Date.now()
+    console.log(
+      `[Goal] evaluator ${label} start: model=${config.model}, promptChars=${promptChars}, timeoutMs=${GOAL_EVALUATOR_TIMEOUT_MS}`
+    )
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
@@ -550,10 +624,12 @@ export async function evaluateGoalWithModel(
           reject(timeoutError)
         }, GOAL_EVALUATOR_TIMEOUT_MS)
       })
-      return await Promise.race([
+      const result = await Promise.race([
         model.invoke(messages, { signal: linkedSignal.signal }),
         timeoutPromise
       ])
+      console.log(`[Goal] evaluator ${label} done in ${Date.now() - startedAt}ms`)
+      return result
     } finally {
       if (timeout) clearTimeout(timeout)
     }
@@ -566,26 +642,29 @@ export async function evaluateGoalWithModel(
       ),
       maxEvidenceChars: resolveGoalEvidenceBudgetChars(config.maxTokens ?? DEFAULT_MAX_TOKENS)
     })
-    const response = await invokeWithFreshTimeout([
-      new SystemMessage(GOAL_JUDGE_SYSTEM_PROMPT),
-      new HumanMessage(judgeUserPrompt)
-    ])
+    const response = await invokeWithFreshTimeout(
+      [new SystemMessage(GOAL_JUDGE_SYSTEM_PROMPT), new HumanMessage(judgeUserPrompt)],
+      "judge"
+    )
     const firstDecision = parseGoalJudgeResult(extractTextContent(response.content))
     if (!firstDecision.parseFailed) return firstDecision
 
     console.warn("[Goal] evaluator returned invalid JSON; retrying once.")
-    const retryResponse = await invokeWithFreshTimeout([
-      new SystemMessage(GOAL_JUDGE_RETRY_SYSTEM_PROMPT),
-      new HumanMessage(
-        [
-          "Respond ONLY with the JSON object. No Markdown, no prose, no preface.",
-          "The previous evaluator response did not contain a valid JSON object.",
-          "Re-evaluate the same evidence and return only the JSON object.",
-          "",
-          judgeUserPrompt
-        ].join("\n")
-      )
-    ])
+    const retryResponse = await invokeWithFreshTimeout(
+      [
+        new SystemMessage(GOAL_JUDGE_RETRY_SYSTEM_PROMPT),
+        new HumanMessage(
+          [
+            "Respond ONLY with the JSON object. No Markdown, no prose, no preface.",
+            "The previous evaluator response did not contain a valid JSON object.",
+            "Re-evaluate the same evidence and return only the JSON object.",
+            "",
+            judgeUserPrompt
+          ].join("\n")
+        )
+      ],
+      "judge-retry"
+    )
     return parseGoalJudgeResult(extractTextContent(retryResponse.content))
   } finally {
     linkedSignal.dispose()

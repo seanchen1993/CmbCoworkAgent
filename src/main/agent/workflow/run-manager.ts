@@ -417,21 +417,56 @@ class WorkflowRunManager {
    * Deliverable = not delivered AND renotify not exhausted; an in-flight one
    * COUNTS as busy (it stays undelivered until its ack lands). */
   hasDeliverablePendingNotification(workspacePath: string, threadId: string): boolean {
+    return this.hasDeliverablePendingNotificationExcept(workspacePath, threadId, undefined)
+  }
+
+  /** Like hasDeliverablePendingNotification, but ignores the run instance a
+   * delivery turn is CURRENTLY reporting. Runs support a pending BACKLOG (only
+   * one notification is delivered per turn; the next is kicked after ack), so a
+   * caller that runs DURING a delivery turn (the goal defer check, which happens
+   * BEFORE the settlement markNotified()s the current run) must exclude that
+   * in-flight run — otherwise it would see its own delivery as "still pending"
+   * and self-defer — yet still detect an OTHER already-completed run whose result
+   * has not entered the conversation, so the goal doesn't evaluate on partial
+   * evidence. Pass undefined (the plain method) when there is no current delivery
+   * to exclude (e.g. auto-commit, which runs AFTER settlement).
+   *
+   * Excludes by INSTANCE identity (runId + startedAt), not runId alone: a resume
+   * REUSES the runId (see setWorkflowRunNotified's identical fence), so if the
+   * model resumes the just-delivered run inside its own notification turn and
+   * that resumed instance completes, excluding by runId would also hide the
+   * resumed instance's pending notification — the exact partial-evidence bug this
+   * guard exists to prevent. startedAt is minted fresh per launch, so only the
+   * true current-delivery instance is excluded. */
+  hasDeliverablePendingNotificationExcept(
+    workspacePath: string,
+    threadId: string,
+    except: { runId: string; startedAt: string } | undefined
+  ): boolean {
+    const isCurrentDelivery = (runId: string, startedAt: string): boolean =>
+      except !== undefined && runId === except.runId && startedAt === except.startedAt
     // In-flight explicitly counts as busy even for an exhausted run: a
     // hydrate/kick can re-report an exhausted run, and exiting workflow mode
     // mid-report would strand that delivery.
-    const deliverable = (runId: string): boolean =>
+    const deliverableByRunId = (runId: string): boolean =>
       this.inFlightNotifications.has(runId) || !this.isRenotifyExhausted(runId)
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
         !snapshot.notificationDelivered &&
-        deliverable(snapshot.runId)
+        !isCurrentDelivery(snapshot.runId, snapshot.startedAt) &&
+        deliverableByRunId(snapshot.runId)
       ) {
         return true
       }
     }
-    return findUndeliveredTerminalRun(workspacePath, threadId, deliverable) !== null
+    return (
+      findUndeliveredTerminalRun(
+        workspacePath,
+        threadId,
+        (run) => !isCurrentDelivery(run.runId, run.startedAt) && deliverableByRunId(run.runId)
+      ) !== null
+    )
   }
 
   /** Launches a run in the background. Throws synchronously on invalid state. */
