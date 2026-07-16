@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Bot, Brain, ChevronDown, ChevronRight, User, Wrench } from "lucide-react"
+import { Bot, ChevronDown, ChevronRight, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import {
@@ -698,8 +698,7 @@ function ReasoningDetails({ text }: { text: string }): React.JSX.Element {
         aria-expanded={open}
       >
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        <Brain className="size-3" />
-        <span className="font-medium">思考过程</span>
+        <span className="font-medium">思考</span>
       </button>
       {open && (
         <div className="mt-1 whitespace-pre-wrap break-words border-l-2 border-border pl-2 text-[11px] leading-5 text-muted-foreground">
@@ -936,7 +935,7 @@ function TimelineMessageRow({
   if (message.role === "subagent" && message.subagentRun) {
     return (
       <div className="flex scroll-mt-2 justify-start pl-8" data-trace-id={message.traceId}>
-        <div className={cn("w-full max-w-[86%] rounded-lg", selected && "ring-2 ring-primary/50")}>
+        <div className={cn("w-full max-w-[82%] rounded-lg", selected && "ring-2 ring-primary/50")}>
           <SubagentRunCard run={message.subagentRun} />
         </div>
       </div>
@@ -946,7 +945,9 @@ function TimelineMessageRow({
   if (message.role === "tool" && message.tools) {
     return (
       <div className="flex scroll-mt-2 justify-start pl-8" data-trace-id={message.traceId}>
-        <div className={cn("w-full max-w-[86%] rounded", selected && "ring-2 ring-primary/40")}>
+        {/* Hug the label width like chat bubbles do — a full-width box here reads
+            as a giant empty bar between much narrower bubbles. */}
+        <div className={cn("max-w-[82%] rounded", selected && "ring-2 ring-primary/40")}>
           <ToolCallDetails tools={message.tools} label={message.content} />
         </div>
       </div>
@@ -955,15 +956,13 @@ function TimelineMessageRow({
 
   const isUser = message.role === "user"
   const time = formatMessageTime(message.occurredAt)
-  const previousTime = formatMessageTime(previous?.occurredAt)
   // Consecutive same-actor bubbles read as one utterance: drop the repeated
-  // avatar/label, keep only a new timestamp when the minute actually changed.
+  // avatar/label. The timestamp always shows so rows stay uniformly annotated.
   const isContinuation =
     !isUser &&
     message.role === previous?.role &&
     message.label === previous.label &&
     message.traceId === previous.traceId
-  const shownTime = time && time !== previousTime ? time : ""
 
   return (
     <div
@@ -982,14 +981,14 @@ function TimelineMessageRow({
       )}
       <div
         className={cn(
-          "max-w-[78%] rounded-lg px-3 py-2 text-xs leading-5",
+          "max-w-[82%] rounded-lg px-3 py-2 text-xs leading-5",
           isUser
             ? "bg-primary text-primary-foreground"
             : "border border-border bg-background text-foreground",
           selected && "ring-2 ring-primary/50"
         )}
       >
-        {(!isContinuation || shownTime) && (
+        {(!isContinuation || time) && (
           <div
             className={cn(
               "mb-1 flex items-baseline justify-between gap-3 text-[10px]",
@@ -997,7 +996,7 @@ function TimelineMessageRow({
             )}
           >
             <span className="font-medium">{isContinuation ? "" : message.label}</span>
-            {shownTime ? <span className="shrink-0">{shownTime}</span> : null}
+            {time ? <span className="shrink-0">{time}</span> : null}
           </div>
         )}
         {message.reasoning ? <ReasoningDetails text={message.reasoning} /> : null}

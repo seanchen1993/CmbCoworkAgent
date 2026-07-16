@@ -73,6 +73,36 @@ function testDevMockContainsWorkflowAndTaskSubagents(): void {
   assertIncludes(source, "rootThreadId: taskRootThreadId", "task sub traces should link root thread")
 }
 
+function testDevMockContainsVisibleReasoning(): void {
+  const helper = section(
+    dashboardSource,
+    "function makeMockTraceWithConversation",
+    "function isSubagentMockTrace"
+  )
+  const linkedTraces = section(
+    dashboardSource,
+    "function makeMockSubagentSessionTraces",
+    "function makeMockAgentTrace"
+  )
+  const ordinaryTraces = section(
+    dashboardSource,
+    "function makeMockAgentTrace",
+    "function makeMockSkillRecentTraces"
+  )
+  assertIncludes(
+    helper,
+    "reasoning: args.initialReasoning",
+    "conversation mock helper should attach initial reasoning"
+  )
+  assertIncludes(
+    helper,
+    "reasoning: args.finalReasoning",
+    "conversation mock helper should attach final reasoning"
+  )
+  assertIncludes(linkedTraces, "finalReasoning:", "multi-agent mock should include reasoning")
+  assertIncludes(ordinaryTraces, "reasoning:", "ordinary mock should include reasoning")
+}
+
 function testDevMockThreadTracesResolveNamespacedRootThread(): void {
   const source = section(dashboardSource, "function makeMockThreadTraces", "function makeMockSkillCodeStats")
   assertIncludes(
@@ -98,6 +128,8 @@ function run(): void {
   console.log("PASS dashboard uncommitted rootThreadId detail")
   testDevMockContainsWorkflowAndTaskSubagents()
   console.log("PASS dashboard dev mock workflow/task subagents")
+  testDevMockContainsVisibleReasoning()
+  console.log("PASS dashboard dev mock visible reasoning")
   testDevMockThreadTracesResolveNamespacedRootThread()
   console.log("PASS dashboard dev mock namespaced threadTraces")
 }

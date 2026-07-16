@@ -8954,6 +8954,8 @@ function makeMockTraceWithConversation(args: {
   durationMs: number
   userMessage: string
   assistantSummary: string
+  initialReasoning?: string
+  finalReasoning?: string
   toolCalls: MockTraceToolCall[]
   skill: string
   userIndex: number
@@ -9041,7 +9043,8 @@ function makeMockTraceWithConversation(args: {
         inputMessages: [{ role: "user", content: args.userMessage }],
         outputMessage: {
           role: "assistant",
-          content: initialAssistantText
+          content: initialAssistantText,
+          ...(args.initialReasoning ? { reasoning: args.initialReasoning } : {})
         },
         toolCalls: args.toolCalls.slice(0, midpoint),
         tokenUsage: {
@@ -9056,7 +9059,8 @@ function makeMockTraceWithConversation(args: {
         inputMessages: [{ role: "user", content: args.userMessage }],
         outputMessage: {
           role: "assistant",
-          content: args.assistantSummary
+          content: args.assistantSummary,
+          ...(args.finalReasoning ? { reasoning: args.finalReasoning } : {})
         },
         toolCalls: args.toolCalls.slice(midpoint),
         tokenUsage: {
@@ -9223,6 +9227,10 @@ function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTr
       userMessage: "用 Agent Team 模式优化运营面板 trace 会话展示，并让 worker 写一个最小改动。",
       assistantSummary:
         "我已启动实现 Worker 和校验 Verifier：实现 Worker 负责补展示字段，Verifier 检查 thread 聚合和工具调用统计。",
+      initialReasoning:
+        "这项任务同时涉及展示与统计口径，适合拆给实现 Worker 和校验 Verifier 并行处理。",
+      finalReasoning:
+        "两个 Worker 的职责已经分开，主 Agent 只需要汇总各自结果并保持同一 root thread 关联。",
       toolCalls: [
         {
           name: "start_worker",
@@ -9254,6 +9262,8 @@ function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTr
       userMessage: "实现 Worker：补齐 TraceHistoryDialog 中子 Agent 展示 mock，并保持主会话收束。",
       assistantSummary:
         "实现完成：子 Agent trace 会以 Worker frontend 标签出现，并通过 rootThreadId 回到主会话。",
+      finalReasoning:
+        "展示所需字段已经存在，最小改动是补齐 mock 的父子关联，而不是改动 thread 聚合规则。",
       toolCalls: [
         {
           name: "read_file",
@@ -9376,6 +9386,10 @@ function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTr
       userMessage: "Workflow Agent：在 Dev-代码实现 阶段补 trace mock 数据。",
       assistantSummary:
         "Dev Agent 已完成实现：写入 mock trace 组，展示为 Workflow Agent Dev-代码实现，并保留 phase 标签。",
+      initialReasoning:
+        "需要复用真实 workflow agent 的字段结构，才能同时验证 phase 标签与父子 trace 归并。",
+      finalReasoning:
+        "mock 已沿用真实字段结构，展示层无需为 DEV 数据增加特殊判断。",
       toolCalls: [
         {
           name: "read_file",
@@ -9491,6 +9505,8 @@ function makeMockSubagentSessionTraces(skill: string, range: TimeRange): AgentTr
       userIndex: 7,
       userMessage: "Task Agent：读取 TraceConversation 并返回摘要。",
       assistantSummary: "已读取组件：对话还原会按角色展示用户、助手和工具调用，并显示 parent/root 标签。",
+      finalReasoning:
+        "Solo Task 是同步子调用，子 Agent 结果应嵌在 task 工具调用位置，并保留可展开的思考摘要。",
       toolCalls: [
         {
           name: "read_file",
@@ -9660,7 +9676,12 @@ function makeMockAgentTrace(skill: string, range: TimeRange, index: number): Age
         inputMessages: [{ role: "user", content: userMessage }],
         outputMessage: {
           role: "assistant",
-          content: assistantSummary
+          content: assistantSummary,
+          ...(index % 2 === 0
+            ? {
+                reasoning: "先结合用户目标和已读取的代码定位关键路径，再给出可验证、可执行的结论。"
+              }
+            : {})
         },
         toolCalls: [],
         tokenUsage: {
