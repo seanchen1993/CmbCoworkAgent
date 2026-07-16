@@ -35,7 +35,8 @@ import {
   Trash2,
   Workflow,
   Zap,
-  CircleCheckBig
+  CircleCheckBig,
+  TriangleAlert
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -5170,10 +5171,34 @@ function ProjectReviewSummary({
       : false
   const result = reviewState.kind === "loaded" && isCurrentProject ? reviewState.result : null
   const reviews = result?.reviews ?? []
+  const hasReviewResult = Boolean(result?.tokenConfigured)
   const metricBoxClassName = "rounded-lg border border-border/70 bg-muted/[0.18] px-3 py-2.5"
 
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-3 text-xs mt-2">
+      {hasReviewResult && (
+        <div className="flex items-center">
+          {reviews.length > 0 ? (
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span tabIndex={0} className="inline-flex">
+                    <CheckCircle2 className="size-3.5 text-status-nominal" aria-label="存在评审记录" />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="z-[70] max-w-72">
+                  已有项目评审流程，请确认详设文档已存在。
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          ) : (
+            <div className="flex items-start gap-1.5 text-destructive">
+              <TriangleAlert  className="mt-0.5 size-3.5 shrink-0" />
+              <span>在进入 ST 流程之前发起评审并上传文档以避免 NC</span>
+            </div>
+          )}
+        </div>
+      )}
       <section className="">
         <div className="mt-1">
           {!normalizedProjectCode ? (
