@@ -184,7 +184,7 @@ function summarizeToolNames(tools: TraceConversationToolInfo[], limit = 8): stri
     counts.set(name, (counts.get(name) ?? 0) + 1)
   }
   const labels = [...counts.entries()].map(([name, count]) =>
-    count > 1 ? `${name} x${count}` : name
+    count > 1 ? `${name} ×${count}` : name
   )
   if (labels.length <= limit) return labels.join("、")
   return `${labels.slice(0, limit).join("、")} 等`
@@ -258,23 +258,16 @@ function TraceContextPills({
 }: {
   trace: TraceConversationSource
 }): React.JSX.Element | null {
-  const labels = traceContextLabels(trace).filter(Boolean)
-  if (labels.length === 0) return null
+  const [actor, ...rest] = traceContextLabels(trace).filter(Boolean)
+  if (!actor) return null
   return (
-    <div className="flex flex-wrap items-center gap-1">
-      {labels.map((label, index) => (
-        <span
-          key={`${label}-${index}`}
-          className={cn(
-            "rounded border px-1.5 py-0 text-[10px] leading-4",
-            index === 0
-              ? "border-blue-500/25 bg-blue-500/10 text-blue-700 dark:text-blue-300"
-              : "border-border bg-background text-muted-foreground"
-          )}
-        >
-          {label}
-        </span>
-      ))}
+    <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+      <span className="rounded border border-blue-500/25 bg-blue-500/10 px-1.5 text-[10px] leading-4 text-blue-700 dark:text-blue-300">
+        {actor}
+      </span>
+      {rest.length > 0 && (
+        <span className="truncate text-[10px] text-muted-foreground">{rest.join(" · ")}</span>
+      )}
     </div>
   )
 }
@@ -458,7 +451,7 @@ export function buildTraceConversation(
   })
   const userText = internalNotificationKind ? "" : cleanUserText(rawUserText)
 
-  const timeline = sortTimeline(buildTraceTimeline(trace, 0, false))
+  const timeline = sortTimeline(buildTraceTimeline(trace, 0))
   const messages = timeline.map((entry) => entry.message)
   const assistantText =
     [...messages].reverse().find((message) => message.role === "assistant" && message.content)
@@ -476,11 +469,7 @@ export function buildTraceConversation(
   }
 }
 
-function buildTraceTimeline(
-  trace: TraceConversationSource,
-  traceOrder: number,
-  includeTime: boolean
-): TimelineEntry[] {
+function buildTraceTimeline(trace: TraceConversationSource, traceOrder: number): TimelineEntry[] {
   const entries: TimelineEntry[] = []
   let sequence = 0
   const add = (
@@ -488,11 +477,9 @@ function buildTraceTimeline(
     occurredAt?: string
   ): void => {
     const time = validEventTime(occurredAt, trace.startedAt)
-    const suffix = includeTime ? formatMessageTime(time) : ""
     entries.push({
       message: {
         ...message,
-        label: suffix ? `${message.label} · ${suffix}` : message.label,
         traceId: message.traceId ?? trace.traceId,
         occurredAt: time
       },
@@ -583,7 +570,7 @@ function buildTraceTimeline(
       {
         role: "tool",
         label: toolMessageLabel(trace),
-        content: `调用 ${count} 次工具：${summarizeToolNames(group.tools)}`,
+        content: `调用 ${count} 次工具 · ${summarizeToolNames(group.tools)}`,
         tools: group.tools
       },
       group.occurredAt
@@ -659,7 +646,7 @@ export function buildThreadConversation(
     ordered.flatMap((trace, traceOrder) =>
       isSubagentTrace(trace)
         ? [buildSubagentTimelineEntry(trace, traceOrder)]
-        : buildTraceTimeline(trace, traceOrder, true)
+        : buildTraceTimeline(trace, traceOrder)
     )
   ).map((entry) => entry.message)
   const allTools = messages.flatMap((message) => message.tools ?? message.subagentRun?.tools ?? [])
@@ -692,13 +679,21 @@ function roleIcon(role: TraceRole): React.JSX.Element {
   return <Bot className="size-3.5" />
 }
 
+function statusDotClass(status?: string): string {
+  if (status === "error") return "bg-destructive"
+  if (status === "cancelled") return "bg-amber-500"
+  if (status === "running") return "bg-blue-500"
+  if (status === "success") return "bg-emerald-500"
+  return "bg-muted-foreground/40"
+}
+
 function ReasoningDetails({ text }: { text: string }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   return (
-    <div className="mb-1.5 rounded-md border border-border/70 bg-muted/35">
+    <div className="my-0.5">
       <button
         type="button"
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[10px] text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1 rounded px-0.5 text-[10px] text-muted-foreground/80 hover:text-foreground"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
       >
@@ -707,7 +702,7 @@ function ReasoningDetails({ text }: { text: string }): React.JSX.Element {
         <span className="font-medium">思考过程</span>
       </button>
       {open && (
-        <div className="whitespace-pre-wrap break-words border-t border-border/60 px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
+        <div className="mt-1 whitespace-pre-wrap break-words border-l-2 border-border pl-2 text-[11px] leading-5 text-muted-foreground">
           {text}
         </div>
       )}
@@ -739,7 +734,7 @@ function ExpandableValue({
 
   return (
     <div className="mt-1.5">
-      <div className="text-[9px] uppercase tracking-wider text-muted-foreground/70">{label}</div>
+      <div className="text-[10px] text-muted-foreground/70">{label}</div>
       <pre className="mt-0.5 whitespace-pre-wrap break-all text-[10px] leading-4 text-muted-foreground">
         {shown}
       </pre>
@@ -768,38 +763,46 @@ function ToolCallDetails({
   if (tools.length === 0) return null
 
   return (
-    <div className="rounded-lg border border-border bg-background shadow-sm">
+    <div className="min-w-0">
       <button
         type="button"
-        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[11px] text-muted-foreground hover:text-foreground"
+        className="flex max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] text-muted-foreground hover:bg-muted/60 hover:text-foreground"
         onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
       >
-        {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        <Wrench className="size-3" />
-        <span className="font-medium">{label ?? `工具调用 ${tools.length} 次`}</span>
+        {open ? (
+          <ChevronDown className="size-3 shrink-0" />
+        ) : (
+          <ChevronRight className="size-3 shrink-0" />
+        )}
+        <Wrench className="size-3 shrink-0" />
+        <span className="truncate">{label ?? `工具调用 ${tools.length} 次`}</span>
       </button>
       {open && (
-        <div className="space-y-2 border-t border-border/60 px-2.5 py-2">
+        <div className="mt-1 divide-y divide-border/60 rounded-md border border-border bg-background">
           {tools.map((tool, index) => (
-            <div
-              key={`${tool.name}-${index}`}
-              className="rounded-md border border-border bg-background px-2.5 py-2"
-            >
+            <div key={`${tool.name}-${index}`} className="px-2.5 py-2">
               <div className="flex items-center gap-2 text-[11px]">
-                <span className="font-medium text-foreground">{tool.name}</span>
-                {tool.status && (
-                  <span className="rounded border border-border px-1.5 py-0 text-[9px] uppercase text-muted-foreground">
-                    {tool.status}
-                  </span>
-                )}
+                <span
+                  className={cn("size-1.5 shrink-0 rounded-full", statusDotClass(tool.status))}
+                  title={tool.status}
+                />
+                <span
+                  className={cn(
+                    "truncate font-medium",
+                    tool.status === "error" ? "text-destructive" : "text-foreground"
+                  )}
+                >
+                  {tool.name}
+                </span>
                 {tool.durationMs ? (
-                  <span className="ml-auto text-[10px] text-muted-foreground">
+                  <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
                     {formatDuration(tool.durationMs)}
                   </span>
                 ) : null}
               </div>
-              <ExpandableValue label="Input" value={tool.input} />
-              <ExpandableValue label="Output" value={tool.output} />
+              <ExpandableValue label="输入" value={tool.input} />
+              <ExpandableValue label="输出" value={tool.output} />
             </div>
           ))}
         </div>
@@ -822,100 +825,191 @@ function subagentDurationMs(run: TraceConversationSubagentRun): number | undefin
 }
 
 function SubagentRunCard({ run }: { run: TraceConversationSubagentRun }): React.JSX.Element {
+  const [open, setOpen] = useState(false)
   const duration = subagentDurationMs(run)
-  const timeRange = [formatMessageTime(run.startedAt), formatMessageTime(run.endedAt)]
-    .filter(Boolean)
-    .filter((value, index, values) => index === 0 || value !== values[index - 1])
-    .join(" – ")
   const isError = run.outcome === "error"
   const isCancelled = run.outcome === "cancelled"
+  const meta = [
+    formatMessageTime(run.startedAt),
+    duration !== undefined ? formatDuration(duration) : ""
+  ]
+    .filter(Boolean)
+    .join(" · ")
 
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-xl border bg-background shadow-sm",
-        isError
-          ? "border-destructive/35"
-          : isCancelled
-            ? "border-amber-500/35"
-            : "border-blue-500/30"
+        "overflow-hidden rounded-lg border bg-background",
+        isError ? "border-destructive/40" : "border-border"
       )}
     >
-      <div
-        className={cn(
-          "flex items-center gap-2 border-b px-3 py-2",
-          isError
-            ? "border-destructive/20 bg-destructive/5"
-            : isCancelled
-              ? "border-amber-500/20 bg-amber-500/5"
-              : "border-blue-500/20 bg-blue-500/5"
-        )}
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 px-2.5 py-2 text-left hover:bg-muted/40"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
       >
-        <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-300">
-          <Bot className="size-3.5" />
+        {open ? (
+          <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+        )}
+        <span className="inline-flex size-5 shrink-0 items-center justify-center rounded bg-blue-500/10 text-blue-600 dark:text-blue-300">
+          <Bot className="size-3" />
         </span>
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-foreground">
-            <span className="truncate">{run.sourceLabel}</span>
-            <span className="text-muted-foreground">→</span>
-            <span className="truncate text-blue-700 dark:text-blue-300">{run.actorLabel}</span>
-          </div>
-          <div className="text-[9px] text-muted-foreground">子 Agent 内嵌执行</div>
-        </div>
+        <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium">
+          <span className="truncate text-muted-foreground">{run.sourceLabel}</span>
+          <span className="shrink-0 text-muted-foreground/60">→</span>
+          <span className="truncate text-blue-700 dark:text-blue-300">{run.actorLabel}</span>
+        </span>
         <span
           className={cn(
-            "ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[9px]",
+            "shrink-0 text-[10px]",
             isError
-              ? "border-destructive/25 bg-destructive/10 text-destructive"
+              ? "text-destructive"
               : isCancelled
-                ? "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                ? "text-amber-600 dark:text-amber-400"
+                : "text-emerald-600 dark:text-emerald-400"
           )}
         >
           {subagentOutcomeLabel(run.outcome)}
         </span>
-        {(timeRange || duration !== undefined) && (
-          <span className="shrink-0 text-[9px] text-muted-foreground">
-            {[timeRange, duration !== undefined ? formatDuration(duration) : ""]
-              .filter(Boolean)
-              .join(" · ")}
-          </span>
-        )}
-      </div>
+        {meta && <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{meta}</span>}
+      </button>
 
-      <div className="space-y-2.5 p-3">
-        {run.instruction && (
-          <div className="rounded-lg bg-muted/45 px-3 py-2">
-            <div className="mb-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-              任务指令
-            </div>
-            <div className="whitespace-pre-wrap break-words text-[11px] leading-5 text-foreground">
-              {run.instruction}
-            </div>
-          </div>
-        )}
+      {!open && run.result ? (
+        <div className="line-clamp-2 whitespace-pre-wrap break-words border-t border-border/60 px-2.5 py-1.5 text-[11px] leading-5 text-muted-foreground">
+          {run.result}
+        </div>
+      ) : null}
 
-        {run.tools.length > 0 && (
-          <ToolCallDetails
-            tools={run.tools}
-            label={`执行 ${run.tools.length} 次工具：${summarizeToolNames(run.tools)}`}
-          />
-        )}
-
-        {(run.result || run.reasoning) && (
-          <div className="rounded-lg border border-border/70 bg-card px-3 py-2">
-            <div className="mb-1 text-[9px] font-medium uppercase tracking-wider text-muted-foreground">
-              执行结果
-            </div>
-            {run.reasoning ? <ReasoningDetails text={run.reasoning} /> : null}
-            {run.result ? (
-              <div className="whitespace-pre-wrap break-words text-[11px] leading-5 text-foreground">
-                {run.result}
+      {open && (
+        <div className="space-y-2.5 border-t border-border/60 px-2.5 py-2.5">
+          {run.instruction && (
+            <div>
+              <div className="mb-0.5 text-[10px] text-muted-foreground/70">任务指令</div>
+              <div className="whitespace-pre-wrap break-words border-l-2 border-border pl-2 text-[11px] leading-5 text-muted-foreground">
+                {run.instruction}
               </div>
-            ) : null}
+            </div>
+          )}
+
+          {run.tools.length > 0 && (
+            <ToolCallDetails
+              tools={run.tools}
+              label={`${run.tools.length} 次工具 · ${summarizeToolNames(run.tools)}`}
+            />
+          )}
+
+          {(run.result || run.reasoning) && (
+            <div>
+              <div className="mb-0.5 text-[10px] text-muted-foreground/70">执行结果</div>
+              {run.reasoning ? <ReasoningDetails text={run.reasoning} /> : null}
+              {run.result ? (
+                <div className="whitespace-pre-wrap break-words text-xs leading-5 text-foreground">
+                  {run.result}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * One timeline row shared by the single-trace and thread views. Speaking roles
+ * (user/assistant) render as chat bubbles; process events (tool groups,
+ * subagent runs) render as flat indented rows that expand on demand, so a long
+ * run reads as one calm rail instead of a wall of nested boxes.
+ */
+function TimelineMessageRow({
+  message,
+  previous,
+  selected = false
+}: {
+  message: TraceConversationMessage
+  previous?: TraceConversationMessage
+  selected?: boolean
+}): React.JSX.Element {
+  if (message.role === "subagent" && message.subagentRun) {
+    return (
+      <div className="flex scroll-mt-2 justify-start pl-8" data-trace-id={message.traceId}>
+        <div className={cn("w-full max-w-[86%] rounded-lg", selected && "ring-2 ring-primary/50")}>
+          <SubagentRunCard run={message.subagentRun} />
+        </div>
+      </div>
+    )
+  }
+
+  if (message.role === "tool" && message.tools) {
+    return (
+      <div className="flex scroll-mt-2 justify-start pl-8" data-trace-id={message.traceId}>
+        <div className={cn("w-full max-w-[86%] rounded", selected && "ring-2 ring-primary/40")}>
+          <ToolCallDetails tools={message.tools} label={message.content} />
+        </div>
+      </div>
+    )
+  }
+
+  const isUser = message.role === "user"
+  const time = formatMessageTime(message.occurredAt)
+  const previousTime = formatMessageTime(previous?.occurredAt)
+  // Consecutive same-actor bubbles read as one utterance: drop the repeated
+  // avatar/label, keep only a new timestamp when the minute actually changed.
+  const isContinuation =
+    !isUser &&
+    message.role === previous?.role &&
+    message.label === previous.label &&
+    message.traceId === previous.traceId
+  const shownTime = time && time !== previousTime ? time : ""
+
+  return (
+    <div
+      className={cn("flex scroll-mt-2 gap-2", isUser ? "justify-end" : "justify-start")}
+      data-trace-id={message.traceId}
+    >
+      {!isUser && (
+        <span
+          className={cn(
+            "mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary",
+            isContinuation && "invisible"
+          )}
+        >
+          {roleIcon(message.role)}
+        </span>
+      )}
+      <div
+        className={cn(
+          "max-w-[78%] rounded-lg px-3 py-2 text-xs leading-5",
+          isUser
+            ? "bg-primary text-primary-foreground"
+            : "border border-border bg-background text-foreground",
+          selected && "ring-2 ring-primary/50"
+        )}
+      >
+        {(!isContinuation || shownTime) && (
+          <div
+            className={cn(
+              "mb-1 flex items-baseline justify-between gap-3 text-[10px]",
+              isUser ? "text-primary-foreground/70" : "text-muted-foreground"
+            )}
+          >
+            <span className="font-medium">{isContinuation ? "" : message.label}</span>
+            {shownTime ? <span className="shrink-0">{shownTime}</span> : null}
           </div>
         )}
+        {message.reasoning ? <ReasoningDetails text={message.reasoning} /> : null}
+        {message.content ? (
+          <div className="whitespace-pre-wrap break-words">{message.content}</div>
+        ) : null}
       </div>
+      {isUser && (
+        <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
+          {roleIcon(message.role)}
+        </span>
+      )}
     </div>
   )
 }
@@ -955,56 +1049,11 @@ export function TraceConversation({
 
       <div className="space-y-2">
         {conversation.messages.map((message, index) => (
-          <div
+          <TimelineMessageRow
             key={`${message.role}-${index}`}
-            className={cn(
-              "flex gap-2",
-              message.role === "user" ? "justify-end" : "justify-start",
-              message.role === "tool" || message.role === "subagent" ? "pl-8" : ""
-            )}
-          >
-            {message.role !== "user" && message.role !== "tool" && message.role !== "subagent" && (
-              <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                {roleIcon(message.role)}
-              </span>
-            )}
-            {message.role === "subagent" && message.subagentRun ? (
-              <div className="w-full max-w-[86%]">
-                <SubagentRunCard run={message.subagentRun} />
-              </div>
-            ) : message.role === "tool" && message.tools ? (
-              <div className="max-w-[78%]">
-                <ToolCallDetails tools={message.tools} label={message.content} />
-              </div>
-            ) : (
-              <div
-                className={cn(
-                  "max-w-[78%] rounded-lg px-3 py-2 text-xs leading-5 shadow-sm",
-                  message.role === "user"
-                    ? "bg-primary text-primary-foreground"
-                    : "border border-border bg-background text-foreground"
-                )}
-              >
-                <div
-                  className={cn(
-                    "mb-1 text-[10px] font-medium",
-                    message.role === "user" ? "text-primary-foreground/70" : "text-muted-foreground"
-                  )}
-                >
-                  {message.label}
-                </div>
-                {message.reasoning ? <ReasoningDetails text={message.reasoning} /> : null}
-                {message.content ? (
-                  <div className="whitespace-pre-wrap break-words">{message.content}</div>
-                ) : null}
-              </div>
-            )}
-            {message.role === "user" && (
-              <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-                {roleIcon(message.role)}
-              </span>
-            )}
-          </div>
+            message={message}
+            previous={index > 0 ? conversation.messages[index - 1] : undefined}
+          />
         ))}
       </div>
     </section>
@@ -1084,74 +1133,14 @@ export function TraceThreadConversation({
           fillAvailableHeight ? "min-h-0 flex-1" : "max-h-[360px]"
         )}
       >
-        {conversation.messages.map((message, index) => {
-          const isSelected = !!selectedTraceId && message.traceId === selectedTraceId
-          return (
-            <div
-              key={`${message.role}-${index}`}
-              data-trace-id={message.traceId}
-              className={cn(
-                "flex scroll-mt-2 gap-2",
-                message.role === "user" ? "justify-end" : "justify-start",
-                message.role === "tool" || message.role === "subagent" ? "pl-8" : ""
-              )}
-            >
-              {message.role !== "user" &&
-                message.role !== "tool" &&
-                message.role !== "subagent" && (
-                  <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                    {roleIcon(message.role)}
-                  </span>
-                )}
-              {message.role === "subagent" && message.subagentRun ? (
-                <div
-                  className={cn(
-                    "w-full max-w-[86%] rounded-xl",
-                    isSelected && "ring-2 ring-primary/50"
-                  )}
-                >
-                  <SubagentRunCard run={message.subagentRun} />
-                </div>
-              ) : message.role === "tool" && message.tools ? (
-                <div
-                  className={cn("max-w-[78%] rounded-lg", isSelected && "ring-2 ring-primary/50")}
-                >
-                  <ToolCallDetails tools={message.tools} label={message.content} />
-                </div>
-              ) : (
-                <div
-                  className={cn(
-                    "max-w-[78%] rounded-lg px-3 py-2 text-xs leading-5 shadow-sm",
-                    message.role === "user"
-                      ? "bg-primary text-primary-foreground"
-                      : "border border-border bg-background text-foreground",
-                    isSelected && "ring-2 ring-primary/50"
-                  )}
-                >
-                  <div
-                    className={cn(
-                      "mb-1 text-[10px] font-medium",
-                      message.role === "user"
-                        ? "text-primary-foreground/70"
-                        : "text-muted-foreground"
-                    )}
-                  >
-                    {message.label}
-                  </div>
-                  {message.reasoning ? <ReasoningDetails text={message.reasoning} /> : null}
-                  {message.content ? (
-                    <div className="whitespace-pre-wrap break-words">{message.content}</div>
-                  ) : null}
-                </div>
-              )}
-              {message.role === "user" && (
-                <span className="mt-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-                  {roleIcon(message.role)}
-                </span>
-              )}
-            </div>
-          )
-        })}
+        {conversation.messages.map((message, index) => (
+          <TimelineMessageRow
+            key={`${message.role}-${index}`}
+            message={message}
+            previous={index > 0 ? conversation.messages[index - 1] : undefined}
+            selected={!!selectedTraceId && message.traceId === selectedTraceId}
+          />
+        ))}
       </div>
     </section>
   )
