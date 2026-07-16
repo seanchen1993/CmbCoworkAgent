@@ -14,6 +14,8 @@ import {
   buildToolMessageFallbackId
 } from "./stream-message-ids"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
+import { HeadTailTextAccumulator } from "../../../shared/head-tail-text"
+import { SUBAGENT_OWNER_METADATA_KEY } from "../../../shared/subagent-owner"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -129,8 +131,6 @@ type MainAssistantSnapshotUpdate =
 // chunk (see runtime.ts SUBAGENT_OWNER_METADATA_KEY). Its value is the owning
 // `task` tool_call_id, which equals the subagent id — letting us attribute
 // interior chunks deterministically regardless of concurrency/ordering.
-const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
-
 interface MessageMetadata {
   langgraph_node?: string
   langgraph_checkpoint_ns?: string
@@ -398,10 +398,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private subagentLogSequence = 0
 
-  // Accumulates a subagent's streamed assistant (thinking) text per message id so
-  // successive AIMessageChunk deltas coalesce into one growing log entry instead
-  // of flooding the subagent log with per-token fragments.
-  private subagentAssistantAccum: Map<string, string> = new Map()
+  // Keeps a bounded head+moving-tail preview per streamed assistant message. The
+  // main process owns the complete transcript; renderer memory must stay bounded
+  // without making the UI appear frozen after the preview reaches its limit.
+  private subagentAssistantAccum = new Map<string, HeadTailTextAccumulator>()
+  private subagentIdlessAssistantKeyByOwner = new Map<string, string>()
+  private subagentIdlessAssistantSequence = 0
 
   // Coordinator worker status checks are analogous to Claude Code TaskOutput:
   // useful as a fallback, but too noisy for the main chat transcript.
@@ -476,6 +478,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.subagentTranscriptToolCallsByMessage.clear()
     this.subagentLogSequence = 0
     this.subagentAssistantAccum.clear()
+    this.subagentIdlessAssistantKeyByOwner.clear()
+    this.subagentIdlessAssistantSequence = 0
     this.quietCoordinatorToolCallIds.clear()
     this.emittedMessageIds.clear()
     this.inFlightMainMessageIds.clear()
@@ -1186,9 +1190,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const isAIMessage = className.includes("AI") || className.includes("AIMessageChunk")
 
       const isTaskResultMessage =
-        isToolMessage &&
-        !!kwargs.tool_call_id &&
-        this.activeSubagents.has(kwargs.tool_call_id)
+        isToolMessage && !!kwargs.tool_call_id && this.activeSubagents.has(kwargs.tool_call_id)
       const isKnownSubagentToolCall =
         isToolMessage &&
         !!kwargs.tool_call_id &&
@@ -1201,6 +1203,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       if (isAIMessage) {
         if (isFromSubagent) {
+          const subagentToolCallId = this.resolveSubagentToolCallId(checkpointNs)
           // Subagent internals stay out of the main conversation, but we surface
           // them in the subagent activity log: aggregate tool count, tool-call
           // titles, and (Phase 2, A1') the subagent's streamed thinking text.
@@ -1218,38 +1221,53 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // would be lost and words/paragraphs would run together); coalesce
           // delta/cumulative chunks per message id into one growing log entry.
           const thinkingChunk = this.extractContent(kwargs.content)
-          const thinkingAccumKey = (kwargs.id as string) || checkpointNs || "subagent-thinking"
-          const prevThinking = this.subagentAssistantAccum.get(thinkingAccumKey) ?? ""
-          let fullThinking = prevThinking
+          const observedThinkingMessageId =
+            typeof kwargs.id === "string" && kwargs.id ? kwargs.id : undefined
+          if (observedThinkingMessageId && subagentToolCallId) {
+            this.subagentIdlessAssistantKeyByOwner.set(
+              subagentToolCallId,
+              observedThinkingMessageId
+            )
+            pruneMapToLimit(this.subagentIdlessAssistantKeyByOwner, MAX_TRACKED_MESSAGE_TOOL_CALLS)
+          }
+          const thinkingMessageKey =
+            observedThinkingMessageId ||
+            this.getIdlessSubagentAssistantKey(subagentToolCallId, checkpointNs)
+          // Message ids and checkpoint namespaces are not globally unique across
+          // concurrent child runs. Owner-scope every preview/transcript key so
+          // id-less chunks from different Solo subagents can never share state.
+          const thinkingAccumKey = `${subagentToolCallId ?? "unowned"}::${thinkingMessageKey}`
+          let thinkingAccum = this.subagentAssistantAccum.get(thinkingAccumKey)
+          if (!thinkingAccum) {
+            thinkingAccum = new HeadTailTextAccumulator(16_000, 8_000)
+            this.subagentAssistantAccum.set(thinkingAccumKey, thinkingAccum)
+            pruneMapToLimit(this.subagentAssistantAccum, MAX_TRACKED_MESSAGE_TOOL_CALLS)
+          }
+          let thinkingPreview = thinkingAccum.snapshot()
           // Skip only LEADING whitespace-only chunks (before any content exists).
           // Once content exists, whitespace deltas separate words/paragraphs and
           // must be accumulated, otherwise "hello"+" "+"world" → "helloworld".
-          if (thinkingChunk.length > 0 && (prevThinking !== "" || thinkingChunk.trim())) {
-            fullThinking =
-              thinkingChunk.startsWith(prevThinking) && thinkingChunk.length >= prevThinking.length
-                ? thinkingChunk
-                : prevThinking + thinkingChunk
-            // Bound stored thinking to keep memory in check; the displayed content
-            // is truncated to the log limit anyway, so the head is what matters.
-            if (fullThinking.length > 16000) fullThinking = fullThinking.slice(0, 16000)
-            this.subagentAssistantAccum.set(thinkingAccumKey, fullThinking)
+          if (thinkingChunk.length > 0 && (!thinkingAccum.isEmpty || thinkingChunk.trim())) {
+            thinkingPreview = thinkingAccum.ingest(
+              thinkingChunk,
+              className.includes("Chunk") ? "delta" : "snapshot"
+            )
             // Only emit a UI event when there is visible (non-whitespace) content,
             // so pure-whitespace deltas accumulate without flooding the stream.
-            if (fullThinking.trim()) {
+            if (thinkingPreview.content.trim()) {
               events.push(
                 this.createSubagentLogEntryEvent({
                   kind: "assistant",
                   entryId: `subagent-assistant-${thinkingAccumKey}`,
                   title: "子代理思考",
-                  content: this.truncateSubagentLogContent(fullThinking),
+                  content: this.truncateSubagentLogContent(thinkingPreview.content),
                   status: "completed",
                   checkpointNs,
-                  subagentToolCallId: this.resolveSubagentToolCallId(checkpointNs)
+                  subagentToolCallId
                 })
               )
             }
           }
-          const subagentToolCallId = this.resolveSubagentToolCallId(checkpointNs)
           if (kwargs.tool_call_chunks?.length) {
             this.accumulateToolCallChunks(kwargs.tool_call_chunks)
           }
@@ -1285,16 +1303,28 @@ export class ElectronIPCTransport implements UseStreamTransport {
               }
             }
           }
-          if (subagentToolCallId && (fullThinking.trim() || transcriptToolCalls.length > 0)) {
+          if (
+            subagentToolCallId &&
+            (thinkingPreview.content.trim() || transcriptToolCalls.length > 0)
+          ) {
             events.push({
               event: "custom",
               data: {
                 type: "subagent_transcript_message",
                 subagentId: subagentToolCallId,
+                transcriptPreview: {
+                  messageId: `subagent-assistant-${thinkingAccumKey}`,
+                  totalChars: thinkingPreview.totalChars,
+                  retainedChars: thinkingPreview.retainedChars,
+                  omittedChars: thinkingPreview.omittedChars,
+                  truncated: thinkingPreview.truncated,
+                  updatedAt: Date.now()
+                },
                 subagentMessage: {
                   id: `subagent-assistant-${thinkingAccumKey}`,
                   role: "assistant",
-                  content: fullThinking,
+                  content: thinkingPreview.content,
+                  is_bounded_preview: thinkingPreview.truncated,
                   ...(transcriptToolCalls.length > 0 && { tool_calls: transcriptToolCalls }),
                   created_at: new Date()
                 }
@@ -1362,18 +1392,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
             if (observedProviderMessageId) {
               this.mainAssistantIndexByObservedId.set(observedProviderMessageId, messageIndex)
             }
-            pruneMapToLimit(
-              this.mainAssistantMessageIdByIndex,
-              MAX_TRACKED_EMITTED_MESSAGES
-            )
-            pruneMapToLimit(
-              this.mainAssistantIndexByObservedId,
-              MAX_TRACKED_EMITTED_MESSAGES
-            )
-            pruneSetToLimit(
-              this.streamedMainAssistantIndexes,
-              MAX_TRACKED_EMITTED_MESSAGES
-            )
+            pruneMapToLimit(this.mainAssistantMessageIdByIndex, MAX_TRACKED_EMITTED_MESSAGES)
+            pruneMapToLimit(this.mainAssistantIndexByObservedId, MAX_TRACKED_EMITTED_MESSAGES)
+            pruneSetToLimit(this.streamedMainAssistantIndexes, MAX_TRACKED_EMITTED_MESSAGES)
           }
           this.currentMessageId = msgId
           this.currentMessageIndex = messageIndex
@@ -1551,6 +1572,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
             checkpointNs,
             kwargs.tool_call_id
           )
+          if (subagentToolCallId) {
+            this.subagentIdlessAssistantKeyByOwner.delete(subagentToolCallId)
+          }
           events.push(
             this.createSubagentLogEntryEvent({
               kind: "tool_result",
@@ -1681,7 +1705,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
 
           // Check for ToolMessage (subagent completion)
-          if (className.includes("ToolMessage") && kwargs.tool_call_id && this.activeSubagents.has(kwargs.tool_call_id)) {
+          if (
+            className.includes("ToolMessage") &&
+            kwargs.tool_call_id &&
+            this.activeSubagents.has(kwargs.tool_call_id)
+          ) {
             const subagent = this.activeSubagents.get(kwargs.tool_call_id)
             if (subagent && subagent.status === "running") {
               subagent.status = this.isToolMessageError(kwargs) ? "failed" : "completed"
@@ -2110,10 +2138,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return merged.slice(existing.length)
   }
 
-  private prepareMainAssistantReasoning(
-    messageId: string,
-    incoming: string
-  ): string | undefined {
+  private prepareMainAssistantReasoning(messageId: string, incoming: string): string | undefined {
     if (!incoming) return undefined
     const existing = this.mainAssistantReasoningByMessageId.get(messageId) ?? ""
     const merged = this.mergeWorkerAssistantTextChunk(existing, incoming)
@@ -2397,7 +2422,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
       currentMessageValuesIndex = candidateIndex
       if (currentMessageValuesIndex < 0 && latestCurrentTurnAiIndex >= 0) {
-        const latestContent = this.extractContent(messages[latestCurrentTurnAiIndex]?.kwargs?.content)
+        const latestContent = this.extractContent(
+          messages[latestCurrentTurnAiIndex]?.kwargs?.content
+        )
         if (this.snapshotReplaysMainAssistantText(reusableCurrentMessageId, latestContent)) {
           currentMessageValuesIndex = latestCurrentTurnAiIndex
         }
@@ -2453,8 +2480,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
         const reusableCurrentMessageIdForIndex =
           index === currentMessageValuesIndex ? reusableCurrentMessageId : undefined
         const providerMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
-        const shouldReuseCurrentMessageId =
-          this.canSafelyApplyMainAssistantSnapshot(reusableCurrentMessageIdForIndex, content)
+        const shouldReuseCurrentMessageId = this.canSafelyApplyMainAssistantSnapshot(
+          reusableCurrentMessageIdForIndex,
+          content
+        )
         let msgId =
           shouldReuseCurrentMessageId && reusableCurrentMessageIdForIndex
             ? reusableCurrentMessageIdForIndex
@@ -2755,7 +2784,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     const maxChars = 1200
     if (trimmed.length <= maxChars) return trimmed
-    return `${trimmed.slice(0, maxChars)}\n...`
+    const headChars = Math.floor(maxChars / 2)
+    const tailChars = maxChars - headChars
+    return `${trimmed.slice(0, headChars)}\n…[活动预览省略 ${trimmed.length - maxChars} 字]…\n${trimmed.slice(-tailChars)}`
   }
 
   /**
@@ -2794,6 +2825,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       }
     }
+  }
+
+  private getIdlessSubagentAssistantKey(
+    subagentToolCallId: string | undefined,
+    checkpointNs: string | undefined
+  ): string {
+    const ownerKey = subagentToolCallId ?? `unowned:${checkpointNs ?? "subagent"}`
+    const existing = this.subagentIdlessAssistantKeyByOwner.get(ownerKey)
+    if (existing) return existing
+    this.subagentIdlessAssistantSequence += 1
+    const key = `idless-${this.subagentIdlessAssistantSequence}:${checkpointNs ?? "subagent"}`
+    this.subagentIdlessAssistantKeyByOwner.set(ownerKey, key)
+    pruneMapToLimit(this.subagentIdlessAssistantKeyByOwner, MAX_TRACKED_MESSAGE_TOOL_CALLS)
+    return key
   }
 
   private isToolMessageError(kwargs: SerializedMessageChunk["kwargs"]): boolean {
@@ -2923,9 +2968,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       byToolId.set(toolCall.id, {
         id: toolCall.id,
         name: toolCall.name || prev?.name || "",
-        args: this.hasToolArgs(toolCall.args)
-          ? toolCall.args!
-          : (prev?.args ?? toolCall.args ?? {})
+        args: this.hasToolArgs(toolCall.args) ? toolCall.args! : (prev?.args ?? toolCall.args ?? {})
       })
     }
 
@@ -3034,9 +3077,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private resolveToolCallChunkId(chunk: { id?: string; index?: number }): string | undefined {
     const msgId = this.currentChunkMessageId
     const key =
-      msgId !== undefined && typeof chunk.index === "number"
-        ? `${msgId}:${chunk.index}`
-        : undefined
+      msgId !== undefined && typeof chunk.index === "number" ? `${msgId}:${chunk.index}` : undefined
     if (chunk.id) {
       if (key) {
         this.toolCallChunkIndexToId.set(key, chunk.id)

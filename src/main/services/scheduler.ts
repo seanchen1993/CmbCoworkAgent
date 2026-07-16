@@ -21,6 +21,8 @@ import {
 import { purgeThreadCheckpointArtifacts } from "../storage"
 import { createThread as dbCreateThread, deleteThread as dbDeleteThread } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
+import { recordSubagentTranscriptStreamChunk } from "../agent/subagent-transcript-recorder"
+import { getSubagentTranscriptStore } from "../agent/subagent-transcript-store"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
 import { emitAppAttention } from "../app-attention-events"
@@ -261,6 +263,7 @@ async function executeTask(taskId: string): Promise<void> {
       if (abortController.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
       const serialized = JSON.parse(JSON.stringify(data))
+      recordSubagentTranscriptStreamChunk(threadId, mode, serialized)
       const events = converter.processChunk(mode, serialized)
       for (const evt of events) {
         broadcastToChannel(channel, evt)
@@ -303,6 +306,16 @@ async function executeTask(taskId: string): Promise<void> {
       }
       hasStreamedContent = true
     }
+
+    getSubagentTranscriptStore().markThreadRuns(
+      threadId,
+      abortController.signal.aborted ? "cancelled" : "interrupted"
+    )
+    await getSubagentTranscriptStore()
+      .flushThread(threadId)
+      .catch((flushError) => {
+        console.warn("[Scheduler] Failed to flush Solo subagent transcripts:", flushError)
+      })
 
     if (!abortController.signal.aborted) {
       updateScheduledTaskRunResult(taskId, "ok", null)
@@ -366,6 +379,12 @@ async function executeTask(taskId: string): Promise<void> {
       : error instanceof Error
         ? error.message
         : String(error)
+    getSubagentTranscriptStore().markThreadRuns(threadId, isAbortError ? "cancelled" : "failed")
+    await getSubagentTranscriptStore()
+      .flushThread(threadId)
+      .catch((flushError) => {
+        console.warn("[Scheduler] Failed to flush Solo subagent transcripts:", flushError)
+      })
     if (isAbortError) {
       updateScheduledTaskRunResult(taskId, "error", errMsg)
       tracer.finish("cancelled").catch(() => {})
@@ -410,6 +429,8 @@ async function executeTask(taskId: string): Promise<void> {
         // ignore cleanup errors
       }
       if (rowDeleted) {
+        const transcriptStore = getSubagentTranscriptStore()
+        transcriptStore.retireThread(threadId)
         try {
           await retireThreadCheckpointers(threadId)
         } catch {
@@ -417,6 +438,11 @@ async function executeTask(taskId: string): Promise<void> {
         }
         try {
           purgeThreadCheckpointArtifacts(threadId)
+        } catch {
+          // ignore cleanup errors
+        }
+        try {
+          await transcriptStore.purgeThread(threadId)
         } catch {
           // ignore cleanup errors
         }

@@ -17,6 +17,8 @@ import {
   getThread
 } from "../db/index"
 import { StreamConverter } from "../agent/stream-converter"
+import { recordSubagentTranscriptStreamChunk } from "../agent/subagent-transcript-recorder"
+import { getSubagentTranscriptStore } from "../agent/subagent-transcript-store"
 import { notifyAlways, stripThink } from "./notify"
 import { trackEvent } from "./event-reporter"
 import { showPetCompletedTaskNotice } from "../pet"
@@ -365,6 +367,7 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
       if (abortController.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
       const serialized = JSON.parse(JSON.stringify(data))
+      recordSubagentTranscriptStreamChunk(threadId, mode, serialized)
       const events = converter.processChunk(mode, serialized)
       for (const evt of events) {
         const chatxEvent = namespaceChatXStreamEventIds(evt, msg.msgId)
@@ -382,6 +385,16 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
       }
       hasStreamedContent = true
     }
+
+    getSubagentTranscriptStore().markThreadRuns(
+      threadId,
+      abortController.signal.aborted ? "cancelled" : "interrupted"
+    )
+    await getSubagentTranscriptStore()
+      .flushThread(threadId)
+      .catch((flushError) => {
+        console.warn("[ChatX] Failed to flush Solo subagent transcripts:", flushError)
+      })
 
     if (!abortController.signal.aborted) {
       // SUCCESS-COMMIT POINT: from here on the message counts as answered —
@@ -442,6 +455,12 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
       : error instanceof Error
         ? error.message
         : String(error)
+    getSubagentTranscriptStore().markThreadRuns(threadId, isAbortError ? "cancelled" : "failed")
+    await getSubagentTranscriptStore()
+      .flushThread(threadId)
+      .catch((flushError) => {
+        console.warn("[ChatX] Failed to flush Solo subagent transcripts:", flushError)
+      })
 
     if (isAbortError) {
       broadcastToChannel(channel, { type: "done" })
@@ -475,6 +494,8 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
         /* ignore */
       }
       if (rowDeleted) {
+        const transcriptStore = getSubagentTranscriptStore()
+        transcriptStore.retireThread(threadId)
         try {
           await retireThreadCheckpointers(threadId)
         } catch {
@@ -482,6 +503,11 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
         }
         try {
           purgeThreadCheckpointArtifacts(threadId)
+        } catch {
+          /* ignore */
+        }
+        try {
+          await transcriptStore.purgeThread(threadId)
         } catch {
           /* ignore */
         }

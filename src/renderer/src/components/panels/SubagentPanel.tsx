@@ -210,7 +210,7 @@ export function SubagentCard({
               <Code2 className="size-3.5" />
             </span>
             <span className="min-w-0">
-              <span className="block text-[12px] font-semibold leading-none">打开完整记录</span>
+              <span className="block text-[12px] font-semibold leading-none">打开运行记录</span>
               <span className="mt-1 block truncate text-[10px] text-slate-500 dark:text-slate-400">
                 查看思考、工具参数和执行结果
               </span>

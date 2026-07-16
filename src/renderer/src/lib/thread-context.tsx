@@ -50,7 +50,8 @@ import type {
   AgentAutoCommitResult,
   UserInputRequest,
   GoalUiState,
-  GoalEvent
+  GoalEvent,
+  SubagentTranscriptPreviewState
 } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
@@ -504,6 +505,8 @@ export interface ThreadState {
    * subagent's nested interior on demand without polluting the main thread.
    */
   subagentTranscripts: Record<string, Message[]>
+  /** Bounded live-preview statistics; complete transcript bytes live in main. */
+  subagentTranscriptPreviews: Record<string, SubagentTranscriptPreviewState>
   coordinatorWorkers: CoordinatorWorkerView[]
   subagentToolCallCount: number
   subagentInternalLogs: SubagentInternalLogEntry[]
@@ -662,6 +665,7 @@ const createDefaultThreadState = (): ThreadState => ({
   gitContext: null,
   subagents: [],
   subagentTranscripts: {},
+  subagentTranscriptPreviews: {},
   coordinatorWorkers: [],
   subagentToolCallCount: 0,
   subagentInternalLogs: [],
@@ -875,6 +879,7 @@ function normalizeThreadState(state: ThreadState): ThreadState {
       : []
   return {
     ...state,
+    subagentTranscriptPreviews: state.subagentTranscriptPreviews || {},
     toolCallStates: state.toolCallStates || {},
     ...buildPendingApprovalState(pendingQueue)
   }
@@ -1027,6 +1032,7 @@ interface CustomEventData {
   subagentId?: string
   subagentMessage?: Message
   subagentMessages?: Message[]
+  transcriptPreview?: SubagentTranscriptPreviewState
   notification?: string
   suppressNotificationAutoRun?: boolean
   mode?: "normal" | "coordinator" | "workflow"
@@ -1220,7 +1226,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const subagentTranscriptPersistTimersRef = useRef<Record<string, number>>({})
   // subagentIds whose transcript changed since the last persist, per thread.
   // Lets the debounced persist serialize only the subagents that actually
-  // changed instead of every subagent's full transcript each time.
+  // changed instead of every subagent's bounded transcript snapshot each time.
   const subagentTranscriptDirtyIdsRef = useRef<Record<string, Set<string>>>({})
   const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
   const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
@@ -1982,7 +1988,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     (threadId: string, transcripts: Record<string, Message[]>, changedIds?: Set<string>) => {
       // Serialize only the subagents that changed since the last persist. The DB
       // deep-merges thread values (see mergeThreadValueObjects), so unchanged
-      // subagents are preserved without re-serializing their full transcripts on
+      // subagents are preserved without re-serializing all bounded snapshots on
       // every keystroke. When changedIds is absent, fall back to the full map.
       const subset =
         changedIds && changedIds.size > 0
@@ -2791,6 +2797,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           ]
           if (subagentId && messages.length > 0) {
             appendSubagentTranscriptMessages(threadId, subagentId, messages)
+          }
+          if (subagentId && data.transcriptPreview) {
+            updateThreadState(threadId, (prev) => ({
+              subagentTranscriptPreviews: {
+                ...prev.subagentTranscriptPreviews,
+                [subagentId]: data.transcriptPreview!
+              }
+            }))
           }
           break
         }

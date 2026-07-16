@@ -1,4 +1,5 @@
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import type { SubagentTranscriptRunSummary } from "../shared/subagent-transcript"
 import type {
   Thread,
   Message,
@@ -836,6 +837,10 @@ interface CustomAPI {
     getSystemPromptPreview: (
       threadId: string
     ) => Promise<{ prompt: string | null; updatedAt: number | null }>
+    getSubagentTranscriptSummary: (
+      threadId: string,
+      subagentId: string
+    ) => Promise<SubagentTranscriptRunSummary | null>
   }
   workflows: {
     listRuns: (threadId: string) => Promise<unknown[]>

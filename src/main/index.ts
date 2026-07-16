@@ -211,6 +211,7 @@ import {
   shutdownAllAgentTasks
 } from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
+import { flushAllSubagentTranscripts } from "./agent/subagent-transcript-store"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
@@ -1090,7 +1091,10 @@ if (!gotTheLock) {
     const cleanup = Promise.all([
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
-      flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
+      flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err)),
+      flushAllSubagentTranscripts().catch((err) =>
+        console.warn("[Main] flushAllSubagentTranscripts error:", err)
+      )
     ])
 
     const CLEANUP_TIMEOUT_MS = 10_000
