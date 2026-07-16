@@ -1000,6 +1000,47 @@ interface CustomAPI {
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null>
+    getBuiltinConfigs: () => Promise<
+      Array<{
+        id: string
+        ref: `builtin:${string}`
+        source: "builtin"
+        origin: "remote" | "fallback"
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+      }>
+    >
+    updateBuiltinConfig: (
+      id: string,
+      config: {
+        name?: string
+        maxTokens?: number
+        maxOutputTokens?: number
+        temperature?: number
+        topP?: number
+        topK?: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+      }
+    ) => Promise<void>
+    resetBuiltinConfig: (id: string) => Promise<void>
+    onChanged: (callback: () => void) => () => void
     setCustomConfig: (config: {
       id: string
       name: string

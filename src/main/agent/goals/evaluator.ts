@@ -4,10 +4,10 @@ import {
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TEMPERATURE,
-  getCustomModelConfigs,
   getGoalSettings,
   type CustomModelConfig
 } from "../../storage"
+import { getModelConfigs } from "../../models/registry"
 import type { GoalJudgeDecision, GoalLedger, ThreadGoal } from "./types"
 
 const GOAL_EVALUATOR_CONTEXT_RATIO = 0.25
@@ -445,12 +445,6 @@ export function parseGoalJudgeResult(raw: string): GoalJudgeDecision {
   }
 }
 
-function normalizeModelId(modelId?: string): string | undefined {
-  const trimmed = modelId?.trim()
-  if (!trimmed) return undefined
-  return trimmed.startsWith("custom:") ? trimmed.slice("custom:".length) : trimmed
-}
-
 function createLinkedAbortSignal(parentSignal: AbortSignal | undefined): {
   signal: AbortSignal
   abort: (reason?: unknown) => void
@@ -475,30 +469,53 @@ function createLinkedAbortSignal(parentSignal: AbortSignal | undefined): {
 }
 
 export function resolveEvaluatorConfig(modelId?: string): CustomModelConfig | null {
-  const configs = getCustomModelConfigs()
-  const configuredJudgeId = normalizeModelId(getGoalSettings().evaluatorModelId)
-  if (configuredJudgeId) {
-    const configuredJudge = findEvaluatorConfig(configs, configuredJudgeId)
-    if (configuredJudge?.apiKey) return configuredJudge
-    console.warn(`[Goal] configured evaluator model "${configuredJudgeId}" is unavailable.`)
+  const configuredJudgeRef = getGoalSettings().evaluatorModelId?.trim()
+  if (configuredJudgeRef) {
+    const configuredJudge = findEvaluatorConfig(configuredJudgeRef)
+    if (configuredJudge) return configuredJudge
+    console.warn(`[Goal] configured evaluator model "${configuredJudgeRef}" is unavailable.`)
     return null
   }
 
-  const requestedId = normalizeModelId(modelId)
-  const requested = requestedId ? findEvaluatorConfig(configs, requestedId) : null
-  if (requested?.apiKey) return requested
+  const requestedRef = modelId?.trim()
+  const requested = requestedRef ? findEvaluatorConfig(requestedRef) : null
+  if (requested) return requested
 
   return null
 }
 
-function findEvaluatorConfig(
-  configs: CustomModelConfig[],
-  normalizedIdOrModel: string
-): CustomModelConfig | null {
-  const byId = configs.find((config) => config.id === normalizedIdOrModel)
+function findEvaluatorConfig(modelRef: string): CustomModelConfig | null {
+  const configs = getModelConfigs()
+  const match = /^(builtin|custom):(.*)$/.exec(modelRef)
+  if (match) {
+    const source = match[1]
+    const idOrModel = match[2]
+    if (!idOrModel) return null
+    const exact = configs.find((config) => config.source === source && config.id === idOrModel)
+    if (exact) return exact.apiKey ? exact : null
+    return (
+      configs.find(
+        (config) => config.source === source && config.model === idOrModel && Boolean(config.apiKey)
+      ) ?? null
+    )
+  }
+
+  // Unprefixed values are retained for legacy settings. Prefer custom models so
+  // a newly managed model with the same ID cannot silently change the provider.
+  const byId =
+    configs.find((config) => config.source === "custom" && config.id === modelRef) ??
+    configs.find((config) => config.source === "builtin" && config.id === modelRef)
   if (byId) return byId.apiKey ? byId : null
 
-  return configs.find((config) => config.model === normalizedIdOrModel && config.apiKey) ?? null
+  return (
+    configs.find(
+      (config) => config.source === "custom" && config.model === modelRef && Boolean(config.apiKey)
+    ) ??
+    configs.find(
+      (config) => config.source === "builtin" && config.model === modelRef && Boolean(config.apiKey)
+    ) ??
+    null
+  )
 }
 
 export async function evaluateGoalWithModel(

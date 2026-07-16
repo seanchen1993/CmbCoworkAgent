@@ -25,8 +25,6 @@ import { getMemoryStore } from "../memory/store"
 import { resolveWorkspaceMemoryDirs, type MemoryNamespace } from "../memory/paths"
 import { ChatOpenAI } from "@langchain/openai"
 import {
-  getCustomModelConfigs,
-  getDefaultModelConfig,
   isDreamEnabled,
   isThreadMemoryEnabled,
   getCustomSkillsDir,
@@ -47,6 +45,7 @@ import {
   getDisabledSkillDirs,
   getHookLoggingConfig
 } from "../storage"
+import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { showPetCompletedTaskNotice } from "../pet"
@@ -1684,10 +1683,7 @@ function isTerminalStreamPayload(payload: unknown): boolean {
     !!payload && typeof payload === "object" && !Array.isArray(payload)
       ? (payload as { type?: unknown }).type
       : undefined
-  return (
-    type === "done" ||
-    type === "error"
-  )
+  return type === "done" || type === "error"
 }
 
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
@@ -3525,9 +3521,7 @@ interface ErrorDetailModelInfo {
 
 function resolveErrorDetailModelInfo(modelId: string | undefined): ErrorDetailModelInfo {
   if (!modelId) return {}
-  const cfgId = modelId.startsWith("custom:") ? modelId.slice("custom:".length) : modelId
-  const configs = getCustomModelConfigs()
-  const cfg = configs.find((c) => c.id === cfgId) ?? configs.find((c) => c.model === cfgId)
+  const cfg = getModelConfigByRef(modelId)
   return {
     modelId,
     modelDisplayName: cfg?.name,
@@ -4663,7 +4657,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let userTranscriptMessagePersisted = false
       let visibleTranscriptUserMessage = message
       if (!isTrustedCoordinatorNotificationInvoke && !shouldDeferUserTranscriptPersistence) {
-        persistVisibleUserTranscriptMessage(threadId, message, userMessageId, goalTranscriptBoundary)
+        persistVisibleUserTranscriptMessage(
+          threadId,
+          message,
+          userMessageId,
+          goalTranscriptBoundary
+        )
         userTranscriptMessagePersisted = true
       }
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
@@ -5784,10 +5783,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend if failover happened — update model display + context window
         const notifyFailover = (): void => {
           if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
-            const usedCfgId = usedModelId?.startsWith("custom:")
-              ? usedModelId.slice("custom:".length)
-              : usedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(usedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {
@@ -5829,10 +5825,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // response metadata once the first AI message arrives (see response_metadata.model_name below).
         if (effectiveModelId) {
           tracer.setModelId(effectiveModelId)
-          const cfgIdForName = effectiveModelId.startsWith("custom:")
-            ? effectiveModelId.slice("custom:".length)
-            : effectiveModelId
-          const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
+          const cfgForName = getModelConfigByRef(effectiveModelId)
           // Use config.model (the actual API model name) as fallback, not config.name (display label)
           if (cfgForName?.model) tracer.setModelName(cfgForName.model)
         }
@@ -7094,17 +7087,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
 
             const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
-              const allConfigs = getCustomModelConfigs()
               const memRoutingResult = await resolveModel({
                 taskSource: "memory_summarize",
                 threadId,
                 requestedModelId: modelId ?? undefined,
                 routingMode: getGlobalRoutingMode()
               }).catch(() => null)
-              const memModelId = memRoutingResult?.resolvedModelId
-              const memCfgId =
-                memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-              const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+              const memModelId = memRoutingResult?.resolvedModelId ?? modelId
+              const config = getModelConfigByRef(memModelId) ?? getDefaultModelConfig()
               if (!config?.apiKey) {
                 console.warn("[Agent] No model config available — skipping memory tasks")
                 return null
@@ -7906,10 +7896,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend + persist routing state if failover happened
         const notifyResumeFailover = (): void => {
           if (resumeFailoverAttempts.length > 0 && resumeUsedModelId !== effectiveResumeModelId) {
-            const usedCfgId = resumeUsedModelId?.startsWith("custom:")
-              ? resumeUsedModelId.slice("custom:".length)
-              : resumeUsedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(resumeUsedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {
@@ -8728,10 +8715,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend + persist routing state if failover happened
         const notifyIntFailover = (): void => {
           if (intFailoverAttempts.length > 0 && intUsedModelId !== effectiveInterruptModelId) {
-            const usedCfgId = intUsedModelId?.startsWith("custom:")
-              ? intUsedModelId.slice("custom:".length)
-              : intUsedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(intUsedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {

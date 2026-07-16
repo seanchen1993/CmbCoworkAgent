@@ -845,6 +845,57 @@ const api = {
         tier?: "premium" | "economy"
       } | null>
     },
+    getBuiltinConfigs: (): Promise<
+      Array<{
+        id: string
+        ref: `builtin:${string}`
+        source: "builtin"
+        origin: "remote" | "fallback"
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+      }>
+    > => {
+      return ipcRenderer.invoke("models:getBuiltinConfigs")
+    },
+    updateBuiltinConfig: (
+      id: string,
+      config: {
+        name?: string
+        maxTokens?: number
+        maxOutputTokens?: number
+        temperature?: number
+        topP?: number
+        topK?: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+      }
+    ): Promise<void> => {
+      return ipcRenderer.invoke("models:updateBuiltinConfig", id, config)
+    },
+    resetBuiltinConfig: (id: string): Promise<void> => {
+      return ipcRenderer.invoke("models:resetBuiltinConfig", id)
+    },
+    onChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("models:changed", handler)
+      return () => ipcRenderer.removeListener("models:changed", handler)
+    },
     setCustomConfig: (config: {
       id: string
       name: string

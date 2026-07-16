@@ -470,12 +470,13 @@ export async function createRuntimeWithModelFallback(
     shellAccess: options.shellAccess
   }
   if (options.model) {
-    // Don't double-prefix, but stay consistent with how the runtime resolves
-    // it: the runtime only recognizes the `custom:` prefix (it slices it off),
-    // so add `custom:` unless it is ALREADY there. (Using includes(":") would
+    // Don't double-prefix known model references. Bare profile model names keep
+    // the legacy custom-model interpretation. (Using includes(":") would
     // wrongly skip the prefix for a custom model whose own name contains a
     // colon, and would not help an unsupported provider prefix anyway.)
-    const modelId = options.model.startsWith("custom:") ? options.model : `custom:${options.model}`
+    const modelId = /^(?:custom|builtin):/.test(options.model)
+      ? options.model
+      : `custom:${options.model}`
     try {
       return {
         runtime: await deps.createRuntime({ ...baseOptions, modelId }),
@@ -743,12 +744,16 @@ function rootSchemaCoversProperty(schema: Record<string, unknown>, key: string):
   ) {
     return true
   }
-  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties)) return true
+  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties))
+    return true
   return rootSchemaVariants(schema).some((variant) => rootSchemaCoversProperty(variant, key))
 }
 
 function rootSchemaDeclaresProperty(schema: Record<string, unknown>, key: string): boolean {
-  if (isPlainRecord(schema.properties) && Object.prototype.hasOwnProperty.call(schema.properties, key)) {
+  if (
+    isPlainRecord(schema.properties) &&
+    Object.prototype.hasOwnProperty.call(schema.properties, key)
+  ) {
     return true
   }
   return rootSchemaVariants(schema).some((variant) => rootSchemaDeclaresProperty(variant, key))

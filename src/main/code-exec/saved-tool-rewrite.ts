@@ -1,7 +1,8 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { ChatOpenAI } from "@langchain/openai"
 import { sanitizeMcpExampleValue } from "../mcp/tool-example-store"
-import { getCustomModelConfigs, type CustomModelConfig } from "../storage"
+import type { CustomModelConfig } from "../storage"
+import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import type { CodeExecMcpCall } from "./types"
 
 const MAX_SAVED_TOOL_METADATA_ERROR_LENGTH = 100
@@ -148,16 +149,9 @@ export interface SavedToolRewriteResult {
 }
 
 function resolveSidecarModelConfig(selectedModelId?: string): CustomModelConfig | null {
-  const configs = getCustomModelConfigs()
-  const requestedId = selectedModelId?.startsWith("custom:")
-    ? selectedModelId.slice("custom:".length)
-    : selectedModelId
-  return requestedId
-    ? configs.find((item) => item.id === requestedId) ||
-        configs.find((item) => item.model === requestedId) ||
-        configs[0] ||
-        null
-    : (configs[0] ?? null)
+  return selectedModelId
+    ? (getModelConfigByRef(selectedModelId) ?? getDefaultModelConfig())
+    : getDefaultModelConfig()
 }
 
 function extractResponseText(content: unknown): string {

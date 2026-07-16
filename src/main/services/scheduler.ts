@@ -3,12 +3,12 @@ import { BrowserWindow } from "electron"
 import { HumanMessage } from "@langchain/core/messages"
 import {
   getScheduledTasks,
-  getCustomModelConfigs,
   updateScheduledTaskRunResult,
   setScheduledTaskEnabled,
   addTaskRunRecord,
   getGlobalRoutingMode
 } from "../storage"
+import { getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
 import { trySendChatXReply } from "./chatx"
@@ -228,10 +228,7 @@ async function executeTask(taskId: string): Promise<void> {
     // Update tracer with resolved model info
     if (effectiveModelId) {
       tracer.setModelId(effectiveModelId)
-      const cfgId = effectiveModelId.startsWith("custom:")
-        ? effectiveModelId.slice("custom:".length)
-        : effectiveModelId
-      const cfg = getCustomModelConfigs().find((c) => c.id === cfgId)
+      const cfg = getModelConfigByRef(effectiveModelId)
       if (cfg?.model) tracer.setModelName(cfg.model)
     }
 
