@@ -8,6 +8,7 @@ import { useAppStore } from "@/lib/store"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import { getWorkerToolResultKey } from "@/lib/worker-tool-result-key"
 import { reconcileTranscriptToolCallsWithResults } from "@/lib/subagent-transcripts"
+import { isToolResultError } from "@/lib/tool-result-error"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 
@@ -31,7 +32,12 @@ function buildToolResults(
     if (!resultKey) continue
     results.set(resultKey, {
       content: message.content,
-      is_error: message.is_error === true || message.status === "error"
+      is_error: isToolResultError({
+        toolName: message.name,
+        content: message.content,
+        is_error: message.is_error,
+        status: message.status
+      })
     })
   }
   return results

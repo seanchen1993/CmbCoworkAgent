@@ -1,6 +1,7 @@
 import type { Message } from "@/types"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
 import { isVisibleCheckpointTranscriptMessage } from "./goal-transcript"
+import { withResolvedToolMessageError } from "./tool-result-error"
 import {
   liveStreamMessageRole,
   normalizeLiveStreamMessageContent,
@@ -12,7 +13,7 @@ export function liveStreamMessageToStoreMessage(
   timing?: { start_at?: Date; end_at?: Date }
 ): Message {
   const role = liveStreamMessageRole(streamMessage.type)
-  return {
+  return withResolvedToolMessageError({
     id: streamMessage.id,
     role,
     content: normalizeLiveStreamMessageContent(streamMessage.content),
@@ -36,7 +37,7 @@ export function liveStreamMessageToStoreMessage(
     created_at: timing?.start_at ?? new Date(),
     ...(timing?.start_at ? { start_at: timing.start_at } : {}),
     ...(timing?.end_at ? { end_at: timing.end_at } : {})
-  }
+  })
 }
 
 export function resolveLiveStreamMessageEndAt(

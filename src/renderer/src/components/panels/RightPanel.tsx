@@ -45,6 +45,7 @@ import {
   type CoordinatorWorkerView
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
+import { getToolLabel } from "@/lib/tool-labels"
 import {
   hasLoadedWorkspaceFiles,
   loadWorkspaceFilesDeduped,
@@ -1256,12 +1257,12 @@ export function RightPanel({
     <aside
       ref={containerRef}
       className={cn(
-        "flex w-full flex-col bg-transparent overflow-hidden",
+        "flex w-full flex-col bg-transparent overflow-hidden border-l",
         allPanelsClosed ? "h-auto self-start" : "h-full"
       )}
     >
       {moduleMode === "browser" && (
-        <div className="flex h-full min-h-0 flex-col rounded-2xl border border-border/75 bg-background p-2">
+        <div className="flex h-full min-h-0 flex-col  bg-background">
           <Suspense fallback={<LazySectionFallback label="加载 Browser..." />}>
             <BrowserPanel
               threadId={currentThreadId}
@@ -1275,8 +1276,8 @@ export function RightPanel({
       )}
 
       {moduleMode === "preview" && (
-        <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-background">
-          <div className="bg-background p-2 h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
+        <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-white">
+          <div className="bg-white p-2 h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
             {previewPath ? (
               <ResourcePreview
                 key={`${previewPath}:${previewReloadToken}`}
@@ -1290,7 +1291,7 @@ export function RightPanel({
               />
             ) : (
               <div className="h-full min-h-0 flex items-center justify-center p-4">
-                <div className="w-full max-w-sm rounded-2xl border border-border/70 bg-background-elevated/80 px-5 py-6 text-center shadow-sm">
+                <div className="w-full bg-background-elevated/80 px-5 py-6 text-center shadow-sm">
                   <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-xl border border-border bg-muted/30">
                     <FileText className="size-5 text-muted-foreground" />
                   </div>
@@ -2786,7 +2787,11 @@ function CoordinatorWorkerCard({
           <div className="flex items-center justify-between gap-2">
             <span className="flex min-w-0 items-center gap-2 font-medium text-foreground/90">
               <Code2 className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate">{worker.last_tool_name || "等待工具调用"}</span>
+              <span className="truncate">
+                {worker.last_tool_name
+                  ? getToolLabel(worker.last_tool_name, { showToolName: false })
+                  : "等待工具调用"}
+              </span>
             </span>
             <span className="shrink-0 rounded-md border border-border/70 bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
               {worker.tool_call_count} 次

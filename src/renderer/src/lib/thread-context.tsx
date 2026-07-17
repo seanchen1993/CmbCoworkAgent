@@ -112,6 +112,7 @@ import {
 } from "./subagent-transcripts"
 import { resolveIncomingSubagentStatus } from "./subagent-state"
 import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
+import { isToolResultError, withResolvedToolMessageError } from "./tool-result-error"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -260,13 +261,13 @@ const normalizePersistedThreadMessages = (messages: Message[]): Message[] => {
     const createdAt = toMessageDate(message.created_at, new Date()) ?? new Date()
     const startAt = toMessageDate(message.start_at)
     const endAt = toMessageDate(message.end_at)
-    return {
+    return withResolvedToolMessageError({
       ...message,
       content: typeof message.content === "string" || Array.isArray(message.content) ? message.content : "",
       created_at: createdAt,
       ...(startAt ? { start_at: startAt } : {}),
       ...(endAt ? { end_at: endAt } : {})
-    }
+    })
   })
 }
 
@@ -957,7 +958,14 @@ function upsertToolCallStateFromRequest(
   })
 }
 
-function toolResultStatusFromMessage(message: Message): ToolCallState["status"] {
+function toolResultStatusFromMessage(message: {
+  name?: string
+  content?: unknown
+  is_error?: boolean
+  status?: string
+}): ToolCallState["status"] {
+  if (isToolResultError(message)) return "failed"
+
   switch (message.status) {
     case "completed":
     case "failed":
@@ -967,7 +975,7 @@ function toolResultStatusFromMessage(message: Message): ToolCallState["status"] 
     case "error":
       return "failed"
     default:
-      return message.is_error ? "failed" : "completed"
+      return "completed"
   }
 }
 
@@ -3297,7 +3305,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             if (message.role === "tool" && message.tool_call_id) {
               nextToolCallStates = upsertToolCallState(nextToolCallStates, message.tool_call_id, {
                 name: message.name,
-                status: message.is_error ? "failed" : "completed"
+                status: toolResultStatusFromMessage(message)
               })
             }
             if (exists) {
@@ -3352,7 +3360,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 if (message.role === "tool" && message.tool_call_id) {
                   acc = upsertToolCallState(acc, message.tool_call_id, {
                     name: message.name,
-                    status: message.is_error ? "failed" : "completed"
+                    status: toolResultStatusFromMessage(message)
                   })
                 }
                 return acc
@@ -4138,7 +4146,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             if (msg.role === "tool" && msg.tool_call_id) {
               acc = upsertToolCallState(acc, msg.tool_call_id, {
                 name: msg.name,
-                status: msg.is_error ? "failed" : "completed"
+                status: toolResultStatusFromMessage(msg)
               })
             }
             return acc
@@ -4266,22 +4274,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const content = event.content as string
           const toolCallId = event.toolCallId as string
           const name = event.name as string | undefined
-          const isError = event.isError as boolean | undefined
+          const toolMessage = withResolvedToolMessageError({
+            id,
+            role: "tool" as const,
+            content,
+            tool_call_id: toolCallId,
+            name,
+            is_error: event.isError as boolean | undefined,
+            created_at: new Date()
+          })
+          const isError = toolMessage.is_error === true
           const subagentId =
             typeof event.subagentId === "string" ? (event.subagentId as string) : undefined
-          const now = new Date()
           if (subagentId) {
-            appendSubagentTranscriptMessages(threadId, subagentId, [
-              {
-                id,
-                role: "tool" as const,
-                content,
-                tool_call_id: toolCallId,
-                name,
-                is_error: isError,
-                created_at: now
-              }
-            ])
+            appendSubagentTranscriptMessages(threadId, subagentId, [toolMessage])
             break
           }
           updateThreadState(threadId, (prev) => {
@@ -4293,15 +4299,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               }),
               messages: [
                 ...prev.messages,
-                {
-                  id,
-                  role: "tool" as const,
-                  content,
-                  tool_call_id: toolCallId,
-                  name,
-                  is_error: isError,
-                  created_at: now
-                }
+                toolMessage
               ]
             }
           })

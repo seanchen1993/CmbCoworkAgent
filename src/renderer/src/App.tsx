@@ -1102,7 +1102,7 @@ function App(): React.JSX.Element {
                 {/* Right Panel - floating style */}
                 <div
                   style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 pl-0"}
                 >
                   <RightPanel
                     moduleMode={rightModule}
@@ -1190,7 +1190,7 @@ function App(): React.JSX.Element {
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 <div
                   style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0  pl-0"}
                 >
                   <RightPanel
                     threadId={harnessSessionThreadId}

@@ -365,6 +365,95 @@ async function testCoordinatorToolLabelsAreUserFriendly(): Promise<void> {
     getToolLabel("cancel_worker", { showToolName: false }) === "取消子代理",
     "cancel_worker should have a Chinese display label"
   )
+  assert(
+    getToolLabel("mcp__node_repl__js", { showToolName: false }) === "内置浏览器：脚本执行",
+    "mcp__node_repl__js should have a base Chinese display label"
+  )
+  assert(
+    getToolLabel("mcp__node_repl__js", {
+      args: {
+        code: `
+          const caps = await tab.capabilities.list();
+          nodeRepl.write(JSON.stringify(caps, null, 2));
+        `
+      },
+      showToolName: false
+    }) === "内置浏览器：能力列表",
+    "mcp__node_repl__js should infer tab capability list actions from code"
+  )
+  assert(
+    getToolLabel("mcp__node_repl__js", {
+      args: {
+        code: `
+          const capability = await tab.capabilities.get("pageAssets");
+          nodeRepl.write(await capability.documentation());
+        `
+      },
+      showToolName: false
+    }) === "内置浏览器：能力详情",
+    "mcp__node_repl__js should infer tab capability get actions from code"
+  )
+  assert(
+    getToolLabel("mcp__node_repl__js", {
+      args: {
+        code: `
+          const tab = await browser.tabs.new();
+          await tab.goto("https://example.com");
+          await tab.playwright.getByRole("button", { name: "Save" }).click();
+        `
+      },
+      showToolName: false
+    }) === "内置浏览器：跳转",
+    "mcp__node_repl__js should infer only the highest-priority browser action from code"
+  )
+  assert(
+    getToolLabel("mcp__node_repl__js", {
+      args: {
+        code: `
+          const input = tab.playwright.getByRole("textbox", { name: "Name" });
+          await input.fill("Alice");
+        `
+      },
+      showToolName: false
+    }) === "内置浏览器：输入",
+    "mcp__node_repl__js should infer browser input actions from code"
+  )
+  assert(
+    getToolLabel("mcp__node_repl__js", {
+      args: {
+        code: `
+          const info = await tab.playwright.evaluate(() => {
+            const canvas = document.getElementById("captchaCanvas");
+            const rect = canvas?.getBoundingClientRect?.();
+            const form = document.querySelector(".captcha-wrap");
+            return {
+              rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,
+              textNear: form?.textContent || null,
+              html: form?.outerHTML || null
+            };
+          });
+          nodeRepl.write(JSON.stringify(info, null, 2));
+        `
+      },
+      showToolName: false
+    }) === "内置浏览器：页面信息读取",
+    "mcp__node_repl__js should describe evaluate-based DOM inspection clearly"
+  )
+  assert(
+    getToolLabel("mcp__node_repl__js", {
+      args: {
+        code: `
+          if (globalThis.agent?.browsers == null) {
+            await setupBrowserRuntime({ globals: globalThis });
+          }
+          globalThis.browser = await agent.browsers.getForUrl("http://localhost:8080/register.html");
+          nodeRepl.write(await browser.documentation());
+        `
+      },
+      showToolName: false
+    }) === "内置浏览器：启动",
+    "mcp__node_repl__js should prefer earlier browser rules over later matches"
+  )
 }
 
 async function run(): Promise<void> {

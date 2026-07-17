@@ -380,7 +380,7 @@ export function BrowserPanel({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-sm border border-border bg-background">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
       <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
         <button
           type="button"

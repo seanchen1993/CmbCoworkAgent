@@ -1,4 +1,5 @@
 import type { Message } from "../types"
+import { withResolvedToolMessageError } from "./tool-result-error"
 
 export const SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY = "subagentTranscripts"
 
@@ -313,7 +314,7 @@ function revivePersistedSubagentMessage(value: unknown): Message | null {
   const rawContent = value.content
   const content: Message["content"] =
     typeof rawContent === "string" || Array.isArray(rawContent) ? rawContent : ""
-  return {
+  return withResolvedToolMessageError({
     id,
     role: role as Message["role"],
     content,
@@ -327,7 +328,7 @@ function revivePersistedSubagentMessage(value: unknown): Message | null {
     created_at: revivePersistedDate(value.created_at),
     ...(value.start_at !== undefined && { start_at: revivePersistedDate(value.start_at) }),
     ...(value.end_at !== undefined && { end_at: revivePersistedDate(value.end_at) })
-  }
+  })
 }
 
 export function getSubagentTranscriptsFromThreadValues(
