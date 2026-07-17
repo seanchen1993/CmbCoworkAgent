@@ -15,6 +15,11 @@ import { useStream } from "@langchain/langgraph-sdk/react"
 import { ElectronIPCTransport, type StreamFallbackIndexBaselines } from "./electron-transport"
 import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
 import {
+  CONTEXT_COMPACTION_EVENT_TYPE,
+  parseContextCompactionLifecycleEvent,
+  type ContextCompactionLifecycleEvent
+} from "../../../shared/context-compaction-events"
+import {
   isCoordinatorModeMetadata,
   isExplicitNormalModeMetadata,
   isWorkflowModeMetadata
@@ -118,6 +123,8 @@ const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
 const INTERNAL_GOAL_MESSAGE_TIMES_THREAD_VALUE_KEY = "internalGoalMessageTimes"
 const INTERNAL_GOAL_MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "internalGoalMessageTimeOrder"
+const CONTEXT_COMPACTION_COMPLETE_DISMISS_MS = 2400
+const CONTEXT_COMPACTION_FAILED_DISMISS_MS = 5000
 
 type MessageTimeMap = Record<string, { start_at?: string; end_at?: string }>
 type MessageTimeEntry = MessageTimeMap[string] & { id: string }
@@ -536,6 +543,8 @@ export interface ThreadState {
   scheduledTaskId: string | null
   routingResult: RoutingResultState | null
   modelRetry: ModelRetryState | null
+  /** Ephemeral foreground context-compaction status shown in the chat transcript. */
+  contextCompaction: ContextCompactionLifecycleEvent | null
   /** Live dynamic workflow run (workflow mode), built from workflow_progress events. */
   workflowRun: WorkflowRunView | null
 }
@@ -689,6 +698,7 @@ const createDefaultThreadState = (): ThreadState => ({
   scheduledTaskId: null,
   routingResult: null,
   modelRetry: null,
+  contextCompaction: null,
   workflowRun: null
 })
 
@@ -877,6 +887,7 @@ function normalizeThreadState(state: ThreadState): ThreadState {
   return {
     ...state,
     toolCallStates: state.toolCallStates || {},
+    contextCompaction: state.contextCompaction ?? null,
     ...buildPendingApprovalState(pendingQueue)
   }
 }
@@ -1002,6 +1013,7 @@ const ThreadContext = createContext<ThreadContextValue | null>(null)
 // Custom event types from the stream
 interface CustomEventData {
   type?: string
+  compaction?: unknown
   request?: HITLRequest
   toolName?: string
   fingerprint?: string
@@ -1218,6 +1230,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const coordinatorNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})
   const coordinatorNotificationAutoRunSuppressedRef = useRef<Set<string>>(new Set())
   const coordinatorNotificationSuppressTimersRef = useRef<Record<string, number>>({})
+  const contextCompactionDismissTimersRef = useRef<Record<string, number>>({})
   const subagentTranscriptPersistTimersRef = useRef<Record<string, number>>({})
   // subagentIds whose transcript changed since the last persist, per thread.
   // Lets the debounced persist serialize only the subagents that actually
@@ -1791,6 +1804,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
+  const clearRunningContextCompactionForStoppedStream = useCallback((threadId: string) => {
+    setThreadStates((prev) => {
+      const current = prev[threadId]
+      if (!current || current.contextCompaction?.phase !== "started") return prev
+      const next = {
+        ...prev,
+        [threadId]: { ...current, contextCompaction: null }
+      }
+      threadStatesRef.current = next
+      return next
+    })
+  }, [])
+
   // Handle stream updates from ThreadStreamHolder
   const handleStreamUpdate = useCallback(
     (threadId: string, data: StreamData, options: StreamUpdateOptions = {}) => {
@@ -1810,6 +1836,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         })
         if (!data.isLoading) {
           finalizeRunningSubagentsForStoppedStream(threadId)
+          clearRunningContextCompactionForStoppedStream(threadId)
         }
         return
       }
@@ -1857,6 +1884,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // any edge case where model_retry_clear was not sent.
       if (!data.isLoading) {
         finalizeRunningSubagentsForStoppedStream(threadId)
+        clearRunningContextCompactionForStoppedStream(threadId)
         setThreadStates((prev) => {
           const cur = prev[threadId]
           if (!cur || !cur.modelRetry) return prev
@@ -1871,6 +1899,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     },
     [
       accumulateLiveStreamMessages,
+      clearRunningContextCompactionForStoppedStream,
       finalizeRunningSubagentsForStoppedStream,
       flushLiveStreamAccumulator,
       getCurrentThreadMessageIds,
@@ -2896,6 +2925,44 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "model_retry_clear":
           updateThreadState(threadId, () => ({ modelRetry: null }))
           break
+        case CONTEXT_COMPACTION_EVENT_TYPE: {
+          const compaction = parseContextCompactionLifecycleEvent(data.compaction)
+          if (!compaction) break
+
+          const existingTimer = contextCompactionDismissTimersRef.current[threadId]
+          if (existingTimer !== undefined) {
+            window.clearTimeout(existingTimer)
+            delete contextCompactionDismissTimersRef.current[threadId]
+          }
+
+          updateThreadState(threadId, (prev) => {
+            const current = prev.contextCompaction
+            if (
+              compaction.phase !== "started" &&
+              current?.phase === "started" &&
+              current.id !== compaction.id
+            ) {
+              return {}
+            }
+            return { contextCompaction: compaction }
+          })
+
+          if (compaction.phase !== "started") {
+            const dismissMs =
+              compaction.phase === "completed"
+                ? CONTEXT_COMPACTION_COMPLETE_DISMISS_MS
+                : CONTEXT_COMPACTION_FAILED_DISMISS_MS
+            contextCompactionDismissTimersRef.current[threadId] = window.setTimeout(() => {
+              delete contextCompactionDismissTimersRef.current[threadId]
+              updateThreadState(threadId, (prev) =>
+                prev.contextCompaction?.id === compaction.id
+                  ? { contextCompaction: null }
+                  : {}
+              )
+            }, dismissMs)
+          }
+          break
+        }
         case "error_detail":
           // Structured diagnostics for the failed turn. Arrives just before the
           // plain `error` event (which sets `error`); stored separately so the
@@ -4670,6 +4737,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         window.clearTimeout(coordinatorNotificationSuppressTimer)
       }
       delete coordinatorNotificationSuppressTimersRef.current[threadId]
+      const contextCompactionDismissTimer =
+        contextCompactionDismissTimersRef.current[threadId]
+      if (contextCompactionDismissTimer !== undefined) {
+        window.clearTimeout(contextCompactionDismissTimer)
+      }
+      delete contextCompactionDismissTimersRef.current[threadId]
 
       initializedThreadsRef.current.delete(threadId)
       delete actionsCache.current[threadId]

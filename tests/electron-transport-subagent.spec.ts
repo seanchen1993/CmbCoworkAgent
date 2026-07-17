@@ -11,6 +11,7 @@
 
 import { ElectronIPCTransport } from "../src/renderer/src/lib/electron-transport.ts"
 import { useAppStore, type WorkerFocusView } from "../src/renderer/src/lib/store.ts"
+import { CONTEXT_COMPACTION_MODEL_TAG } from "../src/shared/context-compaction-events.ts"
 import {
   getWorkerToolResultKey,
   getWorkerToolUiKey
@@ -3560,6 +3561,21 @@ function testSummarizationMessagesAreHiddenByMarkerOnly(): void {
   assert(
     messageEvents(visibleAssistantEvents).length === 1,
     "main message stream should preserve matching prose without the structural marker"
+  )
+
+  const taggedPrivateSummaryEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-tagged-private-summary",
+        content: "1. Primary Request and Intent\ninternal summary"
+      }),
+      { tags: [CONTEXT_COMPACTION_MODEL_TAG] }
+    )
+  )
+  assert(
+    messageEvents(taggedPrivateSummaryEvents).length === 0,
+    "main message stream should hide private summarizer output by model tag"
   )
 }
 

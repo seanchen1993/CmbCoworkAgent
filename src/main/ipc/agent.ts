@@ -69,6 +69,11 @@ import {
 } from "../../shared/checkpoint-transcript"
 import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
 import {
+  CONTEXT_COMPACTION_EVENT_TYPE,
+  isContextCompactionStreamPayload,
+  type ContextCompactionLifecycleEvent
+} from "../../shared/context-compaction-events"
+import {
   extractVisibleReasoning,
   isTraceReasoningTruncated,
   mergeStreamingReasoning,
@@ -1722,6 +1727,17 @@ function sendHookNotice(window: BrowserWindow, channel: string, message: string)
   })
 }
 
+function sendContextCompactionLifecycleEvent(
+  window: BrowserWindow,
+  channel: string,
+  compaction: ContextCompactionLifecycleEvent
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: { type: CONTEXT_COMPACTION_EVENT_TYPE, compaction }
+  })
+}
+
 function sendHarnessSessionContextInjectWarning(
   window: BrowserWindow,
   channel: string,
@@ -1882,6 +1898,7 @@ function sendCoordinatorWorkerStream(
   let data: unknown
   try {
     const serialized = serializeStreamData(stream.data)
+    if (isContextCompactionStreamPayload(stream.mode, serialized)) return
     data = sanitizeStreamDataForRenderer(stream.mode, serialized)
   } catch (error) {
     console.warn("[Agent] Failed to serialize coordinator worker stream event:", error)
@@ -2909,6 +2926,7 @@ function shouldSkipMainTranscriptStreamPayload(
   threadId: string
 ): boolean {
   if (mode !== "messages") return true
+  if (isContextCompactionStreamPayload(mode, payload)) return true
   if (Array.isArray(payload) && isSerializedSummarizationMessage(payload[0])) return true
   if (isCoordinatorWorkerStreamChunk(mode, payload, threadId)) return true
   const metadata = messageStreamMetadata(mode, payload)
@@ -4982,6 +5000,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
       const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
         sendFailureFuseNotice(window, channel, decision)
+      const onContextCompaction = (event: ContextCompactionLifecycleEvent): void =>
+        sendContextCompactionLifecycleEvent(window, channel, event)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -5796,6 +5816,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -6556,6 +6577,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await acknowledgeDeliveredCoordinatorNotificationsIfNeeded()
               const serialized = serializeStreamData(data)
+              if (isContextCompactionStreamPayload(mode, serialized)) continue
               if (mode === "values") {
                 latestSerializedValuesMessagesForGoalFlush =
                   extractSerializedValuesMessages(serialized)
@@ -6639,6 +6661,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
             onFailureFuseNotice,
+            onContextCompaction,
             hookTurnId: turnState.turnId,
             onHookSkippedFactory,
             hookScope,
@@ -6769,6 +6792,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -7761,6 +7785,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
       const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
         sendFailureFuseNotice(window, channel, decision)
+      const onContextCompaction = (event: ContextCompactionLifecycleEvent): void =>
+        sendContextCompactionLifecycleEvent(window, channel, event)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -7983,6 +8009,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -8111,6 +8138,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 continue
               }
               const serialized = serializeStreamData(data)
+              if (isContextCompactionStreamPayload(mode, serialized)) continue
               if (mode === "values") {
                 resumeStableStreamMessages = extractSerializedValuesMessages(
                   sanitizeStreamDataForRenderer(mode, serialized)
@@ -8204,6 +8232,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -8600,6 +8629,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
     const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
       sendFailureFuseNotice(window, channel, decision)
+    const onContextCompaction = (event: ContextCompactionLifecycleEvent): void =>
+      sendContextCompactionLifecycleEvent(window, channel, event)
     const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
       window,
       threadId,
@@ -8806,6 +8837,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -8931,6 +8963,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 continue
               }
               const serialized = serializeStreamData(data)
+              if (isContextCompactionStreamPayload(mode, serialized)) continue
               if (mode === "values") {
                 intStableStreamMessages = extractSerializedValuesMessages(
                   sanitizeStreamDataForRenderer(mode, serialized)
@@ -9023,6 +9056,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,

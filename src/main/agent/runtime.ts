@@ -150,6 +150,8 @@ import {
   mergeStreamingReasoning,
   truncateReasoningForTrace
 } from "../../shared/model-reasoning"
+import type { ContextCompactionLifecycleCallback } from "../../shared/context-compaction-events"
+import { configureContextCompactionModel } from "./context-compaction"
 import type {
   McpCapabilityService,
   McpCapabilityTool,
@@ -1521,6 +1523,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     trimTokensToSummarize,
     summarizationSummaryPrompt,
     summarizationTruncateArgsSettings,
+    onContextCompaction,
     subagentExtraSystemPrompt,
     mainFilesystemEnabled = true,
     mainTodosEnabled = true,
@@ -1605,8 +1608,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   // Summarization options: pass explicit trigger/keep if provided, otherwise let
   // createSummarizationMiddleware auto-compute from the model profile.
-  const summarizationOptions = {
-    model,
+  const summarizationBaseOptions = {
     backend: filesystemBackend,
     historyPathPrefix: ".cmbdevclaw/conversation_history",
     ...(summarizationSummaryPrompt && { summaryPrompt: summarizationSummaryPrompt }),
@@ -1616,6 +1618,14 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ...(summarizationTruncateArgsSettings && {
       truncateArgsSettings: summarizationTruncateArgsSettings
     })
+  }
+  const mainSummarizationOptions = {
+    ...summarizationBaseOptions,
+    model: configureContextCompactionModel(model, onContextCompaction)
+  }
+  const subagentSummarizationOptions = {
+    ...summarizationBaseOptions,
+    model: configureContextCompactionModel(model)
   }
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
@@ -2004,7 +2014,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     subagentToolConcurrencyMiddleware,
     ...(toolHookMiddleware ? [toolHookMiddleware] : []),
     toolErrorMiddleware,
-    createSummarizationMiddleware(summarizationOptions),
+    createSummarizationMiddleware(subagentSummarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     // Same malformed tool-call recovery as the main agent — task subagents call
     // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
@@ -2186,7 +2196,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
             )
           ]
         : []),
-      createSummarizationMiddleware(summarizationOptions),
+      createSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
       // invalid_tool_calls into normalized tool_calls (the guard middleware above
@@ -3566,6 +3576,8 @@ export interface CreateAgentRuntimeOptions {
   onHookResult?: HookResultCallback
   /** Callback invoked when repeated tool failures should be shown to the user. */
   onFailureFuseNotice?: FailureFuseNoticeCallback
+  /** Foreground-only callback for the main agent's context compaction lifecycle. */
+  onContextCompaction?: ContextCompactionLifecycleCallback
   /**
    * Hook-result sink for coordinator workers. Workers run detached/async so
    * their hooks must be delivered on a durable channel rather than the spawning
@@ -3661,6 +3673,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     disableSubagents = false,
     onHookResult,
     onFailureFuseNotice,
+    onContextCompaction,
     onCoordinatorWorkerHookResult,
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
@@ -5557,6 +5570,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
     onFailureFuseNotice,
+    onContextCompaction,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
     // hook chain without knowing per-thread context.

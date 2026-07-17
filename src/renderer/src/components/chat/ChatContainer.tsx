@@ -189,6 +189,7 @@ import {
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
+import { ContextCompactionCard } from "./ContextCompactionCard"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
 
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
@@ -2310,6 +2311,7 @@ export function ChatContainer({
     historyLoading,
     scheduledTaskId,
     modelRetry,
+    contextCompaction,
     activeTurnStartTime,
     setToolCallState,
     setTodos,
@@ -3475,7 +3477,7 @@ export function ChatContainer({
     if (bottomDistance <= 200) {
       viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
     }
-  }, [streamData, isLoading])
+  }, [contextCompaction?.id, contextCompaction?.phase, streamData, isLoading])
 
   // Focus input on mount
   useEffect(() => {
@@ -5924,6 +5926,10 @@ export function ChatContainer({
                     userSendTimeLabelById={userSendTimeLabelById}
                   />
 
+                  {contextCompaction && (
+                    <ContextCompactionCard compaction={contextCompaction} />
+                  )}
+
                   {/*测试git diff功能*/}
                   {/*<DisplayDiffTest/>*/}
 
@@ -5955,22 +5961,24 @@ export function ChatContainer({
                   {/* Streaming indicator and inline TODOs */}
                   {isLoading && (
                     <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-sm">
-                        <div className="rainbow-spinner" />
-                        <span
-                          className="thinking-shimmer-text"
-                          data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-                        >
-                          {THINKING_MESSAGES[thinkingMessageIndex]}
-                        </span>
-                        {streamData.isLoading && (
-                          <ProcessingDuration
-                            key={threadId}
-                            startTime={activeTurnStartTime}
-                            text="已处理"
-                          />
-                        )}
-                      </div>
+                      {contextCompaction?.phase !== "started" && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <div className="rainbow-spinner" />
+                          <span
+                            className="thinking-shimmer-text"
+                            data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+                          >
+                            {THINKING_MESSAGES[thinkingMessageIndex]}
+                          </span>
+                          {streamData.isLoading && (
+                            <ProcessingDuration
+                              key={threadId}
+                              startTime={activeTurnStartTime}
+                              text="已处理"
+                            />
+                          )}
+                        </div>
+                      )}
                       {todos.length > 0 && <ChatTodos todos={todos} />}
                     </div>
                   )}

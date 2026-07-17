@@ -15,6 +15,7 @@ import {
 } from "./stream-message-ids"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
 import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
+import { isContextCompactionStreamPayload } from "../../../shared/context-compaction-events"
 import { extractVisibleReasoning } from "../../../shared/model-reasoning"
 
 export type StreamFallbackIndexBaselines = {
@@ -492,6 +493,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     event: IPCStreamEvent,
     parentThreadId: string
   ): Message[] {
+    if (isContextCompactionStreamPayload(event.mode, event.data)) return []
     const focused = useAppStore.getState().workerFocusView
     if (!focused || focused.threadId !== parentThreadId) return []
     this.syncWorkerTurnBoundary(focused.workerThreadId, event.workerTurn)
@@ -1106,6 +1108,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     // never leaks into values-mode or a subsequent non-subagent chunk.
     this.currentSubagentOwnerHint = undefined
     this.currentChunkMessageId = undefined
+
+    if (isContextCompactionStreamPayload(mode, data)) return events
 
     if (mode === "messages") {
       // Messages mode returns [message, metadata] tuples
