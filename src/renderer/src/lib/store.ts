@@ -409,6 +409,9 @@ interface AppState {
   // A message pushed by the HTTP API gateway, to be submitted through the
   // renderer's normal input-box path once its thread is active (parity with typing).
   pendingApiSubmit: { threadId: string; message: string; nonce: number } | null
+  // A cancel pushed by the HTTP API gateway's cancel endpoint, so the thread's
+  // ChatContainer stops its stream and clears the loading indicator.
+  pendingApiCancel: { threadId: string; nonce: number } | null
 
   // Models and Providers (global, not per-thread)
   models: ModelConfig[]
@@ -599,6 +602,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   threads: [],
   currentThreadId: null,
   pendingApiSubmit: null,
+  pendingApiCancel: null,
   models: [],
   providers: [],
   rightPanelTab: "todos",

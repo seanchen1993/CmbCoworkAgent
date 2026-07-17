@@ -944,6 +944,7 @@ interface CustomAPI {
     onApiSubmitMessage: (
       callback: (payload: { threadId: string; message: string }) => void
     ) => () => void
+    onApiCancelThread: (callback: (threadId: string) => void) => () => void
   }
   models: {
     list: () => Promise<ModelConfig[]>

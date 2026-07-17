@@ -750,6 +750,15 @@ function App(): React.JSX.Element {
     })
   }, [])
 
+  // When the HTTP API cancels a thread, hand it to that thread's ChatContainer
+  // to stop its stream and clear the loading indicator.
+  useEffect(() => {
+    let nonce = 0
+    return window.api.threads.onApiCancelThread((threadId) => {
+      useAppStore.setState({ pendingApiCancel: { threadId, nonce: ++nonce } })
+    })
+  }, [])
+
   // Safety net: refresh thread list when the window regains focus.
   // On Windows, IPC messages sent while the window is minimized/background may be dropped.
   useEffect(() => {

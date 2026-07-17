@@ -219,12 +219,18 @@ async function route(req: IncomingMessage, res: ServerResponse, config: ApiGatew
       model?: unknown
       agentMode?: unknown
       title?: unknown
+      yolo?: unknown
+      sandbox?: unknown
     } | null
     const metadata: Record<string, unknown> = { ...(body?.metadata ?? {}) }
     if (typeof body?.workspacePath === "string") metadata.workspacePath = body.workspacePath
     if (typeof body?.model === "string") metadata.model = body.model
     if (typeof body?.agentMode === "string") metadata.agentMode = body.agentMode
     if (typeof body?.title === "string") metadata.title = body.title
+    // yolo: auto-approve all tools (default OFF → approvals surface in the app).
+    if (typeof body?.yolo === "boolean") metadata.yolo = body.yolo
+    // sandbox: keep the (Windows) sandbox on. Default: OFF on Windows.
+    if (typeof body?.sandbox === "boolean") metadata.sandbox = body.sandbox
     const thread = apiCreateThread(metadata)
     sendJson(res, 201, thread)
     return
@@ -316,8 +322,9 @@ export function startApiGateway(): boolean {
       : "NO AUTH — open to anyone who can reach this port (set CMB_API_TOKEN to require a token)"
     console.warn(
       `[ApiGateway] listening on http://${config.host}:${config.port} — ${authNote}. ` +
-        `API threads bypass ALL tool approvals (arbitrary code/file access). ` +
-        `Reachable from the network; restrict exposure accordingly.`
+        `API threads default to yolo OFF (tool approvals surface in the app); ` +
+        `create with yolo:true to auto-approve. Reachable from the network; ` +
+        `restrict exposure accordingly.`
     )
   })
   return true

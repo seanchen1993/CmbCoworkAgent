@@ -2297,6 +2297,7 @@ export function ChatContainer({
     contextReminder,
     harnessAgentmdLoadStatus,
     currentModel,
+    restoreCurrentModel,
     draftInput: input,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
@@ -2767,6 +2768,17 @@ export function ChatContainer({
   useEffect(() => {
     queryRemoteSkills()
     const fetchYoloMode = (): void => {
+      // A thread created via the HTTP API may carry a per-thread yolo override in
+      // its metadata; reflect it in the badge + renderer-side auto-approve.
+      // Threads without one fall back to the global yolo setting.
+      const apiMeta = useAppStore
+        .getState()
+        .threads.find((t) => t.thread_id === threadId)?.metadata as { yolo?: unknown } | undefined
+      if (typeof apiMeta?.yolo === "boolean") {
+        setYoloMode(apiMeta.yolo)
+        setYoloModeLoaded(true)
+        return
+      }
       window.api.sandbox
         .getYoloMode()
         .then((nextYoloMode) => {
@@ -2780,7 +2792,7 @@ export function ChatContainer({
     }
     fetchYoloMode()
     return window.api.sandbox.onChanged(fetchYoloMode)
-  }, [queryRemoteSkills])
+  }, [queryRemoteSkills, threadId])
 
   const uploadLoChatDataForThread = useCallback(
     async (targetThreadId: string, msgs: Message[], attempt = 0) => {
@@ -4329,11 +4341,47 @@ export function ChatContainer({
     if (lastApiSubmitNonceRef.current === pendingApiSubmit.nonce) return
     // Wait until this thread's stream is ready and idle before submitting.
     if (!stream || historyLoading || (isLoading && !allowSubmitWhileLoading)) return
+    // Backfill the API-specified model so the run uses it (not the app's last
+    // selection / routing fallback). restoreCurrentModel sets it for display +
+    // runtime without touching metadata; defer the submit one render until
+    // currentModel reflects it (setState is async).
+    const apiMeta = threads.find((t) => t.thread_id === threadId)?.metadata as
+      | { model?: unknown }
+      | undefined
+    const wantedModel = typeof apiMeta?.model === "string" ? apiMeta.model : ""
+    if (wantedModel && currentModel !== wantedModel) {
+      restoreCurrentModel(wantedModel)
+      return
+    }
     lastApiSubmitNonceRef.current = pendingApiSubmit.nonce
     const fakeEvent = { preventDefault: () => {} } as React.FormEvent
     void handleSubmitRef.current(fakeEvent, pendingApiSubmit.message)
     useAppStore.setState({ pendingApiSubmit: null })
-  }, [pendingApiSubmit, threadId, stream, historyLoading, isLoading, allowSubmitWhileLoading])
+  }, [
+    pendingApiSubmit,
+    threadId,
+    stream,
+    historyLoading,
+    isLoading,
+    allowSubmitWhileLoading,
+    currentModel,
+    threads,
+    restoreCurrentModel
+  ])
+
+  // When the HTTP API cancels this thread, mirror the stop button's client-side
+  // half: stop the stream so the loading indicator clears (the backend run was
+  // already aborted by the cancel endpoint).
+  const pendingApiCancel = useAppStore((s) => s.pendingApiCancel)
+  const lastApiCancelNonceRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!pendingApiCancel || pendingApiCancel.threadId !== threadId) return
+    if (lastApiCancelNonceRef.current === pendingApiCancel.nonce) return
+    lastApiCancelNonceRef.current = pendingApiCancel.nonce
+    threadContext.suppressCoordinatorNotificationAutoRun(threadId)
+    void stream?.stop()
+    useAppStore.setState({ pendingApiCancel: null })
+  }, [pendingApiCancel, threadId, stream, threadContext])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter

@@ -15,7 +15,12 @@ import {
   hasAgentStreamSink,
   forwardAgentStreamToSinks
 } from "../src/main/agent/agent-stream-sinks"
-import { setForcedYoloThread, isForcedYoloThread } from "../src/main/agent/api-run-flags"
+import {
+  setThreadYoloOverride,
+  getThreadYoloOverride,
+  setThreadSandboxDisabled,
+  isThreadSandboxDisabled
+} from "../src/main/agent/api-run-flags"
 import { createOpenAiStreamEncoder } from "../src/main/api/openai-stream"
 
 let passed = 0
@@ -110,17 +115,27 @@ console.log("PASS stream sink registry")
 }
 console.log("PASS multi-sink isolation")
 
-// ── api-run-flags: forced yolo per thread ───────────────────────────────────
+// ── api-run-flags: per-thread yolo override + sandbox disable ───────────────
 {
   const t = "thread-yolo"
-  assert(isForcedYoloThread(t) === false, "not forced by default")
-  setForcedYoloThread(t, true)
-  assert(isForcedYoloThread(t) === true, "forced after set true")
-  assert(isForcedYoloThread("other") === false, "flag is per-thread")
-  setForcedYoloThread(t, false)
-  assert(isForcedYoloThread(t) === false, "cleared after set false")
+  assert(getThreadYoloOverride(t) === undefined, "no yolo override by default (use global)")
+  setThreadYoloOverride(t, false)
+  assert(getThreadYoloOverride(t) === false, "override forces yolo off")
+  setThreadYoloOverride(t, true)
+  assert(getThreadYoloOverride(t) === true, "override forces yolo on")
+  assert(getThreadYoloOverride("other") === undefined, "override is per-thread")
+  setThreadYoloOverride(t, undefined)
+  assert(getThreadYoloOverride(t) === undefined, "undefined clears the override")
+
+  const s = "thread-sandbox"
+  assert(isThreadSandboxDisabled(s) === false, "sandbox enabled by default")
+  setThreadSandboxDisabled(s, true)
+  assert(isThreadSandboxDisabled(s) === true, "sandbox disabled after set")
+  assert(isThreadSandboxDisabled("other") === false, "sandbox flag is per-thread")
+  setThreadSandboxDisabled(s, false)
+  assert(isThreadSandboxDisabled(s) === false, "sandbox re-enabled after clear")
 }
-console.log("PASS forced-yolo flags")
+console.log("PASS yolo override + sandbox flags")
 
 // ── OpenAI-compatible stream encoder ────────────────────────────────────────
 {

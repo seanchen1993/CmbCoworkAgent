@@ -740,6 +740,18 @@ const api = {
       return () => {
         ipcRenderer.removeListener("api:submit-message", handler)
       }
+    },
+    // Fired by the HTTP API gateway's cancel endpoint so the renderer can stop
+    // its stream and clear the input-box loading indicator (backend abort alone
+    // doesn't unwind the renderer's useStream).
+    onApiCancelThread: (callback: (threadId: string) => void): (() => void) => {
+      const handler = (_event: unknown, payload: { threadId?: string }): void => {
+        if (payload && typeof payload.threadId === "string") callback(payload.threadId)
+      }
+      ipcRenderer.on("api:cancel-thread", handler)
+      return () => {
+        ipcRenderer.removeListener("api:cancel-thread", handler)
+      }
     }
   },
   models: {

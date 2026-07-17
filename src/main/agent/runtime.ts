@@ -41,7 +41,7 @@ import {
   type SkillHookContextProvider
 } from "./local-sandbox"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
-import { isForcedYoloThread } from "./api-run-flags"
+import { getThreadYoloOverride, isThreadSandboxDisabled } from "./api-run-flags"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
@@ -3842,7 +3842,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const codexExePath = join(rgDir, "codex.exe")
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
   const codexExists = process.platform === "win32" && (await pathExists(codexExePath))
-  const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
+  // Windows-only sandbox. API threads may disable it (default OFF on Windows,
+  // where the sandbox is flaky); non-Windows has no windows-sandbox layer.
+  const windowsSandbox =
+    process.platform === "win32"
+      ? isThreadSandboxDisabled(threadId)
+        ? "none"
+        : getWindowsSandboxMode()
+      : "none"
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
   )
@@ -3896,9 +3903,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
 
   // ── Wire up the approval orchestrator ──
-  // API-driven (headless HTTP) threads have no user to answer approval prompts,
-  // so they force yolo per-thread. Local threads keep the global yolo setting.
-  const yoloMode = isForcedYoloThread(threadId) || getYoloMode()
+  // API-driven (HTTP) threads carry a per-thread yolo override (default OFF, so
+  // approvals surface in the app); when unset, use the global yolo setting.
+  const threadYolo = getThreadYoloOverride(threadId)
+  const yoloMode = threadYolo !== undefined ? threadYolo : getYoloMode()
   // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
   // approval, but escaping the sandbox after a sandbox denial still needs explicit
   // one-shot user approval, matching Codex's retry-without-sandbox flow.

@@ -18,7 +18,7 @@ import { BrowserWindow } from "electron"
 import { v4 as uuid } from "uuid"
 import { createThreadCore } from "../ipc/threads"
 import { invokeAgentForApi, abortAgentRunForApi } from "../ipc/agent"
-import { setForcedYoloThread } from "../agent/api-run-flags"
+import { setThreadYoloOverride, setThreadSandboxDisabled } from "../agent/api-run-flags"
 import { getThread, getThreadMessages } from "../db"
 import type { Thread } from "../types"
 
@@ -71,9 +71,34 @@ export function disposeApiCarrierWindow(): void {
  */
 export function apiCreateThread(metadata?: Record<string, unknown>): Thread {
   const thread = createThreadCore(metadata)
-  setForcedYoloThread(thread.thread_id, true)
+  // yolo/sandbox overrides are applied from metadata at run time (applyThreadRunOverrides).
   notifyRenderer("threads:changed")
   return thread
+}
+
+/**
+ * Apply this thread's per-run overrides (yolo, sandbox) from its persisted
+ * metadata, so the runtime honors them. Called before each API-driven turn, so
+ * the overrides are correct even after an app restart.
+ *
+ * Defaults for API threads: yolo OFF (approvals surface in the app); on Windows,
+ * the sandbox is OFF (it's flaky there). Callers override via `yolo`/`sandbox`.
+ */
+function applyThreadRunOverrides(threadId: string): void {
+  const row = getThread(threadId)
+  let meta: Record<string, unknown> = {}
+  try {
+    meta = row?.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : {}
+  } catch {
+    meta = {}
+  }
+  const yolo = typeof meta.yolo === "boolean" ? meta.yolo : false
+  setThreadYoloOverride(threadId, yolo)
+
+  const isWindows = process.platform === "win32"
+  const sandboxDisabled =
+    meta.sandbox === true ? false : meta.sandbox === false ? true : isWindows
+  setThreadSandboxDisabled(threadId, sandboxDisabled)
 }
 
 /** Fetch a thread's public shape, or null if it doesn't exist. */
@@ -91,9 +116,23 @@ export function apiGetThread(threadId: string): Thread | null {
   } as Thread
 }
 
-/** Fetch a thread's persisted messages (same source the UI reads). */
+/**
+ * Fetch a thread's persisted messages in true chronological order.
+ *
+ * The thread_messages table is ordered by write-sequence (ordinal), which groups
+ * tool results after the assistant messages rather than in execution order. We
+ * re-sort by created_at here so external HTTP consumers get the real conversation
+ * timeline. (The app itself restores from the langgraph checkpoint, so this only
+ * affects the HTTP read endpoint.)
+ */
 export function apiGetThreadMessages(threadId: string): unknown {
-  return getThreadMessages(threadId)
+  const messages = getThreadMessages(threadId)
+  return [...messages].sort((a, b) => {
+    const ta = new Date(a.created_at).getTime()
+    const tb = new Date(b.created_at).getTime()
+    if (ta !== tb) return ta - tb
+    return String(a.id ?? "").localeCompare(String(b.id ?? ""))
+  })
 }
 
 /**
@@ -110,8 +149,8 @@ export async function runApiAgentTurn(
   message: string,
   modelId?: string
 ): Promise<void> {
-  // API threads always auto-approve (headless, no interactive approver).
-  setForcedYoloThread(threadId, true)
+  // Apply this thread's yolo/sandbox overrides (from metadata) before the run.
+  applyThreadRunOverrides(threadId)
 
   const rendererWindow = findRendererWindow()
   if (rendererWindow) {
@@ -136,5 +175,10 @@ export async function runApiAgentTurn(
 
 /** Abort a thread's active run. Returns true if a run was aborted. */
 export function apiCancelThread(threadId: string): boolean {
-  return abortAgentRunForApi(threadId)
+  const aborted = abortAgentRunForApi(threadId)
+  // Mirror the UI stop button's client-side half: the backend abort alone doesn't
+  // unwind the renderer's useStream, so tell the renderer to stop its stream and
+  // clear the input-box loading indicator.
+  notifyRenderer("api:cancel-thread", { threadId })
+  return aborted
 }
