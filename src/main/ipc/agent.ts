@@ -79,6 +79,7 @@ import { mkdirSync, writeFileSync } from "fs"
 import { join, resolve } from "path"
 import { v4 as uuid } from "uuid"
 import { LocalSandbox } from "../agent/local-sandbox"
+import { forwardAgentStreamToSinks } from "../agent/agent-stream-sinks"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
 import {
   buildToolResultFallbackKey,
@@ -756,20 +757,18 @@ function rejectRuntimeRestoredCheckpointResume(
   } catch (error) {
     console.warn("[Goal] failed to persist runtime-restored checkpoint rejection notice:", error)
   }
-  if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
-    window.webContents.send(channel, {
-      type: "custom",
-      data: {
-        type: "goal_notice",
-        message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE,
-        goalId,
-        activeWindowId,
-        eventId,
-        createdAt
-      }
-    })
-    window.webContents.send(channel, { type: "done" })
-  }
+  sendAgentStream(window, channel, {
+    type: "custom",
+    data: {
+      type: "goal_notice",
+      message: RUNTIME_RESTORED_GOAL_PAUSE_NOTICE,
+      goalId,
+      activeWindowId,
+      eventId,
+      createdAt
+    }
+  })
+  sendAgentStream(window, channel, { type: "done" })
   return true
 }
 
@@ -778,6 +777,13 @@ function abortActiveRun(threadId: string): void {
   if (!existingController) return
   console.log("[Agent] Aborting existing stream for thread:", threadId)
   existingController.abort?.()
+}
+
+/** Abort a thread's active run on behalf of the HTTP API. Returns true if one was running. */
+export function abortAgentRunForApi(threadId: string): boolean {
+  const wasActive = activeRuns.has(threadId)
+  abortActiveRun(threadId)
+  return wasActive
 }
 
 function persistGoalUserMessage(
@@ -889,12 +895,10 @@ function emitGoalNotice(
     console.warn("[Goal] failed to persist goal notice:", error)
   }
   const payload = { message, goalId, activeWindowId, eventId, createdAt }
-  if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
-    window.webContents.send(channel, {
-      type: "custom",
-      data: { type: "goal_notice", ...payload }
-    })
-  }
+  sendAgentStream(window, channel, {
+    type: "custom",
+    data: { type: "goal_notice", ...payload }
+  })
   return payload
 }
 
@@ -917,9 +921,7 @@ function handleGoalNonStartingControlCommand(params: {
     sendDoneForTerminatingControl = false
   } = params
   const sendDoneEvent = (): void => {
-    if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
-      window.webContents.send(channel, { type: "done" })
-    }
+    sendAgentStream(window, channel, { type: "done" })
   }
   const done = (): void => {
     if (sendDone) sendDoneEvent()
@@ -1700,11 +1702,44 @@ function isTerminalStreamPayload(payload: unknown): boolean {
   return type === "done" || type === "error"
 }
 
+/**
+ * Mirror one agent-stream payload to any registered API (SSE) sinks for the
+ * thread. No-op when no sink is listening → zero cost on the renderer-only path.
+ * This is the single tap the HTTP gateway relies on; every stream-channel send
+ * in this file routes a copy through here so remote SSE clients never miss a
+ * chunk (including the terminal `done`/`error`).
+ */
+function forwardAgentStreamToApiSinks(channel: string, payload: unknown): void {
+  const threadId = threadIdFromAgentStreamChannel(channel)
+  if (!threadId) return
+  forwardAgentStreamToSinks(threadId, channel, payload)
+}
+
+/**
+ * Low-level agent-stream emit: mirror to API sinks, then deliver to the window.
+ * Used by the scattered direct-send sites (goal notices, done events,
+ * auto-commit results) so their payloads also reach SSE clients.
+ */
+function sendAgentStream(
+  window: BrowserWindow | null | undefined,
+  channel: string,
+  payload: unknown
+): void {
+  forwardAgentStreamToApiSinks(channel, payload)
+  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return
+  try {
+    window.webContents.send(channel, payload)
+  } catch (error) {
+    console.warn("[Agent] Failed to send stream event:", error)
+  }
+}
+
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
   if (isTerminalStreamPayload(payload)) {
     const threadId = threadIdFromAgentStreamChannel(channel)
     if (threadId) flushPendingStreamTranscriptMessages(threadId)
   }
+  forwardAgentStreamToApiSinks(channel, payload)
   if (window.isDestroyed() || window.webContents.isDestroyed()) return
   try {
     window.webContents.send(channel, payload)
@@ -2559,7 +2594,7 @@ function sendAutoCommitResult(
   result: AgentAutoCommitResult
 ): void {
   if (result.status === "disabled") return
-  window.webContents.send(channel, {
+  sendAgentStream(window, channel, {
     type: "custom",
     data: { type: "auto_commit_result", result }
   })
@@ -4012,6 +4047,40 @@ async function autoProposeSKill(
   await runSkillProposalFlow(threadId, context, mode, worthinessReason)
 }
 
+/**
+ * The agent:invoke handler body, published as a plain function so the HTTP API
+ * gateway can drive a headless run against a carrier window (no renderer IPC
+ * event). Assigned once when handlers are registered.
+ */
+let programmaticAgentInvoke:
+  | ((window: BrowserWindow, params: AgentInvokeParams) => Promise<void>)
+  | null = null
+
+/**
+ * Publish the invoke implementation. Also used to keep the handler body nested
+ * at its original depth so extracting it introduces no reindent noise.
+ */
+function registerProgrammaticInvoke(
+  fn: (window: BrowserWindow, params: AgentInvokeParams) => Promise<void>
+): (window: BrowserWindow, params: AgentInvokeParams) => Promise<void> {
+  programmaticAgentInvoke = fn
+  return fn
+}
+
+/**
+ * Run agent:invoke for an API-driven (headless HTTP) thread against a carrier
+ * window. Rejects if agent handlers have not been registered yet.
+ */
+export function invokeAgentForApi(
+  window: BrowserWindow,
+  params: AgentInvokeParams
+): Promise<void> {
+  if (!programmaticAgentInvoke) {
+    return Promise.reject(new Error("Agent handlers are not registered yet"))
+  }
+  return programmaticAgentInvoke(window, params)
+}
+
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
   // Let the runtime's checkpointer LRU avoid evicting threads with a live run.
@@ -4322,10 +4391,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   )
 
   // Handle agent invocation with streaming
-  ipcMain.on(
-    "agent:invoke",
+  const runAgentInvoke = registerProgrammaticInvoke(
     async (
-      event,
+      window: BrowserWindow,
       {
         threadId,
         message,
@@ -4334,20 +4402,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         agentMode: requestedAgentMode,
         coordinatorInternalNotification
       }: AgentInvokeParams
-    ) => {
+    ): Promise<void> => {
       const baseChannel = `agent:stream:${threadId}`
-      const window = BrowserWindow.fromWebContents(event.sender)
 
       console.log("[Agent] Received invoke request:", {
         threadId,
         message: message.substring(0, 50),
         modelId
       })
-
-      if (!window) {
-        console.error("[Agent] No window found")
-        return
-      }
 
       const hasCoordinatorNotificationPrefixAtInvoke = message
         .trimStart()
@@ -7734,6 +7796,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     }
   )
+
+  ipcMain.on("agent:invoke", async (event, params: AgentInvokeParams) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window) {
+      console.error("[Agent] No window found")
+      return
+    }
+    await runAgentInvoke(window, params)
+  })
 
   // Handle agent resume (after interrupt approval/rejection via useStream)
   ipcMain.on(

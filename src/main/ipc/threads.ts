@@ -2043,6 +2043,54 @@ function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
     : null
 }
 
+/**
+ * Create a thread and return its public shape. Shared by the `threads:create`
+ * IPC handler and the HTTP API gateway so both apply the same metadata rules
+ * (inherit last workspace, default model, default title).
+ */
+export function createThreadCore(metadata?: Record<string, unknown>): Thread {
+  const threadId = uuid()
+  // 先拷贝一份，避免直接修改调用方传入的 metadata 对象。
+  const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
+
+  // 仅当调用方没有显式传 workspacePath 时，才自动继承最近工作区。
+  // 这样可以兼容两种场景：
+  // 1) 用户手动点“新任务” -> 自动带上最近目录；
+  // 2) 业务方显式指定 workspacePath -> 保持调用方优先。
+  const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
+  if (!hasWorkspacePath) {
+    const lastWorkspacePath = settingsStore.get("workspacePath", null)
+    // 仅在路径存在时回填，避免写入无效目录导致后续报错。
+    if (typeof lastWorkspacePath === "string" && lastWorkspacePath && existsSync(lastWorkspacePath)) {
+      nextMetadata.workspacePath = lastWorkspacePath
+    }
+  }
+
+  const hasModel = Object.prototype.hasOwnProperty.call(nextMetadata, "model")
+  if (!hasModel) {
+    const defaultModelId = getDefaultModel()
+    if (defaultModelId) {
+      nextMetadata.model = defaultModelId
+    }
+  }
+
+  // title 仍保持原有规则：优先使用调用方传入，否则使用日期默认值。
+  const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
+  nextMetadata.title = title
+
+  const thread = dbCreateThread(threadId, nextMetadata)
+
+  return {
+    thread_id: thread.thread_id,
+    created_at: new Date(thread.created_at),
+    updated_at: new Date(thread.updated_at),
+    metadata: thread.metadata ? JSON.parse(thread.metadata) : undefined,
+    status: thread.status as Thread["status"],
+    thread_values: thread.thread_values ? JSON.parse(thread.thread_values) : undefined,
+    title
+  } as Thread
+}
+
 export function registerThreadHandlers(ipcMain: IpcMain): void {
   // List all threads
   ipcMain.handle("threads:list", async () => {
@@ -2112,50 +2160,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   // Create a new thread
   ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
-    const threadId = uuid()
-    // 先拷贝一份，避免直接修改调用方传入的 metadata 对象。
-    const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
-
-    // 仅当调用方没有显式传 workspacePath 时，才自动继承最近工作区。
-    // 这样可以兼容两种场景：
-    // 1) 用户手动点“新任务” -> 自动带上最近目录；
-    // 2) 业务方显式指定 workspacePath -> 保持调用方优先。
-    const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
-    if (!hasWorkspacePath) {
-      const lastWorkspacePath = settingsStore.get("workspacePath", null)
-      // 仅在路径存在时回填，避免写入无效目录导致后续报错。
-      if (
-        typeof lastWorkspacePath === "string" &&
-        lastWorkspacePath &&
-        existsSync(lastWorkspacePath)
-      ) {
-        nextMetadata.workspacePath = lastWorkspacePath
-      }
-    }
-
-    const hasModel = Object.prototype.hasOwnProperty.call(nextMetadata, "model")
-    if (!hasModel) {
-      const defaultModelId = getDefaultModel()
-      if (defaultModelId) {
-        nextMetadata.model = defaultModelId
-      }
-    }
-
-    // title 仍保持原有规则：优先使用调用方传入，否则使用日期默认值。
-    const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
-    nextMetadata.title = title
-
-    const thread = dbCreateThread(threadId, nextMetadata)
-
-    return {
-      thread_id: thread.thread_id,
-      created_at: new Date(thread.created_at),
-      updated_at: new Date(thread.updated_at),
-      metadata: thread.metadata ? JSON.parse(thread.metadata) : undefined,
-      status: thread.status as Thread["status"],
-      thread_values: thread.thread_values ? JSON.parse(thread.thread_values) : undefined,
-      title
-    } as Thread
+    return createThreadCore(metadata)
   })
 
   ipcMain.handle("threads:fork", async (_event, params: ThreadForkParams) => {

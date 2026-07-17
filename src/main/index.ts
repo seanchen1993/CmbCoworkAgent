@@ -210,6 +210,8 @@ import {
 } from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
+import { startApiGateway, stopApiGateway } from "./api/http-gateway"
+import { disposeApiCarrierWindow } from "./api/agent-bridge"
 import { registerModelHandlers } from "./ipc/models"
 import { registerSkillsHandlers } from "./ipc/skills"
 import { registerMcpHandlers } from "./ipc/mcp"
@@ -748,6 +750,10 @@ if (!gotTheLock) {
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
 
+    // Remote HTTP API gateway (opt-in via CMB_API_ENABLED). Started after all
+    // IPC handlers are registered so programmatic agent invocation is available.
+    startApiGateway()
+
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
       if (event.sender.id !== mainWindow.webContents.id || !isRendererAppAttentionPayload(payload))
@@ -1073,6 +1079,8 @@ if (!gotTheLock) {
     }
     quitting = true
     e.preventDefault()
+    stopApiGateway()
+    disposeApiCarrierWindow()
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)

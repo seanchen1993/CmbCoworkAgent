@@ -717,6 +717,29 @@ const api = {
       return () => {
         ipcRenderer.removeListener("threads:changed", handler)
       }
+    },
+    // Fired by the HTTP API gateway to drive a message through the renderer's
+    // normal submit path (so a remote request behaves exactly like typing in the
+    // input box: live streaming, persistence, UI rendering — all identical).
+    onApiSubmitMessage: (
+      callback: (payload: { threadId: string; message: string }) => void
+    ): (() => void) => {
+      const handler = (
+        _event: unknown,
+        payload: { threadId?: string; message?: string }
+      ): void => {
+        if (
+          payload &&
+          typeof payload.threadId === "string" &&
+          typeof payload.message === "string"
+        ) {
+          callback({ threadId: payload.threadId, message: payload.message })
+        }
+      }
+      ipcRenderer.on("api:submit-message", handler)
+      return () => {
+        ipcRenderer.removeListener("api:submit-message", handler)
+      }
     }
   },
   models: {

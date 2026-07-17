@@ -1,0 +1,135 @@
+{
+  "info": {
+    "name": "CmbCoworkAgent HTTP API",
+    "description": "远端驱动 cmbcowork agent 的 HTTP 网关。\n\n用法:\n1) 启动 app(网关默认开)。\n2) 改集合变量 baseUrl 为目标机地址(默认本机局域网 IP)。\n3) 先跑「1. 健康检查」,再跑「2. 建 thread」(会自动把 thread_id 存进变量),然后「3. 发消息」看 SSE 流。\n\n鉴权:默认无鉴权。若 app 启动时设了 CMB_API_TOKEN,把集合变量 apiToken 填上,并在各请求 Headers 里启用 Authorization 那一行。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://192.168.43.170:8765" },
+    { "key": "threadId", "value": "" },
+    { "key": "apiToken", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. 健康检查",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/healthz", "host": ["{{baseUrl}}"], "path": ["healthz"] }
+      }
+    },
+    {
+      "name": "2. 建 thread",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const j = pm.response.json();",
+              "if (j.thread_id) {",
+              "  pm.collectionVariables.set('threadId', j.thread_id);",
+              "  console.log('threadId 已保存:', j.thread_id);",
+              "}",
+              "pm.test('返回 thread_id', () => pm.expect(j.thread_id).to.be.a('string'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{apiToken}}", "disabled": true }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"metadata\": {\n    \"workspacePath\": \"/Users/chenqiang/IdeaProjects/firstDemo\",\n    \"title\": \"Postman 测试会话\"\n  }\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/v1/threads", "host": ["{{baseUrl}}"], "path": ["v1", "threads"] }
+      }
+    },
+    {
+      "name": "3. 发消息(SSE 流式回复)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" },
+          { "key": "Authorization", "value": "Bearer {{apiToken}}", "disabled": true }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"用一句话介绍你自己\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/v1/threads/{{threadId}}/messages",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "threads", "{{threadId}}", "messages"]
+        }
+      }
+    },
+    {
+      "name": "3b. 发消息 — 触发工具(文件写入,验证全放行)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" },
+          { "key": "Authorization", "value": "Bearer {{apiToken}}", "disabled": true }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"在工作区根目录新建文件 api-hello.txt，内容写一行 hi from remote，完成后告诉我\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/v1/threads/{{threadId}}/messages",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "threads", "{{threadId}}", "messages"]
+        }
+      }
+    },
+    {
+      "name": "4. 查会话",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{apiToken}}", "disabled": true }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/v1/threads/{{threadId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "threads", "{{threadId}}"]
+        }
+      }
+    },
+    {
+      "name": "5. 查消息历史",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{apiToken}}", "disabled": true }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/v1/threads/{{threadId}}/messages",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "threads", "{{threadId}}", "messages"]
+        }
+      }
+    },
+    {
+      "name": "6. 取消正在跑的 turn",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{apiToken}}", "disabled": true }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/v1/threads/{{threadId}}/cancel",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "threads", "{{threadId}}", "cancel"]
+        }
+      }
+    }
+  ]
+}

@@ -4318,6 +4318,23 @@ export function ChatContainer({
     }
   }
 
+  // Submit messages pushed by the HTTP API gateway through this thread's normal
+  // input-box path, so a remote request renders and streams identically to typing.
+  const handleSubmitRef = useRef(handleSubmit)
+  handleSubmitRef.current = handleSubmit
+  const pendingApiSubmit = useAppStore((s) => s.pendingApiSubmit)
+  const lastApiSubmitNonceRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!pendingApiSubmit || pendingApiSubmit.threadId !== threadId) return
+    if (lastApiSubmitNonceRef.current === pendingApiSubmit.nonce) return
+    // Wait until this thread's stream is ready and idle before submitting.
+    if (!stream || historyLoading || (isLoading && !allowSubmitWhileLoading)) return
+    lastApiSubmitNonceRef.current = pendingApiSubmit.nonce
+    const fakeEvent = { preventDefault: () => {} } as React.FormEvent
+    void handleSubmitRef.current(fakeEvent, pendingApiSubmit.message)
+    useAppStore.setState({ pendingApiSubmit: null })
+  }, [pendingApiSubmit, threadId, stream, historyLoading, isLoading, allowSubmitWhileLoading])
+
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
     const isComposing = e.nativeEvent.isComposing || isComposingRef.current

@@ -941,6 +941,9 @@ interface CustomAPI {
     }>
     generateTitle: (message: string) => Promise<string>
     onThreadsChanged: (callback: () => void) => () => void
+    onApiSubmitMessage: (
+      callback: (payload: { threadId: string; message: string }) => void
+    ) => () => void
   }
   models: {
     list: () => Promise<ModelConfig[]>

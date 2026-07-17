@@ -406,6 +406,9 @@ interface AppState {
   // Threads
   threads: Thread[]
   currentThreadId: string | null
+  // A message pushed by the HTTP API gateway, to be submitted through the
+  // renderer's normal input-box path once its thread is active (parity with typing).
+  pendingApiSubmit: { threadId: string; message: string; nonce: number } | null
 
   // Models and Providers (global, not per-thread)
   models: ModelConfig[]
@@ -595,6 +598,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   threads: [],
   currentThreadId: null,
+  pendingApiSubmit: null,
   models: [],
   providers: [],
   rightPanelTab: "todos",

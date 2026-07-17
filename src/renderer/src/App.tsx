@@ -733,6 +733,23 @@ function App(): React.JSX.Element {
     })
   }, [])
 
+  // Route remote (HTTP API) messages through the renderer's normal submit path:
+  // refresh the list, open the target thread, then hand the message to that
+  // thread's ChatContainer to submit exactly as if typed in the input box.
+  useEffect(() => {
+    let nonce = 0
+    return window.api.threads.onApiSubmitMessage(async ({ threadId, message }) => {
+      try {
+        const threads = await window.api.threads.list()
+        useAppStore.setState({ threads })
+        await useAppStore.getState().selectThread(threadId)
+        useAppStore.setState({ pendingApiSubmit: { threadId, message, nonce: ++nonce } })
+      } catch (err) {
+        console.error("[App] Failed to route API submit:", err)
+      }
+    })
+  }, [])
+
   // Safety net: refresh thread list when the window regains focus.
   // On Windows, IPC messages sent while the window is minimized/background may be dropped.
   useEffect(() => {
