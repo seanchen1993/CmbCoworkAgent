@@ -4155,7 +4155,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
   const resolvedProjectContextPrompt =
     [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
-  if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
+  if (
+    onAgentsPromptLoadStatus &&
+    agentsPromptLoader &&
+    (agentsPromptLoadStatusItems.length > 0 || resolvedProjectContextPrompt)
+  ) {
     onAgentsPromptLoadStatus({
       items: agentsPromptLoadStatusItems,
       loader: agentsPromptLoader,

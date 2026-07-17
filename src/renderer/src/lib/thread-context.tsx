@@ -2938,7 +2938,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               : Date.now()
           updateThreadState(threadId, () => ({
             harnessAgentmdLoadStatus:
-              items.length > 0 ? { items, createdAt, loader, promptPreview } : null
+              items.length > 0 || promptPreview ? { items, createdAt, loader, promptPreview } : null
           }))
           break
         }
