@@ -49,7 +49,8 @@ import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
 import type {
   HarnessAgentmdLoadStatusItem,
-  HarnessDeployUnitMapping
+  HarnessDeployUnitMapping,
+  HarnessProjectModeSubagentConfig
 } from "../../shared/harness-board-types"
 import {
   createAgent,
@@ -205,6 +206,7 @@ import {
   type CoordinatorWorkerFilesystemAccess
 } from "./coordinator-worker-access"
 import {
+  isGeneralPurposeSubagentEnabled,
   loadAgentProfiles,
   stripBlockedToolDocs,
   stripCustomModelPrefix,
@@ -3530,6 +3532,8 @@ export interface CreateAgentRuntimeOptions {
   enableAgentsPrompt?: boolean
   /** Project-mode plugin switch for the inline task tool. Undefined keeps legacy env behavior. */
   enableTaskTool?: boolean
+  /** Project-mode Solo selection of bundled and explicit user-format subagents. */
+  subagentConfig?: HarnessProjectModeSubagentConfig
   /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
   harnessAgentsPrompt?: string
   /** Optional Harness project AGENTS.md load status returned by the plugin. */
@@ -3660,6 +3664,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
     enableTaskTool,
+    subagentConfig,
     harnessAgentsPrompt,
     agentmdLoadStatus,
     additionalAgentsWorkspacePaths,
@@ -3714,6 +3719,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     memoryEnabled: memoryEnabledForThread,
     enableTaskTool
   })
+  const projectModeSoloSubagentConfig =
+    runtimePolicy.isProjectMode && agentMode === "normal" ? subagentConfig : undefined
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -3794,7 +3801,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
   const registrySubagentSpecs =
     agentMode === "normal" && !disableSubagents
-      ? loadAgentProfiles(workspacePath).map((profile) => ({
+      ? loadAgentProfiles(workspacePath, projectModeSoloSubagentConfig).map((profile) => ({
           name: profile.name,
           description: profile.description,
           systemPrompt: profile.systemPrompt,
@@ -5434,7 +5441,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     windowsShellKind:
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
-    includeGeneralPurposeSubagent: !isCoordinatorMode,
+    includeGeneralPurposeSubagent:
+      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeSoloSubagentConfig),
     skills: mainSkillSources,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO

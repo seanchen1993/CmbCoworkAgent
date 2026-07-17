@@ -39,6 +39,14 @@ export type HarnessFeatureStatus =
 
 export type HarnessAdapterType = "plugin"
 
+/** Project-mode Solo subagent selection supplied by the bound plugin at runtime. */
+export interface HarnessProjectModeSubagentConfig {
+  /** App-bundled subagents to hide. An empty list means all bundled subagents are available. */
+  disabledBuiltinSubagents: string[]
+  /** Absolute paths to user-format subagent Markdown files to load for this project session. */
+  customSubagentFiles: string[]
+}
+
 export type HarnessBoardCompatibilityStatus =
   | "compatible"
   | "missing-plugin"

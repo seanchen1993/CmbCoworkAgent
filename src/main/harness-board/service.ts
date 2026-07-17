@@ -34,6 +34,7 @@ import type {
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
+  HarnessProjectModeSubagentConfig,
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionContextInjectionSource,
@@ -2715,6 +2716,7 @@ export type HarnessRuntimeAgentMode = "solo" | "agent_team"
 export interface HarnessRuntimePolicy {
   agentMode?: HarnessRuntimeAgentMode
   toolCustomConfig?: Record<string, { enabled?: boolean }>
+  subagentConfig?: HarnessProjectModeSubagentConfig
 }
 
 const HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS = new Set(["task"])
@@ -2722,7 +2724,8 @@ const HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS = new Set(["task"])
 function normalizeHarnessRuntimePolicy(value: unknown): HarnessRuntimePolicy | undefined {
   if (!isObject(value)) return undefined
 
-  const agentMode = value.agentMode === "solo" || value.agentMode === "agent_team" ? value.agentMode : undefined
+  const agentMode =
+    value.agentMode === "solo" || value.agentMode === "agent_team" ? value.agentMode : undefined
   const toolCustomConfig: Record<string, { enabled?: boolean }> = {}
   if (isObject(value.toolCustomConfig)) {
     for (const [toolName, config] of Object.entries(value.toolCustomConfig)) {
@@ -2733,10 +2736,31 @@ function normalizeHarnessRuntimePolicy(value: unknown): HarnessRuntimePolicy | u
     }
   }
 
-  if (!agentMode && Object.keys(toolCustomConfig).length === 0) return undefined
+  const normalizeStringList = (input: unknown): string[] => {
+    if (!Array.isArray(input)) return []
+    return [
+      ...new Set(
+        input
+          .filter((item): item is string => typeof item === "string")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    ]
+  }
+  const subagentConfig = isObject(value.subagentConfig)
+    ? {
+        disabledBuiltinSubagents: normalizeStringList(
+          value.subagentConfig.disabledBuiltinSubagents
+        ),
+        customSubagentFiles: normalizeStringList(value.subagentConfig.customSubagentFiles)
+      }
+    : undefined
+
+  if (!agentMode && Object.keys(toolCustomConfig).length === 0 && !subagentConfig) return undefined
   return {
     ...(agentMode ? { agentMode } : {}),
-    ...(Object.keys(toolCustomConfig).length > 0 ? { toolCustomConfig } : {})
+    ...(Object.keys(toolCustomConfig).length > 0 ? { toolCustomConfig } : {}),
+    ...(subagentConfig ? { subagentConfig } : {})
   }
 }
 

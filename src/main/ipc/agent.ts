@@ -58,7 +58,8 @@ import {
 } from "../../shared/goal-events"
 import type {
   HarnessAgentmdLoadStatusItem,
-  HarnessDeployUnitMapping
+  HarnessDeployUnitMapping,
+  HarnessProjectModeSubagentConfig
 } from "../../shared/harness-board-types"
 import {
   checkpointHasInterrupt,
@@ -579,6 +580,7 @@ interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
   enableTaskTool?: boolean
+  subagentConfig?: HarnessProjectModeSubagentConfig
   isHarnessProjectSession?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
@@ -682,6 +684,7 @@ function getHarnessAgentContext(
       pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
       enableTaskTool: featureContext.enableTaskTool,
+      subagentConfig: featureContext.runtimePolicy?.subagentConfig,
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,

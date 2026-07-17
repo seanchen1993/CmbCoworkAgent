@@ -17,11 +17,12 @@
  * `tools`/`disallowedTools` frontmatter (CC tool names are auto-mapped) or the
  * coarse `workload` shortcut.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "fs"
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs"
 import { homedir } from "os"
-import { join } from "path"
+import { basename, extname, isAbsolute, join } from "path"
 import { parseYamlFrontmatter } from "../utils/skill-identifiers"
 import type { ExpertAgentAccess } from "../../shared/expert-agent-types"
+import type { HarnessProjectModeSubagentConfig } from "../../shared/harness-board-types"
 import { LIBRARY_AGENT_PROFILES } from "./library"
 
 /** execute/shell policy for an agent. none = no shell at all; read_only = only
@@ -581,6 +582,41 @@ function loadUserAgents(dir: string): AgentProfile[] {
   return out
 }
 
+/** Load user-format agent Markdown files explicitly selected by a project-mode
+ * plugin. The parser and permission derivation are shared with global/workspace
+ * user agents; this wrapper only adds direct-file validation and deduplication. */
+function loadExplicitUserAgentFiles(filePaths: readonly string[]): AgentProfile[] {
+  const out: AgentProfile[] = []
+  const seenPaths = new Set<string>()
+  for (const configuredPath of filePaths) {
+    if (!isAbsolute(configuredPath)) {
+      console.warn(
+        `[AgentRegistry] Project-mode custom subagent path must be absolute; skipped: ${configuredPath}`
+      )
+      continue
+    }
+    try {
+      const filePath = realpathSync(configuredPath)
+      if (seenPaths.has(filePath)) continue
+      seenPaths.add(filePath)
+      if (extname(filePath).toLowerCase() !== ".md" || !statSync(filePath).isFile()) {
+        console.warn(
+          `[AgentRegistry] Project-mode custom subagent path is not a Markdown file; skipped: ${configuredPath}`
+        )
+        continue
+      }
+      const profile = parseAgentFile(filePath, basename(filePath, extname(filePath)))
+      if (profile) out.push(profile)
+    } catch (error) {
+      console.warn(
+        `[AgentRegistry] Failed to load project-mode custom subagent file ${configuredPath}:`,
+        error
+      )
+    }
+  }
+  return out
+}
+
 // ── Expert agent library (专家团) enablement ──
 //
 // The curated library profiles (src/main/agent/library/) are OFF by default.
@@ -646,7 +682,27 @@ function loadEnabledLibraryProfiles(): AgentProfile[] {
 const BUILT_IN_NAME_BY_LOWER = new Map(
   BUILT_IN_AGENT_PROFILES.map((p) => [p.name.toLowerCase(), p.name] as const)
 )
-export function loadAgentProfiles(workspacePath?: string): AgentProfile[] {
+const GENERAL_PURPOSE_SUBAGENT_NAME = "general-purpose"
+const BUNDLED_AGENT_NAMES = new Set([
+  GENERAL_PURPOSE_SUBAGENT_NAME,
+  ...BUILT_IN_AGENT_PROFILES.map((profile) => profile.name),
+  ...LIBRARY_AGENT_PROFILES.map((profile) => profile.name)
+])
+const BUNDLED_AGENT_NAMES_LOWER = new Set(
+  [...BUNDLED_AGENT_NAMES].map((name) => name.toLowerCase())
+)
+const warnedUnknownDisabledBuiltinSubagents = new Set<string>()
+
+export function isGeneralPurposeSubagentEnabled(
+  subagentConfig?: HarnessProjectModeSubagentConfig
+): boolean {
+  return !subagentConfig?.disabledBuiltinSubagents.includes(GENERAL_PURPOSE_SUBAGENT_NAME)
+}
+
+export function loadAgentProfiles(
+  workspacePath?: string,
+  subagentConfig?: HarnessProjectModeSubagentConfig
+): AgentProfile[] {
   const byName = new Map<string, AgentProfile>()
   const put = (p: AgentProfile): void => {
     // Built-in logical name → canonical key (collapse all casings/layers, last
@@ -654,11 +710,42 @@ export function loadAgentProfiles(workspacePath?: string): AgentProfile[] {
     const key = BUILT_IN_NAME_BY_LOWER.get(p.name.toLowerCase()) ?? p.name
     byName.set(key, p)
   }
-  for (const p of BUILT_IN_AGENT_PROFILES) put(p)
-  for (const p of loadEnabledLibraryProfiles()) put(p)
-  for (const p of loadUserAgents(join(homedir(), ".cmbcoworkagent", "agents"))) put(p)
-  if (workspacePath) {
-    for (const p of loadUserAgents(join(workspacePath, ".cmbcoworkagent", "agents"))) put(p)
+
+  if (subagentConfig) {
+    const disabled = new Set(subagentConfig.disabledBuiltinSubagents)
+    for (const name of disabled) {
+      if (BUNDLED_AGENT_NAMES.has(name) || warnedUnknownDisabledBuiltinSubagents.has(name)) continue
+      warnedUnknownDisabledBuiltinSubagents.add(name)
+      console.warn(`[AgentRegistry] Unknown disabledBuiltinSubagents entry "${name}" was ignored.`)
+    }
+    for (const p of BUILT_IN_AGENT_PROFILES) {
+      if (!disabled.has(p.name)) put(p)
+    }
+    for (const p of LIBRARY_AGENT_PROFILES) {
+      if (!disabled.has(p.name)) put(p)
+    }
+    for (const p of loadExplicitUserAgentFiles(subagentConfig.customSubagentFiles)) {
+      if (BUNDLED_AGENT_NAMES_LOWER.has(p.name.toLowerCase())) {
+        console.warn(
+          `[AgentRegistry] Project-mode custom subagent "${p.name}" collides with a bundled subagent name and was skipped.`
+        )
+        continue
+      }
+      if (byName.has(p.name)) {
+        console.warn(
+          `[AgentRegistry] Duplicate project-mode custom subagent name "${p.name}" was skipped.`
+        )
+        continue
+      }
+      put(p)
+    }
+  } else {
+    for (const p of BUILT_IN_AGENT_PROFILES) put(p)
+    for (const p of loadEnabledLibraryProfiles()) put(p)
+    for (const p of loadUserAgents(join(homedir(), ".cmbcoworkagent", "agents"))) put(p)
+    if (workspacePath) {
+      for (const p of loadUserAgents(join(workspacePath, ".cmbcoworkagent", "agents"))) put(p)
+    }
   }
   return [...byName.values()]
 }
