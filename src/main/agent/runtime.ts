@@ -1480,6 +1480,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     summarizationSummaryPrompt,
     summarizationTruncateArgsSettings,
     subagentExtraSystemPrompt,
+    subagentExtraSystemPromptForRestrictedRoles = false,
     mainFilesystemEnabled = true,
     mainTodosEnabled = true,
     subagentDefaultTools,
@@ -1496,6 +1497,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
     threadId,
+    onTaskSubagentPromptsResolved,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
@@ -1505,6 +1507,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onFailureFuseNotice
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
+    onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
     onToolFailureSignal?: (input: {
       toolName: string | undefined
       toolCallId: string | undefined
@@ -2020,22 +2023,20 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     .map((spec) => {
       const disallowed = spec.disallowedTools ?? []
       const shell: AgentShellAccess = spec.shellAccess ?? "full"
-      // read_only AND none are both restricted roles → omit AGENTS.md + MEMORY.md
-      // (CC omitClaudeMd parity); only write/verify (full) keep them. A no-shell
-      // agent (`none`, e.g. tools: Read) must not get more context than read_only.
+      // read_only AND none are both restricted roles. Outside project mode they
+      // preserve the existing omitClaudeMd-style behavior; project mode may
+      // explicitly share the main agent's already-resolved project context with
+      // every task subagent without changing this role's tools or MEMORY.md policy.
       const restrictedRole = shell === "read_only" || shell === "none"
       // The guard ALWAYS applies to registry agents: even a write-capable custom
       // agent is a subagent and must not get ad-hoc-exec/orchestration meta tools
       // (code_exec/manage_scheduler/manage_skill). It's ordered BEFORE the skills
       // middleware so the guard's systemMessage strip runs first and never touches
       // the injected skill list. Registry agents also see the project skill
-      // catalogue (CC subagents can invoke skills). Both AGENTS.md and MEMORY.md are
-      // injected for write-capable roles and omitted for read_only — this mirrors
-      // CC, where a write-capable subagent inherits the whole claudeMd channel
-      // (CLAUDE.md + auto-MEMORY.md) and CC's omitClaudeMd drops BOTH at once for
-      // read-only Explore/Plan. AGENTS.md is appended to the systemPrompt below
-      // (same as the general-purpose subagent); MEMORY.md rides the memory middleware
-      // here. memory_search/memory_get TOOLS are inherited regardless of role.
+      // catalogue (CC subagents can invoke skills). MEMORY.md keeps the existing
+      // restricted-role policy; project-mode context inheritance is handled only
+      // in the systemPrompt below. memory_search/memory_get TOOLS are inherited
+      // regardless of role.
       const middleware = [
         createAgentToolGuardMiddleware(disallowed, shell, windowsShellKind),
         ...skillsMiddlewareArray,
@@ -2044,11 +2045,12 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       return {
         name: spec.name,
         description: appendRegistrySubagentAccessDescription(spec.description, disallowed, shell),
-        // write/verify (full) get AGENTS.md (project instructions); read_only AND
-        // none omit it (mirrors CC omitClaudeMd dropping the claudeMd channel).
-        // Same `## Project Instructions` format the general-purpose subagent uses.
+        // Preserve the existing non-project restricted-role behavior. In project
+        // mode the caller opts every task subagent into the same resolved context
+        // snapshot as the main agent, without another AGENTS.md read.
         systemPrompt:
-          !restrictedRole && subagentExtraSystemPrompt
+          (!restrictedRole || subagentExtraSystemPromptForRestrictedRoles) &&
+          subagentExtraSystemPrompt
             ? `${spec.systemPrompt}\n\n## Project Instructions\n\n${subagentExtraSystemPrompt}`
             : spec.systemPrompt,
         ...(spec.model ? { model: spec.model } : {}),
@@ -2059,6 +2061,21 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   const availableSubagents = includeGeneralPurposeSubagent
     ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
     : [...processedSubagents, ...registrySubagents]
+
+  if (mainSubagentsEnabled && onTaskSubagentPromptsResolved) {
+    onTaskSubagentPromptsResolved(
+      availableSubagents.flatMap((subagent) =>
+        subagent &&
+        typeof subagent === "object" &&
+        "name" in subagent &&
+        typeof subagent.name === "string" &&
+        "systemPrompt" in subagent &&
+        typeof subagent.systemPrompt === "string"
+          ? [{ name: subagent.name, systemPrompt: subagent.systemPrompt }]
+          : []
+      )
+    )
+  }
 
   // deepagents' fs middleware RE-APPENDS its own `## Execute Tool` section in
   // wrapModelCall whenever the BACKEND supports execution (our LocalSandbox
@@ -4136,13 +4153,13 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   if (combinedAgentsPrompt) {
     systemPrompt += "\n\n" + combinedAgentsPrompt
   }
-  const combinedAgentsPromptPreview =
+  const resolvedProjectContextPrompt =
     [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
   if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
     onAgentsPromptLoadStatus({
       items: agentsPromptLoadStatusItems,
       loader: agentsPromptLoader,
-      promptPreview: combinedAgentsPromptPreview
+      promptPreview: resolvedProjectContextPrompt
     })
   }
   if (extraSystemPrompt) {
@@ -4664,15 +4681,17 @@ The workspace root is: ${workspacePath}`
   const coordinatorProjectInstructions = [combinedAgentsPrompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
-  const coordinatorWorkerProjectInstructions = [
-    combinedAgentsPrompt,
-    coordinatorPluginPromptInject
-      ? `### Skills Runtime Context\n\n${coordinatorPluginPromptInject}`
-      : "",
-    extraSystemPrompt
-  ]
-    .filter(Boolean)
-    .join("\n\n")
+  const coordinatorWorkerProjectInstructions = runtimePolicy.isProjectMode
+    ? [resolvedProjectContextPrompt, extraSystemPrompt].filter(Boolean).join("\n\n")
+    : [
+        combinedAgentsPrompt,
+        coordinatorPluginPromptInject
+          ? `### Skills Runtime Context\n\n${coordinatorPluginPromptInject}`
+          : "",
+        extraSystemPrompt
+      ]
+        .filter(Boolean)
+        .join("\n\n")
 
   const emitCoordinatorWorkerEvent = (event: CoordinatorWorkerUpdateEvent): void => {
     if (!isCoordinatorMode || !onCoordinatorWorkerEvent) return
@@ -5381,6 +5400,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   // Same memory middleware as a normal main agent — injects content only, no tool changes.
   const mainMemorySources =
     !disableMemoryInjection && memorySources?.length ? memorySources : undefined
+  const projectModeTaskSubagentsInheritFullContext =
+    runtimePolicy.isProjectMode && agentMode === "normal" && !disableSubagents
+  const taskSubagentExtraSystemPrompt = projectModeTaskSubagentsInheritFullContext
+    ? resolvedProjectContextPrompt
+    : combinedAgentsPrompt
 
   const agent = createDeepAgent({
     model,
@@ -5392,7 +5416,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     systemPrompt,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
-    subagentExtraSystemPrompt: combinedAgentsPrompt,
+    subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
+    subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && runtimePolicy.includeSubagents,
