@@ -1212,8 +1212,27 @@ if (hasExplicitContract) {
     )
     const reconManifests = take(uniq(manifestLists.flat()), MAX_MANIFESTS)
     const reconMatched = rankPathsByTokens(uniq(sourceLists.flat()), reconTokens, 30)
-    recon = await agent(
-      `请只读勘察项目现状，不要修改文件。一份开发需求即将被固化为验收合同，你的任务是找出"需求没有点名、但实现时必然与之交互的既有代码与行为"，防止合同带盲区出厂。
+    const reconSampled = interleaveUnique(sourceLists, 30, reconMatched)
+    // 多模块仓(manifest 多=monorepo 信号)单个勘察代理覆盖不过来,拆三视角并行;
+    // 小仓一个足够(dryrun 的 glob mock 返回空,恒走单视角,label 保持精确不变)。
+    const reconViews =
+      reconManifests.length > 4
+        ? [
+            { suffix: "·同类能力", ask: "已存在的同类/相邻能力与可复用实现" },
+            {
+              suffix: "·入口链路",
+              ask: "需求会触碰的入口（端点/控制器/服务方法）及其调用链上的既有行为（校验/审计/状态分支/互斥逻辑）"
+            },
+            { suffix: "·冲突约束", ask: "与需求冲突或使其假设不成立的现状、实现必须遵守的既有约束" }
+          ]
+        : [{ suffix: "", ask: "同类/相邻能力、入口调用链上的既有行为、以及与需求冲突的现状" }]
+    const reconParts = (
+      await parallel(
+        reconViews.map(
+          (view) => () =>
+            agent(
+              `请只读勘察项目现状，不要修改文件。一份开发需求即将被固化为验收合同，你的任务是找出"需求没有点名、但实现时必然与之交互的既有代码与行为"，防止合同带盲区出厂。
+本视角侧重：${view.ask}。
 
 开发需求：
 ${requirement}
@@ -1221,21 +1240,46 @@ ${requirement}
 项目 manifest 路径清单：
 ${lines(reconManifests) || "- 未找到"}
 
-与需求关键词匹配的候选文件（按命中度排序，仅是起点，必须用 grep/read 实际核实）：
-${lines(reconMatched) || "- 无命中（请直接用 grep/glob 检索）"}
+与需求关键词匹配的候选文件（按命中度排序，仅是起点）：
+${lines(reconMatched) || "- 无命中"}
+
+其他源码抽样（各类型轮流抽取，仅示意项目结构，绝非全量）：
+${lines(reconSampled)}
+
+勘察方法（关键）：交互代码往往与需求没有任何共同关键词（如"修改密码"需求与登录锁定存储零关键词交集），靠上面的清单找不到它们。正确做法：先用 grep 定位需求会触碰的入口（端点/控制器/服务方法），通读入口及其调用链——既有的校验、审计、状态分支、互斥逻辑全挂在同一条流上，逐个记下来；清单里没有 ≠ 代码里没有。
 
 重点回答三件事，写进返回结果：
-1. 已存在的同类/相邻能力（summary 概述；relevantFiles 给路径，reason 说明它与需求的关系，suggestedUse 标注"交互：<会怎样相互影响>"或"可复用：<符号名>"）；
-2. 需求实现会触碰的既有行为（如同一方法/接口上已有的校验、审计、状态分支——它们与新功能的先后/互斥关系是合同必须定义的）；
+1. 已存在的同类/相邻能力（relevantFiles 给路径，reason 说明它与需求的关系，suggestedUse 标注"交互：<会怎样相互影响>"或"可复用：<符号名>"）；
+2. 需求实现会触碰的既有行为（同一方法/接口上已有的校验、审计、状态分支——它们与新功能的先后/互斥关系是合同必须定义的）；
 3. 与需求冲突或使需求假设不成立的现状（写进 risks）。`,
-      {
-        label: "探索：需求现状勘察",
-        phase: "确定验收标准",
-        agentType: "Explore",
-        schema: EXPLORE_SCHEMA
+              {
+                label: `探索：需求现状勘察${view.suffix}`,
+                phase: "确定验收标准",
+                agentType: "Explore",
+                schema: EXPLORE_SCHEMA
+              }
+            )
+        )
+      )
+    ).filter(Boolean)
+    if (reconParts.length > 0) {
+      const seenReconFiles = Object.create(null)
+      const reconFiles = []
+      for (const part of reconParts) {
+        for (const file of part.relevantFiles || []) {
+          if (!file || !file.path || seenReconFiles[file.path]) continue
+          seenReconFiles[file.path] = true
+          reconFiles.push(file)
+        }
       }
-    )
-    if (!recon) log("需求现状勘察未返回结构化结果，合同代理将自行核实现状（降级继续）。")
+      recon = {
+        summary: reconParts.map((p) => p.summary).filter(Boolean).join("\n"),
+        relevantFiles: take(reconFiles, 40),
+        risks: take(uniq(reconParts.flatMap((p) => p.risks || [])), 12)
+      }
+    } else {
+      log("需求现状勘察未返回结构化结果，合同代理将自行核实现状（降级继续）。")
+    }
   }
   const contract = await agent(
     `请把下面的开发需求固化为一份"交付合同"。合同的核心是验收标准清单（criteria）：
@@ -1539,6 +1583,7 @@ ${pending.map((c) => `- ${c.id}（${c.verify}）：${clip(c.text, 500)}${c.note 
 ${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）：\n${clip(context.conventionsBrief, 2000)}\n` : ""}
 要求：
 - 每个工作包声明它负责证实哪些标准（acIds），粒度小到一个 agent 可以安全完成。
+- 工作包宁少勿碎：同一模块/同一条调用链上的标准合并为一个工作包（工作包串行执行，每个包固定消耗实现+验证+可能的修复代理，碎包成倍拖慢交付）；只有标准分属互不相干的模块时才拆包。
 - 优先复用项目画像中标注"可复用"的现有函数/工具（确无可复用才规划新建），在工作包 objective 里写明要复用的实现及其文件路径。
 - 每条待证实标准必须被至少一个工作包认领；确实无法认领的，在 blockers 里说明原因。
 - conventionsBrief 写一页跨包公约（统一入口/命名/风格），所有实现代理都会收到它。
