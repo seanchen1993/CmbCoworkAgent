@@ -464,8 +464,15 @@ export function closeAdoptionIndex(): void {
 // Queries (all guarded against uninitialised db)
 // ─────────────────────────────────────────────────────────
 
-export function insertGenEvent(row: GenIndexRow): void {
-  if (!db) return
+/**
+ * Insert a generation baseline into the authoritative measurement index.
+ *
+ * The boolean result is intentionally fail-closed for cloud `code_gen`
+ * reporting: callers must not publish a generation that cannot later be
+ * resolved at commit time.
+ */
+export function insertGenEvent(row: GenIndexRow): boolean {
+  if (!db) return false
   try {
     db.run(
       `INSERT OR REPLACE INTO gen_events
@@ -529,8 +536,10 @@ export function insertGenEvent(row: GenIndexRow): void {
       ]
     )
     scheduleSave()
+    return true
   } catch (e) {
     console.warn("[AdoptionIndex] insertGenEvent failed:", e)
+    return false
   }
 }
 

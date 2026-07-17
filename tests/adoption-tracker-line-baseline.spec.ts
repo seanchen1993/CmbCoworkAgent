@@ -7,6 +7,8 @@
 
 import {
   buildAdoptionLineBaseline,
+  countNetGeneratedLines,
+  isCodeFile,
   evaluateAdoptionLineBaselines
 } from "../src/main/services/adoption-tracker.ts"
 
@@ -171,6 +173,55 @@ function testNoopEditProducesNoBaseline(): void {
   assert(baseline.supersededLineHashes.length === 0, "noop edit should not supersede lines")
 }
 
+function testOversizeCountUsesNetGeneratedLines(): void {
+  const unchangedContext = Array.from({ length: 20_001 }, (_, index) => `line ${index}`).join("\n")
+
+  assert(
+    countNetGeneratedLines({
+      tool: "edit_file",
+      generatedContent: `${unchangedContext}\nnew line`,
+      oldString: unchangedContext,
+      occurrences: 1
+    }) === 1,
+    "large edit context should count only its one net-new line"
+  )
+  assert(
+    countNetGeneratedLines({
+      tool: "edit_file",
+      generatedContent: "",
+      oldString: unchangedContext,
+      occurrences: 1
+    }) === 0,
+    "large deletion should not count deleted lines as generated"
+  )
+  assert(
+    countNetGeneratedLines({
+      tool: "edit_file",
+      generatedContent: "status = NEW;",
+      oldString: "status = OLD;",
+      occurrences: 25_000
+    }) === 25_000,
+    "replaceAll net count should scale without expanding the baseline"
+  )
+}
+
+function testInternalWorkflowScriptsAreNotCode(): void {
+  const internalScripts = [
+    ".cmbdevclaw/workflows/thread-1/run.workflow.js",
+    "/repo/.cmbdevclaw/workflows/thread-1/nested/run.workflow.js",
+    "C:\\repo\\.cmbdevclaw\\workflows\\thread-1\\run.workflow.js"
+  ]
+  for (const filePath of internalScripts) {
+    assert(!isCodeFile(filePath), `${filePath} should be excluded from code adoption`)
+  }
+
+  assert(isCodeFile("src/run.workflow.js"), "product workflow.js files should remain code")
+  assert(
+    isCodeFile(".cmbdevclaw/workflows/thread-1/helper.js"),
+    "the exclusion should stay scoped to persisted .workflow.js scripts"
+  )
+}
+
 function run(): void {
   testEditContextIsNotGenerated()
   console.log("PASS edit context is not generated")
@@ -188,6 +239,10 @@ function run(): void {
   console.log("PASS agent deletion supersedes previous generation")
   testNoopEditProducesNoBaseline()
   console.log("PASS noop edit produces no baseline")
+  testOversizeCountUsesNetGeneratedLines()
+  console.log("PASS oversize generation count uses net-new lines")
+  testInternalWorkflowScriptsAreNotCode()
+  console.log("PASS internal workflow scripts are excluded from adoption")
 }
 
 run()

@@ -89,6 +89,12 @@ function makeRow(overrides: Partial<GenIndexRow> = {}): GenIndexRow {
   }
 }
 
+describe("adoption-index unavailable state", () => {
+  it("reports insertion failure before initialization", () => {
+    expect(insertGenEvent(makeRow({ event_id: "g_unavailable" }))).toBe(false)
+  })
+})
+
 describe("adoption-index harness_node_name column", () => {
   beforeAll(async () => {
     await initializeAdoptionIndex()
@@ -104,13 +110,30 @@ describe("adoption-index harness_node_name column", () => {
   })
 
   it("round-trips harness_node_name via getGenRowByEventId", () => {
-    insertGenEvent(makeRow({ event_id: "g_node_1" }))
+    expect(insertGenEvent(makeRow({ event_id: "g_node_1" }))).toBe(true)
     const fetched = getGenRowByEventId("g_node_1")
     expect(fetched).not.toBeNull()
     expect(fetched?.harness_node_name).toBe("Dev-代码实现")
     expect(fetched?.harness_node_status).toBe("进行中")
     // Existing sibling column must remain intact alongside the new one.
     expect(fetched?.harness_feature_slug).toBe("feature-x")
+  })
+
+  it("reports insertion failure when sqlite rejects the row", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      expect(
+        insertGenEvent(
+          makeRow({
+            event_id: "g_rejected",
+            file_path: null as unknown as string
+          })
+        )
+      ).toBe(false)
+    } finally {
+      warn.mockRestore()
+    }
+    expect(getGenRowByEventId("g_rejected")).toBeNull()
   })
 
   it("returns harness_node_name from findPendingGensForFile", () => {

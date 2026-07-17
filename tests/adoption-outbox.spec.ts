@@ -24,6 +24,7 @@ import {
 } from "../src/main/services/adoption-tracker.ts"
 import {
   cleanupAdoptionDeliveryRecords,
+  closeAdoptionIndex,
   enqueueCommitJob,
   enqueueEventOutbox,
   findPendingGensForFile,
@@ -155,6 +156,15 @@ async function waitForTestGenerationCall(reporter: AdoptionReporter): Promise<Co
   throw new Error("timed out waiting for code_test_gen delivery")
 }
 
+async function waitForGenerationCall(reporter: AdoptionReporter, index = 0): Promise<CoworkEvent> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const event = reporter.generationCalls[index]
+    if (event) return event
+    await sleep(20)
+  }
+  throw new Error("timed out waiting for code_gen delivery")
+}
+
 async function generateAndCommit(
   repo: string,
   fileName: string
@@ -278,6 +288,93 @@ async function testTestGenerationUsesSeparateDurableOutbox(): Promise<void> {
     })
   })
   console.log("PASS test generation is isolated and retried through the durable outbox")
+}
+
+async function testCodeGenRequiresAnIndexedBaseline(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    const reporter = new AdoptionReporter()
+    setEventReporter(reporter)
+    await initializeAdoptionTracker()
+
+    await withTempRepo("code-gen-index-gate", async (repo) => {
+      const filePath = join(repo, "unindexed.ts")
+      const generatedContent = "export const unindexed = true\n"
+      await writeFile(filePath, generatedContent)
+
+      // Simulate an index that became unavailable after tracker initialization.
+      // The generation may be omitted from cloud telemetry, but it must never be
+      // uploaded without a baseline that commit measurement can resolve.
+      closeAdoptionIndex()
+      recordGen({
+        threadId: "code-gen-index-gate",
+        workspacePath: repo,
+        filePath,
+        tool: "write_file",
+        generatedContent
+      })
+      await sleep(100)
+
+      assert(reporter.generationCalls.length === 0, "unindexed code_gen must be suppressed")
+      assert(
+        findPendingGensForFile(filePath, 0).length === 0,
+        "a closed index should not expose a pending generation"
+      )
+    })
+  })
+  console.log("PASS code_gen is suppressed when its measurement baseline cannot be indexed")
+}
+
+async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    const reporter = new AdoptionReporter()
+    setEventReporter(reporter)
+    await initializeAdoptionTracker()
+
+    await withTempRepo("oversize-net-generation", async (repo) => {
+      const filePath = join(repo, "large.ts")
+      const oldString = Array.from(
+        { length: 20_001 },
+        (_, index) => `const v${index} = ${index}`
+      ).join("\n")
+      const newString = `${oldString}\nexport const onlyNewLine = true`
+      await writeFile(filePath, newString)
+
+      recordGen({
+        threadId: "oversize-net-generation",
+        workspacePath: repo,
+        filePath,
+        tool: "edit_file",
+        generatedContent: newString,
+        oldString,
+        newString,
+        occurrences: 1
+      })
+
+      const genEvent = await waitForGenerationCall(reporter)
+      assert(
+        genEvent.properties?.lineCount === 1,
+        "oversize code_gen should report one net-new line"
+      )
+      await flushAdoptionEventOutbox()
+      const adoptEvent = reporter.adoptionCalls.find(
+        (event) => event.properties?.genEventId === genEvent.properties?.eventId
+      )
+      assert(
+        adoptEvent?.properties?.verdict === "skipped_large",
+        "oversize edit should stay terminal"
+      )
+      assert(
+        adoptEvent?.properties?.generatedLineCount === 1 &&
+          adoptEvent.properties?.effectiveGeneratedLineCount === 1,
+        "oversize terminal event should use the same net-new denominator"
+      )
+      assert(
+        findPendingGensForFile(filePath, 0).length === 0,
+        "oversize edit should continue skipping the measurement index"
+      )
+    })
+  })
+  console.log("PASS oversize edit telemetry uses net-new generated lines")
 }
 
 async function testStableOutboxRetryAcrossRestart(): Promise<void> {
@@ -477,6 +574,8 @@ async function testOutboxAttemptAndRetentionLimits(): Promise<void> {
 
 async function main(): Promise<void> {
   await testTestGenerationUsesSeparateDurableOutbox()
+  await testCodeGenRequiresAnIndexedBaseline()
+  await testOversizeEditReportsNetGeneratedLines()
   await testStableOutboxRetryAcrossRestart()
   await testCommitJobRecoveryFromRepoAndSha()
   await testOutboxAttemptAndRetentionLimits()

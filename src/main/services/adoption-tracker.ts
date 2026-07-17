@@ -244,6 +244,11 @@ const EXCLUDED_FILENAME_PATTERNS = [
   /\.map$/i
 ]
 
+// Internal Dynamic Workflow source is an orchestration artifact, not product
+// code. The app explicitly keeps this tree gitignored, so counting edits to a
+// persisted workflow script would permanently inflate uncommitted code.
+const INTERNAL_WORKFLOW_SCRIPT_PATTERN = /(?:^|\/)\.cmbdevclaw\/workflows\/.+\.workflow\.js$/i
+
 // ─────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────
@@ -454,6 +459,7 @@ export function isCodeFile(filePath: string): boolean {
   if (!CODE_EXTENSIONS.has(ext)) return false
 
   const normalized = filePath.replace(/\\/g, "/").toLowerCase()
+  if (INTERNAL_WORKFLOW_SCRIPT_PATTERN.test(normalized)) return false
   // Segment-level match so root-relative paths like "node_modules/foo/x.ts" are
   // also excluded (the earlier substring check only caught paths with a leading "/").
   const segments = normalized.split("/").filter(Boolean)
@@ -585,6 +591,35 @@ function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occu
   // edit_file reports 0 for the empty-file insertion special case; the new
   // string still appears once in the generated baseline.
   return occurrences > 0 ? occurrences : 1
+}
+
+/**
+ * Count only net-new, non-blank lines without expanding replaceAll occurrences
+ * into a potentially huge baseline. Used by the oversize fast path, where we
+ * deliberately skip persistence/hashing details but still need an accurate
+ * denominator for telemetry.
+ */
+export function countNetGeneratedLines(
+  input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
+): number {
+  const generatedCounts = buildLineHashCounts(computeLineHashes(input.generatedContent))
+  const generationOccurrences = getGenerationOccurrenceCount(input)
+
+  if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
+    let total = 0
+    for (const count of generatedCounts.values()) total += count * generationOccurrences
+    return total
+  }
+
+  const oldCounts = buildLineHashCounts(computeLineHashes(input.oldString))
+  const deletionOccurrences = getDeletionOccurrenceCount(input)
+  let total = 0
+  for (const [hash, count] of generatedCounts) {
+    const generated = count * generationOccurrences
+    const unchanged = (oldCounts.get(hash) ?? 0) * deletionOccurrences
+    total += Math.max(0, generated - unchanged)
+  }
+  return total
 }
 
 function repeatLineEntries(entries: LineEntry[], occurrences: number): LineEntry[] {
@@ -1237,16 +1272,20 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // `skipped_large` adopt event and skip hashing / JSONL / sqlite entirely.
     const generationOccurrences = getGenerationOccurrenceCount(input)
     const rawLineCount = input.generatedContent.split(/\r?\n/).length * generationOccurrences
+    const rawOldLineCount =
+      typeof input.oldString === "string"
+        ? input.oldString.split(/\r?\n/).length * getDeletionOccurrenceCount(input)
+        : 0
     const eventId = `g_${randomUUID()}`
     const createdAt = Date.now()
 
-    if (rawLineCount > MAX_LINES_FOR_MEASURE) {
+    if (Math.max(rawLineCount, rawOldLineCount) > MAX_LINES_FOR_MEASURE) {
       emitSkippedLargeAtGen({
         eventId,
         input,
         absPath,
         relPath,
-        lineCount: rawLineCount,
+        lineCount: countNetGeneratedLines(input),
         createdAt,
         ctx,
         testMatchRule
@@ -1258,13 +1297,16 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
 
     // Keep the measured baseline guard explicit too, so the persisted row never
     // exceeds the commit-time comparison cap.
-    if (baseline.rawGeneratedLineCount > MAX_LINES_FOR_MEASURE) {
+    if (
+      Math.max(baseline.generatedLineHashes.length, baseline.supersededLineHashes.length) >
+      MAX_LINES_FOR_MEASURE
+    ) {
       emitSkippedLargeAtGen({
         eventId,
         input,
         absPath,
         relPath,
-        lineCount: baseline.rawGeneratedLineCount,
+        lineCount: baseline.generatedLineHashes.length,
         createdAt,
         ctx,
         testMatchRule
@@ -1340,7 +1382,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
     const observabilityColumns = buildGenIndexObservabilityColumns(ctx, input.threadId)
-    insertGenEvent({
+    const indexed = insertGenEvent({
       event_id: eventId,
       file_path: absPath,
       content_fingerprint: fingerprint,
@@ -1366,6 +1408,12 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       harness_adapter_version: ctx.harnessAdapterVersion ?? null,
       ...observabilityColumns
     })
+    if (!indexed) {
+      console.warn(
+        `[AdoptionTracker] code_gen suppressed — generation baseline was not indexed: eventId=${eventId} file=${relPath}`
+      )
+      return
+    }
     trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
 
     // ── Cloud event (metadata only) ─────────────────────
