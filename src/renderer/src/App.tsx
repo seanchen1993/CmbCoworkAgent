@@ -157,6 +157,7 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
 function App(): React.JSX.Element {
   const {
     currentThreadId,
+    previousThreadId,
     loadThreads,
     loadDashboardAllowed,
     dashboardAllowed,
@@ -177,6 +178,7 @@ function App(): React.JSX.Element {
   } = useAppStore(
     useShallow((state) => ({
       currentThreadId: state.currentThreadId,
+      previousThreadId: state.previousThreadId,
       loadThreads: state.loadThreads,
       loadDashboardAllowed: state.loadDashboardAllowed,
       dashboardAllowed: state.dashboardAllowed,
@@ -241,6 +243,8 @@ function App(): React.JSX.Element {
     Boolean(harnessSessionThreadId && workflowAgentFocusView?.threadId === harnessSessionThreadId)
   const isWorkflowAgentFocusActive =
     isThreadWorkflowAgentFocusActive || isHarnessWorkflowAgentFocusActive
+  const isThreadAgentFocusActive =
+    isThreadWorkerFocusActive || isThreadSubagentFocusActive || isThreadWorkflowAgentFocusActive
   const isAgentFocusActive =
     isWorkerFocusActive || isSubagentFocusActive || isWorkflowAgentFocusActive
   const isHarnessAgentFocusActive =
@@ -500,6 +504,13 @@ function App(): React.JSX.Element {
     setHarnessSessionThreadId((prev) => (prev === threadId ? prev : threadId))
   }, [])
 
+  const chatThreadId = mainView === "harness" ? previousThreadId : currentThreadId
+  const chatThreadIsGit = chatThreadId
+    ? Boolean(isGitWorkspaceByThread[chatThreadId])
+    : false
+  const chatHasPendingGitDiff = chatThreadId
+    ? Boolean(pendingGitDiffByThread[chatThreadId] && chatThreadIsGit)
+    : false
   const activeRightPanelThreadId =
     mainView === "harness" ? harnessSessionThreadId : currentThreadId
   const isActiveRightPanelThreadGit = activeRightPanelThreadId
@@ -936,7 +947,7 @@ function App(): React.JSX.Element {
               </Suspense>
             </main>
           </div>
-        ) : mainView !== "claudecode" && mainView !== "dashboard" && mainView !== "harness" ? (
+        ) : mainView === "thread" || mainView === "harness" ? (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
             {!sidebarCollapsed && !isAgentFocusActive && (
@@ -948,16 +959,16 @@ function App(): React.JSX.Element {
               </>
             )}
 
-            {mainView === "kanban" ? (
-              <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-                <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
-                  <KanbanView />
-                </Suspense>
-              </main>
-            ) : (
+            <div
+              className={
+                mainView === "thread"
+                  ? "relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
+                  : "hidden"
+              }
+            >
               <>
                 {/* Center - Content Panel */}
-                {isAgentFocusActive ? (
+                {isThreadAgentFocusActive ? (
                   <main
                     ref={workerSplitRef}
                     className="relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
@@ -966,11 +977,11 @@ function App(): React.JSX.Element {
                       className="flex min-w-0 flex-col overflow-hidden"
                       style={{ width: `${workerSplitLeftPercent}%` }}
                     >
-                      {currentThreadId ? (
+                      {chatThreadId ? (
                         <TabbedPanel
-                          threadId={currentThreadId}
+                          threadId={chatThreadId}
                           showTabBar={false}
-                          hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                          hasPendingGitDiffNotice={chatHasPendingGitDiff && rightModule !== "git"}
                           onRequestOpenGitPanel={selectGitModule}
                           onDismissGitChangeNotice={dismissGitChangeNotice}
                           onThreadGitStatusChange={handleThreadGitStatusChange}
@@ -983,22 +994,22 @@ function App(): React.JSX.Element {
                     </section>
                     <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
                     <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                      {isWorkflowAgentFocusActive ? (
+                      {isThreadWorkflowAgentFocusActive ? (
                         <WorkflowAgentStreamPanel />
-                      ) : isWorkerFocusActive ? (
+                      ) : isThreadWorkerFocusActive ? (
                         <WorkerStreamPanel />
                       ) : (
                         <SubagentStreamPanel />
                       )}
                     </section>
                   </main>
-                ) : !previewFullscreen && (
+                ) : (mainView !== "thread" || !previewFullscreen) && (
                   <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-                    {currentThreadId ? (
+                    {chatThreadId ? (
                       <TabbedPanel
-                        threadId={currentThreadId}
+                        threadId={chatThreadId}
                         showTabBar={false}
-                        hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                        hasPendingGitDiffNotice={chatHasPendingGitDiff && rightModule !== "git"}
                         onRequestOpenGitPanel={selectGitModule}
                         onDismissGitChangeNotice={dismissGitChangeNotice}
                         onThreadGitStatusChange={handleThreadGitStatusChange}
@@ -1011,25 +1022,103 @@ function App(): React.JSX.Element {
                   </main>
                 )}
               </>
-            )}
 
-            {mainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
-              <>
-                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
-                {/* Right Panel - floating style */}
-                <div
-                  style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+              {mainView === "thread" && !rightPanelCollapsed && !isThreadAgentFocusActive && (
+                <>
+                  {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                  {/* Right Panel - floating style */}
+                  <div
+                    style={previewFullscreen ? undefined : { width: rightWidth }}
+                    className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                  >
+                    <RightPanel
+                      threadId={chatThreadId}
+                      moduleMode={rightModule}
+                      onRequestPreviewMode={selectPreviewModule}
+                      onRequestWorkMode={selectWorkModule}
+                      onPreviewFullscreenChange={setPreviewFullscreen}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+
+            {mainView === "harness" && (
+              <div
+                ref={isHarnessAgentFocusActive ? workerSplitRef : undefined}
+                className="relative flex flex-1 overflow-hidden bg-grid-subtle"
+              >
+                <main
+                  key="harness-main"
+                  style={isHarnessAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
+                  className={
+                    previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive
+                      ? "hidden"
+                      : isHarnessAgentFocusActive
+                        ? "relative flex min-w-0 flex-col overflow-hidden"
+                        : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
+                  }
                 >
-                  <RightPanel
-                    moduleMode={rightModule}
-                    onRequestPreviewMode={selectPreviewModule}
-                    onRequestWorkMode={selectWorkModule}
-                    onPreviewFullscreenChange={setPreviewFullscreen}
-                  />
+                  <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                    <HarnessBoardView
+                      hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                      onRequestOpenGitPanel={selectGitModule}
+                      onDismissGitChangeNotice={dismissGitChangeNotice}
+                      onThreadGitStatusChange={handleThreadGitStatusChange}
+                      onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
+                    />
+                  </Suspense>
+                </main>
+                {isHarnessAgentFocusActive && (
+                  <>
+                    <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
+                    <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                      {isHarnessWorkflowAgentFocusActive ? (
+                        <WorkflowAgentStreamPanel />
+                      ) : isHarnessWorkerFocusActive ? (
+                        <WorkerStreamPanel />
+                      ) : (
+                        <SubagentStreamPanel />
+                      )}
+                    </section>
+                  </>
+                )}
+                {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
+                  <>
+                    {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                    <div
+                      style={previewFullscreen ? undefined : { width: rightWidth }}
+                      className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                    >
+                      <RightPanel
+                        threadId={harnessSessionThreadId}
+                        moduleMode={rightModule}
+                        showSystemConstraints={mainView === "harness"}
+                        onRequestPreviewMode={selectPreviewModule}
+                        onRequestWorkMode={selectWorkModule}
+                        onPreviewFullscreenChange={setPreviewFullscreen}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        ) : mainView === "kanban" ? (
+          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+            {!sidebarCollapsed && (
+              <>
+                <div style={{ width: leftWidth }} className="shrink-0">
+                  <ThreadSidebar />
                 </div>
+                <ResizeHandle onDrag={handleLeftResize} />
               </>
             )}
+            <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
+                <KanbanView />
+              </Suspense>
+            </main>
           </div>
         ) : null}
 
@@ -1049,76 +1138,6 @@ function App(): React.JSX.Element {
                 <DashboardView />
               </Suspense>
             </main>
-          </div>
-        )}
-
-        {/* Harness Board 面板 */}
-        {mainView === "harness" && (
-          <div
-            ref={isHarnessAgentFocusActive ? workerSplitRef : undefined}
-            className="relative flex flex-1 overflow-hidden bg-grid-subtle"
-          >
-            {!sidebarCollapsed && !isHarnessAgentFocusActive && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
-            )}
-            <main
-              key="harness-main"
-              style={isHarnessAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
-              className={
-                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive
-                  ? "hidden"
-                  : isHarnessAgentFocusActive
-                    ? "relative flex min-w-0 flex-col overflow-hidden"
-                    : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
-              }
-            >
-              <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
-                <HarnessBoardView
-                  hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
-                  onRequestOpenGitPanel={selectGitModule}
-                  onDismissGitChangeNotice={dismissGitChangeNotice}
-                  onThreadGitStatusChange={handleThreadGitStatusChange}
-                  onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
-                />
-              </Suspense>
-            </main>
-            {isHarnessAgentFocusActive && (
-              <>
-                <WorkerSplitHandle onDrag={handleWorkerSplitResize} />
-                <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                  {isHarnessWorkflowAgentFocusActive ? (
-                    <WorkflowAgentStreamPanel />
-                  ) : isHarnessWorkerFocusActive ? (
-                    <WorkerStreamPanel />
-                  ) : (
-                    <SubagentStreamPanel />
-                  )}
-                </section>
-              </>
-            )}
-            {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
-              <>
-                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
-                <div
-                  style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
-                >
-                  <RightPanel
-                    threadId={harnessSessionThreadId}
-                    moduleMode={rightModule}
-                    showSystemConstraints={mainView === "harness"}
-                    onRequestPreviewMode={selectPreviewModule}
-                    onRequestWorkMode={selectWorkModule}
-                    onPreviewFullscreenChange={setPreviewFullscreen}
-                  />
-                </div>
-              </>
-            )}
           </div>
         )}
 
