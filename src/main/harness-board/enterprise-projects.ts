@@ -230,6 +230,7 @@ function normalizeDeployUnitSearchItem(value: unknown): HarnessDeployUnitSearchI
 
   return {
     deployUnit,
+    deployUnitName: normalizeText(value.deployUnitName),
     ownerId: normalizeText(value.ownerId),
     ownerName: normalizeText(value.ownerName)
   }
@@ -483,16 +484,19 @@ function makeMockDeployUnitSearchResult(): HarnessDeployUnitSearchResult {
     deployUnits: [
       {
         deployUnit: "LF39.18_WealthBoxApi",
+        deployUnitName: "财富管理服务接口",
         ownerId: "80280631",
         ownerName: "陈强"
       },
       {
         deployUnit: "LF39.18_WealthBoxWeb",
+        deployUnitName: "财富管理服务前端",
         ownerId: "80280631",
         ownerName: "陈强"
       },
       {
         deployUnit: "LF39.18_WealthBoxJob",
+        deployUnitName: "财富管理服务批处理",
         ownerId: "80280632",
         ownerName: "李敏"
       }

@@ -3330,7 +3330,11 @@ function ProjectModeSettingsPanel({
                       onChange(index, { ...mapping, deployUnitId })
                     }
                     onSelect={(deployUnit) =>
-                      onChange(index, { ...mapping, deployUnitId: deployUnit.deployUnit })
+                      onChange(index, {
+                        ...mapping,
+                        deployUnitId: deployUnit.deployUnit,
+                        description: deployUnit.deployUnitName
+                      })
                     }
                   />
                   <Input

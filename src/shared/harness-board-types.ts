@@ -224,6 +224,7 @@ export interface HarnessDeployUnitSearchInput {
 
 export interface HarnessDeployUnitSearchItem {
   deployUnit: string
+  deployUnitName: string
   ownerId: string
   ownerName: string
 }
