@@ -21,6 +21,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "fs"
 import { homedir } from "os"
 import { join } from "path"
 import { parseYamlFrontmatter } from "../utils/skill-identifiers"
+import type { ExpertAgentAccess } from "../../shared/expert-agent-types"
+import { LIBRARY_AGENT_PROFILES } from "./library"
 
 /** execute/shell policy for an agent. none = no shell at all; read_only = only
  * provably read-only commands (gated by exec-policy's isReadOnlyShellCommand);
@@ -36,7 +38,7 @@ export interface AgentProfile {
   systemPrompt: string
   /** Optional model override (undefined = inherit the session model). */
   model?: string
-  source: "built-in" | "user"
+  source: "built-in" | "library" | "user"
   /** Project tool names this agent may NOT use (CC aliases already resolved,
    * `execute` handled via shellAccess instead of appearing here). */
   disallowedTools: string[]
@@ -232,6 +234,21 @@ function deriveToolPolicy(fm: Record<string, string>): ToolPolicy {
   }
 
   return policyFromDisallowed(denyExplicit)
+}
+
+/** Inverse of deriveToolPolicy's workload tiers: classify a profile's
+ * (disallowedTools, shellAccess) into the coarse access tier the settings UI
+ * badges with. Lives here, next to deriveToolPolicy, so the tier semantics
+ * have one home — if a tier's definition changes, both directions change
+ * together. */
+export function accessTierForPolicy(
+  disallowedTools: readonly string[],
+  shellAccess: AgentShellAccess
+): ExpertAgentAccess {
+  const noWrites =
+    disallowedTools.includes("write_file") && disallowedTools.includes("edit_file")
+  if (!noWrites) return "full"
+  return shellAccess === "read_only" ? "read_only" : "verify"
 }
 
 /** Split a flat disallowed-tool list into (non-execute denylist, shellAccess).
@@ -564,9 +581,58 @@ function loadUserAgents(dir: string): AgentProfile[] {
   return out
 }
 
-/** Full registry: built-in profiles + user agents from `~/.cmbcoworkagent/agents/`
- * and `<workspace>/.cmbcoworkagent/agents/`. Project overrides user overrides
- * built-in (last writer wins).
+// ── Expert agent library (专家团) enablement ──
+//
+// The curated library profiles (src/main/agent/library/) are OFF by default.
+// Which ones are active is user-controlled via settings, but this module must
+// stay free of electron/storage imports (tests/agent-registry.spec.ts runs it
+// under plain tsx), so the settings read is INJECTED: main registers a reader
+// at startup (see ipc/expert-agents.ts) and loadAgentProfiles calls it on
+// every load — a toggle takes effect on the next runtime creation with no
+// restart. Default reader = nothing enabled, which is also the correct
+// behavior in test contexts.
+type EnabledLibraryAgentsReader = () => readonly string[]
+let readEnabledLibraryAgents: EnabledLibraryAgentsReader = () => []
+
+export function registerEnabledLibraryAgentsReader(reader: EnabledLibraryAgentsReader): void {
+  readEnabledLibraryAgents = reader
+}
+
+/** The enabled subset of the library, resolved via the injected reader.
+ * Unknown names in the stored list (e.g. a profile removed in an upgrade) are
+ * silently skipped. A library profile whose name collides with a BUILT-IN name
+ * (case-insensitive) is refused at runtime with a warning: the registry's
+ * canonical-key collapse would otherwise let it silently REPLACE the built-in
+ * and its tool policy — the privilege footgun the collapse comment warns
+ * about. The curation spec asserts this never ships, but the runtime must not
+ * rely on a test having run. */
+function loadEnabledLibraryProfiles(): AgentProfile[] {
+  let enabled: readonly string[]
+  try {
+    enabled = readEnabledLibraryAgents()
+  } catch (error) {
+    console.warn("[AgentRegistry] Failed to read enabled library agents; treating as none:", error)
+    return []
+  }
+  if (!Array.isArray(enabled) || enabled.length === 0) return []
+  const enabledSet = new Set(enabled)
+  return LIBRARY_AGENT_PROFILES.filter((p) => {
+    if (!enabledSet.has(p.name)) return false
+    if (BUILT_IN_NAME_BY_LOWER.has(p.name.toLowerCase())) {
+      console.warn(
+        `[AgentRegistry] Library agent "${p.name}" collides with a built-in profile name and was skipped — rename the library profile.`
+      )
+      return false
+    }
+    return true
+  })
+}
+
+/** Full registry: built-in profiles + enabled expert-library profiles + user
+ * agents from `~/.cmbcoworkagent/agents/` and
+ * `<workspace>/.cmbcoworkagent/agents/`. Project overrides user overrides
+ * library overrides built-in (last writer wins). Built-ins can never be
+ * disabled; library profiles are opt-in via the 专家团 settings page.
  *
  * Keyed to mirror the resolver: `agentType` resolution treats BUILT-IN names
  * case-insensitively (Explore / explore / EXPLORE), but custom names exact-only.
@@ -589,6 +655,7 @@ export function loadAgentProfiles(workspacePath?: string): AgentProfile[] {
     byName.set(key, p)
   }
   for (const p of BUILT_IN_AGENT_PROFILES) put(p)
+  for (const p of loadEnabledLibraryProfiles()) put(p)
   for (const p of loadUserAgents(join(homedir(), ".cmbcoworkagent", "agents"))) put(p)
   if (workspacePath) {
     for (const p of loadUserAgents(join(workspacePath, ".cmbcoworkagent", "agents"))) put(p)

@@ -15,7 +15,6 @@ import {
   deleteThreadCheckpoint,
   getEnabledSkillsSources,
   getEnabledSkillMiddlewareSources,
-  getCustomModelConfigs,
   getUserInfo,
   getSkillEvolutionThreshold as getStoredSkillEvolutionThreshold,
   getSkillEvolutionTurnThreshold as getStoredSkillEvolutionTurnThreshold,
@@ -31,6 +30,7 @@ import {
   getDisabledSkillDirs,
   getGlobalRoutingMode
 } from "../storage"
+import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 
 import { ChatOpenAI } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
@@ -40,6 +40,7 @@ import {
   readOnlyShellExecutionContext,
   type SkillHookContextProvider
 } from "./local-sandbox"
+import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
@@ -317,6 +318,26 @@ export function hasPendingWorkflowApproval(parentThreadId: string, runId?: strin
   }
   return false
 }
+
+/**
+ * True when the given runtime thread (or a nested child of it, delimiter-fenced
+ * so `w1` cannot match `w10`) is blocked on a pending user approval. The
+ * coordinator worker manager's inactivity watchdog uses this — via the probe
+ * wired below, not a direct import (this module imports the manager, so the
+ * manager importing back would be a cycle) — to treat an approval-blocked
+ * worker as WAITING rather than hung, mirroring hasPendingWorkflowApproval's
+ * role for the workflow engine watchdog.
+ */
+export function hasPendingApprovalForRuntimeThread(runtimeThreadId: string): boolean {
+  for (const approval of pendingApprovals.values()) {
+    if (approvalMatchesRuntimeThread(approval.runtimeThreadId, runtimeThreadId)) {
+      return true
+    }
+  }
+  return false
+}
+
+coordinatorWorkerManager.setWorkerApprovalProbe(hasPendingApprovalForRuntimeThread)
 
 // ─── Tool concurrency: AsyncRWLock (writer-preferring) ──────────────────────
 //
@@ -2382,8 +2403,7 @@ ${shellGuidance}
 `
         : ""
 
-  const memorySection =
-    options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
+  const memorySection = options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
   return (
     workingDirSection +
     backgroundExecSection +
@@ -3039,6 +3059,9 @@ function createRetryingFetch(
       }
 
       try {
+        const requestedStream =
+          typeof init?.body === "string" && init.body.includes('"stream":true')
+        const attemptStartedAt = Date.now()
         const res = await fetch(input, { ...init, signal: attemptCtrl.signal })
 
         // IMPORTANT: do not cancel the per-attempt timeout yet for streaming
@@ -3047,6 +3070,14 @@ function createRetryingFetch(
         // because downstream (SDK / LangChain) owns the stream lifetime from
         // here and should not be interrupted mid-stream by our timer.
         cleanup()
+
+        // Ground truth for the streaming path: an SSE response announces itself as
+        // content-type text/event-stream; application/json means the gateway buffered
+        // the whole completion — long generations on that path will hit the 60s
+        // first-byte watchdog above.
+        console.log(
+          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}`
+        )
 
         // Success or non-retryable error — return as-is.
         if (!isRetryableStatus(res.status)) {
@@ -3675,7 +3706,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     console.log(
       `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"})`
     )
-    const memoryEnvValue = (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
+    const memoryEnvValue =
+      (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
     console.log(
       `[Runtime] Project mode memory enabled: ${isProjectModeMemoryEnabled()} (${PROJECT_MODE_MEMORY_ENV}=${memoryEnvValue})`
     )
@@ -3702,16 +3734,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       onHookSkippedFactory?.(event)
     )
 
-  const selectedModelId = modelId?.startsWith("custom:")
-    ? modelId.slice("custom:".length)
-    : undefined
-
-  const allCustomConfigs = getCustomModelConfigs()
-  const customConfig = selectedModelId
-    ? allCustomConfigs.find((item) => item.id === selectedModelId) ||
-      allCustomConfigs.find((item) => item.model === selectedModelId) ||
-      null
-    : (allCustomConfigs[0] ?? null)
+  const customConfig = modelId ? getModelConfigByRef(modelId) : getAvailableModelConfigOrDefault()
   if (!customConfig) {
     throw new Error("Custom model not configured. Please configure a model in Settings.")
   }
@@ -3735,12 +3758,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     // `model: custom:foo` resolves fine under a workflow agentType but SILENTLY
     // inherits the main model for a Solo task subagent.
     const lookup = stripCustomModelPrefix(profileModel)
-    const cfg =
-      allCustomConfigs.find((item) => item.id === lookup) ||
-      allCustomConfigs.find((item) => item.model === lookup)
+    const cfg = getModelConfigByRef(profileModel) ?? getModelConfigByRef(lookup)
     if (!cfg) {
       console.warn(
-        `[Runtime] Registry agent model "${profileModel}" not found in custom model configs; inheriting main model.`
+        `[Runtime] Registry agent model "${profileModel}" not found in model configs; inheriting main model.`
       )
       return undefined
     }
@@ -4092,7 +4113,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
     }
   } else if (enableAgentsPrompt && normalizedHarnessAgentsPrompt) {
-    console.log("[Runtime] Workspace AGENTS.md prompt injection suppressed by Harness AGENTS.md prompt")
+    console.log(
+      "[Runtime] Workspace AGENTS.md prompt injection suppressed by Harness AGENTS.md prompt"
+    )
   } else {
     console.log("[Runtime] AGENTS.md prompt injection disabled for this runtime")
   }
@@ -4114,8 +4137,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     systemPrompt += "\n\n" + combinedAgentsPrompt
   }
   const combinedAgentsPromptPreview =
-    [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") ||
-    undefined
+    [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
   if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
     onAgentsPromptLoadStatus({
       items: agentsPromptLoadStatusItems,

@@ -2341,12 +2341,15 @@ test("flush-failed snapshot gets a real write-back retry on read paths, not just
 test("workflow notification turn is recognized on a FULL prompt match, not just the prefix (#1)", () => {
   // #1: a user can paste the short TRIGGER prefix (from a log / code sample); only the
   // FULL prompt is treated as internal plumbing, so a pasted prefix is neutralized as
-  // ordinary text instead of being silently swallowed. The full-match relies on main &
-  // renderer keeping the prompt byte-identical (pinned by a workflow-engine test).
+  // ordinary text instead of being silently swallowed. The full-match compare now lives
+  // in the shared helper isWorkflowNotificationTurnMessage (workflow/notification.ts),
+  // whose behavior is pinned by a workflow-engine test; here we pin that agent.ts
+  // recognition actually routes through that helper instead of a drift-prone
+  // hand-rolled compare.
   assert.match(
     agentIpcSource,
-    /message\.trim\(\) === WORKFLOW_NOTIFICATION_TURN_PROMPT/,
-    "an internal workflow turn requires a FULL prompt match"
+    /matchesWorkflowNotificationPrompt = isWorkflowNotificationTurnMessage\(message\)/,
+    "an internal workflow turn requires the shared full-match helper"
   )
   assert.match(
     agentIpcSource,
@@ -2355,12 +2358,13 @@ test("workflow notification turn is recognized on a FULL prompt match, not just 
   )
 })
 
-test("auto-commit is skipped while a background workflow is active on the thread (#3)", () => {
-  // #3: a background workflow writes the workspace asynchronously; a dirty-diff
-  // auto-commit during a turn with an active workflow could sweep its in-progress
-  // edits (meant to stay in the working tree for review) into the commit. Skip
-  // auto-commit while a workflow is active — the workflow's own completion turn runs
-  // after it settles, so isActive is false there and that turn commits normally.
+test("auto-commit is skipped while background work is active on the thread (#3)", () => {
+  // #3: background work (a dynamic workflow OR a coordinator/agent-team worker)
+  // writes the workspace asynchronously; a dirty-diff auto-commit during a turn
+  // with active background work could sweep its in-progress edits (meant to stay
+  // in the working tree for review) into the commit. Skip auto-commit while such
+  // work is active — its own completion/notification turn runs after it settles,
+  // so the running-check is false there and that turn commits normally.
   assert.match(
     agentIpcSource,
     /workspacePath && workflowRunManager\.activeRunForWorkspace\(workspacePath\)/,
@@ -2370,6 +2374,21 @@ test("auto-commit is skipped while a background workflow is active on the thread
     agentIpcSource,
     /activeRunForWorkspace\(workspacePath\)[\s\S]*?workflowRunManager\.isActive\(threadId\)[\s\S]*?status: "skipped"/,
     "with an isActive(threadId) fallback, then skips"
+  )
+  assert.match(
+    agentIpcSource,
+    /workflowRunManager\.isActive\(threadId\)[\s\S]*?coordinatorWorkerManager\.hasRunningWorkersForThread\(threadId\)[\s\S]*?status: "skipped"/,
+    "also skips while a coordinator worker is still writing the shared workspace"
+  )
+  assert.match(
+    agentIpcSource,
+    /coordinatorWorkerManager\.hasRunningWorkersForWorkspace\(workspacePath\)[\s\S]*?status: "skipped"/,
+    "and skips at WORKSPACE level too (a worker on another task/thread, same repo)"
+  )
+  assert.match(
+    agentIpcSource,
+    /workflowRunManager\.hasDeliverablePendingNotification\(workspacePath, threadId\)[\s\S]*?status: "skipped"/,
+    "and skips a FAST workflow's undelivered edits (honors 'leave for review'); the delivered run is already markNotified before finalize, so no turn-type guard is needed"
   )
 })
 

@@ -47,6 +47,7 @@ import {
 } from "../src/main/agent/workflow/run-store.ts"
 import {
   buildWorkflowNotificationMessage,
+  isWorkflowNotificationTurnMessage,
   WORKFLOW_NOTIFICATION_TURN_PROMPT
 } from "../src/main/agent/workflow/notification.ts"
 import {
@@ -119,6 +120,32 @@ function testRendererNotificationFullMatch(): void {
     isWorkflowNotificationPrompt("[[CMB_WORKFLOW_NOTIFICATION_V1:wf_abc123]] result"),
     "expanded notification marker (runId suffix) stays a prefix match"
   )
+}
+
+function testWorkflowNotificationTurnMessageFullMatch(): void {
+  // The main-process goal-preempt guard (agent.ts) exempts the workflow completion
+  // notification turn via isWorkflowNotificationTurnMessage — WITHOUT it, a goal
+  // that launched a workflow is paused ("user message preempted active goal") the
+  // instant its result arrives and never resumes. Must FULL-match so a genuine
+  // notification is always exempted, while a user pasting text that merely STARTS
+  // with the trigger still counts as a real user message.
+  assert(
+    isWorkflowNotificationTurnMessage(WORKFLOW_NOTIFICATION_TURN_PROMPT),
+    "exact turn prompt is recognized as internal workflow plumbing"
+  )
+  assert(
+    isWorkflowNotificationTurnMessage(`  ${WORKFLOW_NOTIFICATION_TURN_PROMPT}  `),
+    "surrounding whitespace is trimmed before matching"
+  )
+  assert(
+    !isWorkflowNotificationTurnMessage("[[CMB_WORKFLOW_NOTIFICATION_TURN]] a user-pasted log line"),
+    "text merely starting with the trigger is NOT internal plumbing (would still preempt)"
+  )
+  assert(
+    !isWorkflowNotificationTurnMessage("请帮我修复登录 bug"),
+    "an ordinary user message is not internal plumbing"
+  )
+  assert(!isWorkflowNotificationTurnMessage(""), "empty message is not internal plumbing")
 }
 
 function testByNewestRunTieBreak(): void {
@@ -1787,7 +1814,7 @@ async function testUndeliveredScanEligibilityPredicate(): Promise<void> {
 
     const unfiltered = findUndeliveredTerminalRun(ws, threadId)
     assert(unfiltered?.runId === newer, "without a predicate the newest undelivered wins")
-    const filtered = findUndeliveredTerminalRun(ws, threadId, (runId) => runId !== newer)
+    const filtered = findUndeliveredTerminalRun(ws, threadId, (run) => run.runId !== newer)
     assert(
       filtered?.runId === older,
       "an ineligible newest candidate must not hide the older deliverable run (guard blind spot)"
@@ -4234,6 +4261,7 @@ async function main(): Promise<void> {
     await testModelFallbackOnlyOnUnavailable()
     testNotificationTurnPromptInSync()
     testRendererNotificationFullMatch()
+    testWorkflowNotificationTurnMessageFullMatch()
     testByNewestRunTieBreak()
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)

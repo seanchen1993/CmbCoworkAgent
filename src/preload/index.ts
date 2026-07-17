@@ -1,7 +1,10 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
-import type {
-  CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
+import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import {
+  isWindowCloseBehavior,
+  type CloseToTrayPromptAction,
+  type CloseToTrayPromptEvent,
+  type WindowCloseBehavior
 } from "../shared/close-to-tray"
 import type {
   Thread,
@@ -102,6 +105,7 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
   APP_ATTENTION_CHANNEL,
   getAgentStreamAttentionKind,
@@ -157,6 +161,9 @@ type PetState =
 
 const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
 const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
@@ -192,8 +199,27 @@ const electronAPI = {
     ipcRenderer.on(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
     return () => ipcRenderer.removeListener(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
   },
-  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction): void => {
-    ipcRenderer.send(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, { requestId, action })
+  respondCloseToTrayPrompt: (
+    requestId: number,
+    action: CloseToTrayPromptAction,
+    rememberChoice = false
+  ): void => {
+    ipcRenderer.send(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, {
+      requestId,
+      action,
+      rememberChoice
+    })
+  },
+  getWindowCloseBehavior: (): Promise<WindowCloseBehavior> =>
+    ipcRenderer.invoke(WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL) as Promise<WindowCloseBehavior>,
+  setWindowCloseBehavior: (behavior: WindowCloseBehavior): Promise<WindowCloseBehavior> =>
+    ipcRenderer.invoke(WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL, behavior) as Promise<WindowCloseBehavior>,
+  onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => {
+    const handler = (_event: unknown, behavior: unknown): void => {
+      if (isWindowCloseBehavior(behavior)) callback(behavior)
+    }
+    ipcRenderer.on(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
   },
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
@@ -824,6 +850,57 @@ const api = {
         thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       } | null>
+    },
+    getBuiltinConfigs: (): Promise<
+      Array<{
+        id: string
+        ref: `builtin:${string}`
+        source: "builtin"
+        origin: "remote" | "fallback"
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+      }>
+    > => {
+      return ipcRenderer.invoke("models:getBuiltinConfigs")
+    },
+    updateBuiltinConfig: (
+      id: string,
+      config: {
+        name?: string
+        maxTokens?: number
+        maxOutputTokens?: number
+        temperature?: number
+        topP?: number
+        topK?: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+      }
+    ): Promise<void> => {
+      return ipcRenderer.invoke("models:updateBuiltinConfig", id, config)
+    },
+    resetBuiltinConfig: (id: string): Promise<void> => {
+      return ipcRenderer.invoke("models:resetBuiltinConfig", id)
+    },
+    onChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("models:changed", handler)
+      return () => ipcRenderer.removeListener("models:changed", handler)
     },
     setCustomConfig: (config: {
       id: string
@@ -1971,6 +2048,12 @@ const api = {
         workspacePath,
         cardNumber
       }) as Promise<AgentAutoCommitWorkspaceCard>
+  },
+  expertAgents: {
+    list: (): Promise<ExpertAgentEntry[]> =>
+      ipcRenderer.invoke("expertAgents:list") as Promise<ExpertAgentEntry[]>,
+    setEnabled: (name: string, enabled: boolean): Promise<string[]> =>
+      ipcRenderer.invoke("expertAgents:setEnabled", { name, enabled }) as Promise<string[]>
   },
   taskCards: {
     list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>
@@ -3180,16 +3263,17 @@ const api = {
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
-      ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<HarnessDeployUnitMapping[]>,
+      ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
+        HarnessDeployUnitMapping[]
+      >,
     getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
     saveDeployUnitMappings: (
       mappings: HarnessDeployUnitMapping[]
     ): Promise<HarnessDeployUnitMapping[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:saveDeployUnitMappings",
-        mappings
-      ) as Promise<HarnessDeployUnitMapping[]>,
+      ipcRenderer.invoke("harnessBoard:saveDeployUnitMappings", mappings) as Promise<
+        HarnessDeployUnitMapping[]
+      >,
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke(
         "harnessBoard:saveLeanTokenConfig",
@@ -3240,9 +3324,7 @@ const api = {
         "harnessBoard:getEnterpriseProjectDetails",
         input
       ) as Promise<HarnessEnterpriseProjectDetailResult>,
-    getProjectReviews: (
-      input: HarnessProjectReviewInput
-    ): Promise<HarnessProjectReviewResult> =>
+    getProjectReviews: (input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> =>
       ipcRenderer.invoke(
         "harnessBoard:getProjectReviews",
         input
@@ -3258,17 +3340,13 @@ const api = {
         projectId
       ) as Promise<HarnessDynamicWorkflowConfig | null>,
     getPublicAgentmdDeployUnits: (projectId: string): Promise<string[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:getPublicAgentmdDeployUnits",
-        projectId
-      ) as Promise<string[]>,
-    getLocalAgentmdDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ): Promise<string[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:getLocalAgentmdDeployUnitMappings",
-        mappings
-      ) as Promise<string[]>,
+      ipcRenderer.invoke("harnessBoard:getPublicAgentmdDeployUnits", projectId) as Promise<
+        string[]
+      >,
+    getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]): Promise<string[]> =>
+      ipcRenderer.invoke("harnessBoard:getLocalAgentmdDeployUnitMappings", mappings) as Promise<
+        string[]
+      >,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -3320,10 +3398,11 @@ const api = {
   },
   update: {
     check: (): Promise<
-      | { hasUpdate: false }
+      | { hasUpdate: false; source?: UpdateSourceInfo | null }
       | {
           hasUpdate: true
           version: string
+          targetVersion: string
           updateType: string
           releaseNotes: string
           size: number
@@ -3338,6 +3417,7 @@ const api = {
             message: string
           } | null
           currentError?: string | null
+          source?: UpdateSourceInfo | null
         }
     > => ipcRenderer.invoke("update:check"),
     download: (): Promise<{ success: boolean }> => ipcRenderer.invoke("update:download"),
@@ -3348,6 +3428,7 @@ const api = {
       status: string
       update: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
@@ -3363,17 +3444,20 @@ const api = {
       } | null
       errorMessage: string | null
       canRollback: boolean
+      source: UpdateSourceInfo | null
     }> => ipcRenderer.invoke("update:get-status"),
     getStartupResult: (): Promise<{ updatedFrom?: string; updatedTo?: string }> =>
       ipcRenderer.invoke("update:get-startup-result"),
     onAvailable: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
         mandatory: boolean
         autoDownloading?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => {
       const wrapper = (_event: unknown, info: Parameters<typeof callback>[0]): void =>
@@ -3399,10 +3483,12 @@ const api = {
     onDownloaded: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes?: string
         size?: number
         mandatory?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => {
       const wrapper = (_event: unknown, info: Parameters<typeof callback>[0]): void =>

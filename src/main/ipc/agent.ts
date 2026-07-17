@@ -25,8 +25,6 @@ import { getMemoryStore } from "../memory/store"
 import { resolveWorkspaceMemoryDirs, type MemoryNamespace } from "../memory/paths"
 import { ChatOpenAI } from "@langchain/openai"
 import {
-  getCustomModelConfigs,
-  getDefaultModelConfig,
   isDreamEnabled,
   isThreadMemoryEnabled,
   getCustomSkillsDir,
@@ -47,6 +45,7 @@ import {
   getDisabledSkillDirs,
   getHookLoggingConfig
 } from "../storage"
+import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { showPetCompletedTaskNotice } from "../pet"
@@ -126,9 +125,9 @@ import { workflowRunManager } from "../agent/workflow/run-manager"
 import { resolveWorkflowOutputFile } from "../agent/workflow/run-store"
 import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
-  WORKFLOW_NOTIFICATION_TURN_PROMPT,
   WORKFLOW_NOTIFICATION_TURN_TRIGGER,
-  buildWorkflowNotificationMessage
+  buildWorkflowNotificationMessage,
+  isWorkflowNotificationTurnMessage
 } from "../agent/workflow/notification"
 import {
   coordinatorWorkerManager,
@@ -205,13 +204,18 @@ import {
   evaluateGoalWithModel,
   getCurrentTurnAssistantResponse,
   resolveEvaluatorConfig,
+  shouldDeferGoalForActiveBackgroundWork,
   shouldPauseGoalForEmptyTurn
 } from "../agent/goals/evaluator"
 import {
   evaluateGoalWithRuntimeRetry,
   formatGoalEvaluatorRuntimeFailureReason
 } from "../agent/goals/evaluator-runtime"
-import { GoalEvidenceBuffer } from "../agent/goals/evidence"
+import {
+  buildGoalToolEvidenceEntry,
+  GoalBackgroundEvidenceStash,
+  GoalEvidenceBuffer
+} from "../agent/goals/evidence"
 import {
   RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
   type GoalContext,
@@ -275,8 +279,14 @@ function canPreviewSystemPrompt(): boolean {
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+let agentTaskShutdownStarted = false
 const goalStore = new SqlGoalStore()
 const goalManager = new GoalManager(goalStore)
+// Deferred-delivery background evidence (see GoalBackgroundEvidenceStash): a
+// notification turn that delivers result A but defers (B still pending) parks
+// A's evidence here so the eventual evaluation sees every delivered batch, not
+// just the last one. Keyed by threadId, scoped by goalId (self-healing).
+const goalBackgroundEvidenceStash = new GoalBackgroundEvidenceStash()
 let restoredRuntimeGoalsReconciled = false
 
 function hasPendingApprovalForThread(threadId: string): boolean {
@@ -454,6 +464,71 @@ export function forgetCoordinatorThreadState(threadId: string): void {
 
 export function hasActiveAgentRun(threadId: string): boolean {
   return activeRuns.has(threadId)
+}
+
+export function hasAnyActiveAgentTasks(): boolean {
+  return (
+    activeRuns.size > 0 ||
+    workflowRunManager.hasActiveRuns() ||
+    coordinatorWorkerManager.hasRunningWorkers() ||
+    LocalSandbox.hasActiveProcesses()
+  )
+}
+
+/** Stop foreground turns, detached workflows/workers, and tool child processes.
+ * The wait is bounded because application shutdown must still make progress if
+ * a provider or child process does not observe its abort signal. */
+export async function shutdownAllAgentTasks(timeoutMs = 5_000): Promise<void> {
+  agentTaskShutdownStarted = true
+  const foregroundRuns = Array.from(activeRuns.entries()).map(([threadId, controller]) => ({
+    threadId,
+    controller,
+    settled: activeRunSettled.get(threadId)
+  }))
+
+  for (const run of foregroundRuns) {
+    LocalSandbox.cancelBackgroundTasks(run.threadId)
+    run.controller.abort()
+  }
+
+  const workflowShutdown = workflowRunManager.cancelAllAndWait(timeoutMs)
+  const coordinatorShutdown = coordinatorWorkerManager.cancelAllWorkersAndWait(timeoutMs)
+  LocalSandbox.killAll()
+
+  let foregroundTimeoutTimer: ReturnType<typeof setTimeout> | undefined
+  let foregroundTimedOut = false
+  const foregroundShutdown =
+    foregroundRuns.length === 0
+      ? Promise.resolve()
+      : Promise.race([
+          Promise.allSettled(
+            foregroundRuns.flatMap((run) => (run.settled ? [run.settled] : []))
+          ).then(() => undefined),
+          new Promise<void>((resolve) => {
+            foregroundTimeoutTimer = setTimeout(() => {
+              foregroundTimedOut = true
+              resolve()
+            }, Math.max(0, timeoutMs))
+          })
+        ]).finally(() => {
+          if (foregroundTimeoutTimer) clearTimeout(foregroundTimeoutTimer)
+        })
+
+  await Promise.allSettled([foregroundShutdown, workflowShutdown, coordinatorShutdown])
+  if (foregroundTimedOut) {
+    console.warn("[Agent] Timed out waiting for foreground runs to settle during shutdown")
+  }
+}
+
+function rejectAgentStartDuringShutdown(window: BrowserWindow, channel: string): boolean {
+  if (!agentTaskShutdownStarted) return false
+  safeSendToWindow(window, channel, {
+    type: "error",
+    error: "APP_SHUTTING_DOWN",
+    message: "The application is quitting and cannot start another agent run."
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+  return true
 }
 
 export function isActiveAgentRunAborting(threadId: string): boolean {
@@ -932,6 +1007,10 @@ function handleGoalNonStartingControlCommand(params: {
       LocalSandbox.cancelBackgroundTasks(threadId)
     }
     goalManager.clear(threadId)
+    // Memory hygiene: drop any background-evidence batches parked for the
+    // cleared goal (the goalId scope would self-heal anyway, but don't leave a
+    // dead bucket behind).
+    goalBackgroundEvidenceStash.clear(threadId)
     const notice = emitGoalNotice(
       window,
       channel,
@@ -1618,10 +1697,7 @@ function isTerminalStreamPayload(payload: unknown): boolean {
     !!payload && typeof payload === "object" && !Array.isArray(payload)
       ? (payload as { type?: unknown }).type
       : undefined
-  return (
-    type === "done" ||
-    type === "error"
-  )
+  return type === "done" || type === "error"
 }
 
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
@@ -2533,13 +2609,58 @@ async function finalizeAutoCommit({
   // wait until the workflow finishes — acceptable, the tree is "unstable" while it
   // runs. (A workflow's own completion/notification turn runs AFTER it settles, so
   // neither check matches there and that turn still auto-commits normally.)
+  // Same rationale extends to coordinator/agent-team workers: they write the
+  // parent's SHARED workspace (no worktree isolation) and, per the coordinator
+  // prompt, run ASYNC after the turn that spawned them has ended — so this
+  // finalize can race a worker's in-progress writes and commit half-written
+  // files or sweep concurrent user edits. Skip while any worker is still running.
+  // (A worker's own completion/notification turn runs AFTER it is terminal, so
+  // neither predicate matches it there and the last worker's notification turn
+  // still auto-commits the settled tree normally.) Checked at BOTH thread level
+  // (covers an undefined workspacePath) AND workspace level — a running worker on
+  // ANOTHER task/thread pointing at the same repo is mutating this tree too,
+  // mirroring the workspace-level protection workflow already has via
+  // activeRunForWorkspace.
+  //
+  // A FAST workflow (script with no agent() calls, or an instant failure) can
+  // finish and active.delete() itself WITHIN its own launch turn — before this
+  // finalize runs — so isActive is already false, yet its edits are now-dirty
+  // relative to this turn's snapshot and would be swept in. That breaks the
+  // explicit workflow contract "do NOT auto-commit the run's edits; leave them in
+  // the working tree for review" (a SLOW workflow is protected because its edits
+  // are in the start snapshot by the time any un-skipped turn runs). Skip while a
+  // deliverable workflow notification is still pending. No isWorkflowNotification-
+  // Turn guard is needed to avoid self-skip: on the delivery turn the run being
+  // delivered is markNotified()+clearNotificationInFlight() BEFORE this finalize
+  // runs (see the settlement block above), so hasDeliverablePendingNotification no
+  // longer counts it and that turn still auto-commits its own near-empty edits.
+  // Gating on the run STATE (not the turn type) also correctly catches a NEW fast
+  // workflow launched during a notification turn — which the turn-type exclusion
+  // would have missed. Coordinator workers are intentionally NOT included: they
+  // carry no "leave for review" contract, and their in-progress writes are
+  // already covered by the running-worker checks above.
+  //
+  // Scope note: this pending-workflow check is THREAD-scoped (a RUNNING workflow
+  // on another thread over the same repo is already covered workspace-wide by
+  // activeRunForWorkspace above). The only uncovered slice is a FAST workflow that
+  // already TERMINATED on ANOTHER thread pointing at this repo, whose notification
+  // is still undelivered when THIS thread auto-commits — its edits could be swept.
+  // Left thread-scoped deliberately: a terminal run's writes are done (write-SAFE;
+  // this is only the "leave for review" preference, not corruption), the scenario
+  // is a narrow cross-task race, and a workspace-wide pending scan means walking
+  // every thread's on-disk run dir on each finalize. Not worth that per-commit I/O.
   if (
     (workspacePath && workflowRunManager.activeRunForWorkspace(workspacePath)) ||
-    workflowRunManager.isActive(threadId)
+    workflowRunManager.isActive(threadId) ||
+    coordinatorWorkerManager.hasRunningWorkersForThread(threadId) ||
+    (workspacePath && coordinatorWorkerManager.hasRunningWorkersForWorkspace(workspacePath)) ||
+    (workspacePath && workflowRunManager.hasDeliverablePendingNotification(workspacePath, threadId))
   ) {
     sendAutoCommitResult(window, channel, {
       status: "skipped",
-      reasons: ["后台动态工作流运行中，已跳过本回合自动提交（工作流改动留待其完成后审阅）"]
+      reasons: [
+        "后台任务运行中（动态工作流 / 协作 worker），已跳过本回合自动提交（改动留待其完成后审阅）"
+      ]
     })
     return
   }
@@ -3459,9 +3580,7 @@ interface ErrorDetailModelInfo {
 
 function resolveErrorDetailModelInfo(modelId: string | undefined): ErrorDetailModelInfo {
   if (!modelId) return {}
-  const cfgId = modelId.startsWith("custom:") ? modelId.slice("custom:".length) : modelId
-  const configs = getCustomModelConfigs()
-  const cfg = configs.find((c) => c.id === cfgId) ?? configs.find((c) => c.model === cfgId)
+  const cfg = getModelConfigByRef(modelId)
   return {
     modelId,
     modelDisplayName: cfg?.name,
@@ -4235,9 +4354,32 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
       const isTrustedCoordinatorNotificationInvoke =
         coordinatorInternalNotification === true && hasCoordinatorNotificationPrefixAtInvoke
+      // A completed background workflow delivers its result via an INTERNAL
+      // notification turn whose message is exactly WORKFLOW_NOTIFICATION_TURN_PROMPT
+      // (recognized at ~5100). Like the coordinator notification above, that turn
+      // must NOT be treated as a "user message" that preempts an active goal —
+      // otherwise a goal that launched a workflow is paused the instant its result
+      // arrives (with "user message preempted active goal") and never resumes.
+      // Both legs mirror the authoritative recognition below: full prompt match
+      // (a user pasting the trigger as ordinary text is unaffected) AND the thread
+      // actually being in workflow agent mode (a pasted byte-exact prompt in a
+      // non-workflow thread stays an ordinary user message and preempts normally).
+      const isWorkflowNotificationInvoke =
+        isWorkflowNotificationTurnMessage(message) &&
+        ((): boolean => {
+          try {
+            const thread = getThread(threadId)
+            if (!thread?.metadata) return false
+            const parsedMetadata = JSON.parse(thread.metadata) as Record<string, unknown>
+            return getAgentModeFromMetadata(parsedMetadata) === "workflow"
+          } catch {
+            return false
+          }
+        })()
       const channel = isTrustedCoordinatorNotificationInvoke
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
+      if (rejectAgentStartDuringShutdown(window, channel)) return
       let modelInputMessage = message
       let routingMessage = message
       let rootUserPrompt = message
@@ -4267,7 +4409,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return false
       }
 
-      if (!isTrustedCoordinatorNotificationInvoke) {
+      if (!isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke) {
         const goalCommand = parseGoalSlashCommand(message)
         if (goalCommand.type !== "none") {
           try {
@@ -4596,7 +4738,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let userTranscriptMessagePersisted = false
       let visibleTranscriptUserMessage = message
       if (!isTrustedCoordinatorNotificationInvoke && !shouldDeferUserTranscriptPersistence) {
-        persistVisibleUserTranscriptMessage(threadId, message, userMessageId, goalTranscriptBoundary)
+        persistVisibleUserTranscriptMessage(
+          threadId,
+          message,
+          userMessageId,
+          goalTranscriptBoundary
+        )
         userTranscriptMessagePersisted = true
       }
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
@@ -4958,6 +5105,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         | { workspacePath: string; runId: string; startedAt: string }
         | undefined
 
+      // When THIS turn delivers a background workflow's completion notification,
+      // the workflow's <task-notification> result arrives as a synthetic
+      // user-role message (modelInputMessage) — which the goal evaluator never
+      // sees (it reads only assistantResponse + per-turn tool evidence). Worse,
+      // the `workflow` TOOL CALL that launched the run happened in an EARLIER
+      // sub-turn that was DEFERRED (kept active, never evaluated). So the turn
+      // that IS evaluated (this delivery turn) carries no proof a workflow ran,
+      // and the evaluator false-negatives ("agent didn't use a workflow") on a
+      // goal that actually succeeded. Capture the delivered result here and
+      // inject it as one tool-evidence entry for THIS turn's evaluation only
+      // (consumed at the goal-eval site so continuation sub-turns don't re-see
+      // a stale result). Set from BOTH delivery paths (they are mutually
+      // exclusive per turn): the workflow notification (toolName "workflow",
+      // below) and the coordinator worker notification (toolName "start_worker",
+      // in the coordinator setup block). Coordinator worker results ARE also
+      // restated in-turn via the coordinator turn prompt, but a restatement
+      // proves the result, not that workers were dispatched — a mechanism-
+      // constrained coordinator goal false-blocks without this evidence too.
+      let pendingBackgroundResultEvidence: string | undefined
+
       try {
         // Get workspace path from thread metadata - REQUIRED
         const thread = getThread(threadId)
@@ -5016,8 +5183,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // counts (#1, source-checked by content since a transport flag wouldn't
         // survive the renderer→main chain). The prefix branch below neutralizes a
         // pasted prefix as ordinary text.
-        const matchesWorkflowNotificationPrompt =
-          message.trim() === WORKFLOW_NOTIFICATION_TURN_PROMPT
+        const matchesWorkflowNotificationPrompt = isWorkflowNotificationTurnMessage(message)
         // Neutralize a pasted prefix of EITHER internal marker: the TURN trigger OR
         // the V1 notification marker. The renderer AND the export path both hide any
         // message starting with these (the V1 marker carries a runId suffix, so they
@@ -5053,6 +5219,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             workflowOutputFile
           )
           modelInputMessage = effectiveMessage
+          // Preserve the delivered workflow result as goal-evaluator evidence so
+          // the (deferred, never-evaluated) launch turn's use of a workflow is
+          // visible when THIS delivery turn is judged. See the decl comment.
+          pendingBackgroundResultEvidence =
+            buildGoalToolEvidenceEntry({
+              toolName: "workflow",
+              output: effectiveMessage,
+              inputSummary:
+                "Background dynamic workflow run completed; its result was delivered into this conversation turn."
+            }) ?? undefined
           // At-least-once (mirrors coordinator): mark in-flight IN MEMORY only —
           // do NOT persist `delivered` yet. The durable flag is set only when this
           // turn SUCCEEDS, so an app crash mid-turn leaves delivered=false on disk
@@ -5486,6 +5662,28 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             promptNotifications.length > 0
               ? buildCoordinatorNotificationHumanMessage(promptNotifications)
               : undefined
+          // Symmetric to the workflow bridge (see pendingBackgroundResultEvidence
+          // decl): a coordinator worker-notification DELIVERY turn surfaces worker
+          // results only via the coordinator turn prompt, which the model restates
+          // in-turn — enough to prove the RESULT, but not that workers were
+          // actually dispatched (the start_worker calls happened in an EARLIER,
+          // DEFERRED, never-evaluated turn). So a mechanism-constrained goal
+          // ("must dispatch workers / coordinator must not count directly")
+          // false-blocks: the evaluator sees a summary with no tool-call evidence
+          // of dispatch. Capture the delivered <task-notification> results as one
+          // start_worker evidence entry for THIS turn's evaluation only (consumed
+          // at the goal-eval site alongside the workflow bridge).
+          if (promptNotifications.length > 0) {
+            pendingBackgroundResultEvidence =
+              buildGoalToolEvidenceEntry({
+                toolName: "start_worker",
+                output: promptNotifications
+                  .map((notification) => notification.message)
+                  .join("\n\n"),
+                inputSummary:
+                  "Background coordinator workers were dispatched and returned; their results were delivered into this conversation turn."
+              }) ?? undefined
+          }
           persistedCoordinatorTurnPromptForMetadata =
             buildCoordinatorTurnContextPrompt(runningWorkerContext)
           activeCoordinatorTurnPrompts.set(threadId, coordinatorTurnPrompt)
@@ -5717,10 +5915,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend if failover happened — update model display + context window
         const notifyFailover = (): void => {
           if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
-            const usedCfgId = usedModelId?.startsWith("custom:")
-              ? usedModelId.slice("custom:".length)
-              : usedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(usedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {
@@ -5762,10 +5957,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // response metadata once the first AI message arrives (see response_metadata.model_name below).
         if (effectiveModelId) {
           tracer.setModelId(effectiveModelId)
-          const cfgIdForName = effectiveModelId.startsWith("custom:")
-            ? effectiveModelId.slice("custom:".length)
-            : effectiveModelId
-          const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
+          const cfgForName = getModelConfigByRef(effectiveModelId)
           // Use config.model (the actual API model name) as fallback, not config.name (display label)
           if (cfgForName?.model) tracer.setModelName(cfgForName.model)
         }
@@ -6688,13 +6880,158 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             sendGoalSubturnComplete()
 
+            // 后台工作(workflow run / coordinator worker)的结果只经各自专门的通知回合
+            // 回灌(本运行时无同回合阻塞读取)。在"结果注定要来但还没进对话证据"的窗口内
+            // defer——保持 goal active、不消耗预算、直接结束本回合;结果到齐后的通知回合再
+            // 经 getActive 重新驱动评估。若不 defer,评估器会拿着不全证据每子回合注入一次
+            // "继续",直到 maxTurns 被烧光("空催"),或据半份结果误判。"结果注定要来"的
+            // 兜底:两侧各有 inactivity 看门狗,卡死即强制终态+通知,故 defer 不会变无限等待。
+            //
+            // 用"专用谓词"而非泛 isBusyForThread(后者把当前正在投递的 in-flight 通知也算
+            // busy → 连投递回合都 defer → goal 永远评估不了)。下面 5 条覆盖从发起到投递的
+            // 各个可观测 pending 状态,每条都保证不把"本回合正在投递的那份"算进来(否则自
+            // defer 死锁):
+            //   1) workflow 运行中(isActive)。
+            //   2) worker 运行中(hasRunningWorkersForThread,查 status)。
+            //   3) worker 已终态、通知已入队未投递(hasAutoRunnableNotifications)——
+            //      coordinator 通知回合在 goal 检查前已 drainNotifications 删本批,故只反映
+            //      drain 之后新到的;排除 suppress 避免永久 defer。
+            //   4) worker 已终态、通知"尚未入队"的 terminalPersistPromise 窄窗
+            //      (hasTerminalWorkerAwaitingNotificationForThread)——补齐第 3 条更早的一段;
+            //      enqueueNotification 首行即置 notificationEnqueued,故当前投递那份不命中;
+            //      排除 suppress/dismiss。(第 3、4 条合起来覆盖 worker 全部"可观测"窗口;
+            //      status 翻终态→terminalPersistPromise 设值之间那段是同步 JS、无其它回合
+            //      插入,不算可观测窗,无需覆盖。)
+            //   5) workflow 已终态、通知已可被发现的 pending(快完成/秒挂的 run 可在 launch
+            //      回合自身撞上:tool 返回后 run 很快 active.delete,但结果还没进证据)。
+            //      注意:workflow 每线程同一时刻只有一个 ACTIVE run,但可有多个"已终态待投递"
+            //      的通知(backlog:一回合投一个、ack 后 kick 下一个)。此处**不能**像 auto-commit
+            //      那样靠 markNotified 排除本 run——goal 检查在设置块(markNotified,~6990)之前跑,
+            //      本 run 此刻仍 in-flight。所以用 hasDeliverablePendingNotificationExcept 精确
+            //      排除"本回合正在投递的那个实例"(按 runId+startedAt,因为 resume 复用 runId),
+            //      而非整回合豁免——否则 backlog(A 投递中、B 也 pending;或 A 在本回合被 resume
+            //      成新实例)会被漏掉,goal 拿半份证据在 A 回合就评估。非通知回合 settle=undefined
+            //      →不排除→照常拦快 workflow。
+            // 诚实边界:仅剩 workflow 一个可观测残余窗**故意不追**——run active.delete() 之后、
+            // pending 通知注册进 run-manager 之前的 flush 瞬间(第 5 条靠该谓词发现,而那一刻
+            // 通知还没注册)。异步 flush 时长级、自愈(结果随后经通知回合送达重驱),追它要在
+            // run-manager 加"终态未注册"谓词,ROI 不值。故表述为"覆盖所有可观测 pending 状态,
+            // 除此微窗",不说"完整时序"。
+            const workflowPendingExcludingThisDelivery =
+              Boolean(workspacePath) &&
+              workflowRunManager.hasDeliverablePendingNotificationExcept(
+                workspacePath as string,
+                threadId,
+                workflowNotificationToSettle
+                  ? {
+                      runId: workflowNotificationToSettle.runId,
+                      startedAt: workflowNotificationToSettle.startedAt
+                    }
+                  : undefined
+              )
+            if (
+              shouldDeferGoalForActiveBackgroundWork(
+                workflowRunManager.isActive(threadId) ||
+                  coordinatorWorkerManager.hasRunningWorkersForThread(threadId) ||
+                  coordinatorWorkerManager.hasAutoRunnableNotifications(threadId) ||
+                  coordinatorWorkerManager.hasTerminalWorkerAwaitingNotificationForThread(threadId) ||
+                  workflowPendingExcludingThisDelivery
+              )
+            ) {
+              // This DELIVERY turn is deferring (another background result is
+              // still pending). Its own delivered result would otherwise die
+              // with this invoke's stack (the notification is already acked and
+              // never re-fires) — park it so the eventual evaluation sees every
+              // delivered batch, not just the final one.
+              //
+              // Also park the turn's ORDINARY tool evidence: workflow-mode main
+              // agents keep the full fs middleware (mainFilesystemEnabled is
+              // only false for coordinator), so a deferring delivery turn may
+              // have run its own verification greps/reads whose outputs would
+              // equally die with the stack. Combined into ONE bounded entry,
+              // stashed as "supplementary": on cap overflow the stash evicts
+              // supplementary entries before ANY batch — batches are
+              // irreplaceable, this has conversation-history redundancy.
+              // The tool-call NAME list rides along in the same entry: a call
+              // with empty/filtered output appears in toolCalls but produces NO
+              // evidence entry (buildGoalToolEvidenceEntry returns null on
+              // blank output), and mechanism goals care about "was X called at
+              // all" — evidence alone cannot always answer that.
+              const deferredTurnEvidence = getCurrentTurnGoalToolEvidence()
+              const deferredTurnToolCalls = getCurrentTurnToolCalls()
+              if (deferredTurnEvidence.length > 0 || deferredTurnToolCalls.length > 0) {
+                goalBackgroundEvidenceStash.stash(
+                  threadId,
+                  activeGoal.goalId,
+                  trimContent(
+                    [
+                      deferredTurnToolCalls.length > 0
+                        ? `Deferred sub-turn tool calls: ${deferredTurnToolCalls.join(", ")}`
+                        : "",
+                      deferredTurnEvidence.length > 0
+                        ? `Tool evidence from an earlier deferred sub-turn:\n${deferredTurnEvidence.join("\n\n")}`
+                        : ""
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n")
+                  ),
+                  "supplementary"
+                )
+              }
+              if (pendingBackgroundResultEvidence) {
+                goalBackgroundEvidenceStash.stash(
+                  threadId,
+                  activeGoal.goalId,
+                  pendingBackgroundResultEvidence
+                )
+                pendingBackgroundResultEvidence = undefined
+              }
+              sendGoalNotice("正在等待后台任务结果，目标暂缓推进（后台任务完成后自动继续）。")
+              break
+            }
+
+            // Prepend background-delivery evidence as tool evidence, oldest
+            // first: (a) results whose delivery turns DEFERRED earlier (parked
+            // in the stash — backlog batches A.. while B was pending), then (b)
+            // this turn's own delivered result. Both are consume-once so later
+            // continuation sub-turns don't re-inject stale results. This lets
+            // the evaluator credit the (deferred, unevaluated) launch turn's
+            // workflow/worker use across ALL delivered batches, not just the
+            // final one. See pendingBackgroundResultEvidence + stash decls.
+            // peek, NOT consume: the evaluator await below is a failure window
+            // (user abort / model error). Discard only after the verdict is
+            // recorded, so a failed attempt leaves the stashed batches intact
+            // for the re-driven turn (see peek's doc for the at-least-once
+            // rationale).
+            const stashedBackgroundEvidence = goalBackgroundEvidenceStash.peek(
+              threadId,
+              activeGoal.goalId
+            )
+            const currentTurnGoalToolEvidence = getCurrentTurnGoalToolEvidence()
+            // Captured (not just read) so the runtime-failure branch below can
+            // re-stash THIS turn's delivered batch — the notification is acked
+            // on this turn's normal completion and never re-fires.
+            const currentDeliveryEvidence = pendingBackgroundResultEvidence
+            const goalToolEvidence = [
+              ...stashedBackgroundEvidence,
+              ...(currentDeliveryEvidence ? [currentDeliveryEvidence] : []),
+              ...currentTurnGoalToolEvidence
+            ]
+            pendingBackgroundResultEvidence = undefined
             const goalEvaluationInput = {
               goal: activeGoal,
               assistantResponse: getCurrentAssistantResponse(),
               toolCalls: getCurrentTurnToolCalls(),
-              toolEvidence: getCurrentTurnGoalToolEvidence(),
+              toolEvidence: goalToolEvidence,
               usedSkills: skillUsageDetector.getUsedSkillNames()
             }
+            // True when the recorded verdict was SYNTHESIZED by the runtime-
+            // retry wrapper because the evaluator never ran to completion (all
+            // retries exhausted). Such a verdict never saw the peeked stash —
+            // the goal pauses with "evaluator unavailable, /goal resume later",
+            // and that later re-evaluation must still find the batches, so the
+            // discard below is skipped for it.
+            let evaluatorRuntimeFailedThisSubturn = false
             const judgeDecision: GoalJudgeDecision = shouldPauseGoalForEmptyTurn(
               goalEvaluationInput
             )
@@ -6716,6 +7053,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   },
                   onFinalFailure: (error) => {
                     console.warn("[Goal] evaluator failed after retry:", error)
+                    evaluatorRuntimeFailedThisSubturn = true
                     return {
                       verdict: "blocked",
                       reason: formatGoalEvaluatorRuntimeFailureReason(error)
@@ -6727,6 +7065,47 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               expectedGoalId: activeGoal.goalId,
               expectedActiveWindowId: activeGoal.activeWindowId
             })
+            // The verdict that saw the peeked batches is now recorded — safe to
+            // drop them (also prevents continuation sub-turns re-injecting). Two
+            // exceptions keep the batches: a stale-window null outcome (goal
+            // changed; the bucket self-heals via its goalId scope) and a
+            // runtime-synthesized failure verdict (the evaluator never saw the
+            // batches; the post-resume re-evaluation still needs them).
+            if (outcome && !evaluatorRuntimeFailedThisSubturn) {
+              goalBackgroundEvidenceStash.discard(threadId)
+            } else if (outcome && evaluatorRuntimeFailedThisSubturn) {
+              // The evaluator never ran, but this turn still completes normally
+              // and acks its own delivered notification — so THIS turn's
+              // contributions would be lost to the post-resume re-evaluation
+              // even though the stash kept the earlier batches. Park them too
+              // (same kind split as the defer branch: supplementary evicts
+              // before any batch on cap overflow).
+              if (
+                currentTurnGoalToolEvidence.length > 0 ||
+                goalEvaluationInput.toolCalls.length > 0
+              ) {
+                goalBackgroundEvidenceStash.stash(
+                  threadId,
+                  activeGoal.goalId,
+                  trimContent(
+                    [
+                      goalEvaluationInput.toolCalls.length > 0
+                        ? `Deferred sub-turn tool calls: ${goalEvaluationInput.toolCalls.join(", ")}`
+                        : "",
+                      currentTurnGoalToolEvidence.length > 0
+                        ? `Tool evidence from an earlier deferred sub-turn:\n${currentTurnGoalToolEvidence.join("\n\n")}`
+                        : ""
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n")
+                  ),
+                  "supplementary"
+                )
+              }
+              if (currentDeliveryEvidence) {
+                goalBackgroundEvidenceStash.stash(threadId, activeGoal.goalId, currentDeliveryEvidence)
+              }
+            }
             if (!outcome) break
 
             if (!outcome.shouldContinue || !outcome.continuationPrompt) {
@@ -7027,17 +7406,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
 
             const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
-              const allConfigs = getCustomModelConfigs()
               const memRoutingResult = await resolveModel({
                 taskSource: "memory_summarize",
                 threadId,
                 requestedModelId: modelId ?? undefined,
                 routingMode: getGlobalRoutingMode()
               }).catch(() => null)
-              const memModelId = memRoutingResult?.resolvedModelId
-              const memCfgId =
-                memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-              const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+              const memModelId = memRoutingResult?.resolvedModelId ?? modelId
+              const config = getModelConfigByRef(memModelId) ?? getDefaultModelConfig()
               if (!config?.apiKey) {
                 console.warn("[Agent] No model config available — skipping memory tasks")
                 return null
@@ -7377,6 +7753,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.error("[Agent] No window found for resume")
         return
       }
+      if (rejectAgentStartDuringShutdown(window, channel)) return
 
       // Get workspace path from thread metadata
       const thread = getThread(threadId)
@@ -7838,10 +8215,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend + persist routing state if failover happened
         const notifyResumeFailover = (): void => {
           if (resumeFailoverAttempts.length > 0 && resumeUsedModelId !== effectiveResumeModelId) {
-            const usedCfgId = resumeUsedModelId?.startsWith("custom:")
-              ? resumeUsedModelId.slice("custom:".length)
-              : resumeUsedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(resumeUsedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {
@@ -8253,6 +8627,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.error("[Agent] No window found for interrupt response")
       return
     }
+    if (rejectAgentStartDuringShutdown(window, channel)) return
     if (
       rejectRuntimeRestoredCheckpointResume(
         threadId,
@@ -8659,10 +9034,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend + persist routing state if failover happened
         const notifyIntFailover = (): void => {
           if (intFailoverAttempts.length > 0 && intUsedModelId !== effectiveInterruptModelId) {
-            const usedCfgId = intUsedModelId?.startsWith("custom:")
-              ? intUsedModelId.slice("custom:".length)
-              : intUsedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(intUsedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {

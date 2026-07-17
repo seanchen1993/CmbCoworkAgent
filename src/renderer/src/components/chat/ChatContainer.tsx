@@ -120,10 +120,7 @@ import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
-import {
-  ContextReminderController,
-  isContextReminderPending
-} from "./ContextReminderController"
+import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -272,7 +269,9 @@ async function installFeaturedSkills(
       // 4. 本地安装版本和市场版本一致：跳过安装，保留现有技能目录。
       const installedVersion = marketInstalledVersionStorage.getVersion(skillName, "skill")
       const shouldInstall =
-        !existingSkill || !installedVersion || isMarketVersionDifferent(installedVersion, skill.version)
+        !existingSkill ||
+        !installedVersion ||
+        isMarketVersionDifferent(installedVersion, skill.version)
 
       if (!shouldInstall) {
         console.log(`Skill ${skillName} is already up to date, skipping install.`)
@@ -1204,6 +1203,9 @@ const ATTACH_FILE_POPOVER_CONTENT = (
 const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
+/** 输入框正文硬上限(字符数)。超过则拒绝发送并提示,防止病态超长输入。
+ * 取值与附件总字符上限(MAX_TOTAL_CHARS)一致,均为 24000。 */
+const MAX_INPUT_CHARS = 24_000
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
 const CHAT_REPORT_RETRY_DELAY_MS = 1_000
@@ -1289,12 +1291,12 @@ function getForkMessagePreview(message: Message): string {
   return text.length > 180 ? `${text.slice(0, 180)}...` : text
 }
 
-const MESSAGE_FORK_CHECKPOINT_HINT =
-  "可在左侧会话列表右键该会话，选择“从 checkpoint fork”。"
+const MESSAGE_FORK_CHECKPOINT_HINT = "可在左侧会话列表右键该会话，选择“从 checkpoint fork”。"
 
 function getMessageForkCheckpointHint(errorMessage?: string): string {
   const message = errorMessage?.trim()
-  if (!message) return `该消息附近没有可精确 fork 的稳定 checkpoint。${MESSAGE_FORK_CHECKPOINT_HINT}`
+  if (!message)
+    return `该消息附近没有可精确 fork 的稳定 checkpoint。${MESSAGE_FORK_CHECKPOINT_HINT}`
   return `${message} ${MESSAGE_FORK_CHECKPOINT_HINT}`
 }
 
@@ -1679,10 +1681,7 @@ interface ChatMessageListProps {
   hookLogBucketByTurnId: Map<string, HookLogBucket>
   detachedHookLogBuckets: HookLogBucket[]
   contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
-  setMessageRef: (
-    messageId: string,
-    role: Message["role"]
-  ) => (node: HTMLDivElement | null) => void
+  setMessageRef: (messageId: string, role: Message["role"]) => (node: HTMLDivElement | null) => void
   isLoading: boolean
   toolResults: Map<string, ChatToolResultInfo>
   toolCallStates: Map<string, ToolCallState>
@@ -1749,11 +1748,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
         }
 
         return (
-          <div
-            key={message.id}
-            ref={combinedRef}
-            data-message-role={message.role}
-          >
+          <div key={message.id} ref={combinedRef} data-message-role={message.role}>
             <MessageBubble
               message={message}
               previousMessage={previousMessage}
@@ -1801,7 +1796,11 @@ const ChatMessageList = React.memo(function ChatMessageList({
   )
 })
 
-function SystemPromptPreviewButton({ threadId }: { threadId?: string | null }): React.JSX.Element | null {
+function SystemPromptPreviewButton({
+  threadId
+}: {
+  threadId?: string | null
+}): React.JSX.Element | null {
   const [allowed, setAllowed] = useState(false)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -2083,8 +2082,7 @@ export function ChatContainer({
   const currentThreadIdRef = useRef(threadId)
   const messageForkRequestIdRef = useRef(0)
   currentThreadIdRef.current = threadId
-  const [forkDestinationMode, setForkDestinationMode] =
-    useState<ForkDestinationMode>("local")
+  const [forkDestinationMode, setForkDestinationMode] = useState<ForkDestinationMode>("local")
   const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
   const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
   const harnessFeatureBinding = useMemo(
@@ -2095,8 +2093,7 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
-  const disableCoordinatorModeOption =
-    isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
+  const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
   const disableWorkflowModeOption = isProjectModeAgentContext
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
@@ -2747,17 +2744,16 @@ export function ChatContainer({
 
   // 从模型配置中获取用户设置的上下文窗口大小
   useEffect(() => {
-    if (!currentModel || !currentModel.startsWith("custom:")) {
+    if (!currentModel) {
       setModelContextLimit(undefined)
       return
     }
     let ignore = false
-    const id = currentModel.replace("custom:", "")
     window.api.models
-      .getCustomConfigs()
-      .then((configs) => {
+      .list()
+      .then((models) => {
         if (ignore) return
-        const match = configs.find((c) => c.id === id)
+        const match = models.find((model) => model.id === currentModel)
         setModelContextLimit(match?.maxTokens)
       })
       .catch(() => {
@@ -3054,10 +3050,7 @@ export function ChatContainer({
   useEffect(() => {
     if (!yoloModeLoaded || !yoloMode || !pendingApproval) return
     const approvalRecord = pendingApproval as unknown as Record<string, unknown>
-    if (
-      approvalRecord._orchestratorRequestId &&
-      approvalRecord.operation === "git_push"
-    ) {
+    if (approvalRecord._orchestratorRequestId && approvalRecord.operation === "git_push") {
       void handleApprovalDecision("approve")
     }
   }, [handleApprovalDecision, pendingApproval, yoloMode, yoloModeLoaded])
@@ -3204,7 +3197,9 @@ export function ChatContainer({
           id: streamMsg.id,
           role,
           content: normalizeLiveStreamMessageContent(streamMsg.content),
-          ...(role === "assistant" && streamMsg.reasoning ? { reasoning: streamMsg.reasoning } : {}),
+          ...(role === "assistant" && streamMsg.reasoning
+            ? { reasoning: streamMsg.reasoning }
+            : {}),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
@@ -3455,7 +3450,6 @@ export function ChatContainer({
     userInputDialogLayout?.top
   ])
 
-
   //  滚动到底部
   // 1.初始化
   // 2.切换thread
@@ -3465,7 +3459,6 @@ export function ChatContainer({
       viewport.scrollTop = viewport.scrollHeight
     }
   }, [getViewport, historyLoading, threadId])
-
 
   // stream 输出的过程中，如果用户正处于底部，那么继续保持底部
   useEffect(() => {
@@ -3584,7 +3577,8 @@ export function ChatContainer({
   )
   // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
   const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly
-  const effectiveComposerControlsDisabled = composerControlsDisabled || contextReminderPending || readOnly
+  const effectiveComposerControlsDisabled =
+    composerControlsDisabled || contextReminderPending || readOnly
   const inputPlaceholder = useMemo(() => {
     if (readOnlyReason) return readOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
@@ -3970,6 +3964,14 @@ export function ChatContainer({
       !stream
     )
       return
+
+    // 硬上限:正文超过 MAX_INPUT_CHARS 字符时拒绝发送并提示,保留输入不清空。
+    if (trimmedInput.length > MAX_INPUT_CHARS) {
+      setError(
+        `消息长度 ${trimmedInput.length.toLocaleString()} 字符,超过上限 ${MAX_INPUT_CHARS.toLocaleString()} 字符。请精简后再发送,或将长内容作为文件上传。`
+      )
+      return
+    }
 
     const goalControlWithPendingTransport =
       hasPendingGoalTransportPayload &&
@@ -5097,9 +5099,7 @@ export function ChatContainer({
           <RotatingHeadline />
         )}
         {skillsLoading ? (
-          <div className="text-sm text-muted-foreground text-center py-10">
-            正在加载技能列表...
-          </div>
+          <div className="text-sm text-muted-foreground text-center py-10">正在加载技能列表...</div>
         ) : skills.length === 0 ? null : (
           <div className="space-y-3">
             {programmingSkillCards.length > 0 && (
@@ -5538,9 +5538,7 @@ export function ChatContainer({
     }
 
     const overrides: ThreadForkOverrides | undefined =
-      forkDestinationMode === "workspace"
-        ? { workspacePath: selectedWorkspacePath }
-        : undefined
+      forkDestinationMode === "workspace" ? { workspacePath: selectedWorkspacePath } : undefined
 
     const resolvedMessageId =
       messageForkTarget.checkpoint.messageForkMode === "checkpoint"
@@ -5768,9 +5766,7 @@ export function ChatContainer({
                   </span>
                   <span>{messageForkTarget.checkpoint.messageCount} 条消息</span>
                 </div>
-                <div className="line-clamp-3 text-sm text-foreground">
-                  {messageForkPreview}
-                </div>
+                <div className="line-clamp-3 text-sm text-foreground">{messageForkPreview}</div>
               </div>
 
               <div className="grid gap-2 sm:grid-cols-2">
@@ -6319,7 +6315,7 @@ export function ChatContainer({
               onHarnessSessionCreated={onHarnessSessionCreated}
             />
             {goalUi.goal && (
-              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-20")}>
+              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-[20px]")}>
                 <GoalStatusPanel
                   goalUi={goalUi}
                   open={goalDetailsOpen}
@@ -6532,9 +6528,7 @@ export function ChatContainer({
                                 ? "normal"
                                 : agentMode
                             }
-                            locked={
-                              isLoading || !canChangeAgentMode
-                            }
+                            locked={isLoading || !canChangeAgentMode}
                             lockedReason={agentModeSwitchDisabledReason}
                             disabledModes={
                               disableCoordinatorModeOption || disableWorkflowModeOption
@@ -6626,7 +6620,7 @@ export function ChatContainer({
                                           preventDefault: () => {}
                                         } as React.FormEvent
                                         // 发送继续消息
-                                        handleSubmit(fakeEvent, '继续')
+                                        handleSubmit(fakeEvent, "继续")
                                       }}
                                       disabled={effectiveInputDisabled}
                                       className="flex items-center justify-center gap-1 px-2.5 h-7 rounded-md border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"

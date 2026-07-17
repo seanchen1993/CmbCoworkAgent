@@ -295,7 +295,13 @@ async function runOnce(
       configurable: { thread_id: threadId },
       callbacks: [],
       signal: controller.signal,
-      streamMode: ["values"] as Array<"values">,
+      // "messages" is subscribed for its side effect, not for display: it attaches
+      // LangGraph's StreamMessagesHandler (lc_prefer_streaming), which switches the
+      // underlying HTTP call to SSE. Without it the request is non-streaming and the
+      // 60s first-byte watchdog in createRetryingFetch kills any model turn whose
+      // generation exceeds 60s (e.g. write_file of a large file). consumeValuesStream
+      // skips non-"values" chunks, so the token stream is otherwise ignored.
+      streamMode: ["values", "messages"] as Array<"values" | "messages">,
       recursionLimit: 1000
     }
     const stopAfterStructuredAccepted =
@@ -464,12 +470,13 @@ export async function createRuntimeWithModelFallback(
     shellAccess: options.shellAccess
   }
   if (options.model) {
-    // Don't double-prefix, but stay consistent with how the runtime resolves
-    // it: the runtime only recognizes the `custom:` prefix (it slices it off),
-    // so add `custom:` unless it is ALREADY there. (Using includes(":") would
+    // Don't double-prefix known model references. Bare profile model names keep
+    // the legacy custom-model interpretation. (Using includes(":") would
     // wrongly skip the prefix for a custom model whose own name contains a
     // colon, and would not help an unsupported provider prefix anyway.)
-    const modelId = options.model.startsWith("custom:") ? options.model : `custom:${options.model}`
+    const modelId = /^(?:custom|builtin):/.test(options.model)
+      ? options.model
+      : `custom:${options.model}`
     try {
       return {
         runtime: await deps.createRuntime({ ...baseOptions, modelId }),
@@ -737,12 +744,16 @@ function rootSchemaCoversProperty(schema: Record<string, unknown>, key: string):
   ) {
     return true
   }
-  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties)) return true
+  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties))
+    return true
   return rootSchemaVariants(schema).some((variant) => rootSchemaCoversProperty(variant, key))
 }
 
 function rootSchemaDeclaresProperty(schema: Record<string, unknown>, key: string): boolean {
-  if (isPlainRecord(schema.properties) && Object.prototype.hasOwnProperty.call(schema.properties, key)) {
+  if (
+    isPlainRecord(schema.properties) &&
+    Object.prototype.hasOwnProperty.call(schema.properties, key)
+  ) {
     return true
   }
   return rootSchemaVariants(schema).some((variant) => rootSchemaDeclaresProperty(variant, key))
