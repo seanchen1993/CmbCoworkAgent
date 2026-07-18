@@ -23,6 +23,7 @@ import type {
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessFeatureDeployUnitBinding,
   HarnessFeatureStatus,
   HarnessAgentmdLoadStatusItem,
@@ -2263,6 +2264,30 @@ function saveFeatureDeployUnitBinding(
   return binding
 }
 
+function updateFeatureDeployUnitBinding(
+  projectId: string,
+  featureId: string,
+  selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+): HarnessFeatureDeployUnitBindingRecord {
+  const store = readFeatureDeployUnitBindingStore()
+  const key = featureDeployUnitBindingKey(projectId, featureId)
+  const existingIndex = store.bindings.findIndex(
+    (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
+  )
+  if (existingIndex < 0) {
+    throw new Error("未找到该特性的发布单元绑定记录")
+  }
+
+  const binding: HarnessFeatureDeployUnitBindingRecord = {
+    ...store.bindings[existingIndex],
+    selectedDeployUnitMappings,
+    updatedAt: formatGmt8Timestamp()
+  }
+  store.bindings[existingIndex] = binding
+  writeFeatureDeployUnitBindingStore(store)
+  return binding
+}
+
 export function listHarnessDeployUnitMappings(): HarnessDeployUnitMapping[] {
   return readDeployUnitMappingStore().mappings
 }
@@ -2428,12 +2453,13 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
 }
 
 function resolveFeatureSelectedDeployUnits(
-  input: HarnessFeatureCreateInput
+  selectedDeployUnits: HarnessDeployUnitMapping[] | undefined,
+  options: { allowEmpty?: boolean } = {}
 ): HarnessDeployUnitMapping[] {
-  if (!Array.isArray(input.selectedDeployUnits)) return []
+  if (!Array.isArray(selectedDeployUnits)) return []
 
-  const selected = normalizeDeployUnitMappings(input.selectedDeployUnits)
-  if (selected.length === 0) {
+  const selected = normalizeDeployUnitMappings(selectedDeployUnits)
+  if (selected.length === 0 && !(options.allowEmpty && selectedDeployUnits.length === 0)) {
     throw new Error("请至少选择一个发布单元")
   }
 
@@ -3091,7 +3117,7 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
-  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input)
+  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input.selectedDeployUnits)
   const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
     input.sessionContextInjectionSource
   )
@@ -3133,6 +3159,23 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
     title: feature,
     workspacePath
   }
+}
+
+export function updateHarnessFeatureDeployUnits(
+  input: HarnessFeatureDeployUnitUpdateInput
+): HarnessFeatureDeployUnitBinding {
+  const projectId = normalizeText(input.projectId).trim()
+  const featureId = normalizeText(input.featureId).trim()
+  if (!projectId || !featureId) {
+    throw new Error("Project and feature are required")
+  }
+  validateHarnessName(featureId, "特性名称")
+  requireProject(projectId)
+
+  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input.selectedDeployUnits, {
+    allowEmpty: true
+  })
+  return updateFeatureDeployUnitBinding(projectId, featureId, selectedDeployUnits)
 }
 
 export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNodeResult {

@@ -80,6 +80,8 @@ import type {
   HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -3334,6 +3336,13 @@ const api = {
         "harnessBoard:createFeature",
         input
       ) as Promise<HarnessFeatureCreateResult>,
+    updateFeatureDeployUnits: (
+      input: HarnessFeatureDeployUnitUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> =>
+      ipcRenderer.invoke(
+        "harnessBoard:updateFeatureDeployUnits",
+        input
+      ) as Promise<HarnessFeatureDeployUnitBinding>,
     getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
       ipcRenderer.invoke(
         "harnessBoard:getDynamicWorkflowConfig",

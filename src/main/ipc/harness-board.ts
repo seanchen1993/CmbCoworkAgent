@@ -20,6 +20,7 @@ import {
   saveHarnessLeanTokenConfig,
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
+  updateHarnessFeatureDeployUnits,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import {
@@ -58,6 +59,8 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
   HarnessKnowledgePreviewResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
@@ -185,6 +188,16 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       // 新建 feature 后立即补一次该项目的快照上报，让面板尽快反映新特性，无需等定时扫描。
       void reportProjectSnapshotNow(result.projectId)
       return result
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:updateFeatureDeployUnits",
+    async (
+      _event,
+      input: HarnessFeatureDeployUnitUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> => {
+      return updateHarnessFeatureDeployUnits(input)
     }
   )
 

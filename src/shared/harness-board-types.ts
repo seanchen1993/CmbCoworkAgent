@@ -337,6 +337,12 @@ export interface HarnessFeatureCreateResult {
   workspacePath: string
 }
 
+export interface HarnessFeatureDeployUnitUpdateInput {
+  projectId: string
+  featureId: string
+  selectedDeployUnits: HarnessDeployUnitMapping[]
+}
+
 export interface HarnessSkipNodeInput {
   projectId: string
   slug: string
