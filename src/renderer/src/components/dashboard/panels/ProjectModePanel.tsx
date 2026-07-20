@@ -1104,17 +1104,19 @@ function ProjectRow({
             </div>
           </div>
         </td>
-        <td className="px-3 py-2 text-muted-foreground">
+        <td className="min-w-0 overflow-hidden px-3 py-2 text-muted-foreground">
           {project.adapterName ? (
-            <span>
-              {project.adapterName}
+            <div
+              className="min-w-0 max-w-full"
+              title={`${project.adapterName}${project.adapterVersion ? ` ${project.adapterVersion}` : ""}`}
+            >
+              <div className="truncate">{project.adapterName}</div>
               {project.adapterVersion ? (
-                <span className="text-[10px] text-muted-foreground/70">
-                  {" "}
+                <div className="truncate text-[10px] text-muted-foreground/70">
                   {project.adapterVersion}
-                </span>
+                </div>
               ) : null}
-            </span>
+            </div>
           ) : (
             "—"
           )}
