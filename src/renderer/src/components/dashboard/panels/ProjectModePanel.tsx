@@ -1173,7 +1173,7 @@ function ProjectRow({
             <div>
               <span className="mr-1 text-muted-foreground">会话</span>
               <span className="font-medium text-foreground">
-                {formatNumber(project.codeStageConversationCount)}
+                {formatNumber(project.devStageConversationCount)}
               </span>
             </div>
             <div>
@@ -1774,9 +1774,9 @@ function ProjectListSection({
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="Code 阶段会话数按所选时间范围统计；Feature 数为项目当前值"
+                title="DEV 大阶段会话数按所选时间范围统计；Feature 数为项目当前值"
               >
-                <div>Code阶段会话数</div>
+                <div>DEV阶段会话数</div>
                 <button
                   type="button"
                   onClick={() => cycleSort("featureCount")}

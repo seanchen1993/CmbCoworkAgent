@@ -24,16 +24,17 @@ export type StageBucket = "plugin_constrained" | "vibecoding" | "unattributed"
 export const STAGE_IN_PROGRESS_LABEL = "进行中"
 export const STAGE_DONE_LABEL = "已完成"
 
-/**
- * Whether a human-readable workflow group-label represents the Code stage.
- * Adapter workflows may localize or prefix the label, so accept both a `code`
- * token (`Code`, `Dev-Code`) and Chinese code labels (`Dev-代码实现`).
- */
-export function isHarnessCodeStageNodeName(value: string | null | undefined): boolean {
+/** Extract the group segment from the historical `${group}-${label}` trace field. */
+export function extractHarnessNodeGroup(value: string | null | undefined): string | null {
   const normalized = value?.normalize("NFKC").trim() ?? ""
-  if (!normalized) return false
-  if (normalized.includes("代码")) return true
-  return /(?:^|[^a-z0-9])code(?:$|[^a-z0-9])/i.test(normalized)
+  const separatorIndex = normalized.indexOf("-")
+  if (separatorIndex <= 0) return null
+  return normalized.slice(0, separatorIndex).trim() || null
+}
+
+/** Whether the workflow node belongs to the Dev group, independent of its label. */
+export function isHarnessDevStageNodeName(value: string | null | undefined): boolean {
+  return extractHarnessNodeGroup(value)?.toLowerCase() === "dev"
 }
 
 /**

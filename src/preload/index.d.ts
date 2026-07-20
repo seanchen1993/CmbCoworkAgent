@@ -610,7 +610,7 @@ interface DashboardProjectModeProject {
   systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
-  codeStageConversationCount: number
+  devStageConversationCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
