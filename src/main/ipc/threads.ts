@@ -2139,7 +2139,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         const workspacePath =
           typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
         const harnessContext = buildHarnessFeatureAgentContext(nextMetadata, { workspacePath })
-        const initialAgentMode = harnessContext?.runtimePolicy?.agentMode
+        const initialAgentMode = harnessContext?.agentConfig?.agentMode
         if (initialAgentMode === "solo") nextMetadata.agentMode = "normal"
         if (initialAgentMode === "agent_team") nextMetadata.agentMode = "coordinator"
       } catch (error) {

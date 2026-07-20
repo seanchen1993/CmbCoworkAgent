@@ -684,7 +684,7 @@ function getHarnessAgentContext(
       pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
       enableTaskTool: featureContext.enableTaskTool,
-      subagentConfig: featureContext.runtimePolicy?.subagentConfig,
+      subagentConfig: featureContext.agentConfig?.subagentConfig,
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
