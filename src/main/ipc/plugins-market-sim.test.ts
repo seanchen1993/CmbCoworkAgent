@@ -14,7 +14,7 @@
  */
 
 import AdmZip from "adm-zip"
-import { existsSync, mkdtempSync, rmSync } from "fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
@@ -35,6 +35,8 @@ const handlers = new Map<string, Handler>()
 const fakeIpcMain = { handle: (channel: string, fn: Handler) => handlers.set(channel, fn) }
 
 const PLUGIN_NAME = `e2e-market-sim-${Date.now()}`
+const MARKET_VERSION = "v2.0.0"
+const NORMALIZED_MARKET_VERSION = "2.0.0"
 let tmpHome: string
 const prevUserProfile = process.env.USERPROFILE
 const prevHome = process.env.HOME
@@ -121,7 +123,8 @@ describe("market download → install → detail (e2e)", () => {
     const res = (await install!(null, {
       buffer: zipBuffer,
       fileName: `${PLUGIN_NAME}.zip`,
-      origin: "market"
+      origin: "market",
+      version: MARKET_VERSION
     })) as { success: boolean; pluginName?: string; error?: string }
     expect(res.success, res.error).toBe(true)
 
@@ -133,15 +136,21 @@ describe("market download → install → detail (e2e)", () => {
       mcpServerCount: number
       hookCount?: number
       path: string
+      version: string
     }>
     const installed = list.find((p) => p.name === PLUGIN_NAME)
     expect(installed, "installed plugin should appear in plugins:list").toBeTruthy()
     expect(installed!.origin).toBe("market")
+    expect(installed!.version).toBe(NORMALIZED_MARKET_VERSION)
     expect(installed!.skillCount).toBe(2)
     expect(installed!.mcpServerCount).toBe(2)
     expect(installed!.hookCount).toBe(2)
     // Files actually copied into the (temp) plugins dir
     expect(existsSync(installed!.path)).toBe(true)
+    const manifest = JSON.parse(readFileSync(join(installed!.path, "plugin.json"), "utf-8")) as {
+      version?: string
+    }
+    expect(manifest.version).toBe(NORMALIZED_MARKET_VERSION)
   })
 
   it("getDetail AFTER install matches the pre-install inspect counts", async () => {
@@ -151,10 +160,12 @@ describe("market download → install → detail (e2e)", () => {
       skills: string[]
       mcpServers: string[]
       hookCount: number
+      manifest: { version?: string } | null
     }
     expect(detail.skills.length).toBe(2)
     expect(detail.mcpServers.length).toBe(2)
     expect(detail.hookCount).toBe(2)
+    expect(detail.manifest?.version).toBe(NORMALIZED_MARKET_VERSION)
   })
 
   it("delete removes the plugin from the registry and disk", async () => {

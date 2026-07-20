@@ -7,6 +7,8 @@ import {
   resolveCoordinatorPath
 } from "./coordinator-worker-paths"
 import type { CoordinatorSelectedSkill } from "./coordinator-mode"
+import { emitAppAttention } from "../app-attention-events"
+import { getWorkflowRunWallClockMs } from "./workflow/types"
 
 export type CoordinatorWorkerRole = "implementer" | "verifier"
 export type CoordinatorWorkerStatus = "running" | "completed" | "failed" | "cancelled"
@@ -181,6 +183,10 @@ interface TerminalPersistFailureMetadata {
   persistedResultPath?: string
 }
 
+interface CoordinatorWorkerManagerOptions {
+  onTerminalNotification?: (worker: CoordinatorWorkerSnapshot) => void
+}
+
 function waitOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted || ms <= 0) return Promise.resolve()
   return new Promise((resolve) => {
@@ -309,6 +315,94 @@ const DEFAULT_WORKER_UPDATE_CALLBACK_KEY = "default"
 const WORKER_STATE_FILENAME_PATTERN =
   /^(implementer|verifier)-(?<timestamp>\d+)-(?<sequence>\d+)\.json$/i
 const TERMINAL_STATUSES = new Set<CoordinatorWorkerStatus>(["completed", "failed", "cancelled"])
+
+// Inactivity watchdog: a worker whose model call stalls mid-stream has NO other
+// exit — the fetch per-attempt timeout covers only up to the first byte
+// (runtime.ts createRetryingFetch), and a stalled run never reaches its
+// finally/persistTerminalAndNotify, so the record stays "running" forever and
+// everything waiting on worker terminality (the coordinator notification turn,
+// the goal defer guard, the busy guards) waits forever with it. The watchdog
+// mirrors the workflow engine's inactivity backstop: sweep running workers on a
+// coarse tick and cancel any with no recorded activity inside the window.
+const WORKER_WATCHDOG_TICK_MS = 60_000
+
+/** Inactivity window for the worker watchdog. Own env knob first; otherwise
+ * follows the workflow run window (CMB_WORKFLOW_RUN_TIMEOUT_MS, default 2h) so
+ * the two background-work subsystems share one timeout policy by default.
+ *
+ * FOOT-GUN: unlike the workflow window (which floors itself above the per-subagent
+ * timeout so a slow-but-alive agent can't be reaped mid-flight), this knob honors
+ * any value >= 60s as-is. A worker doing a genuinely long, event-quiet operation
+ * (e.g. a multi-minute build/test with no interim tool output) writes no progress
+ * event, so lastActivityAt stays put; set the window near that op's duration and a
+ * HEALTHY worker can be cancelled. The 2h default is safe; only override it low if
+ * you know your workers emit activity within the chosen window. */
+export function getCoordinatorWorkerInactivityMs(): number {
+  const raw = process.env.CMB_COORDINATOR_WORKER_TIMEOUT_MS
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN
+  if (Number.isFinite(parsed) && parsed >= 60_000) return parsed
+  return getWorkflowRunWallClockMs()
+}
+
+/** Pure decision for the goal-defer "terminal-but-not-yet-enqueued" gap,
+ * exported for unit tests. True when a worker has produced its terminal result
+ * (terminalPersistPromise is in flight) but its notification has NOT been
+ * enqueued yet — the brief span before persistTerminalAndNotify calls
+ * enqueueNotification. enqueueNotification sets notificationEnqueued on its first
+ * line, so a worker whose notification is already enqueued (incl. the one a
+ * delivery turn is currently handling) returns false → no self-defer/deadlock.
+ * suppress/dismiss workers are excluded — their results are not auto-delivered,
+ * so the goal must not defer forever waiting for them. */
+export function isWorkerAwaitingTerminalNotification(worker: {
+  terminalPersistPromise?: unknown
+  notificationEnqueued?: boolean
+  suppressNotificationAutoRun?: boolean
+  dismissNotificationOnTerminalPersist?: boolean
+  discarded?: boolean
+}): boolean {
+  if (worker.discarded === true) return false
+  return (
+    worker.terminalPersistPromise !== undefined &&
+    worker.notificationEnqueued !== true &&
+    worker.suppressNotificationAutoRun !== true &&
+    worker.dismissNotificationOnTerminalPersist !== true
+  )
+}
+
+/** Pure watchdog decision, exported for unit tests. True only for a RUNNING
+ * worker whose FRESHEST parseable timestamp is older than the window. Takes the
+ * MAX over all parseable stamps (lastActivityAt / lastStartedAt / updatedAt /
+ * createdAt), NOT the first present one: a corrupt or stale lastActivityAt must
+ * not mask a fresh updatedAt and get a still-active worker killed. A genuinely
+ * hung worker has every stamp stale, so max is still stale → terminated. Only
+ * when EVERY stamp is missing or unparseable do we decline to terminate (never
+ * kill on data we cannot read at all). */
+export function isWorkerInactiveForWatchdog(
+  worker: {
+    status: CoordinatorWorkerStatus
+    lastActivityAt?: string
+    lastStartedAt?: string
+    updatedAt: string
+    createdAt: string
+  },
+  nowMs: number,
+  windowMs: number
+): boolean {
+  if (worker.status !== "running") return false
+  let freshestMs = Number.NEGATIVE_INFINITY
+  for (const stamp of [
+    worker.lastActivityAt,
+    worker.lastStartedAt,
+    worker.updatedAt,
+    worker.createdAt
+  ]) {
+    if (stamp === undefined) continue
+    const parsedMs = Date.parse(stamp)
+    if (Number.isFinite(parsedMs)) freshestMs = Math.max(freshestMs, parsedMs)
+  }
+  if (!Number.isFinite(freshestMs)) return false
+  return nowMs - freshestMs > windowMs
+}
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -1175,7 +1269,18 @@ export class CoordinatorWorkerManager {
   >()
   private readonly preparedScratchpadDirs = new Set<string>()
   private readonly warnedScratchpadDirs = new Set<string>()
+  private readonly onTerminalNotification?: (worker: CoordinatorWorkerSnapshot) => void
   private sequence = 0
+  private shuttingDown = false
+  private workerWatchdogTimer?: ReturnType<typeof setInterval>
+  /** Injected by runtime.ts (which owns pendingApprovals; the manager must not
+   * import runtime — runtime already imports this module). True when the given
+   * worker runtime thread is blocked on a pending user approval. */
+  private workerApprovalProbe?: (workerThreadId: string) => boolean
+
+  constructor(options: CoordinatorWorkerManagerOptions = {}) {
+    this.onTerminalNotification = options.onTerminalNotification
+  }
 
   startWorker(options: StartWorkerOptions): CoordinatorWorkerSnapshot {
     const parentThreadId = normalizeThreadId(options.parentThreadId)
@@ -1390,6 +1495,135 @@ export class CoordinatorWorkerManager {
     const normalized = normalizeThreadId(parentThreadId)
     this.pruneInMemoryWorkerHistory(normalized)
     return Array.from(this.getParentMap(normalized)?.values() ?? []).map(toSnapshot)
+  }
+
+  hasRunningWorkers(): boolean {
+    for (const records of this.workersByParent.values()) {
+      for (const record of records.values()) {
+        if (record.status === "running") return true
+      }
+    }
+    return false
+  }
+
+  /** Thread-scoped variant of hasRunningWorkers: whether THIS parent thread has
+   * any worker still running. The goal continuation loop uses it to defer
+   * evaluation while the coordinator's workers are in flight — the global
+   * predicate would wrongly defer a thread's goal because an unrelated thread
+   * has workers running. Workers reach a terminal status BEFORE their
+   * notification is enqueued (see the run promise's finally →
+   * persistTerminalAndNotify), so by the time a coordinator notification turn
+   * evaluates the goal, the finished worker no longer counts as running. */
+  hasRunningWorkersForThread(parentThreadId: string): boolean {
+    const records = this.getParentMap(parentThreadId)
+    if (!records) return false
+    for (const record of records.values()) {
+      if (record.status === "running") return true
+    }
+    return false
+  }
+
+  /** A worker that is terminal (so hasRunningWorkersForThread is already false —
+   * it checks status) but whose notification has NOT yet been enqueued: the brief
+   * terminalPersistPromise span between the run's finally clearing currentRun and
+   * persistTerminalAndNotify → enqueueNotification. In that gap neither
+   * hasRunningWorkersForThread NOR hasAutoRunnableNotifications catches the
+   * worker, so a goal on another notification turn could evaluate on evidence
+   * that is missing this worker's result. The goal defer guard ORs this to close
+   * that gap. Deadlock-safe: enqueueNotification sets notificationEnqueued at its
+   * FIRST line, so the notification a delivery turn is currently handling never
+   * matches here. Excludes suppress_notification_auto_run and
+   * dismissNotificationOnTerminalPersist workers — their results are not
+   * auto-delivered, so the goal must not defer forever waiting for them. The
+   * span always ends (persist success OR failure both fall through to enqueue,
+   * which flips notificationEnqueued), so this can never be permanently true. */
+  hasTerminalWorkerAwaitingNotificationForThread(parentThreadId: string): boolean {
+    const records = this.getParentMap(parentThreadId)
+    if (!records) return false
+    for (const record of records.values()) {
+      if (isWorkerAwaitingTerminalNotification(record)) return true
+    }
+    return false
+  }
+
+  /** Workspace-scoped (across ALL parent threads): is any RUNNING worker bound to
+   * a workspace that overlaps `workspacePath`? auto-commit uses this — a running
+   * worker on ANOTHER task/thread pointing at the same repo may be mutating this
+   * tree, so a dirty-diff commit here could sweep its in-progress writes. Mirrors
+   * workflowRunManager.activeRunForWorkspace: matched by canonical path with
+   * either-way nesting (a worker on /repo and a commit on /repo/pkg overlap, and
+   * vice versa), NOT raw string — symlink / case / trailing-slash variants of one
+   * dir must still match. Counts EVERY running worker regardless of workload
+   * (incl. read_only research fan-outs that never write) — deliberately
+   * conservative: the cost is at most one extra auto-commit skip while a read-only
+   * worker runs, versus the correctness risk of guessing a worker won't write.
+   * Only RUNNING workers count: a terminal worker's runner has already returned,
+   * so its writes are done and the tree is stable. */
+  hasRunningWorkersForWorkspace(workspacePath: string): boolean {
+    for (const records of this.workersByParent.values()) {
+      for (const record of records.values()) {
+        if (record.status !== "running") continue
+        if (
+          isCoordinatorPathWithin(record.workspacePath, workspacePath) ||
+          isCoordinatorPathWithin(workspacePath, record.workspacePath)
+        ) {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  /** Cancel all live workers and wait, within a shared deadline, for their run
+   * and terminal-state persistence promises to settle during application exit. */
+  async cancelAllWorkersAndWait(timeoutMs = 5_000): Promise<void> {
+    this.shuttingDown = true
+    const records = Array.from(this.workersByParent.values()).flatMap((workers) =>
+      Array.from(workers.values()).filter(
+        (record) =>
+          record.status === "running" ||
+          Boolean(record.currentRun || record.terminalPersistPromise || record.statePersistPromise)
+      )
+    )
+    if (records.length === 0) return
+
+    for (const record of records) {
+      if (record.status === "running") {
+        this.cancelRecord(record, "Application is quitting.", true, true)
+      } else {
+        // A parent abort may have synchronously transitioned the worker before
+        // this global drain took its snapshot. Still suppress and await the
+        // cancellation persistence that is already in flight.
+        record.suppressNotificationAutoRun = true
+        record.dismissNotificationOnTerminalPersist = true
+      }
+    }
+
+    const pending = records.flatMap((record) =>
+      [record.currentRun, record.terminalPersistPromise, record.statePersistPromise].filter(
+        (promise): promise is Promise<void> => Boolean(promise)
+      )
+    )
+    if (pending.length === 0) return
+
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
+    try {
+      await Promise.race([
+        Promise.allSettled(pending).then(() => undefined),
+        new Promise<void>((resolve) => {
+          timeoutTimer = setTimeout(() => {
+            timedOut = true
+            resolve()
+          }, Math.max(0, timeoutMs))
+        })
+      ])
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+    }
+    if (timedOut) {
+      console.warn("[CoordinatorWorker] Timed out waiting for workers to settle during shutdown")
+    }
   }
 
   bindWorkerUpdates(
@@ -2135,6 +2369,9 @@ export class CoordinatorWorkerManager {
     ownedFiles: string[]
     workerIdToIgnore?: string
   }): void {
+    if (this.shuttingDown) {
+      throw new Error("The application is quitting; a coordinator worker can no longer be started.")
+    }
     if (input.workload === "read_only") return
     const records = Array.from(this.getParentMap(input.parentThreadId)?.values() ?? [])
     if (input.workload === "verify") {
@@ -2409,12 +2646,93 @@ export class CoordinatorWorkerManager {
     void this.persistTerminalAndNotify(record)
   }
 
+  setWorkerApprovalProbe(probe: (workerThreadId: string) => boolean): void {
+    this.workerApprovalProbe = probe
+  }
+
+  private ensureWorkerWatchdog(): void {
+    if (this.workerWatchdogTimer || this.shuttingDown) return
+    const timer = setInterval(() => this.sweepInactiveWorkers(), WORKER_WATCHDOG_TICK_MS)
+    // Never keep the process alive for the watchdog alone.
+    timer.unref?.()
+    this.workerWatchdogTimer = timer
+  }
+
+  private stopWorkerWatchdog(): void {
+    if (!this.workerWatchdogTimer) return
+    clearInterval(this.workerWatchdogTimer)
+    this.workerWatchdogTimer = undefined
+  }
+
+  /** One watchdog pass: cancel running workers with no activity inside the
+   * inactivity window. A worker blocked on a pending user approval is WAITING,
+   * not hung — its idle clock is reset instead (mirrors the workflow engine's
+   * isAwaitingApproval exemption, so an absent user's approval prompt can sit
+   * for hours without the watchdog killing the worker). Termination reuses
+   * cancelRecord — the exact terminal path the parent-abort case already
+   * exercises: best-effort abort, terminal status, persistTerminalAndNotify —
+   * so the notification turn fires and everything downstream (coordinator
+   * report, goal defer guard) unblocks through the existing machinery.
+   * Public with an injectable clock so tests can drive a pass directly. */
+  sweepInactiveWorkers(nowMs: number = Date.now()): void {
+    if (this.shuttingDown) {
+      this.stopWorkerWatchdog()
+      return
+    }
+    const windowMs = getCoordinatorWorkerInactivityMs()
+    let hasRunning = false
+    for (const records of this.workersByParent.values()) {
+      for (const record of records.values()) {
+        if (record.discarded || record.status !== "running") continue
+        hasRunning = true
+        if (this.workerApprovalProbe?.(record.workerThreadId)) {
+          record.lastActivityAt = nowIso()
+          continue
+        }
+        if (isWorkerInactiveForWatchdog(record, nowMs, windowMs)) {
+          const idleMinutes = Math.round(windowMs / 60_000)
+          console.warn(
+            `[CoordinatorWorker] Inactivity watchdog terminating worker ${record.workerId} (parent ${record.parentThreadId}): no activity for over ${idleMinutes} minutes.`
+          )
+          this.cancelRecord(
+            record,
+            `Worker terminated by inactivity watchdog: no activity for over ${idleMinutes} minutes (likely hung).`
+          )
+          // A watchdog-targeted run may NEVER settle (that is the scenario the
+          // watchdog exists for), so the run promise's own finally cannot be
+          // relied on to clear ownership. Release it here: a later-waking zombie
+          // sees isCurrentRun() false (its currentRun identity is gone) and
+          // returns without touching the record, and occupiesWorkerConcurrencySlot
+          // stops counting the corpse — otherwise a hung write/verify worker
+          // would block that concurrency lane forever even after cancellation.
+          // cancelRecord already aborted the controller before this clear.
+          // TRADEOFF (intentional): if the aborted runner IGNORES the signal (e.g.
+          // an unkillable child process still writing files), releasing the lane
+          // here lets a new write/verify worker or auto-commit run alongside that
+          // zombie. We accept it: the alternative — hold the lane until the runner
+          // truly settles — reintroduces the exact permanent-block this watchdog
+          // exists to break (a runner that never settles never frees the lane). A
+          // grace period would only shift, not remove, the overlap; the real cure
+          // is forceful child-process termination on abort, which is out of scope
+          // here. A worker only reaches the watchdog after the full inactivity
+          // window with NO progress event, so an ACTIVELY-writing worker (its tool
+          // calls emit events → lastActivityAt refreshes) is not a candidate; the
+          // residual is a silent-for-hours-then-writes runner, which is rare.
+          record.currentRun = undefined
+          record.abortController = undefined
+        }
+      }
+    }
+    if (!hasRunning) this.stopWorkerWatchdog()
+  }
+
   private launch(
     record: CoordinatorWorkerRecord,
     prompt: string,
     runner: CoordinatorWorkerRunner,
     parentSignal?: AbortSignal
   ): void {
+    this.ensureWorkerWatchdog()
     const abortController = new AbortController()
     record.abortController = abortController
     record.runVersion += 1
@@ -2720,6 +3038,7 @@ export class CoordinatorWorkerManager {
     } catch (error) {
       console.warn("[CoordinatorWorker] Failed to persist queued notification state:", error)
     }
+    this.onTerminalNotification?.(toSnapshot(record))
     return notification
   }
 
@@ -3087,4 +3406,13 @@ export class CoordinatorWorkerManager {
   }
 }
 
-export const coordinatorWorkerManager = new CoordinatorWorkerManager()
+export const coordinatorWorkerManager = new CoordinatorWorkerManager({
+  onTerminalNotification: (worker) => {
+    if (worker.status !== "completed" && worker.status !== "failed") return
+    emitAppAttention({
+      kind: worker.status === "failed" ? "task-error" : "task-complete",
+      threadId: worker.parent_thread_id,
+      key: `coordinator-worker:${worker.parent_thread_id}:${worker.worker_id}:${worker.turns}`
+    })
+  }
+})

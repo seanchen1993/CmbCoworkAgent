@@ -1,23 +1,32 @@
 import { IpcMain, BrowserWindow, dialog } from "electron"
 import { nowIsoLocal } from "../util/local-time"
 import { AsyncKeyedLock } from "./async-keyed-lock"
-import { HumanMessage, SystemMessage } from "@langchain/core/messages"
+import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
+import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
+import { getDurableRuntimeTail } from "./thread-runtime-tail"
 import { Command } from "@langchain/langgraph"
 import {
   createAgentRuntime,
+  getCapturedSystemPromptPreview,
   getSkillEvolutionThreshold,
-  type ModelRetryHooks
+  withCheckpointer,
+  pendingApprovals,
+  setCheckpointerBusyGuard,
+  getSkillEvolutionTurnThreshold,
+  type ModelRetryHooks,
+  type FetchErrorInfo
 } from "../agent/runtime"
-import { addThreadGoalEvent, getThread, updateThread } from "../db"
+import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
+import { addThreadGoalEvent, getThread, updateThread, upsertThreadMessages } from "../db"
 import { summarizeAndSave } from "../memory/summarizer"
 import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
-import { scanMemoryFiles } from "../memory/manifest"
+import { scanMemoryFiles, type MemoryType } from "../memory/manifest"
 import { getMemoryStore } from "../memory/store"
+import { resolveWorkspaceMemoryDirs, type MemoryNamespace } from "../memory/paths"
 import { ChatOpenAI } from "@langchain/openai"
 import {
-  getCustomModelConfigs,
   isDreamEnabled,
-  isMemoryEnabled,
+  isThreadMemoryEnabled,
   getCustomSkillsDir,
   invalidateEnabledSkillsCache,
   isOnlineSkillEvolutionEnabled,
@@ -31,10 +40,12 @@ import {
   getEnabledPluginHooks,
   getEnabledSkillHooks,
   getEnabledSkillsSources,
+  getUserInfo,
   getEnabledPluginSkillSourceMetadata,
   getDisabledSkillDirs,
   getHookLoggingConfig
 } from "../storage"
+import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { showPetCompletedTaskNotice } from "../pet"
@@ -45,6 +56,19 @@ import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
+import type {
+  HarnessAgentmdLoadStatusItem,
+  HarnessDeployUnitMapping
+} from "../../shared/harness-board-types"
+import {
+  checkpointHasInterrupt,
+  deriveCheckpointTranscriptIndex,
+  isWorkflowPlumbingTranscriptContent
+} from "../../shared/checkpoint-transcript"
+import {
+  FORK_BOUNDARY_MARKER_VERSION,
+  FORK_BOUNDARY_THREAD_METADATA_KEY
+} from "../../shared/checkpoint-forkability"
 import { TraceCollector } from "../agent/trace/collector"
 import {
   requestSkillIntent,
@@ -69,6 +93,7 @@ import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
   getRecentSkillUsageNames,
+  getThreadActiveSkillSource,
   getThreadActiveSkills,
   setThreadActiveSkills,
   snapshotSkillProposalWindow,
@@ -96,29 +121,45 @@ import {
   type AgentMode,
   type CoordinatorSelectedSkill
 } from "../agent/coordinator-mode"
+import { workflowRunManager } from "../agent/workflow/run-manager"
+import { resolveWorkflowOutputFile } from "../agent/workflow/run-store"
+import {
+  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_TURN_TRIGGER,
+  buildWorkflowNotificationMessage,
+  isWorkflowNotificationTurnMessage
+} from "../agent/workflow/notification"
 import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot
 } from "../agent/coordinator-worker-manager"
 import {
   isRetryableApiError,
+  isStreamDisconnectLikeError,
   buildOrderedChain,
-  classifyApiError,
-  type FailoverAttempt
+  extractErrorDetail,
+  type FailoverAttempt,
+  type ApiErrorDetail
 } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
 import {
-  createHookScope,
   normalizePathKey,
   normalizePluginId,
   normalizeSkillName,
   resolveEnabledHooksForRun,
   type HookScopeController
 } from "../hooks/scope"
+import { createPersistentThreadHookScope } from "../hooks/thread-scope-persistence"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
+import {
+  getFailureFuseHaltError,
+  shouldSendFailureFuseNotice,
+  type FailureFuseDecision,
+  type FailureFuseHaltError
+} from "../agent/failure-fuse"
 import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
 import {
   formatSkillUseBlock,
@@ -163,10 +204,18 @@ import {
   evaluateGoalWithModel,
   getCurrentTurnAssistantResponse,
   resolveEvaluatorConfig,
+  shouldDeferGoalForActiveBackgroundWork,
   shouldPauseGoalForEmptyTurn
 } from "../agent/goals/evaluator"
-import { evaluateGoalWithRuntimeRetry } from "../agent/goals/evaluator-runtime"
-import { GoalEvidenceBuffer } from "../agent/goals/evidence"
+import {
+  evaluateGoalWithRuntimeRetry,
+  formatGoalEvaluatorRuntimeFailureReason
+} from "../agent/goals/evaluator-runtime"
+import {
+  buildGoalToolEvidenceEntry,
+  GoalBackgroundEvidenceStash,
+  GoalEvidenceBuffer
+} from "../agent/goals/evidence"
 import {
   RUNTIME_RESTORED_ACTIVE_GOAL_REASON,
   type GoalContext,
@@ -176,8 +225,10 @@ import {
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
   buildHarnessFeatureAgentContext,
-  readHarnessFeatureMetadata
+  readHarnessFeatureMetadata,
+  resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
+import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
 import {
@@ -191,8 +242,10 @@ import type {
   AgentInvokeParams,
   AgentResumeParams,
   AgentInterruptParams,
-  AgentCancelParams
+  AgentCancelParams,
+  Message
 } from "../types"
+import { emitAppAttention } from "../app-attention-events"
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -201,12 +254,112 @@ const MAX_POST_RUN_ASSISTANT_TEXT_CHARS = 60_000
 const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
 const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
+const SYSTEM_PROMPT_PREVIEW_IDS_ENV = "VITE_SYSTEM_PROMPT_PREVIEW_YST_IDS"
+
+function splitEnvIds(value: string | undefined): Set<string> {
+  return new Set(
+    String(value || "")
+      .split(/[,\s;]+/)
+      .map((id) => id.trim())
+      .filter(Boolean)
+  )
+}
+
+function canPreviewSystemPrompt(): boolean {
+  if (import.meta.env.DEV) return true
+  let userInfo: ReturnType<typeof getUserInfo> = null
+  try {
+    userInfo = getUserInfo()
+  } catch {
+    userInfo = null
+  }
+  const ids = splitEnvIds(import.meta.env[SYSTEM_PROMPT_PREVIEW_IDS_ENV] as string | undefined)
+  return [userInfo?.ystId, userInfo?.sapId].some((id) => Boolean(id?.trim() && ids.has(id.trim())))
+}
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+let agentTaskShutdownStarted = false
 const goalStore = new SqlGoalStore()
 const goalManager = new GoalManager(goalStore)
+// Deferred-delivery background evidence (see GoalBackgroundEvidenceStash): a
+// notification turn that delivers result A but defers (B still pending) parks
+// A's evidence here so the eventual evaluation sees every delivered batch, not
+// just the last one. Keyed by threadId, scoped by goalId (self-healing).
+const goalBackgroundEvidenceStash = new GoalBackgroundEvidenceStash()
 let restoredRuntimeGoalsReconciled = false
+
+function hasPendingApprovalForThread(threadId: string): boolean {
+  for (const approval of pendingApprovals.values()) {
+    if (approval.threadId === threadId || approval.runtimeThreadId === threadId) return true
+  }
+  return false
+}
+
+async function markLatestForkBoundary(input: {
+  threadId: string
+  turnId?: string
+  source: "agent_run_complete" | "agent_run_interrupted"
+}): Promise<void> {
+  const { threadId, turnId, source } = input
+  const outcome = source === "agent_run_interrupted" ? "interrupted" : "completed"
+  try {
+    if (hasPendingApprovalForThread(threadId)) return
+    await withCheckpointer(threadId, async (checkpointer) => {
+      const tuple = await checkpointer.getTuple({
+        configurable: { thread_id: threadId, checkpoint_ns: "" }
+      })
+      if (!tuple) return
+      // 用户中断场景（agent_run_interrupted）下，checkpoint 可能包含 __interrupt__，
+      // 此时应跳过 checkpointHasInterrupt 检查，允许创建 fork boundary，
+      // 以便用户可以在中断点之后进行 fork 操作。
+      if (checkpointHasInterrupt(tuple.checkpoint) && source !== "agent_run_interrupted") return
+      if ((tuple.pendingWrites?.length ?? 0) > 0 && source !== "agent_run_interrupted") return
+
+      const checkpointId =
+        typeof tuple.config.configurable?.checkpoint_id === "string"
+          ? tuple.config.configurable.checkpoint_id
+          : tuple.checkpoint.id
+      if (!checkpointId) return
+
+      const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
+      const lastVisibleMessageId = transcript.visibleMessageIds.at(-1)
+      await checkpointer.updateCheckpointMetadata(tuple.config, (metadata) => {
+        const base =
+          metadata && typeof metadata === "object" && !Array.isArray(metadata)
+            ? (metadata as Record<string, unknown>)
+            : {}
+        return {
+          ...base,
+          cmb_fork_boundary: {
+            version: 1,
+            kind: "turn_complete",
+            boundaryId: `${outcome === "interrupted" ? "turn_interrupted" : "turn_complete"}:${threadId}:${checkpointId}`,
+            turnId,
+            checkpointId,
+            checkpointNs: "",
+            completedAt: new Date().toISOString(),
+            source,
+            outcome,
+            lastVisibleMessageId
+          }
+        } as unknown as CheckpointMetadata
+      })
+      await checkpointer.flush()
+    })
+  } catch (error) {
+    console.warn("[Agent] Failed to mark checkpoint fork boundary:", error)
+  }
+}
+
+function ensureThreadForkBoundaryMarkerEra(
+  threadId: string,
+  metadata: Record<string, unknown>
+): void {
+  if (metadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION) return
+  metadata[FORK_BOUNDARY_THREAD_METADATA_KEY] = FORK_BOUNDARY_MARKER_VERSION
+  updateThread(threadId, { metadata: JSON.stringify(metadata) })
+}
 
 type GoalMutationSignature = {
   goalId: string
@@ -313,6 +466,81 @@ export function hasActiveAgentRun(threadId: string): boolean {
   return activeRuns.has(threadId)
 }
 
+export function hasAnyActiveAgentTasks(): boolean {
+  return (
+    activeRuns.size > 0 ||
+    workflowRunManager.hasActiveRuns() ||
+    coordinatorWorkerManager.hasRunningWorkers() ||
+    LocalSandbox.hasActiveProcesses()
+  )
+}
+
+/** Stop foreground turns, detached workflows/workers, and tool child processes.
+ * The wait is bounded because application shutdown must still make progress if
+ * a provider or child process does not observe its abort signal. */
+export async function shutdownAllAgentTasks(timeoutMs = 5_000): Promise<void> {
+  agentTaskShutdownStarted = true
+  const foregroundRuns = Array.from(activeRuns.entries()).map(([threadId, controller]) => ({
+    threadId,
+    controller,
+    settled: activeRunSettled.get(threadId)
+  }))
+
+  for (const run of foregroundRuns) {
+    LocalSandbox.cancelBackgroundTasks(run.threadId)
+    run.controller.abort()
+  }
+
+  const workflowShutdown = workflowRunManager.cancelAllAndWait(timeoutMs)
+  const coordinatorShutdown = coordinatorWorkerManager.cancelAllWorkersAndWait(timeoutMs)
+  LocalSandbox.killAll()
+
+  let foregroundTimeoutTimer: ReturnType<typeof setTimeout> | undefined
+  let foregroundTimedOut = false
+  const foregroundShutdown =
+    foregroundRuns.length === 0
+      ? Promise.resolve()
+      : Promise.race([
+          Promise.allSettled(
+            foregroundRuns.flatMap((run) => (run.settled ? [run.settled] : []))
+          ).then(() => undefined),
+          new Promise<void>((resolve) => {
+            foregroundTimeoutTimer = setTimeout(() => {
+              foregroundTimedOut = true
+              resolve()
+            }, Math.max(0, timeoutMs))
+          })
+        ]).finally(() => {
+          if (foregroundTimeoutTimer) clearTimeout(foregroundTimeoutTimer)
+        })
+
+  await Promise.allSettled([foregroundShutdown, workflowShutdown, coordinatorShutdown])
+  if (foregroundTimedOut) {
+    console.warn("[Agent] Timed out waiting for foreground runs to settle during shutdown")
+  }
+}
+
+function rejectAgentStartDuringShutdown(window: BrowserWindow, channel: string): boolean {
+  if (!agentTaskShutdownStarted) return false
+  safeSendToWindow(window, channel, {
+    type: "error",
+    error: "APP_SHUTTING_DOWN",
+    message: "The application is quitting and cannot start another agent run."
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+  return true
+}
+
+export function isActiveAgentRunAborting(threadId: string): boolean {
+  return activeRuns.get(threadId)?.signal.aborted === true
+}
+
+export async function waitForActiveAgentRunToSettle(
+  threadId: string
+): Promise<"settled" | "timed_out"> {
+  return waitForReplacedRunToSettle(threadId)
+}
+
 async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
   const settled = activeRunSettled.get(threadId)
   if (!settled) return "settled"
@@ -348,7 +576,15 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
 }
 
 interface HarnessAgentContext {
-  workingDirPromptAppendix?: string
+  pluginPromptInject?: string
+  enableAgentsPrompt?: boolean
+  enableTaskTool?: boolean
+  isHarnessProjectSession?: boolean
+  harnessAgentsPrompt?: string
+  additionalAgentsWorkspacePaths?: string[]
+  additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
+  sessionContextInjectWarning?: string
+  agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
   pluginOutputDir?: string
   systemId?: string
   pluginRoot?: string
@@ -356,26 +592,102 @@ interface HarnessAgentContext {
   pluginName?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
+  projectDir?: string
+}
+
+type HarnessFeatureBindingContext = {
+  projectId: string
+  slug: string
+  nodeName?: string
+  nodeStatus?: string
 }
 
 function getHarnessHookContext(
   context: HarnessAgentContext
-): Pick<HookContext, "pluginWorkspace" | "featureId" | "projectCode"> {
+): Pick<
+  HookContext,
+  | "pluginWorkspace"
+  | "featureId"
+  | "harnessProjectId"
+  | "harnessAdapterName"
+  | "harnessAdapterVersion"
+  | "harnessNodeName"
+  | "harnessNodeStatus"
+  | "projectCode"
+  | "projectDir"
+> {
   return {
     pluginWorkspace: context.pluginWorkspace,
     featureId: context.featureId,
-    projectCode: context.projectCode
+    harnessProjectId: context.harnessProjectId,
+    harnessAdapterName: context.harnessAdapterName,
+    harnessAdapterVersion: context.harnessAdapterVersion,
+    harnessNodeName: context.harnessNodeName,
+    harnessNodeStatus: context.harnessNodeStatus,
+    projectCode: context.projectCode,
+    projectDir: context.projectDir
   }
 }
 
-function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgentContext {
+function resolveHarnessCurrentStageForContext(
+  projectId?: string,
+  slug?: string
+): Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus"> {
+  if (!projectId || !slug) return {}
+  const currentStage = resolveHarnessFeatureCurrentStage(projectId, slug)
+  if (!currentStage?.name) return {}
+  return {
+    harnessNodeName: currentStage.name,
+    ...(currentStage.status ? { harnessNodeStatus: currentStage.status } : {})
+  }
+}
+
+function getHarnessAgentContext(
+  metadata: Record<string, unknown>,
+  options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
+): HarnessAgentContext {
+  const isHarnessProjectSession =
+    Boolean(metadata.harnessProjectSession) &&
+    typeof metadata.harnessProjectSession === "object" &&
+    !Array.isArray(metadata.harnessProjectSession)
+  const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
-    const featureContext = buildHarnessFeatureAgentContext(metadata)
-    if (!featureContext) return {}
+    const featureContext = buildHarnessFeatureAgentContext(metadata, {
+      workspacePath: options.workspacePath
+    })
+    if (!featureContext) {
+      return {
+        ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
+        ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
+      }
+    }
+    const currentStage =
+      options.featureBinding !== undefined
+        ? {
+            harnessNodeName: options.featureBinding.nodeName,
+            harnessNodeStatus: options.featureBinding.nodeStatus
+          }
+        : resolveHarnessCurrentStageForContext(
+            featureContext.harnessProjectId,
+            featureContext.featureId
+          )
 
     return {
-      workingDirPromptAppendix: featureContext.systemPromptInject,
+      pluginPromptInject: featureContext.systemPromptInject,
+      enableAgentsPrompt: featureContext.enableAgentsPrompt,
+      enableTaskTool: featureContext.enableTaskTool,
+      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
+      harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
+      additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
+      additionalAgentsWorkspaceMappings: featureContext.additionalAgentsWorkspaceMappings,
+      sessionContextInjectWarning: featureContext.sessionContextInjectWarning,
+      agentmdLoadStatus: featureContext.agentmdLoadStatus,
       pluginOutputDir: featureContext.pluginOutputDir,
       systemId: featureContext.systemId,
       pluginRoot: featureContext.pluginRoot,
@@ -383,11 +695,19 @@ function getHarnessAgentContext(metadata: Record<string, unknown>): HarnessAgent
       pluginName: featureContext.pluginName,
       pluginWorkspace: featureContext.pluginWorkspace,
       featureId: featureContext.featureId,
-      projectCode: featureContext.projectCode
+      harnessProjectId: featureContext.harnessProjectId,
+      harnessAdapterName: featureContext.harnessAdapterName,
+      harnessAdapterVersion: featureContext.harnessAdapterVersion,
+      ...currentStage,
+      projectCode: featureContext.projectCode,
+      projectDir: featureContext.projectDir
     }
   } catch (error) {
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
-    return {}
+    return {
+      ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
+      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
+    }
   }
 }
 
@@ -687,6 +1007,10 @@ function handleGoalNonStartingControlCommand(params: {
       LocalSandbox.cancelBackgroundTasks(threadId)
     }
     goalManager.clear(threadId)
+    // Memory hygiene: drop any background-evidence batches parked for the
+    // cleared goal (the goalId scope would self-heal anyway, but don't leave a
+    // dead bucket behind).
+    goalBackgroundEvidenceStash.clear(threadId)
     const notice = emitGoalNotice(
       window,
       channel,
@@ -739,7 +1063,7 @@ function pauseActiveGoalAfterBoundary(
 }
 
 function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltError): void {
-  window.webContents.send(channel, {
+  safeSendToWindow(window, channel, {
     type: "custom",
     data: {
       type: "hook_blocked",
@@ -749,12 +1073,54 @@ function sendHookHalt(window: BrowserWindow, channel: string, error: HookHaltErr
       systemMessage: error.systemMessage
     }
   })
-  window.webContents.send(channel, { type: "done" })
+  safeSendToWindow(window, channel, { type: "done" })
+}
+
+function sendFailureFuseHalt(
+  window: BrowserWindow,
+  channel: string,
+  error: FailureFuseHaltError
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "failure_fuse_tripped",
+      action: "halt",
+      reason: error.decision.reason,
+      toolName: error.decision.toolName,
+      fingerprint: error.decision.fingerprint,
+      count: error.decision.count,
+      threshold: error.decision.threshold,
+      lastError: error.decision.lastError
+    }
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+}
+
+function sendFailureFuseNotice(
+  window: BrowserWindow,
+  channel: string,
+  decision: FailureFuseDecision
+): void {
+  if (!shouldSendFailureFuseNotice(decision)) return
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "failure_fuse_warning",
+      action: decision.action,
+      reason: decision.reason,
+      toolName: decision.toolName,
+      fingerprint: decision.fingerprint,
+      count: decision.count,
+      threshold: decision.threshold,
+      lastError: decision.lastError
+    }
+  })
 }
 
 /**
  * Thread-scoped hook state shared across IPC handler boundaries. A new
- * `agent:invoke` starts a fresh turn, but keeps the session-level persistent
+ * `agent:invoke` starts a fresh turn, but keeps the thread-level persistent
  * hook keys that were activated by earlier skill / plugin use in this thread.
  * `agent:resume` / `agent:interrupt` reuse the current turn state. Without
  * this Map, every IPC handler entry would reset hookScope etc. and scoped
@@ -772,9 +1138,13 @@ interface TurnState {
 
 const turnStates = new Map<string, TurnState>()
 
-function createTurnState(initialUserMessage?: string, turnId?: string): TurnState {
+function createTurnState(
+  threadId: string,
+  initialUserMessage?: string,
+  turnId?: string
+): TurnState {
   return {
-    hookScope: createHookScope(),
+    hookScope: createPersistentThreadHookScope(threadId),
     skillUseTracker: createSkillUseTracker(),
     skillHookKeys: new Set<string>(),
     stopContextCollector: new StopHookContextCollector(initialUserMessage),
@@ -790,7 +1160,7 @@ function resetTurnStateForNewInvoke(
   turnId?: string
 ): void {
   const snapshot = state.hookScope.snapshot()
-  state.hookScope = createHookScope()
+  state.hookScope = createPersistentThreadHookScope(threadId)
   state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
   state.skillUseTracker = createSkillUseTracker()
   state.skillHookKeys = new Set<string>()
@@ -807,7 +1177,7 @@ function getOrCreateTurnState(
 ): TurnState {
   const existing = turnStates.get(threadId)
   if (existing) return existing
-  const fresh = createTurnState(initialUserMessage, turnId)
+  const fresh = createTurnState(threadId, initialUserMessage, turnId)
   turnStates.set(threadId, fresh)
   return fresh
 }
@@ -908,7 +1278,13 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
+  projectDir?: string
   threadId: string
   turnId?: string
   hookScope: HookScopeController
@@ -940,7 +1316,13 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     systemId: params.systemId,
     pluginWorkspace: params.pluginWorkspace,
     featureId: params.featureId,
+    harnessProjectId: params.harnessProjectId,
+    harnessAdapterName: params.harnessAdapterName,
+    harnessAdapterVersion: params.harnessAdapterVersion,
+    harnessNodeName: params.harnessNodeName,
+    harnessNodeStatus: params.harnessNodeStatus,
     projectCode: params.projectCode,
+    projectDir: params.projectDir,
     sessionId: params.threadId,
     turnId: params.turnId,
     subagent: {
@@ -1126,7 +1508,13 @@ async function activateExplicitSkillFromMessage({
   systemId,
   pluginWorkspace,
   featureId,
+  harnessProjectId,
+  harnessAdapterName,
+  harnessAdapterVersion,
+  harnessNodeName,
+  harnessNodeStatus,
   projectCode,
+  projectDir,
   sessionId,
   turnId,
   hookScope,
@@ -1141,7 +1529,13 @@ async function activateExplicitSkillFromMessage({
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   projectCode?: string
+  projectDir?: string
   sessionId: string
   turnId?: string
   hookScope: HookScopeController
@@ -1191,7 +1585,13 @@ async function activateExplicitSkillFromMessage({
     systemId,
     pluginWorkspace,
     featureId,
+    harnessProjectId,
+    harnessAdapterName,
+    harnessAdapterVersion,
+    harnessNodeName,
+    harnessNodeStatus,
     projectCode,
+    projectDir,
     sessionId,
     turnId,
     hookScope,
@@ -1285,7 +1685,26 @@ function formatActiveHookNotice(summary: ActiveHookSummary): string | null {
   return segments.join("；")
 }
 
+function threadIdFromAgentStreamChannel(channel: string): string | null {
+  const prefix = "agent:stream:"
+  if (!channel.startsWith(prefix)) return null
+  const threadId = channel.slice(prefix.length).split(":")[0]?.trim()
+  return threadId || null
+}
+
+function isTerminalStreamPayload(payload: unknown): boolean {
+  const type =
+    !!payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as { type?: unknown }).type
+      : undefined
+  return type === "done" || type === "error"
+}
+
 function safeSendToWindow(window: BrowserWindow, channel: string, payload: unknown): void {
+  if (isTerminalStreamPayload(payload)) {
+    const threadId = threadIdFromAgentStreamChannel(channel)
+    if (threadId) flushPendingStreamTranscriptMessages(threadId)
+  }
   if (window.isDestroyed() || window.webContents.isDestroyed()) return
   try {
     window.webContents.send(channel, payload)
@@ -1299,6 +1718,65 @@ function sendHookNotice(window: BrowserWindow, channel: string, message: string)
     type: "custom",
     data: { type: "hook_notice", message }
   })
+}
+
+function sendHarnessSessionContextInjectWarning(
+  window: BrowserWindow,
+  channel: string,
+  context: HarnessAgentContext
+): void {
+  const message = context.sessionContextInjectWarning?.trim()
+  if (!message) return
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: { type: "harness_session_context_inject_warning", message }
+  })
+}
+
+function sendHarnessAgentmdLoadStatus(
+  window: BrowserWindow,
+  channel: string,
+  context: HarnessAgentContext,
+  agentmdLoader: "plugin" | "cmbdevclaw" = "plugin",
+  agentmdPromptPreview?: string
+): void {
+  if (!Array.isArray(context.agentmdLoadStatus)) return
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "harness_agentmd_load_status",
+      agentmdLoadStatus: context.agentmdLoadStatus,
+      agentmdLoader,
+      agentmdPromptPreview,
+      createdAt: Date.now()
+    }
+  })
+}
+
+function createHarnessAgentmdLoadStatusHandler(
+  window: BrowserWindow,
+  channel: string,
+  context: HarnessAgentContext
+):
+  | ((payload: {
+      items: HarnessAgentmdLoadStatusItem[]
+      loader: "plugin" | "cmbdevclaw"
+      promptPreview?: string
+    }) => void)
+  | undefined {
+  if (!context.featureId) return undefined
+  return ({ items, loader, promptPreview }) => {
+    sendHarnessAgentmdLoadStatus(
+      window,
+      channel,
+      {
+        ...context,
+        agentmdLoadStatus: items
+      },
+      loader,
+      promptPreview
+    )
+  }
 }
 
 function sendActiveHookNotice(
@@ -1534,6 +2012,42 @@ interface NormalModeGuardState {
   workers: CoordinatorWorkerSnapshot[]
   hasPendingNotifications: boolean
   unresolvedWorkers: CoordinatorWorkerSnapshot[]
+}
+
+/** True when switching toward normal mode is blocked by unresolved coordinator
+ * workers. Workflow has its OWN leave guard (workflowLeaveBlockedMessage) because
+ * it must block leaving to ANY non-workflow mode, not just normal. */
+function isNormalModeBlocked(state: NormalModeGuardState): boolean {
+  return state.unresolvedWorkers.length > 0 || state.hasPendingNotifications
+}
+
+/** Message when leaving workflow mode (to ANY non-workflow mode — normal OR
+ * coordinator) must be blocked: a run is active or its result is still pending,
+ * and the renderer only schedules the completion turn while in workflow mode, so
+ * leaving would orphan the run. Returns null when it is safe to leave. */
+function workflowLeaveBlockedMessage(
+  threadId: string,
+  workspacePath: string | undefined
+): string | null {
+  const active = workflowRunManager.isActive(threadId)
+  // Scan ALL pending runs (hasDeliverablePendingNotification), not just the
+  // first candidate: an exhausted newest run must not unlock the exit while an
+  // older, still-deliverable run waits. Escape hatch preserved: when EVERY
+  // pending run's auto-re-report has been exhausted this process (wedged report
+  // turn / API outage), stop blocking — otherwise the user is locked in
+  // workflow mode with no way out but deleting the thread. HONEST CAVEAT (#5):
+  // leaving takes the pending result OFF the auto-report path. A restart
+  // re-reports ONLY while the thread is still in workflow mode; after leaving
+  // (and especially after a later workspace switch, which makes list/hydrate
+  // look under the new path) the result is stranded under the ORIGINAL
+  // workspace — not lost (on disk, visible in that workspace's history), just
+  // reachable only by returning to workflow mode there. (Mirrors threads.ts.)
+  const pending = workspacePath
+    ? workflowRunManager.hasDeliverablePendingNotification(workspacePath, threadId)
+    : false
+  return active || pending
+    ? "仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换模式。"
+    : null
 }
 
 function extractNotificationWorkerId(notification: string): string | undefined {
@@ -1881,8 +2395,8 @@ function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
   const workerList = state.unresolvedWorkers
     .map((worker) => `${worker.worker_id}: ${worker.description}`)
     .join("; ")
-  const suffix = workerList ? `相关 worker：${workerList}` : "请先切回协同模式处理这些结果。"
-  return "仍有协同 worker 在运行或结果待处理，请先在协同模式处理完成后再切回普通模式。" + suffix
+  const suffix = workerList ? `相关 worker：${workerList}` : "请先切回 Agent Team 处理这些结果。"
+  return "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent。" + suffix
 }
 
 function renderCoordinatorWorkerNotifications(
@@ -2083,14 +2597,123 @@ async function finalizeAutoCommit({
   window: BrowserWindow
   channel: string
 }): Promise<void> {
-  const result = await maybeAutoCommitAfterAgentRun({
-    threadId,
-    workspacePath,
-    userPrompt,
-    snapshot,
-    confirm: (preview) => confirmAutoCommit(window, preview)
-  })
-  sendAutoCommitResult(window, channel, result)
+  // Skip auto-commit while a background workflow is ACTIVE on this WORKSPACE: it
+  // writes to the tree asynchronously, so a dirty-diff commit here could sweep its
+  // in-progress edits — meant to stay in the working tree for review (#3a) — into
+  // this turn's commit (#3). dirty-diff can't tell whose change is whose, and the
+  // write timing races this finalize, so the safe move is to not auto-commit while
+  // the tree is being changed out-of-band. Checked at WORKSPACE level (not just this
+  // thread): a workflow launched on ANOTHER thread that points at the same workspace
+  // is changing this tree too. The isActive(threadId) fallback covers a run whose
+  // workspacePath can't be matched here (e.g. undefined). The user's own edits also
+  // wait until the workflow finishes — acceptable, the tree is "unstable" while it
+  // runs. (A workflow's own completion/notification turn runs AFTER it settles, so
+  // neither check matches there and that turn still auto-commits normally.)
+  // Same rationale extends to coordinator/agent-team workers: they write the
+  // parent's SHARED workspace (no worktree isolation) and, per the coordinator
+  // prompt, run ASYNC after the turn that spawned them has ended — so this
+  // finalize can race a worker's in-progress writes and commit half-written
+  // files or sweep concurrent user edits. Skip while any worker is still running.
+  // (A worker's own completion/notification turn runs AFTER it is terminal, so
+  // neither predicate matches it there and the last worker's notification turn
+  // still auto-commits the settled tree normally.) Checked at BOTH thread level
+  // (covers an undefined workspacePath) AND workspace level — a running worker on
+  // ANOTHER task/thread pointing at the same repo is mutating this tree too,
+  // mirroring the workspace-level protection workflow already has via
+  // activeRunForWorkspace.
+  //
+  // A FAST workflow (script with no agent() calls, or an instant failure) can
+  // finish and active.delete() itself WITHIN its own launch turn — before this
+  // finalize runs — so isActive is already false, yet its edits are now-dirty
+  // relative to this turn's snapshot and would be swept in. That breaks the
+  // explicit workflow contract "do NOT auto-commit the run's edits; leave them in
+  // the working tree for review" (a SLOW workflow is protected because its edits
+  // are in the start snapshot by the time any un-skipped turn runs). Skip while a
+  // deliverable workflow notification is still pending. No isWorkflowNotification-
+  // Turn guard is needed to avoid self-skip: on the delivery turn the run being
+  // delivered is markNotified()+clearNotificationInFlight() BEFORE this finalize
+  // runs (see the settlement block above), so hasDeliverablePendingNotification no
+  // longer counts it and that turn still auto-commits its own near-empty edits.
+  // Gating on the run STATE (not the turn type) also correctly catches a NEW fast
+  // workflow launched during a notification turn — which the turn-type exclusion
+  // would have missed. Coordinator workers are intentionally NOT included: they
+  // carry no "leave for review" contract, and their in-progress writes are
+  // already covered by the running-worker checks above.
+  //
+  // Scope note: this pending-workflow check is THREAD-scoped (a RUNNING workflow
+  // on another thread over the same repo is already covered workspace-wide by
+  // activeRunForWorkspace above). The only uncovered slice is a FAST workflow that
+  // already TERMINATED on ANOTHER thread pointing at this repo, whose notification
+  // is still undelivered when THIS thread auto-commits — its edits could be swept.
+  // Left thread-scoped deliberately: a terminal run's writes are done (write-SAFE;
+  // this is only the "leave for review" preference, not corruption), the scenario
+  // is a narrow cross-task race, and a workspace-wide pending scan means walking
+  // every thread's on-disk run dir on each finalize. Not worth that per-commit I/O.
+  if (
+    (workspacePath && workflowRunManager.activeRunForWorkspace(workspacePath)) ||
+    workflowRunManager.isActive(threadId) ||
+    coordinatorWorkerManager.hasRunningWorkersForThread(threadId) ||
+    (workspacePath && coordinatorWorkerManager.hasRunningWorkersForWorkspace(workspacePath)) ||
+    (workspacePath && workflowRunManager.hasDeliverablePendingNotification(workspacePath, threadId))
+  ) {
+    sendAutoCommitResult(window, channel, {
+      status: "skipped",
+      reasons: [
+        "后台任务运行中（动态工作流 / 协作 worker），已跳过本回合自动提交（改动留待其完成后审阅）"
+      ]
+    })
+    return
+  }
+  try {
+    const result = await maybeAutoCommitAfterAgentRun({
+      threadId,
+      workspacePath,
+      userPrompt,
+      snapshot,
+      confirm: (preview) => confirmAutoCommit(window, preview)
+    })
+    // Telemetry: the existing `git.commit.created` (triggeredBy=agent-auto) only
+    // fires on success. Emit an attempt event so skip / user-cancel / fail are also
+    // visible. "disabled" (mode off) means auto-commit never engaged — don't count.
+    if (result.status !== "disabled") {
+      try {
+        const userCancelled =
+          result.status === "skipped" &&
+          (result.reasons?.some((r) => r.includes("用户取消")) ?? false)
+        trackEvent("git.auto_commit.attempted", "git", {
+          outcome: userCancelled ? "cancelled" : result.status,
+          fileCount: result.committedFiles?.length ?? 0,
+          pushed: result.pushed,
+          pushFailed: !!result.pushError,
+          threadId
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit git.auto_commit.attempted:", e)
+      }
+    }
+    sendAutoCommitResult(window, channel, result)
+  } catch (error) {
+    // Auto-commit is best-effort: a git failure or a UI exception (the confirm
+    // dialog / window send) must NOT fail an otherwise-successful turn — e.g. a
+    // workflow notification turn that already persisted delivered=true and
+    // reported its result. Without this, that turn would bubble to the outer
+    // catch and be mislabeled an error. Log and move on. (Normal path unaffected:
+    // when nothing throws, this try/catch is transparent.)
+    console.warn("[AutoCommit] finalize failed (non-fatal):", error)
+    // But DON'T leave auto-commit silently "successful": tell the renderer it failed,
+    // so the user knows nothing was committed and can commit manually. Guard the
+    // notice send itself (the original failure may have been the window send).
+    try {
+      // status "failed" (not "skipped"): this was a real auto-commit error, not a
+      // deliberate business skip, so the renderer surfaces it accordingly.
+      sendAutoCommitResult(window, channel, {
+        status: "failed",
+        reasons: ["自动提交执行失败，请检查 Git 状态后按需手动提交"]
+      })
+    } catch {
+      /* the failure notice itself couldn't be sent; nothing more we can do */
+    }
+  }
 }
 
 async function beginAutoCommitTracking(
@@ -2269,6 +2892,238 @@ function isCoordinatorWorkerStreamChunk(mode: string, payload: unknown, threadId
   }
 
   return false
+}
+
+function extractPersistedMessageContent(content: unknown): Message["content"] {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  const blocks = content.filter((block) => {
+    if (!block || typeof block !== "object" || Array.isArray(block)) return false
+    const type = (block as { type?: unknown }).type
+    return type === "text" || type === "image" || type === "tool_use" || type === "tool_result"
+  })
+  return blocks.length > 0 ? (blocks as Message["content"]) : ""
+}
+
+function getSerializedMessageRole(msgChunk: unknown): Message["role"] | null {
+  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
+  const record = msgChunk as { id?: unknown; type?: unknown; kwargs?: Record<string, unknown> }
+  const kwargs = asPlainRecord(record.kwargs) ?? {}
+  const className = serializedMessageClassName(msgChunk)
+  const type = kwargs.type ?? record.type
+
+  if (className.includes("HumanMessage") || type === "human" || type === "user") return "user"
+  if (className.includes("ToolMessage") || type === "tool") return "tool"
+  if (className.includes("SystemMessage") || type === "system") return "system"
+  if (className.includes("AIMessage") || type === "ai" || type === "assistant") {
+    return "assistant"
+  }
+  return null
+}
+
+function serializedMessageId(msgChunk: unknown): string | null {
+  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
+  const record = msgChunk as { id?: unknown; kwargs?: Record<string, unknown> }
+  const kwargs = asPlainRecord(record.kwargs) ?? {}
+  if (typeof kwargs.id === "string" && kwargs.id.trim()) return kwargs.id.trim()
+  if (typeof record.id === "string" && record.id.trim()) return record.id.trim()
+  return null
+}
+
+function shouldSkipMainTranscriptStreamPayload(
+  mode: string,
+  payload: unknown,
+  threadId: string
+): boolean {
+  if (mode !== "messages") return true
+  if (isCoordinatorWorkerStreamChunk(mode, payload, threadId)) return true
+  const metadata = messageStreamMetadata(mode, payload)
+  const checkpointNs =
+    typeof metadata?.langgraph_checkpoint_ns === "string"
+      ? metadata.langgraph_checkpoint_ns
+      : typeof metadata?.checkpoint_ns === "string"
+        ? metadata.checkpoint_ns
+        : ""
+  // Deep-agent/subagent interiors are scoped under tools namespaces. Normal
+  // visible tool results are re-persisted by the renderer's filtered transcript
+  // flush, so the main process intentionally stays conservative here.
+  if (checkpointNs.includes("tools:")) return true
+  return false
+}
+
+function persistedMessageFromStreamPayload(payload: unknown): Message | null {
+  if (!Array.isArray(payload)) return null
+  const [msgChunk] = payload
+  if (!msgChunk || typeof msgChunk !== "object" || Array.isArray(msgChunk)) return null
+  const role = getSerializedMessageRole(msgChunk)
+  if (!role || role === "user") return null
+  const id = serializedMessageId(msgChunk)
+  if (!id) return null
+
+  const record = msgChunk as { content?: unknown; kwargs?: Record<string, unknown> }
+  const kwargs = asPlainRecord(record.kwargs) ?? {}
+  const content = extractPersistedMessageContent(kwargs.content ?? record.content)
+  const toolCalls = Array.isArray(kwargs.tool_calls)
+    ? (kwargs.tool_calls as Message["tool_calls"])
+    : undefined
+  if (
+    role !== "tool" &&
+    (typeof content === "string" ? content.length === 0 : content.length === 0) &&
+    (!toolCalls || toolCalls.length === 0)
+  ) {
+    return null
+  }
+
+  const toolCallId = typeof kwargs.tool_call_id === "string" ? kwargs.tool_call_id : undefined
+  const name = typeof kwargs.name === "string" ? kwargs.name : undefined
+  const status = typeof kwargs.status === "string" ? kwargs.status : undefined
+  const additionalKwargs = asPlainRecord(kwargs.additional_kwargs)
+  const isError =
+    kwargs.is_error === true || additionalKwargs?.is_error === true || status === "error"
+
+  return {
+    id,
+    role,
+    content,
+    ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    ...(role === "tool" && toolCallId ? { tool_call_id: toolCallId } : {}),
+    ...(role === "tool" && name ? { name } : {}),
+    ...(role === "tool" && status ? { status } : {}),
+    ...(role === "tool" && isError ? { is_error: true } : {}),
+    created_at: new Date()
+  }
+}
+
+const STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS = 250
+
+const pendingStreamTranscriptMessages = new Map<
+  string,
+  { messages: Message[]; timer?: ReturnType<typeof setTimeout> }
+>()
+
+function hasUsefulQueuedContent(content: Message["content"]): boolean {
+  return typeof content === "string" ? content.length > 0 : content.length > 0
+}
+
+function mergeQueuedStreamContent(
+  existing: Message["content"],
+  incoming: Message["content"]
+): Message["content"] {
+  if (!hasUsefulQueuedContent(incoming)) return existing
+  if (!hasUsefulQueuedContent(existing)) return incoming
+  if (typeof existing === "string" && typeof incoming === "string") {
+    if (incoming.startsWith(existing)) return incoming
+    if (existing.startsWith(incoming)) return existing
+    return `${existing}${incoming}`
+  }
+  return incoming
+}
+
+function mergeQueuedStreamMessage(base: Message, incoming: Message): Message {
+  return {
+    ...base,
+    ...incoming,
+    content: mergeQueuedStreamContent(base.content, incoming.content),
+    tool_calls:
+      incoming.tool_calls && incoming.tool_calls.length > 0 ? incoming.tool_calls : base.tool_calls,
+    tool_call_id: incoming.tool_call_id ?? base.tool_call_id,
+    name: incoming.name ?? base.name,
+    status: incoming.status ?? base.status,
+    is_error: incoming.is_error ?? base.is_error,
+    created_at: base.created_at ?? incoming.created_at,
+    start_at: base.start_at ?? incoming.start_at,
+    end_at: incoming.end_at ?? base.end_at
+  }
+}
+
+function coalesceQueuedStreamMessages(messages: Message[]): Message[] {
+  const byId = new Map<string, Message>()
+  for (const message of messages) {
+    const existing = byId.get(message.id)
+    byId.set(message.id, existing ? mergeQueuedStreamMessage(existing, message) : message)
+  }
+  return [...byId.values()]
+}
+
+function flushPendingStreamTranscriptMessages(threadId: string): void {
+  const pending = pendingStreamTranscriptMessages.get(threadId)
+  if (!pending) return
+
+  if (pending.timer) clearTimeout(pending.timer)
+  pendingStreamTranscriptMessages.delete(threadId)
+
+  const messages = coalesceQueuedStreamMessages(pending.messages)
+  if (messages.length === 0) return
+  try {
+    upsertThreadMessages(threadId, messages)
+  } catch (error) {
+    console.warn("[Agent] Failed to persist streamed transcript messages:", error)
+  }
+}
+
+function discardPendingStreamTranscriptMessages(threadId: string): string[] {
+  const pending = pendingStreamTranscriptMessages.get(threadId)
+  if (!pending) return []
+  if (pending.timer) clearTimeout(pending.timer)
+  pendingStreamTranscriptMessages.delete(threadId)
+  return [...new Set(pending.messages.map((message) => message.id))]
+}
+
+function queueStreamTranscriptMessage(
+  threadId: string,
+  message: Message,
+  options: { deferFlush?: boolean } = {}
+): void {
+  let pending = pendingStreamTranscriptMessages.get(threadId)
+  if (!pending) {
+    pending = { messages: [] }
+    pendingStreamTranscriptMessages.set(threadId, pending)
+  }
+  pending.messages.push(message)
+
+  if (options.deferFlush) return
+  if (pending.timer) return
+  pending.timer = setTimeout(() => {
+    flushPendingStreamTranscriptMessages(threadId)
+  }, STREAM_TRANSCRIPT_FLUSH_DEBOUNCE_MS)
+  pending.timer.unref?.()
+}
+
+function persistStreamTranscriptChunk(
+  threadId: string,
+  mode: string,
+  payload: unknown,
+  options: { deferFlush?: boolean } = {}
+): string | null {
+  if (shouldSkipMainTranscriptStreamPayload(mode, payload, threadId)) return null
+  const message = persistedMessageFromStreamPayload(payload)
+  if (!message) return null
+  queueStreamTranscriptMessage(threadId, message, options)
+  return message.id
+}
+
+function persistVisibleUserTranscriptMessage(
+  threadId: string,
+  content: string,
+  messageId?: string,
+  goal?: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null
+): void {
+  if (!content.trim()) return
+  if (isWorkflowPlumbingTranscriptContent(content)) return
+  try {
+    upsertThreadMessages(threadId, [
+      {
+        id: messageId?.trim() || uuid(),
+        role: "user",
+        content,
+        ...(goal?.goalId ? { goal_id: goal.goalId } : {}),
+        ...(goal?.activeWindowId ? { active_window_id: goal.activeWindowId } : {}),
+        created_at: new Date()
+      }
+    ])
+  } catch (error) {
+    console.warn("[Agent] Failed to persist user transcript message:", error)
+  }
 }
 
 function trimStopContextText(text: string): string {
@@ -2519,6 +3374,7 @@ Steps should describe the METHOD (how to approach the problem class), not the SO
 If the conversation is narrow, lift it one level: "how we fixed X" → "systematic approach to X-type problems".
 
 Other rules:
+- Prefer Chinese for generated skill name, description, rationale, headings, and SKILL.md prose when practical; keep code identifiers, commands, file paths, package names, and API names in their original language.
 - description is the MOST important field — it controls when the skill is injected in future sessions
 - Output ONLY valid JSON, no other text`
 
@@ -2554,6 +3410,25 @@ function getCompletedTaskTitle(threadTitle: string | undefined, message: string)
 }
 
 /**
+ * Most-recent fetch-layer error response per stream channel. Populated by the
+ * retrying-fetch `onFetchError` hook and consumed by the turn's error handler to
+ * enrich {@link extractErrorDetail} with the raw response body — the only source
+ * that survives when the SDK drops a non-OpenAI error envelope. Keyed by channel
+ * (one active run per thread, so no cross-run contamination). Always cleared
+ * after consumption / on turn end to avoid leaks and stale reuse.
+ */
+const lastFetchErrorByChannel = new Map<string, FetchErrorInfo>()
+
+/**
+ * Live reference to the current turn's failover attempts, keyed by channel.
+ * The handlers register their (const, mutated-in-place) `failoverAttempts` array
+ * here so the catch block can surface the failover chain in the error detail
+ * without hoisting the array across the large try/catch scope. Cleared at turn
+ * entry and after consumption.
+ */
+const lastFailoverByChannel = new Map<string, FailoverAttempt[]>()
+
+/**
  * Build ModelRetryHooks that forward retry status to the renderer as custom
  * stream events on the given channel. Used to display the inline "retrying…"
  * indicator in the chat view.
@@ -2585,8 +3460,167 @@ function buildModelRetryHooks(window: BrowserWindow, channel: string): ModelRetr
         type: "custom",
         data: { type: "model_retry_clear" }
       })
+    },
+    onFetchError: (info) => {
+      lastFetchErrorByChannel.set(channel, info)
     }
   }
+}
+
+const STREAM_DISCONNECT_MAX_RETRIES = 2
+
+function streamDisconnectRetryDelay(attempt: number): number {
+  return attempt === 1 ? 500 : 1500
+}
+
+function notifyStreamDisconnectRetry(
+  window: BrowserWindow,
+  channel: string,
+  attempt: number
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "model_retry",
+      attempt,
+      maxRetries: STREAM_DISCONNECT_MAX_RETRIES,
+      reason: "流连接中断，正在重连当前模型",
+      delayMs: streamDisconnectRetryDelay(attempt)
+    }
+  })
+}
+
+function clearStreamDisconnectRetry(window: BrowserWindow, channel: string): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: { type: "model_retry_clear" }
+  })
+}
+
+function resetFailedStreamAttempt(
+  window: BrowserWindow,
+  channel: string,
+  threadId: string,
+  stableMessages: unknown[],
+  inFlightMessageIds: Set<string>
+): void {
+  const discardedMessageIds = [
+    ...new Set([...inFlightMessageIds, ...discardPendingStreamTranscriptMessages(threadId)])
+  ]
+  inFlightMessageIds.clear()
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "stream_retry_reset",
+      messages: stableMessages,
+      discardedMessageIds
+    }
+  })
+}
+
+interface StreamDisconnectRetryResult<T> {
+  error: unknown
+  retries: number
+  stream?: AsyncIterable<T>
+}
+
+export async function retryStreamAfterDisconnect<T>(
+  error: unknown,
+  retries: number,
+  window: BrowserWindow,
+  channel: string,
+  abortSignal: AbortSignal,
+  label: string,
+  modelId: string | undefined,
+  resume: () => Promise<AsyncIterable<T>>
+): Promise<StreamDisconnectRetryResult<T>> {
+  let retryError = error
+  let nextRetries = retries
+
+  while (isStreamDisconnectLikeError(retryError) && nextRetries < STREAM_DISCONNECT_MAX_RETRIES) {
+    if (abortSignal.aborted) throw retryError
+
+    nextRetries += 1
+    const delayMs = streamDisconnectRetryDelay(nextRetries)
+    console.warn(
+      `[Agent][Retry] ${label} ${modelId ?? "unknown"} stream disconnected; retry ${nextRetries}/${STREAM_DISCONNECT_MAX_RETRIES}`
+    )
+    notifyStreamDisconnectRetry(window, channel, nextRetries)
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    if (abortSignal.aborted) throw retryError
+
+    try {
+      const stream = await resume()
+      clearStreamDisconnectRetry(window, channel)
+      return { error: retryError, retries: nextRetries, stream }
+    } catch (retryErr) {
+      retryError = retryErr
+    }
+  }
+
+  return { error: retryError, retries: nextRetries }
+}
+
+/**
+ * Build the structured error detail for a failed turn and push it to the
+ * renderer as an `error_detail` custom event (sent right before the existing
+ * `error` event so the card can render status / request-id / real reason).
+ * Consumes & clears the captured fetch-layer body for the channel.
+ */
+interface ErrorDetailModelInfo {
+  /** Runtime/config model id, e.g. custom:qwen3. */
+  modelId?: string
+  /** User-facing display name shown in the model switcher. */
+  modelDisplayName?: string
+  /** Actual Model field sent to the API, e.g. MiniMax-M2.7. */
+  modelName?: string
+  /** Backward-compatible display field consumed by older renderer code. */
+  model?: string
+}
+
+function resolveErrorDetailModelInfo(modelId: string | undefined): ErrorDetailModelInfo {
+  if (!modelId) return {}
+  const cfg = getModelConfigByRef(modelId)
+  return {
+    modelId,
+    modelDisplayName: cfg?.name,
+    modelName: cfg?.model,
+    model: cfg?.name ?? cfg?.model ?? modelId
+  }
+}
+
+function emitErrorDetail(
+  window: BrowserWindow,
+  channel: string,
+  error: unknown,
+  extras?: ErrorDetailModelInfo
+): ApiErrorDetail {
+  const fetchDetail = lastFetchErrorByChannel.get(channel)
+  lastFetchErrorByChannel.delete(channel)
+  const attempts = lastFailoverByChannel.get(channel) ?? []
+  lastFailoverByChannel.delete(channel)
+  const detail = extractErrorDetail(error, fetchDetail)
+  const failover = attempts.map((a) => ({
+    ...resolveErrorDetailModelInfo(a.modelId),
+    modelId: a.modelId,
+    reason: extractErrorDetail(a.error).reason
+  }))
+  const modelInfo = {
+    ...resolveErrorDetailModelInfo(extras?.modelId ?? extras?.model),
+    ...extras
+  }
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "error_detail",
+      detail: {
+        ...detail,
+        ...modelInfo,
+        failover: failover.length > 0 ? failover : undefined
+      }
+    }
+  })
+  return detail
 }
 
 /**
@@ -2611,8 +3645,7 @@ async function judgeSkillWorthiness(
   threadId: string,
   context: SkillProposalWindowContext
 ): Promise<WorthinessResult | null> {
-  const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = getDefaultModelConfig()
   if (!config?.apiKey) {
     console.log(
       `[SkillEvolution][${threadId}] Worthiness LLM skipped: missing model config or API key`
@@ -2695,8 +3728,7 @@ async function generateSkillProposal(
   // both on the initial run and on manual retry.
   emitSkillGenerating(threadId, "start")
 
-  const configs = getCustomModelConfigs()
-  const config = configs[0]
+  const config = getDefaultModelConfig()
   if (!config?.apiKey) {
     emitSkillGenerating(threadId, "error", "未配置模型或 API Key，无法生成技能草稿")
     return null
@@ -2815,7 +3847,7 @@ async function confirmAndWriteSkillProposal(
   if (!skillId) return
 
   const confirmId = uuid()
-  const adopted = await requestSkillConfirmation({
+  const decision = await requestSkillConfirmation({
     threadId,
     requestId: confirmId,
     skillId,
@@ -2824,7 +3856,7 @@ async function confirmAndWriteSkillProposal(
     content: proposal.content
   })
 
-  if (!adopted) {
+  if (!decision.approved) {
     console.log(`[Agent][${threadId}] User rejected skill detail for "${proposal.name}"`)
     return
   }
@@ -2838,7 +3870,7 @@ async function confirmAndWriteSkillProposal(
   } catch (e) {
     console.warn("[event] failed to emit skill.proposal.accepted:", e)
   }
-  await writeSkillToDisk(skillId, proposal.content, proposal.name)
+  await writeSkillToDisk(skillId, decision.content ?? proposal.content, proposal.name)
 }
 
 /**
@@ -2865,6 +3897,7 @@ async function runSkillProposalFlow(
     requestId: intentId,
     summary: latestUserMessage.slice(0, 120),
     toolCallCount: context.toolCallCount,
+    turnCount: context.turnCount,
     mode: intentMode,
     recommendationReason,
     context
@@ -2981,6 +4014,8 @@ async function autoProposeSKill(
 
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
+  // Let the runtime's checkpointer LRU avoid evicting threads with a live run.
+  setCheckpointerBusyGuard(hasActiveAgentRun)
   if (!restoredRuntimeGoalsReconciled) {
     restoredRuntimeGoalsReconciled = true
     const pausedCount = goalStore.pauseActiveGoalsForRuntimeRestore()
@@ -3200,6 +4235,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     return isCoordinatorModeForcedByEnvironment()
   })
 
+  ipcMain.handle("agent:system-prompt-preview-access", async (): Promise<boolean> => {
+    return canPreviewSystemPrompt()
+  })
+
+  ipcMain.handle(
+    "agent:system-prompt-preview",
+    async (_event, { threadId }: { threadId: string }) => {
+      if (!canPreviewSystemPrompt()) return { prompt: null, updatedAt: null }
+      const preview = getCapturedSystemPromptPreview(threadId)
+      return preview
+        ? { prompt: preview.prompt, updatedAt: preview.updatedAt }
+        : { prompt: null, updatedAt: null }
+    }
+  )
+
   // Manual retry for skill generation — triggered when the user clicks the retry button
   // in the right panel after a generation failure.  Skips the intent banner (user already
   // accepted), jumps straight to generate → confirm → write.
@@ -3242,6 +4292,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     async (event, { threadId, message }: { threadId: string; message: string }) => {
       const window = BrowserWindow.fromWebContents(event.sender)
       const channel = `agent:stream:${threadId}`
+      // Drop any fetch-error / failover record captured by a previous turn so it
+      // can't be misattributed to this run's error detail.
+      lastFetchErrorByChannel.delete(channel)
+      lastFailoverByChannel.delete(channel)
       const goalCommand = parseGoalSlashCommand(message)
       const result = handleGoalNonStartingControlCommand({
         threadId,
@@ -3300,9 +4354,32 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
       const isTrustedCoordinatorNotificationInvoke =
         coordinatorInternalNotification === true && hasCoordinatorNotificationPrefixAtInvoke
+      // A completed background workflow delivers its result via an INTERNAL
+      // notification turn whose message is exactly WORKFLOW_NOTIFICATION_TURN_PROMPT
+      // (recognized at ~5100). Like the coordinator notification above, that turn
+      // must NOT be treated as a "user message" that preempts an active goal —
+      // otherwise a goal that launched a workflow is paused the instant its result
+      // arrives (with "user message preempted active goal") and never resumes.
+      // Both legs mirror the authoritative recognition below: full prompt match
+      // (a user pasting the trigger as ordinary text is unaffected) AND the thread
+      // actually being in workflow agent mode (a pasted byte-exact prompt in a
+      // non-workflow thread stays an ordinary user message and preempts normally).
+      const isWorkflowNotificationInvoke =
+        isWorkflowNotificationTurnMessage(message) &&
+        ((): boolean => {
+          try {
+            const thread = getThread(threadId)
+            if (!thread?.metadata) return false
+            const parsedMetadata = JSON.parse(thread.metadata) as Record<string, unknown>
+            return getAgentModeFromMetadata(parsedMetadata) === "workflow"
+          } catch {
+            return false
+          }
+        })()
       const channel = isTrustedCoordinatorNotificationInvoke
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
+      if (rejectAgentStartDuringShutdown(window, channel)) return
       let modelInputMessage = message
       let routingMessage = message
       let rootUserPrompt = message
@@ -3332,7 +4409,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return false
       }
 
-      if (!isTrustedCoordinatorNotificationInvoke) {
+      if (!isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke) {
         const goalCommand = parseGoalSlashCommand(message)
         if (goalCommand.type !== "none") {
           try {
@@ -3586,30 +4663,32 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Abort any existing stream for this thread before starting a new one
       // This prevents concurrent streams which can cause checkpoint corruption
-      const replacement = await withActiveRunReplacementLock(threadId, async () => {
-        const existingController = activeRuns.get(threadId)
-        if (existingController) {
-          if (isTrustedCoordinatorNotificationInvoke) {
-            return { ignoredInternalNotification: true as const }
+      const replacement = await withThreadRunMutationLock(threadId, () =>
+        withActiveRunReplacementLock(threadId, async () => {
+          const existingController = activeRuns.get(threadId)
+          if (existingController) {
+            if (isTrustedCoordinatorNotificationInvoke) {
+              return { ignoredInternalNotification: true as const }
+            }
+            console.log("[Agent] Aborting existing stream for thread:", threadId)
+            existingController.abort()
+            await waitForReplacedRunToSettle(threadId)
           }
-          console.log("[Agent] Aborting existing stream for thread:", threadId)
-          existingController.abort()
-          await waitForReplacedRunToSettle(threadId)
-        }
 
-        const nextAbortController = new AbortController()
-        activeRuns.set(threadId, nextAbortController)
-        let nextResolveActiveRunSettled: () => void = () => {}
-        const nextActiveRunSettledPromise = new Promise<void>((resolve) => {
-          nextResolveActiveRunSettled = resolve
+          const nextAbortController = new AbortController()
+          activeRuns.set(threadId, nextAbortController)
+          let nextResolveActiveRunSettled: () => void = () => {}
+          const nextActiveRunSettledPromise = new Promise<void>((resolve) => {
+            nextResolveActiveRunSettled = resolve
+          })
+          activeRunSettled.set(threadId, nextActiveRunSettledPromise)
+          return {
+            abortController: nextAbortController,
+            activeRunSettledPromise: nextActiveRunSettledPromise,
+            resolveActiveRunSettled: nextResolveActiveRunSettled
+          }
         })
-        activeRunSettled.set(threadId, nextActiveRunSettledPromise)
-        return {
-          abortController: nextAbortController,
-          activeRunSettledPromise: nextActiveRunSettledPromise,
-          resolveActiveRunSettled: nextResolveActiveRunSettled
-        }
-      })
+      )
       if ("ignoredInternalNotification" in replacement) {
         console.log(
           "[CoordinatorMode] ignoring internal worker notification turn while foreground run is active",
@@ -3635,6 +4714,38 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         isTrustedCoordinatorNotificationInvoke ? undefined : message,
         userMessageId
       )
+      const trimmedInitialMessage = message.trimStart()
+      const goalTranscriptBoundary = /^\/goal(?:\s|$)/i.test(trimmedInitialMessage)
+        ? goalManager.get(threadId)
+        : null
+      const shouldDeferUserTranscriptPersistence =
+        !isTrustedCoordinatorNotificationInvoke &&
+        (trimmedInitialMessage.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
+          trimmedInitialMessage.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX) ||
+          containsCoordinatorInternalMarker(message))
+      flushPendingStreamTranscriptMessages(threadId)
+      const durableRuntimeTail = await getDurableRuntimeTail(threadId, {
+        excludeMessageIds: userMessageId ? [userMessageId] : []
+      })
+      if (
+        durableRuntimeTail.persistedMessages.length > 0 &&
+        durableRuntimeTail.checkpointHasInterrupt
+      ) {
+        throw new Error(
+          "当前会话已有 checkpoint 之后的已恢复消息，旧的运行中断/审批状态已过期。请重新发送请求继续。"
+        )
+      }
+      let userTranscriptMessagePersisted = false
+      let visibleTranscriptUserMessage = message
+      if (!isTrustedCoordinatorNotificationInvoke && !shouldDeferUserTranscriptPersistence) {
+        persistVisibleUserTranscriptMessage(
+          threadId,
+          message,
+          userMessageId,
+          goalTranscriptBoundary
+        )
+        userTranscriptMessagePersisted = true
+      }
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
       const runToken = startTurnStateRun(turnState)
       let turnStateShouldDispose = false
@@ -3650,8 +4761,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       window.once("closed", onWindowClosed)
 
       // Resolve the Harness Board feature binding (if any) so traces can be
-      // linked back to the feature/project that owns this conversation.
-      let harnessFeatureBinding: { projectId: string; slug: string } | undefined
+      // linked back to the feature/project that owns this conversation. We also
+      // resolve the feature's *current stage* once per turn here and attach its
+      // human-readable name (group-label, e.g. "Dev-代码实现") plus the node's status
+      // at this turn (进行中/已完成/...) to the binding, so this turn's trace + code
+      // events are sliceable by stage and by status-within-stage. Best-effort: any
+      // failure leaves nodeName/nodeStatus absent (we never report the raw node id).
+      let harnessFeatureBinding: HarnessFeatureBindingContext | undefined
       try {
         const bindingThread = getThread(threadId)
         if (bindingThread?.metadata) {
@@ -3660,6 +4776,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       } catch {
         // Non-project threads or unparsable metadata: leave the trace untagged.
+      }
+      if (harnessFeatureBinding) {
+        const currentStage = resolveHarnessFeatureCurrentStage(
+          harnessFeatureBinding.projectId,
+          harnessFeatureBinding.slug
+        )
+        if (currentStage?.name)
+          harnessFeatureBinding = {
+            ...harnessFeatureBinding,
+            nodeName: currentStage.name,
+            ...(currentStage.status ? { nodeStatus: currentStage.status } : {})
+          }
       }
 
       // Start trace collection for this invocation (modelId resolved later)
@@ -3691,15 +4819,28 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return getThreadActiveSkills(threadId)
       }
 
+      const computeCodeGenAttributionSkillSource = (
+        currentRunSkills: string[],
+        currentRunSkillSource: string[]
+      ): string[] => {
+        if (currentRunSkills.length > 0) return currentRunSkillSource
+        return getThreadActiveSkillSource(threadId)
+      }
+
       const syncUsedSkillsContext = (): void => {
         const currentRunSkills = skillUsageDetector.getUsedSkillNames()
+        const currentRunSkillSource = skillUsageDetector.getUsedSkillSourceRefs()
         tracer.setUsedSkills(currentRunSkills)
+        tracer.setSkillSource(currentRunSkillSource)
         tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
         // A non-empty current-run skill set becomes (supersedes) the thread's
         // active skills; a skill-less run leaves the prior active set intact.
-        if (currentRunSkills.length > 0) setThreadActiveSkills(threadId, currentRunSkills)
+        if (currentRunSkills.length > 0) {
+          setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource)
+        }
         setAdoptionContext(threadId, {
-          usedSkills: computeCodeGenAttributionSkills(currentRunSkills)
+          usedSkills: computeCodeGenAttributionSkills(currentRunSkills),
+          skillSource: computeCodeGenAttributionSkillSource(currentRunSkills, currentRunSkillSource)
         })
       }
 
@@ -3878,6 +5019,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+        sendFailureFuseNotice(window, channel, decision)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -3935,6 +5078,52 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         CoordinatorSelectedSkill | undefined
       > = {}
       let isCoordinatorNotificationTurn = false
+      // True for ANY internal notification turn (coordinator OR workflow). Used
+      // to suppress user-facing side effects (pet notices, ChatX, memory write,
+      // skill evolution) that must not fire for an internal "report the result"
+      // turn. auto-commit is intentionally NOT suppressed: it still commits any
+      // edits THIS turn itself makes via a fresh snapshot. It does NOT commit a
+      // background workflow's edits — those are left in the working tree for the
+      // user to review (see the workflow notification block below for why).
+      let isInternalNotificationTurn = false
+      // True ONLY for a workflow completion turn (NOT coordinator). Used to skip
+      // user Stop hooks for it: a background workflow's result can ONLY arrive via
+      // this single report turn, so a plugin Stop hook blocking it would lose the
+      // result permanently. Coordinator deliberately keeps HEAD behavior (Stop
+      // hooks fire) — its worker result is re-discoverable on the next hydrate.
+      let isWorkflowNotificationTurn = false
+      // Set when this turn is reporting a workflow completion notification. The
+      // run is only marked in-flight IN MEMORY here; the durable `delivered` flag
+      // is persisted on SUCCESS (so a crash mid-turn re-reports — at-least-once,
+      // mirroring coordinator). On SUCCESS we markNotified + clear in-flight; on
+      // FAILURE we just clear in-flight (delivered stays false → re-reportable).
+      // Carries workspacePath because that is block-scoped inside the try.
+      // `startedAt` pins the run INSTANCE this notification was built from: a resume
+      // reuses the runId, so the ack must not land on a newer instance (see
+      // setWorkflowRunNotified's instance fence).
+      let workflowNotificationToSettle:
+        | { workspacePath: string; runId: string; startedAt: string }
+        | undefined
+
+      // When THIS turn delivers a background workflow's completion notification,
+      // the workflow's <task-notification> result arrives as a synthetic
+      // user-role message (modelInputMessage) — which the goal evaluator never
+      // sees (it reads only assistantResponse + per-turn tool evidence). Worse,
+      // the `workflow` TOOL CALL that launched the run happened in an EARLIER
+      // sub-turn that was DEFERRED (kept active, never evaluated). So the turn
+      // that IS evaluated (this delivery turn) carries no proof a workflow ran,
+      // and the evaluator false-negatives ("agent didn't use a workflow") on a
+      // goal that actually succeeded. Capture the delivered result here and
+      // inject it as one tool-evidence entry for THIS turn's evaluation only
+      // (consumed at the goal-eval site so continuation sub-turns don't re-see
+      // a stale result). Set from BOTH delivery paths (they are mutually
+      // exclusive per turn): the workflow notification (toolName "workflow",
+      // below) and the coordinator worker notification (toolName "start_worker",
+      // in the coordinator setup block). Coordinator worker results ARE also
+      // restated in-turn via the coordinator turn prompt, but a restatement
+      // proves the result, not that workers were dispatched — a mechanism-
+      // constrained coordinator goal false-blocks without this evidence too.
+      let pendingBackgroundResultEvidence: string | undefined
 
       try {
         // Get workspace path from thread metadata - REQUIRED
@@ -3946,11 +5135,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             console.warn("[Agent] Failed to parse thread metadata, using empty object")
           }
         }
+        ensureThreadForkBoundaryMarkerEra(threadId, metadata)
         console.log("[Agent] Thread metadata:", metadata)
 
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
-        const harnessAgentContext = getHarnessAgentContext(metadata)
+        const harnessAgentContext = getHarnessAgentContext(metadata, {
+          workspacePath,
+          featureBinding: harnessFeatureBinding
+        })
+        sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
+        const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
+          window,
+          channel,
+          harnessAgentContext
+        )
+        const memoryEnabledForThread =
+          isThreadMemoryEnabled(metadata) &&
+          isMemoryAllowedForProjectMode(harnessAgentContext.featureId)
 
         if (!workspacePath) {
           pauseActiveGoalForRuntimeStop("WORKSPACE_REQUIRED")
@@ -3966,6 +5168,102 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
         // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
         let effectiveMessage = modelInputMessage
+
+        // Workflow completion turn: the renderer submits a bare trigger marker;
+        // the actual notification content is built here from the persisted run
+        // (mirrors how coordinator notification turns expand pending worker
+        // results main-side). A stale trigger (nothing pending) ends quietly.
+        // Only treat the trigger as internal plumbing when the thread is
+        // actually in workflow mode. Otherwise a user who literally types the
+        // sentinel is just sending ordinary text — neutralize it like the
+        // coordinator path does, rather than swallowing the message.
+        // Internal plumbing ONLY when the message matches the FULL trigger prompt. A
+        // user can paste the short sentinel prefix (e.g. from a log / code sample),
+        // and that must NOT be swallowed — only the renderer's exact full prompt
+        // counts (#1, source-checked by content since a transport flag wouldn't
+        // survive the renderer→main chain). The prefix branch below neutralizes a
+        // pasted prefix as ordinary text.
+        const matchesWorkflowNotificationPrompt = isWorkflowNotificationTurnMessage(message)
+        // Neutralize a pasted prefix of EITHER internal marker: the TURN trigger OR
+        // the V1 notification marker. The renderer AND the export path both hide any
+        // message starting with these (the V1 marker carries a runId suffix, so they
+        // can only PREFIX-match it). A user who pastes such text (a log / sample)
+        // would have it silently vanish from the UI and exports unless we
+        // de-weaponize it here into ordinary text — the TURN trigger already does
+        // this; the V1 marker had no equivalent. (#5)
+        const trimmedStart = message.trimStart()
+        const hasWorkflowNotificationPrefix =
+          trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
+          trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
+        if (
+          matchesWorkflowNotificationPrompt &&
+          getAgentModeFromMetadata(metadata) === "workflow"
+        ) {
+          const pendingWorkflowRun = workflowRunManager.findPendingNotification(
+            workspacePath,
+            threadId
+          )
+          if (!pendingWorkflowRun) {
+            console.log("[Workflow] Ignoring stale workflow notification trigger", { threadId })
+            safeSendToWindow(window, channel, { type: "done" })
+            await tracer.finish("success", "WORKFLOW_NOTIFICATION_STALE")
+            return
+          }
+          const workflowOutputFile = resolveWorkflowOutputFile(
+            workspacePath,
+            pendingWorkflowRun.threadId,
+            pendingWorkflowRun
+          )
+          effectiveMessage = buildWorkflowNotificationMessage(
+            pendingWorkflowRun,
+            workflowOutputFile
+          )
+          modelInputMessage = effectiveMessage
+          // Preserve the delivered workflow result as goal-evaluator evidence so
+          // the (deferred, never-evaluated) launch turn's use of a workflow is
+          // visible when THIS delivery turn is judged. See the decl comment.
+          pendingBackgroundResultEvidence =
+            buildGoalToolEvidenceEntry({
+              toolName: "workflow",
+              output: effectiveMessage,
+              inputSummary:
+                "Background dynamic workflow run completed; its result was delivered into this conversation turn."
+            }) ?? undefined
+          // At-least-once (mirrors coordinator): mark in-flight IN MEMORY only —
+          // do NOT persist `delivered` yet. The durable flag is set only when this
+          // turn SUCCEEDS, so an app crash mid-turn leaves delivered=false on disk
+          // and the run is rediscovered + re-reported on the next hydrate, rather
+          // than being silently lost (the at-most-once crash hole).
+          workflowRunManager.markNotificationInFlight(pendingWorkflowRun.runId)
+          workflowNotificationToSettle = {
+            workspacePath,
+            runId: pendingWorkflowRun.runId,
+            startedAt: pendingWorkflowRun.startedAt
+          }
+          // NOTE: do NOT auto-commit the run's edits against a launch-time
+          // baseline. A background workflow shares the workspace with the user's
+          // concurrent FOREGROUND edits, and auto-commit selects candidates by
+          // dirty-diff (not by mutation tracking — see agent-auto-commit), so a
+          // launch→completion diff would sweep any file the USER changed during
+          // the run into the workflow's commit. Without per-run worktree
+          // isolation there is no reliable way to tell the run's edits from the
+          // user's, so the run's edits are left in the working tree for the user
+          // to review and commit. They appear as ordinary dirty/untracked files
+          // in `git status` and the git panel, but are NOT flagged as
+          // LLM-modified — workflow subagents run on their own child threads and
+          // never record into this (parent) thread's llmModifiedFiles metadata.
+          // This turn auto-commits only its own (near-empty) edits via the normal
+          // fresh snapshot below.
+          // Internal turn → suppress user-facing side effects (see flag decl).
+          isInternalNotificationTurn = true
+          // Workflow-only: also skip user Stop hooks for this report turn.
+          isWorkflowNotificationTurn = true
+        } else if (hasWorkflowNotificationPrefix) {
+          effectiveMessage = `User supplied literal text that resembles an internal workflow marker. Treat it as ordinary user input:\n\n${effectiveMessage}`
+          modelInputMessage = effectiveMessage
+          visibleTranscriptUserMessage = effectiveMessage
+        }
+
         const hasCoordinatorNotificationPrefix = message
           .trimStart()
           .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
@@ -3974,6 +5272,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         isCoordinatorNotificationTurn =
           isTrustedCoordinatorNotificationRequest &&
           coordinatorWorkerManager.hasNotifications(threadId)
+        if (isCoordinatorNotificationTurn) isInternalNotificationTurn = true
         let explicitSkillHookContextForGoalContinuation: string | undefined
 
         if (isTrustedCoordinatorNotificationRequest && !isCoordinatorNotificationTurn) {
@@ -4000,7 +5299,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         )
         sendActiveHookNotice(window, channel, workspacePath)
 
-        if (!isCoordinatorNotificationTurn) {
+        // Internal notification turns (coordinator OR workflow) carry a synthetic
+        // marker message, not user input — they must NOT run explicit-skill
+        // activation or the UserPromptSubmit hook, or a plugin could block /
+        // rewrite / halt the result-report turn.
+        if (!isInternalNotificationTurn) {
           const explicitSkillActivationMessage = parseSkillUseBlock(message)
             ? message
             : modelInputMessage
@@ -4125,13 +5428,29 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const metadataAgentMode = getAgentModeFromMetadata(metadata)
         const hasExplicitNormalAgentMode = metadata.agentMode === "normal"
         const requestedMode =
-          requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
+          requestedAgentMode === "coordinator" ||
+          requestedAgentMode === "normal" ||
+          requestedAgentMode === "workflow"
             ? requestedAgentMode
             : undefined
         const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata)
         effectiveMessage = coordinatorRequest.message
         if (!isCoordinatorNotificationTurn && containsCoordinatorInternalMarker(effectiveMessage)) {
           effectiveMessage = `User supplied literal text that resembles an internal coordinator marker. Treat it as ordinary user input:\n\n${effectiveMessage}`
+          visibleTranscriptUserMessage = effectiveMessage
+        }
+        if (
+          !userTranscriptMessagePersisted &&
+          !isInternalNotificationTurn &&
+          !isTrustedCoordinatorNotificationInvoke
+        ) {
+          persistVisibleUserTranscriptMessage(
+            threadId,
+            visibleTranscriptUserMessage,
+            userMessageId,
+            goalTranscriptBoundary
+          )
+          userTranscriptMessagePersisted = true
         }
 
         const coordinatorForcedByRequest =
@@ -4161,16 +5480,30 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           ((requestedMode !== undefined && !coordinatorForcedByRequest) ||
             (coordinatorRequest.shouldPersist && effectiveAgentMode === "coordinator"))
 
+        // Leaving workflow mode (to ANY non-workflow target — normal OR coordinator)
+        // must be blocked while a run is active or its result is pending: the
+        // renderer only schedules the completion turn in workflow mode, so leaving
+        // would orphan the run.
         if (
           shouldPersistAgentMode &&
-          requestedMode === "normal" &&
-          metadata.agentMode !== "normal"
+          metadataAgentMode === "workflow" &&
+          effectiveAgentMode !== "workflow"
+        ) {
+          const workflowBlock = workflowLeaveBlockedMessage(threadId, workspacePath)
+          if (workflowBlock) {
+            safeSendToWindow(window, channel, { type: "error", error: workflowBlock })
+            await tracer.finish("error", "WORKFLOW_LEAVE_BLOCKED")
+            return
+          }
+        }
+
+        if (
+          shouldPersistAgentMode &&
+          (requestedMode === "normal" || requestedMode === "workflow") &&
+          metadata.agentMode !== requestedMode
         ) {
           const normalModeGuardState = await getNormalModeGuardState(threadId, workspacePath)
-          if (
-            normalModeGuardState.unresolvedWorkers.length > 0 ||
-            normalModeGuardState.hasPendingNotifications
-          ) {
+          if (isNormalModeBlocked(normalModeGuardState)) {
             const errorMessage = buildNormalModeGuardMessage(normalModeGuardState)
             safeSendToWindow(window, channel, {
               type: "error",
@@ -4196,7 +5529,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           effectiveAgentMode
         })
 
-        if (effectiveAgentMode === "normal") {
+        if (effectiveAgentMode !== "coordinator") {
           await coordinatorWorkerManager.restoreWorkersForThread({
             parentThreadId: threadId,
             workspacePath,
@@ -4213,10 +5546,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onUpdateKey: channel
           })
           const normalModeGuardState = await getNormalModeGuardState(threadId)
-          if (
-            normalModeGuardState.unresolvedWorkers.length > 0 ||
-            normalModeGuardState.hasPendingNotifications
-          ) {
+          if (isNormalModeBlocked(normalModeGuardState)) {
             const errorMessage = buildNormalModeGuardMessage(normalModeGuardState)
             safeSendToWindow(window, channel, {
               type: "error",
@@ -4245,10 +5575,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         // Sync FTS index with any memory files changed since last invocation
-        if (isMemoryEnabled()) {
+        if (memoryEnabledForThread) {
           try {
-            const memoryStore = await getMemoryStore()
-            memoryStore.syncMemoryFiles()
+            const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
+            const dirs = [
+              memoryDirs.global.dir,
+              ...(memoryDirs.project ? [memoryDirs.project.dir] : [])
+            ]
+            await Promise.all(
+              dirs.map(async (dir) => {
+                const memoryStore = await getMemoryStore(dir)
+                memoryStore.syncMemoryFiles()
+              })
+            )
           } catch {
             /* non-critical */
           }
@@ -4323,6 +5662,28 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             promptNotifications.length > 0
               ? buildCoordinatorNotificationHumanMessage(promptNotifications)
               : undefined
+          // Symmetric to the workflow bridge (see pendingBackgroundResultEvidence
+          // decl): a coordinator worker-notification DELIVERY turn surfaces worker
+          // results only via the coordinator turn prompt, which the model restates
+          // in-turn — enough to prove the RESULT, but not that workers were
+          // actually dispatched (the start_worker calls happened in an EARLIER,
+          // DEFERRED, never-evaluated turn). So a mechanism-constrained goal
+          // ("must dispatch workers / coordinator must not count directly")
+          // false-blocks: the evaluator sees a summary with no tool-call evidence
+          // of dispatch. Capture the delivered <task-notification> results as one
+          // start_worker evidence entry for THIS turn's evaluation only (consumed
+          // at the goal-eval site alongside the workflow bridge).
+          if (promptNotifications.length > 0) {
+            pendingBackgroundResultEvidence =
+              buildGoalToolEvidenceEntry({
+                toolName: "start_worker",
+                output: promptNotifications
+                  .map((notification) => notification.message)
+                  .join("\n\n"),
+                inputSummary:
+                  "Background coordinator workers were dispatched and returned; their results were delivered into this conversation turn."
+              }) ?? undefined
+          }
           persistedCoordinatorTurnPromptForMetadata =
             buildCoordinatorTurnContextPrompt(runningWorkerContext)
           activeCoordinatorTurnPrompts.set(threadId, coordinatorTurnPrompt)
@@ -4448,7 +5809,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               })
 
-        const humanMessages = [
+        const humanMessages: BaseMessage[] = [
+          ...durableRuntimeTail.messages,
           coordinatorNotificationHumanMessage
             ? new HumanMessage({
                 content: coordinatorNotificationHumanMessage,
@@ -4458,7 +5820,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             : undefined,
           userHumanMessage
-        ].filter((message): message is HumanMessage => message !== undefined)
+        ].filter((message): message is BaseMessage => message !== undefined)
         let currentTurnUserMessageForEvidence =
           coordinatorNotificationHumanMessage ?? effectiveMessage
         const streamConfig = {
@@ -4477,6 +5839,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           invokeRoutingResult?.layer !== "pinned"
         )
         const failoverAttempts: FailoverAttempt[] = []
+        // Expose this turn's attempts to the catch handler (same array ref).
+        lastFailoverByChannel.set(channel, failoverAttempts)
         const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         usedModelId = effectiveModelId
         const isFirstAttempt = true
@@ -4502,12 +5866,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -4549,10 +5915,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend if failover happened — update model display + context window
         const notifyFailover = (): void => {
           if (failoverAttempts.length > 0 && usedModelId !== effectiveModelId) {
-            const usedCfgId = usedModelId?.startsWith("custom:")
-              ? usedModelId.slice("custom:".length)
-              : usedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(usedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {
@@ -4594,10 +5957,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // response metadata once the first AI message arrives (see response_metadata.model_name below).
         if (effectiveModelId) {
           tracer.setModelId(effectiveModelId)
-          const cfgIdForName = effectiveModelId.startsWith("custom:")
-            ? effectiveModelId.slice("custom:".length)
-            : effectiveModelId
-          const cfgForName = getCustomModelConfigs().find((c) => c.id === cfgIdForName)
+          const cfgForName = getModelConfigByRef(effectiveModelId)
           // Use config.model (the actual API model name) as fallback, not config.name (display label)
           if (cfgForName?.model) tracer.setModelName(cfgForName.model)
         }
@@ -4755,12 +6115,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           return ""
         }
 
-        const forwardStreamChunk = (mode: string, payload: unknown): void => {
+        const forwardStreamChunk = (mode: string, payload: unknown): string | null => {
+          const messageId = persistStreamTranscriptChunk(threadId, mode, payload, {
+            deferFlush: true
+          })
           safeSendToWindow(window, channel, {
             type: "stream",
             mode,
             data: sanitizeStreamDataForRenderer(mode, payload)
           })
+          return messageId
         }
 
         const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
@@ -5115,11 +6479,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
 
-            const finalMsgs = state.messages.filter((m) => {
+            const finalMsgs = state.messages.slice(valuesStartIndex).filter((m) => {
               const cn = Array.isArray(m.id) ? m.id[m.id.length - 1] || "" : ""
               const kw = m.kwargs || {}
+              const isAiMessage = cn.includes("AI") || kw.type === "ai"
               return (
-                cn.includes("AI") &&
+                isAiMessage &&
                 (!kw.tool_calls || !Array.isArray(kw.tool_calls) || kw.tool_calls.length === 0)
               )
             })
@@ -5159,6 +6524,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           usedModelId ? orderedChain.indexOf(usedModelId) + 1 : orderedChain.length
         )
         let activeStream: AsyncIterable<unknown> = stream
+        let streamDisconnectRetries = 0
+        let latestStableStreamMessages: unknown[] = []
+        const inFlightStreamMessageIds = new Set<string>()
+        let pendingMessageSideEffectPayloads: unknown[] = []
 
         const acknowledgeDeliveredCoordinatorNotificationsIfNeeded = async (): Promise<void> => {
           if (
@@ -5179,6 +6548,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const consumeStreamWithSideEffects = async (
           source: AsyncIterable<unknown>
         ): Promise<void> => {
+          const commitPendingMessageSideEffects = async (): Promise<void> => {
+            for (const payload of pendingMessageSideEffectPayloads) {
+              await processChunkSideEffects("messages", payload)
+              stopContextCollector.processStreamChunk("messages", payload)
+            }
+            pendingMessageSideEffectPayloads = []
+          }
+
           throwIfInvokeAborted()
           latestSerializedValuesMessagesForGoalFlush = []
           try {
@@ -5195,14 +6572,36 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               if (mode === "values") {
                 latestSerializedValuesMessagesForGoalFlush =
                   extractSerializedValuesMessages(serialized)
+                latestStableStreamMessages = extractSerializedValuesMessages(
+                  sanitizeStreamDataForRenderer(mode, serialized)
+                )
+                flushPendingStreamTranscriptMessages(threadId)
+                inFlightStreamMessageIds.clear()
               }
               // UI forwarding is the primary path. Trace / metrics / skill-evolution
               // processing below are side effects and must never block streaming.
-              forwardStreamChunk(mode, serialized)
-              await processChunkSideEffects(mode, serialized)
-              stopContextCollector.processStreamChunk(mode, serialized)
+              const messageId = forwardStreamChunk(mode, serialized)
+              if (messageId) inFlightStreamMessageIds.add(messageId)
+              if (mode === "messages") {
+                pendingMessageSideEffectPayloads.push(serialized)
+              } else {
+                await commitPendingMessageSideEffects()
+                await processChunkSideEffects(mode, serialized)
+                stopContextCollector.processStreamChunk(mode, serialized)
+              }
             }
+            await commitPendingMessageSideEffects()
+            flushPendingStreamTranscriptMessages(threadId)
+            inFlightStreamMessageIds.clear()
           } catch (error) {
+            pendingMessageSideEffectPayloads = []
+            resetFailedStreamAttempt(
+              window,
+              channel,
+              threadId,
+              latestStableStreamMessages,
+              inFlightStreamMessageIds
+            )
             latestSerializedValuesMessagesForGoalFlush = []
             throw error
           }
@@ -5249,12 +6648,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
+            onFailureFuseNotice,
             hookTurnId: turnState.turnId,
             onHookSkippedFactory,
             hookScope,
             skillHookKeys,
             skillUseTracker,
             ...harnessAgentContext,
+            onAgentsPromptLoadStatus,
             onFileMutation: autoCommit.onFileMutation,
             onCoordinatorWorkerHookResult,
             onCoordinatorWorkerEvent,
@@ -5318,19 +6719,38 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeStreamWithSideEffects(activeStream)
             break // Stream completed successfully
           } catch (midStreamErr) {
-            if (!isRetryableApiError(midStreamErr) || remainingCandidates.length === 0) {
-              throw midStreamErr
+            const currentAgent = agent
+            if (!currentAgent) throw midStreamErr
+            const retry = await retryStreamAfterDisconnect(
+              midStreamErr,
+              streamDisconnectRetries,
+              window,
+              channel,
+              abortController.signal,
+              "Mid-stream",
+              usedModelId,
+              () => currentAgent.stream(null, streamConfig)
+            )
+            streamDisconnectRetries = retry.retries
+            if (retry.stream) {
+              activeStream = retry.stream
+              continue
             }
-            if (abortController.signal.aborted) throw midStreamErr
+            clearStreamDisconnectRetry(window, channel)
+            const error = retry.error
+            if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
+              throw error
+            }
+            if (abortController.signal.aborted) throw error
 
             const failedModelId = usedModelId ?? "unknown"
             failoverAttempts.push({
               modelId: failedModelId,
-              error: String(midStreamErr),
+              error: String(error),
               timestamp: Date.now()
             })
             console.warn(
-              `[Agent][Failover] Mid-stream ${failedModelId} failed: ${midStreamErr}, trying next...`
+              `[Agent][Failover] Mid-stream ${failedModelId} failed: ${error}, trying next...`
             )
 
             if (!abortController.signal.aborted) {
@@ -5355,12 +6775,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -5384,11 +6806,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               abortSignal: abortController.signal,
               getStopContext: () =>
                 stopContextCollector.snapshot({
-                  userMessage: isCoordinatorNotificationTurn ? undefined : message,
+                  userMessage: isInternalNotificationTurn ? undefined : message,
                   assistantResponse: getCurrentAssistantResponse(),
                   toolCalls: getCurrentTurnToolCalls(),
                   usedSkills: skillUsageDetector.getUsedSkillNames()
                 }),
+              // WORKFLOW notification turns only must not be subject to user Stop
+              // hooks: a background workflow's result can ONLY arrive via this one
+              // report turn, so a plugin blocking/halting it would suppress the
+              // report AND (success-path return, not the catch) skip the E
+              // rollback, losing the result permanently. Returning null = "no stop
+              // hook fired" → completion proceeds normally. Coordinator KEEPS HEAD
+              // behavior (Stop hooks fire) — its worker result is re-discoverable
+              // on the next thread hydrate, so the same loss risk does not apply.
+              runStopHooks: isWorkflowNotificationTurn ? async () => null : undefined,
               runRevision: async (revisionPrompt) => {
                 if (!agent)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
@@ -5421,6 +6852,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (completionOutcome === "halted") {
               markInvokeIncomplete("Stop hook halted the turn.")
               pauseActiveGoalForRuntimeStop("Stop hook halted the turn.")
+              // A halted workflow-notification turn must NOT fall through to
+              // the success settlement below the loop — that would persist
+              // delivered=true for a report the model never finished, silently
+              // burying the run's result. Release the in-flight mark and keep
+              // delivered=false (the catch documents the same halt philosophy
+              // for the thrown shape): the next hydrate/restart re-surfaces it.
+              if (workflowNotificationToSettle) {
+                workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+                workflowNotificationToSettle = undefined
+              }
               break
             }
 
@@ -5439,13 +6880,158 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             sendGoalSubturnComplete()
 
+            // 后台工作(workflow run / coordinator worker)的结果只经各自专门的通知回合
+            // 回灌(本运行时无同回合阻塞读取)。在"结果注定要来但还没进对话证据"的窗口内
+            // defer——保持 goal active、不消耗预算、直接结束本回合;结果到齐后的通知回合再
+            // 经 getActive 重新驱动评估。若不 defer,评估器会拿着不全证据每子回合注入一次
+            // "继续",直到 maxTurns 被烧光("空催"),或据半份结果误判。"结果注定要来"的
+            // 兜底:两侧各有 inactivity 看门狗,卡死即强制终态+通知,故 defer 不会变无限等待。
+            //
+            // 用"专用谓词"而非泛 isBusyForThread(后者把当前正在投递的 in-flight 通知也算
+            // busy → 连投递回合都 defer → goal 永远评估不了)。下面 5 条覆盖从发起到投递的
+            // 各个可观测 pending 状态,每条都保证不把"本回合正在投递的那份"算进来(否则自
+            // defer 死锁):
+            //   1) workflow 运行中(isActive)。
+            //   2) worker 运行中(hasRunningWorkersForThread,查 status)。
+            //   3) worker 已终态、通知已入队未投递(hasAutoRunnableNotifications)——
+            //      coordinator 通知回合在 goal 检查前已 drainNotifications 删本批,故只反映
+            //      drain 之后新到的;排除 suppress 避免永久 defer。
+            //   4) worker 已终态、通知"尚未入队"的 terminalPersistPromise 窄窗
+            //      (hasTerminalWorkerAwaitingNotificationForThread)——补齐第 3 条更早的一段;
+            //      enqueueNotification 首行即置 notificationEnqueued,故当前投递那份不命中;
+            //      排除 suppress/dismiss。(第 3、4 条合起来覆盖 worker 全部"可观测"窗口;
+            //      status 翻终态→terminalPersistPromise 设值之间那段是同步 JS、无其它回合
+            //      插入,不算可观测窗,无需覆盖。)
+            //   5) workflow 已终态、通知已可被发现的 pending(快完成/秒挂的 run 可在 launch
+            //      回合自身撞上:tool 返回后 run 很快 active.delete,但结果还没进证据)。
+            //      注意:workflow 每线程同一时刻只有一个 ACTIVE run,但可有多个"已终态待投递"
+            //      的通知(backlog:一回合投一个、ack 后 kick 下一个)。此处**不能**像 auto-commit
+            //      那样靠 markNotified 排除本 run——goal 检查在设置块(markNotified,~6990)之前跑,
+            //      本 run 此刻仍 in-flight。所以用 hasDeliverablePendingNotificationExcept 精确
+            //      排除"本回合正在投递的那个实例"(按 runId+startedAt,因为 resume 复用 runId),
+            //      而非整回合豁免——否则 backlog(A 投递中、B 也 pending;或 A 在本回合被 resume
+            //      成新实例)会被漏掉,goal 拿半份证据在 A 回合就评估。非通知回合 settle=undefined
+            //      →不排除→照常拦快 workflow。
+            // 诚实边界:仅剩 workflow 一个可观测残余窗**故意不追**——run active.delete() 之后、
+            // pending 通知注册进 run-manager 之前的 flush 瞬间(第 5 条靠该谓词发现,而那一刻
+            // 通知还没注册)。异步 flush 时长级、自愈(结果随后经通知回合送达重驱),追它要在
+            // run-manager 加"终态未注册"谓词,ROI 不值。故表述为"覆盖所有可观测 pending 状态,
+            // 除此微窗",不说"完整时序"。
+            const workflowPendingExcludingThisDelivery =
+              Boolean(workspacePath) &&
+              workflowRunManager.hasDeliverablePendingNotificationExcept(
+                workspacePath as string,
+                threadId,
+                workflowNotificationToSettle
+                  ? {
+                      runId: workflowNotificationToSettle.runId,
+                      startedAt: workflowNotificationToSettle.startedAt
+                    }
+                  : undefined
+              )
+            if (
+              shouldDeferGoalForActiveBackgroundWork(
+                workflowRunManager.isActive(threadId) ||
+                  coordinatorWorkerManager.hasRunningWorkersForThread(threadId) ||
+                  coordinatorWorkerManager.hasAutoRunnableNotifications(threadId) ||
+                  coordinatorWorkerManager.hasTerminalWorkerAwaitingNotificationForThread(threadId) ||
+                  workflowPendingExcludingThisDelivery
+              )
+            ) {
+              // This DELIVERY turn is deferring (another background result is
+              // still pending). Its own delivered result would otherwise die
+              // with this invoke's stack (the notification is already acked and
+              // never re-fires) — park it so the eventual evaluation sees every
+              // delivered batch, not just the final one.
+              //
+              // Also park the turn's ORDINARY tool evidence: workflow-mode main
+              // agents keep the full fs middleware (mainFilesystemEnabled is
+              // only false for coordinator), so a deferring delivery turn may
+              // have run its own verification greps/reads whose outputs would
+              // equally die with the stack. Combined into ONE bounded entry,
+              // stashed as "supplementary": on cap overflow the stash evicts
+              // supplementary entries before ANY batch — batches are
+              // irreplaceable, this has conversation-history redundancy.
+              // The tool-call NAME list rides along in the same entry: a call
+              // with empty/filtered output appears in toolCalls but produces NO
+              // evidence entry (buildGoalToolEvidenceEntry returns null on
+              // blank output), and mechanism goals care about "was X called at
+              // all" — evidence alone cannot always answer that.
+              const deferredTurnEvidence = getCurrentTurnGoalToolEvidence()
+              const deferredTurnToolCalls = getCurrentTurnToolCalls()
+              if (deferredTurnEvidence.length > 0 || deferredTurnToolCalls.length > 0) {
+                goalBackgroundEvidenceStash.stash(
+                  threadId,
+                  activeGoal.goalId,
+                  trimContent(
+                    [
+                      deferredTurnToolCalls.length > 0
+                        ? `Deferred sub-turn tool calls: ${deferredTurnToolCalls.join(", ")}`
+                        : "",
+                      deferredTurnEvidence.length > 0
+                        ? `Tool evidence from an earlier deferred sub-turn:\n${deferredTurnEvidence.join("\n\n")}`
+                        : ""
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n")
+                  ),
+                  "supplementary"
+                )
+              }
+              if (pendingBackgroundResultEvidence) {
+                goalBackgroundEvidenceStash.stash(
+                  threadId,
+                  activeGoal.goalId,
+                  pendingBackgroundResultEvidence
+                )
+                pendingBackgroundResultEvidence = undefined
+              }
+              sendGoalNotice("正在等待后台任务结果，目标暂缓推进（后台任务完成后自动继续）。")
+              break
+            }
+
+            // Prepend background-delivery evidence as tool evidence, oldest
+            // first: (a) results whose delivery turns DEFERRED earlier (parked
+            // in the stash — backlog batches A.. while B was pending), then (b)
+            // this turn's own delivered result. Both are consume-once so later
+            // continuation sub-turns don't re-inject stale results. This lets
+            // the evaluator credit the (deferred, unevaluated) launch turn's
+            // workflow/worker use across ALL delivered batches, not just the
+            // final one. See pendingBackgroundResultEvidence + stash decls.
+            // peek, NOT consume: the evaluator await below is a failure window
+            // (user abort / model error). Discard only after the verdict is
+            // recorded, so a failed attempt leaves the stashed batches intact
+            // for the re-driven turn (see peek's doc for the at-least-once
+            // rationale).
+            const stashedBackgroundEvidence = goalBackgroundEvidenceStash.peek(
+              threadId,
+              activeGoal.goalId
+            )
+            const currentTurnGoalToolEvidence = getCurrentTurnGoalToolEvidence()
+            // Captured (not just read) so the runtime-failure branch below can
+            // re-stash THIS turn's delivered batch — the notification is acked
+            // on this turn's normal completion and never re-fires.
+            const currentDeliveryEvidence = pendingBackgroundResultEvidence
+            const goalToolEvidence = [
+              ...stashedBackgroundEvidence,
+              ...(currentDeliveryEvidence ? [currentDeliveryEvidence] : []),
+              ...currentTurnGoalToolEvidence
+            ]
+            pendingBackgroundResultEvidence = undefined
             const goalEvaluationInput = {
               goal: activeGoal,
               assistantResponse: getCurrentAssistantResponse(),
               toolCalls: getCurrentTurnToolCalls(),
-              toolEvidence: getCurrentTurnGoalToolEvidence(),
+              toolEvidence: goalToolEvidence,
               usedSkills: skillUsageDetector.getUsedSkillNames()
             }
+            // True when the recorded verdict was SYNTHESIZED by the runtime-
+            // retry wrapper because the evaluator never ran to completion (all
+            // retries exhausted). Such a verdict never saw the peeked stash —
+            // the goal pauses with "evaluator unavailable, /goal resume later",
+            // and that later re-evaluation must still find the batches, so the
+            // discard below is skipped for it.
+            let evaluatorRuntimeFailedThisSubturn = false
             const judgeDecision: GoalJudgeDecision = shouldPauseGoalForEmptyTurn(
               goalEvaluationInput
             )
@@ -5467,9 +7053,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   },
                   onFinalFailure: (error) => {
                     console.warn("[Goal] evaluator failed after retry:", error)
+                    evaluatorRuntimeFailedThisSubturn = true
                     return {
                       verdict: "blocked",
-                      reason: "评估器暂时不可用。Goal 已暂停，请稍后使用 /goal resume 重试。"
+                      reason: formatGoalEvaluatorRuntimeFailureReason(error)
                     }
                   }
                 })
@@ -5478,6 +7065,47 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               expectedGoalId: activeGoal.goalId,
               expectedActiveWindowId: activeGoal.activeWindowId
             })
+            // The verdict that saw the peeked batches is now recorded — safe to
+            // drop them (also prevents continuation sub-turns re-injecting). Two
+            // exceptions keep the batches: a stale-window null outcome (goal
+            // changed; the bucket self-heals via its goalId scope) and a
+            // runtime-synthesized failure verdict (the evaluator never saw the
+            // batches; the post-resume re-evaluation still needs them).
+            if (outcome && !evaluatorRuntimeFailedThisSubturn) {
+              goalBackgroundEvidenceStash.discard(threadId)
+            } else if (outcome && evaluatorRuntimeFailedThisSubturn) {
+              // The evaluator never ran, but this turn still completes normally
+              // and acks its own delivered notification — so THIS turn's
+              // contributions would be lost to the post-resume re-evaluation
+              // even though the stash kept the earlier batches. Park them too
+              // (same kind split as the defer branch: supplementary evicts
+              // before any batch on cap overflow).
+              if (
+                currentTurnGoalToolEvidence.length > 0 ||
+                goalEvaluationInput.toolCalls.length > 0
+              ) {
+                goalBackgroundEvidenceStash.stash(
+                  threadId,
+                  activeGoal.goalId,
+                  trimContent(
+                    [
+                      goalEvaluationInput.toolCalls.length > 0
+                        ? `Deferred sub-turn tool calls: ${goalEvaluationInput.toolCalls.join(", ")}`
+                        : "",
+                      currentTurnGoalToolEvidence.length > 0
+                        ? `Tool evidence from an earlier deferred sub-turn:\n${currentTurnGoalToolEvidence.join("\n\n")}`
+                        : ""
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n")
+                  ),
+                  "supplementary"
+                )
+              }
+              if (currentDeliveryEvidence) {
+                goalBackgroundEvidenceStash.stash(threadId, activeGoal.goalId, currentDeliveryEvidence)
+              }
+            }
             if (!outcome) break
 
             if (!outcome.shouldContinue || !outcome.continuationPrompt) {
@@ -5554,25 +7182,93 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           clearCoordinatorNotificationSelectedSkillsOnExit = true
           await settleDrainedCoordinatorNotifications("ack")
+          // E (ack side): the notification turn SUCCEEDED → NOW persist
+          // delivered=true. This is the at-least-once commit point: persisting only
+          // here means a crash before this leaves delivered=false on disk so the run
+          // re-reports. markNotified is best-effort — setWorkflowRunNotified swallows
+          // its own IO errors and never throws, so on a write failure delivered just
+          // stays false on disk and the run is re-discovered on the next hydrate
+          // (still at-least-once; no explicit re-notify needed). Then release the
+          // in-flight mark and re-notify budget.
+          if (workflowNotificationToSettle) {
+            const settle = workflowNotificationToSettle
+            workflowNotificationToSettle = undefined
+            const delivered = await workflowRunManager.markNotified(
+              settle.workspacePath,
+              threadId,
+              settle.runId,
+              settle.startedAt
+            )
+            workflowRunManager.clearRenotify(settle.runId)
+            workflowRunManager.clearNotificationInFlight(settle.runId)
+            // The run has been reported; if its final persist had failed, write the
+            // true terminal state back to disk now (disk may have recovered) so
+            // history/hydrate/resume stop reading the stale copy (#4 boundary).
+            // startedAt fences this like markNotified: an old ack must not settle a
+            // NEWER instance's flush-failed snapshot (same runId via resume).
+            const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
+              settle.workspacePath,
+              threadId,
+              settle.runId,
+              settle.startedAt
+            )
+            // Drain any backlog: a second workflow may have completed while this
+            // report was deferred (launch isn't blocked once the first run is
+            // settled), and this ack only settles the one run we just reported.
+            // Kick the next still-undelivered run so it isn't stranded until the
+            // next hydrate/reload.
+            //
+            // Two independent licences to kick — and neither one means "the disk is OK":
+            //   `delivered` — markNotified persisted delivered=true. Required for the
+            //     ORDINARY path: had that write failed, the run would still be
+            //     undelivered on disk and findPendingNotification (newest-first) would
+            //     re-select it → double report. Skip the kick; the next hydrate
+            //     re-surfaces it (at-least-once).
+            //   `shouldKickPendingDrain` — this runId had a flush-failed snapshot and
+            //     something under it still wants reporting. Deliberately true even when
+            //     the write-back failed: findPendingNotification reads flushFailedRuns
+            //     BEFORE the disk, so a memory-stranded snapshot is perfectly reportable,
+            //     and it's the SNAPSHOT's delivered flag (not the disk's) that stops the
+            //     just-acked run from being re-selected. A flush-failed run's disk copy
+            //     is pre-terminal, so markNotified always returns false for it → this is
+            //     its only licence.
+            if (delivered || shouldKickPendingDrain) {
+              workflowRunManager.kickNextPendingNotification(settle.workspacePath, threadId)
+            }
+          }
           if (invokeFinalOutcome === "success") {
             await finalizeAutoCommit({
               threadId,
               workspacePath,
-              userPrompt: isCoordinatorNotificationTurn
-                ? "coordinator notification turn"
+              userPrompt: isInternalNotificationTurn
+                ? isCoordinatorNotificationTurn
+                  ? "coordinator notification turn"
+                  : "workflow notification turn"
                 : rootUserPrompt,
               snapshot: autoCommit.snapshot,
               window,
               channel
             })
+            await markLatestForkBoundary({
+              threadId,
+              turnId: turnState.turnId,
+              source: "agent_run_complete"
+            })
           }
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
           const postRunAssistantText = trimPostRunAssistantText(assistantText)
           if (invokeFinalOutcome === "success") {
             notifyIfBackground("✅ 任务完成", lastFinalText || postRunAssistantText || "对话已完成")
           }
-          if (invokeFinalOutcome === "success" && !isCoordinatorNotificationTurn) {
+          if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
             showPetCompletedTaskNotice(
               threadId,
               getCompletedTaskTitle(thread?.title ?? undefined, message)
@@ -5597,7 +7293,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (
             invokeFinalOutcome === "success" &&
-            !isCoordinatorNotificationTurn &&
+            !isInternalNotificationTurn &&
             isOnlineSkillEvolutionEnabled()
           ) {
             const proposalContext = appendTurnToProposalWindow("success")
@@ -5608,18 +7304,28 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             // Check if this turn crossed the skill-evolution threshold.
             const sessionToolCallCount = proposalContext.toolCallCount
+            const sessionTurnCount = proposalContext.turnCount
             const threshold = getSkillEvolutionThreshold()
-            if (shouldEvaluateSkillProposalWindow(sessionToolCallCount, threshold)) {
+            const turnThreshold = getSkillEvolutionTurnThreshold()
+            if (
+              shouldEvaluateSkillProposalWindow(
+                sessionToolCallCount,
+                threshold,
+                sessionTurnCount,
+                turnThreshold
+              )
+            ) {
               const mode = getSkillProposalMode(isSkillAutoProposeEnabled())
               console.log(
                 `[SkillEvolution][${threadId}] Threshold reached ${JSON.stringify({
                   toolCallCount: sessionToolCallCount,
                   windowToolCallCount: proposalContext.toolCallCount,
                   threshold,
+                  turnThreshold,
                   mode,
                   usedSkills: proposalContext.usedSkills,
                   recentUsedSkills,
-                  turnCount: proposalContext.turnCount,
+                  turnCount: sessionTurnCount,
                   errorCount: proposalContext.errorCount,
                   toolCallSummary: proposalContext.toolCallSummary
                 })}`
@@ -5637,8 +7343,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   console.warn("[Agent] autoProposeSKill failed:", e)
                 )
               }
+            } else if (sessionToolCallCount >= threshold) {
+              console.log(
+                `[SkillEvolution][${threadId}] Tool threshold reached, waiting for turn threshold ${JSON.stringify(
+                  {
+                    toolCallCount: sessionToolCallCount,
+                    threshold,
+                    turnCount: sessionTurnCount,
+                    turnThreshold
+                  }
+                )}`
+              )
             }
-          } else if (invokeFinalOutcome === "success" && !isCoordinatorNotificationTurn) {
+          } else if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
             resetSkillEvolutionSession(threadId)
           }
 
@@ -5646,7 +7363,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const chatxReply = lastFinalText || stripThink(postRunAssistantText).trim()
           if (
             invokeFinalOutcome === "success" &&
-            !isCoordinatorNotificationTurn &&
+            !isInternalNotificationTurn &&
             metadata.chatxRobotChatId &&
             chatxReply
           ) {
@@ -5654,32 +7371,49 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
 
           const conversation =
-            invokeFinalOutcome === "success" &&
-            !isCoordinatorNotificationTurn &&
-            postRunAssistantText
+            invokeFinalOutcome === "success" && !isInternalNotificationTurn && postRunAssistantText
               ? `User: ${rootUserPrompt}\n\nAssistant: ${postRunAssistantText}`
               : ""
 
-          if (isMemoryEnabled() && conversation.length >= MIN_CHARS_FOR_MEMORY) {
-            const memoryStore = await getMemoryStore()
-            const memDir = memoryStore.getMemoryDir()
-            const memDirNormalized = memDir.replace(/\\/g, "/")
-            const agentAlreadyWroteMemory = fileWritePaths.some(
-              (p) => p.startsWith(memDirNormalized) || p.startsWith(memDir)
+          const memoryStillEnabledForThread = (() => {
+            if (!memoryEnabledForThread) return false
+            try {
+              const latestThread = getThread(threadId)
+              const latestMetadata = latestThread?.metadata
+                ? (JSON.parse(latestThread.metadata) as Record<string, unknown>)
+                : metadata
+              return (
+                isThreadMemoryEnabled(latestMetadata) &&
+                isMemoryAllowedForProjectMode(harnessAgentContext.featureId)
+              )
+            } catch {
+              return false
+            }
+          })()
+
+          if (memoryStillEnabledForThread && conversation.length >= MIN_CHARS_FOR_MEMORY) {
+            const memoryDirs = resolveWorkspaceMemoryDirs(workspacePath)
+            const namespaces: MemoryNamespace[] = [
+              memoryDirs.global,
+              ...(memoryDirs.project ? [memoryDirs.project] : [])
+            ]
+            const memoryDirChecks = namespaces.map((ns) => ({
+              dir: ns.dir,
+              normalized: ns.dir.replace(/\\/g, "/")
+            }))
+            const agentAlreadyWroteMemory = fileWritePaths.some((p) =>
+              memoryDirChecks.some((dir) => p.startsWith(dir.normalized) || p.startsWith(dir.dir))
             )
 
             const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
-              const allConfigs = getCustomModelConfigs()
               const memRoutingResult = await resolveModel({
                 taskSource: "memory_summarize",
                 threadId,
                 requestedModelId: modelId ?? undefined,
                 routingMode: getGlobalRoutingMode()
               }).catch(() => null)
-              const memModelId = memRoutingResult?.resolvedModelId
-              const memCfgId =
-                memModelId?.replace("custom:", "") ?? modelId?.replace("custom:", "") ?? ""
-              const config = allConfigs.find((c) => c.id === memCfgId) || allConfigs[0]
+              const memModelId = memRoutingResult?.resolvedModelId ?? modelId
+              const config = getModelConfigByRef(memModelId) ?? getDefaultModelConfig()
               if (!config?.apiKey) {
                 console.warn("[Agent] No model config available — skipping memory tasks")
                 return null
@@ -5697,7 +7431,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
 
-            const tryTriggerDream = (memoryModel: ChatOpenAI): void => {
+            const tryTriggerDream = (memoryModel: ChatOpenAI, memDir: string): void => {
               try {
                 if (!isDreamEnabled()) {
                   console.log("[Agent] Dream auto-trigger disabled")
@@ -5715,31 +7449,79 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
 
+            const buildScopeHint = (namespace: MemoryNamespace): string | undefined => {
+              if (namespace.scope === "global") {
+                return (
+                  "You are maintaining GLOBAL memory shared across all projects. " +
+                  "Extract only cross-project user facts, durable personal preferences, and feedback that applies broadly. " +
+                  "Skip project-specific codebase facts, repository paths, transient implementation status, and external resources tied to one project."
+                )
+              }
+              return (
+                `You are maintaining PROJECT memory for git root: ${namespace.gitRoot ?? "unknown"}. ` +
+                "Extract project facts, project-specific feedback, decisions, constraints, and reference links for this repository. " +
+                "Skip broad user profile facts that should apply to every project."
+              )
+            }
+            const allowedTypesForScope = (namespace: MemoryNamespace): MemoryType[] =>
+              namespace.scope === "global"
+                ? ["user", "feedback"]
+                : ["project", "reference", "feedback"]
+
             if (agentAlreadyWroteMemory) {
               console.log(
                 "[Agent] Main agent wrote to memory during conversation — skipping summarizeAndSave"
               )
-              incrementDreamSessions(memDir)
+              for (const ns of namespaces) {
+                incrementDreamSessions(ns.dir)
+              }
               const memoryModel = await resolveMemoryModel()
               if (memoryModel) {
-                tryTriggerDream(memoryModel)
+                for (const ns of namespaces) {
+                  tryTriggerDream(memoryModel, ns.dir)
+                }
               }
             } else {
               const memoryModel = await resolveMemoryModel()
               if (memoryModel) {
-                summarizeAndSave({
-                  model: memoryModel,
-                  conversation,
-                  memoryDir: memDir
-                })
-                  .then(() => {
-                    incrementDreamSessions(memDir)
-                    tryTriggerDream(memoryModel)
-                  })
-                  .catch((e) => console.warn("[Agent] Memory summarize failed:", e))
+                ;(async () => {
+                  await Promise.all(
+                    namespaces.map(async (ns) => {
+                      await summarizeAndSave({
+                        model: memoryModel,
+                        conversation,
+                        memoryDir: ns.dir,
+                        scopeHint: buildScopeHint(ns),
+                        allowedTypes: allowedTypesForScope(ns)
+                      })
+                      incrementDreamSessions(ns.dir)
+                      tryTriggerDream(memoryModel, ns.dir)
+                    })
+                  )
+                })().catch((e) => console.warn("[Agent] Memory summarize failed:", e))
               }
             }
           }
+        } else {
+          pauseActiveGoalForRuntimeStop("Agent run was aborted.")
+          syncUsedSkillsContext()
+          tracer.finish("cancelled").catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_interrupted"
+          })
+          turnStateShouldDispose = true
         }
       } catch (error) {
         await settleDrainedCoordinatorNotifications("restore")
@@ -5763,6 +7545,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
+        const failureFuseHalt = getFailureFuseHaltError(error)
+        if (failureFuseHalt) {
+          clearCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn("[Agent] Failure fuse halted turn:", failureFuseHalt.decision.reason)
+          pauseActiveGoalForRuntimeStop(failureFuseHalt.decision.reason)
+          sendFailureFuseHalt(window, channel, failureFuseHalt)
+          syncUsedSkillsContext()
+          tracer.finish("cancelled", failureFuseHalt.decision.reason).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          turnStateShouldDispose = true
+          return
+        }
         // Ignore abort-related errors (expected when stream is cancelled)
         const isAbortError =
           error instanceof Error &&
@@ -5770,13 +7573,34 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error.message.includes("aborted") ||
             error.message.includes("Controller is already closed"))
 
+        // A workflow notification turn that ends here (success is settled on the
+        // ack path) MUST release its in-flight mark — INCLUDING on abort — or the
+        // runId stays in inFlightNotifications forever and findPendingNotification
+        // keeps excluding it, so it could never be re-reported this process. The
+        // `delivered` flag was never persisted (at-least-once), so the run stays
+        // re-discoverable on disk regardless. Only a GENUINE failure auto-re-reports;
+        // a user abort / hook halt deliberately does NOT (the user/policy chose to
+        // stop, so re-reporting would fight that intent) — but clearing the mark
+        // still lets a later hydrate / restart surface it.
+        if (workflowNotificationToSettle) {
+          const { runId: settleRunId } = workflowNotificationToSettle
+          workflowNotificationToSettle = undefined
+          workflowRunManager.clearNotificationInFlight(settleRunId)
+          if (!isAbortError) {
+            workflowRunManager.renotify(threadId, settleRunId)
+          }
+        }
+
         if (!isAbortError) {
           const errMsg = error instanceof Error ? error.message : "Unknown error"
           clearCoordinatorNotificationSelectedSkillsOnExit = true
           pauseActiveGoalForRuntimeStop(`Agent run failed: ${errMsg}`)
           console.error("[Agent] Error:", error)
           if (!stopHookFired) {
-            const stopFailureErrorCode = classifyApiError(error)
+            const stopFailureErrorCode = extractErrorDetail(
+              error,
+              lastFetchErrorByChannel.get(channel)
+            ).code
             const stopFailureContext: HookContext = {
               workspacePath: sessionWorkspacePath,
               sessionId: threadId,
@@ -5800,14 +7624,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onHookResult
             ).catch((e: unknown) => console.warn("[Hooks] StopFailure hook error:", e))
           }
+          // Sent BEFORE the error event: the error event terminates the stream
+          // in the renderer (useStream), so any custom event sent after it is
+          // dropped. error_detail must go first to populate the detail card.
+          emitErrorDetail(window, channel, error, { modelId: usedModelId })
           safeSendToWindow(window, channel, {
             type: "error",
             error: errMsg
           })
           notifyIfBackground("❌ 任务失败", errMsg)
-          if (!isCoordinatorNotificationTurn && isOnlineSkillEvolutionEnabled()) {
+          if (!isInternalNotificationTurn && isOnlineSkillEvolutionEnabled()) {
             appendTurnToProposalWindow("error", errMsg)
-          } else if (!isCoordinatorNotificationTurn) {
+          } else if (!isInternalNotificationTurn) {
             resetSkillEvolutionSession(threadId)
           }
           syncUsedSkillsContext()
@@ -5837,9 +7665,28 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
             })
           }
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_interrupted"
+          })
           turnStateShouldDispose = true
         }
       } finally {
+        // Safety net for EARLY RETURNS inside the try (Stop hook blocked
+        // completion, PostSkillUse max revisions, goal-continuation halts…):
+        // success settles on the ack path and thrown errors settle in the
+        // catch, but a bare `return` bypasses BOTH — leaving the runId in
+        // inFlightNotifications for the process lifetime, where
+        // findPendingNotification keeps excluding it and the (still
+        // delivered=false) run can never be re-reported until restart. Clear
+        // the in-flight mark WITHOUT persisting delivered and WITHOUT
+        // auto-renotify — these exits are user/policy stops, mirroring the
+        // catch's documented halt semantics; the run stays re-discoverable.
+        if (workflowNotificationToSettle) {
+          workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+          workflowNotificationToSettle = undefined
+        }
         window.removeListener("closed", onWindowClosed)
         await settleDrainedCoordinatorNotifications("restore")
         if (clearCoordinatorNotificationSelectedSkillsOnExit) {
@@ -5863,6 +7710,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             updateThread(threadId, { metadata: JSON.stringify(metadata) })
           }
         }
+        flushPendingStreamTranscriptMessages(threadId)
         const currentController = activeRuns.get(threadId)
         const replacedByNewRun = Boolean(currentController && currentController !== abortController)
         if (currentController === abortController) {
@@ -5895,6 +7743,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       { threadId, command, modelId, agentMode: requestedAgentMode }: AgentResumeParams
     ) => {
       const channel = `agent:stream:${threadId}`
+      lastFetchErrorByChannel.delete(channel)
+      lastFailoverByChannel.delete(channel)
       const window = BrowserWindow.fromWebContents(event.sender)
 
       console.log("[Agent] Received resume request:", { threadId, command, modelId })
@@ -5903,38 +7753,57 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.error("[Agent] No window found for resume")
         return
       }
+      if (rejectAgentStartDuringShutdown(window, channel)) return
 
       // Get workspace path from thread metadata
       const thread = getThread(threadId)
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+      ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = metadata.workspacePath as string | undefined
-      const harnessAgentContext = getHarnessAgentContext(metadata)
+      const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+      sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
+      const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
+        window,
+        channel,
+        harnessAgentContext
+      )
       const resumeCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
       const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
       const resumeAgentMode: AgentMode = resumeForcedByEnvironment
         ? "coordinator"
-        : requestedAgentMode === "coordinator" || requestedAgentMode === "normal"
+        : requestedAgentMode === "coordinator" ||
+            requestedAgentMode === "normal" ||
+            requestedAgentMode === "workflow"
           ? requestedAgentMode
           : getAgentModeFromMetadata(metadata)
 
       if (
         !resumeForcedByEnvironment &&
-        (requestedAgentMode === "coordinator" || requestedAgentMode === "normal")
+        (requestedAgentMode === "coordinator" ||
+          requestedAgentMode === "normal" ||
+          requestedAgentMode === "workflow")
       ) {
-        if (requestedAgentMode === "normal" && metadata.agentMode !== "normal") {
+        // Leaving workflow → any non-workflow mode: block to avoid orphaning a run.
+        // Covers requestedAgentMode === "coordinator", which the coordinator guard
+        // below explicitly skips.
+        if (metadata.agentMode === "workflow" && requestedAgentMode !== "workflow") {
+          const workflowBlock = workflowLeaveBlockedMessage(threadId, workspacePath)
+          if (workflowBlock) {
+            safeSendToWindow(window, channel, { type: "error", error: workflowBlock })
+            return
+          }
+        }
+        if (requestedAgentMode !== "coordinator" && metadata.agentMode !== requestedAgentMode) {
           if (!workspacePath) {
             safeSendToWindow(window, channel, {
               type: "error",
               error: "WORKSPACE_REQUIRED",
-              message: "该线程缺少工作区路径，无法安全切回普通模式。请先重新选择工作区后再切换。"
+              message: "该线程缺少工作区路径，无法安全切回 Solo Agent。请先重新选择工作区后再切换。"
             })
             return
           }
           const normalModeGuardState = await getNormalModeGuardState(threadId, workspacePath)
-          if (
-            normalModeGuardState.unresolvedWorkers.length > 0 ||
-            normalModeGuardState.hasPendingNotifications
-          ) {
+          if (isNormalModeBlocked(normalModeGuardState)) {
             safeSendToWindow(window, channel, {
               type: "error",
               error: buildNormalModeGuardMessage(normalModeGuardState)
@@ -5957,25 +7826,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       // Abort any existing stream before resuming
-      const resumeReplacement = await withActiveRunReplacementLock(threadId, async () => {
-        const existingController = activeRuns.get(threadId)
-        if (existingController) {
-          existingController.abort()
-          await waitForReplacedRunToSettle(threadId)
-        }
-        const nextAbortController = new AbortController()
-        activeRuns.set(threadId, nextAbortController)
-        let nextResolveResumeRunSettled: () => void = () => {}
-        const nextResumeRunSettledPromise = new Promise<void>((resolve) => {
-          nextResolveResumeRunSettled = resolve
+      const resumeReplacement = await withThreadRunMutationLock(threadId, () =>
+        withActiveRunReplacementLock(threadId, async () => {
+          const existingController = activeRuns.get(threadId)
+          if (existingController) {
+            existingController.abort()
+            await waitForReplacedRunToSettle(threadId)
+          }
+          const nextAbortController = new AbortController()
+          activeRuns.set(threadId, nextAbortController)
+          let nextResolveResumeRunSettled: () => void = () => {}
+          const nextResumeRunSettledPromise = new Promise<void>((resolve) => {
+            nextResolveResumeRunSettled = resolve
+          })
+          activeRunSettled.set(threadId, nextResumeRunSettledPromise)
+          return {
+            abortController: nextAbortController,
+            resumeRunSettledPromise: nextResumeRunSettledPromise,
+            resolveResumeRunSettled: nextResolveResumeRunSettled
+          }
         })
-        activeRunSettled.set(threadId, nextResumeRunSettledPromise)
-        return {
-          abortController: nextAbortController,
-          resumeRunSettledPromise: nextResumeRunSettledPromise,
-          resolveResumeRunSettled: nextResolveResumeRunSettled
-        }
-      })
+      )
       const { abortController, resumeRunSettledPromise, resolveResumeRunSettled } =
         resumeReplacement
       const resumeCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
@@ -6073,6 +7944,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       }
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+      const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+        sendFailureFuseNotice(window, channel, decision)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -6225,6 +8098,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       window.once("closed", onWindowClosed)
       sendActiveHookNotice(window, channel, workspacePath)
 
+      let resumeErrorModelId: string | undefined
       try {
         const requestedModelIdResume = modelId || (metadata.model as string | undefined)
         const resumeRoutingResult = await resolveModel({
@@ -6236,6 +8110,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }).catch(() => null)
         const effectiveResumeModelId =
           resumeRoutingResult?.resolvedModelId ?? requestedModelIdResume
+        resumeErrorModelId = effectiveResumeModelId
 
         const resumeStreamConfig = {
           configurable: { thread_id: threadId },
@@ -6250,6 +8125,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const pendingCount = command?.resume?.pendingCount ?? 1
         const decisions = Array.from({ length: pendingCount }, () => ({ type: decisionType }))
         const resumeValue = { decisions }
+        flushPendingStreamTranscriptMessages(threadId)
+        const resumeDurableRuntimeTail = await getDurableRuntimeTail(threadId)
+        if (resumeDurableRuntimeTail.persistedMessages.length > 0) {
+          throw new Error(
+            "当前会话已有 checkpoint 之后的已恢复消息，旧审批状态已过期。请重新发送请求继续。"
+          )
+        }
 
         // ── Failover loop for resume ──
         const resumePrimaryTier = resumeRoutingResult?.resolvedTier ?? "premium"
@@ -6260,6 +8142,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           resumeRoutingResult?.layer !== "pinned"
         )
         const resumeFailoverAttempts: FailoverAttempt[] = []
+        lastFailoverByChannel.set(channel, resumeFailoverAttempts)
         const resumeCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         let resumeUsedModelId = effectiveResumeModelId
         let resumeStream: AsyncIterable<unknown> | null = null
@@ -6284,12 +8167,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -6301,6 +8186,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             resumeAgentRuntime = resumeAgent
             resumeUsedModelId = candidateId
+            resumeErrorModelId = candidateId
             break
           } catch (err) {
             if (!isRetryableApiError(err)) throw err
@@ -6329,10 +8215,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend + persist routing state if failover happened
         const notifyResumeFailover = (): void => {
           if (resumeFailoverAttempts.length > 0 && resumeUsedModelId !== effectiveResumeModelId) {
-            const usedCfgId = resumeUsedModelId?.startsWith("custom:")
-              ? resumeUsedModelId.slice("custom:".length)
-              : resumeUsedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(resumeUsedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {
@@ -6373,24 +8256,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             : resumeOrderedChain.length
         )
         let activeResumeStream: AsyncIterable<unknown> = resumeStream
+        let resumeStreamDisconnectRetries = 0
+        let resumeStableStreamMessages: unknown[] = []
+        const resumeInFlightMessageIds = new Set<string>()
+        let pendingResumeMessagePayloads: unknown[] = []
         const resumeSubagentStopFired = new Set<string>()
 
         const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
-          for await (const chunk of source) {
-            if (abortController.signal.aborted) break
-            const [mode, data] = chunk as unknown as [string, unknown]
-            if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
-              continue
-            }
-            const serialized = serializeStreamData(data)
-            safeSendToWindow(window, channel, {
-              type: "stream",
-              mode,
-              data: sanitizeStreamDataForRenderer(mode, serialized)
-            })
-            if (mode === "messages") {
+          const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
+            for (const payload of pendingResumeMessagePayloads) {
               await maybeRunSubagentStopHooksFromStreamPayload({
-                payload: serialized,
+                payload,
                 workspacePath,
                 threadId,
                 turnId: turnState.turnId,
@@ -6402,8 +8278,57 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
               })
+              stopContextCollector.processStreamChunk("messages", payload)
             }
-            stopContextCollector.processStreamChunk(mode, serialized)
+            pendingResumeMessagePayloads = []
+          }
+
+          try {
+            for await (const chunk of source) {
+              if (abortController.signal.aborted) {
+                throw Object.assign(new Error("aborted"), { name: "AbortError" })
+              }
+              const [mode, data] = chunk as unknown as [string, unknown]
+              if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
+                continue
+              }
+              const serialized = serializeStreamData(data)
+              if (mode === "values") {
+                resumeStableStreamMessages = extractSerializedValuesMessages(
+                  sanitizeStreamDataForRenderer(mode, serialized)
+                )
+                flushPendingStreamTranscriptMessages(threadId)
+                resumeInFlightMessageIds.clear()
+              }
+              const messageId = persistStreamTranscriptChunk(threadId, mode, serialized, {
+                deferFlush: true
+              })
+              if (messageId) resumeInFlightMessageIds.add(messageId)
+              safeSendToWindow(window, channel, {
+                type: "stream",
+                mode,
+                data: sanitizeStreamDataForRenderer(mode, serialized)
+              })
+              if (mode === "messages") {
+                pendingResumeMessagePayloads.push(serialized)
+              } else {
+                await commitPendingResumeMessageSideEffects()
+                stopContextCollector.processStreamChunk(mode, serialized)
+              }
+            }
+            await commitPendingResumeMessageSideEffects()
+            flushPendingStreamTranscriptMessages(threadId)
+            resumeInFlightMessageIds.clear()
+          } catch (error) {
+            pendingResumeMessagePayloads = []
+            resetFailedStreamAttempt(
+              window,
+              channel,
+              threadId,
+              resumeStableStreamMessages,
+              resumeInFlightMessageIds
+            )
+            throw error
           }
         }
 
@@ -6412,16 +8337,34 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeResumeStream(activeResumeStream)
             break
           } catch (midErr) {
-            if (!isRetryableApiError(midErr) || resumeRemainingCandidates.length === 0) throw midErr
-            if (abortController.signal.aborted) throw midErr
+            const retry = await retryStreamAfterDisconnect(
+              midErr,
+              resumeStreamDisconnectRetries,
+              window,
+              channel,
+              abortController.signal,
+              "Resume mid-stream",
+              resumeUsedModelId,
+              () =>
+                resumeAgentRuntime!.stream(new Command({ resume: resumeValue }), resumeStreamConfig)
+            )
+            resumeStreamDisconnectRetries = retry.retries
+            if (retry.stream) {
+              activeResumeStream = retry.stream
+              continue
+            }
+            clearStreamDisconnectRetry(window, channel)
+            const error = retry.error
+            if (!isRetryableApiError(error) || resumeRemainingCandidates.length === 0) throw error
+            if (abortController.signal.aborted) throw error
 
             resumeFailoverAttempts.push({
               modelId: resumeUsedModelId ?? "unknown",
-              error: String(midErr),
+              error: String(error),
               timestamp: Date.now()
             })
             console.warn(
-              `[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${midErr}, trying next...`
+              `[Agent][Failover][Resume] Mid-stream ${resumeUsedModelId} failed: ${error}, trying next...`
             )
             if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
@@ -6442,12 +8385,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -6459,6 +8404,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             resumeAgentRuntime = nextAgent
             resumeUsedModelId = nextCandidate
+            resumeErrorModelId = nextCandidate
             notifyResumeFailover()
           }
         }
@@ -6530,6 +8476,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_complete"
+          })
           pauseActiveGoalAfterBoundary(
             threadId,
             window,
@@ -6540,6 +8491,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (!boundaryGoalId) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
         }
       } catch (error) {
         if (isHookHaltError(error)) {
@@ -6554,6 +8512,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             boundaryGoalActiveWindowId
           )
           sendHookHalt(window, channel, error)
+          turnStateShouldDispose = true
+          return
+        }
+        const failureFuseHalt = getFailureFuseHaltError(error)
+        if (failureFuseHalt) {
+          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn("[Agent] Resume failure fuse halted turn:", failureFuseHalt.decision.reason)
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            failureFuseHalt.decision.reason,
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
+          sendFailureFuseHalt(window, channel, failureFuseHalt)
           turnStateShouldDispose = true
           return
         }
@@ -6574,9 +8548,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             boundaryGoalId,
             boundaryGoalActiveWindowId
           )
+          // Before the error event — see note in agent:invoke handler.
+          emitErrorDetail(window, channel, error, { modelId: resumeErrorModelId })
           safeSendToWindow(window, channel, {
             type: "error",
             error: error instanceof Error ? error.message : "Unknown error"
+          })
+        } else {
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_interrupted"
           })
         }
         turnStateShouldDispose = true
@@ -6605,6 +8587,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             updateThread(threadId, { metadata: JSON.stringify(metadata) })
           }
         }
+        flushPendingStreamTranscriptMessages(threadId)
         const currentController = activeRuns.get(threadId)
         const replacedByNewRun = Boolean(currentController && currentController !== abortController)
         if (currentController === abortController) {
@@ -6633,6 +8616,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   // compatibility and non-execute tool interrupts.
   ipcMain.on("agent:interrupt", async (event, { threadId, decision }: AgentInterruptParams) => {
     const channel = `agent:stream:${threadId}`
+    lastFetchErrorByChannel.delete(channel)
+    lastFailoverByChannel.delete(channel)
     const window = BrowserWindow.fromWebContents(event.sender)
     const boundaryGoal = goalManager.getActive(threadId)
     const boundaryGoalId = boundaryGoal?.goalId ?? null
@@ -6642,6 +8627,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.error("[Agent] No window found for interrupt response")
       return
     }
+    if (rejectAgentStartDuringShutdown(window, channel)) return
     if (
       rejectRuntimeRestoredCheckpointResume(
         threadId,
@@ -6655,9 +8641,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     // Get workspace path from thread metadata - REQUIRED
     const thread = getThread(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+    ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
-    const harnessAgentContext = getHarnessAgentContext(metadata)
+    const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+    sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
+    const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
+      window,
+      channel,
+      harnessAgentContext
+    )
     const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
     const interruptAgentMode: AgentMode =
       interruptCoordinatorRequest.source === "environment"
@@ -6674,25 +8667,27 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
 
     // Abort any existing stream before continuing
-    const interruptReplacement = await withActiveRunReplacementLock(threadId, async () => {
-      const existingController = activeRuns.get(threadId)
-      if (existingController) {
-        existingController.abort()
-        await waitForReplacedRunToSettle(threadId)
-      }
-      const nextAbortController = new AbortController()
-      activeRuns.set(threadId, nextAbortController)
-      let nextResolveInterruptRunSettled: () => void = () => {}
-      const nextInterruptRunSettledPromise = new Promise<void>((resolve) => {
-        nextResolveInterruptRunSettled = resolve
+    const interruptReplacement = await withThreadRunMutationLock(threadId, () =>
+      withActiveRunReplacementLock(threadId, async () => {
+        const existingController = activeRuns.get(threadId)
+        if (existingController) {
+          existingController.abort()
+          await waitForReplacedRunToSettle(threadId)
+        }
+        const nextAbortController = new AbortController()
+        activeRuns.set(threadId, nextAbortController)
+        let nextResolveInterruptRunSettled: () => void = () => {}
+        const nextInterruptRunSettledPromise = new Promise<void>((resolve) => {
+          nextResolveInterruptRunSettled = resolve
+        })
+        activeRunSettled.set(threadId, nextInterruptRunSettledPromise)
+        return {
+          abortController: nextAbortController,
+          interruptRunSettledPromise: nextInterruptRunSettledPromise,
+          resolveInterruptRunSettled: nextResolveInterruptRunSettled
+        }
       })
-      activeRunSettled.set(threadId, nextInterruptRunSettledPromise)
-      return {
-        abortController: nextAbortController,
-        interruptRunSettledPromise: nextInterruptRunSettledPromise,
-        resolveInterruptRunSettled: nextResolveInterruptRunSettled
-      }
-    })
+    )
     const { abortController, interruptRunSettledPromise, resolveInterruptRunSettled } =
       interruptReplacement
     const interruptCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
@@ -6785,6 +8780,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     }
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
+    const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
+      sendFailureFuseNotice(window, channel, decision)
     const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
       window,
       threadId,
@@ -6935,6 +8932,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     window.once("closed", onWindowClosed)
     sendActiveHookNotice(window, channel, workspacePath)
 
+    let interruptErrorModelId: string | undefined
     try {
       const interruptRoutingResult = await resolveModel({
         taskSource: "chat",
@@ -6945,6 +8943,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }).catch(() => null)
       const effectiveInterruptModelId =
         interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
+      interruptErrorModelId = effectiveInterruptModelId
 
       const interruptStreamConfig = {
         configurable: { thread_id: threadId },
@@ -6963,6 +8962,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           interruptRoutingResult?.layer !== "pinned"
         )
         const intFailoverAttempts: FailoverAttempt[] = []
+        lastFailoverByChannel.set(channel, intFailoverAttempts)
         const interruptCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         let intUsedModelId = effectiveInterruptModelId
         let intStream: AsyncIterable<unknown> | null = null
@@ -6987,12 +8987,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -7001,6 +9003,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = intAgent
             intUsedModelId = candidateId
+            interruptErrorModelId = candidateId
             break
           } catch (err) {
             if (!isRetryableApiError(err)) throw err
@@ -7031,10 +9034,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Notify frontend + persist routing state if failover happened
         const notifyIntFailover = (): void => {
           if (intFailoverAttempts.length > 0 && intUsedModelId !== effectiveInterruptModelId) {
-            const usedCfgId = intUsedModelId?.startsWith("custom:")
-              ? intUsedModelId.slice("custom:".length)
-              : intUsedModelId
-            const usedCfg = getCustomModelConfigs().find((c) => c.id === usedCfgId)
+            const usedCfg = getModelConfigByRef(intUsedModelId)
             safeSendToWindow(window, channel, {
               type: "custom",
               data: {
@@ -7073,24 +9073,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           intUsedModelId ? intOrderedChain.indexOf(intUsedModelId) + 1 : intOrderedChain.length
         )
         let activeIntStream: AsyncIterable<unknown> = intStream
+        let intStreamDisconnectRetries = 0
+        let intStableStreamMessages: unknown[] = []
+        const intInFlightMessageIds = new Set<string>()
+        let pendingIntMessagePayloads: unknown[] = []
         const interruptSubagentStopFired = new Set<string>()
 
         const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
-          for await (const chunk of source) {
-            if (abortController.signal.aborted) break
-            const [mode, data] = chunk as unknown as [string, unknown]
-            if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
-              continue
-            }
-            const serialized = serializeStreamData(data)
-            safeSendToWindow(window, channel, {
-              type: "stream",
-              mode,
-              data: sanitizeStreamDataForRenderer(mode, serialized)
-            })
-            if (mode === "messages") {
+          const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
+            for (const payload of pendingIntMessagePayloads) {
               await maybeRunSubagentStopHooksFromStreamPayload({
-                payload: serialized,
+                payload,
                 workspacePath,
                 threadId,
                 turnId: turnState.turnId,
@@ -7102,8 +9095,57 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 onHookResult,
                 onHookSkipped: onHookSkippedFactory("SubagentStop")
               })
+              stopContextCollector.processStreamChunk("messages", payload)
             }
-            stopContextCollector.processStreamChunk(mode, serialized)
+            pendingIntMessagePayloads = []
+          }
+
+          try {
+            for await (const chunk of source) {
+              if (abortController.signal.aborted) {
+                throw Object.assign(new Error("aborted"), { name: "AbortError" })
+              }
+              const [mode, data] = chunk as unknown as [string, unknown]
+              if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
+                continue
+              }
+              const serialized = serializeStreamData(data)
+              if (mode === "values") {
+                intStableStreamMessages = extractSerializedValuesMessages(
+                  sanitizeStreamDataForRenderer(mode, serialized)
+                )
+                flushPendingStreamTranscriptMessages(threadId)
+                intInFlightMessageIds.clear()
+              }
+              const messageId = persistStreamTranscriptChunk(threadId, mode, serialized, {
+                deferFlush: true
+              })
+              if (messageId) intInFlightMessageIds.add(messageId)
+              safeSendToWindow(window, channel, {
+                type: "stream",
+                mode,
+                data: sanitizeStreamDataForRenderer(mode, serialized)
+              })
+              if (mode === "messages") {
+                pendingIntMessagePayloads.push(serialized)
+              } else {
+                await commitPendingInterruptMessageSideEffects()
+                stopContextCollector.processStreamChunk(mode, serialized)
+              }
+            }
+            await commitPendingInterruptMessageSideEffects()
+            flushPendingStreamTranscriptMessages(threadId)
+            intInFlightMessageIds.clear()
+          } catch (error) {
+            pendingIntMessagePayloads = []
+            resetFailedStreamAttempt(
+              window,
+              channel,
+              threadId,
+              intStableStreamMessages,
+              intInFlightMessageIds
+            )
+            throw error
           }
         }
 
@@ -7112,16 +9154,33 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeInterruptStream(activeIntStream)
             break
           } catch (midErr) {
-            if (!isRetryableApiError(midErr) || intRemainingCandidates.length === 0) throw midErr
-            if (abortController.signal.aborted) throw midErr
+            const retry = await retryStreamAfterDisconnect(
+              midErr,
+              intStreamDisconnectRetries,
+              window,
+              channel,
+              abortController.signal,
+              "Interrupt mid-stream",
+              intUsedModelId,
+              () => intAgentRuntime!.stream(null, interruptStreamConfig)
+            )
+            intStreamDisconnectRetries = retry.retries
+            if (retry.stream) {
+              activeIntStream = retry.stream
+              continue
+            }
+            clearStreamDisconnectRetry(window, channel)
+            const error = retry.error
+            if (!isRetryableApiError(error) || intRemainingCandidates.length === 0) throw error
+            if (abortController.signal.aborted) throw error
 
             intFailoverAttempts.push({
               modelId: intUsedModelId ?? "unknown",
-              error: String(midErr),
+              error: String(error),
               timestamp: Date.now()
             })
             console.warn(
-              `[Agent][Failover][Interrupt] Mid-stream ${intUsedModelId} failed: ${midErr}, trying next...`
+              `[Agent][Failover][Interrupt] Mid-stream ${intUsedModelId} failed: ${error}, trying next...`
             )
             if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
@@ -7142,12 +9201,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
+              onFailureFuseNotice,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
               skillHookKeys,
               skillUseTracker,
               ...harnessAgentContext,
+              onAgentsPromptLoadStatus,
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
@@ -7156,6 +9217,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = nextAgent
             intUsedModelId = nextCandidate
+            interruptErrorModelId = nextCandidate
             notifyIntFailover()
           }
         }
@@ -7227,6 +9289,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             window,
             channel
           })
+          await markLatestForkBoundary({
+            threadId,
+            turnId: turnState.turnId,
+            source: "agent_run_complete"
+          })
           pauseActiveGoalAfterBoundary(
             threadId,
             window,
@@ -7237,6 +9304,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
+          if (!boundaryGoalId) {
+            emitAppAttention({
+              kind: "task-complete",
+              threadId,
+              key: `agent:${threadId}:${turnState.turnId}`
+            })
+          }
         }
       } else if (decision.type === "reject") {
         // For reject, we need to send a Command with reject decision
@@ -7269,6 +9343,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         turnStateShouldDispose = true
         return
       }
+      const failureFuseHalt = getFailureFuseHaltError(error)
+      if (failureFuseHalt) {
+        console.warn("[Agent] Interrupt failure fuse halted turn:", failureFuseHalt.decision.reason)
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          failureFuseHalt.decision.reason,
+          boundaryGoalId,
+          boundaryGoalActiveWindowId
+        )
+        sendFailureFuseHalt(window, channel, failureFuseHalt)
+        turnStateShouldDispose = true
+        return
+      }
       const isAbortError =
         error instanceof Error &&
         (error.name === "AbortError" ||
@@ -7286,9 +9375,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           boundaryGoalId,
           boundaryGoalActiveWindowId
         )
+        // Before the error event — see note in agent:invoke handler.
+        emitErrorDetail(window, channel, error, { modelId: interruptErrorModelId })
         safeSendToWindow(window, channel, {
           type: "error",
           error: error instanceof Error ? error.message : "Unknown error"
+        })
+      } else {
+        await markLatestForkBoundary({
+          threadId,
+          turnId: turnState.turnId,
+          source: "agent_run_interrupted"
         })
       }
       turnStateShouldDispose = true
@@ -7317,6 +9414,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           updateThread(threadId, { metadata: JSON.stringify(metadata) })
         }
       }
+      flushPendingStreamTranscriptMessages(threadId)
       const currentController = activeRuns.get(threadId)
       const replacedByNewRun = Boolean(currentController && currentController !== abortController)
       if (currentController === abortController) {
@@ -7345,69 +9443,73 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "agent:cancel",
     async (event, { threadId, cancelWorkers = false }: AgentCancelParams) => {
-      const controller = activeRuns.get(threadId)
-      console.log(
-        `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, cancelWorkers=${cancelWorkers}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
-      )
-      const workers = cancelWorkers
-        ? coordinatorWorkerManager.cancelWorkersForThread(
-            threadId,
-            "User cancelled coordinator workers.",
-            {
-              suppressNotificationAutoRun: true,
-              dismissNotificationOnTerminalPersist: true
-            }
-          )
-        : []
-      const window = BrowserWindow.fromWebContents(event.sender)
-      if (window && workers.length > 0) {
-        sendCoordinatorWorkers(
-          window,
-          `agent:stream:${threadId}`,
-          coordinatorWorkerManager.readWorkers(threadId)
+      return withThreadRunMutationLock(threadId, async () => {
+        const controller = activeRuns.get(threadId)
+        console.log(
+          `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, cancelWorkers=${cancelWorkers}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`
         )
-      }
-      if (workers.length > 0) {
-        void coordinatorWorkerManager
-          .waitForWorkerCleanup(
-            threadId,
-            workers.map((worker) => worker.worker_id)
+        const workers = cancelWorkers
+          ? coordinatorWorkerManager.cancelWorkersForThread(
+              threadId,
+              "User cancelled coordinator workers.",
+              {
+                suppressNotificationAutoRun: true,
+                dismissNotificationOnTerminalPersist: true
+              }
+            )
+          : []
+        const window = BrowserWindow.fromWebContents(event.sender)
+        if (window && workers.length > 0) {
+          sendCoordinatorWorkers(
+            window,
+            `agent:stream:${threadId}`,
+            coordinatorWorkerManager.readWorkers(threadId)
           )
-          .then(async () => {
-            await coordinatorWorkerManager.acknowledgeNotifications(
+        }
+        if (workers.length > 0) {
+          void coordinatorWorkerManager
+            .waitForWorkerCleanup(
               threadId,
               workers.map((worker) => worker.worker_id)
             )
-            if (!window || window.isDestroyed()) return
-            sendCoordinatorWorkers(
-              window,
-              `agent:stream:${threadId}`,
-              coordinatorWorkerManager.readWorkers(threadId)
-            )
-          })
-          .catch((error) => {
-            console.warn("[Agent] Failed to wait for coordinator worker cancellation:", error)
-            if (!window || window.isDestroyed()) return
-            sendCoordinatorWorkers(
-              window,
-              `agent:stream:${threadId}`,
-              coordinatorWorkerManager.readWorkers(threadId)
-            )
-          })
-      }
-      if (controller && !cancelWorkers) {
-        // Foreground cancellation should stop the active run and any thread-scoped
-        // background tasks it launched. "Stop background workers" uses the same IPC
-        // entrypoint with cancelWorkers=true and must not abort the foreground turn.
-        LocalSandbox.cancelBackgroundTasks(threadId)
-        controller.abort()
-        // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
-        // A user can cancel and immediately send another message; the next invoke must wait
-        // for checkpoint/sandbox cleanup before opening a replacement stream.
-        console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
-      } else if (!controller && !cancelWorkers) {
-        console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
-      }
+            .then(async () => {
+              await coordinatorWorkerManager.acknowledgeNotifications(
+                threadId,
+                workers.map((worker) => worker.worker_id)
+              )
+              if (!window || window.isDestroyed()) return
+              sendCoordinatorWorkers(
+                window,
+                `agent:stream:${threadId}`,
+                coordinatorWorkerManager.readWorkers(threadId)
+              )
+            })
+            .catch((error) => {
+              console.warn("[Agent] Failed to wait for coordinator worker cancellation:", error)
+              if (!window || window.isDestroyed()) return
+              sendCoordinatorWorkers(
+                window,
+                `agent:stream:${threadId}`,
+                coordinatorWorkerManager.readWorkers(threadId)
+              )
+            })
+        }
+        if (controller && !cancelWorkers) {
+          // Foreground cancellation should stop the active run and any thread-scoped
+          // background tasks it launched. "Stop background workers" uses the same IPC
+          // entrypoint with cancelWorkers=true and must not abort the foreground turn.
+          LocalSandbox.cancelBackgroundTasks(threadId)
+          controller.abort()
+          flushPendingStreamTranscriptMessages(threadId)
+          // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
+          // A user can cancel and immediately send another message; the next invoke must wait
+          // for checkpoint/sandbox cleanup before opening a replacement stream.
+          console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
+        } else if (!controller && !cancelWorkers) {
+          console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
+        }
+        return Boolean(controller && !cancelWorkers)
+      })
     }
   )
 }

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   FileCode2,
   Loader2,
   Play,
   Save,
   Trash2,
+  Wand2,
   Wrench
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -29,14 +30,167 @@ interface SuccessfulPreviewState {
   output: string
 }
 
+interface RewriteCandidateState {
+  code: string
+  inputSchema: Record<string, unknown>
+}
+
+interface RewriteResult {
+  toolName: string
+  description: string
+  code: string
+  inputSchema: Record<string, unknown>
+  params: Record<string, unknown>
+}
+
+type RewriteCacheEntry =
+  | {
+      status: "pending"
+      sourceCode: string
+      promise: Promise<RewriteResult>
+    }
+  | {
+      status: "success"
+      sourceCode: string
+      result: RewriteResult
+    }
+  | {
+      status: "error"
+      sourceCode: string
+      error: string
+    }
+
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]+$/
 const TIMEOUT_MIN = 1_000
 const TIMEOUT_MAX = 120_000
+const rewriteCacheByKey = new Map<string, RewriteCacheEntry>()
+const latestRewriteCacheKeyByToolId = new Map<string, string>()
+const rewriteVerifiedToolIds = new Set<string>()
+const rewriteCacheListeners = new Set<() => void>()
 
-function getToolStatusBadgeClass(enabled: boolean): string {
-  return enabled
+function notifyRewriteCacheChanged(): void {
+  rewriteCacheListeners.forEach((listener) => listener())
+}
+
+function subscribeRewriteCache(listener: () => void): () => void {
+  rewriteCacheListeners.add(listener)
+  return () => {
+    rewriteCacheListeners.delete(listener)
+  }
+}
+
+function getRewriteCacheKey(toolId: string, sourceCode: string): string {
+  return JSON.stringify([toolId, sourceCode])
+}
+
+function getCachedRewrite(toolId: string | null | undefined): RewriteCacheEntry | null {
+  if (!toolId) return null
+  const key = latestRewriteCacheKeyByToolId.get(toolId)
+  if (!key) return null
+
+  const entry = rewriteCacheByKey.get(key)
+  if (!entry) {
+    latestRewriteCacheKeyByToolId.delete(toolId)
+    return null
+  }
+
+  return entry
+}
+
+function clearCachedRewrite(toolId: string): void {
+  const key = latestRewriteCacheKeyByToolId.get(toolId)
+  if (!key) return
+
+  latestRewriteCacheKeyByToolId.delete(toolId)
+  rewriteCacheByKey.delete(key)
+  notifyRewriteCacheChanged()
+}
+
+function markRewriteVerified(toolId: string): void {
+  rewriteVerifiedToolIds.add(toolId)
+}
+
+function clearRewriteVerified(toolId: string): void {
+  rewriteVerifiedToolIds.delete(toolId)
+}
+
+function isRewriteVerified(toolId: string | null | undefined): boolean {
+  return Boolean(toolId && rewriteVerifiedToolIds.has(toolId))
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return normalizeErrorMessage(error.message)
+  }
+  return typeof error === "string" ? normalizeErrorMessage(error) : "AI 改写失败"
+}
+
+function normalizeErrorMessage(message: string): string {
+  return message.replace(/^Error invoking remote method '[^']+': Error:\s*/u, "")
+}
+
+function startCachedRewrite(toolId: string, sourceCode: string): void {
+  const key = getRewriteCacheKey(toolId, sourceCode)
+  const previousKey = latestRewriteCacheKeyByToolId.get(toolId)
+  if (previousKey && previousKey !== key) {
+    rewriteCacheByKey.delete(previousKey)
+  }
+
+  const pending: RewriteCacheEntry = {
+    status: "pending",
+    sourceCode,
+    promise: window.api.codeExecTools.rewrite({
+      id: toolId,
+      code: sourceCode
+    })
+  }
+
+  latestRewriteCacheKeyByToolId.set(toolId, key)
+  rewriteCacheByKey.set(key, pending)
+  notifyRewriteCacheChanged()
+
+  void pending.promise
+    .then((result) => {
+      if (rewriteCacheByKey.get(key) !== pending) return
+      rewriteCacheByKey.set(key, {
+        status: "success",
+        sourceCode,
+        result
+      })
+      notifyRewriteCacheChanged()
+    })
+    .catch((error) => {
+      if (rewriteCacheByKey.get(key) !== pending) return
+      rewriteCacheByKey.set(key, {
+        status: "error",
+        sourceCode,
+        error: getErrorMessage(error)
+      })
+      notifyRewriteCacheChanged()
+    })
+}
+
+function getRewriteCandidate(entry: RewriteCacheEntry | null): RewriteCandidateState | null {
+  return entry?.status === "success"
+    ? {
+        code: entry.result.code,
+        inputSchema: entry.result.inputSchema
+      }
+    : null
+}
+
+function getToolStatusBadgeClass(tool: ManagedSavedCodeExecTool, rewriting = false): string {
+  if (rewriting) {
+    return "border border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-400"
+  }
+  return tool.enabled
     ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
     : "border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+}
+
+function getToolStatusLabel(tool: ManagedSavedCodeExecTool): string {
+  if (tool.enabled) return "已启用"
+  return tool.rewriteReady === true ? "已关闭" : "待改写"
 }
 
 function getToolToggleButtonClass(enabled: boolean): string {
@@ -52,6 +206,16 @@ function createEditorState(tool: ManagedSavedCodeExecTool): EditorState {
     code: tool.code,
     timeoutMs: String(tool.timeoutMs),
     paramsText: formatParamsText(tool.lastPreviewParams)
+  }
+}
+
+function createEditorStateFromRewrite(tool: ManagedSavedCodeExecTool, rewrite: RewriteResult): EditorState {
+  return {
+    toolName: rewrite.toolName,
+    description: rewrite.description,
+    code: rewrite.code,
+    timeoutMs: String(tool.timeoutMs),
+    paramsText: formatParamsText(rewrite.params)
   }
 }
 
@@ -147,7 +311,7 @@ function parseTimeoutText(timeoutText: string): { ok: true; value: number } | { 
 
 export function CodeExecToolsPanel(): React.JSX.Element {
   const [tools, setTools] = useState<ManagedSavedCodeExecTool[]>([])
-  const [codeExecEnabled, setCodeExecEnabled] = useState(true)
+  const [codeExecEnabled, setCodeExecEnabled] = useState(false)
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null)
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [runResult, setRunResult] = useState<SavedCodeExecPreviewResult | null>(null)
@@ -159,6 +323,15 @@ export function CodeExecToolsPanel(): React.JSX.Element {
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [rewriteCacheVersion, setRewriteCacheVersion] = useState(0)
+  const appliedToolKeyRef = useRef<string | null>(null)
+  const appliedRewriteEntryRef = useRef<RewriteCacheEntry | null>(null)
+
+  useEffect(() => {
+    return subscribeRewriteCache(() => {
+      setRewriteCacheVersion((version) => version + 1)
+    })
+  }, [])
 
   const loadTools = useCallback(async (preferredToolId?: string) => {
     setLoading(true)
@@ -194,22 +367,60 @@ export function CodeExecToolsPanel(): React.JSX.Element {
     [selectedToolId, tools]
   )
 
+  const selectedRewriteEntry = useMemo(
+    () => getCachedRewrite(selectedTool?.toolId),
+    [rewriteCacheVersion, selectedTool?.toolId]
+  )
+
+  const rewriting = selectedRewriteEntry?.status === "pending"
+  const rewriteCandidate = getRewriteCandidate(selectedRewriteEntry)
+
   useEffect(() => {
     if (!selectedTool) {
+      appliedToolKeyRef.current = null
+      appliedRewriteEntryRef.current = null
       setEditor(null)
       setRunResult(null)
       setLastSuccessfulPreview(null)
       return
     }
 
-    setEditor(createEditorState(selectedTool))
-    setRunResult(null)
-    setLastSuccessfulPreview(null)
-  }, [selectedToolId])
+    const toolKey = `${selectedTool.toolId}:${selectedTool.codeHash}`
+    const toolChanged = appliedToolKeyRef.current !== toolKey
 
-  useEffect(() => {
-    setActionError(null)
-  }, [selectedToolId])
+    if (selectedRewriteEntry?.status === "success") {
+      if (toolChanged || appliedRewriteEntryRef.current !== selectedRewriteEntry) {
+        setEditor(createEditorStateFromRewrite(selectedTool, selectedRewriteEntry.result))
+        setRunResult(null)
+        setLastSuccessfulPreview(null)
+        setActionError(null)
+        setActionMessage("脚本已完成改写，请试运行成功后保存")
+      }
+      appliedToolKeyRef.current = toolKey
+      appliedRewriteEntryRef.current = selectedRewriteEntry
+      return
+    }
+
+    appliedRewriteEntryRef.current = null
+
+    if (toolChanged) {
+      setEditor(createEditorState(selectedTool))
+      setRunResult(null)
+      setLastSuccessfulPreview(null)
+      appliedToolKeyRef.current = toolKey
+    }
+
+    if (selectedRewriteEntry?.status === "pending") {
+      setActionError(null)
+      setActionMessage(null)
+      return
+    }
+
+    if (selectedRewriteEntry?.status === "error") {
+      setActionError(selectedRewriteEntry.error)
+      setActionMessage(null)
+    }
+  }, [selectedRewriteEntry, selectedTool])
 
   const dirty = selectedTool ? isToolDirty(selectedTool, editor) : false
   const timeoutValidation = editor ? parseTimeoutText(editor.timeoutMs) : null
@@ -224,11 +435,20 @@ export function CodeExecToolsPanel(): React.JSX.Element {
         )
       : null
   const saveBlockedByPreview = Boolean(codeChanged && !matchedPreview)
+  const enableBlockedByRewrite = Boolean(
+    selectedTool && !selectedTool.enabled && selectedTool.rewriteReady !== true
+  )
+  const saveableRewriteCandidate = Boolean(
+    selectedTool &&
+      editor &&
+      selectedTool.rewriteReady !== true &&
+      matchedPreview &&
+      (rewriteCandidate?.code === editor.code || isRewriteVerified(selectedTool.toolId))
+  )
   const visibleActionMessage =
     actionMessage &&
     !actionMessage.includes("已启用") &&
-    !actionMessage.includes("已关闭") &&
-    !actionMessage.includes("工具已保存")
+    !actionMessage.includes("已关闭")
       ? actionMessage
       : null
 
@@ -262,6 +482,10 @@ export function CodeExecToolsPanel(): React.JSX.Element {
 
       setRunResult(result)
       if (result.ok) {
+        if (selectedRewriteEntry?.status === "success" && selectedRewriteEntry.result.code === editor.code) {
+          markRewriteVerified(selectedTool.toolId)
+        }
+
         try {
           const updatedTool = await window.api.codeExecTools.setLastPreviewParams(selectedTool.toolId, parsedParams.value)
           setTools((prev) => prev.map((tool) => (tool.toolId === updatedTool.toolId ? updatedTool : tool)))
@@ -279,12 +503,12 @@ export function CodeExecToolsPanel(): React.JSX.Element {
         setLastSuccessfulPreview(null)
       }
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "试运行失败")
+      setActionError(error instanceof Error ? getErrorMessage(error) : "试运行失败")
       setActionMessage(null)
     } finally {
       setRunning(false)
     }
-  }, [editor, selectedTool])
+  }, [editor, selectedRewriteEntry, selectedTool])
 
   const handleSave = useCallback(async () => {
     if (!selectedTool || !editor) return
@@ -313,6 +537,21 @@ export function CodeExecToolsPanel(): React.JSX.Element {
     setActionMessage(null)
 
     try {
+      const readyRewriteCandidate =
+        matchedPreview && rewriteCandidate?.code === editor.code ? rewriteCandidate : null
+      const rewriteReady = Boolean(
+        matchedPreview && (readyRewriteCandidate || isRewriteVerified(selectedTool.toolId))
+      )
+      const rewriteReadyPayload = readyRewriteCandidate
+        ? {
+            inputSchema: readyRewriteCandidate.inputSchema,
+            rewriteReady: true
+          }
+        : rewriteReady
+          ? {
+              rewriteReady: true
+            }
+          : {}
       const updated = await window.api.codeExecTools.update({
         id: selectedTool.toolId,
         toolName: editor.toolName,
@@ -324,16 +563,30 @@ export function CodeExecToolsPanel(): React.JSX.Element {
               previewParams: matchedPreview.params,
               previewOutput: matchedPreview.output
             }
-          : {})
+          : {}),
+        ...rewriteReadyPayload
       })
 
+      clearCachedRewrite(selectedTool.toolId)
+      clearRewriteVerified(selectedTool.toolId)
       await loadTools(updated.toolId)
+      setActionMessage("工具已保存")
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "保存失败")
+      setActionError(error instanceof Error ? getErrorMessage(error) : "保存失败")
     } finally {
       setSaving(false)
     }
-  }, [editor, loadTools, matchedPreview, selectedTool])
+  }, [editor, loadTools, matchedPreview, rewriteCandidate, selectedTool])
+
+  const handleRewrite = useCallback(() => {
+    if (!selectedTool || !editor) return
+
+    setActionError(null)
+    setActionMessage(null)
+    setRunResult(null)
+    setLastSuccessfulPreview(null)
+    startCachedRewrite(selectedTool.toolId, editor.code)
+  }, [editor, selectedTool])
 
   const handleDelete = useCallback(async () => {
     if (!selectedTool) return
@@ -346,16 +599,29 @@ export function CodeExecToolsPanel(): React.JSX.Element {
 
     try {
       await window.api.codeExecTools.delete(selectedTool.toolId)
+      clearCachedRewrite(selectedTool.toolId)
+      clearRewriteVerified(selectedTool.toolId)
       await loadTools()
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "删除失败")
+      setActionError(error instanceof Error ? getErrorMessage(error) : "删除失败")
     } finally {
       setDeleting(false)
     }
   }, [loadTools, selectedTool])
 
+  const handleSelectTool = useCallback((toolId: string) => {
+    setSelectedToolId(toolId)
+    setActionError(null)
+    setActionMessage(null)
+  }, [])
+
   const handleToggleToolEnabled = useCallback(async () => {
     if (!selectedTool) return
+    if (!selectedTool.enabled && selectedTool.rewriteReady !== true) {
+      setActionError("请先使用大模型改写并试运行成功后启用")
+      setActionMessage(null)
+      return
+    }
 
     setActionError(null)
     setActionMessage(null)
@@ -364,7 +630,7 @@ export function CodeExecToolsPanel(): React.JSX.Element {
       const updated = await window.api.codeExecTools.setEnabled(selectedTool.toolId, !selectedTool.enabled)
       setTools((prev) => prev.map((tool) => (tool.toolId === updated.toolId ? updated : tool)))
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "切换启用状态失败")
+      setActionError(error instanceof Error ? getErrorMessage(error) : "切换启用状态失败")
     }
   }, [selectedTool])
 
@@ -378,7 +644,7 @@ export function CodeExecToolsPanel(): React.JSX.Element {
       setCodeExecEnabled(next)
       setActionMessage(next ? "code_exec 已启用" : "code_exec 已关闭")
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "切换 code_exec 状态失败")
+      setActionError(error instanceof Error ? getErrorMessage(error) : "切换 code_exec 状态失败")
     }
   }, [codeExecEnabled])
 
@@ -426,35 +692,45 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                 暂无自主生成工具
               </p>
             ) : (
-              tools.map((tool) => (
-                <button
-                  key={tool.toolId}
-                  className={cn(
-                    "w-full rounded-md border border-border/70 px-3 py-2 text-left transition-colors",
-                    !tool.enabled && "opacity-70",
-                    selectedTool?.toolId === tool.toolId ? "bg-muted/70" : "hover:bg-muted/50"
-                  )}
-                  onClick={() => setSelectedToolId(tool.toolId)}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-medium">{tool.toolName}</span>
-                    <span
-                      className={cn(
-                        "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                        getToolStatusBadgeClass(tool.enabled)
-                      )}
-                    >
-                      {tool.enabled ? "已启用" : "已关闭"}
-                    </span>
-                  </div>
-                  <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
-                    {tool.toolId}
-                  </div>
-                  <div className="mt-2 line-clamp-2 text-xs text-muted-foreground">
-                    {tool.description || "暂无描述"}
-                  </div>
-                </button>
-              ))
+              tools.map((tool) => {
+                const toolRewriting = getCachedRewrite(tool.toolId)?.status === "pending"
+                return (
+                  <button
+                    key={tool.toolId}
+                    className={cn(
+                      "w-full rounded-md border border-border/70 px-3 py-2 text-left transition-colors",
+                      !tool.enabled && "opacity-70",
+                      selectedTool?.toolId === tool.toolId ? "bg-muted/70" : "hover:bg-muted/50"
+                    )}
+                    onClick={() => handleSelectTool(tool.toolId)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-sm font-medium">{tool.toolName}</span>
+                      <span
+                        className={cn(
+                          "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                          getToolStatusBadgeClass(tool, toolRewriting)
+                        )}
+                      >
+                        {toolRewriting ? (
+                          <>
+                            <Loader2 className="size-3 animate-spin" />
+                            改写中
+                          </>
+                        ) : (
+                          getToolStatusLabel(tool)
+                        )}
+                      </span>
+                    </div>
+                    <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                      {tool.toolId}
+                    </div>
+                    <div className="mt-2 line-clamp-2 text-xs text-muted-foreground">
+                      {tool.description || "暂无描述"}
+                    </div>
+                  </button>
+                )
+              })
             )}
           </div>
         </ScrollArea>
@@ -473,9 +749,18 @@ export function CodeExecToolsPanel(): React.JSX.Element {
 
               <div className="flex flex-wrap items-center gap-2">
                 <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRewrite}
+                  disabled={rewriting || saving || running || deleting || !editor.code.trim()}
+                >
+                  {rewriting ? <Loader2 className="size-4 animate-spin" /> : <Wand2 className="size-4" />}
+                  大模型改写
+                </Button>
+                <Button
                   size="sm"
                   onClick={handleSave}
-                  disabled={!dirty || saving || running || deleting || !timeoutValidation?.ok || saveBlockedByPreview}
+                  disabled={(!dirty && !saveableRewriteCandidate) || saving || running || rewriting || deleting || !timeoutValidation?.ok || saveBlockedByPreview}
                 >
                   {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
                   保存修改
@@ -485,7 +770,8 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                   size="sm"
                   onClick={handleToggleToolEnabled}
                   className={getToolToggleButtonClass(selectedTool.enabled)}
-                  disabled={deleting || saving || running || dirty}
+                  disabled={deleting || saving || running || rewriting || dirty || enableBlockedByRewrite}
+                  title={enableBlockedByRewrite ? "请先使用大模型改写并试运行成功后启用" : undefined}
                 >
                   {selectedTool.enabled ? "关闭" : "启用"}
                 </Button>
@@ -493,7 +779,7 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                   variant="destructive"
                   size="sm"
                   onClick={handleDelete}
-                  disabled={deleting || saving || running}
+                  disabled={deleting || saving || running || rewriting}
                 >
                   {deleting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
                   删除
@@ -509,6 +795,11 @@ export function CodeExecToolsPanel(): React.JSX.Element {
             {visibleActionMessage && (
               <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400">
                 {visibleActionMessage}
+              </div>
+            )}
+            {selectedTool.rewriteReady !== true && (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+                请先使用大模型改写脚本。试运行成功后保存即可启用
               </div>
             )}
 
@@ -572,7 +863,7 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                       variant="outline"
                       size="sm"
                       onClick={handleRunPreview}
-                      disabled={running || saving || deleting}
+                      disabled={running || saving || rewriting || deleting}
                     >
                       {running ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
                       运行
@@ -652,11 +943,12 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                 </div>
                 <textarea
                   value={editor.code}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    clearCachedRewrite(selectedTool.toolId)
                     setEditor((current) =>
                       current ? { ...current, code: event.target.value } : current
                     )
-                  }
+                  }}
                   className="min-h-[360px] w-full rounded-sm border border-border bg-background px-3 py-2 font-mono text-xs leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   spellCheck={false}
                 />

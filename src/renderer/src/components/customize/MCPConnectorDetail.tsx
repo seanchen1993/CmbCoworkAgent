@@ -13,6 +13,86 @@ function getConnectorSummary(connector: McpConnectorConfig): string {
   return connector.url ?? ""
 }
 
+const PROJECTION_PROMPT_EXAMPLE =
+  "查最近 20 条未关闭工单，只保留 id、title、status、owner；正文、评论、附件先不要展开。"
+const PROJECTION_DEMO_MCP_PATH = "examples/mcp-ticket-demo-server.mjs"
+const PROJECTION_DEMO_DOC_PATH = "docs/mcp-ticket-demo-usage.md"
+
+function ProjectionGuide(props: { lazyLoad?: boolean; compact?: boolean }): React.JSX.Element {
+  const { lazyLoad, compact = false } = props
+  const statusLabel =
+    typeof lazyLoad === "boolean"
+      ? lazyLoad
+        ? "懒加载已开启"
+        : "开启懒加载后可用"
+      : "配合懒加载使用"
+
+  return (
+    <div
+      className={cn(
+        "rounded-xl border border-border/60 bg-muted/30",
+        compact ? "p-3 space-y-2" : "p-4 space-y-3"
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 flex items-center gap-2">
+          <Database className="size-4 shrink-0 text-muted-foreground/70" />
+          <p className="text-sm font-medium text-foreground/70">大结果裁剪</p>
+        </div>
+        <span
+          className={cn(
+            "shrink-0 rounded-sm border px-1.5 py-0.5 text-[11px]",
+            lazyLoad
+              ? "border-primary/20 bg-primary/10 text-primary"
+              : "border-border bg-background/60 text-muted-foreground"
+          )}
+        >
+          {statusLabel}
+        </span>
+      </div>
+      <p className={cn("text-[13px] text-muted-foreground leading-relaxed", compact && "text-xs")}>
+        对搜索、列表、知识库这类返回很大的 MCP 工具，Agent 会先用{" "}
+        <span className="font-mono text-foreground/70">inspect_tool</span> 读取字段提示，再用{" "}
+        <span className="font-mono text-foreground/70">invoke_deferred_tool</span> 传入{" "}
+        <span className="font-mono text-foreground/70">required_fields</span>、{" "}
+        <span className="font-mono text-foreground/70">max_array_items</span>、{" "}
+        <span className="font-mono text-foreground/70">max_result_chars</span> 只取本轮需要的结果。
+      </p>
+
+      <div className="rounded-md border border-border/60 bg-background/70 px-3 py-2 space-y-1.5">
+        <p className="text-[11px] font-medium text-foreground/60">可以直接这样问</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">{PROJECTION_PROMPT_EXAMPLE}</p>
+      </div>
+
+      <div className="rounded-md border border-border/60 bg-background/70 px-3 py-2 space-y-1.5">
+        <p className="text-[11px] font-medium text-foreground/60">完整测试 MCP</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          源码环境可添加一个{" "}
+          <span className="font-mono text-foreground/70">Local stdio command</span>：启动命令填{" "}
+          <span className="font-mono text-foreground/70">node</span>，命令参数填当前 checkout 下的{" "}
+          <span className="font-mono text-foreground/70">{PROJECTION_DEMO_MCP_PATH}</span>
+          ，并勾选懒加载。完整步骤见{" "}
+          <span className="font-mono text-foreground/70">{PROJECTION_DEMO_DOC_PATH}</span>。
+        </p>
+      </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        这类提问会被转换成下面这样的裁剪字段：
+      </p>
+      <div className="flex flex-wrap gap-1.5 text-[11px]">
+        {["items[].id", "items[].title", "items[].status", "items[].owner"].map((field) => (
+          <span
+            key={field}
+            className="rounded-sm border border-border bg-background/70 px-1.5 py-0.5 font-mono text-muted-foreground"
+          >
+            {field}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function MCPConnectorDetail(props: {
   connector: McpConnectorConfig | null
   onToggleEnabled: (id: string, enabled: boolean) => void
@@ -136,6 +216,8 @@ export function MCPConnectorDetail(props: {
                 协议接口的远程服务都可以接入。连接器支持随时启用 / 禁用，不影响其他功能。
               </p>
             </div>
+
+            <ProjectionGuide />
           </div>
         </div>
       </div>
@@ -256,6 +338,10 @@ export function MCPConnectorDetail(props: {
             {connector.lazyLoad ? "已开启" : "已关闭"}
           </Button>
         </div>
+      </div>
+
+      <div className="px-4 py-3 border-b border-border">
+        <ProjectionGuide lazyLoad={connector.lazyLoad} compact />
       </div>
 
       <div className="px-4 py-3 border-b border-border">

@@ -7,7 +7,6 @@ import {
   FileText,
   GitBranch,
   Lightbulb,
-  Plus,
   Sparkles,
   Star,
   Tag,
@@ -33,9 +32,34 @@ type SkillUserUsage = {
   count: number
 }
 
+type MarketExtraJson = {
+  updated_at?: string
+}
+
+function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
+  if (!extraJson?.trim()) return {}
+  try {
+    const parsed = JSON.parse(extraJson) as MarketExtraJson
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function getMarketUpdatedAt(item: MarketItem): string {
+  return parseMarketExtraJson(item.extra_json).updated_at || item.updated_at || item.created_at
+}
+
+function formatMarketDateTime(value?: string): string {
+  if (!value) return "-"
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN")
+}
+
 interface MarketDetailViewProps {
   activeTab: MarketItemType
   selectedItem: MarketItem
+  canManageSelectedItem: boolean
   detailFilePanel: React.ReactNode
   canViewSkillUserDetail: boolean
   selectedSkillCallCount: number | null
@@ -65,6 +89,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
   const {
     activeTab,
     selectedItem,
+    canManageSelectedItem,
     detailFilePanel,
     canViewSkillUserDetail,
     selectedSkillCallCount,
@@ -92,6 +117,8 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
 
   const subscribeUrl =
     activeTab === "orgSkill" ? buildOrgSkillSubscribeUrl(selectedItem) : null
+  const createdAtLabel = formatMarketDateTime(selectedItem.created_at)
+  const updatedAtLabel = formatMarketDateTime(getMarketUpdatedAt(selectedItem))
 
   const handleOpenSubscribe = () => {
     if (!subscribeUrl) {
@@ -137,349 +164,325 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
   }
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto xl:overflow-hidden">
-      <div className="h-full min-h-0 p-5">
-        <div className="grid h-full min-h-0 grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_380px] xl:items-stretch">
-          <div className="order-2 min-h-0 xl:order-1 xl:flex xl:h-full xl:flex-col xl:overflow-hidden">
-            <ScrollArea className="xl:h-full xl:min-h-0 xl:flex-1">
-              <div className="space-y-3 xl:pr-3">
-                {detailFilePanel}
+    <ScrollArea className="flex-1">
+      <div className="p-5 h-full">
+        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-5 items-start xl:h-full">
+          <div className="space-y-3 xl:order-1 order-2">{detailFilePanel}</div>
+
+          <div className="xl:order-2 order-1 space-y-3 xl:sticky xl:top-4 w-full h-full overflow-y-auto pr-1">
+            <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.04)_0px_4px_16px]">
+              {selectedItem.description && (
+                <p className="my-4 text-xs  leading-relaxed whitespace-pre-wrap break-words">
+                  {selectedItem.description}
+                </p>
+              )}
+
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                {selectedItem.category && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                    <Tag className="size-3" />
+                    {selectedItem.category}
+                  </span>
+                )}
+                {selectedItem.version && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                    <GitBranch className="size-3" />
+                    {selectedItem.updateAvailable && selectedItem.installedVersion
+                      ? `${formatMarketVersionLabel(selectedItem.installedVersion)} -> ${formatMarketVersionLabel(selectedItem.version)}`
+                      : formatMarketVersionLabel(selectedItem.version)}
+                  </span>
+                )}
+                <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                  <Calendar className="size-3" />
+                  创建于 {createdAtLabel}
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                  <Edit className="size-3" />
+                  更新于 {updatedAtLabel}
+                </span>
+                {selectedItem.installed && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-2.5 py-1">
+                    <CheckCircle className="size-3" />
+                    已安装
+                  </span>
+                )}
+                {selectedItem.updateAvailable && (
+                  <MarketUpdateBadge
+                    typeLabel={getMarketTypeLabel(activeTab)}
+                    installedVersion={selectedItem.installedVersion}
+                    currentVersion={selectedItem.version}
+                    label={`当前${getMarketTypeLabel(activeTab)}有更新`}
+                    className="text-[12px] px-3 py-1"
+                  />
+                )}
+                {selectedItem.featured === "精品" && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1">
+                    <Star className="size-3 fill-[#c4956a]" />
+                    精品
+                  </span>
+                )}
+                {isAutoOptimizedMarketItem(selectedItem) && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-[#eef5ff] border border-[#cdddf6] text-[#3b68a8] px-2.5 py-1">
+                    <Sparkles className="size-3" />
+                    系统优化
+                  </span>
+                )}
+                {selectedUploaderFallback ? (
+                  <span className="flex min-w-0 max-w-full items-start gap-1 rounded-xl bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                    <User className="mt-1 size-3 shrink-0" />
+                    {renderUploaderProfile(selectedUploaderProfile, selectedUploaderFallback, {
+                      multiline: true
+                    })}
+                  </span>
+                ) : null}
+                {activeTab === "skill" && selectedSkillCallCount !== null && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-[#d7e2f5] bg-[linear-gradient(135deg,#f4f8ff_0%,#e9f1ff_100%)] text-[#365d97] px-3 py-1">
+                    <BarChart3 className="size-3" />
+                    <span className="text-[11px] text-[#6a7fa5]">调用次数</span>
+                    <span className="font-semibold tabular-nums">{selectedSkillCallCount}</span>
+                  </span>
+                )}
+                {activeTab === "skill" && selectedSkillUserCount !== null && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-[#cfe4d9] bg-[linear-gradient(135deg,#f2faf5_0%,#e8f7ef_100%)] text-[#2f7a55] px-3 py-1">
+                    <User className="size-3" />
+                    <span className="text-[11px] text-[#4c8669]">使用用户数</span>
+                    <span className="font-semibold tabular-nums">{selectedSkillUserCount}</span>
+                  </span>
+                )}
               </div>
-            </ScrollArea>
-          </div>
 
-          <div className="order-1 w-full xl:order-2 xl:h-full xl:min-h-0 xl:overflow-hidden">
-            <ScrollArea className="xl:h-full xl:min-h-0">
-              <div className="space-y-3 xl:pr-1">
-                <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.04)_0px_4px_16px]">
-                  <div className="space-y-1.5">
-                    {selectedItem.chinese_name ? (
-                      <h3 className="text-base font-medium leading-snug text-[#141413]">
-                        {selectedItem.chinese_name}
-                        <span className="ml-2 text-[#87867f] font-normal text-sm">
-                          ({selectedItem.name})
-                        </span>
-                      </h3>
-                    ) : (
-                      <h3 className="text-base font-medium leading-snug text-[#141413]">
-                        {selectedItem.name}
-                      </h3>
-                    )}
-                    {selectedItem.description && (
-                      <p className="my-4 text-xs text-[#87867f] leading-relaxed whitespace-pre-wrap break-words">
-                        {selectedItem.description}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                    {selectedItem.category && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
-                        <Tag className="size-3" />
-                        {selectedItem.category}
-                      </span>
-                    )}
-                    {selectedItem.version && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
-                        <GitBranch className="size-3" />
-                        {selectedItem.updateAvailable && selectedItem.installedVersion
-                          ? `${formatMarketVersionLabel(selectedItem.installedVersion)} -> ${formatMarketVersionLabel(selectedItem.version)}`
-                          : formatMarketVersionLabel(selectedItem.version)}
-                      </span>
-                    )}
-                    <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
-                      <Calendar className="size-3" />
-                      {new Date(selectedItem.created_at).toLocaleDateString("zh-CN")}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                {activeTab === "orgSkill" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#3766a6] border-[#ccdcf5] bg-[#edf4ff] hover:bg-[#dceaff]"
+                    onClick={handleOpenSubscribe}
+                  >
+                    <Sparkles className="size-3" />
+                    跳转去订阅
+                  </Button>
+                )}
+                {selectedItem.installed ? (
+                  activeTab === "orgSkill" ? (
+                    <span className="text-xs bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
+                      <CheckCircle className="size-3" />
+                      已安装
                     </span>
-                    {selectedItem.installed && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-2.5 py-1">
-                        <CheckCircle className="size-3" />
-                        已安装
-                      </span>
-                    )}
-                    {selectedItem.updateAvailable && (
-                      <MarketUpdateBadge
-                        typeLabel={getMarketTypeLabel(activeTab)}
-                        installedVersion={selectedItem.installedVersion}
-                        currentVersion={selectedItem.version}
-                        label={`当前${getMarketTypeLabel(activeTab)}有更新`}
-                        className="text-[12px] px-3 py-1"
-                      />
-                    )}
-                    {selectedItem.featured === "精品" && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1">
-                        <Star className="size-3 fill-[#c4956a]" />
-                        精品
-                      </span>
-                    )}
-                    {isAutoOptimizedMarketItem(selectedItem) && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[#eef5ff] border border-[#cdddf6] text-[#3b68a8] px-2.5 py-1">
-                        <Sparkles className="size-3" />
-                        系统优化
-                      </span>
-                    )}
-                    {selectedUploaderFallback ? (
-                      <span className="flex min-w-0 max-w-full items-start gap-1 rounded-xl bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
-                        <User className="mt-1 size-3 shrink-0" />
-                        {renderUploaderProfile(selectedUploaderProfile, selectedUploaderFallback, {
-                          multiline: true
-                        })}
-                      </span>
-                    ) : null}
-                    {activeTab === "skill" && selectedSkillCallCount !== null && (
-                      <span className="inline-flex items-center gap-1.5 rounded-full border border-[#d7e2f5] bg-[linear-gradient(135deg,#f4f8ff_0%,#e9f1ff_100%)] text-[#365d97] px-3 py-1">
-                        <BarChart3 className="size-3" />
-                        <span className="text-[11px] text-[#6a7fa5]">调用次数</span>
-                        <span className="font-semibold tabular-nums">{selectedSkillCallCount}</span>
-                      </span>
-                    )}
-                    {activeTab === "skill" && selectedSkillUserCount !== null && (
-                      <span className="inline-flex items-center gap-1.5 rounded-full border border-[#cfe4d9] bg-[linear-gradient(135deg,#f2faf5_0%,#e8f7ef_100%)] text-[#2f7a55] px-3 py-1">
-                        <User className="size-3" />
-                        <span className="text-[11px] text-[#4c8669]">使用用户数</span>
-                        <span className="font-semibold tabular-nums">{selectedSkillUserCount}</span>
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 pt-1">
-                    {activeTab === "orgSkill" && (
+                  ) : selectedItem.featured === "精品" ? (
+                    <TooltipProvider delayDuration={180}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="col-span-2 text-xs bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
+                            <Zap className="size-3" />
+                            自动保持最新
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                          这是一个精品技能。系统会自动为你安装并保持最新版本，无需手动安装或更新。
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  ) : selectedItem.installDisabledReason ? (
+                    <TooltipProvider delayDuration={180}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="col-span-2 inline-flex cursor-not-allowed">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="pointer-events-none h-8 w-full gap-1.5 text-xs rounded-lg text-[#9b8f80] border-[#e8e0d4] bg-[#f6f2ea] opacity-90"
+                              disabled
+                              aria-disabled="true"
+                            >
+                              <Zap className="size-3" />
+                              无需安装
+                            </Button>
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                          {selectedItem.installDisabledReason}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  ) : selectedItem.updateAvailable ? (
+                    <UpdateVersionTooltip
+                      typeLabel={getMarketTypeLabel(activeTab)}
+                      installedVersion={selectedItem.installedVersion}
+                      currentVersion={selectedItem.version}
+                    >
                       <Button
                         variant="outline"
                         size="sm"
-                        className="h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#3766a6] border-[#ccdcf5] bg-[#edf4ff] hover:bg-[#dceaff]"
-                        onClick={handleOpenSubscribe}
+                        className="market-update-bounce h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0]"
+                        onClick={() => onUpdateInstall(selectedItem)}
+                        disabled={updatingItems.has(getItemKey(selectedItem))}
                       >
-                        <Sparkles className="size-3" />
-                        跳转去订阅
+                        <Zap className="size-3" />
+                        更新安装
                       </Button>
-                    )}
-                    {selectedItem.installed ? (
-                      activeTab === "orgSkill" ? (
-                        <span className="text-xs bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
-                          <CheckCircle className="size-3" />
-                          已安装
+                    </UpdateVersionTooltip>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc]"
+                      onClick={() => onUpdateInstall(selectedItem)}
+                      disabled={updatingItems.has(getItemKey(selectedItem))}
+                    >
+                      <Zap className="size-3" />
+                      重新安装
+                    </Button>
+                  )
+                ) : selectedItem.installDisabledReason ? (
+                  <TooltipProvider delayDuration={180}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="col-span-2 inline-flex cursor-not-allowed">
+                          <Button
+                            size="sm"
+                            className="pointer-events-none h-8 w-full gap-1.5 text-xs bg-[#d8c8b5] text-[#faf9f5] border-0 rounded-lg opacity-85"
+                            disabled
+                            aria-disabled="true"
+                          >
+                            <Zap className="size-3" />
+                            无需安装
+                          </Button>
                         </span>
-                      ) : selectedItem.featured === "精品" ? (
-                        <TooltipProvider delayDuration={180}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="col-span-2 text-xs bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
-                                <Zap className="size-3" />
-                                自动保持最新
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
-                              这是一个精品技能。系统会自动为你安装并保持最新版本，无需手动安装或更新。
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      ) : selectedItem.installDisabledReason ? (
-                        <TooltipProvider delayDuration={180}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="col-span-2 inline-flex cursor-not-allowed">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="pointer-events-none h-8 w-full gap-1.5 text-xs rounded-lg text-[#9b8f80] border-[#e8e0d4] bg-[#f6f2ea] opacity-90"
-                                  disabled
-                                  aria-disabled="true"
-                                >
-                                  <Plus className="size-3" />
-                                  无需安装
-                                </Button>
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
-                              {selectedItem.installDisabledReason}
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      ) : selectedItem.updateAvailable ? (
-                        <UpdateVersionTooltip
-                          typeLabel={getMarketTypeLabel(activeTab)}
-                          installedVersion={selectedItem.installedVersion}
-                          currentVersion={selectedItem.version}
-                        >
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="market-update-bounce h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0]"
-                            onClick={() => onUpdateInstall(selectedItem)}
-                            disabled={updatingItems.has(getItemKey(selectedItem))}
-                          >
-                            <Plus className="size-3" />
-                            更新安装
-                          </Button>
-                        </UpdateVersionTooltip>
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc]"
-                          onClick={() => onUpdateInstall(selectedItem)}
-                          disabled={updatingItems.has(getItemKey(selectedItem))}
-                        >
-                          <Plus className="size-3" />
-                          重新安装
-                        </Button>
-                      )
-                    ) : selectedItem.installDisabledReason ? (
-                      <TooltipProvider delayDuration={180}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="col-span-2 inline-flex cursor-not-allowed">
-                              <Button
-                                size="sm"
-                                className="pointer-events-none h-8 w-full gap-1.5 text-xs bg-[#d8c8b5] text-[#faf9f5] border-0 rounded-lg opacity-85"
-                                disabled
-                                aria-disabled="true"
-                              >
-                                <Plus className="size-3" />
-                                无需安装
-                              </Button>
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
-                            {selectedItem.installDisabledReason}
-                          </TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
-                    ) : (
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
+                        {selectedItem.installDisabledReason}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                ) : (
+                  <Button
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-lg cursor-pointer"
+                    onClick={() => onDownload(selectedItem, false)}
+                    disabled={downloadingItems.has(getItemKey(selectedItem))}
+                  >
+                    <Zap className="size-3" />
+                    安装
+                  </Button>
+                )}
+                {selectedItem.installed &&
+                  selectedItem.featured !== "精品" &&
+                  !selectedItem.installDisabledReason && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-1.5 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg cursor-pointer"
+                      onClick={() => onUninstall(selectedItem)}
+                    >
+                      <Trash2 className="size-3" />
+                      卸载
+                    </Button>
+                  )}
+                {activeTab !== "orgSkill" && canManageSelectedItem && (
+                    <>
                       <Button
+                        variant="outline"
                         size="sm"
-                        className="h-8 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-lg cursor-pointer"
-                        onClick={() => onDownload(selectedItem, false)}
-                        disabled={downloadingItems.has(getItemKey(selectedItem))}
+                        className="h-8 gap-1.5 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg cursor-pointer"
+                        onClick={() => onUpdate(selectedItem)}
                       >
-                        <Plus className="size-3" />
-                        安装
+                        <Edit className="size-3" />
+                        编辑
                       </Button>
-                    )}
-                    {selectedItem.installed &&
-                      selectedItem.featured !== "精品" &&
-                      !selectedItem.installDisabledReason && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-8 gap-1.5 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg cursor-pointer"
-                          onClick={() => onUninstall(selectedItem)}
-                        >
-                          <Trash2 className="size-3" />
-                          卸载
-                        </Button>
-                      )}
-                    {activeTab !== "orgSkill" &&
-                      (selectedItem.canDelete ||
-                        (selectedItem.ip &&
-                          localStorage.getItem("localIp") &&
-                          selectedItem.ip === localStorage.getItem("localIp"))) && (
-                        <>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-8 gap-1.5 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg cursor-pointer"
-                            onClick={() => onUpdate(selectedItem)}
-                          >
-                            <Edit className="size-3" />
-                            编辑
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-8 gap-1.5 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg cursor-pointer"
-                            onClick={() => onDelete(selectedItem)}
-                          >
-                            <Trash2 className="size-3" />
-                            删除
-                          </Button>
-                        </>
-                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 gap-1.5 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg cursor-pointer"
+                        onClick={() => onDelete(selectedItem)}
+                      >
+                        <Trash2 className="size-3" />
+                        删除
+                      </Button>
+                    </>
+                  )}
+              </div>
+            </div>
+
+            {activeTab === "skill" && canViewSkillUserDetail && (
+              <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细（本月）</h4>
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-flex items-center gap-1 rounded-full border border-[#d7e2f5] bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#365d97]">
+                      <BarChart3 className="size-3" />
+                      <span className="tabular-nums">{selectedSkillCallCount ?? 0}</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full border border-[#cfe4d9] bg-[#edf8f2] px-2 py-0.5 text-[11px] text-[#2f7a55]">
+                      <User className="size-3" />
+                      <span className="tabular-nums">{selectedSkillUserCount ?? 0}</span>
+                    </span>
                   </div>
                 </div>
-
-                {activeTab === "skill" && canViewSkillUserDetail && (
-                  <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细（本月）</h4>
-                      <div className="flex items-center gap-1.5">
-                        <span className="inline-flex items-center gap-1 rounded-full border border-[#d7e2f5] bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#365d97]">
-                          <BarChart3 className="size-3" />
-                          <span className="tabular-nums">{selectedSkillCallCount ?? 0}</span>
-                        </span>
-                        <span className="inline-flex items-center gap-1 rounded-full border border-[#cfe4d9] bg-[#edf8f2] px-2 py-0.5 text-[11px] text-[#2f7a55]">
-                          <User className="size-3" />
-                          <span className="tabular-nums">{selectedSkillUserCount ?? 0}</span>
-                        </span>
-                      </div>
-                    </div>
-                    {skillUsageLoading ? (
-                      <div className="flex items-center justify-center py-5 text-xs text-[#87867f]">
-                        <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mr-2" />
-                        加载中…
-                      </div>
-                    ) : (
-                      <div className="max-h-[260px] overflow-auto border border-[#f0eee6] rounded-xl">
-                        <table className="w-full text-[12px]">
-                          <thead className="bg-[#f5f4ed]">
-                            <tr className="text-[#87867f]">
-                              <th className="text-left py-2 px-2 font-medium">Id</th>
-                              <th className="text-left py-2 px-2 font-medium">名称</th>
-                              <th className="text-left py-2 px-2 font-medium">机构</th>
-                              <th className="text-right py-2 px-2 font-medium">调用</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedSkillUsageRows.map((user) => (
-                              <tr
-                                key={user.sapId}
-                                className="border-t border-[#f0eee6] text-[#5e5d59]"
-                              >
-                                <td className="py-1.5 px-2 font-mono">
-                                  {user.sapId === "__empty_user__" ? "—" : user.sapId}
-                                </td>
-                                <td className="py-1.5 px-2">
-                                  {user.sapId === "__empty_user__"
-                                    ? user.userName
-                                    : user.userName || user.sapId}
-                                </td>
-                                <td className="py-1.5 px-2">{user.orgName || "—"}</td>
-                                <td className="py-1.5 px-2 text-right">{user.count}</td>
-                              </tr>
-                            ))}
-                            {selectedSkillUsageRows.length === 0 && (
-                              <tr>
-                                <td colSpan={4} className="py-6 text-center text-[#87867f]">
-                                  暂无调用用户数据
-                                </td>
-                              </tr>
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+                {skillUsageLoading ? (
+                  <div className="flex items-center justify-center py-5 text-xs text-[#87867f]">
+                    <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mr-2" />
+                    加载中…
                   </div>
-                )}
-
-                {renderSkillTraceEntry()}
-
-                {selectedItem.guidance && (
-                  <div className="rounded-xl border border-[#f5d9c4] bg-[#fdf3e7] p-4 text-sm shadow-[rgba(0,0,0,0.03)_0px_2px_8px]">
-                    <div className="flex items-center gap-2 mb-2 text-[11px] uppercase tracking-[0.08em] text-[#c4956a] font-medium">
-                      <Lightbulb className="size-3.5 shrink-0" />
-                      <span>使用指引</span>
-                    </div>
-                    <p className="text-[#5e5d59] whitespace-pre-wrap leading-relaxed break-all text-[13px]">
-                      {selectedItem.guidance}
-                    </p>
+                ) : (
+                  <div className="max-h-[260px] overflow-auto border border-[#f0eee6] rounded-xl">
+                    <table className="w-full text-[12px]">
+                      <thead className="bg-[#f5f4ed]">
+                        <tr className="text-[#87867f]">
+                          <th className="text-left py-2 px-2 font-medium">Id</th>
+                          <th className="text-left py-2 px-2 font-medium">名称</th>
+                          <th className="text-left py-2 px-2 font-medium">机构</th>
+                          <th className="text-right py-2 px-2 font-medium">调用</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedSkillUsageRows.map((user) => (
+                          <tr
+                            key={user.sapId}
+                            className="border-t border-[#f0eee6] text-[#5e5d59]"
+                          >
+                            <td className="py-1.5 px-2 font-mono">
+                              {user.sapId === "__empty_user__" ? "—" : user.sapId}
+                            </td>
+                            <td className="py-1.5 px-2">
+                              {user.sapId === "__empty_user__"
+                                ? user.userName
+                                : user.userName || user.sapId}
+                            </td>
+                            <td className="py-1.5 px-2">{user.orgName || "—"}</td>
+                            <td className="py-1.5 px-2 text-right">{user.count}</td>
+                          </tr>
+                        ))}
+                        {selectedSkillUsageRows.length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="py-6 text-center text-[#87867f]">
+                              暂无调用用户数据
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </div>
-            </ScrollArea>
+            )}
+
+            {renderSkillTraceEntry()}
+
+            {selectedItem.guidance && (
+              <div className="rounded-xl border border-[#f5d9c4] bg-[#fdf3e7] p-4 text-sm shadow-[rgba(0,0,0,0.03)_0px_2px_8px]">
+                <div className="flex items-center gap-2 mb-2 text-[11px] uppercase tracking-[0.08em] text-[#c4956a] font-medium">
+                  <Lightbulb className="size-3.5 shrink-0" />
+                  <span>使用指引</span>
+                </div>
+                <p className="text-[#5e5d59] whitespace-pre-wrap leading-relaxed break-all text-[13px]">
+                  {selectedItem.guidance}
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </div>
-    </div>
+    </ScrollArea>
   )
 }

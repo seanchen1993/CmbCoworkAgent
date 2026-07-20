@@ -24,12 +24,17 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
 
 async function withTempHome(run: () => Promise<void>): Promise<void> {
   const previousHome = process.env.HOME
+  const previousUserProfile = process.env.USERPROFILE
   const home = await mkdtemp(join(tmpdir(), "cmb-goals-db-"))
   process.env.HOME = home
+  process.env.USERPROFILE = home
   try {
     await run()
   } finally {
-    process.env.HOME = previousHome
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousUserProfile
     await rm(home, { recursive: true, force: true })
   }
 }
@@ -60,18 +65,14 @@ async function testSqlGoalStorePersistsAcrossDatabaseReopen(): Promise<void> {
 
   assert(outcome?.shouldContinue, "continue outcome should request another turn")
   await db.flush()
-  db.closeDatabase()
+  await db.closeDatabase()
 
   await db.initializeDatabase()
   const reloaded = new SqlGoalStore().get("thread-db")
   assert(reloaded, "goal should reload after closing and reopening the database")
   assertEqual(reloaded?.objective, "finish persistent goal", "objective should persist")
   assertEqual(reloaded?.turnsUsed, 1, "turn count should persist")
-  assertEqual(
-    reloaded?.context.explicitSkill?.name,
-    "docs",
-    "explicit skill name should persist"
-  )
+  assertEqual(reloaded?.context.explicitSkill?.name, "docs", "explicit skill name should persist")
   assertEqual(
     reloaded?.context.explicitSkill?.path,
     "/tmp/SKILL.md",
@@ -93,7 +94,7 @@ async function testSqlGoalStorePersistsAcrossDatabaseReopen(): Promise<void> {
     "ledger evidence should persist"
   )
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testDeleteThreadDeletesGoal(): Promise<void> {
@@ -111,7 +112,7 @@ async function testDeleteThreadDeletesGoal(): Promise<void> {
   db.deleteThread("thread-delete")
   assert(new SqlGoalStore().get("thread-delete") === null, "deleteThread should delete goal")
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testGoalEventsPersistAndDeleteWithThread(): Promise<void> {
@@ -123,7 +124,7 @@ async function testGoalEventsPersistAndDeleteWithThread(): Promise<void> {
   const first = db.addThreadGoalEvent("thread-events", "Goal 已设置", "goal-1", 1_000, "window-1")
   const second = db.addThreadGoalEvent("thread-events", "Goal 已完成", "goal-1", 2_000)
   await db.flush()
-  db.closeDatabase()
+  await db.closeDatabase()
 
   await db.initializeDatabase()
   const events = db.getThreadGoalEvents("thread-events")
@@ -142,7 +143,7 @@ async function testGoalEventsPersistAndDeleteWithThread(): Promise<void> {
     "deleteThread should remove goal events"
   )
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testGoalEventsCanBeLimitedForUi(): Promise<void> {
@@ -169,7 +170,7 @@ async function testGoalEventsCanBeLimitedForUi(): Promise<void> {
   assertEqual(limitedEvents[0]?.message, "Goal event 3", "limited query should keep oldest of tail")
   assertEqual(limitedEvents[2]?.message, "Goal event 5", "limited query should keep newest event")
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testGoalEventsRestoreQueryKeepsRequiredEventsAndRecentTail(): Promise<void> {
@@ -244,7 +245,7 @@ async function testGoalEventsRestoreQueryKeepsRequiredEventsAndRecentTail(): Pro
     "restore query should keep the newest retained tail notice"
   )
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testReplacingSqlGoalRefreshesCreatedAt(): Promise<void> {
@@ -276,7 +277,7 @@ async function testReplacingSqlGoalRefreshesCreatedAt(): Promise<void> {
   assertEqual(reloaded?.objective, "second goal", "replacement objective should persist")
   assertEqual(reloaded?.createdAt, 5_000, "replacement should reset created_at")
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testResumingSqlGoalRefreshesCreatedAtBaseline(): Promise<void> {
@@ -310,7 +311,7 @@ async function testResumingSqlGoalRefreshesCreatedAtBaseline(): Promise<void> {
   }
 
   await db.flush()
-  db.closeDatabase()
+  await db.closeDatabase()
 
   await db.initializeDatabase()
   const reloaded = new SqlGoalStore().get("thread-resume-baseline")
@@ -323,7 +324,7 @@ async function testResumingSqlGoalRefreshesCreatedAtBaseline(): Promise<void> {
   assertEqual(reloaded?.createdAt, 5_000, "reloaded goal should keep refreshed baseline")
   assertEqual(reloaded?.updatedAt, 5_000, "reloaded goal should keep refreshed update time")
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testResettingActiveSqlGoalRefreshesCreatedAtBaseline(): Promise<void> {
@@ -342,13 +343,10 @@ async function testResettingActiveSqlGoalRefreshesCreatedAtBaseline(): Promise<v
   try {
     manager.set("thread-active-resume-baseline", "orphaned active resume should refresh baseline")
     now = 2_000
-    manager.recordJudgeDecision(
-      "thread-active-resume-baseline",
-      {
-        verdict: "continue",
-        reason: "first turn incomplete"
-      }
-    )
+    manager.recordJudgeDecision("thread-active-resume-baseline", {
+      verdict: "continue",
+      reason: "first turn incomplete"
+    })
     now = 5_000
     const resumed = manager.resume("thread-active-resume-baseline", {
       resetActiveWindow: true
@@ -362,24 +360,31 @@ async function testResettingActiveSqlGoalRefreshesCreatedAtBaseline(): Promise<v
   }
 
   await db.flush()
-  db.closeDatabase()
+  await db.closeDatabase()
 
   await db.initializeDatabase()
   const reloaded = new SqlGoalStore().get("thread-active-resume-baseline")
   assertEqual(reloaded?.status, "active", "reloaded reset active goal should stay active")
   assertEqual(reloaded?.turnsUsed, 0, "reloaded reset active goal should keep cleared turns")
-  assertEqual(reloaded?.createdAt, 5_000, "reloaded reset active goal should keep refreshed baseline")
-  assertEqual(reloaded?.updatedAt, 5_000, "reloaded reset active goal should keep refreshed update time")
+  assertEqual(
+    reloaded?.createdAt,
+    5_000,
+    "reloaded reset active goal should keep refreshed baseline"
+  )
+  assertEqual(
+    reloaded?.updatedAt,
+    5_000,
+    "reloaded reset active goal should keep refreshed update time"
+  )
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testSqlGoalStorePausesRestoredActiveGoals(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
   const { SqlGoalStore } = await import("../src/main/agent/goals/goal-store.ts")
-  const { displayGoalPausedReason, GoalManager } = await import(
-    "../src/main/agent/goals/goal-manager.ts"
-  )
+  const { displayGoalPausedReason, GoalManager } =
+    await import("../src/main/agent/goals/goal-manager.ts")
 
   await db.initializeDatabase()
   db.createThread("thread-runtime-restore", { title: "Runtime restore regression" })
@@ -423,7 +428,7 @@ async function testSqlGoalStorePausesRestoredActiveGoals(): Promise<void> {
     "runtime restore should add a goal event explaining the automatic pause"
   )
 
-  db.closeDatabase()
+  await db.closeDatabase()
 }
 
 async function testLegacyBudgetLimitedStatusNormalizesToPaused(): Promise<void> {
@@ -458,7 +463,7 @@ async function testLegacyBudgetLimitedStatusNormalizesToPaused(): Promise<void> 
     ]
   )
   await db.flush()
-  db.closeDatabase()
+  await db.closeDatabase()
 
   await db.initializeDatabase()
   const reloaded = new SqlGoalStore().get("thread-legacy-budget")
@@ -469,7 +474,48 @@ async function testLegacyBudgetLimitedStatusNormalizesToPaused(): Promise<void> 
     "legacy budget_limited rows should gain an explicit paused reason"
   )
 
-  db.closeDatabase()
+  await db.closeDatabase()
+}
+
+async function testAppDbFlushRemainsReusable(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  await db.initializeDatabase()
+  db.createThread("thread-flush-reuse", { title: "before flush" })
+
+  await Promise.all([db.flush(), db.flush()])
+  db.updateThread("thread-flush-reuse", { title: "after flush" })
+  await db.flush()
+  await db.closeDatabase()
+
+  await db.initializeDatabase()
+  assertEqual(
+    db.getThread("thread-flush-reuse")?.title,
+    "after flush",
+    "app DB should persist mutations made after an earlier flush"
+  )
+  await db.closeDatabase()
+}
+
+async function testAppDbStrictFlushSerializesConcurrentCallers(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  await db.initializeDatabase()
+  db.createThread("thread-strict-flush-a", { title: "strict flush A" })
+
+  const firstFlush = db.flushStrict()
+  db.createThread("thread-strict-flush-b", { title: "strict flush B" })
+  await Promise.all([firstFlush, db.flushStrict()])
+  await db.closeDatabase()
+
+  await db.initializeDatabase()
+  assert(
+    db.getThread("thread-strict-flush-a"),
+    "first strict flush thread should survive concurrent strict flushes"
+  )
+  assert(
+    db.getThread("thread-strict-flush-b"),
+    "second strict flush thread should survive concurrent strict flushes"
+  )
+  await db.closeDatabase()
 }
 
 async function testGoalJudgeModelSettings(): Promise<void> {
@@ -577,6 +623,22 @@ async function testGoalJudgeModelSettings(): Promise<void> {
     "shared-judge-with-key",
     "current-model fallback should choose a same-model config with an API key"
   )
+
+  storage.upsertCustomModelConfig({
+    id: "minimax-m2p5-229b-w8a8",
+    name: "Custom Collision Model",
+    baseUrl: "https://custom.example.com/v1",
+    model: "custom-collision-model",
+    apiKey: "custom-collision-key",
+    maxTokens: 128_000,
+    maxOutputTokens: 8_192,
+    temperature: 0.1
+  })
+  assertEqual(
+    evaluator.resolveEvaluatorConfig("custom:minimax-m2p5-229b-w8a8")?.model,
+    "custom-collision-model",
+    "explicit custom evaluator refs should not resolve to a same-ID builtin model"
+  )
 }
 
 async function main(): Promise<void> {
@@ -591,6 +653,8 @@ async function main(): Promise<void> {
     testResettingActiveSqlGoalRefreshesCreatedAtBaseline,
     testSqlGoalStorePausesRestoredActiveGoals,
     testLegacyBudgetLimitedStatusNormalizesToPaused,
+    testAppDbFlushRemainsReusable,
+    testAppDbStrictFlushSerializesConcurrentCallers,
     testGoalJudgeModelSettings
   ]
   await withTempHome(async () => {

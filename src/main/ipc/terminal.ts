@@ -8,15 +8,10 @@ import { fork, type ChildProcess } from "node:child_process"
 import { accessSync } from "fs"
 import path from "path"
 import { app } from "electron"
-import { getCustomModelConfigById, syncSkillsToClaudeDir } from "../storage"
-import { homedir } from "os"
-
-// TODO: 当 CmbCowork 记忆系统改为按项目隔离后，使用与 Claude Code 相同的算法按项目拼接路径：
-// 1. findCanonicalGitRoot(effectiveWorkDir) 获取 git 仓库根目录（worktree 解析到主仓库）
-// 2. sanitizePath() 将路径中非字母数字字符替换为 -
-// 3. 最终路径：~/.cmbcoworkagent/memory/{sanitizedPath}/
-// 参考 claude-code/src/memdir/paths.ts 的 getAutoMemPath() 实现。
-const MEMORY_DIR = path.join(homedir(), ".cmbcoworkagent", "memory")
+import { syncSkillsToClaudeDir } from "../storage"
+import { getModelConfigByRef } from "../models/registry"
+import { getGlobalMemoryDir, getProjectMemoryDir } from "../memory/paths"
+import { trackEvent } from "../services/event-reporter"
 
 function isFullBackupPath(candidate: string): boolean {
   const appDir = path.dirname(app.getPath("exe"))
@@ -28,8 +23,10 @@ function isFullBackupPath(candidate: string): boolean {
 
   const normalizedCandidate = normalizeForCompare(candidate)
   const normalizedBackupDir = normalizeForCompare(fullBackupDir)
-  return normalizedCandidate === normalizedBackupDir ||
+  return (
+    normalizedCandidate === normalizedBackupDir ||
     normalizedCandidate.startsWith(`${normalizedBackupDir}${path.sep}`)
+  )
 }
 
 function assertNotFullBackupPath(kind: string, candidate: string): void {
@@ -52,13 +49,21 @@ function getClaudeCodeProxyBase(): string {
   return (import.meta.env.VITE_CLAUDE_CODE_PROXY_BASE as string) || ""
 }
 
-function buildClaudeEnv(modelId: string, syncMemory: boolean): Record<string, string> {
-  const config = getCustomModelConfigById(modelId)
+function resolveClaudeMemoryDir(workDir?: string): string {
+  return getProjectMemoryDir(workDir)?.dir ?? getGlobalMemoryDir()
+}
+
+function buildClaudeEnv(
+  modelId: string,
+  syncMemory: boolean,
+  workDir?: string
+): Record<string, string> {
+  const config = getModelConfigByRef(modelId)
   if (!config) throw new Error(`模型配置不存在: ${modelId}`)
   const proxyBase = getClaudeCodeProxyBase()
   if (!proxyBase) throw new Error("VITE_CLAUDE_CODE_PROXY_BASE 未配置")
   if (!config.apiKey) throw new Error(`模型 "${config.name}" 的 API Key 未设置`)
-  const baseUrl = `${proxyBase.replace(/\/+$/, '')}/${config.model}`
+  const baseUrl = `${proxyBase.replace(/\/+$/, "")}/${config.model}`
   const env: Record<string, string> = {
     ANTHROPIC_AUTH_TOKEN: config.apiKey,
     ANTHROPIC_BASE_URL: baseUrl,
@@ -71,7 +76,7 @@ function buildClaudeEnv(modelId: string, syncMemory: boolean): Record<string, st
     CLAUDE_CODE_IS_COWORK: "1"
   }
   if (syncMemory) {
-    env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE = MEMORY_DIR
+    env.CLAUDE_COWORK_MEMORY_PATH_OVERRIDE = resolveClaudeMemoryDir(workDir)
   }
   return env
 }
@@ -87,14 +92,23 @@ const ptyWindows = new Map<string, BrowserWindow>()
 const windowCleanupRegistered = new WeakSet<BrowserWindow>()
 
 // P1 fix: 等待子进程确认创建成功/失败
-const pendingCreates = new Map<string, { resolve: () => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>()
+const pendingCreates = new Map<
+  string,
+  { resolve: () => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+>()
 
 function getClaudePath(): string {
   const isWin = process.platform === "win32"
   const binName = isWin ? "claude.cmd" : "claude"
 
   // 方式1: 直接用 @anthropic-ai/claude-code 的 cli.js（最可靠，不依赖 .bin shim）
-  const cliJs = path.join(app.getAppPath(), "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+  const cliJs = path.join(
+    app.getAppPath(),
+    "node_modules",
+    "@anthropic-ai",
+    "claude-code",
+    "cli.js"
+  )
   const unpackedCliJs = cliJs.replace("app.asar", "app.asar.unpacked")
   if (pathExistsSync(unpackedCliJs)) {
     assertNotFullBackupPath("Claude Code CLI", unpackedCliJs)
@@ -160,7 +174,9 @@ function ensurePtyHost(): ChildProcess {
   // 如果此时还没有任何 caller await 到 ptyHostReadyPromise 上（比如 host spawn 立刻失败、
   // 或 disposeAllTerminals 在 in-flight create 之前就走完），rejection 会作为 unhandled rejection
   // 浮上来。挂一个空 .catch 让 rejection 立即被消费；真正的 await 方仍然能拿到 reject（同一个 promise）。
-  ptyHostReadyPromise.catch(() => { /* no-op */ })
+  ptyHostReadyPromise.catch(() => {
+    /* no-op */
+  })
 
   const child = fork(hostPath, [], {
     stdio: ["pipe", "pipe", "pipe", "ipc"],
@@ -187,73 +203,88 @@ function ensurePtyHost(): ChildProcess {
     // 20s：send({type:"ready"}) 在 pty-host.ts 文件最末尾，前面要完成所有 import
     // （含 node-pty 原生模块加载），Windows 杀软冷扫 .node 文件容易超 10s，20s 留足余量
     console.warn("[Terminal] Pty Host ready timed out, killing stuck host")
-    try { child.kill() } catch { /* ignore */ }
+    try {
+      child.kill()
+    } catch {
+      /* ignore */
+    }
     ptyHost = null
   }, 20_000).unref()
 
-  child.on("message", (msg: { type: string; id?: string; data?: string; exitCode?: number; error?: string }) => {
-    if (msg.type === "ready") {
-      if (!isCurrent()) return
-      console.log("[Terminal] Pty Host ready")
-      if (ptyHostReadyTimer) { clearTimeout(ptyHostReadyTimer); ptyHostReadyTimer = null }
-      hostReady = true
-      resolveReady!()
-      return
-    }
-
-    // created/error/data/exit 不需要 isCurrent 守卫：会被代际守卫排除的旧 host 只可能是
-    // 卡在 ready 之前被 kill 掉的 stuck host，那样的 host 从未收到过 create 消息（create 在
-    // await ready 之后才发），所以不可能产生 id 类回信。即便万一发生，按 id 单条操作也无副作用。
-    if (msg.type === "created" && msg.id) {
-      const pending = pendingCreates.get(msg.id)
-      if (pending) {
-        clearTimeout(pending.timer)
-        pending.resolve()
-        pendingCreates.delete(msg.id)
+  child.on(
+    "message",
+    (msg: { type: string; id?: string; data?: string; exitCode?: number; error?: string }) => {
+      if (msg.type === "ready") {
+        if (!isCurrent()) return
+        console.log("[Terminal] Pty Host ready")
+        if (ptyHostReadyTimer) {
+          clearTimeout(ptyHostReadyTimer)
+          ptyHostReadyTimer = null
+        }
+        hostReady = true
+        resolveReady!()
+        return
       }
-      return
-    }
 
-    if (msg.type === "error") {
-      if (msg.id) {
+      // created/error/data/exit 不需要 isCurrent 守卫：会被代际守卫排除的旧 host 只可能是
+      // 卡在 ready 之前被 kill 掉的 stuck host，那样的 host 从未收到过 create 消息（create 在
+      // await ready 之后才发），所以不可能产生 id 类回信。即便万一发生，按 id 单条操作也无副作用。
+      if (msg.type === "created" && msg.id) {
         const pending = pendingCreates.get(msg.id)
         if (pending) {
           clearTimeout(pending.timer)
-          pending.reject(new Error(msg.error || "PTY creation failed"))
+          pending.resolve()
           pendingCreates.delete(msg.id)
         }
-      } else {
-        // 全局异常，无 id，记日志
-        console.error("[Terminal] Pty Host error:", msg.error)
+        return
       }
-      return
-    }
 
-    if (msg.type === "data" && msg.id) {
-      const win = ptyWindows.get(msg.id)
-      if (win && !win.isDestroyed()) {
-        // 数据和字节数一起发给渲染端，渲染端消费后发 ack 回来
-        win.webContents.send(`terminal:data:${msg.id}`, msg.data, Buffer.byteLength((msg.data as string) || ""))
+      if (msg.type === "error") {
+        if (msg.id) {
+          const pending = pendingCreates.get(msg.id)
+          if (pending) {
+            clearTimeout(pending.timer)
+            pending.reject(new Error(msg.error || "PTY creation failed"))
+            pendingCreates.delete(msg.id)
+          }
+        } else {
+          // 全局异常，无 id，记日志
+          console.error("[Terminal] Pty Host error:", msg.error)
+        }
+        return
       }
-      return
-    }
 
-    if (msg.type === "exit" && msg.id) {
-      const win = ptyWindows.get(msg.id)
-      if (win && !win.isDestroyed()) {
-        win.webContents.send(`terminal:exit:${msg.id}`, msg.exitCode)
+      if (msg.type === "data" && msg.id) {
+        const win = ptyWindows.get(msg.id)
+        if (win && !win.isDestroyed()) {
+          // 数据和字节数一起发给渲染端，渲染端消费后发 ack 回来
+          win.webContents.send(
+            `terminal:data:${msg.id}`,
+            msg.data,
+            Buffer.byteLength((msg.data as string) || "")
+          )
+        }
+        return
       }
-      ptyWindows.delete(msg.id)
-      return
+
+      if (msg.type === "exit" && msg.id) {
+        const win = ptyWindows.get(msg.id)
+        if (win && !win.isDestroyed()) {
+          win.webContents.send(`terminal:exit:${msg.id}`, msg.exitCode)
+        }
+        ptyWindows.delete(msg.id)
+        return
+      }
     }
-  })
+  )
 
   // exit / error 共用的 tear-down：通知所有 ptyWindows、reject 等待方、清空全局状态。
   // exitCodeOrError 用于构造抛给 caller 的 reason 和发给 renderer 的退出码。
   const tearDownCurrentHost = (exitCodeOrError: number | Error | null): void => {
-    const reason = exitCodeOrError instanceof Error
-      ? exitCodeOrError
-      : new Error(`Pty Host exited with code ${exitCodeOrError ?? "null (killed by signal)"}`)
+    const reason =
+      exitCodeOrError instanceof Error
+        ? exitCodeOrError
+        : new Error(`Pty Host exited with code ${exitCodeOrError ?? "null (killed by signal)"}`)
     const exitCodeForRenderer = exitCodeOrError instanceof Error ? null : exitCodeOrError
 
     // 1. settle 本代 ready promise（任何代际都做，避免 shutdown/spawn-fail 时 await 永久悬挂）
@@ -263,7 +294,9 @@ function ensurePtyHost(): ChildProcess {
     // 2. 旧代 host 不动全局状态，避免误清新 host
     // 命中场景：ready timeout 主动 kill stuck host、被新一代 host 替换、或 spawn fail 已先走 error handler
     if (!isCurrent()) {
-      console.log("[Terminal] Stale Pty Host exited (killed by ready timeout / replaced / already torn down), skipping global cleanup")
+      console.log(
+        "[Terminal] Stale Pty Host exited (killed by ready timeout / replaced / already torn down), skipping global cleanup"
+      )
       return
     }
     // 3. 通知所有渲染端：你的终端已经死了
@@ -274,7 +307,10 @@ function ensurePtyHost(): ChildProcess {
     }
     // 4. 清空全局状态
     ptyHost = null
-    if (ptyHostReadyTimer) { clearTimeout(ptyHostReadyTimer); ptyHostReadyTimer = null }
+    if (ptyHostReadyTimer) {
+      clearTimeout(ptyHostReadyTimer)
+      ptyHostReadyTimer = null
+    }
     ptyHostReadyPromise = null
     ptyWindows.clear()
     // 5. reject 所有等待中的 create 请求（含 shutdown 期间正在跑的 terminal:create）
@@ -354,7 +390,9 @@ function isAllowedSender(sender: Electron.WebContents): boolean {
       const allowed = new URL(renderUrl)
       if (parsed.origin === allowed.origin) return true
     }
-  } catch { return false }
+  } catch {
+    return false
+  }
   return false
 }
 
@@ -380,7 +418,28 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "terminal:create",
-    async (event, { workDir, args, cols: initCols, rows: initRows, claudeModelId, syncSkills = false, syncMemory = false }: { workDir?: string; args?: string[]; cols?: number; rows?: number; claudeModelId?: string; syncSkills?: boolean; syncMemory?: boolean }) => {
+    async (
+      event,
+      {
+        workDir,
+        args,
+        cols: initCols,
+        rows: initRows,
+        claudeModelId,
+        syncSkills = false,
+        syncMemory = false,
+        launchSource
+      }: {
+        workDir?: string
+        args?: string[]
+        cols?: number
+        rows?: number
+        claudeModelId?: string
+        syncSkills?: boolean
+        syncMemory?: boolean
+        launchSource?: "select_dir" | "restart"
+      }
+    ) => {
       const id = `term-${++idCounter}`
       const window = BrowserWindow.fromWebContents(event.sender)
       // ptyCreated 在 try/catch 两侧共享：createPromise resolve 后标记为 true。
@@ -447,7 +506,11 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
               // 包括 reject 其余 pendingCreates（其他 PTY I/O 此时也已冻结，kill 是正确策略）。
               if (ptyHost && !ptyHost.killed) {
                 console.warn("[Terminal] PTY creation timed out, killing stuck host")
-                try { ptyHost.kill() } catch { /* ignore */ }
+                try {
+                  ptyHost.kill()
+                } catch {
+                  /* ignore */
+                }
               }
             }
           }, 30_000).unref()
@@ -455,24 +518,46 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
         })
 
         // throwOnError=true：IPC 失败时立刻抛出，避免被 30s create timeout 故障放大
-        sendToHost({
-          type: "create",
-          id,
-          workDir: effectiveWorkDir,
-          cols: initCols || 120,
-          rows: initRows || 30,
-          claudePath,
-          args: finalArgs,
-          electronPath: process.execPath,
-          extraEnv: claudeModelId
-            ? buildClaudeEnv(claudeModelId, syncMemory)
-            : { CLAUDE_CODE_IS_COWORK: "1", ...(syncMemory ? { CLAUDE_COWORK_MEMORY_PATH_OVERRIDE: MEMORY_DIR } : {}) }
-        }, true)
+        sendToHost(
+          {
+            type: "create",
+            id,
+            workDir: effectiveWorkDir,
+            cols: initCols || 120,
+            rows: initRows || 30,
+            claudePath,
+            args: finalArgs,
+            electronPath: process.execPath,
+            extraEnv: claudeModelId
+              ? buildClaudeEnv(claudeModelId, syncMemory, effectiveWorkDir)
+              : {
+                  CLAUDE_CODE_IS_COWORK: "1",
+                  ...(syncMemory
+                    ? {
+                        CLAUDE_COWORK_MEMORY_PATH_OVERRIDE: resolveClaudeMemoryDir(effectiveWorkDir)
+                      }
+                    : {})
+                }
+          },
+          true
+        )
 
         await createPromise
         ptyCreated = true
         ensureStillAlive("after created")
         console.log(`[Terminal] Created PTY ${id} via Pty Host, running: ${claudePath}`)
+        if (launchSource === "select_dir") {
+          trackEvent("workspace.launch.started", "workspace", {
+            surface: "claude_code",
+            source: "terminal_create",
+            workspacePath: effectiveWorkDir,
+            workspaceName: path.basename(effectiveWorkDir),
+            terminalId: id,
+            syncSkills,
+            syncMemory,
+            hasModelOverride: Boolean(claudeModelId)
+          })
+        }
         return id
       } catch (err) {
         // 创建失败：幂等清理主进程状态，通知子进程销毁可能已创建的 PTY。
@@ -514,11 +599,14 @@ export function registerTerminalHandlers(ipcMain: IpcMain): void {
     sendToHost({ type: "ack", id, bytes })
   })
 
-  ipcMain.on("terminal:resize", (event, { id, cols, rows }: { id: string; cols: number; rows: number }) => {
-    const win = ptyWindows.get(id)
-    if (!win || win.webContents.id !== event.sender.id) return
-    sendToHost({ type: "resize", id, cols, rows })
-  })
+  ipcMain.on(
+    "terminal:resize",
+    (event, { id, cols, rows }: { id: string; cols: number; rows: number }) => {
+      const win = ptyWindows.get(id)
+      if (!win || win.webContents.id !== event.sender.id) return
+      sendToHost({ type: "resize", id, cols, rows })
+    }
+  )
 
   ipcMain.handle("terminal:selectDir", async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)

@@ -1,10 +1,21 @@
 import type { HookConfig } from "./hooks/types"
+import type {
+  ForkableCheckpoint as SharedForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
+  ThreadForkOverrides as SharedThreadForkOverrides,
+  ThreadForkParams as SharedThreadForkParams,
+  ThreadForkResponse as SharedThreadForkResponse
+} from "../shared/checkpoint-forkability"
+
+export type { ForkBoundarySource, ForkUnstableReason } from "../shared/checkpoint-forkability"
 
 export type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
+  AgentAutoCommitRepoResult,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitStatus
 } from "../shared/auto-commit-types"
 
@@ -20,7 +31,7 @@ export interface AgentInvokeParams {
   threadId: string
   message: string
   modelId?: string
-  agentMode?: "normal" | "coordinator"
+  agentMode?: "normal" | "coordinator" | "workflow"
   coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string
@@ -36,7 +47,7 @@ export interface AgentResumeParams {
     }
   }
   modelId?: string
-  agentMode?: "normal" | "coordinator"
+  agentMode?: "normal" | "coordinator" | "workflow"
 }
 
 export interface AgentInterruptParams {
@@ -59,6 +70,12 @@ export interface ThreadValuesMergeParams {
   threadId: string
   patch: Record<string, unknown>
 }
+
+export type ThreadForkOverrides = SharedThreadForkOverrides
+export type ThreadForkParams = SharedThreadForkParams
+export type ThreadForkResponse = SharedThreadForkResponse<Thread>
+export type ThreadForkCheckpointForMessageParams = SharedThreadForkCheckpointForMessageParams
+export type ForkableCheckpoint = SharedForkableCheckpoint
 
 // Workspace IPC
 export interface WorkspaceSetParams {
@@ -99,7 +116,7 @@ export interface Run {
 }
 
 // Provider configuration
-export type ProviderId = "custom"
+export type ProviderId = "builtin" | "custom"
 
 export interface Provider {
   id: ProviderId
@@ -115,6 +132,9 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  source: ProviderId
+  origin?: "remote" | "fallback"
+  maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
 }
@@ -124,11 +144,17 @@ export interface Subagent {
   id: string
   name: string
   description: string
-  status: "pending" | "running" | "completed" | "failed"
+  status: "pending" | "running" | "completed" | "failed" | "cancelled"
   startedAt?: Date
   completedAt?: Date
   toolCallId?: string
   subagentType?: string
+  /** Latest interior tool the subagent invoked — drives the collapsed status line. */
+  currentTool?: string
+  /** ISO timestamp of the subagent's most recent interior activity (heartbeat). */
+  lastActivityAt?: string
+  /** Registration order (0-based). Used to match LangGraph checkpoint_ns index (e.g. "tools:0"). */
+  spawnIndex?: number
 }
 
 // Stream events from agent
@@ -149,8 +175,18 @@ export interface Message {
   id: string
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  content_priority?: number
+  reasoning?: string
   tool_calls?: ToolCall[]
+  tool_call_id?: string
+  name?: string
+  status?: string
+  is_error?: boolean
+  goal_id?: string | null
+  active_window_id?: string | null
   created_at: Date
+  start_at?: Date
+  end_at?: Date
 }
 
 export interface ContentBlock {
@@ -280,6 +316,45 @@ export interface McpConnectorUpsert {
   lazyLoad?: boolean // true = lazy load tools, false/undefined = load all tools
 }
 
+export type McpImportConflict = "existing" | "duplicate"
+export type McpImportConflictStrategy = "update" | "rename" | "skip"
+
+export interface McpImportPreviewConnector {
+  name: string
+  sourceName?: string
+  kind: McpConnectorKind
+  url?: string
+  command?: string
+  args?: string[]
+  hasHeaders: boolean
+  hasEnv: boolean
+  enabled: boolean
+  lazyLoad: boolean
+  conflict?: McpImportConflict
+  existingId?: string
+}
+
+export interface McpImportPreviewResult {
+  connectors: McpImportPreviewConnector[]
+  errors: string[]
+}
+
+export interface McpImportConfigRequest {
+  rawJson: string
+  autoEnable?: boolean
+}
+
+export interface McpImportConfigApplyRequest extends McpImportConfigRequest {
+  conflictStrategy?: McpImportConflictStrategy
+}
+
+export interface McpImportApplyResult {
+  created: Array<{ id: string; name: string }>
+  updated: Array<{ id: string; name: string }>
+  skipped: Array<{ name: string; reason: string }>
+  errors: string[]
+}
+
 // Scheduled Task types
 export type ScheduledTaskFrequency =
   | "once"
@@ -358,6 +433,7 @@ export interface PluginManifest {
   name: string
   version?: string
   description?: string
+  useScenario?: string
   author?: { name?: string; email?: string; url?: string } | string
   license?: string
   keywords?: string[]
@@ -372,6 +448,7 @@ export interface PluginMetadata {
   name: string
   version: string
   description: string
+  useScenario?: string
   author: string
   path: string
   enabled: boolean
@@ -611,9 +688,20 @@ export interface ApprovalRequest extends HITLRequest {
     | "write_file"
     | "edit_file"
     | "code_exec"
-    | "prepare_save_code_exec_tool"
     | "save_code_exec_tool"
+    | "git_commit"
+    | "git_push"
   command?: string // shell command (for execute operations)
+  /** For git_commit: the message the agent passed via -m, used to pre-fill the dialog */
+  suggestedCommitMessage?: string
+  /** For git_commit: file paths the agent selected via pathspecs or existing staged files */
+  suggestedCommitFilePaths?: string[]
+  /** For git_commit: cwd that explicit pathspecs are relative to (after git -C) */
+  suggestedCommitFileBasePath?: string
+  /** For git_commit/git_push: Git working directory resolved from cd / git -C. */
+  suggestedGitWorktreePath?: string
+  /** For git_commit: where suggestedCommitFilePaths came from */
+  suggestedCommitFileSelectionSource?: "pathspec" | "staged"
   filePath?: string // target file path (for write_file/edit_file operations)
   code?: string // code_exec script preview
   params?: unknown // code_exec params preview
@@ -621,14 +709,18 @@ export interface ApprovalRequest extends HITLRequest {
   savedToolName?: string // proposed saved tool name before slug normalization
   savedToolId?: string // proposed saved tool ID
   savedToolDescription?: string // proposed saved tool description
-  savedToolMetadataError?: string // metadata generation failure message for manual fallback
   cwd: string
   reason?: string // why approval is needed
   retry_reason?: string // sandbox-failure retry context
   allowed_approval_types: ApprovalDecisionType[]
 }
 
-export type ApprovalDecisionType = "approve" | "approve_session" | "approve_permanent" | "reject"
+export type ApprovalDecisionType =
+  | "approve"
+  | "approve_session"
+  | "approve_permanent"
+  | "reject"
+  | "error"
 
 /** Fine-grained approval decision from the renderer */
 export interface ApprovalDecision {
@@ -636,6 +728,25 @@ export interface ApprovalDecision {
   tool_call_id: string
   savedToolName?: string
   savedToolDescription?: string
+  /**
+   * For git_commit approvals: the outcome of the commit the renderer performed
+   * (via workspace:commitWorktree) after the user picked a task card and confirmed.
+   * Present only when operation === "git_commit".
+   */
+  commitResult?: {
+    success: boolean
+    commitMessage?: string
+    error?: string
+  }
+  /**
+   * For git_push approvals: the outcome of the push the renderer performed (via
+   * workspace:pushWorktree, the same path as the Git Panel) after the user approved.
+   * Present only when operation === "git_push".
+   */
+  pushResult?: {
+    success: boolean
+    error?: string
+  }
 }
 
 // User input request tool

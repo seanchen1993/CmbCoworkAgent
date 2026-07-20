@@ -48,11 +48,18 @@ import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
 import { getHarnessProjectAdapterSnapshot } from "../../harness-board/service"
 import { nowIsoLocal } from "../../util/local-time"
+import { deriveUpperOrgLevelsFromPath } from "../../org-levels"
 import {
   DEFAULT_SKILL_VERSION,
   ensureVersionedSkillIdentifier,
   parseSkillIdentifier
 } from "../../utils/skill-identifiers"
+import {
+  makePluginSkillSourceRef,
+  normalizeSkillSourceRefs,
+  parsePluginSkillSourceRef,
+  type PluginSkillSourceRef
+} from "../../utils/skill-source"
 import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
 import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
@@ -155,44 +162,6 @@ function normalizeTrace(parsed: AgentTrace): AgentTrace {
   }
 }
 
-function deriveUpperOrgLevels(
-  pathName?: string
-): Pick<AgentTrace, "upperOrgLv0" | "upperOrgLv1" | "upperOrgLv2" | "upperOrgLv3"> {
-  const emptyLevels = {
-    upperOrgLv0: "",
-    upperOrgLv1: "",
-    upperOrgLv2: "",
-    upperOrgLv3: ""
-  }
-  const parts =
-    typeof pathName === "string"
-      ? pathName
-          .split("/")
-          .map((part) => part.trim())
-          .filter(Boolean)
-      : []
-  const itDeptIndex = parts.findIndex((part) => part.includes("信息技术部"))
-  if (itDeptIndex < 0) return emptyLevels
-
-  const lowerParts = parts.slice(itDeptIndex + 1)
-  const startsWithTeam = lowerParts[0]?.includes("团队") ?? false
-  if (startsWithTeam) {
-    return {
-      upperOrgLv0: lowerParts[2] ?? "",
-      upperOrgLv1: lowerParts[1] ?? "",
-      upperOrgLv2: lowerParts[0] ?? "",
-      upperOrgLv3: "本部团队"
-    }
-  }
-
-  return {
-    upperOrgLv0: lowerParts[3] ?? "",
-    upperOrgLv1: lowerParts[2] ?? "",
-    upperOrgLv2: lowerParts[1] ?? "",
-    upperOrgLv3: lowerParts[0] ?? ""
-  }
-}
-
 function getAppVersionForTrace(): string {
   try {
     return typeof app?.getVersion === "function" ? app.getVersion() : "unknown"
@@ -248,10 +217,13 @@ export class TraceCollector {
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
   private readonly triggerSource: TraceTriggerSource
-  private readonly harnessFeature: { projectId: string; slug: string } | undefined
+  private readonly harnessFeature:
+    | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
+    | undefined
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
+  private skillSource: string[] = []
   private evolvedSkills: string[] = []
   private modelCalls: TraceModelCall[] = []
   private nodes: TraceNode[] = []
@@ -272,7 +244,7 @@ export class TraceCollector {
     modelId: string,
     options: {
       triggerSource?: TraceTriggerSource
-      harnessFeature?: { projectId: string; slug: string }
+      harnessFeature?: { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
     } = {}
   ) {
     this.traceId = uuid()
@@ -298,11 +270,32 @@ export class TraceCollector {
         triggerSource: this.triggerSource
       }
     })
-    // Publish context to adoption tracker (side-effect only)
+    // Publish context to adoption tracker (side-effect only). Project-mode
+    // conversations also carry their harness project / adapter so emitted
+    // code_gen/code_adopt events can be sliced by project / plugin directly.
     try {
+      let harnessAdapter: { name?: string; version?: string } = {}
+      if (this.harnessFeature) {
+        try {
+          const adapter = getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId)
+          if (adapter) harnessAdapter = { name: adapter.name, version: adapter.version }
+        } catch {
+          // best-effort: leave adapter fields absent on resolution failure
+        }
+      }
       setAdoptionContext(this.threadId, {
         traceId: this.traceId,
-        modelId: this.modelId
+        modelId: this.modelId,
+        ...(this.harnessFeature
+          ? {
+              harnessProjectId: this.harnessFeature.projectId,
+              harnessFeatureSlug: this.harnessFeature.slug,
+              harnessNodeName: this.harnessFeature.nodeName,
+              harnessNodeStatus: this.harnessFeature.nodeStatus,
+              harnessAdapterName: harnessAdapter.name,
+              harnessAdapterVersion: harnessAdapter.version
+            }
+          : {})
       })
     } catch {
       // never block trace setup
@@ -369,6 +362,19 @@ export class TraceCollector {
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...skills] }
+    }
+  }
+
+  /** Set source markers keyed by the same skill identifier used in usedSkills. */
+  setSkillSource(skillSource: string[]): void {
+    this.skillSource = normalizeSkillSourceRefs(skillSource)
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      const metadata = { ...(root.metadata ?? {}) }
+      const normalized = normalizeSkillSourceRefs(this.skillSource)
+      if (normalized.length > 0) metadata.skillSource = normalized
+      else delete metadata.skillSource
+      root.metadata = metadata
     }
   }
 
@@ -623,10 +629,30 @@ export class TraceCollector {
     }
 
     const usedSkillsWithVersions = await resolveSkillVersions(this.usedSkills, true)
+    const parsedSkillSource = this.skillSource
+      .map(parsePluginSkillSourceRef)
+      .filter((ref): ref is PluginSkillSourceRef => Boolean(ref))
+    const skillSourceSkillsWithVersions = await resolveSkillVersions(
+      parsedSkillSource.map((ref) => ref.skill)
+    )
+    const usedSkillSet = new Set(usedSkillsWithVersions)
+    const skillSource = normalizeSkillSourceRefs(
+      parsedSkillSource.map((ref, index) =>
+        makePluginSkillSourceRef(
+          ref.pluginId,
+          skillSourceSkillsWithVersions[index] ?? ref.skill,
+          ref.pluginName
+        )
+      ),
+      usedSkillsWithVersions
+    ).filter((ref) => {
+      const parsed = parsePluginSkillSourceRef(ref)
+      return Boolean(parsed && usedSkillSet.has(parsed.skill))
+    })
     const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
 
     const userInfo = getUserInfo()
-    const upperOrgLevels = deriveUpperOrgLevels(userInfo?.pathName)
+    const upperOrgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
 
     // Project-mode traces also record the bound adapter plugin's version, so
     // operations analytics can attribute a project conversation to a plugin
@@ -679,6 +705,7 @@ export class TraceCollector {
         outcome,
         endedAt,
         usedSkillsWithVersions,
+        skillSource,
         evolvedSkillsWithVersions,
         errorMessage
       ),
@@ -686,12 +713,19 @@ export class TraceCollector {
       outcome,
       ...(errorMessage ? { errorMessage } : {}),
       usedSkills: usedSkillsWithVersions,
+      ...(skillSource.length > 0 ? { skillSource } : {}),
       evolvedSkills: evolvedSkillsWithVersions,
       triggerSource: this.triggerSource,
       ...(this.harnessFeature
         ? {
             harnessProjectId: this.harnessFeature.projectId,
             harnessFeatureSlug: this.harnessFeature.slug,
+            ...(this.harnessFeature.nodeName
+              ? { harnessNodeName: this.harnessFeature.nodeName }
+              : {}),
+            ...(this.harnessFeature.nodeStatus
+              ? { harnessNodeStatus: this.harnessFeature.nodeStatus }
+              : {}),
             ...harnessAdapterFields
           }
         : {}),
@@ -749,6 +783,7 @@ export class TraceCollector {
     outcome: TraceOutcome,
     endedAt: string,
     resolvedUsedSkills: string[],
+    resolvedSkillSource: string[],
     resolvedEvolvedSkills: string[],
     errorMessage?: string
   ): TraceNode[] {
@@ -818,6 +853,7 @@ export class TraceCollector {
       root.metadata = {
         ...(root.metadata ?? {}),
         usedSkills: [...resolvedUsedSkills],
+        ...(resolvedSkillSource.length > 0 ? { skillSource: [...resolvedSkillSource] } : {}),
         evolvedSkills: [...resolvedEvolvedSkills],
         triggerSource: this.triggerSource
       }

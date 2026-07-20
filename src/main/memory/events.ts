@@ -7,6 +7,7 @@ import { BrowserWindow } from "electron"
  * summarizer can notify the UI without importing IPC handler internals.
  */
 export function notifyMemoryChanged(): void {
+  if (!BrowserWindow || typeof BrowserWindow.getAllWindows !== "function") return
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
       win.webContents.send("memory:changed")

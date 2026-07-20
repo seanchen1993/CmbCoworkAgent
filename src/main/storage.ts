@@ -3,6 +3,7 @@ import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
 import {
+  type Dirent,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -12,6 +13,11 @@ import {
   readdirSync
 } from "fs"
 import {
+  deleteSqliteDurableFileSync,
+  sqliteDurableVariantBase,
+  sqliteQuarantineVariantBase
+} from "./utils/sqlite-durable-file"
+import {
   isSupportedHookEvent,
   type HookConfig,
   type HookInjectUserContext,
@@ -20,7 +26,9 @@ import {
   type HookSourceType,
   type HookUpsert
 } from "./hooks/types"
-import type { AgentAutoCommitSettings } from "./types"
+import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
+import { normalizeWorkspacePathKey } from "../shared/workspace-path"
+import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
 import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -31,6 +39,7 @@ import type {
   SkillHookMetadata
 } from "./types"
 import { copyDirRecursive } from "./utils/fs"
+import Store from "electron-store"
 import {
   discoverSkills,
   discoverSkillsSync,
@@ -51,10 +60,12 @@ import {
   getPluginSkillSearchSources,
   readPluginManifest
 } from "./plugins/manifest"
+import { getBundledBuiltinModelApiKey } from "./models/builtin-credential"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
 const CUSTOM_API_KEY_PREFIX = "CUSTOM_API_KEY__"
+const BUILTIN_MODEL_API_KEY_ENV_NAME = "CMB_BUILTIN_MODEL_API_KEY"
 
 export function getOpenworkDir(): string {
   if (!existsSync(OPENWORK_DIR)) {
@@ -109,10 +120,72 @@ export function getThreadCheckpointPath(threadId: string): string {
 }
 
 export function deleteThreadCheckpoint(threadId: string): void {
-  const path = getThreadCheckpointPath(threadId)
-  if (existsSync(path)) {
-    unlinkSync(path)
+  // Checkpoints are durable sqlite files: the live .sqlite plus .bak/.tmp
+  // sidecars that openRecoveredSqliteDatabase can restore from. Deleting only
+  // the live file lets a reused threadId (workflow resume reuses runId and
+  // restarts agent indices) resurrect the dead transcript from .bak — purge
+  // every variant.
+  //
+  // HOT PATH: called from every workflow subagent's finally, so it deletes the
+  // known fixed-suffix variants only (no directory scan). Quarantine archives
+  // never resurrect (not recovery candidates); their privacy cleanup belongs to
+  // thread deletion — see purgeThreadCheckpointArtifacts.
+  deleteSqliteDurableFileSync(getThreadCheckpointPath(threadId))
+}
+
+/** Deep cleanup for the USER-FACING "delete thread" semantic: durable variants
+ * plus quarantine archives (`.corrupt.<ts>` / `.bak.<ts>`), which are not
+ * recovery candidates but still hold full transcripts (privacy residue). Does a
+ * directory scan, so keep it on the cold thread-deletion path — subagent
+ * self-clean uses the fast deleteThreadCheckpoint instead. */
+export function purgeThreadCheckpointArtifacts(threadId: string): void {
+  deleteSqliteDurableFileSync(getThreadCheckpointPath(threadId))
+  const dir = getThreadCheckpointDir()
+  for (const filename of readdirSync(dir)) {
+    if (sqliteQuarantineVariantBase(filename) !== threadId) continue
+    try {
+      unlinkSync(join(dir, filename))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
   }
+}
+
+/** Shared sweep for prefix-scoped checkpoint cleanup: removes the live file,
+ * every durable sidecar (a `.bak` whose live file is already gone still counts
+ * as a leftover checkpoint) AND quarantine archives (transcript-bearing
+ * `.corrupt.<ts>` / `.bak.<ts>` files). Returns the number of distinct
+ * checkpoint thread ids removed. */
+function sweepCheckpointVariants(prefix: string): number {
+  const dir = getThreadCheckpointDir()
+
+  // Group by checkpoint first, then delete each through the durable helper so
+  // every checkpoint gets the safe deletion order (sidecars first, live last)
+  // instead of readdir's arbitrary file order. The helper tolerates ENOENT, so
+  // a concurrent cleanup (subagent self-clean) racing this sweep is safe.
+  const checkpointThreadIds = new Set<string>()
+  const quarantineFiles: string[] = []
+  for (const filename of readdirSync(dir)) {
+    const durableBase = sqliteDurableVariantBase(filename)
+    const quarantineBase = durableBase === null ? sqliteQuarantineVariantBase(filename) : null
+    const checkpointThreadId = durableBase ?? quarantineBase
+    if (!checkpointThreadId || !checkpointThreadId.startsWith(prefix)) continue
+    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
+    if (quarantineBase !== null) quarantineFiles.push(filename)
+    checkpointThreadIds.add(checkpointThreadId)
+  }
+  for (const checkpointThreadId of checkpointThreadIds) {
+    deleteSqliteDurableFileSync(join(dir, `${checkpointThreadId}.sqlite`))
+  }
+  for (const filename of quarantineFiles) {
+    try {
+      unlinkSync(join(dir, filename))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+  }
+
+  return checkpointThreadIds.size
 }
 
 export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
@@ -125,20 +198,26 @@ export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
     )
   }
 
-  const dir = getThreadCheckpointDir()
-  const prefix = `${parentThreadId}__worker__`
-  let deleted = 0
+  return sweepCheckpointVariants(`${parentThreadId}__worker__`)
+}
 
-  for (const filename of readdirSync(dir)) {
-    if (!filename.endsWith(".sqlite")) continue
-    const checkpointThreadId = filename.slice(0, -".sqlite".length)
-    if (!checkpointThreadId.startsWith(prefix)) continue
-    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
-    unlinkSync(join(dir, filename))
-    deleted += 1
+/** Delete leftover workflow-subagent checkpoints for a thread. Workflow subagents
+ * use a `<parent>__wf_<run>_a<index>` checkpoint thread (subagent.ts), exactly like
+ * coordinator workers use `__worker__`. They self-clean in the subagent's `finally`
+ * (deleteThreadCheckpoint), so this only sweeps the rare leftovers a crash or a
+ * failed cleanup left behind — the symmetric counterpart to
+ * deleteThreadWorkerCheckpoints, which only covers `__worker__`. (#3) */
+export function deleteThreadWorkflowCheckpoints(parentThreadId: string): number {
+  if (!SAFE_ID_RE.test(parentThreadId)) {
+    throw new Error(`Invalid threadId: ${parentThreadId}`)
+  }
+  if (parentThreadId.includes("__wf_")) {
+    throw new Error(
+      `Invalid workflow parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __wf_ delimiter.`
+    )
   }
 
-  return deleted
+  return sweepCheckpointVariants(`${parentThreadId}__wf_`)
 }
 
 export function getEnvFilePath(): string {
@@ -173,6 +252,15 @@ function writeEnvFile(env: Record<string, string>): void {
     .filter((entry) => entry[1])
     .map(([k, v]) => `${k}=${v}`)
   writeFileSync(getEnvFilePath(), lines.join("\n") + "\n")
+}
+
+/** Resolve the managed-model credential, keeping runtime values overridable. */
+export function getBuiltinModelApiKey(): string | undefined {
+  const processValue = process.env[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
+  if (processValue) return processValue
+  const localValue = parseEnvFile()[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
+  if (localValue) return localValue
+  return getBundledBuiltinModelApiKey()
 }
 
 // Skills directory — bundled with the app at project root /skills/
@@ -230,6 +318,7 @@ interface SkillEvolutionSettings {
   onlineEnabled?: boolean
   autoPropose?: boolean
   threshold?: number
+  turnThreshold?: number
 }
 
 function readSkillEvolutionSettings(): SkillEvolutionSettings {
@@ -261,7 +350,8 @@ export function setOnlineSkillEvolutionEnabled(enabled: boolean): void {
   writeSkillEvolutionSettings({
     onlineEnabled: enabled,
     autoPropose: current.autoPropose === true,
-    threshold: getSkillEvolutionThreshold()
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: getSkillEvolutionTurnThreshold()
   })
 }
 
@@ -279,13 +369,17 @@ export function setSkillAutoProposeEnabled(enabled: boolean): void {
   writeSkillEvolutionSettings({
     onlineEnabled: current.onlineEnabled === true,
     autoPropose: enabled,
-    threshold: getSkillEvolutionThreshold()
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: getSkillEvolutionTurnThreshold()
   })
 }
 
 const SKILL_EVOLUTION_THRESHOLD_DEFAULT = 10
 const SKILL_EVOLUTION_THRESHOLD_MIN = 1
 const SKILL_EVOLUTION_THRESHOLD_MAX = 99
+const SKILL_EVOLUTION_TURN_THRESHOLD_DEFAULT = 2
+const SKILL_EVOLUTION_TURN_THRESHOLD_MIN = 1
+const SKILL_EVOLUTION_TURN_THRESHOLD_MAX = 99
 
 export function getSkillEvolutionThreshold(): number {
   const value = Number(readSkillEvolutionSettings().threshold)
@@ -308,7 +402,34 @@ export function setSkillEvolutionThreshold(value: number): void {
   writeSkillEvolutionSettings({
     onlineEnabled: current.onlineEnabled === true,
     autoPropose: current.autoPropose === true,
-    threshold: clamped
+    threshold: clamped,
+    turnThreshold: getSkillEvolutionTurnThreshold()
+  })
+}
+
+export function getSkillEvolutionTurnThreshold(): number {
+  const value = Number(readSkillEvolutionSettings().turnThreshold)
+  if (
+    Number.isInteger(value) &&
+    value >= SKILL_EVOLUTION_TURN_THRESHOLD_MIN &&
+    value <= SKILL_EVOLUTION_TURN_THRESHOLD_MAX
+  ) {
+    return value
+  }
+  return SKILL_EVOLUTION_TURN_THRESHOLD_DEFAULT
+}
+
+export function setSkillEvolutionTurnThreshold(value: number): void {
+  const clamped = Math.max(
+    SKILL_EVOLUTION_TURN_THRESHOLD_MIN,
+    Math.min(SKILL_EVOLUTION_TURN_THRESHOLD_MAX, Math.round(value))
+  )
+  const current = readSkillEvolutionSettings()
+  writeSkillEvolutionSettings({
+    onlineEnabled: current.onlineEnabled === true,
+    autoPropose: current.autoPropose === true,
+    threshold: getSkillEvolutionThreshold(),
+    turnThreshold: clamped
   })
 }
 
@@ -319,12 +440,16 @@ const MEMORY_SETTINGS_FILE = join(OPENWORK_DIR, "memory-settings.json")
 interface MemorySettings {
   enabled?: boolean
   dreamEnabled?: boolean
+  sessionOptInMigrated?: boolean
 }
 
 function readMemorySettings(): MemorySettings {
   if (!existsSync(MEMORY_SETTINGS_FILE)) return {}
   try {
-    return JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8")) as MemorySettings
+    const parsed = JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8"))
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as MemorySettings)
+      : {}
   } catch {
     return {}
   }
@@ -335,27 +460,90 @@ function writeMemorySettings(settings: MemorySettings): void {
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify(settings, null, 2))
 }
 
+function hasLegacyMemoryFiles(): boolean {
+  const memoryDir = join(OPENWORK_DIR, "memory")
+  if (!existsSync(memoryDir)) return false
+  const stack = [memoryDir]
+  while (stack.length > 0) {
+    const dir = stack.pop()!
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith(".md")) return true
+      if (entry.isDirectory()) stack.push(join(dir, entry.name))
+    }
+  }
+  return false
+}
+
+export function getMemorySessionOptInMigrationState(hasExistingThreads: boolean): {
+  migrated: boolean
+  legacyMemoryEnabled: boolean
+  legacyDreamEnabled: boolean
+} {
+  const settingsFileExists = existsSync(MEMORY_SETTINGS_FILE)
+  const current = readMemorySettings()
+  if (current.sessionOptInMigrated === true) {
+    const enabled = current.enabled === true
+    return {
+      migrated: true,
+      legacyMemoryEnabled: enabled,
+      legacyDreamEnabled: enabled && current.dreamEnabled === true
+    }
+  }
+  const legacyInstall = settingsFileExists || hasExistingThreads || hasLegacyMemoryFiles()
+  const legacyMemoryEnabled = legacyInstall && current.enabled !== false
+  return {
+    migrated: false,
+    legacyMemoryEnabled,
+    legacyDreamEnabled: legacyMemoryEnabled && current.dreamEnabled !== false
+  }
+}
+
+export function markMemorySessionOptInMigrated(options: {
+  enabled: boolean
+  dreamEnabled: boolean
+}): void {
+  const current = readMemorySettings()
+  writeMemorySettings({
+    ...current,
+    enabled: options.enabled,
+    dreamEnabled: options.enabled && options.dreamEnabled,
+    sessionOptInMigrated: true
+  })
+}
+
 export function isMemoryEnabled(): boolean {
-  return readMemorySettings().enabled !== false
+  return readMemorySettings().enabled === true
 }
 
 export function setMemoryEnabled(enabled: boolean): void {
   const current = readMemorySettings()
   writeMemorySettings({
+    ...current,
     enabled,
-    dreamEnabled: enabled ? current.dreamEnabled !== false : false
+    dreamEnabled: enabled ? current.dreamEnabled === true : false
   })
+}
+
+export function isThreadMemoryEnabled(metadata?: Record<string, unknown> | null): boolean {
+  return isMemoryEnabled() && metadata?.memoryEnabled === true
 }
 
 export function isDreamEnabled(): boolean {
   const current = readMemorySettings()
-  return current.enabled !== false && current.dreamEnabled !== false
+  return current.enabled === true && current.dreamEnabled === true
 }
 
 export function setDreamEnabled(enabled: boolean): void {
   const current = readMemorySettings()
-  const memoryEnabled = current.enabled !== false
+  const memoryEnabled = current.enabled === true
   writeMemorySettings({
+    ...current,
     enabled: memoryEnabled,
     dreamEnabled: memoryEnabled && enabled
   })
@@ -364,6 +552,10 @@ export function setDreamEnabled(enabled: boolean): void {
 // ── Agent auto-commit settings ───────────────────────────────────────────────
 
 const AGENT_AUTO_COMMIT_SETTINGS_FILE = join(OPENWORK_DIR, "agent-auto-commit-settings.json")
+const AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE = join(
+  OPENWORK_DIR,
+  "agent-auto-commit-workspace-cards.json"
+)
 
 const DEFAULT_AGENT_AUTO_COMMIT_SETTINGS: AgentAutoCommitSettings = {
   mode: "off",
@@ -399,6 +591,57 @@ function normalizeAgentAutoCommitSettings(input: unknown): AgentAutoCommitSettin
   }
 }
 
+function normalizeWorkspaceCardEntry(
+  value: unknown,
+  fallbackPath: string
+): AgentAutoCommitWorkspaceCard | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const workspacePath =
+    typeof raw.workspacePath === "string" && raw.workspacePath.trim()
+      ? raw.workspacePath.trim()
+      : fallbackPath
+  const cardNumber =
+    typeof raw.cardNumber === "string" && raw.cardNumber.trim() ? raw.cardNumber.trim() : undefined
+  const updatedAt =
+    typeof raw.updatedAt === "string" && raw.updatedAt.trim() ? raw.updatedAt.trim() : undefined
+  return {
+    workspacePath,
+    ...(cardNumber ? { cardNumber } : {}),
+    ...(updatedAt ? { updatedAt } : {})
+  }
+}
+
+function readAgentAutoCommitWorkspaceCards(): Record<string, AgentAutoCommitWorkspaceCard> {
+  getOpenworkDir()
+  if (!existsSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE)) return {}
+  try {
+    const raw = JSON.parse(readFileSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE, "utf-8")) as unknown
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+    const entries = raw as Record<string, unknown>
+    const cards: Record<string, AgentAutoCommitWorkspaceCard> = {}
+    for (const [key, value] of Object.entries(entries)) {
+      const card = normalizeWorkspaceCardEntry(value, key)
+      if (!card?.workspacePath) continue
+      cards[normalizeWorkspacePathKey(card.workspacePath)] = card
+    }
+    return cards
+  } catch {
+    return {}
+  }
+}
+
+function writeAgentAutoCommitWorkspaceCards(
+  cards: Record<string, AgentAutoCommitWorkspaceCard>
+): void {
+  getOpenworkDir()
+  writeFileSync(AGENT_AUTO_COMMIT_WORKSPACE_CARDS_FILE, JSON.stringify(cards, null, 2))
+}
+
+function getLegacyAgentAutoCommitCardNumber(): string | undefined {
+  return getAgentAutoCommitSettings().cardNumber?.trim()
+}
+
 export function getAgentAutoCommitSettings(): AgentAutoCommitSettings {
   getOpenworkDir()
   if (!existsSync(AGENT_AUTO_COMMIT_SETTINGS_FILE)) {
@@ -421,11 +664,86 @@ export function saveAgentAutoCommitSettings(
     ...getAgentAutoCommitSettings(),
     ...updates
   })
-  if (next.mode !== "off" && !next.cardNumber?.trim()) {
-    throw new Error("开启自动提交前需要填写卡片编号")
+  const persisted: AgentAutoCommitSettings = {
+    mode: next.mode,
+    push: next.push,
+    messageStrategy: next.messageStrategy,
+    // Preserve the legacy global cardNumber so it stays available as the migration
+    // fallback for workspaces that have not been configured yet (see
+    // getAgentAutoCommitWorkspaceCard). Renderer saves never set this field.
+    ...(next.cardNumber ? { cardNumber: next.cardNumber } : {}),
+    ...(next.template ? { template: next.template } : {})
   }
-  writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(next, null, 2))
+  writeFileSync(AGENT_AUTO_COMMIT_SETTINGS_FILE, JSON.stringify(persisted, null, 2))
+  return persisted
+}
+
+export function getAgentAutoCommitWorkspaceCard(
+  workspacePath: string
+): AgentAutoCommitWorkspaceCard {
+  const trimmedPath = workspacePath.trim()
+  if (!trimmedPath) {
+    return { workspacePath: "" }
+  }
+  const key = normalizeWorkspacePathKey(trimmedPath)
+  const cards = readAgentAutoCommitWorkspaceCards()
+  const existing = cards[key]
+  // Any explicit record for this workspace wins — including a "cleared" record
+  // with no cardNumber. This is what lets the user clear a workspace card and have
+  // it stay cleared instead of leaking the legacy global card back in on reload.
+  if (existing) return existing
+
+  // Read-only legacy fallback: only when the workspace has never been configured.
+  // Surface the old global card as a soft default without persisting; it becomes a
+  // real per-workspace entry once a card is explicitly saved or committed. This
+  // keeps the getter side-effect-free and avoids stamping the legacy card onto every
+  // workspace the user happens to open.
+  const legacyCardNumber = getLegacyAgentAutoCommitCardNumber()
+  if (legacyCardNumber) {
+    return { workspacePath: trimmedPath, cardNumber: legacyCardNumber }
+  }
+  return { workspacePath: trimmedPath }
+}
+
+export function saveAgentAutoCommitWorkspaceCard(
+  workspacePath: string,
+  cardNumber: string | undefined
+): AgentAutoCommitWorkspaceCard {
+  const trimmedPath = workspacePath.trim()
+  if (!trimmedPath) {
+    throw new Error("缺少工作区路径，无法保存任务卡片")
+  }
+  const key = normalizeWorkspacePathKey(trimmedPath)
+  const cards = readAgentAutoCommitWorkspaceCards()
+  const trimmedCard = cardNumber?.trim()
+  if (!trimmedCard) {
+    // Persist an explicit "cleared" record (no cardNumber) rather than deleting the
+    // entry, so getAgentAutoCommitWorkspaceCard does not fall back to the legacy
+    // global card for a workspace the user deliberately emptied.
+    const cleared: AgentAutoCommitWorkspaceCard = {
+      workspacePath: trimmedPath,
+      updatedAt: new Date().toISOString()
+    }
+    cards[key] = cleared
+    writeAgentAutoCommitWorkspaceCards(cards)
+    return cleared
+  }
+
+  const next: AgentAutoCommitWorkspaceCard = {
+    workspacePath: trimmedPath,
+    cardNumber: trimmedCard,
+    updatedAt: new Date().toISOString()
+  }
+  cards[key] = next
+  writeAgentAutoCommitWorkspaceCards(cards)
   return next
+}
+
+export function getAgentAutoCommitCardNumberForWorkspace(
+  workspacePath: string | undefined
+): string | undefined {
+  if (!workspacePath?.trim()) return undefined
+  return getAgentAutoCommitWorkspaceCard(workspacePath).cardNumber
 }
 
 // ── Code exec settings ──
@@ -446,7 +764,7 @@ function readCodeExecSettings(): CodeExecSettings {
 }
 
 export function isCodeExecEnabled(): boolean {
-  return readCodeExecSettings().enabled !== false
+  return readCodeExecSettings().enabled === true
 }
 
 export function setCodeExecEnabled(enabled: boolean): void {
@@ -707,6 +1025,23 @@ export interface CustomModelConfig {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
+  tier?: "premium" | "economy"
+}
+
+export interface BuiltinModelOverride {
+  name?: string
+  maxTokens?: number
+  maxOutputTokens?: number
+  temperature?: number
+  topP?: number
+  topK?: number
+  interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -717,6 +1052,7 @@ export interface UserInfoConfig {
   originOrgId?: string
   orgName?: string
   pathName?: string
+  upperOrgLv1?: string
   originPathId?: string
   ystRefreshToken?: string
   ystIdToken?: string
@@ -739,6 +1075,8 @@ export const MAX_TOP_P = 1
 export const DEFAULT_TOP_K = 40
 export const MIN_TOP_K = 0
 export const MAX_TOP_K = 1_000
+export type ThinkingEffort = "high" | "max"
+export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
 
 export interface CustomModelPublicConfig {
   id: string
@@ -752,6 +1090,9 @@ export interface CustomModelPublicConfig {
   topP: number
   topK: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -766,6 +1107,9 @@ interface StoredCustomModelRecord {
   topP?: number
   topK?: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -848,12 +1192,33 @@ function normalizeTopK(value: unknown): number {
   return Math.min(MAX_TOP_K, Math.max(MIN_TOP_K, Math.floor(value)))
 }
 
+function normalizeThinkingEffort(value: unknown): ThinkingEffort {
+  return value === "max" ? "max" : DEFAULT_THINKING_EFFORT
+}
+
 function defaultInterleavedThinkingForModel(model: string): boolean {
   return /minimax/i.test(model)
 }
 
-function resolveInterleavedThinkingSetting(model: string, value: unknown): boolean {
+function resolveInterleavedThinkingSetting(
+  model: string,
+  value: unknown,
+  enableThinking: unknown
+): boolean {
+  if (enableThinking !== true) return false
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
+}
+
+function resolveEnableThinkingSetting(
+  enableThinking: unknown,
+  interleavedThinking: unknown
+): boolean {
+  if (typeof enableThinking === "boolean") return enableThinking
+  return interleavedThinking === true
+}
+
+function resolveThinkingEffortEnabled(enableThinking: unknown, value: unknown): boolean {
+  return enableThinking === true && value === true
 }
 
 function getCustomApiKeyEnvName(id: string): string {
@@ -1011,6 +1376,108 @@ export function getCustomModelConfig(): CustomModelConfig | null {
   return configs[0] ?? null
 }
 
+/**
+ * Lazily-created handle to the shared electron-store "settings" file, which is
+ * where the user-designated default model id is persisted (key "defaultModel").
+ * Lazy so module init order never matters.
+ */
+let _settingsStore: Store | null = null
+function getSettingsStore(): Store {
+  if (!_settingsStore) {
+    _settingsStore = new Store({ name: "settings", cwd: getOpenworkDir() })
+  }
+  return _settingsStore
+}
+
+const BUILTIN_MODEL_OVERRIDES_KEY = "builtinModelOverrides"
+
+export function getBuiltinModelOverrides(): Record<string, BuiltinModelOverride> {
+  const raw = getSettingsStore().get(BUILTIN_MODEL_OVERRIDES_KEY, {}) as unknown
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  return raw as Record<string, BuiltinModelOverride>
+}
+
+export function setBuiltinModelOverride(id: string, override: BuiltinModelOverride): void {
+  const normalizedId = id.trim()
+  if (!normalizedId) throw new Error("内置模型 ID 不能为空")
+  const current = getBuiltinModelOverrides()
+  getSettingsStore().set(BUILTIN_MODEL_OVERRIDES_KEY, {
+    ...current,
+    [normalizedId]: override
+  })
+}
+
+export function resetBuiltinModelOverride(id: string): void {
+  const current = getBuiltinModelOverrides()
+  if (!(id in current)) return
+  delete current[id]
+  getSettingsStore().set(BUILTIN_MODEL_OVERRIDES_KEY, current)
+}
+
+export function getStoredDefaultModelId(): string {
+  return String(getSettingsStore().get("defaultModel", "") || "").trim()
+}
+
+export function setStoredDefaultModelId(modelId: string): void {
+  getSettingsStore().set("defaultModel", modelId.trim())
+}
+
+const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
+
+export function getWindowCloseBehavior(): WindowCloseBehavior {
+  try {
+    return normalizeWindowCloseBehavior(getSettingsStore().get(WINDOW_CLOSE_BEHAVIOR_KEY))
+  } catch (error) {
+    console.warn("[Storage] Failed to load window close behavior; using ask:", error)
+    return "ask"
+  }
+}
+
+export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
+  const normalized = normalizeWindowCloseBehavior(behavior)
+  getSettingsStore().set(WINDOW_CLOSE_BEHAVIOR_KEY, normalized)
+  return normalized
+}
+
+/** Enabled expert-library agent names (专家团 opt-ins), persisted in the shared
+ * settings store (key "enabledExpertAgents"). Non-string entries are dropped
+ * defensively; validity against the current library is the caller's concern
+ * (stored names may outlive a library upgrade). */
+export function getEnabledExpertAgents(): string[] {
+  const raw = getSettingsStore().get("enabledExpertAgents", []) as unknown
+  if (!Array.isArray(raw)) return []
+  return raw.filter((n): n is string => typeof n === "string")
+}
+
+export function setEnabledExpertAgents(names: string[]): void {
+  getSettingsStore().set("enabledExpertAgents", names)
+}
+
+/**
+ * Resolve the user-designated default model config (the "默认模型" chosen in
+ * settings), falling back to the first configured model when no explicit
+ * default is set or the stored id no longer matches a config.
+ *
+ * Use this anywhere a background / sub-agent task (skill draft generation,
+ * trace optimization, worthiness judging, …) should run on the default model
+ * rather than the chat's currently-selected model.
+ */
+export function getDefaultModelConfig(): CustomModelConfig | null {
+  const configs = getCustomModelConfigs()
+  if (configs.length === 0) return null
+
+  const stored = String(getSettingsStore().get("defaultModel", "") || "").trim()
+  if (stored) {
+    const normalizedId = stored.startsWith("custom:") ? stored.slice("custom:".length) : stored
+    const matched =
+      configs.find((config) => config.id === normalizedId) ??
+      configs.find((config) => config.model === normalizedId || config.model === stored)
+    if (matched) return matched
+  }
+
+  return configs[0] ?? null
+}
+
 function readCustomModelsRaw(): StoredCustomModelRecord[] {
   getOpenworkDir()
   if (!existsSync(CUSTOM_MODELS_FILE)) return []
@@ -1087,6 +1554,10 @@ function toPublicConfig(
   config: StoredCustomModelRecord,
   env?: Record<string, string>
 ): CustomModelPublicConfig {
+  const enableThinking = resolveEnableThinkingSetting(
+    config.enableThinking,
+    config.interleavedThinking
+  )
   return {
     id: config.id,
     name: config.name || config.model,
@@ -1098,10 +1569,14 @@ function toPublicConfig(
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, config.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
-      config.interleavedThinking
+      config.interleavedThinking,
+      enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 }
@@ -1109,26 +1584,43 @@ function toPublicConfig(
 export function getCustomModelConfigs(): CustomModelConfig[] {
   migrateLegacyCustomModel()
   const env = parseEnvFile()
-  return readCustomModelsRaw().map((item) => ({
-    id: item.id,
-    name: item.name || item.model,
-    baseUrl: item.baseUrl,
-    model: item.model,
-    apiKey: getCustomModelApiKey(item.id, env),
-    maxTokens: normalizeMaxTokens(item.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
-    temperature: normalizeTemperature(item.temperature),
-    topP: normalizeTopP(item.topP),
-    topK: normalizeTopK(item.topK),
-    interleavedThinking: resolveInterleavedThinkingSetting(item.model, item.interleavedThinking),
-    ...(item.tier !== undefined && { tier: item.tier })
-  }))
+  return readCustomModelsRaw().map((item) => {
+    const enableThinking = resolveEnableThinkingSetting(
+      item.enableThinking,
+      item.interleavedThinking
+    )
+    return {
+      id: item.id,
+      name: item.name || item.model,
+      baseUrl: item.baseUrl,
+      model: item.model,
+      apiKey: getCustomModelApiKey(item.id, env),
+      maxTokens: normalizeMaxTokens(item.maxTokens),
+      maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
+      temperature: normalizeTemperature(item.temperature),
+      topP: normalizeTopP(item.topP),
+      topK: normalizeTopK(item.topK),
+      enableThinking,
+      enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, item.enableThinkingEffort),
+      interleavedThinking: resolveInterleavedThinkingSetting(
+        item.model,
+        item.interleavedThinking,
+        enableThinking
+      ),
+      thinkingEffort: normalizeThinkingEffort(item.thinkingEffort),
+      ...(item.tier !== undefined && { tier: item.tier })
+    }
+  })
 }
 
 export function getCustomModelConfigById(id: string): CustomModelConfig | null {
   migrateLegacyCustomModel()
   const record = readCustomModelsRaw().find((item) => item.id === id)
   if (!record) return null
+  const enableThinking = resolveEnableThinkingSetting(
+    record.enableThinking,
+    record.interleavedThinking
+  )
   return {
     id: record.id,
     name: record.name || record.model,
@@ -1140,10 +1632,14 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, record.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
-      record.interleavedThinking
+      record.interleavedThinking,
+      enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(record.thinkingEffort),
     ...(record.tier !== undefined && { tier: record.tier })
   }
 }
@@ -1195,6 +1691,10 @@ export function upsertCustomModelConfig(
     throw new Error("显示名称不能重复，请使用不同的显示名称")
   }
 
+  const enableThinking = resolveEnableThinkingSetting(
+    config.enableThinking,
+    config.interleavedThinking
+  )
   const nextRecord: StoredCustomModelRecord = {
     id: targetId,
     name: normalizedName,
@@ -1205,10 +1705,14 @@ export function upsertCustomModelConfig(
     temperature: validatedTemperature,
     topP: validatedTopP,
     topK: validatedTopK,
+    enableThinking,
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, config.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
-      config.interleavedThinking
+      config.interleavedThinking,
+      enableThinking
     ),
+    thinkingEffort: normalizeThinkingEffort(config.thinkingEffort),
     ...(config.tier !== undefined && { tier: config.tier })
   }
 
@@ -2417,8 +2921,9 @@ function parseHookInjectUserContext(raw: unknown): HookInjectUserContext | undef
 
   const record = raw as Record<string, unknown>
   const include = Array.isArray(record.include)
-    ? record.include.filter((item): item is HookUserContextField =>
-        typeof item === "string" && HOOK_USER_CONTEXT_FIELDS.has(item as HookUserContextField)
+    ? record.include.filter(
+        (item): item is HookUserContextField =>
+          typeof item === "string" && HOOK_USER_CONTEXT_FIELDS.has(item as HookUserContextField)
       )
     : undefined
   return {

@@ -1,6 +1,9 @@
 import type React from "react"
 import { marketApi, type MarketItem, type MarketItemType } from "../../../api/market"
-import { UniversalUploadDialog } from "./UniversalUploadDialog"
+import {
+  UniversalUploadDialog,
+  type GeneratedMarketFileBuildContext
+} from "./UniversalUploadDialog"
 import { markUploadedItemInStorage } from "./marketPublishStorage"
 
 type PublishMode = "upload" | "update"
@@ -12,7 +15,10 @@ export type MarketPublishTarget = {
   chineseName?: string
   category?: string
   guidance?: string
+  extraJson?: string
 }
+
+export type MarketPublishFileBuildContext = GeneratedMarketFileBuildContext
 
 function getTypeLabel(type: MarketPublishTarget["type"]): string {
   return type === "mcp" ? "MCP 连接器" : "Plugin"
@@ -24,10 +30,11 @@ export function MarketPublishDialog(props: {
   target: MarketPublishTarget | null
   marketInfo?: Pick<
     MarketItem,
-    "name" | "description" | "category" | "chinese_name" | "guidance" | "version"
+    "name" | "description" | "category" | "chinese_name" | "guidance" | "version" | "extra_json"
   >
   buildFile: (
-    target: MarketPublishTarget
+    target: MarketPublishTarget,
+    context: MarketPublishFileBuildContext
   ) => Promise<{ success: boolean; file?: File; error?: string }>
   onOpenChange: (open: boolean) => void
   onSuccess: (payload: {
@@ -49,7 +56,7 @@ export function MarketPublishDialog(props: {
         onSuccess({ name: target.name, type: target.type, mode })
       }}
       resourceType={target?.type ?? "mcp"}
-      onUpload={(file, name, description, category, version, guidance, chineseName, userId) => {
+      onUpload={(file, name, description, category, version, guidance, chineseName, userId, extraJson) => {
         if (!target) return Promise.resolve({ success: false, error: "未选择项目" })
         if (mode === "update") {
           return marketApi.updateItem(
@@ -61,7 +68,8 @@ export function MarketPublishDialog(props: {
             version,
             guidance,
             chineseName,
-            userId
+            userId,
+            extraJson
           )
         }
         if (!file) return Promise.resolve({ success: false, error: "文件不能为空" })
@@ -74,7 +82,8 @@ export function MarketPublishDialog(props: {
           version,
           guidance,
           chineseName,
-          userId
+          userId,
+          extraJson
         )
       }}
       isUpdate={mode === "update"}
@@ -86,7 +95,11 @@ export function MarketPublishDialog(props: {
               category: target.category || marketInfo?.category || "",
               version: marketInfo?.version || undefined,
               guidance: target.guidance || marketInfo?.guidance || "",
-              chinese_name: target.chineseName || marketInfo?.chinese_name || ""
+              chinese_name: target.chineseName || marketInfo?.chinese_name || "",
+              extra_json:
+                mode === "update"
+                  ? target.extraJson || marketInfo?.extra_json || undefined
+                  : target.extraJson || marketInfo?.extra_json || undefined
             }
           : undefined
       }
@@ -94,7 +107,7 @@ export function MarketPublishDialog(props: {
         target
           ? {
               label: target.type === "mcp" ? "将自动生成 MCP JSON 配置" : "将自动打包 Plugin ZIP",
-              build: () => buildFile(target)
+              build: (context) => buildFile(target, context)
             }
           : undefined
       }

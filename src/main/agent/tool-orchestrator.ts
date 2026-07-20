@@ -10,9 +10,26 @@
  */
 
 import { randomUUID } from "crypto"
+import { execFile } from "child_process"
+import { realpath } from "fs/promises"
 import path from "path"
+import { promisify } from "util"
 import { ApprovalStore } from "./approval-store"
-import { assessCommandSafety, derivePermanentApprovalPattern } from "./exec-policy"
+import {
+  assessCommandSafety,
+  derivePermanentApprovalPattern,
+  extractGitCommitPathspecs,
+  extractGitCommitMessage,
+  isAmendOrFixupCommit,
+  isChainedShellCommand,
+  isForcePushCommand,
+  isGitCommitCommand,
+  isGitPushCommand,
+  normalizeCdPrefixedGitCommitCommand,
+  normalizeGitAddPrefixedGitCommitCommand,
+  resolveGitCommandCwd,
+  resolveGitPushCommandCwd
+} from "./exec-policy"
 import { LocalSandbox } from "./local-sandbox"
 import type {
   ApprovalRequest,
@@ -20,10 +37,20 @@ import type {
   ReviewDecision,
   ApprovalDecisionType
 } from "../types"
+import {
+  discoverWorkspaceGitRepositories,
+  getGitRootForPath
+} from "../services/git-repository-discovery"
 import type { ExecuteResponse } from "deepagents"
 
+const execFileAsync = promisify(execFile)
+
 /** Raw execution function signature (no approval logic). */
-export type RawExecuteFn = (command: string, sandboxMode?: string) => Promise<ExecuteResponse>
+export type RawExecuteFn = (
+  command: string,
+  sandboxMode?: string,
+  cwd?: string
+) => Promise<ExecuteResponse>
 
 /** Function to request interactive approval from the user (renderer). */
 export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
@@ -36,12 +63,130 @@ export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecisi
 const SANDBOX_BYPASS_PROMPT_REASON =
   "命令在沙箱内执行失败，疑似受沙箱限制。是否允许我在沙箱外重试同一命令？"
 
+async function readStagedGitFilePaths(cwd: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "diff", "--cached", "--name-only", "-z"], {
+      maxBuffer: 2 * 1024 * 1024
+    })
+    return Array.from(
+      new Set(
+        String(stdout)
+          .split("\0")
+          .map((item) => item.trim().replace(/\\/g, "/"))
+          .filter(Boolean)
+      )
+    )
+  } catch {
+    return []
+  }
+}
+
+function normalizeDirBoundaryKey(dir: string): string {
+  const resolved = path.resolve(dir)
+  if (process.platform === "win32") {
+    return resolved.replace(/[\\/]+/g, "\\").replace(/\\+$/, "").toLowerCase()
+  }
+  return resolved.replace(/\/+$/, "") || "/"
+}
+
+function isPathInsideOrSame(targetPath: string, rootPath: string): boolean {
+  const target = normalizeDirBoundaryKey(targetPath)
+  const root = normalizeDirBoundaryKey(rootPath)
+  const separator = process.platform === "win32" ? "\\" : "/"
+  if (root === separator) return target === root || target.startsWith(separator)
+  return target === root || target.startsWith(`${root}${separator}`)
+}
+
+async function resolveExistingDirForBoundary(dir: string): Promise<{ path: string; exists: boolean }> {
+  try {
+    return { path: await realpath(dir), exists: true }
+  } catch {
+    return { path: path.resolve(dir), exists: false }
+  }
+}
+
+type GitOperationKind = "commit" | "push"
+
+const GIT_OPERATION_COPY: Record<
+  GitOperationKind,
+  {
+    commandName: string
+    actionName: string
+    outsideWorkspaceMessage: string
+    operationLabel: string
+  }
+> = {
+  commit: {
+    commandName: "git commit",
+    actionName: "提交",
+    outsideWorkspaceMessage:
+      "`git commit` 的 -C 目标不在当前线程工作区内，任务卡片对话框无法安全展示或提交该仓库。" +
+      "请在当前工作区内执行提交，或切换到对应工作区后再提交。",
+    operationLabel: "Git 提交"
+  },
+  push: {
+    commandName: "git push",
+    actionName: "推送",
+    outsideWorkspaceMessage:
+      "`git push` 的 -C 目标不在当前线程工作区内，无法安全推送该仓库。" +
+      "请在当前工作区内执行推送，或切换到对应工作区后再推送。",
+    operationLabel: "Git 推送"
+  }
+}
+
+async function validateGitCommandCwd(
+  cwd: string,
+  gitCommandCwd: string,
+  operation: GitOperationKind
+): Promise<string | null> {
+  const copy = GIT_OPERATION_COPY[operation]
+  const [realCwd, realGitCommandCwd] = await Promise.all([
+    resolveExistingDirForBoundary(cwd),
+    resolveExistingDirForBoundary(gitCommandCwd)
+  ])
+  if (!realGitCommandCwd.exists) {
+    return `\`${copy.commandName}\` 的工作目录不存在，请确认 cd/-C 目标后再${copy.actionName}。`
+  }
+  if (isPathInsideOrSame(realGitCommandCwd.path, realCwd.path)) return null
+  return copy.outsideWorkspaceMessage
+}
+
+async function validateGitOperationCwd(
+  workspaceCwd: string,
+  gitCommandCwd: string,
+  operation: GitOperationKind
+): Promise<string | null> {
+  const existingError = await validateGitCommandCwd(workspaceCwd, gitCommandCwd, operation)
+  if (existingError) return existingError
+  const gitRoot = await getGitRootForPath(gitCommandCwd)
+  if (gitRoot) return null
+
+  const repositories = await discoverWorkspaceGitRepositories(workspaceCwd)
+  const copy = GIT_OPERATION_COPY[operation]
+  if (repositories.length > 0) {
+    const repoList = repositories.map((repo) => repo.displayPath).join("，")
+    return (
+      `当前目录不是 Git 仓库，但工作区内发现 ${repositories.length} 个子仓库：${repoList}。` +
+      `请进入具体子仓库后再执行 ${copy.operationLabel}，例如 \`cd <子仓库> && ${copy.commandName}\`。`
+    )
+  }
+  return `当前目录不是 Git 仓库，无法执行 ${copy.operationLabel}。`
+}
+
 export class ToolOrchestrator {
   constructor(
     private approvalStore: ApprovalStore,
     private rawExecute: RawExecuteFn,
     private requestApproval: RequestApprovalFn,
-    private yoloMode: boolean = false
+    private yoloMode: boolean = false,
+    /**
+     * Auto-approve file edits (write_file/edit_file) WITHOUT prompting, while
+     * still gating shell execution. Used by dynamic-workflow subagents: the user
+     * already approved the whole workflow at launch, so its background subagents
+     * editing many files must not re-prompt per file (the official acceptEdits
+     * semantics). Shell `execute` stays gated — it's the more dangerous op.
+     */
+    private autoApproveFileEdits: boolean = false
   ) {}
 
   /**
@@ -57,13 +202,18 @@ export class ToolOrchestrator {
    */
   async execute(command: string, cwd: string, sandboxMode: string): Promise<ExecuteResponse> {
     {
-      console.log(`[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`)
+      console.log(
+        `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`
+      )
 
       // 1. Assess command safety — always check, even in YOLO mode
       const safety = assessCommandSafety(command, cwd, {
-        windowsShell: process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown"
+        windowsShell:
+          process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown"
       })
-      console.log(`[Orchestrator] safety: ${safety.level}${safety.reason ? ` (${safety.reason})` : ""}`)
+      console.log(
+        `[Orchestrator] safety: ${safety.level}${safety.reason ? ` (${safety.reason})` : ""}`
+      )
 
       // 2. Forbidden commands → reject immediately, regardless of YOLO mode
       if (safety.level === "forbidden") {
@@ -74,17 +224,85 @@ export class ToolOrchestrator {
         }
       }
 
+      // 2.5 git commit → route through the task-card commit dialog instead of a plain
+      // approval. The renderer collects the task card + message, performs the commit via
+      // workspace:commitWorktree (the same path as the Git Panel), and reports the result
+      // back. This applies even in YOLO mode: a commit must always carry a task card and
+      // the CMB message format, so it is the one operation YOLO still prompts for.
+      if (isGitCommitCommand(command)) {
+        let commitCommand = command
+        let commitCwd = cwd
+        let preselectedFilePaths: string[] | undefined
+        // The dialog only performs the commit; a chained command (e.g.
+        // `git commit -m x && git push`) would have its tail silently dropped. Refuse it
+        // and tell the agent to run the commit on its own.
+        if (isChainedShellCommand(command)) {
+          const preparedCommit =
+            normalizeGitAddPrefixedGitCommitCommand(command, cwd) ||
+            normalizeCdPrefixedGitCommitCommand(command, cwd)
+          if (preparedCommit) {
+            commitCommand = preparedCommit.command
+            commitCwd = preparedCommit.cwd
+            preselectedFilePaths =
+              "filePaths" in preparedCommit && Array.isArray(preparedCommit.filePaths)
+                ? preparedCommit.filePaths
+                : undefined
+          } else {
+            return {
+              output:
+                "检测到 `git commit` 与其他命令串联执行，提交对话框只会执行提交本身，其余命令会被丢弃。" +
+                "请单独执行 `git commit`（会弹出任务卡片对话框完成提交），再单独执行其余命令（如 git push）。",
+              exitCode: 1,
+              truncated: false
+            }
+          }
+        }
+        // The dialog only ever creates a fresh commit, so --amend/--fixup/--squash would be
+        // silently turned into a new commit (losing the amend/fixup/squash intent). Refuse
+        // rather than mislead the agent with a "提交成功".
+        if (isAmendOrFixupCommit(commitCommand)) {
+          return {
+            output:
+              "检测到 `git commit --amend/--fixup/--squash`，但任务卡片提交流程只会新建一条普通提交，" +
+              "无法修补/压缩已有提交。请改为创建新的提交，或让用户在 Git 面板手动处理历史提交。",
+            exitCode: 1,
+            truncated: false
+          }
+        }
+        return this.requestCardCommit(commitCommand, commitCwd, preselectedFilePaths)
+      }
+
+      // 2.6 git push → route a plain (non-force) push through workspace:pushWorktree — the
+      // same robust, unsandboxed mechanism the Git Panel uses. Running push inside the
+      // sandbox often hangs on Git Credential Manager prompts and times out. This branch is
+      // intentionally before the YOLO shortcut so YOLO pushes can still use the Git Panel
+      // path; the renderer auto-accepts git_push requests in YOLO mode. Force pushes and
+      // chained pushes keep the raw path (pushWorktree only performs a plain
+      // `push -u origin <current branch>`), and we only route when the push actually targets
+      // the current cwd — a `git -C <other>` push to a different repo would otherwise be
+      // silently redirected to the thread's worktree.
+      if (
+        isGitPushCommand(command) &&
+        !isForcePushCommand(command) &&
+        !isChainedShellCommand(command)
+      ) {
+        const gitCommandCwd = resolveGitPushCommandCwd(command, cwd)
+        if (isPathInsideOrSame(gitCommandCwd, cwd)) {
+          return this.requestWorktreePush(command, cwd, gitCommandCwd)
+        }
+      }
+
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
       // commands, but still require explicit approval before escaping the sandbox.
       if (this.yoloMode) {
-        const result = await this.rawExecute(command, sandboxMode)
+        const result = await this.rawExecute(command, sandboxMode, cwd)
         return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
 
       // 4. Safe commands → execute directly
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
-        const result = await this.rawExecute(command, sandboxMode)
+        const result = await this.rawExecute(command, sandboxMode, cwd)
         return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       }
 
@@ -134,7 +352,7 @@ export class ToolOrchestrator {
       // 6. Execute (with sandbox), then offer a one-shot bypass prompt if the failure
       // looks sandbox-induced.
       try {
-        const result = await this.rawExecute(command, sandboxMode)
+        const result = await this.rawExecute(command, sandboxMode, cwd)
         return await this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
       } catch (err) {
         // 7. Sandbox denial → block and inform user
@@ -147,6 +365,138 @@ export class ToolOrchestrator {
         }
         throw err
       }
+    }
+  }
+
+  /**
+   * Handle a `git commit` the agent issued by popping the task-card commit dialog in the
+   * renderer. The renderer is the single owner of the actual commit (it calls
+   * workspace:commitWorktree, exactly like the Git Panel), so this method only requests
+   * the interactive flow and translates its outcome into an ExecuteResponse for the agent.
+   * We never run the raw `git commit` ourselves — that keeps the CMB commit-message format
+   * (`<card> #comment <type>:<msg> #CMBDevClaw`) enforced in one place.
+   */
+  private async requestCardCommit(
+    command: string,
+    cwd: string,
+    preselectedFilePaths?: string[]
+  ): Promise<ExecuteResponse> {
+    const suggestedCommitMessage = extractGitCommitMessage(command)
+    const gitCommandCwd = resolveGitCommandCwd(command, cwd)
+    const gitCommandCwdError = await validateGitOperationCwd(cwd, gitCommandCwd, "commit")
+    if (gitCommandCwdError) {
+      return {
+        output: gitCommandCwdError,
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    let suggestedCommitFilePaths = Array.from(
+      new Set([...(preselectedFilePaths ?? []), ...extractGitCommitPathspecs(command)])
+    )
+    let suggestedCommitFileSelectionSource: "pathspec" | "staged" | undefined =
+      suggestedCommitFilePaths.length > 0 ? "pathspec" : undefined
+    let suggestedCommitFileBasePath: string | undefined =
+      suggestedCommitFilePaths.length > 0 ? gitCommandCwd : undefined
+    if (suggestedCommitFilePaths.length === 0) {
+      const stagedFilePaths = await readStagedGitFilePaths(gitCommandCwd)
+      if (stagedFilePaths.length > 0) {
+        suggestedCommitFilePaths = stagedFilePaths
+        suggestedCommitFileSelectionSource = "staged"
+        suggestedCommitFileBasePath = undefined
+      }
+    }
+    console.log(`[Orchestrator] git commit → task-card dialog (cwd=${cwd}, gitCwd=${gitCommandCwd})`)
+    const decision = await this.requestApproval({
+      id: randomUUID(),
+      tool_call: { id: randomUUID(), name: "execute", args: { command } },
+      safety_level: "needs_approval",
+      operation: "git_commit",
+      command,
+      cwd,
+      suggestedCommitMessage,
+      suggestedCommitFilePaths,
+      suggestedCommitFileBasePath,
+      suggestedGitWorktreePath: gitCommandCwd,
+      suggestedCommitFileSelectionSource,
+      reason: "Git 提交需要选择任务卡片并确认",
+      allowed_decisions: ["approve", "reject"],
+      allowed_approval_types: ["approve", "reject"]
+    })
+
+    if (decision.type !== "approve") {
+      return {
+        output: "用户取消了本次提交（未选择任务卡片或已取消提交对话框）。",
+        exitCode: 1,
+        truncated: false
+      }
+    }
+
+    const result = decision.commitResult
+    if (result?.success) {
+      const detail = result.commitMessage ? `：${result.commitMessage}` : ""
+      return { output: `提交成功${detail}`, exitCode: 0, truncated: false }
+    }
+    return {
+      output: `提交失败：${result?.error || "未知错误"}`,
+      exitCode: 1,
+      truncated: false
+    }
+  }
+
+  /**
+   * Handle a plain `git push` by routing it through the renderer's workspace:pushWorktree —
+   * the same path the Git Panel push button uses (unsandboxed `push -u origin <branch>` in
+   * the main process, with LFS compat + adoption push-marking). This avoids the sandbox
+   * credential-prompt hang/timeout. We never run the raw `git push` ourselves; the renderer
+   * performs the push and reports the outcome back via decision.pushResult.
+   */
+  private async requestWorktreePush(
+    command: string,
+    cwd: string,
+    gitCommandCwd: string
+  ): Promise<ExecuteResponse> {
+    const gitCommandCwdError = await validateGitOperationCwd(cwd, gitCommandCwd, "push")
+    if (gitCommandCwdError) {
+      return {
+        output: gitCommandCwdError,
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    console.log(`[Orchestrator] git push → workspace:pushWorktree (cwd=${cwd}, gitCwd=${gitCommandCwd})`)
+    const decision = await this.requestApproval({
+      id: randomUUID(),
+      tool_call: { id: randomUUID(), name: "execute", args: { command } },
+      safety_level: "needs_approval",
+      operation: "git_push",
+      command,
+      cwd,
+      suggestedGitWorktreePath: gitCommandCwd,
+      reason: "Git 推送将通过 Git 面板的推送机制执行（push -u origin <当前分支>）",
+      allowed_decisions: ["approve", "reject"],
+      allowed_approval_types: ["approve", "reject"]
+    })
+
+    const result = decision.pushResult
+    if (decision.type !== "approve") {
+      if (decision.type === "error" || result) {
+        return {
+          output: `推送失败：${result?.error || "未知错误"}`,
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      return { output: "用户取消了本次推送。", exitCode: 1, truncated: false }
+    }
+
+    if (result?.success) {
+      return { output: "推送成功（push -u origin 当前分支）。", exitCode: 0, truncated: false }
+    }
+    return {
+      output: `推送失败：${result?.error || "未知错误"}`,
+      exitCode: 1,
+      truncated: false
     }
   }
 
@@ -195,8 +545,8 @@ export class ToolOrchestrator {
     // (e.g. error 1385 = elevated sandbox blocked by domain policy → tell the user
     // to switch sandbox mode, not just approve a per-command bypass). Falls back to
     // Codex's generic "command failed; retry without sandbox?" prompt otherwise.
-    const promptReason = LocalSandbox.getSandboxBypassGuidance(output)
-      ?? SANDBOX_BYPASS_PROMPT_REASON
+    const promptReason =
+      LocalSandbox.getSandboxBypassGuidance(output) ?? SANDBOX_BYPASS_PROMPT_REASON
     console.warn(`[Orchestrator] sandbox bypass eligible for "${command}" (sandbox=${sandboxMode})`)
     const approval = await this.requestApproval({
       id: randomUUID(),
@@ -213,11 +563,15 @@ export class ToolOrchestrator {
     const decision = this.mapDecisionToReview(approval.type)
     if (decision === "denied" || decision === "abort") {
       // Surface the original sandbox failure to the agent so it can adjust its plan.
-      console.warn(`[Orchestrator] sandbox bypass rejected for "${command}" — returning original sandbox output`)
+      console.warn(
+        `[Orchestrator] sandbox bypass rejected for "${command}" — returning original sandbox output`
+      )
       return sandboxResult
     }
-    console.warn(`[Orchestrator] sandbox bypass approved for "${command}" — retrying outside sandbox`)
-    return this.rawExecute(command, "none")
+    console.warn(
+      `[Orchestrator] sandbox bypass approved for "${command}" — retrying outside sandbox`
+    )
+    return this.rawExecute(command, "none", cwd)
   }
 
   /**
@@ -233,7 +587,7 @@ export class ToolOrchestrator {
     cwd: string
   ): Promise<boolean> {
     {
-      if (this.yoloMode) return true
+      if (this.yoloMode || this.autoApproveFileEdits) return true
 
       const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
       // Directory-based pattern for permanent approval: file:write:/dir/* or file:edit:/dir/*
@@ -267,7 +621,9 @@ export class ToolOrchestrator {
       )
 
       const approved = decision !== "denied" && decision !== "abort"
-      console.log(`[Orchestrator] approveFileOp: ${operation} "${filePath}" → ${approved ? "approved" : "rejected"}`)
+      console.log(
+        `[Orchestrator] approveFileOp: ${operation} "${filePath}" → ${approved ? "approved" : "rejected"}`
+      )
       return approved
     }
   }
@@ -275,11 +631,16 @@ export class ToolOrchestrator {
   /** Map renderer decision type to ReviewDecision. */
   private mapDecisionToReview(type: ApprovalDecisionType): ReviewDecision {
     switch (type) {
-      case "approve": return "approved"
-      case "approve_session": return "approved_session"
-      case "approve_permanent": return "approved_permanent"
-      case "reject": return "denied"
-      default: return "denied"
+      case "approve":
+        return "approved"
+      case "approve_session":
+        return "approved_session"
+      case "approve_permanent":
+        return "approved_permanent"
+      case "reject":
+        return "denied"
+      default:
+        return "denied"
     }
   }
 

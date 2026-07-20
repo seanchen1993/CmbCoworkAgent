@@ -14,7 +14,10 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest"
 import http from "http"
+import { mkdtempSync, rmSync } from "fs"
 import type { AddressInfo } from "net"
+import { tmpdir } from "os"
+import { join } from "path"
 import type { UserInfoConfig } from "../storage"
 import type { LatestJson } from "./checker"
 
@@ -22,27 +25,32 @@ import type { LatestJson } from "./checker"
 let currentAppVersion = "1.3.10"
 let getUserInfoImpl: () => UserInfoConfig | null = () => null
 let currentManifest: LatestJson | null = null
+let expectedManifestFile = "cmbdevclaw-latest.json"
+let chainTestRoot = ""
 
 vi.mock("electron", () => ({
   app: { getVersion: () => currentAppVersion }
 }))
 vi.mock("../storage", () => ({
-  getUserInfo: () => getUserInfoImpl()
+  getUserInfo: () => getUserInfoImpl(),
+  getOpenworkDir: () => chainTestRoot
 }))
 
 // SUT imports must come AFTER vi.mock calls
 import { checkForUpdate } from "./checker"
 import { isSameStagingPayload } from "./gray-release"
+import { clearPendingUpdateChain, writePendingUpdateChain } from "./update-chain"
 
 let server: http.Server
 let baseUrl: string
 
 beforeAll(async () => {
+  chainTestRoot = mkdtempSync(join(tmpdir(), "cmb-updater-e2e-"))
   server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost")
     if (req.method === "POST" && url.pathname === "/download") {
       const file = url.searchParams.get("file")
-      if (file === "cmbdevclaw-latest.json") {
+      if (file === expectedManifestFile) {
         res.writeHead(200, { "content-type": "application/json" })
         res.end(JSON.stringify(currentManifest))
         return
@@ -64,6 +72,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()))
+  rmSync(chainTestRoot, { recursive: true, force: true })
 })
 
 beforeEach(() => {
@@ -73,6 +82,8 @@ beforeEach(() => {
   currentAppVersion = "1.3.10"
   getUserInfoImpl = () => null
   currentManifest = null
+  expectedManifestFile = "cmbdevclaw-latest.json"
+  clearPendingUpdateChain()
 })
 
 // --- Manifest fixtures -----------------------------------------------------
@@ -113,6 +124,28 @@ const sales: UserInfoConfig = {
 // ---------------------------------------------------------------------------
 
 describe("E2E gray release — real HTTP server, real checkForUpdate", () => {
+  it("C0 自测入口：可按指定 manifest 文件检查更新", async () => {
+    expectedManifestFile = "cmbdevclaw-latest.selftest.json"
+    currentAppVersion = "1.4.5"
+    currentManifest = {
+      ...baseManifest,
+      version: "1.4.8",
+      minVersion: "1.4.5",
+      releaseNotes: "自测 1.4.8",
+      asar: { version: "1.4.8", file: "selftest-1.4.8.asar.gz", sha256: "selftest-sha", size: 200 }
+    }
+
+    const r = await checkForUpdate(baseUrl, { manifestFile: expectedManifestFile })
+
+    expect(r).toMatchObject({
+      version: "1.4.8",
+      targetVersion: "1.4.8",
+      updateType: "asar",
+      downloadFile: "selftest-1.4.8.asar.gz",
+      channel: "stable"
+    })
+  })
+
   it("C1 兼容性：manifest 不写 staging → stable，行为完全等同改造前", async () => {
     // 模拟存量用户：还在 1.3.10，升级到 1.4.0 是 minor → 走 full installer
     currentAppVersion = "1.3.10"
@@ -142,6 +175,98 @@ describe("E2E gray release — real HTTP server, real checkForUpdate", () => {
     expect(r!.channel).toBe("stable")
     expect(r!.updateType).toBe("asar")
     expect(r!.downloadFile).toBe("stable-1.4.1.asar.gz")
+  })
+
+  it("C1c 非强制链式更新：先安装实际版本 full，再获取最终 ASAR", async () => {
+    getUserInfoImpl = () => dev
+    currentManifest = {
+      ...baseManifest,
+      version: "1.4.7",
+      minVersion: "1.4.5",
+      mandatory: false,
+      asar: {
+        version: "1.4.7",
+        file: "stable-1.4.7.asar.gz",
+        sha256: "patch-1.4.7",
+        size: 150
+      },
+      full: {
+        version: "1.4.5",
+        file: "stable-1.4.5.zip",
+        sha256: "full-1.4.5",
+        size: 99999
+      }
+    }
+
+    currentAppVersion = "1.3.10"
+    const bootstrap = await checkForUpdate(baseUrl)
+    expect(bootstrap).toMatchObject({
+      version: "1.4.5",
+      targetVersion: "1.4.7",
+      updateType: "full",
+      mandatory: false,
+      downloadFile: "stable-1.4.5.zip"
+    })
+
+    currentAppVersion = "1.4.5"
+    const finalPatch = await checkForUpdate(baseUrl)
+    expect(finalPatch).toMatchObject({
+      version: "1.4.7",
+      targetVersion: "1.4.7",
+      updateType: "asar",
+      mandatory: false,
+      downloadFile: "stable-1.4.7.asar.gz"
+    })
+  })
+
+  it("C1d 灰度链式更新：持久化第一跳后不因重新分桶停在中间版本", async () => {
+    getUserInfoImpl = () => dev
+    currentManifest = {
+      ...baseManifest,
+      minVersion: "1.4.5",
+      staging: {
+        version: "1.4.7",
+        rolloutPercent: 100,
+        asar: {
+          version: "1.4.7",
+          file: "staging-1.4.7.asar.gz",
+          sha256: "staging-asar-1.4.7",
+          size: 150
+        },
+        full: {
+          version: "1.4.5",
+          file: "staging-1.4.5.zip",
+          sha256: "staging-full-1.4.5",
+          size: 99999
+        }
+      }
+    }
+
+    const bootstrap = await checkForUpdate(baseUrl)
+    expect(bootstrap).toMatchObject({
+      version: "1.4.5",
+      targetVersion: "1.4.7",
+      updateType: "full",
+      channel: "staging"
+    })
+
+    writePendingUpdateChain({
+      intermediateVersion: "1.4.5",
+      targetVersion: "1.4.7",
+      channel: "staging",
+      minVersion: "1.4.5"
+    })
+    currentAppVersion = "1.4.5"
+    getUserInfoImpl = () => null
+    currentManifest.staging!.rolloutPercent = 0
+
+    const finalPatch = await checkForUpdate(baseUrl)
+    expect(finalPatch).toMatchObject({
+      version: "1.4.7",
+      updateType: "asar",
+      channel: "staging",
+      grayReason: "pending-chain"
+    })
   })
 
   it("C2 白名单 ystId 命中 → 走 staging", async () => {

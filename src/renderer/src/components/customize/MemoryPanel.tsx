@@ -17,6 +17,12 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 
 type MemoryType = "user" | "feedback" | "project" | "reference"
+type MemoryScope = "global" | "project"
+type ProjectScopeStatus = "checking" | "available" | "unavailable"
+
+interface MemoryPanelProps {
+  workspacePath?: string | null
+}
 
 interface MemoryFile {
   name: string
@@ -50,6 +56,10 @@ interface MemoryStats {
   enabled: boolean
   dreamEnabled: boolean
   dreamState: DreamStateInfo
+  scope: MemoryScope
+  memoryDir: string
+  projectId?: string
+  gitRoot?: string
 }
 
 function formatDreamAge(lastRunAt: number): string {
@@ -84,6 +94,12 @@ function formatSize(bytes: number): string {
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString()
+}
+
+function lastPathSegment(path: string | null | undefined): string {
+  if (!path) return ""
+  const trimmed = path.replace(/[\\/]+$/, "")
+  return trimmed.split(/[\\/]/).pop() || trimmed
 }
 
 interface FileButtonProps {
@@ -159,17 +175,90 @@ interface DreamResult {
   skipped: number
 }
 
-export function MemoryPanel(): React.JSX.Element {
+interface MemoryProject {
+  projectId: string
+  displayName: string
+  memoryDir: string
+  gitRoot?: string
+  fileCount: number
+  totalSize: number
+  indexSize: number
+  isCurrent: boolean
+}
+
+export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Element {
   const [files, setFiles] = useState<MemoryFile[]>([])
   const [selectedFile, setSelectedFile] = useState<MemoryFile | null>(null)
   const [fileContent, setFileContent] = useState("")
   const [stats, setStats] = useState<MemoryStats | null>(null)
-  const [enabled, setEnabled] = useState(true)
-  const [dreamEnabled, setDreamEnabled] = useState(true)
+  const [enabled, setEnabled] = useState(false)
+  const [dreamEnabled, setDreamEnabled] = useState(false)
   const [dreamRunning, setDreamRunning] = useState(false)
   const [dreamResult, setDreamResult] = useState<DreamResult | null>(null)
+  const [activeScope, setActiveScope] = useState<MemoryScope>("global")
+  const [projectScopeStatus, setProjectScopeStatus] = useState<ProjectScopeStatus>("unavailable")
+  const [projects, setProjects] = useState<MemoryProject[]>([])
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const mountedRef = useRef(true)
   const grouped = useMemo(() => groupFiles(files), [files])
+  const hasProjectScope = projects.length > 0
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.projectId === selectedProjectId) ?? null,
+    [projects, selectedProjectId]
+  )
+  const projectFactCount = files.filter((file) => file.name !== "MEMORY.md").length
+  const projectTitle =
+    selectedProject?.displayName || workspacePath
+      ? (selectedProject?.displayName ?? lastPathSegment(workspacePath))
+      : "未关联工作区"
+  const scopeRequest = useMemo(
+    () => ({
+      scope: activeScope,
+      workspacePath: workspacePath ?? null,
+      projectId: activeScope === "project" ? selectedProjectId : null
+    }),
+    [activeScope, selectedProjectId, workspacePath]
+  )
+
+  useEffect(() => {
+    if (activeScope === "project" && !hasProjectScope) {
+      setActiveScope("global")
+    }
+  }, [activeScope, hasProjectScope])
+
+  useEffect(() => {
+    let cancelled = false
+    setProjectScopeStatus("checking")
+    window.api.memory
+      .listProjects({ workspacePath: workspacePath ?? null })
+      .then((projectList) => {
+        if (cancelled || !mountedRef.current) return
+        setProjects(projectList)
+        setSelectedProjectId((prev) => {
+          if (prev && projectList.some((project) => project.projectId === prev)) return prev
+          return (
+            projectList.find((project) => project.isCurrent)?.projectId ??
+            projectList[0]?.projectId ??
+            null
+          )
+        })
+        setProjectScopeStatus(projectList.length > 0 ? "available" : "unavailable")
+        if (workspacePath?.trim() && projectList.some((project) => project.isCurrent)) {
+          setActiveScope((scope) => (scope === "global" ? "project" : scope))
+        }
+      })
+      .catch((e) => {
+        console.error(e)
+        if (!cancelled && mountedRef.current) {
+          setProjects([])
+          setSelectedProjectId(null)
+          setProjectScopeStatus("unavailable")
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [workspacePath])
 
   useEffect(() => {
     mountedRef.current = true
@@ -181,8 +270,8 @@ export function MemoryPanel(): React.JSX.Element {
   const loadData = useCallback(async () => {
     try {
       const [fileList, memStats] = await Promise.all([
-        window.api.memory.listFiles(),
-        window.api.memory.getStats()
+        window.api.memory.listFiles(scopeRequest),
+        window.api.memory.getStats(scopeRequest)
       ])
       if (!mountedRef.current) return
       setFiles(fileList)
@@ -196,7 +285,7 @@ export function MemoryPanel(): React.JSX.Element {
     } catch (e) {
       console.error(e)
     }
-  }, [])
+  }, [scopeRequest])
 
   useEffect(() => {
     loadData()
@@ -214,7 +303,7 @@ export function MemoryPanel(): React.JSX.Element {
       return
     }
     window.api.memory
-      .readFile(selectedFile.name)
+      .readFile(selectedFile.name, scopeRequest)
       .then((content) => {
         if (mountedRef.current) setFileContent(content)
       })
@@ -222,7 +311,13 @@ export function MemoryPanel(): React.JSX.Element {
     // Re-read when name OR modifiedAt changes — this catches background
     // rewrites by the summarizer (which fires memory:changed → loadData →
     // setSelectedFile with the fresh metadata).
-  }, [selectedFile?.name, selectedFile?.modifiedAt])
+  }, [scopeRequest, selectedFile?.name, selectedFile?.modifiedAt])
+
+  useEffect(() => {
+    setSelectedFile(null)
+    setFileContent("")
+    setDreamResult(null)
+  }, [activeScope, selectedProjectId, workspacePath])
 
   const handleToggleEnabled = useCallback(async () => {
     try {
@@ -259,7 +354,7 @@ export function MemoryPanel(): React.JSX.Element {
     setDreamRunning(true)
     setDreamResult(null)
     try {
-      const result = await window.api.memory.consolidate()
+      const result = await window.api.memory.consolidate(scopeRequest)
       if (mountedRef.current) {
         setDreamResult(result)
         await loadData()
@@ -269,21 +364,21 @@ export function MemoryPanel(): React.JSX.Element {
     } finally {
       if (mountedRef.current) setDreamRunning(false)
     }
-  }, [dreamRunning, enabled, dreamEnabled, loadData])
+  }, [dreamRunning, enabled, dreamEnabled, loadData, scopeRequest])
 
   const handleDelete = useCallback(
     async (file: MemoryFile) => {
       if (file.name === "MEMORY.md") return
       if (!confirm(`确定要删除记忆文件「${file.name}」吗？此操作不可撤销。`)) return
       try {
-        await window.api.memory.deleteFile(file.name)
+        await window.api.memory.deleteFile(file.name, scopeRequest)
         if (selectedFile?.name === file.name) setSelectedFile(null)
         await loadData()
       } catch (e) {
         console.error(e)
       }
     },
-    [selectedFile, loadData]
+    [selectedFile, loadData, scopeRequest]
   )
 
   return (
@@ -291,6 +386,115 @@ export function MemoryPanel(): React.JSX.Element {
       <div className="w-[330px] shrink-0 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
           <h2 className="text-base font-bold">Memory</h2>
+          <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-muted/30 p-1">
+            <button
+              className={cn(
+                "rounded px-2 py-1 text-xs transition-colors",
+                activeScope === "global"
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              onClick={() => setActiveScope("global")}
+            >
+              全局
+            </button>
+            <button
+              className={cn(
+                "rounded px-2 py-1 text-xs transition-colors",
+                activeScope === "project"
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+                !hasProjectScope && "cursor-not-allowed opacity-50"
+              )}
+              onClick={() => {
+                if (hasProjectScope) setActiveScope("project")
+              }}
+              disabled={!hasProjectScope}
+              title={
+                hasProjectScope
+                  ? (selectedProject?.gitRoot ?? selectedProject?.memoryDir ?? undefined)
+                  : projectScopeStatus === "checking"
+                    ? "正在检测项目记忆"
+                    : "没有可用的项目记忆"
+              }
+            >
+              当前项目
+            </button>
+          </div>
+          {activeScope === "project" && hasProjectScope && (
+            <select
+              className="h-7 w-full rounded-md border border-border bg-background px-2 text-xs text-foreground"
+              value={selectedProjectId ?? ""}
+              onChange={(event) => setSelectedProjectId(event.target.value || null)}
+              title="选择要查看和管理的项目记忆"
+            >
+              {projects.map((project) => (
+                <option key={project.projectId} value={project.projectId}>
+                  {project.isCurrent ? "当前项目 · " : ""}
+                  {project.displayName} · {project.projectId}
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="rounded-md border border-border/70 bg-muted/30 px-2 py-1.5 text-[11px] text-muted-foreground">
+            {activeScope === "project" ? (
+              <>
+                <div className="flex items-center gap-1.5">
+                  <Folder className="size-3 shrink-0" />
+                  <span className="min-w-0 truncate font-medium text-foreground/70">
+                    当前项目：{projectTitle}
+                  </span>
+                  {selectedProject?.projectId && (
+                    <span className="shrink-0 text-muted-foreground/70">
+                      #{selectedProject.projectId}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1 space-y-0.5 pl-4">
+                  {workspacePath ? (
+                    <div className="truncate" title={workspacePath}>
+                      工作区：{workspacePath}
+                    </div>
+                  ) : (
+                    <div>当前会话未关联工作区</div>
+                  )}
+                  {projectScopeStatus === "checking" ? (
+                    <div>正在识别 Git 项目</div>
+                  ) : hasProjectScope && selectedProject ? (
+                    <>
+                      {selectedProject.gitRoot ? (
+                        <div className="truncate" title={selectedProject.gitRoot}>
+                          Git root：{selectedProject.gitRoot}
+                        </div>
+                      ) : (
+                        <div>Git root：未知（旧项目记忆）</div>
+                      )}
+                      <div className="truncate" title={selectedProject.memoryDir}>
+                        记忆目录：{selectedProject.memoryDir}
+                      </div>
+                    </>
+                  ) : workspacePath ? (
+                    <div>未识别到可用项目记忆</div>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-1.5">
+                  <Brain className="size-3 shrink-0" />
+                  <span className="min-w-0 truncate font-medium text-foreground/70">全局记忆</span>
+                </div>
+                <div className="mt-1 space-y-0.5 pl-4">
+                  <div>跨项目共享的用户事实、偏好与反馈</div>
+                  {stats?.memoryDir && (
+                    <div className="truncate" title={stats.memoryDir}>
+                      记忆目录：{stats.memoryDir}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
           <div className="flex items-center gap-1.5">
             <button
               className={cn(
@@ -301,7 +505,7 @@ export function MemoryPanel(): React.JSX.Element {
               )}
               onClick={handleToggleEnabled}
             >
-              记忆 {enabled ? "已启用" : "已禁用"}
+              记忆子系统 {enabled ? "已启用" : "已禁用"}
             </button>
             <button
               className={cn(
@@ -357,16 +561,18 @@ export function MemoryPanel(): React.JSX.Element {
             <Info className="size-3.5 shrink-0" />
             <span>
               {enabled
-                ? "记忆系统会自动总结对话并在后续会话中回忆"
-                : "记忆系统已关闭，不会总结、检索或注入记忆"}
+                ? "记忆库可用；具体会话需在输入框旁单独开启"
+                : "记忆子系统已关闭，所有会话都不会总结、检索或注入记忆"}
             </span>
           </div>
           {stats && (
-            <div className="flex items-center gap-3 px-2 text-[10px] text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-2 text-[10px] text-muted-foreground">
+              <span>{stats.scope === "project" ? "项目记忆" : "全局记忆"}</span>
               <span>{stats.fileCount} 个文件</span>
               <span>{formatSize(stats.totalSize)}</span>
               <span>索引 {formatSize(stats.indexSize)}</span>
-              <span className="ml-auto">
+              {stats.projectId && <span>项目 {stats.projectId}</span>}
+              <span className="ml-auto min-w-0">
                 Dream {stats.dreamEnabled ? "开启" : "关闭"} · 整合:{" "}
                 {formatDreamAge(stats.dreamState.lastRunAt)}
                 {stats.dreamState.sessionsSinceLastRun > 0 &&
@@ -377,10 +583,17 @@ export function MemoryPanel(): React.JSX.Element {
         </div>
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-3">
+            {activeScope === "project" && hasProjectScope && projectFactCount === 0 && (
+              <div className="rounded-md border border-blue-500/25 bg-blue-500/5 p-2.5 text-[11px] text-blue-700 dark:text-blue-300 leading-relaxed">
+                当前项目已识别，但还没有项目事实文件。旧版记忆会保留在全局记忆里；项目记忆会在后续会话结束总结后写入这里。
+              </div>
+            )}
             {files.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                 <Brain className="size-8 opacity-40 mb-2" />
-                <p className="text-xs">暂无记忆文件</p>
+                <p className="text-xs">
+                  {activeScope === "project" ? "当前项目暂无记忆文件" : "暂无记忆文件"}
+                </p>
               </div>
             ) : (
               <>
@@ -497,8 +710,8 @@ export function MemoryPanel(): React.JSX.Element {
               </div>
               <h3 className="text-lg font-semibold text-foreground/80">Memory 记忆</h3>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                记忆系统让 AI 拥有长期记忆能力。每次对话结束后，AI
-                会自动总结关键信息并保存为记忆文件，在后续对话中自动回忆相关内容，从而提供更连贯、更个性化的服务。
+                记忆系统让 AI
+                拥有长期记忆能力。现在新会话默认不使用记忆；你可以在输入框旁为当前会话单独开启。
               </p>
             </div>
 
@@ -506,11 +719,11 @@ export function MemoryPanel(): React.JSX.Element {
               <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
                 <p className="text-sm font-medium text-foreground/70">记忆如何工作？</p>
                 <p className="text-[13px] text-muted-foreground leading-relaxed">
-                  每次对话结束时，AI
-                  会自动提取对话中的关键信息——比如你的偏好、项目背景、决策的「为什么」——并按
+                  当前会话开启记忆后，对话成功结束时 AI
+                  会提取对话中的关键信息——比如你的偏好、项目背景、决策的「为什么」——并按
                   <span className="font-medium text-foreground/60">类型分类</span>
-                  保存为单独的事实文件（user / feedback / project / reference）。下次对话时，AI
-                  会自动检索相关记忆，并参考 MEMORY.md 索引。
+                  保存为单独的事实文件（user / feedback / project /
+                  reference）。后续已开启记忆的会话会检索相关内容，并参考 MEMORY.md 索引。
                 </p>
               </div>
 
@@ -523,8 +736,8 @@ export function MemoryPanel(): React.JSX.Element {
                   </li>
                   <li className="flex gap-2">
                     <span className="text-foreground/40 shrink-0">2.</span>
-                    <span className="font-medium text-foreground/60">MEMORY.md</span>{" "}
-                    是 LLM 维护的索引，每次对话都会注入到系统提示词
+                    <span className="font-medium text-foreground/60">MEMORY.md</span> 是 LLM
+                    维护的索引，仅在会话开启记忆时注入到系统提示词
                   </li>
                   <li className="flex gap-2">
                     <span className="text-foreground/40 shrink-0">3.</span>
@@ -532,7 +745,7 @@ export function MemoryPanel(): React.JSX.Element {
                   </li>
                   <li className="flex gap-2">
                     <span className="text-foreground/40 shrink-0">4.</span>
-                    通过顶部开关可随时启用或禁用记忆功能
+                    通过顶部开关可控制全局记忆子系统；通过输入框旁入口控制当前会话
                   </li>
                 </ul>
               </div>
@@ -540,7 +753,7 @@ export function MemoryPanel(): React.JSX.Element {
               <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
                 <p className="text-sm font-medium text-foreground/70">隐私与控制</p>
                 <p className="text-[13px] text-muted-foreground leading-relaxed">
-                  所有记忆数据完全存储在本地，不会上传到任何服务器。你对记忆拥有完全控制权，可以随时查看、编辑或删除任何记忆内容，也可以一键关闭整个记忆功能。
+                  所有记忆数据完全存储在本地，不会上传到任何服务器。你对记忆拥有完全控制权，可以随时查看、编辑或删除任何记忆内容，也可以一键关闭全局记忆子系统。
                 </p>
               </div>
             </div>

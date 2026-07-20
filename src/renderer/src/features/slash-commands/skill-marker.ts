@@ -87,6 +87,7 @@ export function formatSkillUseBlock(skill: {
     `- 不要跳过任何步骤，也不要把步骤改写成泛化或概括的回答；\n` +
     `- 不要重复询问技能文档中已经明确给出的内容；\n` +
     `- 不要凭猜测代替技能中明确的指令；\n` +
+    `- 技能文档中提到的相对脚本、资源、模板路径，都必须按 <path> 指定的 SKILL.md 所在目录解析；执行脚本时请使用绝对路径，或把 cwd 设置为该技能目录；\n` +
     `- 始终使用中文回答。\n` +
     `</instruction>\n` +
     `<name>${escapeXml(name)}</name>\n` +

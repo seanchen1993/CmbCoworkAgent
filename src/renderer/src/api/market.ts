@@ -56,6 +56,7 @@ export interface MarketItem {
   user_id?: string // 110
   guidance?: string // Usage guidance for the skill/item
   chinese_name?: string // Chinese name for the skill/item
+  extra_json?: string
   // Only keep essential UI fields for compatibility
   id?: string
   type?: MarketItemType
@@ -72,6 +73,7 @@ export interface MarketItem {
   installedVersion?: string
   updateAvailable?: boolean
   installDisabledReason?: string
+  project_mode_supported?: boolean
   orgSkillId?: number
   orgSkillVersionId?: number
   sourceOriginName?: string
@@ -372,8 +374,9 @@ export const marketApi = {
     }
   },
 
-  async getPlugins(): Promise<MarketApiResponse> {
+  async getPlugins(options?: { allowMockOnError?: boolean; silent?: boolean }): Promise<MarketApiResponse> {
     const cacheKey = "plugins"
+    const allowMockOnError = options?.allowMockOnError ?? USE_MARKET_MOCK_ON_ERROR
 
     // Check cache first
     // const cachedData = getCachedData(cacheKey)
@@ -392,6 +395,9 @@ export const marketApi = {
       })
 
       if (!response.ok) {
+        if (options?.silent) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
         await throwMarketError(response)
       }
 
@@ -414,7 +420,7 @@ export const marketApi = {
       return result
     } catch (error) {
       console.error("Error fetching plugins:", error)
-      if (USE_MARKET_MOCK_ON_ERROR) {
+      if (allowMockOnError) {
         return getMockMarketResponse("plugin", error)
       }
       return {
@@ -509,7 +515,7 @@ export const marketApi = {
       try {
         const arrayBuffer = await blob.arrayBuffer()
         if (typeof window.api?.plugins?.install === "function") {
-          const installResult = await window.api.plugins.install(arrayBuffer, filename, "market")
+          const installResult = await window.api.plugins.install(arrayBuffer, filename, "market", item?.version)
           return {
             success: installResult.success,
             error: installResult.error
@@ -636,7 +642,8 @@ export const marketApi = {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string
   ): Promise<{ success: boolean; data?: MarketUploadResponse; error?: string }> {
     console.log(`Uploading ${resourceType} file: ${file.name} category:${category} version:${version}`)
 
@@ -655,6 +662,9 @@ export const marketApi = {
     }
     if (userId) {
       formData.append("user_id", userId)
+    }
+    if (extraJson) {
+      formData.append("extra_json", extraJson)
     }
     const ip = localStorage.getItem("localIp")
     formData.append("ip", ip || "")
@@ -697,7 +707,9 @@ export const marketApi = {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string,
+    ipOverride?: string | null
   ): Promise<{ success: boolean; data?: MarketUpdateResponse; error?: string }> {
     console.log(`Updating ${resourceType} item: ${name} category:${category} version:${version}`)
 
@@ -719,7 +731,10 @@ export const marketApi = {
     if (userId) {
       formData.append("user_id", userId)
     }
-    const ip = localStorage.getItem("localIp")
+    if (extraJson) {
+      formData.append("extra_json", extraJson)
+    }
+    const ip = ipOverride ?? localStorage.getItem("localIp")
     formData.append("ip", ip || "")
 
     const response = await fetch(ENDPOINTS.update(resourceType, name), {

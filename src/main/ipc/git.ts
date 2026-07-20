@@ -10,6 +10,7 @@ import {
   type StagedSnapshot
 } from "../services/adoption-tracker"
 import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
+import { discoverWorkspaceGitRepositories } from "../services/git-repository-discovery"
 import { promisify } from "util"
 
 /**
@@ -30,6 +31,7 @@ interface ExecCommandError extends Error {
   stdout?: unknown
   code?: string
   signal?: string
+  path?: string
 }
 
 const execFileAsync = promisify(execFile)
@@ -58,6 +60,7 @@ const ALLOWED_GIT_SUBCOMMANDS = new Set([
   "rev-parse",
   "ls-files"
 ])
+const GIT_UNAVAILABLE_MESSAGE = "未检测到 Git 命令，请检查 Git 是否已安装并配置到 PATH。"
 
 type WorkingDirectoryCacheEntry = {
   value: string
@@ -71,13 +74,25 @@ function isCommitCommand(command: string): boolean {
 interface StagedCapture {
   workingDir: string
   snapshots: StagedSnapshot[]
+  /**
+   * Wall-clock time of the staged capture (epoch ms). The capture runs before
+   * `git commit`, so it is an exact upper bound on which generations can be part
+   * of the commit — passed to adoption measurement to keep later (post-capture)
+   * generations from being attributed to this commit.
+   */
+  captureTimeMs: number
 }
 
 async function captureStagedSnapshotsForCommand(command: string): Promise<StagedCapture | null> {
   try {
     const parsed = parseGitCommand(command)
     const workingDir = parsed.workingDirFromFlag || (await getCurrentWorkingDirectory())
-    return { workingDir, snapshots: captureAdoptionStagedSnapshots(workingDir) }
+    const captureTimeMs = Date.now()
+    return {
+      workingDir,
+      captureTimeMs,
+      snapshots: await captureAdoptionStagedSnapshots(workingDir)
+    }
   } catch (e) {
     console.warn("[Git] adoption pre-commit capture skipped:", e)
     return null
@@ -98,6 +113,7 @@ function extractCommitSha(commitOutput: string, workingDir: string): string | nu
       encoding: "utf-8",
       cwd: workingDir,
       timeout: 5000,
+      windowsHide: true,
       shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
     }).trim()
     return sha || null
@@ -613,6 +629,15 @@ function isNotGitRepoErrorText(text: string): boolean {
   return (
     normalized.includes("not a git repository") ||
     normalized.includes("does not appear to be a git repository")
+  )
+}
+
+function isGitUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const err = error as ExecCommandError
+  return (
+    err.code === "ENOENT" &&
+    (err.path === "git" || err.message.toLowerCase().includes("spawn git"))
   )
 }
 
@@ -1158,7 +1183,7 @@ export function registerGitHandlers(): void {
           console.log(
             `[Git] triggering post-commit measurement: commitSha=${sha ?? "unknown"} snapshots=${stagedCapture.snapshots.length}`
           )
-          measureForCommit(stagedCapture.snapshots, sha)
+          measureForCommit(stagedCapture.snapshots, sha, stagedCapture.captureTimeMs)
         } catch (e) {
           console.warn("[Git] adoption post-commit measurement skipped:", e)
         }
@@ -1206,16 +1231,57 @@ export function registerGitHandlers(): void {
     async (
       _,
       cwd?: string
-    ): Promise<{ isGitRepo: boolean; branch: string | null; isWorktree: boolean }> => {
+    ): Promise<{
+      isGitRepo: boolean
+      branch: string | null
+      isWorktree: boolean
+      isMultiRepo?: boolean
+      repositories?: Array<{ path: string; displayPath: string; gitRoot: string }>
+      error?: string
+    }> => {
       try {
-        const repoCheck = await isGitRepo(cwd)
-        if (!repoCheck) return { isGitRepo: false, branch: null, isWorktree: false }
-        const branch = await getCurrentBranch(cwd)
-        const worktree = await isWorktree(cwd)
+        const workingDir = cwd || (await getCurrentWorkingDirectory())
+        try {
+          await runGitArgs(["rev-parse", "--git-dir"], {
+            cwd: workingDir,
+            timeout: 10000
+          })
+        } catch (error) {
+          if (isGitUnavailableError(error)) {
+            return {
+              isGitRepo: false,
+              branch: null,
+              isWorktree: false,
+              error: GIT_UNAVAILABLE_MESSAGE
+            }
+          }
+          const repositories = await discoverWorkspaceGitRepositories(workingDir)
+          if (repositories.length > 0) {
+            return {
+              isGitRepo: true,
+              branch: repositories.length > 1 ? `${repositories.length} 个仓库` : repositories[0].displayPath,
+              isWorktree: false,
+              isMultiRepo: true,
+              repositories: repositories.map((repo) => ({
+                path: repo.repoPath,
+                displayPath: repo.displayPath,
+                gitRoot: repo.gitRoot
+              }))
+            }
+          }
+          return { isGitRepo: false, branch: null, isWorktree: false }
+        }
+        const branch = await getCurrentBranch(workingDir)
+        const worktree = await isWorktree(workingDir)
         return { isGitRepo: true, branch, isWorktree: worktree }
       } catch (error) {
         console.error("[IPC] git:currentBranch error:", error)
-        return { isGitRepo: false, branch: null, isWorktree: false }
+        return {
+          isGitRepo: false,
+          branch: null,
+          isWorktree: false,
+          ...(isGitUnavailableError(error) ? { error: GIT_UNAVAILABLE_MESSAGE } : {})
+        }
       }
     }
   )

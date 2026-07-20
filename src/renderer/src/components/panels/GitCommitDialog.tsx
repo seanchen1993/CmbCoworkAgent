@@ -1,8 +1,7 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
@@ -10,8 +9,10 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { TaskCardPicker } from "@/components/git/TaskCardPicker"
 import { cn } from "@/lib/utils"
 import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
+import type { TaskCardItem } from "../../../../shared/task-card-types"
 
 const COMMIT_TYPES = [
   { value: "fix", label: "fix" },
@@ -36,8 +37,9 @@ interface GitCommitDialogProps {
   commitType: CommitType
   commitMessage: string
   commitHistory: GitCommitHistoryRecord[]
+  preferredTaskText?: string
   onOpenChange: (open: boolean) => void
-  onCardNumberChange: (value: string) => void
+  onCardNumberChange: (value: string, card?: TaskCardItem | null) => void
   onCommitTypeChange: (value: CommitType) => void
   onCommitMessageChange: (value: string) => void
   onHistorySelect: (record: GitCommitHistoryRecord) => void
@@ -55,6 +57,7 @@ export function GitCommitDialog({
   commitType,
   commitMessage,
   commitHistory,
+  preferredTaskText,
   onOpenChange,
   onCardNumberChange,
   onCommitTypeChange,
@@ -63,6 +66,7 @@ export function GitCommitDialog({
   onSubmit
 }: GitCommitDialogProps): React.JSX.Element {
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | undefined>(undefined)
+  const selectedHistoryIdRef = useRef<string | undefined>(undefined)
   const cardValue = cardNumber.trim()
   const messageValue = commitMessage.trim()
   const finalMessagePreview = cardValue
@@ -71,27 +75,42 @@ export function GitCommitDialog({
   const noSelectedFiles = fileCount <= 0
   const cardMissing = !noSelectedFiles && !cardValue
   const messageMissing = !noSelectedFiles && !messageValue
+  const historySelectValue =
+    selectedHistoryId && commitHistory.some((record) => record.id === selectedHistoryId)
+      ? selectedHistoryId
+      : undefined
 
   useEffect(() => {
-    if (!open) {
-      setSelectedHistoryId(undefined)
-      return
+    selectedHistoryIdRef.current = selectedHistoryId
+  }, [selectedHistoryId])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (!open) {
+        setSelectedHistoryId(undefined)
+        return
+      }
+
+      const latest = commitHistory[0]
+      if (!latest) {
+        setSelectedHistoryId(undefined)
+        return
+      }
+
+      const currentHistoryId = selectedHistoryIdRef.current
+      const selectedExists = currentHistoryId
+        ? commitHistory.some((record) => record.id === currentHistoryId)
+        : false
+      if (selectedExists) return
+
+      setSelectedHistoryId(latest.id)
+      onHistorySelect(latest)
+    }, 0)
+
+    return () => {
+      window.clearTimeout(timer)
     }
-
-    const latest = commitHistory[0]
-    if (!latest) {
-      setSelectedHistoryId(undefined)
-      return
-    }
-
-    const selectedExists = selectedHistoryId
-      ? commitHistory.some((record) => record.id === selectedHistoryId)
-      : false
-    if (selectedExists) return
-
-    setSelectedHistoryId(latest.id)
-    onHistorySelect(latest)
-  }, [open, commitHistory, selectedHistoryId, onHistorySelect])
+  }, [open, commitHistory, onHistorySelect])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -103,17 +122,20 @@ export function GitCommitDialog({
         <div className="rounded-xl border border-border/70 bg-muted/25 p-3 mx-4 space-y-2">
           <div className="flex items-center justify-between gap-3 text-xs">
             <span className="text-muted-foreground">分支</span>
-            <span className="font-mono text-foreground truncate max-w-[300px]" title={branch || "-"}>
-                {branch || "-"}
-              </span>
+            <span
+              className="font-mono text-foreground truncate max-w-[300px]"
+              title={branch || "-"}
+            >
+              {branch || "-"}
+            </span>
           </div>
           <div className="flex items-center justify-between gap-3 text-xs">
             <span className="text-muted-foreground">变更</span>
             <span className="font-medium">
-                <span>{fileCount} 文件</span>
-                <span className="ml-2 text-emerald-600 dark:text-emerald-400">+{additions}</span>
-                <span className="ml-1 text-rose-600 dark:text-rose-400">-{deletions}</span>
-              </span>
+              <span>{fileCount} 文件</span>
+              <span className="ml-2 text-emerald-600 dark:text-emerald-400">+{additions}</span>
+              <span className="ml-1 text-rose-600 dark:text-rose-400">-{deletions}</span>
+            </span>
           </div>
         </div>
 
@@ -125,13 +147,13 @@ export function GitCommitDialog({
         >
           {commitHistory.length > 0 && (
             <div className="space-y-1.5 mb-6 border-b pb-4">
-              <div className={'flex items-center'}>
+              <div className={"flex items-center"}>
                 <label htmlFor="git-commit-history" className="text-xs font-medium text-foreground">
                   选择复用 历史 commit
                 </label>
               </div>
               <Select
-                value={selectedHistoryId}
+                value={historySelectValue}
                 onValueChange={(recordId) => {
                   setSelectedHistoryId(recordId)
                   const record = commitHistory.find((item) => item.id === recordId)
@@ -154,19 +176,27 @@ export function GitCommitDialog({
           <div className="space-y-1.5">
             <div className="flex items-center justify-between text-xs">
               <label htmlFor="git-card-number" className="font-medium text-foreground">
-                卡片编号
+                任务卡片
               </label>
-              <span className={cn("text-[11px]", cardMissing ? "text-destructive" : "text-muted-foreground")}>
+              <span
+                className={cn(
+                  "text-[11px]",
+                  cardMissing ? "text-destructive" : "text-muted-foreground"
+                )}
+              >
                 必填
               </span>
             </div>
-            <Input
-              id="git-card-number"
+            <TaskCardPicker
               value={cardNumber}
-              onChange={(e) => onCardNumberChange(e.target.value)}
-              placeholder="例如：CMP-1024"
-              required
-              className={cn(cardMissing && "border-destructive/50 focus-visible:ring-destructive/40")}
+              onValueChange={(nextValue, card) => onCardNumberChange(nextValue, card)}
+              preferredText={preferredTaskText}
+              autoSelect={false}
+              disabled={running}
+              placeholder="选择任务卡片"
+              className={cn(
+                cardMissing && "border-destructive/50 focus-visible:ring-destructive/40"
+              )}
             />
           </div>
           <div className="space-y-1.5">
@@ -193,7 +223,12 @@ export function GitCommitDialog({
               <label htmlFor="git-message" className="font-medium text-foreground">
                 提交消息
               </label>
-              <span className={cn("text-[11px]", messageMissing ? "text-destructive" : "text-muted-foreground")}>
+              <span
+                className={cn(
+                  "text-[11px]",
+                  messageMissing ? "text-destructive" : "text-muted-foreground"
+                )}
+              >
                 必填
               </span>
             </div>
@@ -218,8 +253,7 @@ export function GitCommitDialog({
             </div>
           )}
           {noSelectedFiles && (
-            <div
-              className="rounded-lg border border-amber-500/45 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+            <div className="rounded-lg border border-amber-500/45 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
                 <div>

@@ -31,6 +31,7 @@ export function validatePluginManifest(raw: unknown): PluginManifest | null {
     name: obj.name,
     version: typeof obj.version === "string" ? obj.version : undefined,
     description: typeof obj.description === "string" ? obj.description : undefined,
+    useScenario: typeof obj.useScenario === "string" ? obj.useScenario : undefined,
     author:
       typeof obj.author === "string"
         ? obj.author

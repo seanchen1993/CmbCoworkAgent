@@ -35,6 +35,7 @@ import {
 } from "../src/main/agent/goals/evaluator.ts"
 import {
   buildGoalToolEvidenceEntry,
+  GoalBackgroundEvidenceStash,
   GoalEvidenceBuffer,
   summarizeGoalToolInput
 } from "../src/main/agent/goals/evidence.ts"
@@ -182,7 +183,11 @@ async function testSlashParsing(): Promise<void> {
   const withMessyAttachmentName = parseGoalSlashCommand(
     '/goal summarize escaped attachment\n\n<attachment filename="line&#10;break &amp; docs.txt" type="text/plain" size="4">\ndata\n</attachment>'
   )
-  assertEqual(withMessyAttachmentName.type, "set", "goal parser should set with messy attachment name")
+  assertEqual(
+    withMessyAttachmentName.type,
+    "set",
+    "goal parser should set with messy attachment name"
+  )
   if (withMessyAttachmentName.type === "set") {
     assert(
       withMessyAttachmentName.context?.transportSummary?.includes("line break & docs.txt"),
@@ -360,13 +365,13 @@ async function testSlashParsing(): Promise<void> {
 
   const transportPayload = extractGoalTransportPayload(
     [
-      '/goal summarize README',
-      '',
+      "/goal summarize README",
+      "",
       '<attachment filename="notes.txt" type="text/plain" size="4">',
-      'data',
-      '</attachment>',
-      '',
-      '<CMBDEVCLAW-SKILL-USE-V1><name>docs</name><path>/tmp/SKILL.md</path></CMBDEVCLAW-SKILL-USE-V1>'
+      "data",
+      "</attachment>",
+      "",
+      "<CMBDEVCLAW-SKILL-USE-V1><name>docs</name><path>/tmp/SKILL.md</path></CMBDEVCLAW-SKILL-USE-V1>"
     ].join("\n")
   )
   assert(
@@ -397,7 +402,11 @@ async function testGoalLifecycle(): Promise<void> {
       transportSummary: "显式技能：docs"
     }
   })
-  assertEqual(skillGoal.objective, "use selected skill", "context summary should not pollute objective")
+  assertEqual(
+    skillGoal.objective,
+    "use selected skill",
+    "context summary should not pollute objective"
+  )
   assertEqual(
     skillGoal.context.explicitSkill?.path,
     "/tmp/SKILL.md",
@@ -421,7 +430,11 @@ async function testGoalLifecycle(): Promise<void> {
 }
 
 async function testDisplayGoalPausedReasonNormalizesInternalCodes(): Promise<void> {
-  assertEqual(displayGoalPausedReason("user-paused"), "已手动暂停。", "user-paused should be friendly")
+  assertEqual(
+    displayGoalPausedReason("user-paused"),
+    "已手动暂停。",
+    "user-paused should be friendly"
+  )
   assertEqual(
     displayGoalPausedReason("user-cancelled"),
     "你已取消当前运行。",
@@ -737,10 +750,7 @@ function testGoalContinuationPreservesExplicitSkillHookContext(): void {
 }
 
 async function testNonGoalPromptRewriteStillReplacesPromptDirectly(): Promise<void> {
-  const rewritten = applyPromptRewritePreservingGoalMarker(
-    "hello world",
-    "rewritten plain prompt"
-  )
+  const rewritten = applyPromptRewritePreservingGoalMarker("hello world", "rewritten plain prompt")
   assertEqual(
     rewritten,
     "rewritten plain prompt",
@@ -810,7 +820,10 @@ async function testStatusLineIsActionable(): Promise<void> {
 
   manager.pause("thread-status", "user-paused")
   const pausedStatus = manager.statusLine("thread-status")
-  assert(pausedStatus.includes("暂停原因：已手动暂停。"), "paused status should translate internal reasons")
+  assert(
+    pausedStatus.includes("暂停原因：已手动暂停。"),
+    "paused status should translate internal reasons"
+  )
   manager.resume("thread-status")
 
   manager.recordJudgeDecision("thread-status", {
@@ -1181,8 +1194,7 @@ function testCurrentTurnAssistantResponseDoesNotFallBackToPreviousTurn(): void {
   assertEqual(
     getCurrentTurnAssistantResponse({
       assistantText: previous,
-      currentTurnAssistantStart: previous.length,
-      lastFinalText: ""
+      currentTurnAssistantStart: previous.length
     }),
     "",
     "current-turn response extraction should not fall back to previous assistant text"
@@ -1191,21 +1203,116 @@ function testCurrentTurnAssistantResponseDoesNotFallBackToPreviousTurn(): void {
   assertEqual(
     getCurrentTurnAssistantResponse({
       assistantText: `${previous}<think>hidden</think>\n本轮可见回复`,
-      currentTurnAssistantStart: previous.length,
-      lastFinalText: ""
+      currentTurnAssistantStart: previous.length
     }),
     "本轮可见回复",
     "current-turn response extraction should slice from the current turn boundary and strip thinking"
   )
 
+  // AE-1 regression: a turn that ends with only this-turn reasoning before the
+  // boundary (i.e. no new final text after it) must return EMPTY — it must not
+  // resurrect any prior-turn final answer. The function intentionally has no
+  // cross-turn backfill, so the only signal is the current-turn slice.
   assertEqual(
     getCurrentTurnAssistantResponse({
-      assistantText: previous,
-      currentTurnAssistantStart: previous.length,
-      lastFinalText: "最终回复优先"
+      assistantText: `${previous}本轮工具阶段，无最终文本`,
+      currentTurnAssistantStart: `${previous}本轮工具阶段，无最终文本`.length
     }),
-    "最终回复优先",
-    "explicit current final response should still win when present"
+    "",
+    "an empty current-turn slice must stay empty — no stale prior-turn final leaks in (AE-1)"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: `${previous}本轮流式草稿`,
+      currentTurnAssistantStart: previous.length,
+      lastFinalText: "本轮 values 快照最终回复"
+    }),
+    "本轮 values 快照最终回复",
+    "current-turn values snapshot should take precedence over an incomplete streaming draft"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "",
+      currentTurnAssistantStart: 0,
+      lastFinalText: "values-only 最终回复"
+    }),
+    "values-only 最终回复",
+    "values-only final answer should still be visible to the goal evaluator"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "<think>unfinished hidden reasoning",
+      currentTurnAssistantStart: 0
+    }),
+    "<think>unfinished hidden reasoning",
+    "unclosed think text without a standalone opening tag should be preserved as visible text"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "<think>\nunfinished hidden reasoning",
+      currentTurnAssistantStart: 0
+    }),
+    "",
+    "unclosed think-only output with a standalone opening tag should be treated as empty assistant response"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "<think> 标签是字面量说明，后续内容不能被删。",
+      currentTurnAssistantStart: 0
+    }),
+    "<think> 标签是字面量说明，后续内容不能被删。",
+    "literal think tag at the start of visible text should not erase the answer"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "<think>标签是字面量说明",
+      currentTurnAssistantStart: 0
+    }),
+    "<think>标签是字面量说明",
+    "literal think tag followed by text should not erase the answer"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "<think>: literal label",
+      currentTurnAssistantStart: 0
+    }),
+    "<think>: literal label",
+    "literal think tag followed by punctuation should not erase the answer"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "<think>：字面量说明",
+      currentTurnAssistantStart: 0
+    }),
+    "<think>：字面量说明",
+    "literal think tag followed by full-width punctuation should not erase the answer"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "请在文档中展示字面量 <think> 标签，并保留后续说明。",
+      currentTurnAssistantStart: 0
+    }),
+    "请在文档中展示字面量 <think> 标签，并保留后续说明。",
+    "literal unclosed think tags inside visible text should not erase the answer"
+  )
+
+  assertEqual(
+    getCurrentTurnAssistantResponse({
+      assistantText: "",
+      currentTurnAssistantStart: 0,
+      lastFinalText: "最终回复包含字面量 <think> 标签和后续说明。"
+    }),
+    "最终回复包含字面量 <think> 标签和后续说明。",
+    "values final text should preserve literal unclosed think tags inside visible text"
   )
 }
 
@@ -1772,6 +1879,218 @@ async function testGoalToolEvidenceFormatting(): Promise<void> {
   assert(entry?.includes("BUILD SUCCESS"), "head/tail truncation should retain tail evidence")
 }
 
+async function testWorkflowDeliveryEvidenceReachesEvaluator(): Promise<void> {
+  // Mirrors the agent.ts bridge (pendingBackgroundResultEvidence): a workflow
+  // completion DELIVERY turn injects the delivered <task-notification> result as
+  // a "workflow" tool-evidence entry. Without this, the launch turn's workflow
+  // use is invisible to the evaluator (that turn was DEFERRED and never
+  // evaluated; the delivery turn carries no workflow tool call), so a succeeding
+  // "use a dynamic workflow" goal is false-blocked as "agent didn't use a
+  // workflow". This locks in that the delivered result (a) forms a valid
+  // evidence entry, (b) counts as evidence, and (c) reaches the judge prompt.
+  const workflowNotificationXml = [
+    "<task-notification>",
+    "  <source>dynamic-workflow</source>",
+    "  <result>dependencies=42 devDependencies=18</result>",
+    "</task-notification>"
+  ].join("\n")
+  const evidenceEntry = buildGoalToolEvidenceEntry({
+    toolName: "workflow",
+    output: workflowNotificationXml,
+    inputSummary:
+      "Background dynamic workflow run completed; its result was delivered into this conversation turn."
+  })
+  assert(evidenceEntry !== null, "workflow delivery result should produce a non-null evidence entry")
+  assert(evidenceEntry!.includes("Tool: workflow"), "evidence should name the workflow tool")
+  assert(
+    evidenceEntry!.includes("dependencies=42 devDependencies=18"),
+    "evidence should carry the delivered workflow result"
+  )
+
+  // A delivery turn with no assistant text and no in-turn tool calls but WITH the
+  // injected workflow evidence must NOT be treated as an empty turn (which would
+  // itself false-block the goal).
+  assert(
+    !shouldPauseGoalForEmptyTurn({
+      goal: makeManager().set("thread-wf-evidence-empty", "用动态工作流统计依赖数量"),
+      assistantResponse: "",
+      toolCalls: [],
+      toolEvidence: [evidenceEntry!]
+    }),
+    "injected workflow evidence should keep the delivery turn from being paused as empty"
+  )
+
+  // The evaluator prompt must surface the workflow evidence so the judge can
+  // credit that a workflow actually ran.
+  const prompt = buildGoalJudgeUserPrompt({
+    goal: makeManager().set("thread-wf-evidence-prompt", "用动态工作流统计依赖数量"),
+    assistantResponse: "依赖 42 个，devDependencies 18 个。",
+    toolCalls: [],
+    toolEvidence: [evidenceEntry!],
+    usedSkills: []
+  })
+  assert(prompt.includes("Tool: workflow"), "judge prompt should include the workflow evidence")
+  assert(
+    prompt.includes("dependencies=42 devDependencies=18"),
+    "judge prompt should include the delivered workflow result"
+  )
+}
+
+async function testCoordinatorDeliveryEvidenceReachesEvaluator(): Promise<void> {
+  // Symmetric to the workflow bridge, for the coordinator path: a worker
+  // notification DELIVERY turn injects the delivered <task-notification> results
+  // as a "start_worker" tool-evidence entry. Without it, a mechanism-constrained
+  // agent-team goal ("must dispatch workers; coordinator must not count
+  // directly") false-blocks — the evaluator sees the coordinator's in-turn
+  // restatement of the numbers but no tool-call evidence that workers were
+  // actually dispatched (the start_worker calls happened in an earlier, deferred,
+  // never-evaluated turn), and concludes the coordinator counted directly.
+  const workerNotificationsXml = [
+    "<task-notification><worker>worker-1</worker><result>src has 38 .java files</result></task-notification>",
+    "<task-notification><worker>worker-2</worker><result>pom.xml has 5 <dependency> tags</result></task-notification>"
+  ].join("\n\n")
+  const evidenceEntry = buildGoalToolEvidenceEntry({
+    toolName: "start_worker",
+    output: workerNotificationsXml,
+    inputSummary:
+      "Background coordinator workers were dispatched and returned; their results were delivered into this conversation turn."
+  })
+  assert(evidenceEntry !== null, "coordinator delivery results should produce a non-null evidence entry")
+  assert(
+    evidenceEntry!.includes("Tool: start_worker"),
+    "evidence should name the start_worker tool so the evaluator sees workers were dispatched"
+  )
+  assert(
+    evidenceEntry!.includes("worker-1") && evidenceEntry!.includes("worker-2"),
+    "evidence should carry both delivered worker results"
+  )
+
+  assert(
+    !shouldPauseGoalForEmptyTurn({
+      goal: makeManager().set("thread-coord-evidence-empty", "用 agent team 必须派两个 worker 分别统计"),
+      assistantResponse: "",
+      toolCalls: [],
+      toolEvidence: [evidenceEntry!]
+    }),
+    "injected coordinator evidence should keep the delivery turn from being paused as empty"
+  )
+
+  const prompt = buildGoalJudgeUserPrompt({
+    goal: makeManager().set("thread-coord-evidence-prompt", "用 agent team 必须派两个 worker 分别统计"),
+    assistantResponse: "两个 worker 都返回了：38 个 .java、5 个 dependency。",
+    toolCalls: [],
+    toolEvidence: [evidenceEntry!],
+    usedSkills: []
+  })
+  assert(
+    prompt.includes("Tool: start_worker"),
+    "judge prompt should include the coordinator worker-dispatch evidence"
+  )
+  assert(
+    prompt.includes("worker-1") && prompt.includes("worker-2"),
+    "judge prompt should include both delivered worker results"
+  )
+}
+
+async function testGoalBackgroundEvidenceStash(): Promise<void> {
+  // Backlog scenario the stash exists for: delivery turn A defers (B still
+  // pending) → A's evidence is parked; the eventual evaluation consumes EVERY
+  // parked batch plus the final delivery, not just the last one.
+  const stash = new GoalBackgroundEvidenceStash(3)
+
+  // Parked entries come back in arrival order, then the bucket is cleared.
+  stash.stash("t1", "goal-1", "evidence-A")
+  stash.stash("t1", "goal-1", "evidence-B")
+  assertEqual(
+    stash.consume("t1", "goal-1").join(","),
+    "evidence-A,evidence-B",
+    "consume must return parked entries in arrival order"
+  )
+  assertEqual(
+    stash.consume("t1", "goal-1").length,
+    0,
+    "consume must clear the bucket (consume-once)"
+  )
+
+  // Goal scoping self-heals: a new goal on the same thread must never see the
+  // previous goal's parked evidence (stash under old goal, consume under new).
+  stash.stash("t1", "goal-old", "stale-evidence")
+  assertEqual(
+    stash.consume("t1", "goal-new").length,
+    0,
+    "a different goalId must discard the stale bucket, not leak it"
+  )
+  assertEqual(
+    stash.consume("t1", "goal-old").length,
+    0,
+    "the stale bucket must be gone after the mismatch discard"
+  )
+  // Stashing under a new goal atop an old bucket resets rather than mixes.
+  stash.stash("t1", "goal-old", "stale-evidence")
+  stash.stash("t1", "goal-new", "fresh-evidence")
+  assertEqual(
+    stash.consume("t1", "goal-new").join(","),
+    "fresh-evidence",
+    "stash under a new goalId must reset the bucket, not mix goals"
+  )
+
+  // Cap drops oldest, keeps newest (evaluator budget favors recent evidence).
+  for (const entry of ["e1", "e2", "e3", "e4"]) stash.stash("t2", "g", entry)
+  assertEqual(
+    stash.consume("t2", "g").join(","),
+    "e2,e3,e4",
+    "cap must drop the oldest entries and keep the newest"
+  )
+
+  // Priority eviction: on overflow, SUPPLEMENTARY entries go before ANY batch —
+  // even earlier batches must survive a late supplementary/batch push (plain
+  // drop-oldest would evict the oldest batch while newer supplementary
+  // evidence survived, exactly backwards).
+  stash.stash("t7", "g", "supp-1", "supplementary")
+  stash.stash("t7", "g", "b1")
+  stash.stash("t7", "g", "b2")
+  stash.stash("t7", "g", "b3") // overflow (cap 3): drops supp-1, NOT b1
+  assertEqual(
+    stash.consume("t7", "g").join(","),
+    "b1,b2,b3",
+    "overflow must evict the supplementary entry, preserving every batch"
+  )
+  // A supplementary push into a batch-full bucket evicts ITSELF (batches win).
+  stash.stash("t8", "g", "b1")
+  stash.stash("t8", "g", "b2")
+  stash.stash("t8", "g", "b3")
+  stash.stash("t8", "g", "supp-late", "supplementary")
+  assertEqual(
+    stash.consume("t8", "g").join(","),
+    "b1,b2,b3",
+    "a late supplementary push must not evict any batch from a full bucket"
+  )
+
+  // Threads are independent; blank entries are ignored.
+  stash.stash("t3", "g", "kept")
+  stash.stash("t4", "g", "   ")
+  assertEqual(stash.consume("t4", "g").length, 0, "blank evidence must not be stashed")
+  assertEqual(stash.consume("t3", "g").join(","), "kept", "threads must not share buckets")
+
+  // peek/discard (the production split): the evaluator await between reading
+  // the stash and recording the verdict is a failure window — peek must NOT
+  // clear, so an aborted/failed evaluation attempt leaves the batches intact
+  // for the re-driven turn; discard clears only after the verdict is recorded.
+  stash.stash("t5", "g", "batch-A")
+  assertEqual(stash.peek("t5", "g").join(","), "batch-A", "peek must return the parked entries")
+  assertEqual(
+    stash.peek("t5", "g").join(","),
+    "batch-A",
+    "peek must NOT clear — a failed evaluation attempt must not lose the batches"
+  )
+  stash.discard("t5")
+  assertEqual(stash.peek("t5", "g").length, 0, "discard after a recorded verdict must clear")
+  // peek self-heals on goalId mismatch, same as consume.
+  stash.stash("t6", "goal-old", "stale")
+  assertEqual(stash.peek("t6", "goal-new").length, 0, "peek must discard a stale-goal bucket")
+  assertEqual(stash.peek("t6", "goal-old").length, 0, "the stale bucket must be gone after peek")
+}
+
 async function testGoalToolEvidenceBoundaryCases(): Promise<void> {
   assertEqual(summarizeGoalToolInput(undefined), "", "undefined args should produce empty summary")
   assertEqual(summarizeGoalToolInput({}), "", "empty args should produce empty summary")
@@ -2058,6 +2377,9 @@ async function main(): Promise<void> {
     testJudgePromptBudgetsLongAssistantResponse,
     testJudgePromptEvidenceBudgetKeepsImportantLines,
     testGoalToolEvidenceFormatting,
+    testWorkflowDeliveryEvidenceReachesEvaluator,
+    testCoordinatorDeliveryEvidenceReachesEvaluator,
+    testGoalBackgroundEvidenceStash,
     testGoalToolEvidenceBoundaryCases,
     testGoalEvidenceBufferAssociatesToolInputAndOutput,
     testGoalEvidenceBufferSupportsPerTurnWindows,

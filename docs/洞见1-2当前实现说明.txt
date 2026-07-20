@@ -1,0 +1,497 @@
+# 洞见 1/2 当前实现说明
+
+实现日期：2026-07-01  
+实现分支：`codex/insight-1-2-mvp`  
+实现范围：工具结果字段投影/裁剪 MVP、工具失败熔断 MVP。
+
+## 1. 总体说明
+
+本次实现按“先做最小闭环，再扩产品化能力”的原则落地，目标不是一步到位完成 sidecar、Harness 聚合、UI 面板等完整闭环，而是先让两个核心能力进入真实执行链路：
+
+1. 大工具结果可以按字段投影，并有字符/数组上限兜底。
+2. 同一 turn 内重复出现的同类工具失败可以被识别、提示，并在达到阈值后停止本轮。
+
+当前实现仍保持默认兼容：不传投影参数时，`invoke_deferred_tool` 的成功返回仍是旧结构：
+
+```json
+{
+  "ok": true,
+  "data": "..."
+}
+```
+
+只有显式传入 `required_fields`、`max_result_chars` 或 `max_array_items` 时，才返回 `_projection` 元数据。
+
+## 2. 工具结果投影
+
+### 2.1 新增核心模块
+
+新增文件：
+
+```text
+src/main/mcp/result-projection.ts
+src/main/mcp/result-projection.test.ts
+```
+
+核心能力：
+
+1. `projectResultData(data, options)`
+   - 支持字段路径白名单。
+   - 支持数组条数上限。
+   - 支持最终字符上限。
+   - 输出投影元数据。
+
+2. `deriveFieldPathsFromJsonSchema(schema)`
+   - 从 MCP `output_schema` 推导可用字段路径。
+
+3. `deriveFieldPathsFromValue(value)`
+   - 从已脱敏的历史结果样例推导字段路径。
+
+4. `hasProjectionOptions(options)`
+   - 判断本次调用是否显式启用了投影或裁剪。
+
+字段路径当前支持简单 JSONPath 子集：
+
+```text
+id
+name
+items[].id
+items[].status
+data.records[].customerId
+data.records[].score
+```
+
+当前没有引入完整 JSONPath 引擎，避免第一版增加复杂语义、安全边界和性能风险。
+
+### 2.2 MCP result-utils 接入
+
+修改文件：
+
+```text
+src/main/mcp/result-utils.ts
+```
+
+改动：
+
+1. 将原 `getUsefulMcpResultData(result)` 的内部逻辑拆出为 `extractUsefulMcpResultData(result)`。
+2. 新增 `projectMcpResultData(result, options)`。
+3. 保持 `getUsefulMcpResultData(result)` 的旧行为不变。
+
+这样旧链路仍能继续使用完整“有用数据”，新链路可以显式选择投影。
+
+### 2.3 invoke_deferred_tool 接入
+
+修改文件：
+
+```text
+src/main/agent/tools/tool-search-tool.ts
+```
+
+`invoke_deferred_tool` 新增可选参数：
+
+```ts
+required_fields?: string[]
+max_result_chars?: number
+max_array_items?: number
+```
+
+示例调用：
+
+```json
+{
+  "tool_id": "some_large_mcp_tool",
+  "tool_args": {
+    "query": "risk"
+  },
+  "required_fields": ["items[].id", "items[].name", "items[].status"],
+  "max_result_chars": 4000,
+  "max_array_items": 20
+}
+```
+
+示例返回：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "items": [
+      {
+        "id": "1",
+        "name": "A",
+        "status": "done"
+      }
+    ]
+  },
+  "_projection": {
+    "projected": true,
+    "truncated": false,
+    "originalBytes": 98322,
+    "projectedBytes": 1024,
+    "topLevelKeys": ["items", "total"]
+  }
+}
+```
+
+缺失字段不会导致工具失败。当前行为是：
+
+1. 返回已经命中的字段。
+2. 在 `_projection.missingFields` 中列出缺失字段。
+3. 如果所有字段都没命中，回退到 preview，并返回可用 top-level keys。
+
+### 2.4 inspect_tool 字段提示
+
+`inspect_tool(caller="invoke_deferred_tool")` 现在会尝试返回：
+
+```json
+{
+  "field_hints": ["items[].id", "items[].status"],
+  "example_field_paths": ["items[].name", "items[].score"]
+}
+```
+
+来源：
+
+1. `field_hints` 来自 MCP `output_schema`。
+2. `example_field_paths` 来自已保存的脱敏结果样例，只返回字段路径，不暴露完整历史结果。
+
+这解决了模型不知道 `required_fields` 应该填什么的问题。
+
+### 2.5 saved tool 行为
+
+`invoke_deferred_tool` 同时支持 saved code_exec tool。当前约定：
+
+1. saved tool 始终支持 `max_result_chars`。
+2. saved tool 输出如果能解析为 JSON object/array，会 best-effort 应用 `required_fields`。
+3. saved tool 输出如果是普通文本，不报错，但返回：
+
+```json
+{
+  "_projection": {
+    "requiredFieldsIgnored": true,
+    "ignoredReason": "Saved tool output is plain text, so required_fields could not be applied."
+  }
+}
+```
+
+这样同一个入口不会静默忽略投影参数。
+
+### 2.6 应用内入口和实测方式
+
+本次新增一个可直接挂进应用的本地示例 MCP：
+
+```text
+examples/mcp-ticket-demo-server.mjs
+examples/mcp-ticket-demo-smoke.mjs
+docs/mcp-ticket-demo-usage.md
+```
+
+它提供 `ticket_list` 和 `ticket_detail` 两个工具，`ticket_list` 会返回带有大字段的模拟工单列表，用来验证裁剪是否真的去掉 `description`、`comments`、`attachments`。
+
+应用内入口：
+
+```text
+自定义 -> MCP 连接器 -> 添加/编辑连接器 -> 懒加载
+自定义 -> MCP 连接器 -> 选择连接器 -> 大结果裁剪
+```
+
+本次已在 MCP 连接器页面补充说明：
+
+1. 添加/编辑连接器时，懒加载说明提示大结果工具可以配合字段提示裁剪返回。
+2. 连接器详情页新增“大结果裁剪”提示，展示 `required_fields`、`max_array_items`、`max_result_chars` 和字段路径示例。
+3. 实测时建议选择搜索、列表、知识库这类返回较大的 MCP 工具，开启该连接器懒加载后，在对话中要求只取必要字段；观察模型是否先调用 `inspect_tool(caller="invoke_deferred_tool")`，再调用 `invoke_deferred_tool` 并带上裁剪参数。
+
+示例 MCP 添加方式：
+
+```text
+名称：工单裁剪测试 MCP
+连接方式：Local stdio command
+启动命令：node
+命令参数：<你的仓库目录>\examples\mcp-ticket-demo-server.mjs
+懒加载：勾选
+```
+
+可直接复制的实测提问：
+
+```text
+查最近 20 条未关闭工单，只保留 id、title、status、owner；正文、评论、附件先不要展开。
+```
+
+预期调用会把自然语言约束转成类似字段：
+
+```json
+{
+  "required_fields": ["items[].id", "items[].title", "items[].status", "items[].owner"],
+  "max_array_items": 20,
+  "max_result_chars": 4000
+}
+```
+
+## 3. 工具失败熔断
+
+### 3.1 新增核心模块
+
+新增文件：
+
+```text
+src/main/agent/failure-fuse.ts
+src/main/agent/failure-fuse.test.ts
+```
+
+核心类型：
+
+```ts
+export type FailureFuseAction = "observe" | "warn" | "strong_warn" | "halt"
+
+export interface FailureFuseInput {
+  threadId: string
+  turnId: string
+  toolName?: string
+  toolCallId?: string
+  toolArgs?: unknown
+  signal: ToolFailureSignal
+  mode: "off" | "warn" | "debug"
+}
+```
+
+状态 key：
+
+```text
+threadId + turnId + fingerprint
+```
+
+这保证第一版只在同一 turn 内触发熔断，不会因为旧 turn 的失败累计导致误杀。
+
+### 3.2 failure fingerprint
+
+指纹包含：
+
+1. `toolName`
+2. `signal.kind`
+3. `signal.errorType`
+4. 标准化后的错误文本
+5. 可选参数摘要
+
+错误文本标准化包括：
+
+1. 用户目录归一化。
+2. UUID/hash/timestamp 替换为占位符。
+3. 行号/列号替换为占位符。
+4. 空白压缩。
+5. 最多保留前 500 字符。
+
+参数摘要当前会提取：
+
+1. MCP/tool id 类字段。
+2. `command` 的首个命令词。
+3. 文件路径扩展名类别。
+
+### 3.3 阈值策略
+
+默认模式：
+
+```text
+warn
+```
+
+重复失败提醒默认开启。未设置环境变量时，同一轮同类同参数工具错误会在第 2 次给用户提醒、第 3 次及以后给用户强提醒；不会改写模型可见工具结果，也不会停止本轮。
+
+若需要完全关闭用户提醒，可显式设置：
+
+```text
+CMB_AGENT_FAILURE_FUSE_WARN=0
+```
+
+重复失败提醒：
+
+```text
+CMB_AGENT_FAILURE_FUSE_WARN=1
+```
+
+| 次数 | 动作 |
+|---:|---|
+| 第 1 次 | observe |
+| 第 2 次 | warn |
+| 第 3 次及以后 | strong_warn |
+
+该模式只发给用户 UI，不改写模型可见的工具结果，也不停止本轮。若希望 Agent 也收到防重试提示，需要单独开启：
+
+```text
+CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK=1
+```
+
+该模式会把第 2 次 warning、第 3 次 strong warning 追加给模型，帮助 Agent 改变参数或换策略；不会给用户弹窗，也不会停止本轮。
+
+调试模式：
+
+```text
+CMB_AGENT_FAIL_FAST=1
+```
+
+开启后任意工具失败首错即停。若“重复失败提醒”/“Agent 防重试提示”和“Debug 首错即停”同时开启，Debug 优先。
+
+应用内入口：
+
+```text
+自定义 -> 沙盒环境 -> 工具失败提醒与调试 -> 重复失败提醒
+自定义 -> 沙盒环境 -> 工具失败提醒与调试 -> Agent 防重试提示
+自定义 -> 沙盒环境 -> 工具失败提醒与调试 -> Debug 首错即停
+```
+
+这些开关只影响当前 App 会话；也可以在启动前通过 `CMB_AGENT_FAILURE_FUSE_WARN=0/1`、`CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK=1` 或 `CMB_AGENT_FAIL_FAST=1` 控制。
+
+用户取消/Abort 不计入熔断。
+
+同一工具在同一 turn 内后续成功时，只会重置同参数签名下的失败计数，避免无关参数的成功误清掉仍在重复的失败。
+
+### 3.4 awaited 控制流接入
+
+本次实现重点避免把 halt 放在 fire-and-forget 观察链路里。
+
+已接入的 awaited 控制点：
+
+1. MCP scoped invoke
+   - 文件：`src/main/agent/runtime.ts`
+   - MCP 返回 `result.isError` 后，同步调用 failure fuse。
+   - 第 2 次 warning 会追加到 MCP result text/contentBlocks。
+   - 第 3 次抛出 `FailureFuseHaltError`。
+
+2. tool error middleware throw-path
+   - 文件：`src/main/agent/runtime.ts`
+   - 工具抛错被包装成 recoverable ToolMessage 前，先进入 failure fuse。
+   - debug 模式可在这里首错即停。
+
+3. 通用 tool hook middleware
+   - 文件：`src/main/agent/tool-hooks.ts`
+   - 工具返回后检测 `success:false`、`is_error:true`、`error`、非 0 exitCode、命令失败文本等。
+   - warning 通过已有 hook feedback 通道追加给模型。
+
+4. LocalSandbox PostToolUse
+   - 文件：`src/main/agent/local-sandbox.ts`
+   - 覆盖 `execute`、`read_file`、`grep`、`glob`、`ls`、文件写入/编辑等沙箱工具路径。
+   - 保留原 `PostToolUseFailure` fire-and-forget 通知，但不依赖它做 halt。
+
+5. IPC 顶层 catch
+   - 文件：`src/main/ipc/agent.ts`
+   - 捕获 `FailureFuseHaltError`。
+   - pause active goal。
+   - `tracer.finish("cancelled", reason)`。
+   - 发送 renderer custom event：
+
+```json
+{
+  "type": "failure_fuse_tripped",
+  "action": "halt",
+  "reason": "...",
+  "toolName": "...",
+  "fingerprint": "...",
+  "count": 3,
+  "threshold": 3,
+  "lastError": "..."
+}
+```
+
+6. Renderer 展示
+   - 文件：`src/renderer/src/lib/thread-context.tsx`
+   - `failure_fuse_tripped` 会进入现有 `hookInterruption` 中断面板，并展示 toast。
+   - 面板包含工具名、重复次数、fingerprint、lastError，避免用户看到静默停止。
+   - 文件：`src/renderer/src/components/customize/SandboxPanel.tsx`
+   - 沙盒设置页新增“工具失败熔断调试”说明和“Debug 首错即停”开关。
+   - 文件：`src/renderer/src/components/chat/ChatContainer.tsx`
+   - 熔断面板标题展示为“工具失败熔断已停止本轮”，不再误显示为 Hook 停止。
+
+## 4. 当前没有实现的内容
+
+本次 MVP 暂未实现：
+
+1. 完整结果 sidecar / managed result store。
+2. eager MCP 的全局默认 bounding。
+3. 跨 turn / skill 级熔断。
+4. Harness UI 熔断卡片。
+5. Harness run 中 projection 节省量展示。
+6. 完整 JSONPath 引擎。
+7. failure fuse 配置持久化。
+
+当前重复失败用户提醒默认开启；`CMB_AGENT_FAILURE_FUSE_WARN=0` 可显式关闭用户提醒；`CMB_AGENT_FAILURE_FUSE_MODEL_FEEDBACK=1` 只开启模型防重试提示；两者都不会停止本轮；`CMB_AGENT_FAIL_FAST=1` 才会进入 Debug 首错即停。
+
+## 5. 验证结果
+
+已通过：
+
+```text
+npm run typecheck
+npx vitest run                  # 23 个测试文件、222 个测试通过
+npx vitest run src/main/mcp/result-projection.test.ts src/main/agent/failure-fuse.test.ts
+npx vitest run src/main/agent/tools/tool-search-tool.test.ts src/main/mcp/result-projection.test.ts src/main/agent/failure-fuse.test.ts
+npx tsx tests/mcp-fallback.spec.ts
+npx tsx tests/tool-hook-regression.spec.ts
+npm run test:hooks
+npx tsx tests/agent-tool-guard.spec.ts
+npx tsx tests/thread-checkpoint-cleanup.spec.ts
+git diff --check
+```
+
+本次功能入口级测试已补充：
+
+1. `src/main/agent/tools/tool-search-tool.test.ts`
+   - 验证 `invoke_deferred_tool` 传入 `required_fields`、`max_result_chars`、`max_array_items` 后返回 `_projection`。
+   - 验证投影控制字段不会透传给真实 MCP server。
+   - 验证不传投影参数时保持旧 `{ ok: true, data }` 返回结构。
+   - 验证 `inspect_tool(caller="invoke_deferred_tool")` 能从 `output_schema` 返回 `field_hints`。
+   - 验证底层熔断抛出的 `FailureFuseHaltError` 不会被包装成普通 `{ ok: false }`。
+
+2. `tests/tool-hook-regression.spec.ts`
+   - 新增 R4：连续三次同类工具失败且两个开关都开启时，第 2 次注入模型 warning 并发用户提醒，第 3 次注入 strong warning 并发强提醒。
+   - 新增 R5：只开启用户提醒时，不会把 failure fuse warning 注入模型可见工具结果。
+   - 新增 R6：只开启 Agent 防重试提示时，不会发送用户提醒。
+   - 新增 R7：`{ success:false }` / `{ error:"..." }` 这类 object-shaped 失败会进入 failure fuse，不会被误记为成功。
+
+3. `src/main/agent/failure-fuse.test.ts`
+   - 验证同参数成功会重置计数。
+   - 验证不同参数成功不会误清掉原失败计数。
+
+4. `src/main/mcp/result-projection.test.ts`
+   - 验证 root array 的 `[].field` hints 可被 `required_fields` 正确消费。
+   - 验证 root array JSON schema 和示例值都会产出可用字段路径。
+
+单独 lint 通过：
+
+```text
+npx eslint src/main/mcp/result-projection.ts src/main/mcp/result-projection.test.ts src/main/mcp/result-utils.ts src/main/agent/failure-fuse.ts src/main/agent/failure-fuse.test.ts
+npx eslint src/main/agent/tools/tool-search-tool.ts src/main/ipc/agent.ts
+```
+
+未完整通过但判断为环境或既有问题：
+
+1. `npm run test:workflow`
+   - 停在 Windows symlink 权限 `EPERM`。
+   - 失败点在 `workflow-engine.spec.ts` 的 symlink 用例。
+
+2. `tests/local-sandbox-readonly-hook.spec.ts`
+   - 停在 `cat C:\Users/$USER/.gnupg/...` 的敏感路径断言。
+   - 当前 PowerShell 环境将 `$USER` 展开为空，导致命令实际访问 `C:\Users\.gnupg\...`。
+   - 与本次 failure fuse 接入无直接关系。
+
+3. `npm run lint`
+   - 被仓库既有 CRLF/prettier warning 和旧 `any` / control-regex lint 债淹没。
+   - 本次新增模块和主要接入文件已单独 lint 通过。
+
+## 6. 当前价值
+
+本次 MVP 已经能带来实际收益：
+
+1. 减少大 MCP 结果直接塞进模型上下文。
+2. 让模型可以按字段拿数据，而不是靠完整 JSON 截断后猜。
+3. 降低长链路任务中重复失败工具调用带来的 token 浪费。
+4. 调试模式下能更快暴露首个真实错误。
+5. 用户显式开启提醒后，模型能看到为什么不该继续同参数重试，而不是只收到一串工具失败。
+
+## 7. 后续建议
+
+建议下一阶段按以下顺序继续：
+
+1. eager MCP 默认 bounding。
+2. projection/failure fuse trace metadata。
+3. managed result store / sidecar 设计评审。
+4. Harness UI 展示 projection 节省量和 failure fuse tripped 信息。
+5. 跨 turn/skill 级失败提醒只做 warn，不直接 halt，避免误杀。

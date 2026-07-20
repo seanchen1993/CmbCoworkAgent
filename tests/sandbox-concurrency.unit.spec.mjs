@@ -51,6 +51,24 @@ test("runtime only shares read-only execute calls", () => {
   )
 })
 
+test("runtime allows parallel task subagent spawns", () => {
+  const exclusiveSection = sectionBetween(runtimeSource, "const EXCLUSIVE_TOOL_NAMES = new Set", "const SHARED_TOOL_NAMES = new Set")
+  const sharedSection = sectionBetween(runtimeSource, "const SHARED_TOOL_NAMES = new Set", "function isRecord")
+
+  assert.doesNotMatch(exclusiveSection, /"task"/, "task should not serialize subagent spawns")
+  assert.match(sharedSection, /"task"/, "task should be eligible for parallel subagent spawning")
+  assert.match(
+    runtimeSource,
+    /const MAX_PARALLEL_TASK_SUBAGENTS = 3/,
+    "parallel task subagent spawns should have a hard limit"
+  )
+  assert.match(
+    runtimeSource,
+    /toolCall\?\.name === "task"[\s\S]*taskLimiter\.run\(runSharedTool\)/,
+    "task tool calls should pass through the task-specific limiter"
+  )
+})
+
 test("subagents use their own concurrency gate to avoid parent task deadlock", () => {
   const subagentSection = sectionBetween(runtimeSource, "const subagentMiddleware: any[] = [", "const generalPurposeSubagent =")
   const mainAgentSection = sectionBetween(runtimeSource, "return createAgent({", "createSubAgentMiddleware({")
@@ -109,6 +127,16 @@ test("local sandbox keeps risky commands exclusive while limiting read-only comm
     executeRawSection,
     /const commandConcurrency = classifyCommandConcurrency\(command\)/,
     "foreground risky commands should still be classified in the sandbox layer"
+  )
+  assert.match(
+    executeRawSection,
+    /const sandboxWorkspaceRoot = path\.resolve\(this\.workingDir\)[\s\S]*buildSerializedExecutionKey\(this\.runId, sandboxWorkspaceRoot, effectiveSandboxMode\)/,
+    "foreground Windows sandbox commands should serialize by workspace root, not by execution cwd"
+  )
+  assert.doesNotMatch(
+    executeRawSection,
+    /buildSerializedExecutionKey\(this\.runId, effectiveCwd, effectiveSandboxMode\)/,
+    "skill execution cwd must not split the foreground exclusive queue"
   )
   assert.match(
     executeRawSection,

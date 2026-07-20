@@ -3,12 +3,30 @@ import http from "http"
 import https from "https"
 import { getUserInfo, type UserInfoConfig } from "../storage"
 import type { FeatureGatesConfig } from "../../shared/feature-gates"
+import type { RemoteModelCatalog } from "../../shared/model-catalog"
 import { evaluateStaging } from "./gray-release"
 import { compareSemver } from "./semver"
+import { DEFAULT_UPDATE_MANIFEST_FILE } from "./channel-config"
+import {
+  clearPendingUpdateChain,
+  readLegacyUpdateMarker,
+  readPendingUpdateChain,
+  type PendingUpdateChain
+} from "./update-chain"
+import { canCompleteWithAsar, isLegacyIntermediateFullUpdate } from "./update-marker"
 
 export { compareSemver }
 
 export interface AsarInfo {
+  /**
+   * Actual version contained in this package. When omitted, the channel's
+   * target version is used for backward compatibility.
+   *
+   * This is primarily useful for a full package that bootstraps an older
+   * client to the minimum ASAR-capable version before it receives the final
+   * patch update.
+   */
+  version?: string
   file: string
   sha256: string
   size: number
@@ -76,13 +94,20 @@ export interface LatestJson {
   staging?: StagingBlock
   /** Optional app feature gates. Independent from updater gray-release staging. */
   featureGates?: FeatureGatesConfig
+  /** Optional managed model catalog. Independent from app-update staging. */
+  modelCatalog?: RemoteModelCatalog
 }
 
 export type UpdateType = "asar" | "full"
 export type UpdateChannel = "stable" | "staging"
 
 export interface UpdateCheckResult {
+  /** Actual version installed by this update step. */
   version: string
+  /** Final version advertised by the selected stable/staging channel. */
+  targetVersion: string
+  /** Global compatibility floor used to select this update step. */
+  minVersion: string
   updateType: UpdateType
   releaseNotes: string
   mandatory: boolean
@@ -100,7 +125,11 @@ export interface UpdateCheckResult {
  * Determine update type by comparing version numbers.
  * Only patch-level changes use ASAR replacement; everything else uses full installer.
  */
-function determineUpdateType(currentVersion: string, newVersion: string, minVersion: string): UpdateType {
+function determineUpdateType(
+  currentVersion: string,
+  newVersion: string,
+  minVersion: string
+): UpdateType {
   // If current version is below minVersion, force full update
   if (compareSemver(currentVersion, minVersion) < 0) {
     return "full"
@@ -120,9 +149,12 @@ function determineUpdateType(currentVersion: string, newVersion: string, minVers
 /**
  * Fetch latest.json from the update server.
  */
-export function fetchLatestJson(baseUrl: string): Promise<LatestJson> {
+export function fetchLatestJson(
+  baseUrl: string,
+  manifestFile: string = DEFAULT_UPDATE_MANIFEST_FILE
+): Promise<LatestJson> {
   const url = new URL(`${baseUrl}/download`)
-  url.searchParams.set("file", "cmbdevclaw-latest.json")
+  url.searchParams.set("file", manifestFile)
   const urlStr = url.toString()
   console.log("[Updater] Fetching:", urlStr)
 
@@ -137,12 +169,14 @@ export function fetchLatestJson(baseUrl: string): Promise<LatestJson> {
       }
 
       let data = ""
-      res.on("data", (chunk: Buffer) => { data += chunk.toString() })
+      res.on("data", (chunk: Buffer) => {
+        data += chunk.toString()
+      })
       res.on("end", () => {
         try {
           const json = JSON.parse(data) as LatestJson
           resolve(json)
-        } catch (e) {
+        } catch {
           reject(new Error("Failed to parse latest.json"))
         }
       })
@@ -159,6 +193,8 @@ export function fetchLatestJson(baseUrl: string): Promise<LatestJson> {
 }
 
 interface ResolvedDownload {
+  /** Actual version expected after installing the selected package. */
+  version: string
   updateType: UpdateType
   downloadFile: string
   downloadSha256: string
@@ -189,6 +225,7 @@ function resolveDownload(
   let downloadFile: string
   let downloadSha256: string
   let downloadSize: number
+  let packageVersion: string
 
   if (updateType === "asar") {
     if (!asar) {
@@ -197,6 +234,14 @@ function resolveDownload(
     downloadFile = asar.file
     downloadSha256 = asar.sha256
     downloadSize = asar.size
+    packageVersion = asar.version ?? targetVersion
+
+    // A channel exposes only one ASAR payload. Allowing that payload to lag
+    // behind the channel target would select the same already-installed file
+    // again on the next check and create an update loop.
+    if (compareSemver(packageVersion, targetVersion) !== 0) {
+      throw new Error(`asar 包版本 ${packageVersion} 必须与目标版本 ${targetVersion} 一致`)
+    }
   } else {
     const fullInfo = platformInfo?.full ?? full
     if (!fullInfo) {
@@ -205,9 +250,26 @@ function resolveDownload(
     downloadFile = fullInfo.file
     downloadSha256 = fullInfo.sha256
     downloadSize = fullInfo.size
+    packageVersion = fullInfo.version ?? targetVersion
+
+    if (compareSemver(packageVersion, currentVersion) <= 0) {
+      throw new Error(`full 包版本 ${packageVersion} 必须高于当前版本 ${currentVersion}`)
+    }
+    if (compareSemver(packageVersion, targetVersion) > 0) {
+      throw new Error(`full 包版本 ${packageVersion} 不能高于目标版本 ${targetVersion}`)
+    }
+    if (
+      compareSemver(packageVersion, targetVersion) < 0 &&
+      determineUpdateType(packageVersion, targetVersion, topLevelMinVersion) !== "asar"
+    ) {
+      throw new Error(
+        `full 包版本 ${packageVersion} 安装后无法通过 asar 升级到目标版本 ${targetVersion}`
+      )
+    }
   }
 
   return {
+    version: packageVersion,
     updateType,
     downloadFile,
     downloadSha256,
@@ -251,7 +313,8 @@ export function selectChannelTarget(
   latest: LatestJson,
   currentVersion: string,
   userInfo: UserInfoConfig | null,
-  platform: NodeJS.Platform
+  platform: NodeJS.Platform,
+  pendingChain: PendingUpdateChain | null = null
 ): UpdateCheckResult | null {
   const decision = evaluateStaging({
     userInfo,
@@ -264,7 +327,21 @@ export function selectChannelTarget(
     !latest.mandatory &&
     compareSemver(latest.staging.version, latest.version) > 0
 
-  if (decision.hit && stagingViable && latest.staging) {
+  // Once an intermediate full package has been installed, cohort membership
+  // must be sticky for the final ASAR step. Re-bucketing, logout, or an account
+  // switch must not strand the client. Global safety controls still win:
+  // deleting/expiring staging, raising a minVersion above the intermediate,
+  // or publishing a mandatory stable update all disable continuation.
+  const continuingStagingChain =
+    !!latest.staging &&
+    pendingChain?.channel === "staging" &&
+    pendingChain.intermediateVersion === currentVersion &&
+    pendingChain.targetVersion === latest.staging.version &&
+    canCompleteWithAsar(currentVersion, latest.staging.version, latest.minVersion) &&
+    (!latest.staging.minVersion || compareSemver(currentVersion, latest.staging.minVersion) >= 0) &&
+    decision.reason !== "staging-expired"
+
+  if ((decision.hit || continuingStagingChain) && stagingViable && latest.staging) {
     const staging = latest.staging
     if (compareSemver(currentVersion, staging.version) < 0) {
       try {
@@ -278,12 +355,15 @@ export function selectChannelTarget(
           staging.rollback,
           platform
         )
+        const grayReason = continuingStagingChain ? "pending-chain" : decision.reason
         console.log(
-          `[Updater] Staging hit: v${staging.version} reason=${decision.reason}` +
+          `[Updater] Staging hit: v${staging.version} reason=${grayReason}` +
             (decision.bucketKey ? ` user=${decision.bucketKey}` : "")
         )
         return {
-          version: staging.version,
+          version: resolved.version,
+          targetVersion: staging.version,
+          minVersion: latest.minVersion,
           updateType: resolved.updateType,
           releaseNotes: staging.releaseNotes ?? latest.releaseNotes,
           // Staging is never mandatory — mandatory upgrades must go through the
@@ -294,7 +374,7 @@ export function selectChannelTarget(
           downloadSize: resolved.downloadSize,
           rollback: resolved.rollback,
           channel: "staging",
-          grayReason: decision.reason
+          grayReason
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -322,7 +402,9 @@ export function selectChannelTarget(
   )
   console.log(`[Updater] Stable: v${latest.version} grayReason=${decision.reason}`)
   return {
-    version: latest.version,
+    version: resolved.version,
+    targetVersion: latest.version,
+    minVersion: latest.minVersion,
     updateType: resolved.updateType,
     releaseNotes: latest.releaseNotes,
     mandatory: latest.mandatory,
@@ -335,11 +417,59 @@ export function selectChannelTarget(
   }
 }
 
+function resolvePendingChain(
+  latest: LatestJson,
+  currentVersion: string
+): PendingUpdateChain | null {
+  const persisted = readPendingUpdateChain()
+  if (persisted) {
+    if (compareSemver(currentVersion, persisted.targetVersion) >= 0) {
+      clearPendingUpdateChain()
+    } else if (persisted.intermediateVersion === currentVersion) {
+      return persisted
+    }
+  }
+
+  const legacyMarker = readLegacyUpdateMarker()
+  if (
+    !legacyMarker ||
+    !isLegacyIntermediateFullUpdate(legacyMarker, currentVersion, latest.minVersion)
+  ) {
+    return null
+  }
+
+  let channel: PendingUpdateChain["channel"] | null = null
+  if (legacyMarker.toVersion === latest.version) {
+    channel = "stable"
+  } else if (legacyMarker.toVersion === latest.staging?.version) {
+    channel = "staging"
+  }
+  if (!channel) return null
+
+  return {
+    intermediateVersion: currentVersion,
+    targetVersion: legacyMarker.toVersion,
+    channel,
+    minVersion: latest.minVersion,
+    createdAt: legacyMarker.updatedAt ?? "legacy-marker"
+  }
+}
+
 /**
  * Check for updates against the remote server.
  * Returns null if no update is available for the current client.
  */
-export async function checkForUpdate(baseUrl: string): Promise<UpdateCheckResult | null> {
-  const latest = await fetchLatestJson(baseUrl)
-  return selectChannelTarget(latest, app.getVersion(), safeGetUserInfo(), process.platform)
+export async function checkForUpdate(
+  baseUrl: string,
+  options: { manifestFile?: string } = {}
+): Promise<UpdateCheckResult | null> {
+  const latest = await fetchLatestJson(baseUrl, options.manifestFile)
+  const currentVersion = app.getVersion()
+  return selectChannelTarget(
+    latest,
+    currentVersion,
+    safeGetUserInfo(),
+    process.platform,
+    resolvePendingChain(latest, currentVersion)
+  )
 }

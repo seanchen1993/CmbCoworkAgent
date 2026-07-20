@@ -8,7 +8,7 @@
 import { execFile } from "child_process"
 import { createHash } from "crypto"
 import { existsSync } from "fs"
-import { mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from "fs/promises"
 import { homedir, tmpdir } from "os"
 import { join } from "path"
 import { promisify } from "util"
@@ -24,6 +24,7 @@ import {
   syncGitHookEvents,
   uninstallGitHooks
 } from "../src/main/services/git-hook-service.ts"
+import { findPendingGensForFile } from "../src/main/services/adoption-index.ts"
 
 const execFileAsync = promisify(execFile)
 
@@ -87,6 +88,10 @@ async function initRepo(repo: string): Promise<void> {
 
 function repoKey(repo: string): string {
   return createHash("sha1").update(repo.trim().replace(/\\/g, "/").toLowerCase()).digest("hex")
+}
+
+function normalizePathForAssert(value: string): string {
+  return value.trim().replace(/\\/g, "/").toLowerCase()
 }
 
 function repoEventsDir(repo: string): string {
@@ -173,7 +178,10 @@ async function testExternalCommandCommitWithoutCodeGenIsSkipped(): Promise<void>
 
     const head = await git(repo, ["rev-parse", "HEAD"])
     const snapshot = await readReadySnapshot(repo)
-    assert(snapshot.meta.gitRoot === repo, `snapshot gitRoot should be repo, got ${snapshot.meta.gitRoot}`)
+    assert(
+      normalizePathForAssert(snapshot.meta.gitRoot || "") === normalizePathForAssert(repo),
+      `snapshot gitRoot should be repo, got ${snapshot.meta.gitRoot}`
+    )
     assert(snapshot.meta.commitSha === head, `snapshot commitSha should be HEAD, got ${snapshot.meta.commitSha}`)
     assert(snapshot.meta.files?.length === 1, `expected one collected file, got ${snapshot.meta.files?.length}`)
     assert(snapshot.meta.files?.[0]?.relPath === "external.ts", "external.ts should be collected")
@@ -235,7 +243,7 @@ async function testGitPanelPathSkipsHookAndUsesDirectStagedCapture(): Promise<vo
     await writeFile(join(repo, "panel.ts"), "export const panelValue = 1\n")
     await git(repo, ["add", "panel.ts"])
 
-    const snapshots = captureStagedSnapshotsForCommit(repo)
+    const snapshots = await captureStagedSnapshotsForCommit(repo)
     assert(snapshots.length === 1, `Git Panel path should directly capture one staged file, got ${snapshots.length}`)
     assert(snapshots[0]?.absPath.endsWith("panel.ts"), `expected panel.ts snapshot, got ${snapshots[0]?.absPath}`)
     assert(
@@ -254,6 +262,107 @@ async function testGitPanelPathSkipsHookAndUsesDirectStagedCapture(): Promise<vo
   })
 }
 
+async function testCoreHooksPathInWorkspaceIsNotModified(): Promise<void> {
+  await withTempRepo("git-hook-husky-skip", async (repo) => {
+    await git(repo, ["config", "core.hooksPath", ".husky"])
+    const huskyDir = join(repo, ".husky")
+    const preCommit = join(huskyDir, "pre-commit")
+    const originalHook = `#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+npm test
+`
+    await mkdir(huskyDir, { recursive: true })
+    await writeFile(preCommit, originalHook)
+
+    const status = await installGitHooks(repo)
+    assert(
+      status.state === "external_hooks_path",
+      `workspace core.hooksPath should be skipped, got ${status.state}`
+    )
+    assert(status.canInstall === false, "workspace core.hooksPath should not be installable")
+    assert(
+      (await readFile(preCommit, "utf-8")) === originalHook,
+      ".husky/pre-commit must not be modified"
+    )
+    assert(
+      !existsSync(`${preCommit}.cmbdevclaw-user`),
+      "should not create a .cmbdevclaw-user backup in .husky"
+    )
+    assert(
+      !existsSync(join(repo, ".git", "hooks", "pre-commit")),
+      "should not install an inert .git/hooks hook"
+    )
+  })
+}
+
+async function testExternalCommitReconciledWithoutHook(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    await initializeAdoptionTracker()
+    await withTempRepo("git-hook-reconcile", async (repo) => {
+      // Simulate IntelliJ IDEA 2026: the agent generated code, but the external
+      // commit bypasses our pre-commit/post-commit hooks entirely — so NO hooks
+      // are installed here. The hook-independent reconciler must still detect the
+      // commit and measure adoption from the commit object itself.
+      const filePath = join(repo, "reconciled.ts")
+      const generatedContent = "export const reconciledValue = 42\n"
+      recordGen({
+        threadId: "reconcile-test-thread",
+        workspacePath: repo,
+        filePath,
+        tool: "write_file",
+        generatedContent
+      })
+      await sleep(250)
+      assert(
+        findPendingGensForFile(filePath, 0).length === 1,
+        "expected exactly one pending gen before the commit"
+      )
+
+      // First sync establishes the reconciler baseline cursor at the current HEAD
+      // (the repo's initial commit) WITHOUT backfilling history — it must not
+      // consume the pending gen yet.
+      await syncGitHookEvents(repo)
+      assert(
+        findPendingGensForFile(filePath, 0).length === 1,
+        "baseline sync must not measure the pending gen"
+      )
+
+      // External commit with no hook firing.
+      await writeFile(filePath, generatedContent)
+      await git(repo, ["add", "reconciled.ts"])
+      await git(repo, ["commit", "-q", "-m", "external IDE commit without hook"])
+      const head = await git(repo, ["rev-parse", "HEAD"])
+
+      // Second sync: the reconciler sees HEAD moved and measures adoption.
+      await syncGitHookEvents(repo)
+      await sleep(250)
+
+      const processedRaw = await readFile(
+        join(repoEventsDir(repo), "processed-commits.json"),
+        "utf-8"
+      ).catch(() => "[]")
+      const processed = JSON.parse(processedRaw) as string[]
+      assert(
+        Array.isArray(processed) && processed.includes(head),
+        `reconciler should record commit ${head} in processed-commits.json`
+      )
+      assert(
+        findPendingGensForFile(filePath, 0).length === 0,
+        "reconciler should have measured (consumed) the pending gen for the hookless commit"
+      )
+
+      // The reconciler path must not have created any hook ready/pending snapshots.
+      const ready = await listDirs(join(repoEventsDir(repo), "ready"))
+      const pending = await listDirs(join(repoEventsDir(repo), "pending"))
+      assert(
+        ready.length === 0 && pending.length === 0,
+        "reconciler must not produce hook ready/pending snapshots"
+      )
+    })
+  })
+}
+
 async function run(): Promise<void> {
   await testExternalCommandCommitWithoutCodeGenIsSkipped()
   console.log("PASS external command commit without code_gen is skipped")
@@ -261,6 +370,10 @@ async function run(): Promise<void> {
   console.log("PASS external command commit with code_gen is collected through Git hook")
   await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
   console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
+  await testCoreHooksPathInWorkspaceIsNotModified()
+  console.log("PASS workspace core.hooksPath is skipped without modifying .husky")
+  await testExternalCommitReconciledWithoutHook()
+  console.log("PASS external commit without hook is reconciled and measured")
 }
 
 run().catch((error) => {

@@ -1,5 +1,15 @@
 // Re-export types from electron for use in renderer
 
+import type {
+  ForkableCheckpoint as SharedForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
+  ThreadForkOverrides as SharedThreadForkOverrides,
+  ThreadForkParams as SharedThreadForkParams,
+  ThreadForkResponse as SharedThreadForkResponse
+} from "../../shared/checkpoint-forkability"
+
+export type { ForkBoundarySource, ForkUnstableReason } from "../../shared/checkpoint-forkability"
+
 export interface FileAttachment {
   filename: string
   filePath: string // full path for display
@@ -21,6 +31,12 @@ export interface Thread {
   title?: string
 }
 
+export type ThreadForkOverrides = SharedThreadForkOverrides
+export type ThreadForkParams = SharedThreadForkParams
+export type ThreadForkResponse = SharedThreadForkResponse<Thread>
+export type ThreadForkCheckpointForMessageParams = SharedThreadForkCheckpointForMessageParams
+export type ForkableCheckpoint = SharedForkableCheckpoint
+
 export type RunStatus = "pending" | "running" | "error" | "success" | "interrupted"
 
 export interface Run {
@@ -34,7 +50,7 @@ export interface Run {
 }
 
 // Provider configuration
-export type ProviderId = "custom"
+export type ProviderId = "builtin" | "custom"
 
 export interface Provider {
   id: ProviderId
@@ -49,6 +65,9 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  source: ProviderId
+  origin?: "remote" | "fallback"
+  maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
 }
@@ -57,6 +76,11 @@ import type {
   McpConnectorAdvanced,
   McpConnectorConfig,
   McpConnectorUpsert,
+  McpImportApplyResult,
+  McpImportConfigApplyRequest,
+  McpImportConfigRequest,
+  McpImportConflictStrategy,
+  McpImportPreviewResult,
   Subagent,
   ScheduledTask,
   ScheduledTaskUpsert,
@@ -84,7 +108,8 @@ import type {
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitMode,
   AgentAutoCommitResult,
-  AgentAutoCommitSettings
+  AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard
 } from "../../shared/auto-commit-types"
 import type {
   ManagedSavedCodeExecTool,
@@ -92,20 +117,41 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../../main/ipc/code-exec-tools"
 import type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailItem,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchItem,
+  HarnessEnterpriseProjectSearchResult,
   HarnessArtifact,
   HarnessArtifactStatus,
   HarnessArtifactType,
   HarnessEventStatus,
+  HarnessFeatureStatus,
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewFile,
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewItem,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessDynamicWorkflowConfig,
+  HarnessDynamicWorkflowNode,
+  HarnessDynamicWorkflowTemplate,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessRunNode,
   HarnessFeatureSummary,
   HarnessSessionBinding,
@@ -121,6 +167,11 @@ export type {
   McpConnectorAdvanced,
   McpConnectorConfig,
   McpConnectorUpsert,
+  McpImportApplyResult,
+  McpImportConfigApplyRequest,
+  McpImportConfigRequest,
+  McpImportConflictStrategy,
+  McpImportPreviewResult,
   Subagent,
   ScheduledTask,
   ScheduledTaskUpsert,
@@ -146,26 +197,48 @@ export type {
   AgentAutoCommitMode,
   AgentAutoCommitMessageStrategy,
   AgentAutoCommitSettings,
+  AgentAutoCommitWorkspaceCard,
   AgentAutoCommitResult
 }
 
 export type { ManagedSavedCodeExecTool, SavedCodeExecPreviewResult, SavedCodeExecToolUpdatePayload }
 
 export type {
+  HarnessEnterpriseProjectDetailInput,
+  HarnessEnterpriseProjectDetailItem,
+  HarnessEnterpriseProjectDetailResult,
+  HarnessEnterpriseProjectSearchInput,
+  HarnessEnterpriseProjectSearchItem,
+  HarnessEnterpriseProjectSearchResult,
   HarnessArtifact,
   HarnessArtifactStatus,
   HarnessArtifactType,
   HarnessEventStatus,
+  HarnessFeatureStatus,
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewFile,
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewItem,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessDynamicWorkflowConfig,
+  HarnessDynamicWorkflowNode,
+  HarnessDynamicWorkflowTemplate,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessFeatureDeployUnitBinding,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
+  HarnessSkipNodeInput,
+  HarnessSkipNodeResult,
   HarnessRunNode,
   HarnessFeatureSummary,
   HarnessSessionBinding,
@@ -193,6 +266,8 @@ export interface Message {
   id: string
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  content_priority?: number
+  reasoning?: string
   tool_calls?: ToolCall[]
   // For tool messages - links result to its tool call
   tool_call_id?: string
@@ -301,6 +376,13 @@ export interface HITLRequest {
   pendingCount?: number
   pendingToolCallIds?: string[]
   allowRuntimeRestoredCheckpointResume?: boolean
+  operation?: string
+  command?: string
+  reason?: string
+  suggestedCommitMessage?: string
+  suggestedCommitFilePaths?: string[]
+  suggestedCommitFileBasePath?: string
+  suggestedCommitFileSelectionSource?: "pathspec" | "staged"
 }
 
 export interface HITLDecision {

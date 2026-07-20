@@ -2,6 +2,8 @@ node_modules
 dist
 out
 .DS_Store
+*.swp
+.*.swp
 .eslintcache
 *.log*
 *.tsbuildinfo
@@ -14,6 +16,8 @@ src/renderer/.vite/
 .playwright-browsers/
 __pycache__/
 *.pyc
+# One-off intranet backfill script — carries ES credentials, copy by hand, never commit.
+scripts/backfill_code_adoption_harness.py
 .trace-evolver-state/
 *.egg-info/
 trace_evolver_service/
@@ -21,6 +25,12 @@ trace_evolver_service/
 # Codex local files
 .codex/
 tests/screenshots/
+.hook-scope-log/
+
+# OMC local runtime/cache state
+.omc/project-memory.json
+.omc/state/
+.omc/sessions/
 
 # Java LSP VSIX bundles (downloaded via scripts/download-jdtls.sh)
 resources/lsp-vsix/*.vsix
@@ -28,7 +38,9 @@ resources/lsp-vsix/*.vsix
 # Claude Code local session artifacts
 .cmbdevclaw/
 AGENTS.md
-claude-code-source-code-main
-
-
 claude-code-source-code-main/
+.github/
+EnsoAI-main/
+output/
+.playwright-cli/
+git.md

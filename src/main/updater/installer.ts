@@ -3,6 +3,8 @@ import { spawn } from "child_process"
 import { chmodSync, writeFileSync } from "fs"
 import { basename, join, dirname } from "path"
 import { getUpdatesDir } from "./downloader"
+import { clearPendingUpdateChain, writePendingUpdateChain } from "./update-chain"
+import { canCompleteWithAsar } from "./update-marker"
 
 const isWindows = process.platform === "win32"
 const isLinux = process.platform === "linux"
@@ -59,8 +61,26 @@ function toPsString(value: string): string {
   return `'${escapePowerShellLiteral(value)}'`
 }
 
-function makeUpdateMarkerJson(fromVersion: string, toVersion: string, updateType?: "full"): string {
-  return JSON.stringify(updateType ? { fromVersion, toVersion, updateType } : { fromVersion, toVersion })
+function makeUpdateMarkerJson(
+  fromVersion: string,
+  toVersion: string,
+  updateType?: "full",
+  releaseVersion?: string,
+  channel?: "stable" | "staging",
+  minVersion?: string
+): string {
+  return JSON.stringify(
+    updateType
+      ? {
+          fromVersion,
+          toVersion,
+          updateType,
+          releaseVersion: releaseVersion ?? toVersion,
+          channel: channel ?? "stable",
+          minVersion: minVersion ?? toVersion
+        }
+      : { fromVersion, toVersion }
+  )
 }
 
 /**
@@ -380,20 +400,31 @@ nohup "$EXE" --no-sandbox > /dev/null 2>&1 &
 /**
  * Generate full-zip update bash script for Linux/UOS.
  */
-function generateFullZipUpdateSh(
+export function generateFullZipUpdateSh(
   zipPath: string,
   appDir: string,
   exePath: string,
   fromVersion: string,
-  toVersion: string
+  toVersion: string,
+  releaseVersion: string,
+  channel: "stable" | "staging" = "stable",
+  minVersion: string = toVersion
 ): string {
   const backupDir = `${appDir}.bak`
   const markerPath = join(appDir, "resources", "update-marker.json")
   const processName = getProcessName()
-  const markerJson = makeUpdateMarkerJson(fromVersion, toVersion, "full")
+  const markerJson = makeUpdateMarkerJson(
+    fromVersion,
+    toVersion,
+    "full",
+    releaseVersion,
+    channel,
+    minVersion
+  )
 
   return `#!/bin/bash
 set -e
+set -o pipefail
 
 ZIP=${toBashString(zipPath)}
 APP_DIR=${toBashString(appDir)}
@@ -402,6 +433,8 @@ MARKER=${toBashString(markerPath)}
 EXE=${toBashString(exePath)}
 PROC_NAME=${toBashString(processName)}
 TEMP_DIR="/tmp/cmbdevclaw_update_tmp"
+ARCHIVE_DIR="$TEMP_DIR/archive"
+PAYLOAD_DIR="$TEMP_DIR/payload"
 STAGE_DIR="$APP_DIR.new"
 EXE_FILE="$(basename "$EXE")"
 PRODUCT_WRAPPER=${toBashString(LINUX_WRAPPER_NAME)}
@@ -411,6 +444,19 @@ STAGE_MARKER="$STAGE_DIR/resources/update-marker.json"
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-full-update.log}"
 
 exec > "$LOG_FILE" 2>&1
+
+validate_archive_paths() {
+  awk '
+    function unsafe(path, count, parts, i) {
+      if (substr(path, 1, 1) == "/") return 1
+      count = split(path, parts, "/")
+      for (i = 1; i <= count; i++) if (parts[i] == "..") return 1
+      return 0
+    }
+    unsafe($0) { invalid = 1 }
+    END { exit invalid ? 1 : 0 }
+  '
+}
 
 # Wait for process to exit (up to 30s)
 n=0
@@ -426,11 +472,49 @@ fi
 # Prepare a complete staged app before touching the live installation.
 rm -rf "$TEMP_DIR"
 rm -rf "$STAGE_DIR"
-mkdir -p "$TEMP_DIR"
+mkdir -p "$ARCHIVE_DIR"
 mkdir -p "$STAGE_DIR"
-unzip -o "$ZIP" -d "$TEMP_DIR" || { echo "Unzip failed"; exit 1; }
 
-cp -a "$TEMP_DIR"/. "$STAGE_DIR"/ || { echo "Stage copy failed"; exit 1; }
+# GitHub Actions always wraps downloaded artifacts in a zip. Linux artifacts
+# are already a tar.gz (to preserve executable bits), so the website download
+# has the shape outer.zip -> one inner.tar.gz -> application files. Detect that
+# shape and stream the tar directly into the payload directory; this avoids the
+# operator having to unpack and re-zip every release and avoids materialising a
+# second 300+ MB archive on the client.
+if ! unzip -Z1 "$ZIP" | validate_archive_paths; then
+  echo "Outer zip contains an unsafe path or is invalid"
+  exit 1
+fi
+mapfile -t ZIP_FILES < <(unzip -Z1 "$ZIP" | grep -v '/$')
+SOURCE_DIR="$ARCHIVE_DIR"
+if [ "\${#ZIP_FILES[@]}" -eq 1 ] && [[ "\${ZIP_FILES[0]}" =~ \\.(tar\\.gz|tgz)$ ]]; then
+  NESTED_TAR="\${ZIP_FILES[0]}"
+  echo "Detected nested Linux artifact: $NESTED_TAR"
+  mkdir -p "$PAYLOAD_DIR"
+
+  # Reject absolute paths and parent traversal before extracting. The package
+  # is SHA256-verified already, but this keeps archive handling safe by itself.
+  if ! unzip -p "$ZIP" "$NESTED_TAR" | tar -tzf - | validate_archive_paths; then
+    echo "Nested tar.gz contains an unsafe path or is invalid"
+    exit 1
+  fi
+
+  unzip -p "$ZIP" "$NESTED_TAR" | tar -xzf - -C "$PAYLOAD_DIR" || {
+    echo "Nested tar.gz extraction failed"
+    exit 1
+  }
+  SOURCE_DIR="$PAYLOAD_DIR"
+else
+  unzip -o "$ZIP" -d "$ARCHIVE_DIR" || { echo "Unzip failed"; exit 1; }
+
+  # Also accept a conventional zip with one outer application directory.
+  mapfile -t ROOT_ENTRIES < <(find "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -print)
+  if [ "\${#ROOT_ENTRIES[@]}" -eq 1 ] && [ -d "\${ROOT_ENTRIES[0]}" ]; then
+    SOURCE_DIR="\${ROOT_ENTRIES[0]}"
+  fi
+fi
+
+cp -a "$SOURCE_DIR"/. "$STAGE_DIR"/ || { echo "Stage copy failed"; exit 1; }
 
 # Repair Linux launcher layout and executable bits. Zip archives produced on
 # non-Linux hosts often lose mode bits, and older packages may contain a wrapper
@@ -507,12 +591,22 @@ function generateFullZipUpdatePs1(
   appDir: string,
   exePath: string,
   fromVersion: string,
-  toVersion: string
+  toVersion: string,
+  releaseVersion: string,
+  channel: "stable" | "staging" = "stable",
+  minVersion: string = toVersion
 ): string {
   const backupDir = `${appDir}.bak`
   const markerPath = join(appDir, "resources", "update-marker.json")
   const exeBaseName = EXE_NAME.replace(".exe", "")
-  const markerJson = makeUpdateMarkerJson(fromVersion, toVersion, "full")
+  const markerJson = makeUpdateMarkerJson(
+    fromVersion,
+    toVersion,
+    "full",
+    releaseVersion,
+    channel,
+    minVersion
+  )
 
   return `
 $exeBaseName = ${toPsString(exeBaseName)}
@@ -630,8 +724,31 @@ export function installAsarUpdate(newAsarPath: string, toVersion: string): void 
  * - If the file is a .exe (Windows only): launches the NSIS setup installer directly.
  * - If the file is a .deb (Linux only): launches dpkg to install.
  */
-export function installFullUpdate(filePath: string, toVersion: string): void {
+export function installFullUpdate(
+  filePath: string,
+  toVersion: string,
+  releaseVersion: string = toVersion,
+  channel: "stable" | "staging" = "stable",
+  minVersion: string = toVersion
+): void {
   const ext = filePath.toLowerCase().split(".").pop()
+
+  if (canCompleteWithAsar(toVersion, releaseVersion, minVersion)) {
+    // Persist before launching an external installer. The state is only honored
+    // when the next process reports exactly toVersion, so a failed install
+    // cannot accidentally activate the continuation.
+    const persisted = writePendingUpdateChain({
+      intermediateVersion: toVersion,
+      targetVersion: releaseVersion,
+      channel,
+      minVersion
+    })
+    if (!persisted) {
+      throw new Error("无法保存链式更新状态，已取消本次全量安装")
+    }
+  } else if (releaseVersion === toVersion) {
+    clearPendingUpdateChain()
+  }
 
   if (ext === "zip") {
     const exePath = getExePath()
@@ -644,13 +761,31 @@ export function installFullUpdate(filePath: string, toVersion: string): void {
     console.log("[Updater] Platform:", process.platform)
 
     if (isWindows) {
-      const ps1Content = generateFullZipUpdatePs1(filePath, appDir, exePath, fromVersion, toVersion)
+      const ps1Content = generateFullZipUpdatePs1(
+        filePath,
+        appDir,
+        exePath,
+        fromVersion,
+        toVersion,
+        releaseVersion,
+        channel,
+        minVersion
+      )
       const ps1Path = join(getUpdatesDir(), "full-update.ps1")
       writePowerShellScript(ps1Path, ps1Content)
       console.log("[Updater] Generated full-update.ps1 at", ps1Path)
       launchDetachedPowerShellScript(ps1Path)
     } else if (isLinux) {
-      const shContent = generateFullZipUpdateSh(filePath, appDir, exePath, fromVersion, toVersion)
+      const shContent = generateFullZipUpdateSh(
+        filePath,
+        appDir,
+        exePath,
+        fromVersion,
+        toVersion,
+        releaseVersion,
+        channel,
+        minVersion
+      )
       const shPath = join(getUpdatesDir(), "full-update.sh")
       writeBashScript(shPath, shContent)
       console.log("[Updater] Generated full-update.sh at", shPath)

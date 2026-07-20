@@ -1,4 +1,19 @@
-import { ChevronLeft, ChevronRight, ExternalLink, GitCommit, Info, Loader2, Search, X } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import {
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  FileWarning,
+  GitCommit,
+  GitCompare,
+  Info,
+  Loader2,
+  MessagesSquare,
+  Search,
+  Upload,
+  X
+} from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -9,8 +24,23 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import type { DashboardCommitDetail, DashboardCommitDetailsData } from "./use-dashboard"
+import { TraceExplorer } from "./TraceHistoryDialog"
+import { CommitAdoptionTraceDialog } from "./CommitAdoptionTraceDialog"
+import { UncommittedCodeAnalysisPanel, type UncommittedScope } from "./UncommittedCodeDialog"
+import type {
+  DashboardCommitDetail,
+  DashboardCommitDetailsData,
+  DashboardNonGitAdoptionReportItem,
+  DashboardNonGitAdoptionReportsData,
+  DashboardTraceDetail
+} from "./use-dashboard"
+
+interface CommitDetailsUncommittedAnalysis {
+  range: { from: string; to: string }
+  scope: UncommittedScope
+}
 
 function HeaderHint({ hint }: { hint: string }): React.JSX.Element {
   return (
@@ -41,7 +71,7 @@ function repoName(item: DashboardCommitDetail): string {
   return parts[parts.length - 1] || repoPath
 }
 
-function orgLabel(item: DashboardCommitDetail): string {
+function orgLabel(item: { upperOrgLv1?: string; upperOrgLv0?: string; orgName?: string }): string {
   const upperOrgLv1 = item.upperOrgLv1?.trim() ?? ""
   const upperOrgLv0 = item.upperOrgLv0?.trim() ?? ""
   if (upperOrgLv1 && upperOrgLv0) return `${upperOrgLv1}/${upperOrgLv0}`
@@ -90,12 +120,16 @@ function SkillChips({ skills }: { skills: string[] }): React.JSX.Element {
 
 function CommitRow({
   item,
-  onOpenExternal
+  onOpenExternal,
+  onViewThread,
+  onViewTrace
 }: {
   item: DashboardCommitDetail
   onOpenExternal: (url: string) => void
+  onViewThread: (item: DashboardCommitDetail) => void
+  onViewTrace: (item: DashboardCommitDetail) => void
 }): React.JSX.Element {
-  const externalUrl = item.pushed ? (item.commitUrl || item.repositoryWebUrl || "") : ""
+  const externalUrl = item.pushed ? item.commitUrl || item.repositoryWebUrl || "" : ""
   const displayRepo = repoName(item)
   const displayOrg = orgLabel(item)
 
@@ -109,7 +143,9 @@ function CommitRow({
         <div className="text-[10px] text-muted-foreground">{item.sapId || item.ystId || "-"}</div>
       </td>
       <td className="max-w-[120px] px-3 py-2 text-xs text-muted-foreground">
-        <span className="block truncate" title={displayOrg}>{displayOrg}</span>
+        <span className="block truncate" title={displayOrg}>
+          {displayOrg}
+        </span>
       </td>
       <td className="max-w-[180px] px-3 py-2 text-xs">
         {externalUrl ? (
@@ -134,11 +170,13 @@ function CommitRow({
         </span>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-          item.pushed
-            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-            : "bg-muted text-muted-foreground"
-        }`}>
+        <span
+          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+            item.pushed
+              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              : "bg-muted text-muted-foreground"
+          }`}
+        >
           {item.pushed ? "已 Push" : "未 Push"}
         </span>
       </td>
@@ -146,22 +184,621 @@ function CommitRow({
         <SkillChips skills={item.usedSkills} />
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
-        <div className="font-medium tabular-nums text-foreground">
-          {formatPercent(item.codeAdoptionRate)}
-        </div>
-        <div className="text-[10px] text-muted-foreground">
-          {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)} 行
-        </div>
+        <button
+          type="button"
+          className="group/trace -mx-1 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-blue-500/10 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          disabled={!item.commitSha}
+          title={
+            item.commitSha
+              ? "查看采纳溯源：该率对应的 gen / adopt 事件"
+              : "无 commit 信息，无法溯源"
+          }
+          onClick={() => onViewTrace(item)}
+        >
+          <div className="flex items-center gap-1 font-medium tabular-nums text-foreground">
+            {formatPercent(item.codeAdoptionRate)}
+            {item.commitSha ? (
+              <GitCompare className="size-3 text-muted-foreground opacity-0 transition-opacity group-hover/trace:opacity-100" />
+            ) : null}
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)}{" "}
+            行
+          </div>
+        </button>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs">
         <span className="text-muted-foreground">{item.filesChanged} 文件</span>
         <span className="ml-2 text-emerald-600 dark:text-emerald-400">+{item.insertions}</span>
         <span className="ml-1 text-rose-600 dark:text-rose-400">-{item.deletions}</span>
       </td>
-      <td className="max-w-[110px] px-3 py-2 text-[11px] font-mono text-muted-foreground">
-        <span className="block truncate" title={item.threadId}>{item.threadId || "-"}</span>
+      <td className="max-w-[130px] px-3 py-2 text-xs">
+        {item.threadIds.length > 0 ? (
+          <button
+            type="button"
+            className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground/80 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-300"
+            title={`查看会话记录 · ${item.threadIds.join(", ")}`}
+            onClick={() => onViewThread(item)}
+          >
+            <MessagesSquare className="size-3 shrink-0" />
+            <span className="truncate">查看会话</span>
+            {item.threadIds.length > 1 ? (
+              <span className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground">
+                {item.threadIds.length}
+              </span>
+            ) : null}
+          </button>
+        ) : (
+          <span className="text-xs text-muted-foreground">-</span>
+        )}
       </td>
     </tr>
+  )
+}
+
+function CommitAdoptionSummaryBar({
+  commit
+}: {
+  commit: DashboardCommitDetail
+}): React.JSX.Element {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-muted/10 px-5 py-2 text-[11px] text-muted-foreground">
+      <span className="inline-flex items-center gap-1 font-medium text-foreground">
+        <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+        采纳 {formatLines(commit.codeAdoptedLines)} 行
+      </span>
+      <span>有效生成 {formatLines(commit.codeEffectiveGeneratedLines)} 行</span>
+      <span>
+        采纳率{" "}
+        <span className="font-medium text-foreground">
+          {formatPercent(commit.codeAdoptionRate)}
+        </span>
+      </span>
+      <span className="ml-auto">关联 {commit.threadIds.length} 个会话</span>
+    </div>
+  )
+}
+
+function ThreadConversationDialog({
+  commit,
+  threadScope = "platform",
+  onOpenChange
+}: {
+  commit: DashboardCommitDetail | null
+  threadScope?: "platform" | "project"
+  onOpenChange: (open: boolean) => void
+}): React.JSX.Element {
+  const threadIds = useMemo(() => commit?.threadIds ?? [], [commit])
+  const threadKey = threadIds.join("|")
+  const [traces, setTraces] = useState<DashboardTraceDetail[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (threadIds.length === 0) {
+      setTraces([])
+      setError(null)
+      return
+    }
+    const api = window.api?.dashboard
+    if (!api || typeof api.threadTraces !== "function") {
+      setError("当前环境不支持加载会话记录")
+      return
+    }
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    Promise.all(
+      threadIds.map(async (id) => {
+        try {
+          const res = await api.threadTraces(id, { scope: threadScope })
+          return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
+        } catch {
+          return []
+        }
+      })
+    )
+      .then((lists) => {
+        if (!cancelled) setTraces(lists.flat())
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+    // threadKey 是 threadIds 的稳定字符串表示，避免数组引用变化导致的重复请求。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadKey, threadScope])
+
+  // 已按 threadId 分好的 trace 供 TraceExplorer 选中会话时复用，避免重复网络请求。
+  const tracesByThread = useMemo(() => {
+    const map = new Map<string, DashboardTraceDetail[]>()
+    for (const trace of traces) {
+      const id = trace.threadId || "unknown-thread"
+      map.set(id, [...(map.get(id) ?? []), trace])
+    }
+    return map
+  }, [traces])
+
+  return (
+    <Dialog open={Boolean(commit)} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[80vh] max-w-[1000px] flex-col gap-0 p-0">
+        <DialogHeader className="border-b border-border px-5 py-4">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <MessagesSquare className="size-4 text-muted-foreground" />
+            会话记录
+          </DialogTitle>
+          <DialogDescription className="truncate">
+            {commit?.userName ? `${commit.userName} · ` : ""}
+            {commit?.repositoryName || commit?.branch || ""}
+          </DialogDescription>
+        </DialogHeader>
+        {commit ? <CommitAdoptionSummaryBar commit={commit} /> : null}
+        <TraceExplorer
+          traces={traces}
+          loading={loading}
+          error={error}
+          showCodeStats={false}
+          defaultViewMode="thread"
+          showViewModeToggle={false}
+          loadThreadTraces={async (id) => tracesByThread.get(id) ?? []}
+          title="关联会话"
+          subtitle="选择会话查看对话还原"
+          emptyText="该 commit 暂无可还原的会话记录"
+          className="min-h-0 flex-1"
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function nonGitSourceLabel(item: DashboardNonGitAdoptionReportItem): string {
+  return item.source || item.harnessAdapterName || "外部上报"
+}
+
+function nonGitProjectLabel(item: DashboardNonGitAdoptionReportItem): string {
+  const project = item.harnessProjectId?.trim() ?? ""
+  const feature = item.harnessFeatureSlug?.trim() ?? ""
+  if (project && feature) return `${project} / ${feature}`
+  if (project) return project
+  if (feature) return feature
+  return "-"
+}
+
+function nonGitAdapterLabel(item: DashboardNonGitAdoptionReportItem): string {
+  const adapter = item.harnessAdapterName?.trim() ?? ""
+  const version = item.harnessAdapterVersion?.trim() ?? ""
+  if (adapter && version) return `${adapter}@${version}`
+  return adapter || "-"
+}
+
+function nonGitThreadCommit(item: DashboardNonGitAdoptionReportItem): DashboardCommitDetail {
+  const source = nonGitSourceLabel(item)
+  return {
+    eventId: item.eventId,
+    eventTime: item.generatedAt || item.eventTime,
+    userName: item.userName,
+    sapId: item.sapId,
+    ystId: item.ystId,
+    orgName: item.orgName,
+    upperOrgLv0: item.upperOrgLv0,
+    upperOrgLv1: item.upperOrgLv1,
+    userIp: item.userIp,
+    repositoryName: source,
+    repositoryFullName: source,
+    pushed: item.pushed,
+    pushedAt: item.pushedAt,
+    branch: item.harnessFeatureSlug,
+    filesChanged: 0,
+    insertions: item.adoptedLineCount,
+    deletions: 0,
+    threadId: item.threadId,
+    threadIds: item.threadIds,
+    usedSkills: item.usedSkills,
+    skillCount: item.usedSkills.length,
+    codeGeneratedLines: item.generatedLineCount,
+    codeEffectiveGeneratedLines: item.effectiveGeneratedLineCount,
+    codeAdoptedLines: item.adoptedLineCount,
+    codeAdoptionRate: item.adoptionRate
+  }
+}
+
+function NonGitReportsToolbar({
+  total,
+  page,
+  pageSize,
+  pageCount,
+  fromIndex,
+  toIndex,
+  departmentValue,
+  userValue,
+  loading,
+  canPrev,
+  canNext,
+  onPageChange,
+  onDepartmentValueChange,
+  onUserValueChange,
+  onSearch,
+  onClearDepartment,
+  onClearUser
+}: {
+  total: number
+  page: number
+  pageSize: number
+  pageCount: number
+  fromIndex: number
+  toIndex: number
+  departmentValue: string
+  userValue: string
+  loading: boolean
+  canPrev: boolean
+  canNext: boolean
+  onPageChange: (page: number) => void
+  onDepartmentValueChange: (value: string) => void
+  onUserValueChange: (value: string) => void
+  onSearch: () => void
+  onClearDepartment: () => void
+  onClearUser: () => void
+}): React.JSX.Element {
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/10 px-5 py-2 text-xs text-muted-foreground">
+      <div className="flex items-center gap-3">
+        <span>共 {total} 条</span>
+        <span>每页 {pageSize} 条</span>
+        <span>
+          {fromIndex}-{toIndex}
+        </span>
+        {loading ? <Loader2 className="size-3.5 animate-spin" /> : null}
+      </div>
+      <div className="flex items-center gap-3">
+        <form
+          className="flex items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault()
+            onSearch()
+          }}
+        >
+          <div className="relative w-[180px]">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={departmentValue}
+              onChange={(event) => onDepartmentValueChange(event.target.value)}
+              aria-label="按 Lv1 或 Lv0 部门筛选非 Git 上报"
+              placeholder="部门查询"
+              className="h-7 pl-8 pr-7 text-xs"
+            />
+            {departmentValue ? (
+              <button
+                type="button"
+                onClick={onClearDepartment}
+                className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="清空部门筛选"
+                title="清空"
+              >
+                <X className="size-3" />
+              </button>
+            ) : null}
+          </div>
+          <div className="relative w-[160px]">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={userValue}
+              onChange={(event) => onUserValueChange(event.target.value)}
+              aria-label="按用户姓名或 ID 筛选非 Git 上报"
+              placeholder="用户查询"
+              className="h-7 pl-8 pr-7 text-xs"
+            />
+            {userValue ? (
+              <button
+                type="button"
+                onClick={onClearUser}
+                className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="清空用户筛选"
+                title="清空"
+              >
+                <X className="size-3" />
+              </button>
+            ) : null}
+          </div>
+          <Button type="submit" variant="outline" size="sm" className="h-7 px-2" disabled={loading}>
+            查询
+          </Button>
+        </form>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2"
+            disabled={!canPrev}
+            onClick={() => onPageChange(page - 1)}
+          >
+            <ChevronLeft className="size-3.5" />
+          </Button>
+          <span className="min-w-14 text-center tabular-nums">
+            {page} / {pageCount}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2"
+            disabled={!canNext}
+            onClick={() => onPageChange(page + 1)}
+          >
+            <ChevronRight className="size-3.5" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function NonGitReportRow({
+  item,
+  onViewThread
+}: {
+  item: DashboardNonGitAdoptionReportItem
+  onViewThread: (item: DashboardNonGitAdoptionReportItem) => void
+}): React.JSX.Element {
+  const displayOrg = orgLabel(item)
+  const source = nonGitSourceLabel(item)
+  const project = nonGitProjectLabel(item)
+  const adapter = nonGitAdapterLabel(item)
+  const canViewThread = item.threadIds.length > 0
+
+  return (
+    <tr className="border-b border-border/60 last:border-b-0 hover:bg-muted/20">
+      <td className="whitespace-nowrap px-3 py-2 text-[11px] text-muted-foreground">
+        <div>{formatTime(item.generatedAt || item.eventTime)}</div>
+        <div className="text-[10px]">入库 {formatTime(item.pushedAt || item.eventTime)}</div>
+      </td>
+      <td className="px-3 py-2">
+        <div className="text-xs font-medium text-foreground">{item.userName || "-"}</div>
+        <div className="text-[10px] text-muted-foreground">{item.sapId || item.ystId || "-"}</div>
+      </td>
+      <td className="max-w-[120px] px-3 py-2 text-xs text-muted-foreground">
+        <span className="block truncate" title={displayOrg}>
+          {displayOrg}
+        </span>
+      </td>
+      <td className="max-w-[150px] px-3 py-2 text-xs">
+        <span className="block truncate font-medium text-foreground" title={source}>
+          {source}
+        </span>
+        <span className="block truncate text-[10px] text-muted-foreground" title={adapter}>
+          {adapter}
+        </span>
+      </td>
+      <td className="max-w-[170px] px-3 py-2 text-xs">
+        <span className="block truncate font-mono text-muted-foreground" title={project}>
+          {project}
+        </span>
+      </td>
+      <td className="px-3 py-2">
+        <SkillChips skills={item.usedSkills} />
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-xs">
+        <div className="font-medium tabular-nums text-foreground">
+          {formatPercent(item.adoptionRate)}
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          {formatLines(item.adoptedLineCount)} / {formatLines(item.effectiveGeneratedLineCount)} 行
+        </div>
+      </td>
+      <td className="max-w-[120px] px-3 py-2 text-xs">
+        <span
+          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+            item.pushed
+              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              : "bg-muted text-muted-foreground"
+          }`}
+        >
+          {item.pushed ? "已入库" : "已上报"}
+        </span>
+        <div
+          className="mt-1 truncate text-[10px] text-muted-foreground"
+          title={[item.fileHint, item.language].filter(Boolean).join(" · ")}
+        >
+          {[item.fileHint, item.language].filter(Boolean).join(" · ") || "-"}
+        </div>
+      </td>
+      <td className="max-w-[130px] px-3 py-2 text-xs">
+        {canViewThread ? (
+          <button
+            type="button"
+            className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground/80 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-300"
+            title={`查看会话记录 · ${item.threadIds.join(", ")}`}
+            onClick={() => onViewThread(item)}
+          >
+            <MessagesSquare className="size-3 shrink-0" />
+            <span className="truncate">查看会话</span>
+          </button>
+        ) : (
+          <span className="text-xs text-muted-foreground">-</span>
+        )}
+      </td>
+    </tr>
+  )
+}
+
+function NonGitAdoptionReportsPanel({
+  active,
+  range,
+  scope,
+  onViewThread
+}: {
+  active: boolean
+  range: { from: string; to: string }
+  scope?: UncommittedScope
+  onViewThread: (item: DashboardNonGitAdoptionReportItem) => void
+}): React.JSX.Element {
+  const [data, setData] = useState<DashboardNonGitAdoptionReportsData | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [page, setPage] = useState(1)
+  const [departmentValue, setDepartmentValue] = useState("")
+  const [departmentFilter, setDepartmentFilter] = useState("")
+  const [userValue, setUserValue] = useState("")
+  const [userFilter, setUserFilter] = useState("")
+  const pageSize = 20
+  const scopeUpperOrgLv1 = scope?.upperOrgLv1
+
+  const load = useCallback(
+    (targetPage = page, upperOrgLv1 = departmentFilter, userKeyword = userFilter) => {
+      if (!active) return
+      const api = window.api?.dashboard
+      if (!api || typeof api.nonGitAdoptionReports !== "function") {
+        setError("当前环境不支持加载非 Git 仓库上报")
+        return
+      }
+      setLoading(true)
+      setError(null)
+      api
+        .nonGitAdoptionReports(range, {
+          page: targetPage,
+          pageSize,
+          upperOrgLv1: upperOrgLv1.trim() || null,
+          userKeyword: userKeyword.trim() || null,
+          orgLv1List: scopeUpperOrgLv1 ?? [],
+          projectMode: scope?.projectMode,
+          projectId: scope?.projectId ?? null,
+          featureSlug: scope?.featureSlug ?? null,
+          usedSkillsOnly: scope?.usedSkillsOnly
+        })
+        .then((result) => {
+          if (result.success) {
+            setData(result.data ?? { total: 0, page: targetPage, pageSize, items: [] })
+          } else {
+            setError(result.error ?? "加载失败")
+          }
+        })
+        .catch((e) => {
+          setError(e instanceof Error ? e.message : String(e))
+        })
+        .finally(() => setLoading(false))
+    },
+    [
+      active,
+      departmentFilter,
+      page,
+      range,
+      scope?.featureSlug,
+      scope?.projectId,
+      scope?.projectMode,
+      scope?.usedSkillsOnly,
+      scopeUpperOrgLv1,
+      userFilter
+    ]
+  )
+
+  useEffect(() => {
+    if (!active) return
+    load(page)
+  }, [active, load, page])
+
+  const handleSearch = useCallback(() => {
+    const nextDepartment = departmentValue.trim()
+    const nextUser = userValue.trim()
+    setDepartmentFilter(nextDepartment)
+    setUserFilter(nextUser)
+    setPage(1)
+  }, [departmentValue, userValue])
+
+  const handleClearDepartment = useCallback(() => {
+    setDepartmentValue("")
+    setDepartmentFilter("")
+    setPage(1)
+  }, [])
+
+  const handleClearUser = useCallback(() => {
+    setUserValue("")
+    setUserFilter("")
+    setPage(1)
+  }, [])
+
+  const total = data?.total ?? 0
+  const currentPage = data?.page ?? page
+  const currentPageSize = data?.pageSize ?? pageSize
+  const pageCount = Math.max(1, Math.ceil(total / currentPageSize))
+  const fromIndex = total === 0 ? 0 : (currentPage - 1) * currentPageSize + 1
+  const toIndex = Math.min(total, currentPage * currentPageSize)
+  const canPrev = currentPage > 1 && !loading
+  const canNext = currentPage < pageCount && !loading
+  const items = data?.items ?? []
+
+  if (loading && !data) {
+    return (
+      <div className="flex flex-1 items-center justify-center">
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-6 text-sm text-destructive">
+        {error}
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <NonGitReportsToolbar
+        total={total}
+        page={currentPage}
+        pageSize={currentPageSize}
+        pageCount={pageCount}
+        fromIndex={fromIndex}
+        toIndex={toIndex}
+        departmentValue={departmentValue}
+        userValue={userValue}
+        loading={loading}
+        canPrev={canPrev}
+        canNext={canNext}
+        onPageChange={setPage}
+        onDepartmentValueChange={setDepartmentValue}
+        onUserValueChange={setUserValue}
+        onSearch={handleSearch}
+        onClearDepartment={handleClearDepartment}
+        onClearUser={handleClearUser}
+      />
+      {items.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
+          暂无非 Git 仓库上报数据
+        </div>
+      ) : (
+        <ScrollArea className="min-h-0 flex-1" orientation="both">
+          <div className="min-w-max">
+            <table className="w-full min-w-[1060px] text-left">
+              <thead className="sticky top-0 z-10 bg-background">
+                <tr className="border-b border-border text-[11px] text-muted-foreground">
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">生成 / 入库时间</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">用户</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">部门</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">来源</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">项目 / 特性</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">
+                    <span className="inline-flex items-center gap-1">
+                      采纳率
+                      <HeaderHint hint="非 Git 仓库外部上报的 code_adopt 行级采纳率，按 generatedAt 归入当前时间范围。" />
+                    </span>
+                  </th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">入库状态</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">对话记录</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <NonGitReportRow key={item.eventId} item={item} onViewThread={onViewThread} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </ScrollArea>
+      )}
+    </div>
   )
 }
 
@@ -174,14 +811,17 @@ function CommitDetailsToolbar({
   toIndex,
   pushedOnly,
   departmentValue,
+  userValue,
   loading,
   canPrev,
   canNext,
   onPageChange,
   onPushedOnlyChange,
   onDepartmentValueChange,
-  onDepartmentSearch,
-  onClearDepartment
+  onUserValueChange,
+  onSearch,
+  onClearDepartment,
+  onClearUser
 }: {
   total: number
   page: number
@@ -191,21 +831,26 @@ function CommitDetailsToolbar({
   toIndex: number
   pushedOnly: boolean
   departmentValue: string
+  userValue: string
   loading: boolean
   canPrev: boolean
   canNext: boolean
   onPageChange: (page: number) => void
   onPushedOnlyChange: (pushedOnly: boolean) => void
   onDepartmentValueChange: (value: string) => void
-  onDepartmentSearch: () => void
+  onUserValueChange: (value: string) => void
+  onSearch: () => void
   onClearDepartment: () => void
+  onClearUser: () => void
 }): React.JSX.Element {
   return (
     <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/10 px-5 py-2 text-xs text-muted-foreground">
       <div className="flex items-center gap-3">
         <span>共 {total} 条</span>
         <span>每页 {pageSize} 条</span>
-        <span>{fromIndex}-{toIndex}</span>
+        <span>
+          {fromIndex}-{toIndex}
+        </span>
         {loading ? <Loader2 className="size-3.5 animate-spin" /> : null}
       </div>
       <div className="flex items-center gap-3">
@@ -213,7 +858,7 @@ function CommitDetailsToolbar({
           className="flex items-center gap-2"
           onSubmit={(event) => {
             event.preventDefault()
-            onDepartmentSearch()
+            onSearch()
           }}
         >
           <div className="relative w-[180px]">
@@ -231,6 +876,27 @@ function CommitDetailsToolbar({
                 onClick={onClearDepartment}
                 className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 aria-label="清空部门筛选"
+                title="清空"
+              >
+                <X className="size-3" />
+              </button>
+            ) : null}
+          </div>
+          <div className="relative w-[160px]">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={userValue}
+              onChange={(event) => onUserValueChange(event.target.value)}
+              aria-label="按用户姓名或 ID 筛选 Commit"
+              placeholder="用户查询"
+              className="h-7 pl-8 pr-7 text-xs"
+            />
+            {userValue ? (
+              <button
+                type="button"
+                onClick={onClearUser}
+                className="absolute right-2 top-1/2 inline-flex size-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="清空用户筛选"
                 title="清空"
               >
                 <X className="size-3" />
@@ -273,7 +939,9 @@ function CommitDetailsToolbar({
           >
             <ChevronLeft className="size-3.5" />
           </Button>
-          <span className="min-w-14 text-center tabular-nums">{page} / {pageCount}</span>
+          <span className="min-w-14 text-center tabular-nums">
+            {page} / {pageCount}
+          </span>
           <Button
             variant="ghost"
             size="sm"
@@ -293,30 +961,40 @@ export function CommitDetailsDialog({
   open,
   onOpenChange,
   scopeLabel,
+  threadScope = "platform",
   data,
   loading,
   error,
   onPageChange,
   onPushedOnlyChange,
   departmentValue,
+  userValue,
   onDepartmentValueChange,
-  onDepartmentSearch,
+  onUserValueChange,
+  onSearch,
   onClearDepartment,
-  onOpenExternal
+  onClearUser,
+  onOpenExternal,
+  uncommittedAnalysis
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   scopeLabel: string
+  threadScope?: "platform" | "project"
   data: DashboardCommitDetailsData | null
   loading: boolean
   error: string | null
   onPageChange: (page: number) => void
   onPushedOnlyChange: (pushedOnly: boolean) => void
   departmentValue: string
+  userValue: string
   onDepartmentValueChange: (value: string) => void
-  onDepartmentSearch: () => void
+  onUserValueChange: (value: string) => void
+  onSearch: () => void
   onClearDepartment: () => void
+  onClearUser: () => void
   onOpenExternal: (url: string) => void
+  uncommittedAnalysis?: CommitDetailsUncommittedAnalysis
 }): React.JSX.Element {
   const items = data?.items ?? []
   const total = data?.total ?? 0
@@ -328,108 +1006,197 @@ export function CommitDetailsDialog({
   const toIndex = Math.min(total, page * pageSize)
   const canPrev = page > 1 && !loading
   const canNext = page < pageCount && !loading
+  const [threadCommit, setThreadCommit] = useState<DashboardCommitDetail | null>(null)
+  const [traceCommit, setTraceCommit] = useState<DashboardCommitDetail | null>(null)
+  const [activeTab, setActiveTab] = useState<"commits" | "nonGit" | "uncommitted">("commits")
+  const hasUncommittedTab = Boolean(uncommittedAnalysis)
+  const tabValue = hasUncommittedTab ? activeTab : "commits"
+  const handleDialogOpenChange = (nextOpen: boolean): void => {
+    if (!nextOpen) setActiveTab("commits")
+    onOpenChange(nextOpen)
+  }
+
+  const commitContent =
+    loading && !data ? (
+      <div className="flex flex-1 items-center justify-center">
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      </div>
+    ) : error ? (
+      <div className="flex flex-1 items-center justify-center px-6 text-sm text-destructive">
+        {error}
+      </div>
+    ) : items.length === 0 ? (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <CommitDetailsToolbar
+          total={total}
+          page={page}
+          pageSize={pageSize}
+          pageCount={pageCount}
+          fromIndex={fromIndex}
+          toIndex={toIndex}
+          pushedOnly={pushedOnly}
+          departmentValue={departmentValue}
+          userValue={userValue}
+          loading={loading}
+          canPrev={canPrev}
+          canNext={canNext}
+          onPageChange={onPageChange}
+          onPushedOnlyChange={onPushedOnlyChange}
+          onDepartmentValueChange={onDepartmentValueChange}
+          onUserValueChange={onUserValueChange}
+          onSearch={onSearch}
+          onClearDepartment={onClearDepartment}
+          onClearUser={onClearUser}
+        />
+        <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
+          {pushedOnly ? "该时间范围内没有已 Push 的 Commit 数据" : "该时间范围内没有 Commit 数据"}
+        </div>
+      </div>
+    ) : (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <CommitDetailsToolbar
+          total={total}
+          page={page}
+          pageSize={pageSize}
+          pageCount={pageCount}
+          fromIndex={fromIndex}
+          toIndex={toIndex}
+          pushedOnly={pushedOnly}
+          departmentValue={departmentValue}
+          userValue={userValue}
+          loading={loading}
+          canPrev={canPrev}
+          canNext={canNext}
+          onPageChange={onPageChange}
+          onPushedOnlyChange={onPushedOnlyChange}
+          onDepartmentValueChange={onDepartmentValueChange}
+          onUserValueChange={onUserValueChange}
+          onSearch={onSearch}
+          onClearDepartment={onClearDepartment}
+          onClearUser={onClearUser}
+        />
+        <ScrollArea className="min-h-0 flex-1" orientation="both">
+          <div className="min-w-max">
+            <table className="w-full min-w-[1060px] text-left">
+              <thead className="sticky top-0 z-10 bg-background">
+                <tr className="border-b border-border text-[11px] text-muted-foreground">
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">用户</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">部门</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">仓库</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">状态</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">
+                    <span className="inline-flex items-center gap-1">
+                      采纳率
+                      <HeaderHint hint="Agent 生成代码的采纳率。点击下方的数字可进行采纳溯源。" />
+                    </span>
+                  </th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">
+                    <span className="inline-flex items-center gap-1">
+                      变更
+                      <HeaderHint hint="git 提交的变更行数" />
+                    </span>
+                  </th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">对话记录</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <CommitRow
+                    key={item.eventId}
+                    item={item}
+                    onOpenExternal={onOpenExternal}
+                    onViewThread={setThreadCommit}
+                    onViewTrace={setTraceCommit}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </ScrollArea>
+      </div>
+    )
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       <DialogContent className="flex h-[75vh] max-w-[1000px] flex-col gap-0 p-0">
         <DialogHeader className="border-b border-border px-5 py-4">
           <DialogTitle className="flex items-center gap-2 text-base">
             <GitCommit className="size-4 text-muted-foreground" />
-            Commit 明细
+            {hasUncommittedTab ? "采纳率下钻" : "Commit 明细"}
           </DialogTitle>
           <DialogDescription>{scopeLabel}</DialogDescription>
         </DialogHeader>
-
-        {loading && !data ? (
-          <div className="flex flex-1 items-center justify-center">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : error ? (
-          <div className="flex flex-1 items-center justify-center px-6 text-sm text-destructive">
-            {error}
-          </div>
-        ) : items.length === 0 ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <CommitDetailsToolbar
-              total={total}
-              page={page}
-              pageSize={pageSize}
-              pageCount={pageCount}
-              fromIndex={fromIndex}
-              toIndex={toIndex}
-              pushedOnly={pushedOnly}
-              departmentValue={departmentValue}
-              loading={loading}
-              canPrev={canPrev}
-              canNext={canNext}
-              onPageChange={onPageChange}
-              onPushedOnlyChange={onPushedOnlyChange}
-              onDepartmentValueChange={onDepartmentValueChange}
-              onDepartmentSearch={onDepartmentSearch}
-              onClearDepartment={onClearDepartment}
-            />
-            <div className="flex flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
-              {pushedOnly ? "该时间范围内没有已 Push 的 Commit 数据" : "该时间范围内没有 Commit 数据"}
+        {hasUncommittedTab ? (
+          <Tabs
+            value={tabValue}
+            onValueChange={(value) =>
+              setActiveTab(value === "nonGit" || value === "uncommitted" ? value : "commits")
+            }
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <div className="border-b border-border px-5 py-2">
+              <TabsList className="h-8">
+                <TabsTrigger value="commits" className="h-6 gap-1.5 text-xs">
+                  <GitCommit className="size-3.5" />
+                  Commit 明细
+                </TabsTrigger>
+                <TabsTrigger value="nonGit" className="h-6 gap-1.5 text-xs">
+                  <Upload className="size-3.5" />
+                  非Git仓库上报
+                </TabsTrigger>
+                <TabsTrigger value="uncommitted" className="h-6 gap-1.5 text-xs">
+                  <FileWarning className="size-3.5" />
+                  未提交分析
+                </TabsTrigger>
+              </TabsList>
             </div>
-          </div>
+            <TabsContent value="commits" className="m-0 flex min-h-0 flex-1 flex-col">
+              {commitContent}
+            </TabsContent>
+            <TabsContent value="nonGit" className="m-0 flex min-h-0 flex-1 flex-col">
+              {uncommittedAnalysis ? (
+                <NonGitAdoptionReportsPanel
+                  active={open && activeTab === "nonGit"}
+                  range={uncommittedAnalysis.range}
+                  scope={uncommittedAnalysis.scope}
+                  onViewThread={(item) => setThreadCommit(nonGitThreadCommit(item))}
+                />
+              ) : null}
+            </TabsContent>
+            <TabsContent value="uncommitted" className="m-0 flex min-h-0 flex-1 flex-col">
+              {uncommittedAnalysis ? (
+                <UncommittedCodeAnalysisPanel
+                  active={open && activeTab === "uncommitted"}
+                  range={uncommittedAnalysis.range}
+                  scope={uncommittedAnalysis.scope}
+                />
+              ) : null}
+            </TabsContent>
+          </Tabs>
         ) : (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <CommitDetailsToolbar
-              total={total}
-              page={page}
-              pageSize={pageSize}
-              pageCount={pageCount}
-              fromIndex={fromIndex}
-              toIndex={toIndex}
-              pushedOnly={pushedOnly}
-              departmentValue={departmentValue}
-              loading={loading}
-              canPrev={canPrev}
-              canNext={canNext}
-              onPageChange={onPageChange}
-              onPushedOnlyChange={onPushedOnlyChange}
-              onDepartmentValueChange={onDepartmentValueChange}
-              onDepartmentSearch={onDepartmentSearch}
-              onClearDepartment={onClearDepartment}
-            />
-            <ScrollArea className="min-h-0 flex-1">
-              <div className="overflow-x-auto">
-                <table className="min-w-[1060px] w-full text-left">
-                  <thead className="sticky top-0 z-10 bg-background">
-                    <tr className="border-b border-border text-[11px] text-muted-foreground">
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">时间</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">用户</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">部门</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">仓库</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">分支</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">状态</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">关联 Skill</th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">
-                        <span className="inline-flex items-center gap-1">
-                          采纳率
-                          <HeaderHint hint="Agent 生成代码的采纳率" />
-                        </span>
-                      </th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">
-                        <span className="inline-flex items-center gap-1">
-                          变更
-                          <HeaderHint hint="git 提交的变更行数" />
-                        </span>
-                      </th>
-                      <th className="whitespace-nowrap px-3 py-2 font-medium">Thread</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.map((item) => (
-                      <CommitRow key={item.eventId} item={item} onOpenExternal={onOpenExternal} />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </ScrollArea>
-          </div>
+          commitContent
         )}
       </DialogContent>
+      <ThreadConversationDialog
+        commit={threadCommit}
+        threadScope={threadScope}
+        onOpenChange={(next) => {
+          if (!next) setThreadCommit(null)
+        }}
+      />
+      <CommitAdoptionTraceDialog
+        commit={traceCommit}
+        onOpenChange={(next) => {
+          if (!next) setTraceCommit(null)
+        }}
+        onViewThread={(threadId) => {
+          // 复用既有会话还原弹窗（ThreadConversationDialog），按单个会话作用域打开。
+          if (traceCommit) setThreadCommit({ ...traceCommit, threadIds: [threadId] })
+        }}
+      />
     </Dialog>
   )
 }

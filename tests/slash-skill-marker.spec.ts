@@ -26,6 +26,10 @@ function assert(cond: unknown, msg: string): void {
 async function testRoundTripSimple(): Promise<void> {
   const block = formatSkillUseBlock({ name: "pdf", path: "C:/skills/pdf/SKILL.md" })
   const message = `请用这个技能\n\n${block}`
+  assert(
+    block.includes("SKILL.md 所在目录解析"),
+    "renderer marker should tell the model to resolve relative skill paths from the skill directory"
+  )
 
   const renderer = parseRenderer(message)
   assert(renderer?.skillName === "pdf", `renderer parse name, got ${renderer?.skillName}`)
@@ -72,6 +76,10 @@ async function testMainFormatterRoundTrip(): Promise<void> {
   }
   const block = formatMainSkillUseBlock(skill)
   const message = `继续 goal\n\n${block}`
+  assert(
+    block.includes("SKILL.md 所在目录解析"),
+    "main marker should tell the model to resolve relative skill paths from the skill directory"
+  )
 
   for (const [label, parsed] of [
     ["renderer", parseRenderer(message)],

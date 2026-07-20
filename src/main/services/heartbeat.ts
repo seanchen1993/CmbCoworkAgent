@@ -1,8 +1,20 @@
 import { BrowserWindow } from "electron"
 import { HumanMessage } from "@langchain/core/messages"
-import { getHeartbeatConfig, getHeartbeatContent, saveHeartbeatConfig, getGlobalRoutingMode } from "../storage"
+import {
+  getHeartbeatConfig,
+  getHeartbeatContent,
+  saveHeartbeatConfig,
+  getGlobalRoutingMode
+} from "../storage"
 import { resolveModel } from "../routing"
-import { createAgentRuntime, getCheckpointer, closeCheckpointer } from "../agent/runtime"
+import {
+  createAgentRuntime,
+  getCheckpointer,
+  closeCheckpointer,
+  pinCheckpointer,
+  reviveRetiredThread
+} from "../agent/runtime"
+import { reviveWorkflowThread } from "../agent/workflow/run-store"
 import {
   createThread as dbCreateThread,
   getThread as dbGetThread,
@@ -10,6 +22,8 @@ import {
 } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyIfBackground } from "./notify"
+import { emitAppAttention } from "../app-attention-events"
+import { trackEvent } from "./event-reporter"
 
 /** Fixed thread ID for heartbeat (aligns with Nanobot session_key="heartbeat"). Resets won't orphan it. */
 const HEARTBEAT_THREAD_ID = "heartbeat"
@@ -17,6 +31,7 @@ const HEARTBEAT_THREAD_ID = "heartbeat"
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 let running = false
 let abortController: AbortController | null = null
+let shuttingDown = false
 
 function notifyRenderer(channel: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -106,7 +121,11 @@ function stripTokenAtEdges(raw: string): { text: string; didStrip: boolean } {
  * Ported from Moltbot's stripHeartbeatToken.
  * Returns shouldSkip=true when the reply is just an ack with no real content.
  */
-function stripHeartbeatToken(raw: string): { shouldSkip: boolean; text: string; didStrip: boolean } {
+function stripHeartbeatToken(raw: string): {
+  shouldSkip: boolean
+  text: string
+  didStrip: boolean
+} {
   const trimmed = raw.trim()
   if (!trimmed) return { shouldSkip: true, text: "", didStrip: false }
 
@@ -129,6 +148,7 @@ function stripHeartbeatToken(raw: string): { shouldSkip: boolean; text: string; 
 
 export function startHeartbeat(): void {
   console.log("[Heartbeat] Starting heartbeat service")
+  shuttingDown = false
   scheduleNext(true)
 }
 
@@ -137,11 +157,14 @@ export function stopHeartbeat(): void {
     clearTimeout(tickTimer)
     tickTimer = null
   }
-  if (abortController) {
-    abortController.abort()
-    abortController = null
-  }
-  running = false
+  // Abort only — do NOT drop `running` or null the shared controller here.
+  // The owning executeHeartbeat is still unwinding after this abort (model
+  // call, checkpoint close): `running` is runNow's re-entry gate, and
+  // releasing it early lets a new run start while the old close is mid-flush
+  // — the new run pins first, skips the pending-close wait, and dual-writes
+  // the same sqlite file. The run's own finally clears both (identity-checked)
+  // after its close settles.
+  abortController?.abort()
   console.log("[Heartbeat] Stopped heartbeat service")
 }
 
@@ -155,6 +178,7 @@ export function restartHeartbeat(): void {
 }
 
 function scheduleNext(compensate = false): void {
+  if (shuttingDown) return
   const config = getHeartbeatConfig()
   if (!config.enabled) {
     console.log("[Heartbeat] Disabled, not scheduling")
@@ -186,6 +210,7 @@ function tick(): void {
 }
 
 export async function runHeartbeatNow(): Promise<void> {
+  if (shuttingDown) throw new Error("The application is quitting; heartbeat cannot start.")
   if (running) throw new Error("Heartbeat is already running")
   await executeHeartbeat()
 }
@@ -200,64 +225,127 @@ export function isHeartbeatRunning(): boolean {
   return running
 }
 
+export async function stopHeartbeatAndWait(timeoutMs = 5_000): Promise<void> {
+  shuttingDown = true
+  stopHeartbeat()
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (running && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+  }
+  if (running) {
+    console.warn("[Heartbeat] Timed out waiting for the active run to settle")
+  }
+}
+
 async function executeHeartbeat(): Promise<void> {
-  const config = getHeartbeatConfig()
-  if (!config.workDir) {
-    saveHeartbeatConfig({ lastRunStatus: "error", lastRunError: "No workspace configured", lastRunAt: new Date().toISOString() })
-    notifyRenderer("heartbeat:changed")
-    return
-  }
-  const globalRoutingMode = getGlobalRoutingMode()
-  const routingResult = await resolveModel({
-    taskSource: "heartbeat",
-    threadId: HEARTBEAT_THREAD_ID,
-    requestedModelId: config.modelId || undefined,
-    routingMode: globalRoutingMode
-  }).catch(() => null)
-
-  const effectiveModelId = routingResult?.resolvedModelId ?? config.modelId ?? undefined
-
-  if (!effectiveModelId) {
-    saveHeartbeatConfig({ lastRunStatus: "error", lastRunError: "No model configured", lastRunAt: new Date().toISOString() })
-    notifyRenderer("heartbeat:changed")
-    return
-  }
-
-  const content = getHeartbeatContent()
-  if (!content || isContentEmpty(content)) {
-    console.log("[Heartbeat] HEARTBEAT.md is empty, skipping")
-    saveHeartbeatConfig({ lastRunStatus: "skipped", lastRunError: null, lastRunAt: new Date().toISOString() })
-    notifyRenderer("heartbeat:changed")
-    return
-  }
-
+  // Re-entry gate set SYNCHRONOUSLY, before the first await: runNow and the
+  // scheduler wake fire-and-forget this function, so a gate set after
+  // resolveModel() let a second trigger pass isHeartbeatRunning() during
+  // routing — two concurrent beats then race getCheckpointer's
+  // create-then-cache window and can put TWO savers on the same fixed-id
+  // sqlite. Every exit below (including the pre-run gates) flows through the
+  // finally, which restores the gate.
   running = true
-  abortController = new AbortController()
+  // Local ownership: every signal read below uses THIS controller, so a stop
+  // racing the run can never null-deref the shared slot mid-loop; the finally
+  // clears the shared slot identity-checked.
+  const controller = new AbortController()
+  abortController = controller
   notifyRenderer("heartbeat:changed")
 
   const threadId = HEARTBEAT_THREAD_ID
-
-  // Ensure thread exists in DB and metadata stays current
-  const existing = dbGetThread(threadId)
-  if (!existing) {
-    dbCreateThread(threadId, {
-      workspacePath: config.workDir,
-      title: "[Heartbeat] 心跳检查",
-      isHeartbeat: true
-    })
-    notifyRenderer("threads:changed")
-  } else {
-    const meta = existing.metadata ? JSON.parse(existing.metadata) : {}
-    if (meta.workspacePath !== config.workDir) {
-      dbUpdateThread(threadId, {
-        metadata: JSON.stringify({ ...meta, workspacePath: config.workDir })
-      })
-    }
-  }
-
   const channel = `heartbeat:stream:${threadId}`
+  // Baseline for telemetry; only outcomes past the gates emit run events, so
+  // setting it before the gates adds no phantom "real run" metrics.
+  const runStartedAt = Date.now()
+  // Pinned only after the pre-run gates pass; the finally must not close a
+  // checkpointer this run never opened.
+  let releaseCheckpointerPin: (() => void) | null = null
 
   try {
+    const config = getHeartbeatConfig()
+    if (!config.workDir) {
+      saveHeartbeatConfig({
+        lastRunStatus: "error",
+        lastRunError: "No workspace configured",
+        lastRunAt: new Date().toISOString()
+      })
+      notifyRenderer("heartbeat:changed")
+      return
+    }
+    const globalRoutingMode = getGlobalRoutingMode()
+    const routingResult = await resolveModel({
+      taskSource: "heartbeat",
+      threadId: HEARTBEAT_THREAD_ID,
+      requestedModelId: config.modelId || undefined,
+      routingMode: globalRoutingMode
+    }).catch(() => null)
+
+    const effectiveModelId = routingResult?.resolvedModelId ?? config.modelId ?? undefined
+
+    if (!effectiveModelId) {
+      saveHeartbeatConfig({
+        lastRunStatus: "error",
+        lastRunError: "No model configured",
+        lastRunAt: new Date().toISOString()
+      })
+      notifyRenderer("heartbeat:changed")
+      return
+    }
+
+    const content = getHeartbeatContent()
+    if (!content || isContentEmpty(content)) {
+      console.log("[Heartbeat] HEARTBEAT.md is empty, skipping")
+      saveHeartbeatConfig({
+        lastRunStatus: "skipped",
+        lastRunError: null,
+        lastRunAt: new Date().toISOString()
+      })
+      notifyRenderer("heartbeat:changed")
+      return
+    }
+
+    releaseCheckpointerPin = pinCheckpointer(threadId)
+
+    // Assert the fixed heartbeat id alive on EVERY beat, not only when the DB
+    // row is missing. Thread deletion tombstones the id (runtime checkpointer +
+    // workflow run-store); a beat racing that deletion can recreate the row
+    // BEFORE the deletion's late retire lands, which re-tombstones the new
+    // incarnation — and with the row now present, a row-missing-only revive
+    // would never run again (stuck until restart). Re-asserting here makes any
+    // such re-kill converge within one beat cycle. Inside try/finally so an
+    // ensure failure still restores `running` and the pin.
+    reviveRetiredThread(threadId)
+    reviveWorkflowThread(threadId)
+
+    // Ensure thread exists in DB and metadata stays current. `model` mirrors the
+    // heartbeat's selected model into the thread metadata so ModelSwitcher shows
+    // it on idle open (hydration reads metadata.model); without it currentModel
+    // hydrates empty and the footer falls back to models[0]. The live routing_result
+    // event above covers the running case; this covers the idle case. effectiveModelId
+    // is guaranteed non-empty here by the gate above.
+    const existing = dbGetThread(threadId)
+    if (!existing) {
+      dbCreateThread(threadId, {
+        workspacePath: config.workDir,
+        title: "[Heartbeat] 心跳检查",
+        isHeartbeat: true,
+        model: effectiveModelId
+      })
+      notifyRenderer("threads:changed")
+    } else {
+      const meta = existing.metadata ? JSON.parse(existing.metadata) : {}
+      if (meta.workspacePath !== config.workDir || meta.model !== effectiveModelId) {
+        dbUpdateThread(threadId, {
+          metadata: JSON.stringify({
+            ...meta,
+            workspacePath: config.workDir,
+            model: effectiveModelId
+          })
+        })
+      }
+    }
+
     // Snapshot pre-heartbeat checkpoint so we can restore if HEARTBEAT_OK
     const checkpointer = await getCheckpointer(threadId)
     const preHeartbeatSnapshot = await checkpointer.getTuple({
@@ -280,7 +368,7 @@ async function executeHeartbeat(): Promise<void> {
       extraSystemPrompt: heartbeatContext,
       enableAgentsPrompt: false,
       noSchedulerTool: true,
-      abortSignal: abortController.signal
+      abortSignal: controller.signal
     })
 
     const converter = new StreamConverter()
@@ -288,7 +376,7 @@ async function executeHeartbeat(): Promise<void> {
       { messages: [new HumanMessage(config.prompt)] },
       {
         configurable: { thread_id: threadId },
-        signal: abortController.signal,
+        signal: controller.signal,
         streamMode: ["messages", "values"],
         recursionLimit: 1000
       }
@@ -297,8 +385,27 @@ async function executeHeartbeat(): Promise<void> {
     let fullReply = ""
     broadcastToChannel(channel, { type: "started" })
 
+    // Surface the actually-used model to the renderer. The heartbeat thread never
+    // persists a model to its metadata (its selection lives in heartbeat-config),
+    // and this stream — unlike the chat agent path — otherwise emits no
+    // routing_result, so the footer's currentModel stays empty and ModelSwitcher
+    // falls back to models[0] (always "first model"). This mirrors the chat path's
+    // custom/routing_result envelope; handleCustomEvent syncs currentModel from it
+    // (in-memory only, not written back to metadata).
+    if (effectiveModelId) {
+      broadcastToChannel(channel, {
+        type: "custom",
+        data: {
+          type: "routing_result",
+          resolvedModelId: effectiveModelId,
+          resolvedTier: routingResult?.resolvedTier ?? "premium",
+          routeReason: routingResult?.routeReason ?? "heartbeat-config"
+        }
+      })
+    }
+
     for await (const chunk of stream) {
-      if (abortController.signal.aborted) break
+      if (controller.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
       const serialized = JSON.parse(JSON.stringify(data))
       const events = converter.processChunk(mode, serialized)
@@ -317,10 +424,9 @@ async function executeHeartbeat(): Promise<void> {
       // Restore pre-heartbeat checkpoint: only prune this HEARTBEAT_OK round,
       // preserving any previous actionable history. Aligns with Moltbot's pruneHeartbeatTranscript.
       try {
-        const cp = await getCheckpointer(threadId)
-        await cp.deleteThread(threadId)
+        await checkpointer.deleteThread(threadId)
         if (preHeartbeatSnapshot?.metadata) {
-          await cp.put(
+          await checkpointer.put(
             preHeartbeatSnapshot.config,
             preHeartbeatSnapshot.checkpoint,
             preHeartbeatSnapshot.metadata
@@ -336,6 +442,15 @@ async function executeHeartbeat(): Promise<void> {
         lastRunError: null
       })
       console.log("[Heartbeat] Completed, HEARTBEAT_OK (silent, no action needed)")
+      try {
+        trackEvent("heartbeat.run.completed", "heartbeat", {
+          outcome: "silent",
+          durationMs: Date.now() - runStartedAt,
+          replyChars: fullReply.length
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit heartbeat.run.completed:", e)
+      }
     } else {
       saveHeartbeatConfig({
         lastRunAt: new Date().toISOString(),
@@ -343,23 +458,63 @@ async function executeHeartbeat(): Promise<void> {
         lastRunError: null
       })
       notifyIfBackground("💓 Heartbeat", stripped.text.trim() || "检查完成，有需要关注的内容")
+      emitAppAttention({
+        kind: "interaction",
+        threadId
+      })
       console.log("[Heartbeat] Completed with actionable output")
+      try {
+        trackEvent("heartbeat.run.completed", "heartbeat", {
+          outcome: "actionable",
+          durationMs: Date.now() - runStartedAt,
+          replyChars: fullReply.length
+        })
+      } catch (e) {
+        console.warn("[event] failed to emit heartbeat.run.completed:", e)
+      }
     }
   } catch (error) {
-    const isAbort = error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
-    const message = isAbort ? "Cancelled" : (error instanceof Error ? error.message : String(error))
+    const isAbort =
+      error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
+    const message = isAbort ? "Cancelled" : error instanceof Error ? error.message : String(error)
     broadcastToChannel(channel, { type: "done" })
     saveHeartbeatConfig({
       lastRunAt: new Date().toISOString(),
       lastRunStatus: "error",
       lastRunError: message
     })
-    if (!isAbort) notifyIfBackground("❌ Heartbeat", message)
+    if (!isAbort) {
+      notifyIfBackground("❌ Heartbeat", message)
+      emitAppAttention({
+        kind: "task-error",
+        threadId
+      })
+    }
     console.error("[Heartbeat] Error:", message)
+    try {
+      trackEvent("heartbeat.run.completed", "heartbeat", {
+        outcome: isAbort ? "cancelled" : "error",
+        durationMs: Date.now() - runStartedAt
+      })
+    } catch (e) {
+      console.warn("[event] failed to emit heartbeat.run.completed:", e)
+    }
   } finally {
+    // Identity-checked: never clobber a NEWER run's controller (defense in
+    // depth — the `running` gate should already prevent overlap).
+    if (abortController === controller) abortController = null
+    releaseCheckpointerPin?.()
+    // Close BEFORE dropping `running`: runHeartbeatNow gates on that flag, and
+    // a manual run landing inside this close window would pin first — pinned
+    // threads skip the pending-close wait in getCheckpointer — creating a
+    // second saver instance that writes the same file the old close is still
+    // flushing (dual writer). Keeping the flag up until the close settles makes
+    // re-entry wait it out instead. Skipped when the pre-run gates bailed —
+    // this run never opened a checkpointer, so there is nothing to close.
+    if (releaseCheckpointerPin) {
+      await closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
+    }
     running = false
-    abortController = null
-    closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
     notifyRenderer("heartbeat:changed")
     notifyRenderer("threads:changed")
   }

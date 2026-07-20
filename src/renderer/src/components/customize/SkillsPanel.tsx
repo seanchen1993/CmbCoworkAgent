@@ -7,6 +7,7 @@ import {
   FileText,
   Folder,
   GitBranch,
+  Info,
   Plus,
   Power,
   Radio,
@@ -1004,17 +1005,26 @@ function SkillsGuide(): React.JSX.Element {
                   <code className="mx-1 font-mono text-foreground/85">description</code>
                   等元信息，也会加载
                   <code className="mx-1 font-mono text-foreground/85">hooks</code>
-                  字段里的配套 Skill Hook。frontmatter 后面的正文仍是技能说明，会按正常技能内容读取。
+                  字段里的配套 Skill Hook。frontmatter
+                  后面的正文仍是技能说明，会按正常技能内容读取。
                 </p>
                 <p>
-                  如果某个 Skill Hook 需要在技能触发后于本会话持续生效，可以在该 Hook 上加
-                  <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt: true</code>
-                  ；这个字段只对技能 / 插件 Hook 有意义，并且按 Hook 自己的身份持久化。
+                  如果某个 Skill Hook 需要在技能触发后于当前线程持续生效，可以在该 Hook 上加
+                  <code className="mx-1 font-mono text-foreground/85">
+                    persistAfterInterrupt: true
+                  </code>
+                  ；这个字段只对技能 / 插件 Hook 有意义，并且按 Hook 自己的身份持久化到线程。
                 </p>
                 <p>
                   一个技能目录下如果还有子目录包含
                   <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
                   ，会被识别为独立的子技能；系统按目录路径区分父子技能和同名技能。
+                </p>
+                <p>
+                  技能说明中提到的相对脚本、资源和模板路径，会按当前
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  所在目录解析；这只用于技能脚本定位，不会改变工作区 Hook 的
+                  <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>。
                 </p>
                 <p>
                   应用里会区分内置技能和自定义技能；内置技能不可删除，自定义技能可以上传、禁用、编辑和删除。
@@ -1046,7 +1056,7 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   父技能和子技能都支持
                   <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>
-                  ，是否在会话后续轮次继续命中由各自 Hook 自己决定。
+                  ，是否在当前线程后续轮次继续命中由各自 Hook 自己决定。
                 </p>
               </div>
             </SkillGuideSubSection>
@@ -1067,6 +1077,11 @@ function SkillsGuide(): React.JSX.Element {
                   作为主技能；如果包含子技能且子技能名称与已有技能重复，会先提示确认。
                 </p>
                 <p>上传后可以在左侧展开目录、右侧预览文件内容，也可以随时切换技能启用状态。</p>
+                <p>
+                  如果普通技能与插件自带技能同名，斜杠列表会同时展示两个入口并标明来源；选中后按对应
+                  <code className="mx-1 font-mono text-foreground/85">SKILL.md</code>
+                  绝对路径执行，插件自带技能仍由插件管理。
+                </p>
                 <p>禁用技能后，该技能本体和它附带的 Skill Hook 会一起失效。</p>
               </div>
             </SkillGuideSubSection>
@@ -1172,8 +1187,8 @@ function SkillsGuide(): React.JSX.Element {
                   会继续生效；同一个技能同一轮只会做一次激活记录，避免重复读取时反复触发激活 Hook。
                 </p>
                 <p>
-                  父技能和子技能互相独立：只选子技能时只触发子技能目录下的 Hook，不会自动触发父技能 Hook；只选父技能时也不会自动触发子技能
-                  Hook。
+                  父技能和子技能互相独立：只选子技能时只触发子技能目录下的 Hook，不会自动触发父技能
+                  Hook；只选父技能时也不会自动触发子技能 Hook。
                 </p>
                 <p>禁用某个技能后，该技能本体和它目录下的 Skill Hook 会一起失效。</p>
               </div>
@@ -1191,20 +1206,19 @@ function SkillsGuide(): React.JSX.Element {
                   <code>{SKILL_HOOK_FRONTMATTER_EXAMPLE}</code>
                 </pre>
                 <p>
-                frontmatter 使用 YAML，字段无需加引号；内部
-                <code className="mx-1 font-mono text-foreground/85">hooks</code>
-                结构与 Claude Code hooks settings 一致，并支持
-                <code className="mx-1 font-mono text-foreground/85">once</code>、
-                <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
-                <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
-                <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>、
-                <code className="mx-1 font-mono text-foreground/85">forcedReason</code>、
-                <code className="mx-1 font-mono text-foreground/85">onBlock</code>和
-                <code className="mx-1 font-mono text-foreground/85">modelId</code>。
+                  frontmatter 使用 YAML，字段无需加引号；内部
+                  <code className="mx-1 font-mono text-foreground/85">hooks</code>
+                  结构与 Claude Code hooks settings 一致，并支持
+                  <code className="mx-1 font-mono text-foreground/85">once</code>、
+                  <code className="mx-1 font-mono text-foreground/85">persistAfterInterrupt</code>、
+                  <code className="mx-1 font-mono text-foreground/85">timeoutMs</code>、
+                  <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>、
+                  <code className="mx-1 font-mono text-foreground/85">forcedReason</code>、
+                  <code className="mx-1 font-mono text-foreground/85">onBlock</code>和
+                  <code className="mx-1 font-mono text-foreground/85">modelId</code>。
                 </p>
                 <p>
-                  对
-                  <code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>/
+                  对<code className="mx-1 font-mono text-foreground/85">PreSkillUse</code>/
                   <code className="mx-1 font-mono text-foreground/85">PostSkillUse</code>
                   ，如果 frontmatter 里的
                   <code className="mx-1 font-mono text-foreground/85">matcher</code>
@@ -1251,8 +1265,7 @@ function SkillsGuide(): React.JSX.Element {
                   Skill Hook 的命令默认在技能目录执行，
                   <code className="mx-1 font-mono text-foreground/85">cwd</code>
                   不是当前项目工作区。Skill Hook 里
-                  <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>
-                  与
+                  <code className="mx-1 font-mono text-foreground/85">HOOK_SOURCE_ROOT</code>与
                   <code className="mx-1 font-mono text-foreground/85">SKILL_ROOT</code>
                   通常相同；要访问用户当前工作区，请优先读取
                   <code className="mx-1 font-mono text-foreground/85">WORKSPACE_PATH</code>
@@ -1310,7 +1323,8 @@ function SkillsGuide(): React.JSX.Element {
                 </div>
                 <div className="space-y-2">
                   <p>
-                    如果确实要把工作区路径作为命令参数传入，Windows 下可以这样写；跨平台脚本仍建议读取环境变量：
+                    如果确实要把工作区路径作为命令参数传入，Windows
+                    下可以这样写；跨平台脚本仍建议读取环境变量：
                   </p>
                   <pre className="overflow-x-auto rounded-md border border-border/40 bg-background p-3 text-xs leading-5 text-foreground">
                     <code>{SKILL_HOOK_WINDOWS_ARG_EXAMPLE}</code>
@@ -1333,9 +1347,10 @@ function SkillsGuide(): React.JSX.Element {
                     不同事件还会补充
                     <code className="mx-1 font-mono text-foreground/85">prompt</code>、
                     <code className="mx-1 font-mono text-foreground/85">tool_response</code>、
-                    <code className="mx-1 font-mono text-foreground/85">skill_trigger_tool_name</code>、
-                    <code className="mx-1 font-mono text-foreground/85">subagent</code>
-                    和
+                    <code className="mx-1 font-mono text-foreground/85">
+                      skill_trigger_tool_name
+                    </code>
+                    、<code className="mx-1 font-mono text-foreground/85">subagent</code>和
                     <code className="mx-1 font-mono text-foreground/85">stop_context</code>
                     等字段；完整字段以“自定义 &gt; 钩子”的事件协议说明为准。
                   </p>
@@ -1349,16 +1364,15 @@ function SkillsGuide(): React.JSX.Element {
             >
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  命令 Hook 的调试日志建议写到 stderr；stdout 必须输出纯 JSON 才会被当成
-                  Hook 返回值解析，不要额外包单引号、markdown 或混入调试日志。
+                  命令 Hook 的调试日志建议写到 stderr；stdout 必须输出纯 JSON 才会被当成 Hook
+                  返回值解析，不要额外包单引号、markdown 或混入调试日志。
                 </p>
                 <p>
                   常用返回包括
                   <code className="mx-1 font-mono text-foreground/85">decision="block"</code>、
                   <code className="mx-1 font-mono text-foreground/85">reason</code>、
                   <code className="mx-1 font-mono text-foreground/85">systemMessage</code>、
-                  <code className="mx-1 font-mono text-foreground/85">additionalContext</code>
-                  和
+                  <code className="mx-1 font-mono text-foreground/85">additionalContext</code>和
                   <code className="mx-1 font-mono text-foreground/85">requiredSkill</code>
                   ；命令返回
                   <code className="mx-1 font-mono text-foreground/85">exit=2</code>
@@ -1366,12 +1380,12 @@ function SkillsGuide(): React.JSX.Element {
                 </p>
                 <p>
                   所有事件都支持
-                  <code className="mx-1 font-mono text-foreground/85">continue=false</code>
-                  +
+                  <code className="mx-1 font-mono text-foreground/85">continue=false</code>+
                   <code className="mx-1 font-mono text-foreground/85">stopReason</code>
                   ，优先级高于
                   <code className="mx-1 font-mono text-foreground/85">decision=block</code>
-                  ：Stop / PostSkillUse 上是真的终止整轮；Pre / Post 工具事件上等同强制阻断该次操作。
+                  ：Stop / PostSkillUse 上是真的终止整轮；Pre / Post
+                  工具事件上等同强制阻断该次操作。
                 </p>
                 <p>
                   如果不想让脚本动态决定，可以在 Hook 配置里直接锁定行为：
@@ -1649,7 +1663,12 @@ export function SkillsPanel(): React.JSX.Element {
   const handleDeleteSkill = useCallback(
     async (skill: SkillMetadata) => {
       if (!window.api?.skills?.delete) return
-      if (!confirm(`确定要删除技能「${skill.name}」吗？\n\n特别注意：删除后的技能文件不会进入垃圾箱，会直接从磁盘移除。`)) return
+      if (
+        !confirm(
+          `确定要删除技能「${skill.name}」吗？\n\n特别注意：删除后的技能文件不会进入垃圾箱，会直接从磁盘移除。`
+        )
+      )
+        return
       const res = await window.api.skills.delete(skill.path)
       if (res.success) {
         removeLocalUploadedSkillPathFromStorage(skill.path)
@@ -1973,6 +1992,18 @@ export function SkillsPanel(): React.JSX.Element {
               <span className="relative">去应用市场</span>
               <ChevronRight className="relative size-3 text-primary/80 transition-transform duration-200 group-hover:translate-x-0.5" />
             </Button>
+            <div className="rounded-md border border-sky-200/70 bg-sky-50/80 px-2.5 py-2 text-[11px] leading-4 text-sky-900 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
+              <div className="flex items-start gap-1.5">
+                <Info className="mt-0.5 size-3 shrink-0" />
+                <p>
+                  这里管理普通技能。与插件技能同名时，斜杠列表会同时显示并用来源区分；技能说明中的相对脚本路径按
+                  <code className="mx-0.5 rounded bg-sky-100 px-1 dark:bg-sky-500/20">
+                    SKILL.md
+                  </code>
+                  所在目录解析。
+                </p>
+              </div>
+            </div>
           </div>
         </div>
         <ScrollArea className="flex-1">
@@ -2480,14 +2511,14 @@ function SkillTreeList(props: {
   return (
     <div className="space-y-2">
       {nodes.map((node) => {
-          const childCount = node.children.reduce(
-            (sum, child) => sum + countSkillTreeSkills(child),
-            0
-          )
-          const childrenExpanded = expandedSkillTreeNodes.has(node.key)
+        const childCount = node.children.reduce(
+          (sum, child) => sum + countSkillTreeSkills(child),
+          0
+        )
+        const childrenExpanded = expandedSkillTreeNodes.has(node.key)
 
-          return (
-            <div key={node.key} className="space-y-1.5">
+        return (
+          <div key={node.key} className="space-y-1.5">
             {node.skill ? (
               (() => {
                 const skill = node.skill
@@ -3122,12 +3153,34 @@ export function SkillDetail(props: {
               <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
                 {description}
               </p>
+              <div className="flex items-start gap-2 rounded-lg border border-sky-200/70 bg-sky-50/80 px-3 py-2.5 text-xs leading-relaxed text-sky-900 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
+                <Info className="mt-0.5 size-3.5 shrink-0" />
+                <div className="space-y-1">
+                  <p className="font-medium">运行规则</p>
+                  <p>
+                    与插件技能同名时，斜杠列表会同时显示并用来源区分；选中后按对应
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">
+                      SKILL.md
+                    </code>
+                    绝对路径执行。相对脚本、资源和模板路径按
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">
+                      SKILL.md
+                    </code>
+                    所在目录解析，不会改写工作区 Hook 的
+                    <code className="mx-1 rounded bg-sky-100 px-1 dark:bg-sky-500/20">
+                      WORKSPACE_PATH
+                    </code>
+                    。
+                  </p>
+                </div>
+              </div>
               {skillVersionMissingInFrontmatter && (
                 <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
                   <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
                   <p>
-                    当前没有在 <code className="rounded bg-amber-100 px-1">SKILL.md frontmatter</code>{" "}
-                    里找到 <code className="rounded bg-amber-100 px-1">version</code>，系统当前按{" "}
+                    当前没有在{" "}
+                    <code className="rounded bg-amber-100 px-1">SKILL.md frontmatter</code> 里找到{" "}
+                    <code className="rounded bg-amber-100 px-1">version</code>，系统当前按{" "}
                     <code className="rounded bg-amber-100 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
                     处理。建议补上 version，方便发布、追踪和版本识别。
                   </p>
@@ -3163,7 +3216,7 @@ export function SkillDetail(props: {
       ) : (
         <ScrollArea className="flex-1">
           <div className="space-y-3">
-            <div className="rounded-lg bg-background/70 p-3">
+            <div className="rounded-lg border border-border/70 bg-background/70 px-3">
               {isLoading ? (
                 <p className="text-sm text-muted-foreground">加载中...</p>
               ) : previewKind === "image" && binaryDataUrl ? (

@@ -20,6 +20,19 @@ export type HarnessNodeStatus =
   | "in_progress"
   | "done"
   | "blocked"
+  | "warning"
+  | "error"
+  | "skipped"
+  | "archived"
+  | "unknown"
+
+export type HarnessFeatureStatus =
+  | "not_started"
+  | "in_progress"
+  | "done"
+  | "blocked"
+  | "warning"
+  | "error"
   | "skipped"
   | "archived"
   | "unknown"
@@ -53,7 +66,103 @@ export interface HarnessAdapterSnapshot {
 
 export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   description: string
+  useScenario?: string
+  developerName?: string
+  developerSapId?: string
+  organizationName?: string
+  pullKnowledgeAvailable?: boolean
   boardCompatibility: HarnessBoardCompatibility
+}
+
+export interface HarnessProjectConstraintSyncResult {
+  adapterId: string
+  adapterName: string
+  message?: string
+  path?: string
+}
+
+export interface HarnessKnowledgePreviewFile {
+  path: string
+  is_dir: boolean
+  size?: number
+  modified_at?: string
+}
+
+export interface HarnessKnowledgePreviewResult {
+  adapterId: string
+  adapterName: string
+  configured: boolean
+  exists: boolean
+  path?: string
+  files: HarnessKnowledgePreviewFile[]
+  error?: string
+}
+
+export interface HarnessDeployUnitMapping {
+  deployUnitIdMapping: string
+  deployUnitId: string
+  localRepoPath: string
+  description?: string
+}
+
+export interface HarnessLeanTokenConfig {
+  leanToken: string
+}
+
+export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
+
+export interface HarnessAgentmdLoadStatusItem {
+  deployUnitId: string
+  path: string
+  loaded: boolean
+  source: string
+  message: string
+}
+
+export interface HarnessFeatureDeployUnitBinding {
+  projectId: string
+  featureId: string
+  selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+  sessionContextInjectionSource: HarnessSessionContextInjectionSource
+}
+
+function normalizeHarnessText(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+function isHarnessPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+}
+
+export function normalizeHarnessAgentmdLoadStatus(
+  value: unknown
+): HarnessAgentmdLoadStatusItem[] {
+  if (!Array.isArray(value)) return []
+  const status: HarnessAgentmdLoadStatusItem[] = []
+  for (const item of value) {
+    if (!isHarnessPlainObject(item)) continue
+    const deployUnitId = normalizeHarnessText(item.deployUnitId).trim()
+    const path = normalizeHarnessText(item.path).trim()
+    if (!deployUnitId && !path) continue
+    status.push({
+      deployUnitId: deployUnitId || "(unknown)",
+      path,
+      loaded: item.loaded === true,
+      source: normalizeHarnessText(item.source).trim(),
+      message: normalizeHarnessText(item.message).trim()
+    })
+  }
+  return status
+}
+
+export interface HarnessProjectCreatorMetadata {
+  sapId?: string
+  ystId?: string
+  userName?: string
+  orgName?: string
+  pathName?: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
 }
 
 export interface HarnessProjectMetadata {
@@ -61,10 +170,14 @@ export interface HarnessProjectMetadata {
   name: string
   description: string
   projectCode: string
+  projectFromLean: boolean
+  projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
   "harness-adapter": HarnessAdapterSnapshot
+  creator?: HarnessProjectCreatorMetadata
   lifecycle: {
     status: "active" | "archived"
     createAt: string
@@ -77,15 +190,74 @@ export interface HarnessProjectCreateInput {
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
+  projectFromLean: boolean
+  projectDir: string
   description: string
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
+}
+
+export interface HarnessEnterpriseProjectSearchInput {
+  keyword: string
+  field?: "name" | "code"
+}
+
+export interface HarnessEnterpriseProjectSearchItem {
+  projectCode: string
+  projectName: string
+  pm: string
+  systemId: string
+  systemName: string
+}
+
+export interface HarnessEnterpriseProjectSearchResult {
+  projects: HarnessEnterpriseProjectSearchItem[]
+  total: number
+  hasMore: boolean
+}
+
+export interface HarnessEnterpriseProjectDetailInput {
+  prjCodeList: string[]
+}
+
+export interface HarnessEnterpriseProjectDetailItem extends HarnessEnterpriseProjectSearchItem {
+  status: string
+  phaseStatus: string
+  baselineEndDate: string
+}
+
+export interface HarnessEnterpriseProjectDetailResult {
+  projects: HarnessEnterpriseProjectDetailItem[]
+}
+
+export interface HarnessProjectReviewInput {
+  projectCode: string
+}
+
+export interface HarnessProjectReviewItem {
+  title: string
+  type: string
+  start_time: string
+  end_time: string
+  creator: string
+  members: string
+}
+
+export interface HarnessProjectReviewResult {
+  tokenConfigured: boolean
+  reviews: HarnessProjectReviewItem[]
 }
 
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
+  selectedDeployUnits?: HarnessDeployUnitMapping[]
+  sessionContextInjectionSource?: HarnessSessionContextInjectionSource
+  workflowTemplate?: string
+  workflowNodes?: string[]
+  workflowConfig?: HarnessDynamicWorkflowConfig
 }
 
 export interface HarnessFeatureCreateResult {
@@ -95,15 +267,30 @@ export interface HarnessFeatureCreateResult {
   workspacePath: string
 }
 
+export interface HarnessSkipNodeInput {
+  projectId: string
+  slug: string
+  nodeId: string
+}
+
+export interface HarnessSkipNodeResult {
+  projectId: string
+  slug: string
+  nodeId: string
+}
+
 export interface HarnessProjectMetadataUpdateInput {
   adapterId: string
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
+  projectFromLean: boolean
+  projectDir: string
   description: string
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
 }
 
 export interface HarnessProjectListItem {
@@ -111,17 +298,26 @@ export interface HarnessProjectListItem {
   name: string
   description: string
   projectCode: string
+  projectFromLean: boolean
+  projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
+  sessionWorkspacePath?: string
   harnessAdapter: {
     id: string
     name: string
     type: HarnessAdapterType
   }
+  creator?: HarnessProjectCreatorMetadata
   boardCompatibility: HarnessBoardCompatibility
+  supportsDeployUnits: boolean
+  supportsSessionContextInjection: boolean
   lifecycle: {
     status: "active" | "archived"
+    createAt: string
+    /** Last lifecycle/metadata change (set on metadata edit and on archive). */
+    updateAt?: string
   }
 }
 
@@ -154,11 +350,14 @@ export interface HarnessFeatureSummary {
   slug: string
   title: string
   location: "active" | "archived" | string
+  featureStatus: HarnessFeatureStatus
+  featureStatusLabel?: string
   /**
-   * Feature-level status derived for summary cards. It is not the display value
-   * of the current node state unless the workflow has reached its final node.
+   * Feature-level status for summary cards. Plugins can provide it explicitly;
+   * otherwise the framework derives it from the current node and workflow.
    */
   overallStatus: HarnessStatus
+  nodeIds: string[]
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
   currentNodeStatusLabel?: string
@@ -173,9 +372,11 @@ export interface HarnessProjectDetailViewModel {
     projectId: string
     name: string
     projectCode: string
+    projectDir: string
     systemId: string
     systemName: string
     workspacePath: string
+    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -185,15 +386,45 @@ export interface HarnessProjectDetailViewModel {
   projectState?: HarnessStatus
   workflow: HarnessWorkflow
   runs: HarnessFeatureSummary[]
+  systemConstraintUpdate?: {
+    syncType: "invoke_session"
+    nextAction: HarnessWorkflowNextAction
+    knowledgePath?: string
+  }
   watchRefs: HarnessWatchRef[]
   loading: boolean
   error: string | null
+}
+
+export interface HarnessDynamicWorkflowTemplate {
+  id: string
+  templateType: string
+  label: string
+  description: string
+  nodes: string[]
+  requiredNodes: string[]
+}
+
+export interface HarnessDynamicWorkflowNode {
+  id: string
+  label: string
+  group?: string
+  description: string
+}
+
+export interface HarnessDynamicWorkflowConfig {
+  templates: HarnessDynamicWorkflowTemplate[]
+  nodes: HarnessDynamicWorkflowNode[]
 }
 
 export interface HarnessWorkflowNextAction {
   slashSkill?: string
   userMessage?: string
   dialogTips?: string
+  preferredPlugin?: {
+    id?: string
+    name?: string
+  }
 }
 
 export interface HarnessWorkflowStateDefinition {
@@ -214,12 +445,7 @@ export type HarnessArtifactType =
   | "virtual"
   | "unknown"
 
-export type HarnessArtifactStatus =
-  | "generated"
-  | "missing"
-  | "partial"
-  | "invalid"
-  | "unknown"
+export type HarnessArtifactStatus = "generated" | "missing" | "partial" | "invalid" | "unknown"
 
 export interface HarnessWorkflowArtifactDefinition {
   id: string
@@ -271,12 +497,7 @@ export interface HarnessArtifact {
   }
 }
 
-export type HarnessEventStatus =
-  | "success"
-  | "blocked"
-  | "skipped"
-  | "error"
-  | "unknown"
+export type HarnessEventStatus = "success" | "blocked" | "skipped" | "error" | "unknown"
 
 export interface HarnessHookLogView {
   ts: string
@@ -306,8 +527,10 @@ export interface HarnessRunDetailViewModel {
     projectId: string
     name: string
     projectCode: string
+    projectDir: string
     systemId: string
     workspacePath: string
+    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -329,6 +552,11 @@ export interface HarnessRunDetailViewModel {
       format: "ndjson" | string
     }>
     watchRefs: HarnessWatchRef[]
+    featureStatus?: HarnessFeatureStatus
+    featureStatusLabel?: string
+    overallStatus?: HarnessStatus
+    skipNodeAvailable: boolean
+    selectedDeployUnits: HarnessDeployUnitMapping[]
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

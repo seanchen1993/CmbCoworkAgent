@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { Eye, EyeOff, Info, Loader2, Plus, Trash2, Zap } from "lucide-react"
+import { Eye, EyeOff, Info, Loader2, Lock, Plus, RotateCcw, Trash2, Zap } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -19,8 +19,12 @@ interface CustomModelDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
+type ThinkingEffort = "high" | "max"
+
 interface CustomConfig {
   id?: string
+  source: "builtin" | "custom"
+  origin?: "remote" | "fallback"
   name: string
   baseUrl: string
   model: string
@@ -31,6 +35,9 @@ interface CustomConfig {
   topPInput: string
   topKInput: string
   interleavedThinking: boolean
+  enableThinking: boolean
+  enableThinkingEffort: boolean
+  thinkingEffort: ThinkingEffort
   tier: "premium" | "economy"
 }
 
@@ -52,6 +59,8 @@ interface TokenLimits {
 
 interface CustomModelItem {
   id: string
+  source: "builtin" | "custom"
+  origin?: "remote" | "fallback"
   name: string
   baseUrl: string
   model: string
@@ -62,6 +71,9 @@ interface CustomModelItem {
   topP: number
   topK: number
   interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
   tier?: "premium" | "economy"
 }
 
@@ -80,6 +92,12 @@ const FALLBACK_LIMITS: TokenLimits = {
   minTopK: 0,
   maxTopK: 1_000
 }
+
+const DEFAULT_THINKING_EFFORT: ThinkingEffort = "high"
+const THINKING_EFFORT_OPTIONS: Array<{ value: ThinkingEffort; label: string }> = [
+  { value: "high", label: "High" },
+  { value: "max", label: "Max" }
+]
 
 function ParameterLabel({
   children,
@@ -124,6 +142,60 @@ function defaultSamplingForModel(
     topPInput: String(limits.defaultTopP),
     topKInput: String(limits.defaultTopK)
   }
+}
+
+function emptyConfig(limits: TokenLimits): CustomConfig {
+  return {
+    id: undefined,
+    source: "custom",
+    name: "",
+    baseUrl: "",
+    model: "",
+    apiKey: "",
+    maxTokensInput: String(limits.defaultMaxTokens),
+    maxOutputTokensInput: String(limits.defaultMaxOutputTokens),
+    temperatureInput: String(limits.defaultTemperature),
+    topPInput: String(limits.defaultTopP),
+    topKInput: String(limits.defaultTopK),
+    interleavedThinking: false,
+    enableThinking: false,
+    enableThinkingEffort: false,
+    thinkingEffort: DEFAULT_THINKING_EFFORT,
+    tier: "premium"
+  }
+}
+
+function configFromItem(item: CustomModelItem, limits: TokenLimits): CustomConfig {
+  return {
+    id: item.id,
+    source: item.source,
+    origin: item.origin,
+    name: item.name,
+    baseUrl: item.baseUrl,
+    model: item.model,
+    apiKey: "",
+    maxTokensInput: String(item.maxTokens ?? limits.defaultMaxTokens),
+    maxOutputTokensInput: String(item.maxOutputTokens ?? limits.defaultMaxOutputTokens),
+    temperatureInput: String(item.temperature ?? limits.defaultTemperature),
+    topPInput: String(item.topP ?? limits.defaultTopP),
+    topKInput: String(item.topK ?? limits.defaultTopK),
+    interleavedThinking: item.interleavedThinking ?? defaultInterleavedThinkingForModel(item.model),
+    enableThinking: item.enableThinking === true,
+    enableThinkingEffort: item.enableThinkingEffort === true,
+    thinkingEffort: item.thinkingEffort ?? DEFAULT_THINKING_EFFORT,
+    tier: item.tier ?? "premium"
+  }
+}
+
+async function loadModelItems(): Promise<CustomModelItem[]> {
+  const [builtin, custom] = await Promise.all([
+    window.api.models.getBuiltinConfigs(),
+    window.api.models.getCustomConfigs()
+  ])
+  return [
+    ...builtin.map((item) => ({ ...item, source: "builtin" as const })),
+    ...custom.map((item) => ({ ...item, source: "custom" as const }))
+  ]
 }
 
 function parseMaxTokens(value: string): number | null {
@@ -207,20 +279,7 @@ export function CustomModelDialog({
   onModelSaved,
   onOpenChange
 }: CustomModelDialogProps): React.JSX.Element {
-  const [config, setConfig] = useState<CustomConfig>({
-    id: undefined,
-    name: "",
-    baseUrl: "",
-    model: "",
-    apiKey: "",
-    maxTokensInput: String(FALLBACK_LIMITS.defaultMaxTokens),
-    maxOutputTokensInput: String(FALLBACK_LIMITS.defaultMaxOutputTokens),
-    temperatureInput: String(FALLBACK_LIMITS.defaultTemperature),
-    topPInput: String(FALLBACK_LIMITS.defaultTopP),
-    topKInput: String(FALLBACK_LIMITS.defaultTopK),
-    interleavedThinking: false,
-    tier: "premium"
-  })
+  const [config, setConfig] = useState<CustomConfig>(() => emptyConfig(FALLBACK_LIMITS))
   const [showKey, setShowKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -246,66 +305,38 @@ export function CustomModelDialog({
       setFormError(null)
       setTestResult(null)
 
-      const normalizedSelectedId = selectedModelId?.startsWith("custom:")
-        ? selectedModelId.slice("custom:".length)
-        : selectedModelId
+      const selectedSource = selectedModelId?.startsWith("builtin:")
+        ? "builtin"
+        : selectedModelId?.startsWith("custom:")
+          ? "custom"
+          : undefined
+      const normalizedSelectedId = selectedModelId?.replace(/^(?:custom|builtin):/, "")
       void Promise.all([
         window.api.models.getTokenLimits(),
-        window.api.models.getCustomConfigs(),
-        window.api.models.getCustomConfig(normalizedSelectedId),
+        loadModelItems(),
         window.api.models.getDefault()
       ])
-        .then(([limits, all, existing, savedDefaultModelId]) => {
+        .then(([limits, all, savedDefaultModelId]) => {
           if (cancelled) return
           setTokenLimits(limits)
           setAllConfigs(all)
           setDefaultModelId(savedDefaultModelId || "")
           setDefaultModelDraftId(savedDefaultModelId || "")
 
-          const resolvedExisting =
-            existing ||
-            (normalizedSelectedId
-              ? all.find(
-                  (item) => item.id === normalizedSelectedId || item.model === normalizedSelectedId
-                ) || null
-              : null)
+          const resolvedExisting = normalizedSelectedId
+            ? all.find(
+                (item) =>
+                  (!selectedSource || item.source === selectedSource) &&
+                  (item.id === normalizedSelectedId || item.model === normalizedSelectedId)
+              ) || null
+            : all[0] || null
 
           if (resolvedExisting) {
-            setConfig({
-              id: resolvedExisting.id,
-              name: resolvedExisting.name,
-              baseUrl: resolvedExisting.baseUrl,
-              model: resolvedExisting.model,
-              apiKey: "",
-              maxTokensInput: String(resolvedExisting.maxTokens ?? limits.defaultMaxTokens),
-              maxOutputTokensInput: String(
-                resolvedExisting.maxOutputTokens ?? limits.defaultMaxOutputTokens
-              ),
-              temperatureInput: String(resolvedExisting.temperature ?? limits.defaultTemperature),
-              topPInput: String(resolvedExisting.topP ?? limits.defaultTopP),
-              topKInput: String(resolvedExisting.topK ?? limits.defaultTopK),
-              interleavedThinking:
-                resolvedExisting.interleavedThinking ??
-                defaultInterleavedThinkingForModel(resolvedExisting.model),
-              tier: resolvedExisting.tier ?? "premium"
-            })
+            setConfig(configFromItem(resolvedExisting, limits))
             setHasExisting(true)
             setHasExistingKey(resolvedExisting.hasApiKey)
           } else {
-            setConfig({
-              id: undefined,
-              name: "",
-              baseUrl: "",
-              model: "",
-              apiKey: "",
-              maxTokensInput: String(limits.defaultMaxTokens),
-              maxOutputTokensInput: String(limits.defaultMaxOutputTokens),
-              temperatureInput: String(limits.defaultTemperature),
-              topPInput: String(limits.defaultTopP),
-              topKInput: String(limits.defaultTopK),
-              interleavedThinking: false,
-              tier: "premium"
-            })
+            setConfig(emptyConfig(limits))
             setHasExisting(false)
             setHasExistingKey(false)
           }
@@ -320,35 +351,21 @@ export function CustomModelDialog({
     }
   }, [open, selectedModelId])
 
-  const selectedConfigId = config.id
+  const selectedConfigKey = config.id ? `${config.source}:${config.id}` : ""
 
-  async function selectConfigToEdit(id: string): Promise<void> {
+  async function selectConfigToEdit(id: string, source: "builtin" | "custom"): Promise<void> {
     setFormError(null)
     setTestResult(null)
-    const picked = await window.api.models.getCustomConfig(id)
+    const picked = allConfigs.find((item) => item.id === id && item.source === source)
     if (!picked) return
-    setConfig({
-      id: picked.id,
-      name: picked.name,
-      baseUrl: picked.baseUrl,
-      model: picked.model,
-      apiKey: "",
-      maxTokensInput: String(picked.maxTokens ?? tokenLimits.defaultMaxTokens),
-      maxOutputTokensInput: String(picked.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens),
-      temperatureInput: String(picked.temperature ?? tokenLimits.defaultTemperature),
-      topPInput: String(picked.topP ?? tokenLimits.defaultTopP),
-      topKInput: String(picked.topK ?? tokenLimits.defaultTopK),
-      interleavedThinking:
-        picked.interleavedThinking ?? defaultInterleavedThinkingForModel(picked.model),
-      tier: picked.tier ?? "premium"
-    })
+    setConfig(configFromItem(picked, tokenLimits))
     setHasExisting(true)
     setHasExistingKey(picked.hasApiKey)
     setShowKey(false)
     setDefaultModelDraftId(defaultModelId)
   }
 
-  const currentModelStorageId = config.id ? `custom:${config.id}` : ""
+  const currentModelStorageId = config.id ? `${config.source}:${config.id}` : ""
   const isDefaultModel =
     currentModelStorageId !== "" && currentModelStorageId === defaultModelDraftId
   const isPersistedDefaultModel =
@@ -362,7 +379,10 @@ export function CustomModelDialog({
   const canToggleKeyVisibility = config.apiKey.trim().length > 0
   const duplicateNameError =
     config.name.trim() &&
-    allConfigs.some((item) => item.name === config.name.trim() && item.id !== config.id)
+    allConfigs.some(
+      (item) =>
+        item.source === config.source && item.name === config.name.trim() && item.id !== config.id
+    )
       ? "显示名称不能重复，请使用不同的显示名称"
       : null
 
@@ -414,14 +434,21 @@ export function CustomModelDialog({
         return
       }
       const result = await window.api.models.testConnection({
-        id: config.id,
-        baseUrl: config.baseUrl.trim(),
-        model: config.model.trim(),
-        apiKey: config.apiKey.trim() || undefined,
+        id: config.id
+          ? config.source === "builtin"
+            ? `builtin:${config.id}`
+            : config.id
+          : undefined,
+        baseUrl: config.source === "builtin" ? undefined : config.baseUrl.trim(),
+        model: config.source === "builtin" ? undefined : config.model.trim(),
+        apiKey: config.source === "builtin" ? undefined : config.apiKey.trim() || undefined,
         maxOutputTokens: parsedMaxOutputTokens,
         temperature: parsedTemperature,
         topP: parsedTopP,
-        topK: parsedTopK
+        topK: parsedTopK,
+        enableThinking: config.enableThinking,
+        enableThinkingEffort: config.enableThinking && config.enableThinkingEffort,
+        thinkingEffort: config.thinkingEffort
       })
       setTestResult(result)
     } catch (e) {
@@ -473,21 +500,44 @@ export function CustomModelDialog({
         return
       }
 
-      const result = await window.api.models.upsertCustomConfig({
-        id: config.id,
-        name: config.name.trim(),
-        baseUrl: config.baseUrl.trim(),
-        model: config.model.trim(),
-        apiKey: config.apiKey.trim() || undefined,
-        maxTokens: parsedMaxTokens,
-        maxOutputTokens: parsedMaxOutputTokens,
-        temperature: parsedTemperature,
-        topP: parsedTopP,
-        topK: parsedTopK,
-        interleavedThinking: config.interleavedThinking,
-        tier: config.tier
-      })
-      const savedModelId = `custom:${result.id}`
+      let savedId: string
+      if (config.source === "builtin") {
+        if (!config.id) throw new Error("内置模型 ID 不能为空")
+        await window.api.models.updateBuiltinConfig(config.id, {
+          name: config.name.trim(),
+          maxTokens: parsedMaxTokens,
+          maxOutputTokens: parsedMaxOutputTokens,
+          temperature: parsedTemperature,
+          topP: parsedTopP,
+          topK: parsedTopK,
+          enableThinking: config.enableThinking,
+          enableThinkingEffort: config.enableThinking && config.enableThinkingEffort,
+          thinkingEffort: config.thinkingEffort,
+          interleavedThinking: config.interleavedThinking,
+          tier: config.tier
+        })
+        savedId = config.id
+      } else {
+        const result = await window.api.models.upsertCustomConfig({
+          id: config.id,
+          name: config.name.trim(),
+          baseUrl: config.baseUrl.trim(),
+          model: config.model.trim(),
+          apiKey: config.apiKey.trim() || undefined,
+          maxTokens: parsedMaxTokens,
+          maxOutputTokens: parsedMaxOutputTokens,
+          temperature: parsedTemperature,
+          topP: parsedTopP,
+          topK: parsedTopK,
+          enableThinking: config.enableThinking,
+          enableThinkingEffort: config.enableThinking && config.enableThinkingEffort,
+          thinkingEffort: config.thinkingEffort,
+          interleavedThinking: config.interleavedThinking,
+          tier: config.tier
+        })
+        savedId = result.id
+      }
+      const savedModelId = `${config.source}:${savedId}`
       const nextDefaultModelId =
         allConfigs.length === 0
           ? savedModelId
@@ -497,25 +547,11 @@ export function CustomModelDialog({
       await window.api.models.setDefault(nextDefaultModelId)
       setDefaultModelId(nextDefaultModelId)
       setDefaultModelDraftId(nextDefaultModelId)
-      const refreshed = await window.api.models.getCustomConfigs()
+      const refreshed = await loadModelItems()
       setAllConfigs(refreshed)
-      const updated = refreshed.find((item) => item.id === result.id)
+      const updated = refreshed.find((item) => item.id === savedId && item.source === config.source)
       if (updated) {
-        setConfig((prev) => ({
-          ...prev,
-          id: updated.id,
-          name: updated.name,
-          baseUrl: updated.baseUrl,
-          model: updated.model,
-          apiKey: "",
-          maxTokensInput: String(updated.maxTokens ?? tokenLimits.defaultMaxTokens),
-          maxOutputTokensInput: String(
-            updated.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens
-          ),
-          temperatureInput: String(updated.temperature ?? tokenLimits.defaultTemperature),
-          topPInput: String(updated.topP ?? tokenLimits.defaultTopP),
-          topKInput: String(updated.topK ?? tokenLimits.defaultTopK)
-        }))
+        setConfig(configFromItem(updated, tokenLimits))
         setHasExisting(true)
         setHasExistingKey(updated.hasApiKey)
       }
@@ -531,7 +567,7 @@ export function CustomModelDialog({
   }
 
   async function handleDelete(): Promise<void> {
-    if (!config.id) return
+    if (!config.id || config.source !== "custom") return
     setDeleting(true)
     try {
       const tasks = await window.api.scheduledTasks.list()
@@ -544,33 +580,17 @@ export function CustomModelDialog({
         return
       }
       await window.api.models.deleteCustomConfig(config.id)
-      const refreshed = await window.api.models.getCustomConfigs()
+      const refreshed = await loadModelItems()
       setAllConfigs(refreshed)
       if (refreshed.length > 0) {
         const fallback = refreshed[0]
-        const fallbackModelId = `custom:${fallback.id}`
+        const fallbackModelId = `${fallback.source}:${fallback.id}`
         if (isPersistedDefaultModel) {
           await window.api.models.setDefault(fallbackModelId)
           setDefaultModelId(fallbackModelId)
           setDefaultModelDraftId(fallbackModelId)
         }
-        setConfig({
-          id: fallback.id,
-          name: fallback.name,
-          baseUrl: fallback.baseUrl,
-          model: fallback.model,
-          apiKey: "",
-          maxTokensInput: String(fallback.maxTokens ?? tokenLimits.defaultMaxTokens),
-          maxOutputTokensInput: String(
-            fallback.maxOutputTokens ?? tokenLimits.defaultMaxOutputTokens
-          ),
-          temperatureInput: String(fallback.temperature ?? tokenLimits.defaultTemperature),
-          topPInput: String(fallback.topP ?? tokenLimits.defaultTopP),
-          topKInput: String(fallback.topK ?? tokenLimits.defaultTopK),
-          interleavedThinking:
-            fallback.interleavedThinking ?? defaultInterleavedThinkingForModel(fallback.model),
-          tier: fallback.tier ?? "premium"
-        })
+        setConfig(configFromItem(fallback, tokenLimits))
         setHasExisting(true)
         setHasExistingKey(fallback.hasApiKey)
         onModelSaved?.(fallbackModelId)
@@ -580,20 +600,7 @@ export function CustomModelDialog({
           setDefaultModelId("")
           setDefaultModelDraftId("")
         }
-        setConfig({
-          id: undefined,
-          name: "",
-          baseUrl: "",
-          model: "",
-          apiKey: "",
-          maxTokensInput: String(tokenLimits.defaultMaxTokens),
-          maxOutputTokensInput: String(tokenLimits.defaultMaxOutputTokens),
-          temperatureInput: String(tokenLimits.defaultTemperature),
-          topPInput: String(tokenLimits.defaultTopP),
-          topKInput: String(tokenLimits.defaultTopK),
-          interleavedThinking: false,
-          tier: "premium"
-        })
+        setConfig(emptyConfig(tokenLimits))
         setHasExisting(false)
         setHasExistingKey(false)
       }
@@ -605,12 +612,38 @@ export function CustomModelDialog({
     }
   }
 
+  async function handleResetBuiltin(): Promise<void> {
+    if (!config.id || config.source !== "builtin") return
+    setDeleting(true)
+    setFormError(null)
+    try {
+      await window.api.models.resetBuiltinConfig(config.id)
+      const refreshed = await loadModelItems()
+      setAllConfigs(refreshed)
+      const updated = refreshed.find((item) => item.source === "builtin" && item.id === config.id)
+      if (updated) {
+        setConfig(configFromItem(updated, tokenLimits))
+        setHasExistingKey(updated.hasApiKey)
+      }
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : "恢复系统默认失败")
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[760px] max-h-[85vh] flex flex-col gap-3 p-4">
         <DialogHeader className="space-y-1">
-          <DialogTitle>编辑模型配置</DialogTitle>
-          <DialogDescription>配置兼容 OpenAI 接口格式的模型服务。</DialogDescription>
+          <DialogTitle>
+            {config.source === "builtin" ? "编辑内置模型参数" : "编辑模型配置"}
+          </DialogTitle>
+          <DialogDescription>
+            {config.source === "builtin"
+              ? "连接信息由系统管理；你可以调整上下文、采样、思考和路由参数。"
+              : "配置兼容 OpenAI 接口格式的模型服务。"}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="min-h-0 flex-1 grid grid-cols-[220px_1fr] gap-4">
@@ -623,20 +656,7 @@ export function CustomModelDialog({
                 size="sm"
                 className="h-7 px-2"
                 onClick={() => {
-                  setConfig({
-                    id: undefined,
-                    name: "",
-                    baseUrl: "",
-                    model: "",
-                    apiKey: "",
-                    maxTokensInput: String(tokenLimits.defaultMaxTokens),
-                    maxOutputTokensInput: String(tokenLimits.defaultMaxOutputTokens),
-                    temperatureInput: String(tokenLimits.defaultTemperature),
-                    topPInput: String(tokenLimits.defaultTopP),
-                    topKInput: String(tokenLimits.defaultTopK),
-                    interleavedThinking: false,
-                    tier: "premium"
-                  })
+                  setConfig(emptyConfig(tokenLimits))
                   setHasExisting(false)
                   setHasExistingKey(false)
                   setDefaultModelDraftId(defaultModelId)
@@ -650,22 +670,41 @@ export function CustomModelDialog({
               </Button>
             </div>
             <div className="max-h-[330px] space-y-1 overflow-y-auto">
-              {allConfigs.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    void selectConfigToEdit(item.id)
-                  }}
-                  className={`w-full rounded-sm border px-2 py-1.5 text-left text-xs transition-colors ${
-                    item.id === selectedConfigId
-                      ? "border-primary bg-primary/10 text-foreground"
-                      : "border-transparent text-muted-foreground hover:bg-muted"
-                  }`}
-                >
-                  <div className="truncate font-medium">{item.name}</div>
-                </button>
-              ))}
+              {(["builtin", "custom"] as const).map((source) => {
+                const items = allConfigs.filter((item) => item.source === source)
+                if (source === "custom" && items.length === 0) return null
+                return (
+                  <div key={source} className="space-y-1">
+                    <div className="flex items-center gap-1 px-2 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                      {source === "builtin" && <Lock className="size-3" />}
+                      {source === "builtin" ? "系统内置" : "自定义模型"}
+                    </div>
+                    {items.map((item) => (
+                      <button
+                        key={`${item.source}:${item.id}`}
+                        type="button"
+                        onClick={() => {
+                          void selectConfigToEdit(item.id, item.source)
+                        }}
+                        className={`w-full rounded-sm border px-2 py-1.5 text-left text-xs transition-colors ${
+                          `${item.source}:${item.id}` === selectedConfigKey
+                            ? "border-primary bg-primary/10 text-foreground"
+                            : "border-transparent text-muted-foreground hover:bg-muted"
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className="min-w-0 flex-1 truncate font-medium">{item.name}</span>
+                          {item.source === "builtin" && (
+                            <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px]">
+                              {item.origin === "remote" ? "后台" : "兜底"}
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )
+              })}
               {allConfigs.length === 0 && (
                 <div className="px-2 py-6 text-center text-xs text-muted-foreground">
                   暂无模型配置
@@ -697,6 +736,7 @@ export function CustomModelDialog({
                 <Input
                   className="h-8"
                   value={config.baseUrl}
+                  disabled={config.source === "builtin"}
                   onChange={(e) => {
                     setConfig((c) => ({ ...c, baseUrl: e.target.value }))
                     setTestResult(null)
@@ -706,15 +746,23 @@ export function CustomModelDialog({
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">模型名称（Model）</label>
+                <label className="text-xs font-medium text-muted-foreground">
+                  模型名称（Model）
+                </label>
                 <Input
                   className="h-8"
                   value={config.model}
+                  disabled={config.source === "builtin"}
                   onChange={(e) => {
                     const nextModel = e.target.value
                     setConfig((c) => {
-                      const currentDefault = defaultInterleavedThinkingForModel(c.model)
-                      const nextDefault = defaultInterleavedThinkingForModel(nextModel)
+                      const currentInterleavedDefault = defaultInterleavedThinkingForModel(c.model)
+                      const nextInterleavedDefault = defaultInterleavedThinkingForModel(nextModel)
+                      const currentEnableThinkingDefault = defaultInterleavedThinkingForModel(
+                        c.model
+                      )
+                      const nextEnableThinkingDefault =
+                        defaultInterleavedThinkingForModel(nextModel)
                       const currentSamplingDefault = defaultSamplingForModel(c.model, tokenLimits)
                       const nextSamplingDefault = defaultSamplingForModel(nextModel, tokenLimits)
                       const shouldUseNextSamplingDefault =
@@ -728,9 +776,13 @@ export function CustomModelDialog({
                         model: nextModel,
                         ...(shouldUseNextSamplingDefault ? nextSamplingDefault : {}),
                         interleavedThinking:
-                          c.interleavedThinking === currentDefault
-                            ? nextDefault
-                            : c.interleavedThinking
+                          c.interleavedThinking === currentInterleavedDefault
+                            ? nextInterleavedDefault
+                            : c.interleavedThinking,
+                        enableThinking:
+                          c.enableThinking === currentEnableThinkingDefault
+                            ? nextEnableThinkingDefault
+                            : c.enableThinking
                       }
                     })
                     setTestResult(null)
@@ -860,6 +912,107 @@ export function CustomModelDialog({
               </div>
 
               <div className="space-y-1">
+                <ParameterLabel explanation="开启后，支持的模型会在回答前进行更充分的推理，并可在对话中展示思考内容。是否生效取决于模型能力，例如 deepseek-flash 支持思考开关和思考强度。">
+                  思考模式
+                </ParameterLabel>
+                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                  <div>
+                    <div className="text-sm text-foreground">
+                      {config.enableThinking ? "已开启" : "已关闭"}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={config.enableThinking}
+                    onClick={() =>
+                      setConfig((c) => ({
+                        ...c,
+                        enableThinking: !c.enableThinking,
+                        ...(c.enableThinking
+                          ? { interleavedThinking: false, enableThinkingEffort: false }
+                          : {})
+                      }))
+                    }
+                    className={cn(
+                      "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
+                      config.enableThinking ? "bg-primary" : "bg-muted-foreground/30"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        config.enableThinking ? "translate-x-4" : "translate-x-0"
+                      )}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <ParameterLabel explanation="部分模型或服务支持额外指定思考强度；不支持时关闭即可，只保留思考模式。开启后可选择 High 或 Max。">
+                  思考强度
+                </ParameterLabel>
+                <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
+                  <div>
+                    <div className="text-sm text-foreground">
+                      {config.enableThinking && config.enableThinkingEffort ? "已开启" : "已关闭"}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={config.enableThinking && config.enableThinkingEffort}
+                    disabled={!config.enableThinking}
+                    onClick={() => {
+                      setConfig((c) => ({ ...c, enableThinkingEffort: !c.enableThinkingEffort }))
+                      setTestResult(null)
+                    }}
+                    className={cn(
+                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                      !config.enableThinking
+                        ? "cursor-not-allowed bg-muted-foreground/20"
+                        : config.enableThinkingEffort
+                          ? "cursor-pointer bg-primary"
+                          : "cursor-pointer bg-muted-foreground/30"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        config.enableThinking && config.enableThinkingEffort
+                          ? "translate-x-4"
+                          : "translate-x-0"
+                      )}
+                    />
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  {THINKING_EFFORT_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      disabled={!config.enableThinking || !config.enableThinkingEffort}
+                      onClick={() => {
+                        setConfig((c) => ({ ...c, thinkingEffort: option.value }))
+                        setTestResult(null)
+                      }}
+                      className={cn(
+                        "flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45",
+                        config.enableThinking &&
+                          config.enableThinkingEffort &&
+                          config.thinkingEffort === option.value
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:bg-muted disabled:hover:bg-transparent"
+                      )}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">交错思考</label>
                 <div className="flex items-center justify-between rounded-md border border-border px-3 py-1.5">
                   <div>
@@ -871,12 +1024,17 @@ export function CustomModelDialog({
                     type="button"
                     role="switch"
                     aria-checked={config.interleavedThinking}
+                    disabled={!config.enableThinking}
                     onClick={() =>
                       setConfig((c) => ({ ...c, interleavedThinking: !c.interleavedThinking }))
                     }
                     className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
-                      config.interleavedThinking ? "bg-primary" : "bg-muted-foreground/30"
+                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
+                      !config.enableThinking
+                        ? "cursor-not-allowed bg-muted-foreground/20"
+                        : config.interleavedThinking
+                          ? "cursor-pointer bg-primary"
+                          : "cursor-pointer bg-muted-foreground/30"
                     )}
                   >
                     <span
@@ -930,7 +1088,7 @@ export function CustomModelDialog({
                     disabled={!config.id}
                     onClick={() => {
                       if (!config.id) return
-                      setDefaultModelDraftId(isDefaultModel ? "" : `custom:${config.id}`)
+                      setDefaultModelDraftId(isDefaultModel ? "" : `${config.source}:${config.id}`)
                     }}
                     className={cn(
                       "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors",
@@ -963,18 +1121,25 @@ export function CustomModelDialog({
                     className="h-8 pr-10"
                     type={showKey ? "text" : "password"}
                     value={config.apiKey}
+                    disabled={config.source === "builtin"}
                     onChange={(e) => {
                       setConfig((c) => ({ ...c, apiKey: e.target.value }))
                       setTestResult(null)
                     }}
-                    placeholder={hasExisting ? "••••••••••••••••" : "sk-..."}
+                    placeholder={
+                      config.source === "builtin"
+                        ? "系统已配置（不可修改）"
+                        : hasExisting
+                          ? "••••••••••••••••"
+                          : "sk-..."
+                    }
                   />
                   <button
                     type="button"
                     onClick={() => {
                       if (canToggleKeyVisibility) setShowKey(!showKey)
                     }}
-                    disabled={!canToggleKeyVisibility}
+                    disabled={config.source === "builtin" || !canToggleKeyVisibility}
                     title={canToggleKeyVisibility ? "显示或隐藏密钥" : "请输入密钥后再切换显示"}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                   >
@@ -983,7 +1148,9 @@ export function CustomModelDialog({
                 </div>
                 <div className="flex items-center gap-2">
                   <p className="text-xs leading-tight text-muted-foreground">
-                    密钥仅作用于当前模型（按模型 ID 独立保存）。
+                    {config.source === "builtin"
+                      ? "内置模型密钥由后台配置或本地主进程兜底，页面不会读取或修改实际值。"
+                      : "密钥仅作用于当前模型（按模型 ID 独立保存）。"}
                   </p>
                   <Button
                     type="button"
@@ -1024,7 +1191,22 @@ export function CustomModelDialog({
             </div>
 
             <div className="flex justify-between pt-3">
-              {hasExisting ? (
+              {hasExisting && config.source === "builtin" ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleResetBuiltin}
+                  disabled={deleting || saving || testing}
+                >
+                  {deleting ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <RotateCcw className="size-4" />
+                  )}
+                  恢复系统默认
+                </Button>
+              ) : hasExisting ? (
                 <Button
                   type="button"
                   variant="destructive"

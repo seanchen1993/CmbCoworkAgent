@@ -40,12 +40,107 @@ import {
 
 interface ParsedPlugin {
   manifest: PluginManifest | null
-  skillDirs: string[]
+  manifestRelPath: string | null
+  skillNames: string[]
   mcpConfigs: Record<string, PluginMcpServerConfig>
   mcpServerDetails: PluginMcpServerDetail[]
   hookCount: number
   hookPath: string
   name: string
+}
+
+const GENERATED_PLUGIN_MANIFEST_REL_PATH = ".codex-plugin/plugin.json"
+
+export function normalizePluginVersion(version?: string | null): string | undefined {
+  const trimmed = String(version || "").trim()
+  if (!trimmed) return undefined
+  return trimmed.replace(/^v(?=\d)/i, "")
+}
+
+export function resolvePluginInstallVersion(
+  manifestVersion?: string | null,
+  overrideVersion?: string | null
+): string {
+  return (
+    normalizePluginVersion(overrideVersion) ?? normalizePluginVersion(manifestVersion) ?? "1.0.0"
+  )
+}
+
+async function readJsonObjectFile(filePath: string): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = JSON.parse(await fs.readFile(filePath, "utf-8"))
+    return raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : null
+  } catch {
+    return null
+  }
+}
+
+function buildVersionedPluginManifest(
+  base: Record<string, unknown> | null,
+  metadata: {
+    name: string
+    version: string
+    description?: string
+    useScenario?: string
+    author?: PluginManifest["author"]
+  }
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...(base ?? {}) }
+  if (typeof next.name !== "string" || !next.name.trim()) next.name = metadata.name
+  next.version = metadata.version
+  if (metadata.description && (typeof next.description !== "string" || !next.description.trim())) {
+    next.description = metadata.description
+  }
+  if (metadata.useScenario && (typeof next.useScenario !== "string" || !next.useScenario.trim())) {
+    next.useScenario = metadata.useScenario
+  }
+  if (!next.author && metadata.author) next.author = metadata.author
+  return next
+}
+
+async function writeVersionedPluginManifest(
+  pluginRoot: string,
+  manifestRelPath: string | null,
+  metadata: {
+    name: string
+    version: string
+    description?: string
+    useScenario?: string
+    author?: PluginManifest["author"]
+  }
+): Promise<void> {
+  const relPath = manifestRelPath ?? GENERATED_PLUGIN_MANIFEST_REL_PATH
+  const manifestPath = path.join(pluginRoot, relPath)
+  const base = existsSync(manifestPath) ? await readJsonObjectFile(manifestPath) : null
+  const next = buildVersionedPluginManifest(base, metadata)
+  await fs.mkdir(path.dirname(manifestPath), { recursive: true })
+  await fs.writeFile(manifestPath, `${JSON.stringify(next, null, 2)}\n`, "utf-8")
+}
+
+async function upsertVersionedPluginManifestInZip(
+  zip: AdmZip,
+  plugin: PluginMetadata,
+  versionOverride?: string | null
+): Promise<void> {
+  const manifestResult = readPluginManifest(plugin.path)
+  const manifestRelPath = manifestResult?.relPath ?? GENERATED_PLUGIN_MANIFEST_REL_PATH
+  const base = manifestResult ? await readJsonObjectFile(manifestResult.path) : null
+  const version = resolvePluginInstallVersion(plugin.version, versionOverride)
+  const next = buildVersionedPluginManifest(base, {
+    name: plugin.name,
+    version,
+    description: plugin.description,
+    useScenario: plugin.useScenario,
+    author: plugin.author || undefined
+  })
+  const content = Buffer.from(`${JSON.stringify(next, null, 2)}\n`, "utf-8")
+  if (zip.getEntry(manifestRelPath)) {
+    zip.updateFile(manifestRelPath, content)
+  } else {
+    zip.addFile(manifestRelPath, content)
+  }
 }
 
 function sanitizePluginName(name: string): string {
@@ -85,12 +180,13 @@ async function addDirToZip(zip: AdmZip, dirPath: string, rootDir: string): Promi
 
 async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<ParsedPlugin> {
   let manifest: PluginManifest | null = null
-  const skillDirs: string[] = []
+  const skillNames: string[] = []
   let mcpConfigs: Record<string, PluginMcpServerConfig> = {}
   let name = fallbackName?.trim() || path.basename(dirPath)
 
   const manifestResult = readPluginManifest(dirPath)
   manifest = manifestResult?.manifest ?? null
+  const manifestRelPath = manifestResult?.relPath ?? null
   if (manifest?.name) name = manifest.name
 
   const seenSkillDirs = new Set<string>()
@@ -101,7 +197,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
         const key = skill.rootDir.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
         if (seenSkillDirs.has(key)) continue
         seenSkillDirs.add(key)
-        skillDirs.push(skill.relativePath || ".")
+        skillNames.push(skill.name)
       }
     } catch {
       console.warn("[Plugins] Failed to scan skills in", source.sourceDir)
@@ -161,7 +257,16 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     }
   }
 
-  return { manifest, skillDirs, mcpConfigs, mcpServerDetails, hookCount, hookPath, name }
+  return {
+    manifest,
+    manifestRelPath,
+    skillNames,
+    mcpConfigs,
+    mcpServerDetails,
+    hookCount,
+    hookPath,
+    name
+  }
 }
 
 function formatAuthor(author: PluginManifest["author"]): string {
@@ -173,12 +278,13 @@ function formatAuthor(author: PluginManifest["author"]): string {
 async function installPluginFromDir(
   dirPath: string,
   fallbackName?: string,
-  origin?: "market" | "local"
+  origin?: "market" | "local",
+  versionOverride?: string
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const parsed = await parsePluginDir(dirPath, fallbackName)
     if (
-      parsed.skillDirs.length === 0 &&
+      parsed.skillNames.length === 0 &&
       Object.keys(parsed.mcpConfigs).length === 0 &&
       parsed.hookCount === 0
     ) {
@@ -211,6 +317,18 @@ async function installPluginFromDir(
       pluginDirName = path.basename(existing.path)
     }
     const destDir = path.join(pluginsDir, pluginDirName)
+    const resolvedVersion = resolvePluginInstallVersion(parsed.manifest?.version, versionOverride)
+    const shouldSyncManifestVersion = Boolean(normalizePluginVersion(versionOverride))
+    const syncCopiedManifestVersion = async (): Promise<void> => {
+      if (!shouldSyncManifestVersion) return
+      await writeVersionedPluginManifest(destDir, parsed.manifestRelPath, {
+        name: parsed.name,
+        version: resolvedVersion,
+        description: parsed.manifest?.description,
+        useScenario: parsed.manifest?.useScenario,
+        author: parsed.manifest?.author
+      })
+    }
 
     if (existing) {
       // Update existing: backup old directory, then copy new, restore on failure
@@ -220,6 +338,7 @@ async function installPluginFromDir(
       }
       try {
         await copyDirRecursive(dirPath, destDir)
+        await syncCopiedManifestVersion()
       } catch (copyErr) {
         // Restore from backup
         if (existsSync(backupDir)) {
@@ -236,7 +355,15 @@ async function installPluginFromDir(
       }
     } else {
       // Fresh install
-      await copyDirRecursive(dirPath, destDir)
+      try {
+        await copyDirRecursive(dirPath, destDir)
+        await syncCopiedManifestVersion()
+      } catch (copyErr) {
+        if (existsSync(destDir)) {
+          rmSync(destDir, { recursive: true, force: true })
+        }
+        throw copyErr
+      }
     }
 
     const now = new Date().toISOString()
@@ -247,12 +374,13 @@ async function installPluginFromDir(
     const meta: PluginMetadata = {
       id: existing?.id ?? uuid(),
       name: parsed.name,
-      version: parsed.manifest?.version ?? "1.0.0",
+      version: resolvedVersion,
       description: parsed.manifest?.description ?? "",
+      ...(parsed.manifest?.useScenario ? { useScenario: parsed.manifest.useScenario } : {}),
       author: formatAuthor(parsed.manifest?.author),
       path: destDir,
       enabled: true,
-      skillCount: parsed.skillDirs.length,
+      skillCount: parsed.skillNames.length,
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
       hookCount: parsed.hookCount,
       hookPath: parsed.hookPath,
@@ -309,7 +437,7 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
   for (const candidate of candidates) {
     const parsed = await parsePluginDir(candidate)
     if (
-      parsed.skillDirs.length > 0 ||
+      parsed.skillNames.length > 0 ||
       Object.keys(parsed.mcpConfigs).length > 0 ||
       parsed.hookCount > 0
     ) {
@@ -471,7 +599,7 @@ export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetai
     tempDir = extracted.tempDir
     const parsed = await parsePluginDir(extracted.pluginRoot)
     return {
-      skills: parsed.skillDirs,
+      skills: parsed.skillNames,
       mcpServers: Object.keys(parsed.mcpConfigs),
       mcpServerDetails: parsed.mcpServerDetails,
       hookCount: parsed.hookCount,
@@ -493,7 +621,8 @@ export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetai
 async function installPluginFromZip(
   buffer: ArrayBuffer,
   fileName?: string,
-  origin?: "market" | "local"
+  origin?: "market" | "local",
+  versionOverride?: string
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const extracted = await extractZipToTemp(buffer, getPluginsDir(), "_temp_")
@@ -511,7 +640,7 @@ async function installPluginFromZip(
           : rootName
 
       // Parse and install (the real copy lands in getPluginsDir() via installPluginFromDir)
-      return await installPluginFromDir(pluginRoot, fallbackName, origin)
+      return await installPluginFromDir(pluginRoot, fallbackName, origin, versionOverride)
     } finally {
       // Clean up temp directory regardless of install outcome
       if (existsSync(tempDir)) {
@@ -520,6 +649,23 @@ async function installPluginFromZip(
     }
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : "解压失败" }
+  }
+}
+
+export async function exportPluginForMarketZip(
+  plugin: PluginMetadata,
+  options?: { version?: string | null }
+): Promise<{ fileName: string; buffer: ArrayBuffer }> {
+  const zip = new AdmZip()
+  await addDirToZip(zip, plugin.path, plugin.path)
+  await upsertVersionedPluginManifestInZip(zip, plugin, options?.version)
+  const zipBuffer = zip.toBuffer()
+  return {
+    fileName: makeSafeZipFileName(plugin.name),
+    buffer: zipBuffer.buffer.slice(
+      zipBuffer.byteOffset,
+      zipBuffer.byteOffset + zipBuffer.byteLength
+    )
   }
 }
 
@@ -535,8 +681,10 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
     "plugins:exportForMarket",
     async (
       _event,
-      id: string
+      payload: string | { id: string; version?: string | null }
     ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; error?: string }> => {
+      const id = typeof payload === "string" ? payload : payload?.id
+      const version = typeof payload === "object" ? payload.version : undefined
       if (!id || typeof id !== "string") {
         return { success: false, error: "无效的 Plugin ID" }
       }
@@ -550,17 +698,12 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           return { success: false, error: "Plugin 目录不存在" }
         }
 
-        const zip = new AdmZip()
-        await addDirToZip(zip, plugin.path, plugin.path)
-        const zipBuffer = zip.toBuffer()
+        const exported = await exportPluginForMarketZip(plugin, { version })
 
         return {
           success: true,
-          fileName: makeSafeZipFileName(plugin.name),
-          buffer: zipBuffer.buffer.slice(
-            zipBuffer.byteOffset,
-            zipBuffer.byteOffset + zipBuffer.byteLength
-          )
+          fileName: exported.fileName,
+          buffer: exported.buffer
         }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "导出 Plugin 失败" }
@@ -572,9 +715,14 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
     "plugins:install",
     async (
       _event,
-      payload: { buffer: ArrayBuffer; fileName: string; origin?: "market" | "local" }
+      payload: {
+        buffer: ArrayBuffer
+        fileName: string
+        origin?: "market" | "local"
+        version?: string
+      }
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
-      const { buffer, fileName, origin } = payload
+      const { buffer, fileName, origin, version } = payload
       if (!buffer || !fileName) {
         return { success: false, error: "无效的文件" }
       }
@@ -590,7 +738,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         origin === "market" || origin === "local" ? origin : "local"
       await pluginMutex.acquire()
       try {
-        return await installPluginFromZip(buffer, fileName, sanitizedOrigin)
+        return await installPluginFromZip(buffer, fileName, sanitizedOrigin, version)
       } finally {
         pluginMutex.release()
       }
@@ -720,7 +868,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       }
       const parsed = await parsePluginDir(plugin.path)
       return {
-        skills: parsed.skillDirs,
+        skills: parsed.skillNames,
         mcpServers: Object.keys(parsed.mcpConfigs),
         mcpServerDetails: parsed.mcpServerDetails,
         hookCount: parsed.hookCount,
