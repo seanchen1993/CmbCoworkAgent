@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Bot, ChevronDown, ChevronRight, User, Wrench } from "lucide-react"
+import { Bot, ChevronDown, ChevronRight, Route, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import {
   classifyInternalNotificationTurn,
   type InternalNotificationTurnKind
 } from "../../../../shared/internal-notification-turn"
+import { summarizeThreadProjectNodes } from "./trace-project-node-summary"
 
 type TraceRole = "user" | "assistant" | "tool" | "subagent"
 
@@ -76,6 +77,10 @@ export interface TraceConversationSource {
   workflowAgentIndex?: number
   workflowPhase?: string
   workflowAgentLabel?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   nodes?: TraceConversationNode[]
   modelCalls?: TraceConversationModelCall[]
   steps?: TraceConversationStep[]
@@ -1078,6 +1083,7 @@ export function TraceThreadConversation({
 }): React.JSX.Element {
   const conversation = useMemo(() => buildThreadConversation(traces), [traces])
   const subagentCount = useMemo(() => traces.filter(isSubagentTrace).length, [traces])
+  const projectNodeSummary = useMemo(() => summarizeThreadProjectNodes(traces), [traces])
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // When the user picks a trace in the left list, jump the reconstructed
@@ -1114,7 +1120,7 @@ export function TraceThreadConversation({
         className
       )}
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
         <div>
           <h4 className="text-xs font-semibold text-foreground">{title}</h4>
           <p className="mt-0.5 text-[10px] text-muted-foreground">
@@ -1123,6 +1129,19 @@ export function TraceThreadConversation({
               : `已聚合 ${traces.length} 条 trace（主 ${traces.length - subagentCount} / 子 ${subagentCount}）的输入与回复`}
           </p>
         </div>
+        {projectNodeSummary.isProjectMode && (
+          <span
+            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-primary/20 bg-primary/10 px-2 py-1 text-[10px] font-medium text-primary"
+            title={
+              projectNodeSummary.visitedNodeNames.length > 0
+                ? `经历节点：${projectNodeSummary.visitedNodeNames.join("、")}`
+                : "当前 thread 的 trace 尚未记录项目节点"
+            }
+          >
+            <Route className="size-3" />
+            已经历项目节点 {projectNodeSummary.visitedNodeNames.length} 个
+          </span>
+        )}
       </div>
 
       <div

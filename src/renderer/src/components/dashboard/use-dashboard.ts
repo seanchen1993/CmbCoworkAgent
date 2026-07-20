@@ -169,6 +169,10 @@ export interface DashboardTraceDetail {
   workflowAgentIndex?: number
   workflowPhase?: string
   workflowAgentLabel?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number

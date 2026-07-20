@@ -205,6 +205,10 @@ interface DashboardTraceDetail {
   workflowAgentIndex?: number
   workflowPhase?: string
   workflowAgentLabel?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number
@@ -1639,7 +1643,11 @@ function traceObservabilityDetailFields(
     ["coordinatorWorkerWorkload", "coordinatorWorkerWorkload"],
     ["workflowRunId", "workflowRunId"],
     ["workflowPhase", "workflowPhase"],
-    ["workflowAgentLabel", "workflowAgentLabel"]
+    ["workflowAgentLabel", "workflowAgentLabel"],
+    ["harnessProjectId", "harnessProjectId"],
+    ["harnessFeatureSlug", "harnessFeatureSlug"],
+    ["harnessNodeName", "harnessNodeName"],
+    ["harnessNodeStatus", "harnessNodeStatus"]
   ]
   for (const [outKey, inKey] of stringFields) {
     const value = asOptionalString(field(inKey))
@@ -1959,6 +1967,8 @@ function dashboardTraceSourceIncludes(): string[] {
     "usedSkills",
     "evolvedSkills",
     "triggerSource",
+    "harnessProjectId",
+    "harnessFeatureSlug",
     "harnessNodeName",
     "harnessNodeStatus"
   ]
@@ -8747,6 +8757,49 @@ function makeMockProjectModeProjects(
   return makeMockProjectModeProjectPage(makeMockProjectMode(range, options).projects, options)
 }
 
+const MOCK_PROJECT_THREAD_NODE_NAMES = [
+  "Biz-需求分析",
+  "Dev-行为规格",
+  "Dev-代码实现",
+  "Dev-单元测试"
+]
+
+/** Attach deterministic project-node attribution so the thread restore UI is testable in DEV. */
+function attributeMockProjectThreadTraces(
+  traces: DashboardTraceDetail[],
+  projectId: string
+): DashboardTraceDetail[] {
+  const attributionByTraceId = new Map<
+    string,
+    { featureSlug: string; nodeName: string; nodeStatus: string }
+  >()
+  for (const [groupIndex, group] of groupMockTraceDetailsByThread(traces).entries()) {
+    group.traces.forEach((trace, traceIndex) => {
+      attributionByTraceId.set(trace.traceId, {
+        featureSlug: `mock-feature-${groupIndex + 1}`,
+        nodeName:
+          MOCK_PROJECT_THREAD_NODE_NAMES[
+            Math.min(traceIndex, MOCK_PROJECT_THREAD_NODE_NAMES.length - 1)
+          ],
+        nodeStatus:
+          traceIndex < group.traces.length - 1 ? STAGE_DONE_LABEL : STAGE_IN_PROGRESS_LABEL
+      })
+    })
+  }
+
+  return traces.map((trace) => {
+    const attribution = attributionByTraceId.get(trace.traceId)
+    if (!attribution) return trace
+    return {
+      ...trace,
+      harnessProjectId: projectId,
+      harnessFeatureSlug: trace.harnessFeatureSlug ?? attribution.featureSlug,
+      harnessNodeName: trace.harnessNodeName ?? attribution.nodeName,
+      harnessNodeStatus: trace.harnessNodeStatus ?? attribution.nodeStatus
+    }
+  })
+}
+
 function makeMockProjectModeTraces(
   projectId: string,
   range: TimeRange,
@@ -8760,7 +8813,10 @@ function makeMockProjectModeTraces(
   )
   const tracePage = clampLimit(options?.tracePage ?? options?.page, 1, 1000)
   const traceTriggerScope = normalizeTraceTriggerScope(options?.triggerScope)
-  const traces = namespaceMockTraceDetails(makeMockSkillRecentTraces("项目模式", range, 10), projectId)
+  const traces = attributeMockProjectThreadTraces(
+    namespaceMockTraceDetails(makeMockSkillRecentTraces("项目模式", range, 10), projectId),
+    projectId
+  )
 
   if (traceViewMode === "trace") {
     const from = (tracePage - 1) * tracePageSize
@@ -9735,7 +9791,10 @@ function makeMockSkillRecentTraces(
     .map((trace, index) => makeMockDashboardTraceDetail(trace, index))
 }
 
-function makeMockThreadTraces(threadId: string): DashboardTraceDetail[] {
+function makeMockThreadTraces(
+  threadId: string,
+  options?: ThreadTracesOptions
+): DashboardTraceDetail[] {
   const now = Date.now()
   const range: TimeRange = {
     from: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
@@ -9744,19 +9803,25 @@ function makeMockThreadTraces(threadId: string): DashboardTraceDetail[] {
   const base = makeMockSkillRecentTraces("auto-code-workflow-v1.0.0", range, 10)
   const groups = groupMockTraceDetailsByThread(base)
   const exactGroup = findMockThreadGroupForThreadId(groups, threadId)
+  let traces: DashboardTraceDetail[]
   if (exactGroup) {
-    return exactGroup.threadId === threadId
-      ? exactGroup.traces
-      : namespaceMockThreadGroupForRequest(exactGroup.traces, threadId)
+    traces =
+      exactGroup.threadId === threadId
+        ? exactGroup.traces
+        : namespaceMockThreadGroupForRequest(exactGroup.traces, threadId)
+  } else {
+    // 真实环境 threadTraces(id) 只返回该会话的 trace；mock 同样把若干条 trace 归到
+    // 同一个 rootThreadId，保证按 thread 视图时恰好是「单个完整会话」。
+    const seed = Array.from(threadId).reduce((acc, char) => acc + char.charCodeAt(0), 0)
+    const count = Math.min(base.length, 2 + (seed % 3))
+    traces = namespaceMockTraceDetails(base.slice(0, count), threadId, {
+      startedAt: (index) => new Date(now - (count - index) * 12 * 60 * 1000).toISOString()
+    })
   }
 
-  // 真实环境 threadTraces(id) 只返回该会话的 trace；mock 同样把若干条 trace 归到
-  // 同一个 rootThreadId，保证按 thread 视图时恰好是「单个完整会话」。
-  const seed = Array.from(threadId).reduce((acc, char) => acc + char.charCodeAt(0), 0)
-  const count = Math.min(base.length, 2 + (seed % 3))
-  return namespaceMockTraceDetails(base.slice(0, count), threadId, {
-    startedAt: (index) => new Date(now - (count - index) * 12 * 60 * 1000).toISOString()
-  })
+  return options?.scope === "project"
+    ? attributeMockProjectThreadTraces(traces, `mock-project-${threadId}`)
+    : traces
 }
 
 function makeMockSkillCodeStats(skill: string): DashboardCodeStats {
@@ -13721,7 +13786,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle(
     "dashboard:threadTraces",
     async (_, threadId: string, options?: ThreadTracesOptions) => {
-      if (import.meta.env.DEV) return { success: true, data: makeMockThreadTraces(threadId) }
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockThreadTraces(threadId, options) }
       try {
         return { success: true, data: await fetchThreadTraces(threadId, options) }
       } catch (e) {

@@ -9,6 +9,7 @@ import {
   buildTraceConversation,
   type TraceConversationSource
 } from "./TraceConversation"
+import { summarizeThreadProjectNodes } from "./trace-project-node-summary"
 
 function traceWithResponse(
   overrides: Partial<TraceConversationSource> = {}
@@ -27,6 +28,68 @@ function traceWithResponse(
     ...overrides
   }
 }
+
+describe("Thread project node summary", () => {
+  it("deduplicates visited project nodes regardless of node status", () => {
+    const result = summarizeThreadProjectNodes([
+      traceWithResponse({
+        harnessProjectId: "project-1",
+        harnessNodeName: "Dev-代码实现",
+        harnessNodeStatus: "已完成"
+      }),
+      traceWithResponse({
+        traceId: "child-trace",
+        traceKind: "subagent",
+        harnessProjectId: "project-1",
+        harnessNodeName: " Dev-代码实现 ",
+        harnessNodeStatus: " 已完成 "
+      }),
+      traceWithResponse({
+        traceId: "next-node",
+        harnessProjectId: "project-1",
+        harnessNodeName: "Dev-单元测试",
+        harnessNodeStatus: "已完成"
+      }),
+      traceWithResponse({
+        traceId: "in-progress-node",
+        harnessProjectId: "project-1",
+        harnessNodeName: "Dev-E2E 测试",
+        harnessNodeStatus: "进行中"
+      }),
+      traceWithResponse({
+        traceId: "status-missing-node",
+        harnessProjectId: "project-1",
+        harnessNodeName: "Ops-发布"
+      })
+    ])
+
+    expect(result).toEqual({
+      isProjectMode: true,
+      visitedNodeNames: ["Dev-代码实现", "Dev-单元测试", "Dev-E2E 测试", "Ops-发布"]
+    })
+  })
+
+  it("does not infer project mode from node-looking fields without a project binding", () => {
+    expect(
+      summarizeThreadProjectNodes([
+        traceWithResponse({
+          harnessNodeName: "Dev-代码实现",
+          harnessNodeStatus: "已完成"
+        })
+      ])
+    ).toEqual({ isProjectMode: false, visitedNodeNames: [] })
+  })
+
+  it("keeps project mode visible when no node attribution has been recorded", () => {
+    expect(
+      summarizeThreadProjectNodes([
+        traceWithResponse({
+          harnessProjectId: "project-1"
+        })
+      ])
+    ).toEqual({ isProjectMode: true, visitedNodeNames: [] })
+  })
+})
 
 describe("Trace conversation internal notifications", () => {
   it("hides an explicitly marked coordinator notification but keeps its response and tools", () => {
