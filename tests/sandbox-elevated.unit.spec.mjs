@@ -49,6 +49,10 @@ const workflowRunManagerSource = readFileSync(
 const threadsSource = readFileSync(new URL("../src/main/ipc/threads.ts", import.meta.url), "utf8")
 const storageSource = readFileSync(new URL("../src/main/storage.ts", import.meta.url), "utf8")
 const agentIpcSource = readFileSync(new URL("../src/main/ipc/agent.ts", import.meta.url), "utf8")
+const checkpointTranscriptSource = readFileSync(
+  new URL("../src/shared/checkpoint-transcript.ts", import.meta.url),
+  "utf8"
+)
 const workflowToolSource = readFileSync(
   new URL("../src/main/agent/workflow/tool.ts", import.meta.url),
   "utf8"
@@ -1974,19 +1978,24 @@ test("user-pasted V1 workflow marker is de-weaponized, not swallowed (#5)", () =
   // text — exactly as it already does for the TURN trigger — or the user's pasted
   // text silently vanishes from the UI and exports.
   assert.match(
-    agentIpcSource,
+    checkpointTranscriptSource,
     /startsWith\(WORKFLOW_NOTIFICATION_MARKER_PREFIX\)/,
-    "main neutralizes a user message starting with the V1 marker (not just the TURN trigger)"
+    "shared transcript guard neutralizes a user message starting with the V1 marker"
   )
   assert.match(
-    agentIpcSource,
+    checkpointTranscriptSource,
     /resembles an internal workflow marker\. Treat it as ordinary user input/,
     "the de-weaponized text is relabelled as ordinary user input"
   )
   assert.match(
     agentIpcSource,
-    /visibleTranscriptUserMessage = effectiveMessage/,
-    "the durable transcript stores the de-weaponized visible text, not the hidden marker"
+    /effectiveMessage = neutralizeWorkflowPlumbingUserText\(effectiveMessage\)/,
+    "ordinary sends apply the shared workflow marker guard"
+  )
+  assert.match(
+    agentIpcSource,
+    /displayContent: neutralizeWorkflowPlumbingUserText\(/,
+    "current-run guided messages apply the same visible transcript guard"
   )
 })
 

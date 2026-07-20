@@ -392,6 +392,56 @@ const api = {
           throw error
         })
     },
+    // Steer a queued draft into the running turn on this thread. Resolves with
+    // { queued:false, reason } when there is no active foreground run.
+    queueCurrentRunMessage: (
+      threadId: string,
+      message: { id: string; content: string; displayContent?: string }
+    ): Promise<{ queued: boolean; reason?: string; message?: string }> => {
+      return ipcRenderer.invoke("agent:queueCurrentRunMessage", { threadId, message }) as Promise<{
+        queued: boolean
+        reason?: string
+        message?: string
+      }>
+    },
+    // Un-steer a message that hasn't been injected yet.
+    deleteCurrentRunQueuedMessage: (threadId: string, messageId: string): Promise<void> => {
+      return ipcRenderer.invoke("agent:deleteCurrentRunQueuedMessage", { threadId, messageId })
+    },
+    reconcileCurrentRunQueuedMessages: (
+      threadId: string,
+      messageIds: string[]
+    ): Promise<{ pendingIds: string[]; injectedIds: string[]; durableIds: string[] }> => {
+      return ipcRenderer.invoke("agent:reconcileCurrentRunQueuedMessages", {
+        threadId,
+        messageIds
+      })
+    },
+    // Subscribe to injection notifications for a thread. The main process fires
+    // this when steered messages are drained into the model loop, so the renderer
+    // can drop them from its draft queue and render them as committed user turns.
+    onQueuedMessagesInjected: (
+      threadId: string,
+      callback: (payload: {
+        messages: Array<{ id: string; content: string }>
+        assistantIdAlias?: { sourceId: string; id: string }
+      }) => void
+    ): (() => void) => {
+      const channel = `agent:queueInjected:${threadId}`
+      const handler = (
+        _event: unknown,
+        payload: {
+          messages: Array<{ id: string; content: string }>
+          assistantIdAlias?: { sourceId: string; id: string }
+        }
+      ): void => {
+        callback(payload)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
     getCoordinatorWorkers: (
       threadId: string,
       options?: { subscribeUpdates?: boolean }

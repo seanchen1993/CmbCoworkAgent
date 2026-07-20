@@ -284,6 +284,30 @@ export interface Message {
   active_window_id?: string | null
 }
 
+/**
+ * A user message parked in the per-thread draft queue while a run is active or a
+ * tool approval is pending. It carries the fully-composed payload so it can be
+ * sent verbatim once the run ends (auto-drain) or steered into the running turn:
+ *   - `text`                    the raw user text (what the edit box shows)
+ *   - `attachmentModelBlocks`   <attachment>…</attachment> XML appended for the model
+ *   - `attachmentDisplayPrefix` "📎 name" lines shown in the user's bubble
+ *   - `skillBlock`              trailing slash-command skill block, if any
+ *   - `modelId`                 model selected when the draft was composed
+ *   - `handoffRequestedAt`      set once the message has been steered into the
+ *                               current run (awaiting injection); cleared on run end
+ */
+export interface QueuedMessage {
+  id: string
+  text: string
+  attachmentModelBlocks?: string
+  attachmentDisplayPrefix?: string
+  skillBlock?: string
+  modelId?: string
+  handoffRequestedAt?: Date
+  created_at: Date
+  updated_at: Date
+}
+
 export interface GoalEvent {
   event_id: number
   thread_id: string

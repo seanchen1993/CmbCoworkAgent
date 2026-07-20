@@ -91,7 +91,13 @@ import { createMemorySearchTool, createMemoryGetTool } from "../memory/tools"
 import { resolveWorkspaceMemoryDirs } from "../memory/paths"
 import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
-import { getThread } from "../db/index"
+import {
+  flushStrict,
+  getThread,
+  moveThreadMessagesAfterLastNonAssistant,
+  replaceThreadMessageId,
+  upsertThreadMessages
+} from "../db/index"
 import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
@@ -139,12 +145,38 @@ import {
   type HookScopeController
 } from "../hooks/scope"
 import { ApprovalStore } from "./approval-store"
+import {
+  assertCurrentRunMessagesDurablyPersisted,
+  createCurrentRunMessageQueueMiddleware,
+  setCurrentRunInjectionNotifier
+} from "./current-run-message-queue"
+// Re-exported so existing importers (ipc/agent.ts) keep resolving these from
+// runtime; the implementation now lives in the electron-free queue module.
+export {
+  clearCurrentRunMessageQueue,
+  deleteCurrentRunQueuedMessage,
+  getCurrentRunInjectedMessageIds,
+  isCurrentRunMessageQueueOwner,
+  isCurrentRunMessageWithdrawn,
+  peekCurrentRunMessageQueue,
+  queueCurrentRunMessage,
+  setCurrentRunMessageQueueOwner
+} from "./current-run-message-queue"
+export type { CurrentRunQueuedMessage } from "./current-run-message-queue"
+
+let flushTranscriptBeforeCurrentRunInjection: ((threadId: string) => void) | null = null
+
+export function setCurrentRunTranscriptFlushBeforeInjection(
+  flush: (threadId: string) => void
+): void {
+  flushTranscriptBeforeCurrentRunInjection = flush
+}
 import { ToolOrchestrator } from "./tool-orchestrator"
 import { classifyCommandConcurrency, isReadOnlyShellCommand } from "./exec-policy"
 import type { WindowsShellKind } from "./windows-safe-commands"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
-import type { ApprovalRequest, ApprovalDecision } from "../types"
+import type { ApprovalRequest, ApprovalDecision, Message } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import type {
   McpCapabilityService,
@@ -698,6 +730,129 @@ export function getOrCreateApprovalStore(threadId: string): ApprovalStore {
   }
   return store
 }
+
+// The current-run message queue (in-flight steering) lives in a dedicated,
+// electron-free module (current-run-message-queue.ts) so its logic can be
+// unit-tested directly. Here we only wire its injection notifier to broadcast to
+// renderer windows, so each window's draft queue can reconcile the messages that
+// were steered into the running turn (drop them from the queue, render them as
+// committed user turns).
+setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
+  // This strict DB flush is the durable acknowledgement boundary. The
+  // renderer may remove its localStorage draft only after this succeeds; if it
+  // throws, the queue middleware restores the messages for a later retry.
+  if (!flushTranscriptBeforeCurrentRunInjection) {
+    throw new Error("Current-run transcript flush is not registered")
+  }
+  // Streamed assistant/tool chunks use a deferred transcript buffer. Flush that
+  // buffer first so the steered user turn receives an ordinal after every model
+  // message that preceded it in the active run.
+  flushTranscriptBeforeCurrentRunInjection(threadId)
+  // afterModel runs before the outer stream consumer receives the final AI
+  // message. Write that completed reply first so the steer cannot replace it
+  // in the durable transcript. Its priority wins over delayed stream chunks
+  // with the same message id.
+  const completedAssistantMessage = context?.completedAssistantMessage
+  const transcriptMessages: Message[] = [
+    ...(completedAssistantMessage
+      ? [
+          {
+            id: completedAssistantMessage.id,
+            role: "assistant" as const,
+            content: completedAssistantMessage.content,
+            content_priority: 1,
+            created_at: new Date()
+          }
+        ]
+      : []),
+    ...messages.map((message) => ({
+      id: message.id,
+      role: "user" as const,
+      // Keep the durable transcript aligned with the user bubble. The prepared
+      // model payload remains in the checkpoint HumanMessage below, with the
+      // visible alias attached for checkpoint restore/export.
+      content: message.displayContent || message.content,
+      created_at: new Date()
+    }))
+  ]
+  const persistedCount = upsertThreadMessages(threadId, transcriptMessages)
+  assertCurrentRunMessagesDurablyPersisted(transcriptMessages.length, persistedCount)
+  // Coordinator streams can emit the provider's final assistant event after
+  // afterModel has already persisted the stable current-run id above. Record an
+  // alias now so that delayed event updates merge into this row instead of
+  // becoming a second, identical assistant transcript entry.
+  if (
+    completedAssistantMessage?.sourceId &&
+    completedAssistantMessage.sourceId !== completedAssistantMessage.id
+  ) {
+    replaceThreadMessageId(
+      threadId,
+      completedAssistantMessage.sourceId,
+      completedAssistantMessage.id,
+      "assistant"
+    )
+  }
+  moveThreadMessagesAfterLastNonAssistant(
+    threadId,
+    transcriptMessages.map((message) => message.id)
+  )
+  await flushStrict()
+  const assistantIdAlias =
+    completedAssistantMessage?.sourceId &&
+    completedAssistantMessage.sourceId !== completedAssistantMessage.id
+      ? {
+          sourceId: completedAssistantMessage.sourceId,
+          id: completedAssistantMessage.id
+        }
+      : undefined
+  const payload = {
+    messages: messages.map((message) => ({
+      id: message.id,
+      content: message.displayContent || message.content
+    })),
+    ...(assistantIdAlias
+      ? {
+          assistantIdAlias
+        }
+      : {})
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
+    try {
+      // The coordinator can have already streamed the provider id to the UI
+      // before afterModel assigns a stable id for the durable transcript. Reuse
+      // the normal stream alias event so the existing live bubble is renamed,
+      // rather than rendering the stable values snapshot as a second reply.
+      if (assistantIdAlias) {
+        win.webContents.send(`agent:stream:${threadId}`, {
+          type: "custom",
+          data: {
+            type: "message_id_alias",
+            fromId: assistantIdAlias.sourceId,
+            toId: assistantIdAlias.id,
+            role: "assistant"
+          }
+        })
+      }
+      // Guided input starts a new user/assistant boundary inside the same run.
+      // Reset the renderer's live assistant accumulator before the model is
+      // invoked again so coordinator output cannot append to the prior reply.
+      win.webContents.send(`agent:stream:${threadId}`, {
+        type: "custom",
+        data: {
+          type: "current_run_user_injected",
+          messages: payload.messages
+        }
+      })
+      win.webContents.send(`agent:queueInjected:${threadId}`, payload)
+    } catch (error) {
+      // Persistence is the acknowledgement boundary. A renderer can disappear
+      // after the durable write (reload/window close); notification failure must
+      // not restore the queue and prevent the model from receiving the message.
+      console.warn("[Runtime] Failed to notify renderer about injected messages:", error)
+    }
+  }
+})
 
 const BASE_PROMPT =
   "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
@@ -1505,6 +1660,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
     threadId,
+    currentRunMessageQueueOwnerToken,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
@@ -2150,6 +2306,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
             )
           ]
         : []),
+      // Inject user messages steered into the running turn. Placed BEFORE
+      // summarization (injected turns should participate in context management)
+      // and BEFORE humanInTheLoop (a steered message must never race a pending
+      // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
+      createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
       createSummarizationMiddleware(summarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
@@ -3472,6 +3633,8 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 export interface CreateAgentRuntimeOptions {
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
+  /** Physical foreground run token allowed to drain the current-run steer queue. */
+  currentRunMessageQueueOwnerToken?: string
   /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
   approvalThreadId?: string
   /** Optional model ID from thread/runtime config */
@@ -5421,6 +5584,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO
     // mode it skips initial approvals but still prompts before sandbox escape.
+    // If this is ever set to a real interruptOn map, re-check the current-run
+    // steer queue: a native LangGraph interrupt ends the invoke handler's stream
+    // loop (hits its finally, clearCurrentRunMessageQueue fires) while the run is
+    // still awaiting resume, unlike the IPC-based approval above which keeps the
+    // run's promise chain alive and doesn't touch the queue.
     interruptOn: undefined,
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },
@@ -5433,6 +5601,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       maxLength: 2000
     },
     threadId: options.threadId,
+    currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
     onFailureFuseNotice,
