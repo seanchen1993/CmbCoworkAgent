@@ -33,8 +33,10 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { cn } from "@/lib/utils"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
+import { resolvePluginInstallVersion } from "../../../../../shared/plugin-version"
 
 const DEFAULT_MARKET_VERSION = "v1.0.0"
+const DEFAULT_PLUGIN_VERSION = resolvePluginInstallVersion()
 
 interface UserInfoLite {
   sapId?: string
@@ -274,6 +276,12 @@ function getResourceTypeLabel(resourceType: UniversalUploadDialogProps["resource
   }
 }
 
+function getDefaultVersionForResourceType(
+  resourceType: UniversalUploadDialogProps["resourceType"]
+): string {
+  return resourceType === "plugin" ? DEFAULT_PLUGIN_VERSION : DEFAULT_MARKET_VERSION
+}
+
 function buildFormInitializationKey(
   resourceType: UniversalUploadDialogProps["resourceType"],
   isUpdate: boolean | undefined,
@@ -291,7 +299,7 @@ function buildFormInitializationKey(
     name: existingItem.name || "",
     description: existingItem.description || "",
     category: existingItem.category || DEFAULT_SCENE_CATEGORY,
-    version: existingItem.version || DEFAULT_MARKET_VERSION,
+    version: existingItem.version || getDefaultVersionForResourceType(resourceType),
     guidance: existingItem.guidance || "",
     chinese_name: existingItem.chinese_name || "",
     user_id: existingItem.user_id || "",
@@ -375,7 +383,7 @@ export function UniversalUploadDialog({
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [category, setCategory] = useState<string>(DEFAULT_SCENE_CATEGORY)
-  const [version, setVersion] = useState(DEFAULT_MARKET_VERSION)
+  const [version, setVersion] = useState(() => getDefaultVersionForResourceType(resourceType))
   const [guidance, setGuidance] = useState("")
   const [chineseName, setChineseName] = useState("")
   const [userId, setUserId] = useState<string | undefined>(undefined)
@@ -392,24 +400,25 @@ export function UniversalUploadDialog({
 
   const isSkillResource = resourceType === "skill"
   const isPluginResource = resourceType === "plugin"
-  const isVersionReadonly = isSkillResource
+  const isVersionReadonly = isSkillResource || (isPluginResource && versionFromPluginFile)
   const shouldPreserveExistingPublisherMetadata =
     Boolean(isUpdate) && isAdminModeActive && Boolean(existingItem)
   const hasExistingItem = Boolean(existingItem)
+  const defaultVersion = getDefaultVersionForResourceType(resourceType)
   const existingItemName = existingItem?.name || ""
   const existingItemDescription = existingItem?.description || ""
   const existingItemCategory = existingItem?.category || DEFAULT_SCENE_CATEGORY
-  const existingItemVersion = existingItem?.version || DEFAULT_MARKET_VERSION
+  const existingItemVersion = existingItem?.version || defaultVersion
   const existingItemGuidance = existingItem?.guidance || ""
   const existingItemChineseName = existingItem?.chinese_name || ""
   const existingItemExtraJson = existingItem?.extra_json
 
   const resetVersionState = React.useCallback(() => {
-    setVersion(DEFAULT_MARKET_VERSION)
+    setVersion(defaultVersion)
     setVersionFromSkillFile(false)
     setVersionFoundInSkillFrontmatter(false)
     setVersionFromPluginFile(false)
-  }, [])
+  }, [defaultVersion])
 
   const loadCurrentUserId = React.useCallback(async () => {
     try {
@@ -443,7 +452,7 @@ export function UniversalUploadDialog({
         name: name.trim(),
         description: description.trim(),
         category: category.trim() || DEFAULT_SCENE_CATEGORY,
-        version: version.trim() || DEFAULT_MARKET_VERSION,
+        version: version.trim() || defaultVersion,
         guidance: guidance.trim(),
         chineseName: chineseName.trim(),
         userId: uploadUserId,
@@ -466,7 +475,8 @@ export function UniversalUploadDialog({
       pluginSkills,
       shouldPreserveExistingPublisherMetadata,
       userId,
-      version
+      version,
+      defaultVersion
     ]
   )
 
@@ -687,17 +697,12 @@ export function UniversalUploadDialog({
         const buffer = await selectedFile.arrayBuffer()
         const detail = await window.api.plugins.inspectZip(buffer)
         setPluginSkills(sanitizeSkillNames(detail.skills))
-        if (detail.manifest?.version) {
-          setVersion(detail.manifest.version)
-          setVersionFromPluginFile(true)
-        } else {
-          setVersion(DEFAULT_MARKET_VERSION)
-          setVersionFromPluginFile(false)
-        }
+        setVersion(resolvePluginInstallVersion(detail.manifest?.version))
+        setVersionFromPluginFile(Boolean(detail.manifest?.version?.trim()))
       } catch (e) {
         console.warn("[UniversalUploadDialog] Failed to inspect plugin zip:", e)
         setPluginSkills([])
-        setVersion(DEFAULT_MARKET_VERSION)
+        setVersion(defaultVersion)
         setVersionFromPluginFile(false)
       }
     }
@@ -1379,24 +1384,24 @@ export function UniversalUploadDialog({
                       </div>
                     ) : isPluginResource ? (
                       <div className="space-y-2">
-                        <p className="leading-5">
-                          {versionFromPluginFile ? (
-                            <>
-                              已从{" "}
-                              <code className="rounded bg-muted px-1">plugin.json</code>{" "}
-                              中解析出版本号。如需修改，可以直接编辑。
-                            </>
-                          ) : (
-                            <>
-                              Plugin 版本默认从{" "}
-                              <code className="rounded bg-muted px-1">plugin.json</code>{" "}
-                              的 <code className="rounded bg-muted px-1">version</code>{" "}
-                              字段读取；未找到时按{" "}
-                              <code className="rounded bg-muted px-1">{DEFAULT_MARKET_VERSION}</code>{" "}
-                              处理，可手动填写。
-                            </>
-                          )}
-                        </p>
+                        {(versionFromPluginFile || !file) && (
+                          <p className="leading-5">
+                            {versionFromPluginFile ? (
+                              <>
+                                已从{" "}
+                                <code className="rounded bg-muted px-1">plugin.json</code>{" "}
+                                中解析出版本号，因此这里不允许手动修改。
+                              </>
+                            ) : (
+                              <>
+                                Plugin 版本默认从{" "}
+                                <code className="rounded bg-muted px-1">plugin.json</code>{" "}
+                                的 <code className="rounded bg-muted px-1">version</code>{" "}
+                                字段读取；如果没有解析到版本号，这里会允许你手动填写。
+                              </>
+                            )}
+                          </p>
+                        )}
                         {!versionFromPluginFile && file ? (
                           <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
                             <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
@@ -1404,7 +1409,11 @@ export function UniversalUploadDialog({
                               当前没有从{" "}
                               <code className="rounded bg-amber-100 px-1">plugin.json</code>{" "}
                               里找到 <code className="rounded bg-amber-100 px-1">version</code>
-                              ，请手动填写版本号。
+                              ，当前先按{" "}
+                              <code className="rounded bg-amber-100 px-1">
+                                {DEFAULT_PLUGIN_VERSION}
+                              </code>{" "}
+                              回填，你也可以手动修改。
                             </p>
                           </div>
                         ) : null}
