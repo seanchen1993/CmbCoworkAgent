@@ -13,9 +13,8 @@
  *      markers without changing the already-completed git commit outcome.
  *   2. Performance. Line-level hashing uses a lightweight FNV-1a 32-bit
  *      function; no new deps; no per-line crypto hashing.
- *   3. Local first. `code_adopt` and `code_test_gen` envelopes use a SQLite
- *      transactional outbox; retries reuse the exact top-level eventId. Other
- *      telemetry remains fire-and-forget through `trackEvent()`.
+ *   3. Local first. `code_gen`, `code_adopt`, and `code_test_gen` envelopes use
+ *      a SQLite transactional outbox; retries reuse the exact top-level eventId.
  *   4. Only code files are tracked (whitelist + build-output blacklist).
  *
  * ── Storage layout ───────────────────────────────────────
@@ -53,7 +52,7 @@ import type {
   LocalGeneratedLineStatus,
   LocalGenAdoptionLines
 } from "../../shared/adoption-trace-types"
-import { buildEvent, getEventReporter, trackEvent, type CoworkEvent } from "./event-reporter"
+import { buildEvent, getEventReporter, type CoworkEvent } from "./event-reporter"
 import { getGitRootForPath } from "./git-repository-discovery"
 import { getTestCodeMatchRule, type TestCodeMatchRule } from "./adoption-file-policy"
 import {
@@ -63,13 +62,14 @@ import {
   deleteAdoptLineDetailsOlderThan,
   enqueueCommitJob,
   enqueueEventOutbox,
+  enqueueEventOutboxBatch,
   findPendingGensForFile,
   getAdoptLineDetails,
   flushAdoptionIndex,
   getCommitJob,
   getGenRowByEventId,
   initializeAdoptionIndex,
-  insertGenEvent,
+  insertGenEventWithOutbox,
   listDueCommitJobs,
   listDueOutboxEvents,
   listPendingGenPaths,
@@ -131,19 +131,17 @@ const LOCAL_ADOPT_DETAILS_MAX_BYTES = 50 * 1024 * 1024
 const LOCAL_ADOPT_DETAILS_MAX_ROWS = 10000
 const OUTBOX_POLL_INTERVAL_MS = 15 * 1000
 const OUTBOX_BATCH_SIZE = 25
+// Normal code generation can be much more frequent than commit/test events.
+// Give the existing 500ms sql.js save debounce time to coalesce rapid edits
+// before draining; the drain itself still verifies the snapshot is durable.
+const CODE_GEN_OUTBOX_DRAIN_DELAY_MS = 750
 const OUTBOX_MAX_ATTEMPTS = 10
 const OUTBOX_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000
 const OUTBOX_SENDING_STALE_MS = 2 * 60 * 1000
 const COMMIT_JOB_POLL_INTERVAL_MS = 30 * 1000
 const COMMIT_JOB_BATCH_SIZE = 5
 const DELIVERY_RECORD_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
-const COMMIT_JOB_RETRY_DELAYS_MS = [
-  5_000,
-  30_000,
-  2 * 60_000,
-  10 * 60_000,
-  60 * 60_000
-] as const
+const COMMIT_JOB_RETRY_DELAYS_MS = [5_000, 30_000, 2 * 60_000, 10 * 60_000, 60 * 60_000] as const
 // Ten upload attempts finish within one day. The event remains locally for the
 // 14-day audit/cleanup window, but stale telemetry is not uploaded after day one.
 const OUTBOX_RETRY_DELAYS_MS = [
@@ -354,6 +352,7 @@ export interface AdoptionLineMeasureResult {
 let initialized = false
 let sweepTimer: NodeJS.Timeout | null = null
 let outboxTimer: NodeJS.Timeout | null = null
+let codeGenOutboxDrainTimer: NodeJS.Timeout | null = null
 let commitJobTimer: NodeJS.Timeout | null = null
 let sweepCount = 0
 let currentShardPath: string | null = null
@@ -839,8 +838,7 @@ function retryDelayMs(
   retryAfterMs?: number,
   delays: readonly number[] = COMMIT_JOB_RETRY_DELAYS_MS
 ): number {
-  const fallback =
-    delays[Math.min(attemptsBeforeCurrentAttempt, delays.length - 1)]
+  const fallback = delays[Math.min(attemptsBeforeCurrentAttempt, delays.length - 1)]
   return Math.max(fallback, retryAfterMs ?? 0)
 }
 
@@ -851,14 +849,14 @@ function retryDelayMs(
 function hasObservabilityContext(ctx: AdoptionContext): boolean {
   return Boolean(
     ctx.traceId ||
-      ctx.observabilitySchemaVersion ||
-      ctx.traceKind ||
-      ctx.executionMode ||
-      ctx.rootTraceId ||
-      ctx.parentTraceId ||
-      ctx.subagentKind ||
-      ctx.workflowRunId ||
-      ctx.coordinatorWorkerId
+    ctx.observabilitySchemaVersion ||
+    ctx.traceKind ||
+    ctx.executionMode ||
+    ctx.rootTraceId ||
+    ctx.parentTraceId ||
+    ctx.subagentKind ||
+    ctx.workflowRunId ||
+    ctx.coordinatorWorkerId
   )
 }
 
@@ -933,14 +931,14 @@ function buildGenIndexObservabilityColumns(
 function hasPendingObservabilityContext(pending: GenIndexRow): boolean {
   return Boolean(
     pending.trace_id ||
-      pending.observability_schema_version ||
-      pending.trace_kind ||
-      pending.execution_mode ||
-      pending.root_trace_id ||
-      pending.parent_trace_id ||
-      pending.subagent_kind ||
-      pending.workflow_run_id ||
-      pending.coordinator_worker_id
+    pending.observability_schema_version ||
+    pending.trace_kind ||
+    pending.execution_mode ||
+    pending.root_trace_id ||
+    pending.parent_trace_id ||
+    pending.subagent_kind ||
+    pending.workflow_run_id ||
+    pending.coordinator_worker_id
   )
 }
 
@@ -1382,32 +1380,36 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // directly, without a two-step join against code_gen). Using the snapshot
     // taken before the await — see the top of this function.
     const observabilityColumns = buildGenIndexObservabilityColumns(ctx, input.threadId)
-    const indexed = insertGenEvent({
-      event_id: eventId,
-      file_path: absPath,
-      content_fingerprint: fingerprint,
-      shard_file: shardFile,
-      shard_offset: offset,
-      line_hashes: packLineHashes(hashes),
-      old_line_hashes: oldLineHashes.length > 0 ? packLineHashes(oldLineHashes) : null,
-      generated_lines_blob: packLocalLineTexts(baseline.generatedLineTexts),
-      created_at: createdAt,
-      measured: 0,
-      tool: input.tool,
-      used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
-      skill_source: skillSource.length > 0 ? JSON.stringify(skillSource) : null,
-      thread_id: input.threadId || null,
-      trace_id: ctx.traceId ?? null,
-      model_id: ctx.modelId ?? null,
-      model_name: ctx.modelName ?? null,
-      harness_project_id: ctx.harnessProjectId ?? null,
-      harness_feature_slug: ctx.harnessFeatureSlug ?? null,
-      harness_node_name: ctx.harnessNodeName ?? null,
-      harness_node_status: ctx.harnessNodeStatus ?? null,
-      harness_adapter_name: ctx.harnessAdapterName ?? null,
-      harness_adapter_version: ctx.harnessAdapterVersion ?? null,
-      ...observabilityColumns
-    })
+    const generationEvent = buildEvent("code_gen", "code_adoption", generationProperties)
+    const indexed = insertGenEventWithOutbox(
+      {
+        event_id: eventId,
+        file_path: absPath,
+        content_fingerprint: fingerprint,
+        shard_file: shardFile,
+        shard_offset: offset,
+        line_hashes: packLineHashes(hashes),
+        old_line_hashes: oldLineHashes.length > 0 ? packLineHashes(oldLineHashes) : null,
+        generated_lines_blob: packLocalLineTexts(baseline.generatedLineTexts),
+        created_at: createdAt,
+        measured: 0,
+        tool: input.tool,
+        used_skills: usedSkills.length > 0 ? JSON.stringify(usedSkills) : null,
+        skill_source: skillSource.length > 0 ? JSON.stringify(skillSource) : null,
+        thread_id: input.threadId || null,
+        trace_id: ctx.traceId ?? null,
+        model_id: ctx.modelId ?? null,
+        model_name: ctx.modelName ?? null,
+        harness_project_id: ctx.harnessProjectId ?? null,
+        harness_feature_slug: ctx.harnessFeatureSlug ?? null,
+        harness_node_name: ctx.harnessNodeName ?? null,
+        harness_node_status: ctx.harnessNodeStatus ?? null,
+        harness_adapter_name: ctx.harnessAdapterName ?? null,
+        harness_adapter_version: ctx.harnessAdapterVersion ?? null,
+        ...observabilityColumns
+      },
+      toOutboxEvent(generationEvent, createdAt)
+    )
     if (!indexed) {
       console.warn(
         `[AdoptionTracker] code_gen suppressed — generation baseline was not indexed: eventId=${eventId} file=${relPath}`
@@ -1416,8 +1418,9 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     }
     trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
 
-    // ── Cloud event (metadata only) ─────────────────────
-    trackEvent("code_gen", "code_adoption", generationProperties)
+    // Let rapid write/edit calls share the existing debounced sql.js export.
+    // The outbox drain performs a final durability check before network I/O.
+    scheduleBatchedCodeGenOutboxDrain()
     console.log(
       `[AdoptionTracker] recordGen OK: eventId=${eventId} file=${relPath} lineCount=${reportedLineCount} rawHashes=${baseline.rawGeneratedLineCount} supersededHashes=${oldLineHashes.length} deletedLineCount=${deletedLineCount} threadId=${input.threadId} traceId=${ctx.traceId ?? "none"}`
     )
@@ -1470,8 +1473,7 @@ function emitSkippedLargeAtGen(args: {
     return
   }
 
-  // L1 — record that the agent generated code (metadata only, no path/content)
-  trackEvent("code_gen", "code_adoption", generationProperties)
+  const generationEvent = buildEvent("code_gen", "code_adoption", generationProperties)
 
   // Terminal L2/L3 equivalent — no hashing possible, so persist skipped_large
   // immediately. The complete envelope (including its top-level eventId) is
@@ -1506,11 +1508,16 @@ function emitSkippedLargeAtGen(args: {
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
     ...observabilityProps
   })
-  if (enqueueEventOutbox(toOutboxEvent(adoptEvent, createdAt))) {
-    scheduleOutboxDrain()
+  if (
+    enqueueEventOutboxBatch(
+      [toOutboxEvent(generationEvent, createdAt), toOutboxEvent(adoptEvent, createdAt)],
+      false
+    )
+  ) {
+    scheduleBatchedCodeGenOutboxDrain()
   } else {
     console.warn(
-      `[AdoptionTracker] failed to persist skipped_large event for genEventId=${eventId}`
+      `[AdoptionTracker] failed to persist oversize code_gen/code_adopt pair for genEventId=${eventId}`
     )
   }
 }
@@ -2832,17 +2839,28 @@ function scheduleOutboxDrain(): void {
   })
 }
 
+function scheduleBatchedCodeGenOutboxDrain(): void {
+  if (codeGenOutboxDrainTimer) return
+  codeGenOutboxDrainTimer = setTimeout(() => {
+    codeGenOutboxDrainTimer = null
+    void flushAdoptionEventOutbox()
+  }, CODE_GEN_OUTBOX_DRAIN_DELAY_MS)
+  if (typeof codeGenOutboxDrainTimer.unref === "function") codeGenOutboxDrainTimer.unref()
+}
+
 async function drainAdoptionEventOutbox(): Promise<void> {
+  // A code_gen envelope and its measurement baseline share the in-memory
+  // transaction. Never expose either to the reporter until the current sql.js
+  // image is safely exported; failures stay queued for the next poll.
+  if (!flushAdoptionIndex()) {
+    console.warn("[AdoptionTracker] outbox drain deferred — adoption index flush failed")
+    return
+  }
   resetInterruptedOutboxEvents(Date.now() - OUTBOX_SENDING_STALE_MS)
   const rows = listDueOutboxEvents(Date.now(), OUTBOX_BATCH_SIZE)
   for (const row of rows) {
     if (Date.now() - row.created_at >= OUTBOX_RETRY_WINDOW_MS) {
-      markOutboxFailed(
-        row.event_id,
-        "retry window expired after 24 hours",
-        Date.now(),
-        true
-      )
+      markOutboxFailed(row.event_id, "retry window expired after 24 hours", Date.now(), true)
       continue
     }
     if (!markOutboxSending(row.event_id)) continue
@@ -2881,9 +2899,7 @@ async function drainAdoptionEventOutbox(): Promise<void> {
       const attemptLimitReached = row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
       markOutboxFailed(
         row.event_id,
-        attemptLimitReached
-          ? `${error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})`
-          : error,
+        attemptLimitReached ? `${error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})` : error,
         Date.now() + retryDelayMs(row.attempts, undefined, OUTBOX_RETRY_DELAYS_MS),
         malformed || attemptLimitReached
       )
@@ -3014,6 +3030,10 @@ export function shutdownAdoptionTracker(): void {
   if (outboxTimer) {
     clearInterval(outboxTimer)
     outboxTimer = null
+  }
+  if (codeGenOutboxDrainTimer) {
+    clearTimeout(codeGenOutboxDrainTimer)
+    codeGenOutboxDrainTimer = null
   }
   if (commitJobTimer) {
     clearInterval(commitJobTimer)

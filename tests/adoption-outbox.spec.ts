@@ -8,9 +8,10 @@
 import { execFile } from "child_process"
 import { createHash } from "crypto"
 import { existsSync } from "fs"
-import { mkdir, mkdtemp, realpath, rename, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "fs/promises"
 import { homedir, tmpdir } from "os"
 import { join, resolve } from "path"
+import initSqlJs from "sql.js"
 import { promisify } from "util"
 import {
   captureStagedSnapshotsForCommit,
@@ -59,12 +60,18 @@ class AdoptionReporter implements IEventReporter {
   readonly generationCalls: CoworkEvent[] = []
   readonly testGenerationCalls: CoworkEvent[] = []
   failAdoption = false
+  failGeneration = false
   failTestGeneration = false
+  onGenerationReport?: (event: CoworkEvent) => Promise<void>
 
   async report(event: CoworkEvent): Promise<EventReportResult> {
     const snapshot = JSON.parse(JSON.stringify(event)) as CoworkEvent
     if (event.eventName === "code_gen") {
       this.generationCalls.push(snapshot)
+      await this.onGenerationReport?.(snapshot)
+      if (this.failGeneration) {
+        return { ok: false, retryable: true, error: "simulated generation failure" }
+      }
       return { ok: true, status: 200 }
     }
     if (event.eventName === "code_test_gen") {
@@ -157,12 +164,26 @@ async function waitForTestGenerationCall(reporter: AdoptionReporter): Promise<Co
 }
 
 async function waitForGenerationCall(reporter: AdoptionReporter, index = 0): Promise<CoworkEvent> {
-  for (let attempt = 0; attempt < 50; attempt++) {
+  for (let attempt = 0; attempt < 150; attempt++) {
     const event = reporter.generationCalls[index]
     if (event) return event
     await sleep(20)
   }
   throw new Error("timed out waiting for code_gen delivery")
+}
+
+async function querySnapshotCount(sql: string, params: Array<string | number>): Promise<number> {
+  const SQL = await initSqlJs()
+  const indexPath = join(homedir(), ".cmbcoworkagent", "adoption-index.sqlite")
+  const snapshot = new SQL.Database(await readFile(indexPath))
+  const stmt = snapshot.prepare(sql)
+  stmt.bind(params)
+  try {
+    return stmt.step() ? Number(stmt.getAsObject().count ?? 0) : 0
+  } finally {
+    stmt.free()
+    snapshot.close()
+  }
 }
 
 async function generateAndCommit(
@@ -324,9 +345,96 @@ async function testCodeGenRequiresAnIndexedBaseline(): Promise<void> {
   console.log("PASS code_gen is suppressed when its measurement baseline cannot be indexed")
 }
 
+async function testCodeGenUsesDurableBatchedOutbox(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    const reporter = new AdoptionReporter()
+    reporter.failGeneration = true
+    let durablePairCounts = { baseline: 0, outbox: 0 }
+    reporter.onGenerationReport = async (event) => {
+      const genEventId = String(event.properties?.eventId ?? "")
+      const baselineCount = await querySnapshotCount(
+        "SELECT COUNT(*) AS count FROM gen_events WHERE event_id = ?",
+        [genEventId]
+      )
+      const outboxCount = await querySnapshotCount(
+        "SELECT COUNT(*) AS count FROM event_outbox WHERE event_id = ?",
+        [event.eventId]
+      )
+      durablePairCounts = { baseline: baselineCount, outbox: outboxCount }
+    }
+    setEventReporter(reporter)
+    await initializeAdoptionTracker()
+
+    await withTempRepo("code-gen-durable-outbox", async (repo) => {
+      const filePath = join(repo, "durable-generation.ts")
+      const generatedContent = "export const durableGeneration = true\n"
+      await writeFile(filePath, generatedContent)
+
+      recordGen({
+        threadId: "code-gen-durable-outbox",
+        workspacePath: repo,
+        filePath,
+        tool: "write_file",
+        generatedContent
+      })
+
+      // Normal generations share the existing debounced sql.js save instead of
+      // forcing a full database export from every recordGen call.
+      await sleep(100)
+      assert(reporter.generationCalls.length === 0, "code_gen drain should be batched")
+
+      const firstEvent = await waitForGenerationCall(reporter)
+      const genEventId = String(firstEvent.properties?.eventId ?? "")
+      assert(genEventId.startsWith("g_"), "code_gen should retain its measurement id")
+      assert(
+        durablePairCounts.baseline === 1 && durablePairCounts.outbox === 1,
+        `reporter must see a disk-durable baseline/outbox pair: ${JSON.stringify(durablePairCounts)}`
+      )
+      assert(
+        getGenRowByEventId(genEventId)?.measured === 0,
+        "durable code_gen baseline should remain pending for commit measurement"
+      )
+      assert(
+        getOutboxEvent(firstEvent.eventId)?.status === "retry",
+        "failed code_gen delivery should remain retryable"
+      )
+
+      markOutboxFailed(firstEvent.eventId, "retry code_gen after restart", 0, false)
+      assert(flushAdoptionIndex(), "code_gen retry state should flush before restart")
+      shutdownAdoptionTracker()
+
+      reporter.failGeneration = false
+      await initializeAdoptionTracker()
+      await flushAdoptionEventOutbox()
+
+      assert(reporter.generationCalls.length === 2, "code_gen should retry after restart")
+      const retriedEvent = reporter.generationCalls[1]
+      assert(
+        retriedEvent.eventId === firstEvent.eventId,
+        "code_gen retry must reuse the top-level server idempotency key"
+      )
+      assert(
+        JSON.stringify(retriedEvent) === JSON.stringify(firstEvent),
+        "code_gen retry must reuse the immutable payload"
+      )
+      assert(
+        getGenRowByEventId(genEventId) !== null,
+        "code_gen measurement baseline should survive restart"
+      )
+      assert(
+        getOutboxEvent(firstEvent.eventId)?.status === "delivered",
+        "successful code_gen retry should complete the outbox row"
+      )
+    })
+  })
+  console.log("PASS code_gen batches persistence and retries the durable envelope")
+}
+
 async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
   await withIsolatedAdoptionStore(async () => {
     const reporter = new AdoptionReporter()
+    reporter.failGeneration = true
+    reporter.failAdoption = true
     setEventReporter(reporter)
     await initializeAdoptionTracker()
 
@@ -358,6 +466,12 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
       await flushAdoptionEventOutbox()
       const adoptEvent = reporter.adoptionCalls.find(
         (event) => event.properties?.genEventId === genEvent.properties?.eventId
+      )
+      assert(adoptEvent !== undefined, "oversize code_gen/code_adopt should be delivered together")
+      assert(
+        getOutboxEvent(genEvent.eventId)?.status === "retry" &&
+          getOutboxEvent(adoptEvent.eventId)?.status === "retry",
+        "both oversize envelopes should remain durable after upload failures"
       )
       assert(
         adoptEvent?.properties?.verdict === "skipped_large",
@@ -538,10 +652,7 @@ async function testOutboxAttemptAndRetentionLimits(): Promise<void> {
       "retry-window event should enter the outbox"
     )
     await flushAdoptionEventOutbox()
-    assert(
-      reporter.adoptionCalls.length === 10,
-      "events older than one day must not be uploaded"
-    )
+    assert(reporter.adoptionCalls.length === 10, "events older than one day must not be uploaded")
     assert(
       getOutboxEvent(retryExpiredEvent.eventId)?.status === "dead_letter",
       "expired retry window should move the event to dead letter"
@@ -575,6 +686,7 @@ async function testOutboxAttemptAndRetentionLimits(): Promise<void> {
 async function main(): Promise<void> {
   await testTestGenerationUsesSeparateDurableOutbox()
   await testCodeGenRequiresAnIndexedBaseline()
+  await testCodeGenUsesDurableBatchedOutbox()
   await testOversizeEditReportsNetGeneratedLines()
   await testStableOutboxRetryAcrossRestart()
   await testCommitJobRecoveryFromRepoAndSha()

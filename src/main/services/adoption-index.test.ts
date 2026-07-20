@@ -27,12 +27,15 @@ vi.mock("../storage", () => ({ getOpenworkDir: () => h.tempDir }))
 
 import {
   closeAdoptionIndex,
+  enqueueEventOutbox,
   finalizeGenMeasurement,
   findPendingGensForFile,
   getAdoptLineDetails,
   getGenRowByEventId,
+  getOutboxEvent,
   initializeAdoptionIndex,
   insertGenEvent,
+  insertGenEventWithOutbox,
   trimGeneratedSourceTextToByteCap,
   type GenIndexRow
 } from "./adoption-index"
@@ -134,6 +137,36 @@ describe("adoption-index harness_node_name column", () => {
       warn.mockRestore()
     }
     expect(getGenRowByEventId("g_rejected")).toBeNull()
+  })
+
+  it("rolls back the generation when its outbox envelope conflicts", () => {
+    const eventId = "code-gen-envelope-conflict"
+    const originalPayload = JSON.stringify({ eventId, eventName: "code_gen", version: 1 })
+    expect(
+      enqueueEventOutbox({
+        eventId,
+        eventName: "code_gen",
+        payloadJson: originalPayload,
+        createdAt: 1
+      })
+    ).toBe(true)
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      expect(
+        insertGenEventWithOutbox(makeRow({ event_id: "g_atomic_conflict" }), {
+          eventId,
+          eventName: "code_gen",
+          payloadJson: JSON.stringify({ eventId, eventName: "code_gen", version: 2 }),
+          createdAt: 2
+        })
+      ).toBe(false)
+    } finally {
+      warn.mockRestore()
+    }
+
+    expect(getGenRowByEventId("g_atomic_conflict")).toBeNull()
+    expect(getOutboxEvent(eventId)?.payload_json).toBe(originalPayload)
   })
 
   it("returns harness_node_name from findPendingGensForFile", () => {

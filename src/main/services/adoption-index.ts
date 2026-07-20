@@ -736,12 +736,38 @@ function insertOutboxEventUnsafe(event: EventOutboxInput): boolean {
   }
 }
 
-/** Persist a standalone adoption event (for example code_test_gen/skipped_large). */
-export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): boolean {
+/**
+ * Atomically persist a measurable generation baseline and its immutable
+ * `code_gen` envelope. Disk export remains debounced: the outbox worker flushes
+ * the shared sql.js image before it sends any queued event, so rapid edits are
+ * coalesced without ever publishing an unpersisted baseline.
+ */
+export function insertGenEventWithOutbox(row: GenIndexRow, event: EventOutboxInput): boolean {
   if (!db) return false
   try {
     db.run("BEGIN TRANSACTION")
+    if (!insertGenEvent(row)) throw new Error(`failed to insert generation: ${row.event_id}`)
     insertOutboxEventUnsafe(event)
+    db.run("COMMIT")
+    scheduleSave()
+    return true
+  } catch (e) {
+    try {
+      db.run("ROLLBACK")
+    } catch {
+      // transaction may already have committed
+    }
+    console.warn("[AdoptionIndex] insertGenEventWithOutbox failed:", e)
+    return false
+  }
+}
+
+/** Persist one or more standalone adoption events in a single transaction. */
+export function enqueueEventOutboxBatch(events: EventOutboxInput[], flushNow = true): boolean {
+  if (!db || events.length === 0) return false
+  try {
+    db.run("BEGIN TRANSACTION")
+    for (const event of events) insertOutboxEventUnsafe(event)
     db.run("COMMIT")
     scheduleSave()
     return !flushNow || flushAdoptionIndex()
@@ -751,9 +777,14 @@ export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): bo
     } catch {
       // transaction may already have committed
     }
-    console.warn("[AdoptionIndex] enqueueEventOutbox failed:", e)
+    console.warn("[AdoptionIndex] enqueueEventOutboxBatch failed:", e)
     return false
   }
+}
+
+/** Persist a standalone adoption event (for example code_test_gen/skipped_large). */
+export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): boolean {
+  return enqueueEventOutboxBatch([event], flushNow)
 }
 
 /**
