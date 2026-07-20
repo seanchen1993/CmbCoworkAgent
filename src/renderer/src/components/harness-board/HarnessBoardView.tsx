@@ -1619,6 +1619,12 @@ function HarnessProjectPhaseFlow({
 }): React.JSX.Element {
   return (
     <section className="w-full shrink-0 rounded-2xl border border-border/80 bg-background-elevated/80 p-3 shadow-sx">
+      <div className="mb-2 flex">
+	<span className="text-sm">项目流程</span>
+        <span className="ml-2 shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+          来自精益之星
+        </span>
+      </div>
       <div className="overflow-x-auto pb-1">
         <div className="grid w-full grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-6">
           {steps.map((step, index) => {
@@ -5836,6 +5842,8 @@ function FeatureDetailPage({
   const effectiveSelectedNodeId = selectedNodeId ?? defaultNodeId
   const selectedNode =
     detail?.run.nodes.find((node) => node.id === effectiveSelectedNodeId) ?? detail?.run.nodes[0] ?? null
+  const completedArtifactCount =
+    selectedNode?.artifacts?.filter((artifact) => artifact.artifactStatus === "generated").length ?? 0
   const selectedNodeHooks = useMemo(
     () => [...(selectedNode?.hooks ?? [])].sort((a, b) => (b.ts || "").localeCompare(a.ts || "")),
     [selectedNode]
@@ -6405,9 +6413,9 @@ function FeatureDetailPage({
                   </div>
                   <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
                     <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
-                      产物
+                      产物(已完成/预期)
                       <strong className="mt-0.5 block text-sm text-foreground">
-                        {selectedNode?.artifacts.length ?? 0}
+                        {completedArtifactCount}/{selectedNode?.artifacts?.length ?? 0}
                       </strong>
                     </div>
                     <div className="rounded-lg border border-border/70 bg-background/70 px-2.5 py-2">
