@@ -116,6 +116,7 @@ const PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL =
 type MarketExtraJson = {
   skills?: string[]
   grayUserIds?: string[]
+  grayOrgs?: string[]
   updated_at?: string
   [key: string]: unknown
 }
@@ -164,6 +165,28 @@ function normalizeUserIdsForForm(userIds: string[]): string[] {
   return normalized
 }
 
+function sanitizeOrgs(orgs: string[]): string[] {
+  return Array.from(new Set(orgs.map((org) => org.trim()).filter(Boolean)))
+}
+
+function normalizeOrgsForForm(orgs: string[]): string[] {
+  const seen = new Set<string>()
+  const normalized: string[] = []
+
+  for (const org of orgs) {
+    const trimmed = org.trim()
+    if (!trimmed) {
+      normalized.push("")
+      continue
+    }
+    if (seen.has(trimmed)) continue
+    seen.add(trimmed)
+    normalized.push(trimmed)
+  }
+
+  return normalized
+}
+
 function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
   if (!extraJson?.trim()) return {}
   try {
@@ -188,6 +211,13 @@ function parseGrayUserIdsFromExtraJson(extraJson?: string): string[] {
     : []
 }
 
+function parseGrayOrgsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  return Array.isArray(parsed.grayOrgs)
+    ? sanitizeOrgs(parsed.grayOrgs.filter((item): item is string => typeof item === "string"))
+    : []
+}
+
 function buildMarketTimestamp(): string {
   return new Date().toISOString()
 }
@@ -195,12 +225,14 @@ function buildMarketTimestamp(): string {
 function buildExtraJson(options: {
   skills: string[]
   userIds: string[]
+  orgs: string[]
   existingExtraJson?: string
   includeSkills?: boolean
 }): string {
-  const { skills, userIds, existingExtraJson, includeSkills = false } = options
+  const { skills, userIds, orgs, existingExtraJson, includeSkills = false } = options
   const normalizedSkills = sanitizeSkillNames(skills)
   const normalizedUserIds = sanitizeUserIds(userIds)
+  const normalizedOrgs = sanitizeOrgs(orgs)
   const payload: MarketExtraJson = {
     ...parseMarketExtraJson(existingExtraJson),
     updated_at: buildMarketTimestamp()
@@ -218,6 +250,12 @@ function buildExtraJson(options: {
     payload.grayUserIds = normalizedUserIds
   } else {
     delete payload.grayUserIds
+  }
+
+  if (normalizedOrgs.length > 0) {
+    payload.grayOrgs = normalizedOrgs
+  } else {
+    delete payload.grayOrgs
   }
 
   return JSON.stringify(payload)
@@ -343,9 +381,11 @@ export function UniversalUploadDialog({
   const [userId, setUserId] = useState<string | undefined>(undefined)
   const [pluginSkills, setPluginSkills] = useState<string[]>([])
   const [grayUserIds, setGrayUserIds] = useState<string[]>([])
+  const [grayOrgs, setGrayOrgs] = useState<string[]>([])
   const [nameFromFile, setNameFromFile] = useState(false) // name 是否来自文件解析（锁定）
   const [versionFromSkillFile, setVersionFromSkillFile] = useState(false)
   const [versionFoundInSkillFrontmatter, setVersionFoundInSkillFrontmatter] = useState(false)
+  const [versionFromPluginFile, setVersionFromPluginFile] = useState(false)
   const [submitReasonOpen, setSubmitReasonOpen] = useState(false)
   const [parsingPluginSkills, setParsingPluginSkills] = useState(false)
   const lastInitializedFormKeyRef = React.useRef<string | null>(null)
@@ -368,6 +408,7 @@ export function UniversalUploadDialog({
     setVersion(DEFAULT_MARKET_VERSION)
     setVersionFromSkillFile(false)
     setVersionFoundInSkillFrontmatter(false)
+    setVersionFromPluginFile(false)
   }, [])
 
   const loadCurrentUserId = React.useCallback(async () => {
@@ -383,11 +424,13 @@ export function UniversalUploadDialog({
   const buildUploadContext = React.useCallback(
     (
       skills: string[] = pluginSkills,
-      userIds: string[] = grayUserIds
+      userIds: string[] = grayUserIds,
+      orgs: string[] = grayOrgs
     ): GeneratedMarketFileBuildContext => {
       const extraJson = buildExtraJson({
         skills: isPluginResource ? normalizePluginSkillsForForm(skills) : [],
         userIds: normalizeUserIdsForForm(userIds),
+        orgs: normalizeOrgsForForm(orgs),
         existingExtraJson: existingItem?.extra_json,
         includeSkills: isPluginResource
       })
@@ -413,6 +456,7 @@ export function UniversalUploadDialog({
       description,
       existingItem?.extra_json,
       existingItem?.user_id,
+      grayOrgs,
       grayUserIds,
       guidance,
       isAdminModeActive,
@@ -425,12 +469,6 @@ export function UniversalUploadDialog({
       version
     ]
   )
-
-  const parsePluginSkillsFromFile = React.useCallback(async (pluginFile: File): Promise<string[]> => {
-    const buffer = await pluginFile.arrayBuffer()
-    const detail = await window.api.plugins.inspectZip(buffer)
-    return sanitizeSkillNames(detail.skills)
-  }, [])
 
   const canRefreshPluginSkills =
     open && isUpdate && isPluginResource && !file && typeof loadPluginSkills === "function"
@@ -498,9 +536,11 @@ export function UniversalUploadDialog({
         resourceType === "plugin" ? parsePluginSkillsFromExtraJson(existingItemExtraJson) : []
       )
       setGrayUserIds(parseGrayUserIdsFromExtraJson(existingItemExtraJson))
+      setGrayOrgs(parseGrayOrgsFromExtraJson(existingItemExtraJson))
       setNameFromFile(false)
       setVersionFromSkillFile(false)
       setVersionFoundInSkillFrontmatter(false)
+      setVersionFromPluginFile(false)
       return
     }
 
@@ -513,7 +553,9 @@ export function UniversalUploadDialog({
     setChineseName("")
     setPluginSkills([])
     setGrayUserIds([])
+    setGrayOrgs([])
     setNameFromFile(false)
+    setVersionFromPluginFile(false)
   }, [
     existingItemCategory,
     existingItemChineseName,
@@ -598,6 +640,7 @@ export function UniversalUploadDialog({
     }
     if (resourceType !== "plugin") {
       setPluginSkills([])
+      setVersionFromPluginFile(false)
     }
 
     // 对 skill 的 .md / .zip 文件，尝试从文件内容中提取 name
@@ -641,10 +684,21 @@ export function UniversalUploadDialog({
 
     if (resourceType === "plugin") {
       try {
-        setPluginSkills(await parsePluginSkillsFromFile(selectedFile))
+        const buffer = await selectedFile.arrayBuffer()
+        const detail = await window.api.plugins.inspectZip(buffer)
+        setPluginSkills(sanitizeSkillNames(detail.skills))
+        if (detail.manifest?.version) {
+          setVersion(detail.manifest.version)
+          setVersionFromPluginFile(true)
+        } else {
+          setVersion(DEFAULT_MARKET_VERSION)
+          setVersionFromPluginFile(false)
+        }
       } catch (e) {
         console.warn("[UniversalUploadDialog] Failed to inspect plugin zip:", e)
         setPluginSkills([])
+        setVersion(DEFAULT_MARKET_VERSION)
+        setVersionFromPluginFile(false)
       }
     }
 
@@ -692,6 +746,7 @@ export function UniversalUploadDialog({
     }
 
     const normalizedGrayUserIds = normalizeUserIdsForForm(grayUserIds)
+    const normalizedGrayOrgs = normalizeOrgsForForm(grayOrgs)
     const normalizedPluginSkills = isPluginResource
       ? normalizePluginSkillsForForm(pluginSkills)
       : pluginSkills
@@ -704,6 +759,17 @@ export function UniversalUploadDialog({
     }
     if (normalizedGrayUserIds.some((userId) => !userId.trim())) {
       setError("请完整填写灰度用户 User ID，或删除空白项")
+      return
+    }
+
+    const grayOrgsChanged =
+      normalizedGrayOrgs.length !== grayOrgs.length ||
+      normalizedGrayOrgs.some((org, index) => org !== grayOrgs[index])
+    if (grayOrgsChanged) {
+      setGrayOrgs(normalizedGrayOrgs)
+    }
+    if (normalizedGrayOrgs.some((org) => !org.trim())) {
+      setError("请完整填写灰度组织，或删除空白项")
       return
     }
 
@@ -724,7 +790,7 @@ export function UniversalUploadDialog({
     setUploading(true)
 
     try {
-      const uploadContext = buildUploadContext(normalizedPluginSkills, normalizedGrayUserIds)
+      const uploadContext = buildUploadContext(normalizedPluginSkills, normalizedGrayUserIds, normalizedGrayOrgs)
       let uploadFile = file
       if (generatedFile) {
         const generated = await generatedFile.build(uploadContext)
@@ -809,11 +875,13 @@ export function UniversalUploadDialog({
         setChineseName("")
         setPluginSkills([])
         setGrayUserIds([])
+        setGrayOrgs([])
         setError(null)
         setShowJsonTemplate(false)
         setNameFromFile(false)
         setVersionFromSkillFile(false)
         setVersionFoundInSkillFrontmatter(false)
+        setVersionFromPluginFile(false)
         setParsingPluginSkills(false)
       }
     }
@@ -851,6 +919,7 @@ export function UniversalUploadDialog({
   const [pluginMcpTemplateCopied, setPluginMcpTemplateCopied] = useState(false)
   const [showPluginMcpTemplate, setShowPluginMcpTemplate] = useState(false)
   const hasValidGrayUserIds = grayUserIds.every((item) => item.trim().length > 0)
+  const hasValidGrayOrgs = grayOrgs.every((item) => item.trim().length > 0)
   const hasValidPluginSkills =
     !isPluginResource || pluginSkills.every((skill) => skill.trim().length > 0)
   const canSubmit =
@@ -862,6 +931,7 @@ export function UniversalUploadDialog({
     !!version.trim() &&
     !!guidance.trim() &&
     hasValidGrayUserIds &&
+    hasValidGrayOrgs &&
     hasValidPluginSkills
 
   const resourceTypeLabel = getResourceTypeLabel(resourceType)
@@ -901,6 +971,22 @@ export function UniversalUploadDialog({
     setGrayUserIds((current) => normalizeUserIdsForForm(current))
   }
 
+  const updateGrayOrg = (index: number, value: string) => {
+    setGrayOrgs((current) => current.map((org, i) => (i === index ? value : org)))
+  }
+
+  const addGrayOrg = () => {
+    setGrayOrgs((current) => [...current, ""])
+  }
+
+  const removeGrayOrg = (index: number) => {
+    setGrayOrgs((current) => current.filter((_, i) => i !== index))
+  }
+
+  const normalizeGrayOrgsState = () => {
+    setGrayOrgs((current) => normalizeOrgsForForm(current))
+  }
+
   const getSubmitDisabledReason = () => {
     if (uploading) return submittingLabel || (isUpdate ? "更新中..." : "上传中...")
     if (!isUpdate && !file && !generatedFile) return "请选择文件"
@@ -912,6 +998,9 @@ export function UniversalUploadDialog({
     if (!guidance.trim()) return "请填写使用指引"
     if (grayUserIds.some((userId) => !userId.trim())) {
       return "请完整填写灰度用户 User ID，或删除空白项"
+    }
+    if (grayOrgs.some((org) => !org.trim())) {
+      return "请完整填写灰度组织，或删除空白项"
     }
     if (isPluginResource && pluginSkills.some((skill) => !skill.trim())) {
       return "请完整填写 Skills，或删除空白项"
@@ -1288,9 +1377,41 @@ export function UniversalUploadDialog({
                           </div>
                         ) : null}
                       </div>
+                    ) : isPluginResource ? (
+                      <div className="space-y-2">
+                        <p className="leading-5">
+                          {versionFromPluginFile ? (
+                            <>
+                              已从{" "}
+                              <code className="rounded bg-muted px-1">plugin.json</code>{" "}
+                              中解析出版本号。如需修改，可以直接编辑。
+                            </>
+                          ) : (
+                            <>
+                              Plugin 版本默认从{" "}
+                              <code className="rounded bg-muted px-1">plugin.json</code>{" "}
+                              的 <code className="rounded bg-muted px-1">version</code>{" "}
+                              字段读取；未找到时按{" "}
+                              <code className="rounded bg-muted px-1">{DEFAULT_MARKET_VERSION}</code>{" "}
+                              处理，可手动填写。
+                            </>
+                          )}
+                        </p>
+                        {!versionFromPluginFile && file ? (
+                          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
+                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                            <p className="leading-5">
+                              当前没有从{" "}
+                              <code className="rounded bg-amber-100 px-1">plugin.json</code>{" "}
+                              里找到 <code className="rounded bg-amber-100 px-1">version</code>
+                              ，请手动填写版本号。
+                            </p>
+                          </div>
+                        ) : null}
+                      </div>
                     ) : (
                       <>
-                        MCP 和 Plugin 的版本由发布人维护，默认从{" "}
+                        MCP 的版本由发布人维护，默认从{" "}
                         <code className="rounded bg-muted px-1">{DEFAULT_MARKET_VERSION}</code>{" "}
                         开始。
                       </>
@@ -1356,6 +1477,59 @@ export function UniversalUploadDialog({
                             onClick={() => removeGrayUserId(index)}
                             disabled={uploading}
                             aria-label="删除灰度用户"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <h4 className="text-sm font-medium text-foreground">灰度组织</h4>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        选填。填写后仅 pathName 包含这些组织的用户可在市场列表看到该资源；留空则默认所有用户可见。
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={addGrayOrg}
+                      disabled={uploading}
+                    >
+                      <Plus className="mr-1.5 h-3.5 w-3.5" />
+                      新增组织
+                    </Button>
+                  </div>
+                  {grayOrgs.length === 0 ? (
+                    <div className="rounded-md border border-dashed border-border px-3 py-3 text-xs leading-5 text-muted-foreground">
+                      暂无灰度组织，当前默认全部用户可见。
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {grayOrgs.map((orgValue, index) => (
+                        <div key={`gray-org-${index}`} className="flex items-center gap-2">
+                          <Input
+                            value={orgValue}
+                            placeholder="输入组织名称"
+                            onChange={(e) => updateGrayOrg(index, e.target.value)}
+                            onBlur={normalizeGrayOrgsState}
+                            disabled={uploading}
+                            className="h-10"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-10 w-10 shrink-0 p-0 text-muted-foreground hover:text-destructive"
+                            onClick={() => removeGrayOrg(index)}
+                            disabled={uploading}
+                            aria-label="删除灰度组织"
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>

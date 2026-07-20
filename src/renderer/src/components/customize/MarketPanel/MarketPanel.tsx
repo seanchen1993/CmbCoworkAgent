@@ -388,6 +388,7 @@ interface UserInfoLite {
 type MarketExtraJson = {
   skills?: string[]
   grayUserIds?: string[]
+  grayOrgs?: string[]
   updated_at?: string
 }
 
@@ -407,6 +408,19 @@ function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
   return Array.from(
     new Set(
       parsed.grayUserIds
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function getGrayOrgsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  if (!Array.isArray(parsed.grayOrgs)) return []
+  return Array.from(
+    new Set(
+      parsed.grayOrgs
         .filter((item): item is string => typeof item === "string")
         .map((item) => item.trim())
         .filter(Boolean)
@@ -490,16 +504,30 @@ function doesMarketUserIdMatchCurrentUser(
 function canCurrentUserViewMarketItem(
   item: MarketItem,
   currentUserSapId: string | null | undefined,
-  currentUserIdCandidates: Iterable<string>
+  currentUserIdCandidates: Iterable<string>,
+  currentUserPathName?: string | null | undefined
 ): boolean {
   if (doesMarketUserIdMatchCurrentUser(item.user_id, currentUserIdCandidates, currentUserSapId)) {
     return true
   }
   const grayUserIds = getGrayUserIdsFromExtraJson(item.extra_json)
-  if (grayUserIds.length === 0) return true
-  return grayUserIds.some((userId) =>
+  const grayOrgs = getGrayOrgsFromExtraJson(item.extra_json)
+  
+  if (grayUserIds.length === 0 && grayOrgs.length === 0) return true
+  
+  if (grayUserIds.length > 0 && grayUserIds.some((userId) =>
     doesMarketUserIdMatchCurrentUser(userId, currentUserIdCandidates, currentUserSapId)
-  )
+  )) {
+    return true
+  }
+  
+  if (grayOrgs.length > 0 && currentUserPathName && grayOrgs.some((org) =>
+    currentUserPathName.includes(org)
+  )) {
+    return true
+  }
+  
+  return false
 }
 
 type UploadFilterMode = "mine" | "installed" | "featured" | "certified"
@@ -1015,6 +1043,7 @@ export function MarketPanel(): React.JSX.Element {
   const [uploaderProfiles, setUploaderProfiles] = useState<Record<string, UploaderProfile>>({})
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
   const [currentUserSapId, setCurrentUserSapId] = useState<string | null>(null)
+  const [currentUserPathName, setCurrentUserPathName] = useState<string | null>(null)
   const [isCurrentUserMarketAdmin, setIsCurrentUserMarketAdmin] = useState(false)
   const [adminModeEnabled, setAdminModeEnabled] = useState(false)
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
@@ -1311,6 +1340,7 @@ export function MarketPanel(): React.JSX.Element {
       }
       const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
       setCurrentUserSapId(userInfo?.sapId?.trim() || null)
+      setCurrentUserPathName(userInfo?.pathName?.trim() || null)
       const currentYstId = userInfo?.ystId?.trim() || ""
       const isAdmin = Boolean(currentYstId && MARKET_ADMIN_YST_IDS.has(currentYstId))
       setIsCurrentUserMarketAdmin(isAdmin)
@@ -1326,6 +1356,7 @@ export function MarketPanel(): React.JSX.Element {
       console.warn("[MarketPanel] Failed to load current user upload candidates:", err)
       setCurrentUserUploadCandidates([])
       setCurrentUserSapId(null)
+      setCurrentUserPathName(null)
       setIsCurrentUserMarketAdmin(false)
       setAdminModeEnabled(false)
     }
@@ -2057,7 +2088,7 @@ export function MarketPanel(): React.JSX.Element {
       currentData.filter((item) => {
         if (
           activeTab !== ORG_SKILL_MARKET_TYPE &&
-          !canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet)
+          !canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet, currentUserPathName)
         ) {
           return false
         }
@@ -2209,7 +2240,7 @@ export function MarketPanel(): React.JSX.Element {
     const targetItem = skillsData.find(
       (item) =>
         item.name === detailName &&
-        canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet)
+        canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet, currentUserPathName)
     )
     if (!targetItem) {
       if (skillsData.length > 0) setMarketInitialSkillDetailName(null)
