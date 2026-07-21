@@ -12,6 +12,7 @@ export type MarketPublishTarget = {
   type: Exclude<MarketItemType, "skill" | "orgSkill">
   name: string
   description?: string
+  version?: string
   chineseName?: string
   category?: string
   guidance?: string
@@ -93,7 +94,7 @@ export function MarketPublishDialog(props: {
               name: target.name,
               description: target.description || marketInfo?.description || "",
               category: target.category || marketInfo?.category || "",
-              version: marketInfo?.version || undefined,
+              version: target.version || marketInfo?.version || undefined,
               guidance: target.guidance || marketInfo?.guidance || "",
               chinese_name: target.chineseName || marketInfo?.chinese_name || "",
               extra_json:
