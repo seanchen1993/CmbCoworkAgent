@@ -227,12 +227,6 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
       }
       return newRows
     })
-
-    setDeployUnitPopoverOpen(prev => {
-      const newOpen = [...prev]
-      newOpen[index] = value.trim().length > 0
-      return newOpen
-    })
   }
 
   const handleDeployUnitSearchKeyDown = (
@@ -243,6 +237,11 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
     event.preventDefault()
     const keyword = labelRows[index]?.deployUnitSearch ?? ""
     if (keyword.trim().length >= DEPLOY_UNIT_SEARCH_MIN_CHARS) {
+      setDeployUnitPopoverOpen(prev => {
+        const newOpen = [...prev]
+        newOpen[index] = true
+        return newOpen
+      })
       void fetchDeployUnits(index, keyword)
     }
   }
@@ -515,6 +514,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                           <span className="text-xs font-normal text-muted-foreground">Enter查询</span>
                         </label>
                         <Popover
+                          modal={false}
                           open={deployUnitPopoverOpen[index]}
                           onOpenChange={(nextOpen) => {
                             setDeployUnitPopoverOpen(prev => {
@@ -529,15 +529,6 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                               value={row.deployUnit || row.deployUnitSearch}
                               onChange={(e) => handleDeployUnitSearchChange(index, e.target.value)}
                               onKeyDown={(e) => handleDeployUnitSearchKeyDown(index, e)}
-                              onFocus={() => {
-                                if (row.deployUnitSearch.trim() || row.deployUnit) {
-                                  setDeployUnitPopoverOpen(prev => {
-                                    const newOpen = [...prev]
-                                    newOpen[index] = true
-                                    return newOpen
-                                  })
-                                }
-                              }}
                               placeholder="请输入关键字"
                               disabled={submitting}
                               readOnly={!!row.deployUnit}
