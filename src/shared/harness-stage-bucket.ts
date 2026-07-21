@@ -24,6 +24,19 @@ export type StageBucket = "plugin_constrained" | "vibecoding" | "unattributed"
 export const STAGE_IN_PROGRESS_LABEL = "进行中"
 export const STAGE_DONE_LABEL = "已完成"
 
+/** Extract the group segment from the historical `${group}-${label}` trace field. */
+export function extractHarnessNodeGroup(value: string | null | undefined): string | null {
+  const normalized = value?.normalize("NFKC").trim() ?? ""
+  const separatorIndex = normalized.indexOf("-")
+  if (separatorIndex <= 0) return null
+  return normalized.slice(0, separatorIndex).trim() || null
+}
+
+/** Whether the workflow node belongs to the Dev group, independent of its label. */
+export function isHarnessDevStageNodeName(value: string | null | undefined): boolean {
+  return extractHarnessNodeGroup(value)?.toLowerCase() === "dev"
+}
+
 /**
  * Classify one turn's / code event's (stage status, skill-presence) into a bucket.
  *  - 进行中 + 有 Skill 归因 → plugin_constrained（阶段进行中且实际调用插件）

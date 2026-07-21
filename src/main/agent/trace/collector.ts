@@ -30,6 +30,11 @@ import {
 import { v4 as uuid } from "uuid"
 import type {
   AgentTrace,
+  TraceContext,
+  TraceExecutionMode,
+  TraceHarnessFeatureContext,
+  TraceKind,
+  TraceObservabilityContext,
   TraceSkillEvalExtension,
   TraceStep,
   TraceToolCall,
@@ -41,7 +46,7 @@ import type {
   ITraceReporter,
   RoutingTrace
 } from "./types"
-import { NoopTraceReporter } from "./types"
+import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
 import { app } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
@@ -156,6 +161,12 @@ function pruneOldTraces(threadId: string): void {
 function normalizeTrace(parsed: AgentTrace): AgentTrace {
   return {
     ...parsed,
+    observabilitySchemaVersion:
+      parsed.observabilitySchemaVersion ?? TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind: parsed.traceKind ?? "root",
+    executionMode: parsed.executionMode ?? "normal",
+    rootTraceId: parsed.rootTraceId ?? parsed.traceId,
+    rootThreadId: parsed.rootThreadId ?? parsed.threadId,
     usedSkills: Array.isArray(parsed.usedSkills) ? parsed.usedSkills : [],
     evolvedSkills: Array.isArray(parsed.evolvedSkills) ? parsed.evolvedSkills : [],
     triggerSource: parsed.triggerSource ?? "chat"
@@ -208,6 +219,58 @@ function buildSkillAuthorByRawName(
 // TraceCollector class
 // ─────────────────────────────────────────────────────────
 
+export interface TraceCollectorOptions extends Partial<TraceObservabilityContext> {
+  traceId?: string
+  triggerSource?: TraceTriggerSource
+  harnessFeature?: TraceHarnessFeatureContext
+  includeSkillEval?: boolean
+}
+
+function compactUndefined<T extends Record<string, unknown>>(record: T): T {
+  for (const key of Object.keys(record)) {
+    if (record[key] === undefined) delete record[key]
+  }
+  return record
+}
+
+function buildObservabilityContext(
+  traceId: string,
+  threadId: string,
+  options: TraceCollectorOptions
+): TraceObservabilityContext {
+  const traceKind: TraceKind = options.traceKind ?? "root"
+  const executionMode: TraceExecutionMode = options.executionMode ?? "normal"
+  const rootTraceId = options.rootTraceId ?? traceId
+  const rootThreadId = options.rootThreadId ?? threadId
+  const subagentThreadId =
+    options.subagentThreadId ?? (traceKind === "subagent" ? threadId : undefined)
+  return compactUndefined({
+    observabilitySchemaVersion: TRACE_OBSERVABILITY_SCHEMA_VERSION,
+    traceKind,
+    executionMode,
+    rootTraceId,
+    rootThreadId,
+    parentTraceId: options.parentTraceId,
+    parentThreadId: options.parentThreadId,
+    parentSpanId: options.parentSpanId,
+    linkType: options.linkType,
+    subagentKind: options.subagentKind,
+    subagentRunId: options.subagentRunId,
+    subagentThreadId,
+    handoffAction: options.handoffAction,
+    handoffSourceAgent: options.handoffSourceAgent,
+    handoffTargetAgent: options.handoffTargetAgent,
+    coordinatorWorkerId: options.coordinatorWorkerId,
+    coordinatorWorkerTurn: options.coordinatorWorkerTurn,
+    coordinatorWorkerRole: options.coordinatorWorkerRole,
+    coordinatorWorkerWorkload: options.coordinatorWorkerWorkload,
+    workflowRunId: options.workflowRunId,
+    workflowAgentIndex: options.workflowAgentIndex,
+    workflowPhase: options.workflowPhase,
+    workflowAgentLabel: options.workflowAgentLabel
+  }) as TraceObservabilityContext
+}
+
 export class TraceCollector {
   private readonly traceId: string
   private readonly threadId: string
@@ -217,9 +280,9 @@ export class TraceCollector {
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
   private readonly triggerSource: TraceTriggerSource
-  private readonly harnessFeature:
-    | { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
-    | undefined
+  private readonly harnessFeature: TraceHarnessFeatureContext | undefined
+  private observability: TraceObservabilityContext
+  private readonly includeSkillEval: boolean
 
   private steps: TraceStep[] = []
   private usedSkills: string[] = []
@@ -242,17 +305,16 @@ export class TraceCollector {
     threadId: string,
     userMessage: string,
     modelId: string,
-    options: {
-      triggerSource?: TraceTriggerSource
-      harnessFeature?: { projectId: string; slug: string; nodeName?: string; nodeStatus?: string }
-    } = {}
+    options: TraceCollectorOptions = {}
   ) {
-    this.traceId = uuid()
+    this.traceId = options.traceId ?? uuid()
     this.threadId = threadId
     this.userMessage = userMessage
     this.modelId = modelId
     this.triggerSource = options.triggerSource ?? "chat"
     this.harnessFeature = options.harnessFeature
+    this.observability = buildObservabilityContext(this.traceId, threadId, options)
+    this.includeSkillEval = options.includeSkillEval ?? (this.observability.traceKind === "root")
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
@@ -264,6 +326,7 @@ export class TraceCollector {
       startedAt: this.startedAt,
       input: { userMessage },
       metadata: {
+        ...this.observability,
         traceId: this.traceId,
         threadId: this.threadId,
         modelId: this.modelId,
@@ -283,9 +346,15 @@ export class TraceCollector {
           // best-effort: leave adapter fields absent on resolution failure
         }
       }
+      // setAdoptionContext intentionally merges incremental updates. A new
+      // trace is a new ownership epoch, though, so reset the prior turn first;
+      // otherwise a background-finishing child could leave stale Skill/model/
+      // project fields for a fast continuation on the same thread.
+      clearAdoptionContext(this.threadId)
       setAdoptionContext(this.threadId, {
         traceId: this.traceId,
         modelId: this.modelId,
+        ...this.observability,
         ...(this.harnessFeature
           ? {
               harnessProjectId: this.harnessFeature.projectId,
@@ -300,6 +369,40 @@ export class TraceCollector {
     } catch {
       // never block trace setup
     }
+  }
+
+  getTraceId(): string {
+    return this.traceId
+  }
+
+  getTraceContext(): TraceContext {
+    return {
+      traceId: this.traceId,
+      threadId: this.threadId,
+      rootNodeId: this.rootNodeId,
+      ...this.observability,
+      ...(this.harnessFeature ? { harnessFeature: { ...this.harnessFeature } } : {})
+    }
+  }
+
+  setObservabilityContext(patch: Partial<TraceObservabilityContext>): void {
+    this.observability = compactUndefined({
+      ...this.observability,
+      ...patch
+    }) as TraceObservabilityContext
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      root.metadata = { ...(root.metadata ?? {}), ...this.observability }
+    }
+    try {
+      setAdoptionContext(this.threadId, this.observability)
+    } catch {
+      // ignore
+    }
+  }
+
+  setExecutionMode(mode: TraceExecutionMode): void {
+    this.setObservabilityContext({ executionMode: mode })
   }
 
   /** Update the modelId (can be resolved after construction). */
@@ -404,6 +507,22 @@ export class TraceCollector {
   /** Record a tool call within the current step. */
   recordToolCall(call: TraceToolCall): void {
     this.currentToolCalls.push(call)
+  }
+
+  private getTotalToolCalls(): number {
+    const stepToolCalls = this.steps.reduce((sum, step) => sum + step.toolCalls.length, 0)
+    const nodeToolCalls = this.nodes.filter((node) => node.type === "tool").length
+    const metadataToolCalls = this.nodes.reduce((sum, node) => {
+      const toolNames = node.metadata?.toolNames
+      if (!Array.isArray(toolNames)) return sum
+      return sum + toolNames.filter((name) => typeof name === "string" && name.trim().length > 0).length
+    }, 0)
+    const metadataToolCallCounts = this.nodes.reduce((sum, node) => {
+      const count = node.metadata?.toolCallCount
+      if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return sum
+      return sum + Math.floor(count)
+    }, 0)
+    return Math.max(stepToolCalls, nodeToolCalls, metadataToolCalls, metadataToolCallCounts)
   }
 
   /** Record one LLM run (input context + output message). */
@@ -589,7 +708,7 @@ export class TraceCollector {
   async finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
     const endedAt = nowIsoLocal()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
-    const totalToolCalls = this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0)
+    const totalToolCalls = this.getTotalToolCalls()
 
     // Resolve skill versions and merge into "name-version" format
     let skillAuthorByRawName: Record<string, string | undefined> = {}
@@ -680,6 +799,7 @@ export class TraceCollector {
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
+      ...this.observability,
       startedAt: this.startedAt,
       endedAt,
       durationMs,
@@ -732,48 +852,53 @@ export class TraceCollector {
       ...(this.routingTrace ? { metadata: { routingTrace: this.routingTrace } } : {})
     }
     let skillEval: TraceSkillEvalExtension | undefined
-    try {
-      const windowTurn = appendSkillEvalWindowTurn({
-        traceId: trace.traceId,
-        threadId: trace.threadId,
-        startedAt: trace.startedAt,
-        endedAt: trace.endedAt,
-        usedSkills: usedSkillsWithVersions,
-        userMessage: trace.userMessage,
-        assistantText: getSkillEvalWindowAssistantText(trace),
-        outcome: trace.outcome
-      })
-      const evalRawSkillNames = windowTurn.evalSkillNames
-      const windowContextByRawName = getSkillEvalWindowContextByRawName(
-        trace.threadId,
-        evalRawSkillNames
-      )
-      skillEval = buildSkillEvalTraceExtension(trace, {
-        skillAuthorByRawName,
-        windowContextByRawName,
-        evalRawSkillNames
-      })
-    } catch (e) {
-      console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+    if (this.includeSkillEval) {
+      try {
+        const windowTurn = appendSkillEvalWindowTurn({
+          traceId: trace.traceId,
+          threadId: trace.threadId,
+          startedAt: trace.startedAt,
+          endedAt: trace.endedAt,
+          usedSkills: usedSkillsWithVersions,
+          userMessage: trace.userMessage,
+          assistantText: getSkillEvalWindowAssistantText(trace),
+          outcome: trace.outcome
+        })
+        const evalRawSkillNames = windowTurn.evalSkillNames
+        const windowContextByRawName = getSkillEvalWindowContextByRawName(
+          trace.threadId,
+          evalRawSkillNames
+        )
+        skillEval = buildSkillEvalTraceExtension(trace, {
+          skillAuthorByRawName,
+          windowContextByRawName,
+          evalRawSkillNames
+        })
+      } catch (e) {
+        console.warn("[Tracer] buildSkillEvalTraceExtension failed:", e)
+      }
     }
     const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
 
-    writeTraceFile(traceWithEval)
-
-    // Fire-and-forget: trace upload is a side-channel operation and must
-    // never block the main agent flow. Errors are logged and swallowed.
-    void Promise.resolve()
-      .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
-      .catch((e) => {
-        console.warn("[Tracer] Reporter.report() threw:", e)
-      })
-
-    // Clear adoption context — subsequent write_file calls on this thread
-    // will no longer carry this trace's attribution.
     try {
-      clearAdoptionContext(this.threadId)
-    } catch {
-      // ignore
+      writeTraceFile(traceWithEval)
+
+      // Fire-and-forget: trace upload is a side-channel operation and must
+      // never block the main agent flow. Errors are logged and swallowed.
+      void Promise.resolve()
+        .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
+        .catch((e) => {
+          console.warn("[Tracer] Reporter.report() threw:", e)
+        })
+    } finally {
+      // A child trace may finish in the background after a continuation has
+      // installed a newer context on the same worker thread. Only clear the
+      // context still owned by this trace, even when persistence fails.
+      try {
+        clearAdoptionContext(this.threadId, this.traceId)
+      } catch {
+        // ignore
+      }
     }
 
     return traceWithEval
@@ -847,11 +972,12 @@ export class TraceCollector {
       root.output = {
         outcome,
         totalSteps: this.steps.length,
-        totalToolCalls: this.steps.reduce((sum, s) => sum + s.toolCalls.length, 0),
+        totalToolCalls: this.getTotalToolCalls(),
         ...(errorMessage ? { errorMessage } : {})
       }
       root.metadata = {
         ...(root.metadata ?? {}),
+        ...this.observability,
         usedSkills: [...resolvedUsedSkills],
         ...(resolvedSkillSource.length > 0 ? { skillSource: [...resolvedSkillSource] } : {}),
         evolvedSkills: [...resolvedEvolvedSkills],
@@ -879,6 +1005,56 @@ export class TraceCollector {
     node.status = status
     node.endedAt = nowIsoLocal()
   }
+}
+
+/** Construct optional child-run telemetry behind a hard failure boundary. */
+export function createTraceCollectorSafely(
+  threadId: string,
+  userMessage: string,
+  modelId: string,
+  options: TraceCollectorOptions = {},
+  scope = "Tracer"
+): TraceCollector | undefined {
+  try {
+    return new TraceCollector(threadId, userMessage, modelId, options)
+  } catch (error) {
+    console.warn(`[${scope}] trace creation failed; continuing without telemetry:`, error)
+    return undefined
+  }
+}
+
+/** Run a synchronous trace mutation without allowing telemetry to affect the run. */
+export function runTraceSideEffect(scope: string, effect: () => void): void {
+  try {
+    effect()
+  } catch (error) {
+    console.warn(`[${scope}] trace update failed; continuing without this telemetry:`, error)
+  }
+}
+
+/** Complete and persist a child trace without delaying the worker/workflow result. */
+export function finishTraceInBackground(
+  tracer: TraceCollector,
+  outcome: TraceOutcome,
+  errorMessage?: string,
+  scope = "Tracer",
+  beforeFinish?: () => void
+): void {
+  // Defer the whole finish call, not just its returned promise. Async functions
+  // execute synchronously until their first await, so calling finish inline
+  // would still add telemetry work to the child-run completion path.
+  setImmediate(() => {
+    if (beforeFinish) {
+      runTraceSideEffect(`${scope} pre-finish`, beforeFinish)
+    }
+    try {
+      void tracer.finish(outcome, errorMessage).catch((error) => {
+        console.warn(`[${scope}] background trace finish failed:`, error)
+      })
+    } catch (error) {
+      console.warn(`[${scope}] background trace finish failed:`, error)
+    }
+  })
 }
 
 // ─────────────────────────────────────────────────────────

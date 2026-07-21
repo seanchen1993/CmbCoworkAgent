@@ -74,6 +74,7 @@ import {
 import {
   consumeValuesStream,
   createRuntimeWithModelFallback,
+  extractWorkflowTraceToolDetails,
   isModelUnavailableError,
   type WorkflowSubagentDeps
 } from "../src/main/agent/workflow/subagent.ts"
@@ -637,6 +638,66 @@ async function testConsumeValuesStreamTapIsolation(): Promise<void> {
   assert(
     JSON.stringify(withThrowingTap) === JSON.stringify(withoutTap),
     "a throwing onValues tap must be swallowed and not change the returned snapshot"
+  )
+}
+
+function testWorkflowTraceToolDetails(): void {
+  const details = extractWorkflowTraceToolDetails({
+    messages: [
+      {
+        _getType: () => "ai",
+        tool_calls: [{ id: "call-read", name: "read_file", args: { path: "src/app.ts" } }]
+      },
+      {
+        id: ["langchain_core", "messages", "AIMessage"],
+        kwargs: {
+          tool_calls: [
+            { id: "call-execute", name: "execute", args: { command: "npm run typecheck" } }
+          ]
+        }
+      },
+      {
+        _getType: () => "tool",
+        tool_call_id: "call-read",
+        content: "export const app = true",
+        status: "success"
+      },
+      {
+        id: ["langchain_core", "messages", "ToolMessage"],
+        kwargs: {
+          tool_call_id: "call-execute",
+          content: "typecheck failed",
+          status: "error"
+        }
+      },
+      {
+        // Cumulative snapshots may repeat a provider call id; trace detail must not duplicate it.
+        _getType: () => "ai",
+        tool_calls: [{ id: "call-read", name: "read_file", args: { path: "src/app.ts" } }]
+      },
+      {
+        // Malformed/raw artifacts are not executable calls and must stay out of trace details.
+        _getType: () => "ai",
+        tool_calls: [],
+        invalid_tool_calls: [{ id: "call-invalid", name: "write_file", args: "{" }]
+      }
+    ]
+  })
+
+  assert(details.length === 2, `two executed tools should be recovered, got ${details.length}`)
+  assert(
+    details[0]?.name === "read_file" &&
+      JSON.stringify(details[0]?.input) === JSON.stringify({ path: "src/app.ts" }) &&
+      details[0]?.output === "export const app = true" &&
+      details[0]?.status === "success",
+    `read_file detail should retain args/result/status: ${JSON.stringify(details[0])}`
+  )
+  assert(
+    details[1]?.name === "execute" &&
+      JSON.stringify(details[1]?.input) === JSON.stringify({ command: "npm run typecheck" }) &&
+      details[1]?.output === "typecheck failed" &&
+      details[1]?.status === "error",
+    `execute detail should retain args/result/error status: ${JSON.stringify(details[1])}`
   )
 }
 
@@ -4218,6 +4279,7 @@ async function main(): Promise<void> {
     await testModelFallbackNotJournaled(workspace)
     await testFullResultSidecarForOversizedReturn(workspace)
     await testConsumeValuesStreamTapIsolation()
+    testWorkflowTraceToolDetails()
     await testWorkflowAgentSnapshotBounding()
     await testAgentToolStreamStaleSidecarKilled()
     await testClearAllAgentToolStreamsSweepsRunIdSidecars()
@@ -4266,7 +4328,7 @@ async function main(): Promise<void> {
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (82 tests)")
+    console.log("PASS workflow-engine (83 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome

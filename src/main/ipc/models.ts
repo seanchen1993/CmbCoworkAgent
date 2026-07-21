@@ -4495,7 +4495,17 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           () => null
         )
         if (adoptionSnapshots.length > 0) {
-          measureForCommit(adoptionSnapshots, commitSha, adoptionCaptureTimeMs)
+          const durable = await measureForCommit(
+            adoptionSnapshots,
+            commitSha,
+            adoptionCaptureTimeMs,
+            worktreePath
+          )
+          if (!durable) {
+            console.warn(
+              `[GitPanel] adoption measurement queued for retry: commitSha=${commitSha ?? "unknown"}`
+            )
+          }
         }
         const postChangedFiles = await getPostCommitChangedFilesForMetadata(
           worktreePath,

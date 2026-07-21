@@ -93,6 +93,7 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
 import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent,
@@ -190,6 +191,33 @@ interface DashboardTraceDetail {
   userIp?: string
   modelId?: string
   modelName?: string
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number
@@ -332,23 +360,6 @@ interface DashboardCommitAdoptionEvents {
     sumAdopted: number
     rate: number | null
   }
-}
-
-interface LocalAdoptionLine {
-  lineNumber: number
-  text: string
-  adopted: boolean
-}
-
-interface LocalGenAdoptionLines {
-  genEventId: string
-  available: boolean
-  reason?: string
-  relPath?: string
-  generatedLineCount?: number
-  matchedLineCount?: number
-  truncated?: boolean
-  lines?: LocalAdoptionLine[]
 }
 
 interface DashboardSkillEvalOptions {
@@ -600,8 +611,10 @@ interface DashboardProjectModeProject {
   lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
+  systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  devStageConversationCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
@@ -1937,6 +1950,29 @@ interface CustomAPI {
       Array<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         durationMs: number
         userMessage: string
@@ -1956,6 +1992,29 @@ interface CustomAPI {
     getTraceDetail: (traceId: string) => Promise<{
       traceId: string
       threadId: string
+      observabilitySchemaVersion?: number
+      traceKind?: string
+      executionMode?: string
+      rootTraceId?: string
+      rootThreadId?: string
+      parentTraceId?: string
+      parentThreadId?: string
+      parentSpanId?: string
+      linkType?: string
+      subagentKind?: string
+      subagentRunId?: string
+      subagentThreadId?: string
+      handoffAction?: string
+      handoffSourceAgent?: string
+      handoffTargetAgent?: string
+      coordinatorWorkerId?: string
+      coordinatorWorkerTurn?: number
+      coordinatorWorkerRole?: string
+      coordinatorWorkerWorkload?: string
+      workflowRunId?: string
+      workflowAgentIndex?: number
+      workflowPhase?: string
+      workflowAgentLabel?: string
       startedAt: string
       endedAt: string
       durationMs: number

@@ -32,6 +32,8 @@ export interface TraceToolCall {
 export interface TraceChatMessage {
   role: "system" | "user" | "assistant" | "tool" | "unknown"
   content: string
+  /** Provider-explicit reasoning/summary visible to the client; never inferred hidden chain-of-thought. */
+  reasoning?: string
   name?: string
   toolCallId?: string
 }
@@ -63,6 +65,9 @@ export interface TraceModelCall {
 
 export type TraceNodeType =
   | "trace"
+  | "agent"
+  | "workflow"
+  | "handoff"
   | "llm"
   | "tool"
   | "tool_result"
@@ -95,6 +100,68 @@ export interface TraceStep {
   assistantText: string
   /** All tool calls made during this step */
   toolCalls: TraceToolCall[]
+}
+
+// ─────────────────────────────────────────────────────────
+// Agent / workflow observability context
+// ─────────────────────────────────────────────────────────
+
+/** Current flattened schema version for trace/event fields used by dashboard DSL. */
+export const TRACE_OBSERVABILITY_SCHEMA_VERSION = 1
+
+export type TraceKind = "root" | "subagent" | "workflow_run"
+export type TraceExecutionMode = "normal" | "coordinator" | "workflow"
+export type TraceLinkType = "parent_child" | "async_span_link"
+export type TraceSubagentKind = "task" | "coordinator_worker" | "workflow_agent"
+export type TraceHandoffAction =
+  | "task"
+  | "start_worker"
+  | "continue_worker"
+  | "cancel_worker"
+  | "launch_workflow"
+  | "workflow_agent"
+
+export interface TraceObservabilityContext {
+  observabilitySchemaVersion: typeof TRACE_OBSERVABILITY_SCHEMA_VERSION
+  traceKind: TraceKind
+  executionMode: TraceExecutionMode
+  rootTraceId: string
+  rootThreadId: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: TraceLinkType
+  subagentKind?: TraceSubagentKind
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: TraceHandoffAction
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: "implementer" | "verifier"
+  coordinatorWorkerWorkload?: "read_only" | "verify" | "write"
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
+}
+
+/** Project-mode binding inherited by child traces so code adoption emitted from
+ * coordinator/workflow subagents keeps the same project/feature/stage scope as
+ * the root turn. */
+export interface TraceHarnessFeatureContext {
+  projectId: string
+  slug: string
+  nodeName?: string
+  nodeStatus?: string
+}
+
+export interface TraceContext extends TraceObservabilityContext {
+  traceId: string
+  threadId: string
+  rootNodeId?: string
+  harnessFeature?: TraceHarnessFeatureContext
 }
 
 // ─────────────────────────────────────────────────────────
@@ -149,7 +216,7 @@ export interface RoutingTrace {
   layers: RoutingLayerRecord[]
 }
 
-export type TraceTriggerSource = RoutingTrace["taskSource"]
+export type TraceTriggerSource = RoutingTrace["taskSource"] | "internal_notification"
 
 /** How the agent's run ended. */
 export type TraceOutcome =
@@ -326,6 +393,42 @@ export interface AgentTrace {
   traceId: string
   /** Thread the trace belongs to */
   threadId: string
+  /** Version for flattened observability fields used by dashboard DSL and backfill. */
+  observabilitySchemaVersion?: number
+  /** Root user turn, linked async child run, or workflow-run aggregate trace. */
+  traceKind?: TraceKind
+  /** User-selected execution mode for the root chain this trace belongs to. */
+  executionMode?: TraceExecutionMode
+  /** Root trace for this causal chain. Root traces point to themselves. */
+  rootTraceId?: string
+  /** Root user-visible thread for this causal chain. */
+  rootThreadId?: string
+  /** Direct parent trace when this is a child / linked async trace. */
+  parentTraceId?: string
+  /** Direct parent thread when this is a child / linked async trace. */
+  parentThreadId?: string
+  /** Span/node in the parent trace that dispatched this trace. */
+  parentSpanId?: string
+  /** Whether this trace is nested synchronously or linked from an async dispatch. */
+  linkType?: TraceLinkType
+  /** Child agent family, populated for subagent traces. */
+  subagentKind?: TraceSubagentKind
+  /** Stable child run id within its family (worker turn, workflow agent, etc.). */
+  subagentRunId?: string
+  /** Runtime thread that executed the child agent. */
+  subagentThreadId?: string
+  /** Handoff/delegation action that created this trace when applicable. */
+  handoffAction?: TraceHandoffAction
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: "implementer" | "verifier"
+  coordinatorWorkerWorkload?: "read_only" | "verify" | "write"
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
   /** ISO timestamp when the run started */
   startedAt: string
   /** ISO timestamp when the run ended */

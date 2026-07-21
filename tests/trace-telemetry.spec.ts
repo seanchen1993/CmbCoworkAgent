@@ -9,7 +9,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { SkillUsageDetector } from "../src/main/agent/skill-evolution/usage-detector.ts"
-import { TraceCollector, setTraceReporter } from "../src/main/agent/trace/collector.ts"
+import { observeSkillUsageFromStream } from "../src/main/agent/coordinator-worker-stream.ts"
+import {
+  TraceCollector,
+  createTraceCollectorSafely,
+  finishTraceInBackground,
+  runTraceSideEffect,
+  setTraceReporter
+} from "../src/main/agent/trace/collector.ts"
 import { buildTraceTree } from "../src/main/agent/trace/tree-builder.ts"
 import type { AgentTrace, ITraceReporter } from "../src/main/agent/trace/types.ts"
 
@@ -85,6 +92,140 @@ function testSkillUsageDetectorNormalizesVersions(): void {
     ["代码审查-v1.0.0", "接口设计-v2.3.4", "斜杠技能-v3.1.4"],
     "Skill detector should emit versioned identifiers with default version fallback"
   )
+}
+
+function testStreamSkillUsageObservation(): void {
+  const detector = new SkillUsageDetector()
+  const skillPath = "/repo/skills/stream-skill/SKILL.md"
+  const snapshot = {
+    skillsMetadata: [{ name: "stream-skill", path: skillPath }],
+    messages: [
+      {
+        id: ["langchain_core", "messages", "AIMessage"],
+        kwargs: {
+          tool_calls: [{ id: "read-skill", name: "read_file", args: { path: skillPath } }]
+        }
+      }
+    ]
+  }
+
+  assert(
+    observeSkillUsageFromStream("values", snapshot, detector),
+    "values stream should report a newly observed Skill read"
+  )
+  assertArrayEqual(
+    detector.getUsedSkillNames(),
+    ["stream-skill-v1.0.0"],
+    "values stream should attribute the read Skill"
+  )
+  assert(
+    !observeSkillUsageFromStream("values", snapshot, detector),
+    "replayed cumulative values snapshots should not report duplicate Skill changes"
+  )
+}
+
+async function testTraceSidecarFailureIsolation(): Promise<void> {
+  const originalWarn = console.warn
+  let warningCount = 0
+  console.warn = () => {
+    warningCount += 1
+  }
+
+  try {
+    const throwingOptions = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error("injected trace creation failure")
+        }
+      }
+    ) as Parameters<typeof createTraceCollectorSafely>[3]
+    assert(
+      createTraceCollectorSafely(
+        "sidecar-create-thread",
+        "test safe trace creation",
+        "model-test",
+        throwingOptions,
+        "TraceTest"
+      ) === undefined,
+      "trace creation failure should disable telemetry instead of escaping"
+    )
+
+    const throwingDetector = {
+      getUsedSkillNames: () => {
+        throw new Error("injected Skill observer failure")
+      }
+    } as unknown as SkillUsageDetector
+    assert(
+      !observeSkillUsageFromStream("values", {}, throwingDetector),
+      "Skill observer failure should be swallowed and reported as no attribution change"
+    )
+
+    let continuedAfterMutation = false
+    runTraceSideEffect("TraceTest", () => {
+      throw new Error("injected trace mutation failure")
+    })
+    continuedAfterMutation = true
+    assert(continuedAfterMutation, "trace mutation failure should not stop the agent path")
+
+    let finishStarted = false
+    let resolveFinish!: (trace: AgentTrace) => void
+    const pendingFinish = new Promise<AgentTrace>((resolve) => {
+      resolveFinish = resolve
+    })
+    const pendingTracer = {
+      finish: () => {
+        finishStarted = true
+        return pendingFinish
+      }
+    } as unknown as TraceCollector
+    let beforeFinishRan = false
+    finishTraceInBackground(pendingTracer, "success", undefined, "TraceTest", () => {
+      beforeFinishRan = true
+    })
+    assert(
+      !beforeFinishRan && !finishStarted,
+      "background trace preparation and completion should not execute inline on the agent completion stack"
+    )
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert(
+      beforeFinishRan,
+      "background trace preparation should run on the scheduled event-loop turn"
+    )
+    assert(
+      finishStarted,
+      "background trace completion should start on the scheduled event-loop turn"
+    )
+    resolveFinish({} as AgentTrace)
+
+    let finishAfterPrepareFailureStarted = false
+    const prepareFailureTracer = {
+      finish: async () => {
+        finishAfterPrepareFailureStarted = true
+        return {} as AgentTrace
+      }
+    } as unknown as TraceCollector
+    finishTraceInBackground(prepareFailureTracer, "success", undefined, "TraceTest", () => {
+      throw new Error("injected pre-finish trace preparation failure")
+    })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert(
+      finishAfterPrepareFailureStarted,
+      "a failed background trace preparation should not prevent trace completion"
+    )
+
+    const throwingFinishTracer = {
+      finish: () => {
+        throw new Error("injected synchronous trace finish failure")
+      }
+    } as unknown as TraceCollector
+    finishTraceInBackground(throwingFinishTracer, "error", "test", "TraceTest")
+    await new Promise<void>((resolve) => setImmediate(resolve))
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert(warningCount >= 4, "every isolated telemetry failure should be logged")
 }
 
 async function testSkillUsageDetectorReadsSkillMetadataDirectly(): Promise<void> {
@@ -241,6 +382,163 @@ async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
   }
 }
 
+async function testTraceCollectorObservabilityContext(): Promise<void> {
+  const tracesDir = await mkdtemp(join(tmpdir(), "trace-observability-"))
+  const previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
+  process.env.CMB_COWORK_TRACES_DIR = tracesDir
+  setTraceReporter({
+    async report(trace) {
+      void trace
+    }
+  })
+
+  try {
+    const harnessFeature = {
+      projectId: "project-observability",
+      slug: "feature-observability",
+      nodeName: "Dev-代码实现",
+      nodeStatus: "进行中"
+    }
+    const rootTracer = new TraceCollector("root-thread", "Run a workflow", "model-root", {
+      harnessFeature
+    })
+    rootTracer.setExecutionMode("workflow")
+    const rootContext = rootTracer.getTraceContext()
+    const rootTrace = await rootTracer.finish("success")
+
+    assert(rootTrace.traceKind === "root", "root trace should default to traceKind=root")
+    assert(rootTrace.executionMode === "workflow", "setExecutionMode should update root trace")
+    assert(
+      rootTrace.rootTraceId === rootTrace.traceId,
+      "root trace should point rootTraceId to itself"
+    )
+    assert(
+      rootTrace.rootThreadId === rootTrace.threadId,
+      "root trace should point rootThreadId to itself"
+    )
+    assert(
+      rootContext.rootNodeId === `trace:${rootTrace.traceId}`,
+      "root context should expose root node id"
+    )
+    assert(
+      rootContext.harnessFeature?.projectId === harnessFeature.projectId &&
+        rootContext.harnessFeature?.slug === harnessFeature.slug &&
+        rootContext.harnessFeature?.nodeName === harnessFeature.nodeName &&
+        rootContext.harnessFeature?.nodeStatus === harnessFeature.nodeStatus,
+      "root trace context should expose the project-mode binding for child traces"
+    )
+
+    const childTracer = new TraceCollector(
+      "worker-thread",
+      "Implement worker task",
+      "model-child",
+      {
+        traceKind: "subagent",
+        executionMode: "coordinator",
+        rootTraceId: rootContext.rootTraceId,
+        rootThreadId: rootContext.rootThreadId,
+        parentTraceId: rootContext.traceId,
+        parentThreadId: rootContext.threadId,
+        parentSpanId: rootContext.rootNodeId,
+        linkType: "async_span_link",
+        subagentKind: "coordinator_worker",
+        subagentRunId: "worker-1:turn:1",
+        subagentThreadId: "worker-thread",
+        handoffAction: "start_worker",
+        coordinatorWorkerId: "worker-1",
+        coordinatorWorkerTurn: 1,
+        coordinatorWorkerRole: "implementer",
+        coordinatorWorkerWorkload: "write",
+        harnessFeature: rootContext.harnessFeature,
+        includeSkillEval: false
+      }
+    )
+    const childTrace = await childTracer.finish("success")
+
+    assert(childTrace.traceKind === "subagent", "child trace should keep traceKind=subagent")
+    assert(childTrace.executionMode === "coordinator", "child trace should keep execution mode")
+    assert(childTrace.rootTraceId === rootTrace.traceId, "child trace should link to root trace")
+    assert(childTrace.rootThreadId === rootTrace.threadId, "child trace should link to root thread")
+    assert(
+      childTrace.parentTraceId === rootTrace.traceId,
+      "child trace should link direct parent trace"
+    )
+    assert(
+      childTrace.parentSpanId === rootContext.rootNodeId,
+      "child trace should link parent span"
+    )
+    assert(childTrace.linkType === "async_span_link", "child trace should mark async link type")
+    assert(
+      childTrace.subagentKind === "coordinator_worker",
+      "child trace should keep subagent kind"
+    )
+    assert(childTrace.coordinatorWorkerId === "worker-1", "child trace should keep worker id")
+    assert(childTrace.coordinatorWorkerTurn === 1, "child trace should keep worker turn")
+    assert(
+      childTrace.harnessProjectId === harnessFeature.projectId &&
+        childTrace.harnessFeatureSlug === harnessFeature.slug &&
+        childTrace.harnessNodeName === harnessFeature.nodeName &&
+        childTrace.harnessNodeStatus === harnessFeature.nodeStatus,
+      "child trace should retain inherited project-mode attribution"
+    )
+    assert(
+      childTrace.skillEval === undefined,
+      "child trace should skip skill eval by default option"
+    )
+  } finally {
+    restoreTraceEnv(previousTracesDir)
+    await rm(tracesDir, { recursive: true, force: true })
+  }
+}
+
+async function testTraceCollectorCountsSubagentMetadataTools(): Promise<void> {
+  const tracesDir = await mkdtemp(join(tmpdir(), "trace-subagent-tools-"))
+  const previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
+  process.env.CMB_COWORK_TRACES_DIR = tracesDir
+  setTraceReporter({
+    async report(trace) {
+      void trace
+    }
+  })
+
+  try {
+    const tracer = new TraceCollector("worker-thread", "Summarize worker", "model-child", {
+      traceKind: "subagent",
+      executionMode: "coordinator",
+      rootTraceId: "root-trace",
+      rootThreadId: "root-thread",
+      parentTraceId: "root-trace",
+      parentThreadId: "root-thread",
+      linkType: "async_span_link",
+      subagentKind: "coordinator_worker",
+      includeSkillEval: false
+    })
+    tracer.addTerminalNode({
+      type: "message",
+      output: "Worker summary",
+      metadata: {
+        toolNames: ["read_file"],
+        toolCallCount: 3
+      }
+    })
+    const trace = await tracer.finish("success")
+    const root = trace.nodes.find((node) => node.type === "trace")
+    const rootOutput = root?.output as { totalToolCalls?: number } | undefined
+
+    assert(
+      trace.totalToolCalls === 3,
+      "subagent metadata toolCallCount should count repeated tool calls"
+    )
+    assert(
+      rootOutput?.totalToolCalls === 3,
+      "root trace node output should expose inferred tool count"
+    )
+  } finally {
+    restoreTraceEnv(previousTracesDir)
+    await rm(tracesDir, { recursive: true, force: true })
+  }
+}
+
 async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
   const tracesDir = await mkdtemp(join(tmpdir(), "trace-sanitize-"))
   const previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
@@ -389,7 +687,11 @@ async function testTraceCollectorPreservesUnknownOutcomeNodes(): Promise<void> {
   })
 
   try {
-    const tracer = new TraceCollector("thread-unknown-unit", "Goal paused for user input", "model-unknown")
+    const tracer = new TraceCollector(
+      "thread-unknown-unit",
+      "Goal paused for user input",
+      "model-unknown"
+    )
     const llmNodeId = tracer.beginLlmNode({ name: "LLM Call", input: [] })
     const toolNodeId = tracer.addToolNode({
       name: "read_file",
@@ -423,7 +725,10 @@ async function testTraceCollectorPreservesUnknownOutcomeNodes(): Promise<void> {
     assert(persisted.outcome === "unknown", "persisted trace outcome should stay unknown")
     assert(persistedRoot?.status === "unknown", "persisted root node should use unknown status")
     assert(persistedTerminal !== undefined, "persisted trace should keep unknown terminal node")
-    assert(persistedTerminal?.name === "Run Ended", "persisted unknown terminal should not say completed")
+    assert(
+      persistedTerminal?.name === "Run Ended",
+      "persisted unknown terminal should not say completed"
+    )
   } finally {
     restoreTraceEnv(previousTracesDir)
     await rm(tracesDir, { recursive: true, force: true })
@@ -470,10 +775,18 @@ function testTraceTreeBuilderPreservesUnknownOutcome(): void {
 async function run(): Promise<void> {
   testSkillUsageDetectorNormalizesVersions()
   console.log("PASS Skill usage detector version normalization")
+  testStreamSkillUsageObservation()
+  console.log("PASS stream Skill usage observation")
+  await testTraceSidecarFailureIsolation()
+  console.log("PASS trace sidecar failure isolation")
   await testSkillUsageDetectorReadsSkillMetadataDirectly()
   console.log("PASS Skill usage detector direct SKILL.md metadata lookup")
   await testTraceCollectorReportsVersionedSkills()
   console.log("PASS trace collector telemetry usedSkills normalization")
+  await testTraceCollectorObservabilityContext()
+  console.log("PASS trace collector observability context")
+  await testTraceCollectorCountsSubagentMetadataTools()
+  console.log("PASS trace collector subagent metadata tool count")
   await testTraceCollectorSanitizesLargeFields()
   console.log("PASS trace collector trace field sanitization")
   await testTraceCollectorPreservesUnknownOutcomeNodes()

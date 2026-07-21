@@ -192,6 +192,10 @@ function buildProjectDoc(
     lifecycleUpdatedAt: project.lifecycle?.updateAt,
     compatible: project.boardCompatibility?.compatible,
     compatibilityStatus: project.boardCompatibility?.status,
+    // Monotonic runtime fact: once a feature session has successfully loaded
+    // its complete system-constraint set, the project keeps this marker.
+    systemConstraintEverLoadedSuccessfully: Boolean(project.systemConstraintFirstLoadedAt),
+    systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
     featureCount: features.length,
     features,
     ...(detail?.error ? { error: detail.error } : {})
