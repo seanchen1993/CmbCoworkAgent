@@ -19,6 +19,8 @@ import {
 } from "../src/renderer/src/lib/goal-transcript.ts"
 import { buildGoalContinuationPrompt, buildGoalStartPrompt } from "../src/main/agent/goals/goal-manager.ts"
 import {
+  isWorkflowPlumbingTranscriptContent,
+  neutralizeWorkflowPlumbingUserText,
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
   WORKFLOW_NOTIFICATION_TURN_TRIGGER
@@ -868,6 +870,27 @@ function testWorkflowPlumbingStaysOutOfCheckpointTranscript(): void {
   )
 }
 
+function testUserSuppliedWorkflowMarkersRemainVisible(): void {
+  const markerText = `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}workflow-run-1]] pasted log`
+  const neutralizedMarker = neutralizeWorkflowPlumbingUserText(markerText)
+  const neutralizedTurnPrompt = neutralizeWorkflowPlumbingUserText(
+    WORKFLOW_NOTIFICATION_TURN_PROMPT
+  )
+
+  assert(
+    neutralizedMarker.endsWith(markerText),
+    "neutralization should preserve the user's workflow marker text"
+  )
+  assert(
+    !isWorkflowPlumbingTranscriptContent(neutralizedMarker),
+    "a user-supplied V1 marker should remain visible after restore/export"
+  )
+  assert(
+    !isWorkflowPlumbingTranscriptContent(neutralizedTurnPrompt),
+    "a user-supplied full workflow turn prompt should remain visible after restore/export"
+  )
+}
+
 function testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore(): void {
   const rawCheckpointMessages = [
     message("user-1", "user", "用动态工作流实现！"),
@@ -915,6 +938,7 @@ function run(): void {
     testGoalEventsStayInGoalUiState,
     testVisibilityPredicateMatchesTranscriptBuilder,
     testWorkflowPlumbingStaysOutOfCheckpointTranscript,
+    testUserSuppliedWorkflowMarkersRemainVisible,
     testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore
   ]
 

@@ -139,6 +139,46 @@ async function testMessagesPersistAcrossReopen(): Promise<void> {
   await db.closeDatabase()
 }
 
+async function testSteeredTranscriptRecordsAreSplicedBeforeDelayedFollowup(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-steered-transcript-order"
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Steered transcript order" })
+
+  db.upsertThreadMessages(threadId, [
+    { id: "user-original", role: "user", content: "原始请求", created_at: new Date() },
+    {
+      id: "assistant-guided-reply",
+      role: "assistant",
+      content: "引导后的回复先到达",
+      created_at: new Date()
+    },
+    {
+      id: "assistant-original-reply",
+      role: "assistant",
+      content: "原始回复延后到达",
+      created_at: new Date()
+    },
+    { id: "user-guide", role: "user", content: "引导消息", created_at: new Date() }
+  ])
+
+  assert(
+    db.moveThreadMessagesAfterLastNonAssistant(threadId, [
+      "assistant-original-reply",
+      "user-guide"
+    ]),
+    "steering records should move before delayed follow-up output"
+  )
+  assertEqual(
+    db.getThreadMessages(threadId).map((message) => message.id).join(","),
+    "user-original,assistant-original-reply,user-guide,assistant-guided-reply",
+    "durable transcript should retain logical turn order despite delayed stream delivery"
+  )
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
 async function testStreamingDeltaMerge(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
   const threadId = "thread-stream-delta"
@@ -1130,6 +1170,7 @@ async function testAuthoritativeSnapshotCanClearPersistedAssistantContent(): Pro
 async function main(): Promise<void> {
   await withTempHome(async () => {
     await testMessagesPersistAcrossReopen()
+    await testSteeredTranscriptRecordsAreSplicedBeforeDelayedFollowup()
     await testStreamingDeltaMerge()
     await testBatchStreamingDeltaCoalesce()
     await testTranscriptUpsertDoesNotTouchThreadUpdatedAt()

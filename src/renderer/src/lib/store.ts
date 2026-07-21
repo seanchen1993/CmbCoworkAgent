@@ -9,6 +9,7 @@ import type {
   ThreadForkParams
 } from "@/types"
 import { findFirstChatThread, isHarnessProjectModeThread } from "./thread-classification"
+import { queueStorageKey } from "./queued-message-content"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -735,6 +736,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await window.api.threads.delete(threadId)
       console.log("[Store] Thread deleted from backend")
+      // The draft-message queue is persisted to localStorage independent of the
+      // DB thread record (thread-context.tsx's persistQueuedMessages) so it
+      // survives reloads; nothing else clears that key, so it would otherwise
+      // sit there forever once the thread it belonged to is gone.
+      window.localStorage.removeItem(queueStorageKey(threadId))
 
       set((state) => {
         const threads = state.threads.filter((t) => t.thread_id !== threadId)

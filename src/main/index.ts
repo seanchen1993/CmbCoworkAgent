@@ -513,6 +513,16 @@ function createWindow(): void {
     return { action: "deny" }
   })
 
+  // A renderer reload destroys the in-flight stream consumer while the agent
+  // continues in the main process. This application intentionally has no
+  // mid-turn reload/reconnect contract, so block browser refresh shortcuts.
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    const isRefreshShortcut =
+      input.key === "F5" ||
+      ((input.meta || input.control) && input.key.toLowerCase() === "r")
+    if (isRefreshShortcut) event.preventDefault()
+  })
+
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
   })

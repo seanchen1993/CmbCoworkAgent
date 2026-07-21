@@ -814,6 +814,22 @@ interface CustomAPI {
       }
     }>
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
+    queueCurrentRunMessage: (
+      threadId: string,
+      message: { id: string; content: string; displayContent?: string }
+    ) => Promise<{ queued: boolean; reason?: string; message?: string }>
+    deleteCurrentRunQueuedMessage: (threadId: string, messageId: string) => Promise<void>
+    reconcileCurrentRunQueuedMessages: (
+      threadId: string,
+      messageIds: string[]
+    ) => Promise<{ pendingIds: string[]; injectedIds: string[]; durableIds: string[] }>
+    onQueuedMessagesInjected: (
+      threadId: string,
+      callback: (payload: {
+        messages: Array<{ id: string; content: string }>
+        assistantIdAlias?: { sourceId: string; id: string }
+      }) => void
+    ) => () => void
     getCoordinatorWorkers: (
       threadId: string,
       options?: { subscribeUpdates?: boolean }
