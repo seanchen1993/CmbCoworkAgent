@@ -53,13 +53,13 @@ export function HeartbeatPanel(): React.JSX.Element {
         window.api.heartbeat.getConfig(),
         window.api.heartbeat.getContent(),
         window.api.heartbeat.isRunning(),
-        window.api.models.getCustomConfigs()
+        window.api.models.list()
       ])
       if (!mountedRef.current) return
       setConfig(cfg)
       setContent(md)
       setRunning(isRunning)
-      setModels(modelConfigs.map((c) => ({ id: `custom:${c.id}`, name: c.name })))
+      setModels(modelConfigs.map((c) => ({ id: c.id, name: c.name })))
     } catch (e) {
       console.error("[HeartbeatPanel] load error:", e)
     }
@@ -70,7 +70,9 @@ export function HeartbeatPanel(): React.JSX.Element {
   }, [loadAll])
 
   useEffect(() => {
-    return window.api.heartbeat.onChanged(() => { loadAll() })
+    return window.api.heartbeat.onChanged(() => {
+      loadAll()
+    })
   }, [loadAll])
 
   const saveConfig = useCallback(async (updates: Partial<HeartbeatConfig>) => {
@@ -166,12 +168,7 @@ export function HeartbeatPanel(): React.JSX.Element {
             <h2 className="text-lg font-semibold">Heartbeat</h2>
           </div>
           <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleReset}
-              title="重置为默认配置"
-            >
+            <Button variant="ghost" size="sm" onClick={handleReset} title="重置为默认配置">
               <RotateCcw className="size-4 mr-1" />
               重置
             </Button>
@@ -226,9 +223,13 @@ export function HeartbeatPanel(): React.JSX.Element {
               value={config.modelId || ""}
               onChange={(e) => handleModelChange(e.target.value)}
             >
-              <option value="" disabled>请选择模型</option>
+              <option value="" disabled>
+                请选择模型
+              </option>
               {models.map((m) => (
-                <option key={m.id} value={m.id}>{m.name}</option>
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
               ))}
             </select>
           </div>
@@ -266,12 +267,11 @@ export function HeartbeatPanel(): React.JSX.Element {
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="text-sm font-medium">HEARTBEAT.md</label>
-            {saving && (
-              <span className="text-xs text-muted-foreground">保存中...</span>
-            )}
+            {saving && <span className="text-xs text-muted-foreground">保存中...</span>}
           </div>
           <p className="text-xs text-muted-foreground mb-2">
-            在下方编辑 HEARTBEAT.md 的内容。Heartbeat 会定期读取此文件并按内容执行。内容为空时会跳过执行。
+            在下方编辑 HEARTBEAT.md 的内容。Heartbeat
+            会定期读取此文件并按内容执行。内容为空时会跳过执行。
           </p>
           <textarea
             className="w-full min-h-[200px] rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"

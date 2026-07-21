@@ -3,12 +3,12 @@ import { BrowserWindow } from "electron"
 import { HumanMessage } from "@langchain/core/messages"
 import {
   getScheduledTasks,
-  getCustomModelConfigs,
   updateScheduledTaskRunResult,
   setScheduledTaskEnabled,
   addTaskRunRecord,
   getGlobalRoutingMode
 } from "../storage"
+import { getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
 import { trySendChatXReply } from "./chatx"
@@ -28,6 +28,7 @@ import { emitAppAttention } from "../app-attention-events"
 const TICK_INTERVAL_MS = 60_000
 const ONCE_EXPIRE_MS = 30 * 60_000 // once tasks older than 30 min are auto-disabled instead of executed
 let tickTimer: ReturnType<typeof setTimeout> | null = null
+let shuttingDown = false
 const runningTasks = new Set<string>()
 const activeAbortControllers = new Map<string, AbortController>()
 
@@ -68,10 +69,12 @@ function showTaskNotification(taskName: string, status: "ok" | "error", body?: s
 
 export function startScheduler(): void {
   console.log("[Scheduler] Starting scheduler service")
+  shuttingDown = false
   tick()
 }
 
 export function stopScheduler(): void {
+  shuttingDown = true
   if (tickTimer) {
     clearTimeout(tickTimer)
     tickTimer = null
@@ -88,12 +91,30 @@ export function stopScheduler(): void {
   console.log("[Scheduler] Stopped scheduler service")
 }
 
+export function hasActiveScheduledTaskRuns(): boolean {
+  return runningTasks.size > 0
+}
+
+export async function stopSchedulerAndWait(timeoutMs = 5_000): Promise<void> {
+  stopScheduler()
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (runningTasks.size > 0 && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+  }
+  if (runningTasks.size > 0) {
+    console.warn(
+      `[Scheduler] Timed out waiting for ${runningTasks.size} scheduled task(s) to settle`
+    )
+  }
+}
+
 function armTimer(): void {
   tickTimer = setTimeout(tick, TICK_INTERVAL_MS)
 }
 
 function tick(): void {
   tickTimer = null
+  if (shuttingDown) return
   try {
     const now = new Date()
     const tasks = getScheduledTasks()
@@ -121,7 +142,7 @@ function tick(): void {
   } catch (err) {
     console.error("[Scheduler] tick error:", err)
   } finally {
-    armTimer()
+    if (!shuttingDown) armTimer()
   }
 }
 
@@ -132,6 +153,7 @@ function broadcastToChannel(channel: string, data: unknown): void {
 }
 
 async function executeTask(taskId: string): Promise<void> {
+  if (shuttingDown) throw new Error("The application is quitting; scheduled tasks cannot start.")
   const tasks = getScheduledTasks()
   const task = tasks.find((t) => t.id === taskId)
   if (!task) throw new Error(`任务不存在: ${taskId}`)
@@ -206,10 +228,7 @@ async function executeTask(taskId: string): Promise<void> {
     // Update tracer with resolved model info
     if (effectiveModelId) {
       tracer.setModelId(effectiveModelId)
-      const cfgId = effectiveModelId.startsWith("custom:")
-        ? effectiveModelId.slice("custom:".length)
-        : effectiveModelId
-      const cfg = getCustomModelConfigs().find((c) => c.id === cfgId)
+      const cfg = getModelConfigByRef(effectiveModelId)
       if (cfg?.model) tracer.setModelName(cfg.model)
     }
 

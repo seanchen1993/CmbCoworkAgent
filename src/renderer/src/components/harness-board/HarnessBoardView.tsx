@@ -3308,6 +3308,7 @@ function FeatureCreateTabTrigger({
 }
 
 function FeatureCreateDialog({
+  mode,
   project,
   featureName,
   workflowConfig,
@@ -3332,6 +3333,7 @@ function FeatureCreateDialog({
   onSyncPublicConstraints,
   onSubmit
 }: {
+  mode: "create" | "edit"
   project: HarnessProjectListItem | null
   featureName: string
   workflowConfig: HarnessDynamicWorkflowConfig | null
@@ -3356,6 +3358,7 @@ function FeatureCreateDialog({
   onSyncPublicConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
+  const editing = mode === "edit"
   const featureNameError = getHarnessNameError("特性名称", featureName)
   const selectedTemplate = selectedWorkflowTemplate(workflowConfig, workflowTemplate)
   const customWorkflowSelected = isCustomWorkflowTemplate(selectedTemplate)
@@ -3375,7 +3378,7 @@ function FeatureCreateDialog({
   const sessionContextStatusText = supportsSessionContextInjection
     ? `由 ${sessionContextProviderName} 加载会话工作区及所选发布单元的系统约束`
     : "由 CMBDevClaw 加载会话工作区及所选发布单元的系统约束"
-  const workflowTabDisabled = !workflowLoading && !workflowConfig
+  const workflowTabDisabled = editing || (!workflowLoading && !workflowConfig)
   const defaultTab = "deploy-units"
   const workflowPanel = workflowLoading ? (
     <div className="flex min-h-32 items-center justify-center rounded-md border border-border bg-background text-sm text-muted-foreground">
@@ -3537,7 +3540,7 @@ function FeatureCreateDialog({
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
-          <DialogTitle>创建特性</DialogTitle>
+          <DialogTitle>{editing ? "编辑绑定的发布单元" : "创建特性"}</DialogTitle>
         </DialogHeader>
         <form
           className="grid min-w-0 gap-4 py-1"
@@ -3554,7 +3557,8 @@ function FeatureCreateDialog({
               onChange={(event) => onChange(sanitizeHarnessNameInput(event.target.value))}
               placeholder="请输入特性名称"
               className="bg-background"
-              autoFocus
+              autoFocus={!editing}
+              disabled={creating || editing}
               aria-invalid={featureNameError ? true : undefined}
             />
             {featureNameError && <span className="text-status-critical">{featureNameError}</span>}
@@ -3591,7 +3595,7 @@ function FeatureCreateDialog({
                 <FeatureCreateTabTrigger
                   value="workflow"
                   disabled={workflowTabDisabled}
-                  tooltip="插件暂不支持"
+                  tooltip={editing ? "工作流创建后不可修改" : "插件暂不支持"}
                 >
                   选择要使用的工作流
                 </FeatureCreateTabTrigger>
@@ -3618,14 +3622,20 @@ function FeatureCreateDialog({
               disabled={
                 creating ||
                 syncingPublicConstraints ||
-                workflowLoading ||
+                (!editing && workflowLoading) ||
                 !featureName.trim() ||
                 featureNameError !== null
               }
               className="gap-2"
             >
-              {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-              创建
+              {creating ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : editing ? (
+                <Pencil className="size-4" />
+              ) : (
+                <Plus className="size-4" />
+              )}
+              {editing ? "保存" : "创建"}
             </Button>
           </DialogFooter>
         </form>
@@ -3757,7 +3767,11 @@ function ProjectModeSettingsPanel({
                       onChange(index, { ...mapping, deployUnitId })
                     }
                     onSelect={(deployUnit) =>
-                      onChange(index, { ...mapping, deployUnitId: deployUnit.deployUnit })
+                      onChange(index, {
+                        ...mapping,
+                        deployUnitId: deployUnit.deployUnit,
+                        description: deployUnit.deployUnitName
+                      })
                     }
                   />
                   <Input
@@ -5268,8 +5282,19 @@ function ProjectConstraintSyncPanel({
 
   return (
     <section className="rounded-md border border-border bg-background shadow-sm">
-      <div className="border-b border-border px-4 py-3">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-sm font-semibold text-foreground">拉取公共系统约束</h2>
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto min-w-0 px-0 py-0 text-xs"
+          onClick={() => {
+            void window.electron.openExternal("https://doc.cmbchina.com/f/v?id=zfGMOW")
+          }}
+        >
+          知识库使用指引
+        </Button>
       </div>
       <div className="space-y-3 p-4">
         {adapters.length === 0 ? (
@@ -5790,6 +5815,7 @@ function FeatureDetailPage({
   fallbackFeatureTitle,
   onBackToList,
   onBackToProject,
+  onEditDeployUnits,
   onRefresh,
   onActiveSessionChange,
   onSessionViewChange,
@@ -5809,6 +5835,7 @@ function FeatureDetailPage({
   fallbackFeatureTitle?: string
   onBackToList: () => void
   onBackToProject: () => void
+  onEditDeployUnits: () => void
   onRefresh: () => void | Promise<void>
   onActiveSessionChange?: (threadId: string) => void
   onSessionViewChange?: (viewing: boolean) => void
@@ -6234,6 +6261,17 @@ function FeatureDetailPage({
           </div>
           {effectiveActiveDetailTab === "feature" && (
             <div className={cn(harnessPageHeaderActionsClassName, "pt-0")}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className={cn(harnessDetailSecondaryButtonClassName, "w-[176px]")}
+                onClick={onEditDeployUnits}
+                disabled={loading || !detail || projectInteractionDisabled}
+              >
+                <Pencil className="size-4" />
+                编辑绑定的发布单元
+              </Button>
               <Button
                 type="button"
                 variant="ghost"
@@ -6994,6 +7032,7 @@ export function HarnessBoardView({
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null)
   const [pendingProjectAction, setPendingProjectAction] = useState<PendingProjectAction>(null)
   const [confirmingProjectAction, setConfirmingProjectAction] = useState(false)
+  const [featureDialogMode, setFeatureDialogMode] = useState<"create" | "edit">("create")
   const [featureDialogProject, setFeatureDialogProject] = useState<HarnessProjectListItem | null>(null)
   const [featureName, setFeatureName] = useState("")
   const [featureError, setFeatureError] = useState<string | null>(null)
@@ -7015,6 +7054,7 @@ export function HarnessBoardView({
   const [selectedKnowledgePreviewPaths, setSelectedKnowledgePreviewPaths] =
     useState<Record<string, string | null>>({})
   const [creatingFeatureProjectId, setCreatingFeatureProjectId] = useState<string | null>(null)
+  const [updatingFeatureDeployUnits, setUpdatingFeatureDeployUnits] = useState(false)
   const [updatingPluginNames, setUpdatingPluginNames] = useState<Set<string>>(new Set())
   const [loadError, setLoadError] = useState<string | null>(null)
   const [deployUnitMappings, setDeployUnitMappings] = useState<HarnessDeployUnitMapping[]>([])
@@ -7778,25 +7818,32 @@ export function HarnessBoardView({
     })
   }, [loadProjectDetail])
 
-  const refreshSelectedRunDetail = useCallback(async (): Promise<void> => {
-    if (!selectedFeature || selectedFeature.deleted) return
-    setLoadingRun(true)
-    setLoadError(null)
-    try {
-      const detail = await window.api.harnessBoard.getRunDetail(
-        selectedFeature.projectId,
-        selectedFeature.slug
-      )
-      setRunDetail((currentDetail) =>
-        areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
-      )
-      await loadProjectDetail(selectedFeature.projectId, { showLoading: false, reportError: false })
-    } catch (error) {
-      setLoadError(cleanIpcError(error))
-    } finally {
-      setLoadingRun(false)
-    }
-  }, [loadProjectDetail, selectedFeature])
+  const refreshSelectedRunDetail = useCallback(
+    async (options: { rethrow?: boolean } = {}): Promise<void> => {
+      if (!selectedFeature || selectedFeature.deleted) return
+      setLoadingRun(true)
+      setLoadError(null)
+      try {
+        const detail = await window.api.harnessBoard.getRunDetail(
+          selectedFeature.projectId,
+          selectedFeature.slug
+        )
+        setRunDetail((currentDetail) =>
+          areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
+        )
+        await loadProjectDetail(selectedFeature.projectId, {
+          showLoading: false,
+          reportError: false
+        })
+      } catch (error) {
+        setLoadError(cleanIpcError(error))
+        if (options.rethrow) throw error
+      } finally {
+        setLoadingRun(false)
+      }
+    },
+    [loadProjectDetail, selectedFeature]
+  )
 
   const { activeSystemGroups, archivedSystemGroups } = useMemo<{
     activeSystemGroups: SystemGroup[]
@@ -8081,6 +8128,7 @@ export function HarnessBoardView({
       return
     }
     const requestId = ++featureWorkflowRequestIdRef.current
+    setFeatureDialogMode("create")
     setFeatureDialogProject(project)
     setFeatureName("")
     setFeatureError(null)
@@ -8127,8 +8175,9 @@ export function HarnessBoardView({
 
   const handleFeatureDialogOpenChange = useCallback(
     (open: boolean): void => {
-      if (!open && !creatingFeatureProjectId) {
+      if (!open && !creatingFeatureProjectId && !updatingFeatureDeployUnits) {
         featureWorkflowRequestIdRef.current += 1
+        setFeatureDialogMode("create")
         setFeatureDialogProject(null)
         setFeatureName("")
         setFeatureError(null)
@@ -8141,18 +8190,18 @@ export function HarnessBoardView({
         setSelectedDeployUnitIds(new Set())
       }
     },
-    [creatingFeatureProjectId]
+    [creatingFeatureProjectId, updatingFeatureDeployUnits]
   )
 
   const handleOpenDeployUnitSettings = useCallback((): void => {
-    if (creatingFeatureProjectId) return
+    if (creatingFeatureProjectId || updatingFeatureDeployUnits) return
     handleFeatureDialogOpenChange(false)
     setSelectedProjectSession(null)
     setSelectedFeature(null)
     setSelectedProjectId(null)
     setIsViewingSession(false)
     setProjectModeTab("settings")
-  }, [creatingFeatureProjectId, handleFeatureDialogOpenChange])
+  }, [creatingFeatureProjectId, handleFeatureDialogOpenChange, updatingFeatureDeployUnits])
 
   const handleWorkflowTemplateChange = useCallback((templateId: string): void => {
     setFeatureWorkflowTemplate(templateId)
@@ -8316,6 +8365,109 @@ export function HarnessBoardView({
     )
   const selectedProject =
     selectedProjectId ? projects.find((project) => project.projectId === selectedProjectId) ?? null : null
+  const openFeatureDeployUnitEditDialog = useCallback((): void => {
+    if (!selectedProject || !runDetailWithSessions || selectedFeature?.deleted) return
+
+    const requestId = ++featureWorkflowRequestIdRef.current
+    setFeatureDialogMode("edit")
+    setFeatureDialogProject(selectedProject)
+    setFeatureName(runDetailWithSessions.run.slug)
+    setFeatureError(null)
+    setFeatureWorkflowConfig(null)
+    setFeatureWorkflowLoading(false)
+    setFeatureWorkflowTemplate("")
+    setSelectedWorkflowNodeIds(new Set())
+    setFeatureAgentsReadyDeployUnits([])
+    setFeatureLocalAgentmdDeployUnitMappings([])
+    setSelectedDeployUnitIds(
+      new Set(
+        runDetailWithSessions.run.selectedDeployUnits.map(
+          (mapping) => mapping.deployUnitIdMapping
+        )
+      )
+    )
+
+    void refreshFeaturePublicConstraints(selectedProject.projectId, requestId)
+    void window.api.harnessBoard
+      .getLocalAgentmdDeployUnitMappings(deployUnitMappings)
+      .then((deployUnitMappingIds) => {
+        if (requestId !== featureWorkflowRequestIdRef.current) return
+        setFeatureLocalAgentmdDeployUnitMappings(deployUnitMappingIds)
+      })
+      .catch(() => {
+        if (requestId !== featureWorkflowRequestIdRef.current) return
+        setFeatureLocalAgentmdDeployUnitMappings([])
+      })
+  }, [
+    deployUnitMappings,
+    refreshFeaturePublicConstraints,
+    runDetailWithSessions,
+    selectedFeature?.deleted,
+    selectedProject
+  ])
+
+  const handleSubmitFeatureDeployUnits = useCallback(async (): Promise<void> => {
+    if (
+      featureDialogMode !== "edit" ||
+      !featureDialogProject ||
+      !selectedFeature ||
+      updatingFeatureDeployUnits
+    ) {
+      return
+    }
+
+    const selectedDeployUnits = deployUnitMappings.filter((mapping) =>
+      selectedDeployUnitIds.has(mapping.deployUnitIdMapping)
+    )
+    if (selectedDeployUnits.length > 0 && deployUnitMappingsDirty) {
+      setFeatureError("发布单元路径配置尚未保存，请先保存后再编辑绑定")
+      return
+    }
+
+    setUpdatingFeatureDeployUnits(true)
+    setFeatureError(null)
+    try {
+      await window.api.harnessBoard.updateFeatureDeployUnits({
+        projectId: selectedFeature.projectId,
+        featureId: selectedFeature.slug,
+        selectedDeployUnits
+      })
+      try {
+        await refreshSelectedRunDetail({ rethrow: true })
+      } catch (error) {
+        setFeatureError(`发布单元已保存，但刷新特性详情失败：${cleanIpcError(error)}`)
+        return
+      }
+      featureWorkflowRequestIdRef.current += 1
+      setFeatureDialogProject(null)
+      setFeatureDialogMode("create")
+      setFeatureName("")
+      setSelectedDeployUnitIds(new Set())
+      toast.success("已更新特性绑定的发布单元")
+    } catch (error) {
+      setFeatureError(cleanIpcError(error))
+    } finally {
+      setUpdatingFeatureDeployUnits(false)
+    }
+  }, [
+    deployUnitMappings,
+    deployUnitMappingsDirty,
+    featureDialogMode,
+    featureDialogProject,
+    refreshSelectedRunDetail,
+    selectedDeployUnitIds,
+    selectedFeature,
+    updatingFeatureDeployUnits
+  ])
+  const featureDialogSubmitting =
+    featureDialogMode === "edit" ? updatingFeatureDeployUnits : creatingFeatureProjectId !== null
+  const handleSubmitFeatureDialog = useCallback((): void => {
+    if (featureDialogMode === "edit") {
+      void handleSubmitFeatureDeployUnits()
+      return
+    }
+    void handleSubmitFeature()
+  }, [featureDialogMode, handleSubmitFeature, handleSubmitFeatureDeployUnits])
   const selectedProjectSessionThread = selectedProjectSession
     ? threadsById.get(selectedProjectSession.threadId) ?? null
     : null
@@ -9039,6 +9191,7 @@ export function HarnessBoardView({
           fallbackFeatureTitle={fallbackFeatureSummary?.title ?? selectedFeature.slug}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
+          onEditDeployUnits={openFeatureDeployUnitEditDialog}
           onRefresh={refreshSelectedRunDetail}
           onActiveSessionChange={handleActiveSessionChange}
           onSessionViewChange={handleSessionViewChange}
@@ -9046,6 +9199,32 @@ export function HarnessBoardView({
           onRequestOpenGitPanel={onRequestOpenGitPanel}
           onDismissGitChangeNotice={onDismissGitChangeNotice}
           onThreadGitStatusChange={onThreadGitStatusChange}
+        />
+        <FeatureCreateDialog
+          mode={featureDialogMode}
+          project={featureDialogProject}
+          featureName={featureName}
+          workflowConfig={featureWorkflowConfig}
+          workflowLoading={featureWorkflowLoading}
+          workflowTemplate={featureWorkflowTemplate}
+          selectedWorkflowNodeIds={selectedWorkflowNodeIds}
+          agentsReadyDeployUnits={featureAgentsReadyDeployUnits}
+          localAgentmdDeployUnitMappings={featureLocalAgentmdDeployUnitMappings}
+          publicConstraintsSyncAvailable={featureDialogAdapter?.pullKnowledgeAvailable === true}
+          syncingPublicConstraints={featurePublicConstraintsSyncing}
+          deployUnitMappings={deployUnitMappings}
+          deployUnitMappingsLoading={deployUnitMappingsLoading}
+          selectedDeployUnitIds={selectedDeployUnitIds}
+          creating={featureDialogSubmitting}
+          error={featureError}
+          onOpenChange={handleFeatureDialogOpenChange}
+          onChange={setFeatureName}
+          onWorkflowTemplateChange={handleWorkflowTemplateChange}
+          onWorkflowNodeToggle={handleWorkflowNodeToggle}
+          onDeployUnitToggle={handleDeployUnitToggle}
+          onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
+          onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
+          onSubmit={handleSubmitFeatureDialog}
         />
         {sidebarDeleteDialog}
         {sidebarPortal}
@@ -9100,6 +9279,7 @@ export function HarnessBoardView({
           onOpenFeature={openFeatureDetail}
         />
         <FeatureCreateDialog
+          mode={featureDialogMode}
           project={featureDialogProject}
           featureName={featureName}
           workflowConfig={featureWorkflowConfig}
@@ -9113,7 +9293,7 @@ export function HarnessBoardView({
           deployUnitMappings={deployUnitMappings}
           deployUnitMappingsLoading={deployUnitMappingsLoading}
           selectedDeployUnitIds={selectedDeployUnitIds}
-          creating={creatingFeatureProjectId !== null}
+          creating={featureDialogSubmitting}
           error={featureError}
           onOpenChange={handleFeatureDialogOpenChange}
           onChange={setFeatureName}
@@ -9122,7 +9302,7 @@ export function HarnessBoardView({
           onDeployUnitToggle={handleDeployUnitToggle}
           onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
           onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
-          onSubmit={() => void handleSubmitFeature()}
+          onSubmit={handleSubmitFeatureDialog}
         />
         <ProjectEditDialog
           open={editingProject !== null}
@@ -9365,6 +9545,7 @@ export function HarnessBoardView({
       </ScrollArea>
 
       <FeatureCreateDialog
+        mode={featureDialogMode}
         project={featureDialogProject}
         featureName={featureName}
         workflowConfig={featureWorkflowConfig}
@@ -9378,7 +9559,7 @@ export function HarnessBoardView({
         deployUnitMappings={deployUnitMappings}
         deployUnitMappingsLoading={deployUnitMappingsLoading}
         selectedDeployUnitIds={selectedDeployUnitIds}
-        creating={creatingFeatureProjectId !== null}
+        creating={featureDialogSubmitting}
         error={featureError}
         onOpenChange={handleFeatureDialogOpenChange}
         onChange={setFeatureName}
@@ -9387,7 +9568,7 @@ export function HarnessBoardView({
         onDeployUnitToggle={handleDeployUnitToggle}
         onOpenDeployUnitSettings={handleOpenDeployUnitSettings}
         onSyncPublicConstraints={() => void handleSyncFeaturePublicConstraints()}
-        onSubmit={() => void handleSubmitFeature()}
+        onSubmit={handleSubmitFeatureDialog}
       />
       <ProjectFormDialog
         open={dialogOpen}

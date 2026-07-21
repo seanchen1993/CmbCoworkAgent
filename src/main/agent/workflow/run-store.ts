@@ -537,8 +537,11 @@ export function findUndeliveredTerminalRun(
   // Busy-guard support: keep scanning past undelivered runs the caller deems
   // ineligible (e.g. renotify-exhausted) instead of stopping at the first —
   // a single-candidate answer has a blind spot when the newest pending is
-  // exhausted but an older one is still perfectly deliverable.
-  isEligible?: (runId: string) => boolean
+  // exhausted but an older one is still perfectly deliverable. Receives the
+  // fully-loaded run (not just the runId) so a caller can fence by instance
+  // identity (runId + startedAt) — a resume REUSES the runId, so runId alone
+  // cannot tell a superseded instance from the current one.
+  isEligible?: (run: PersistedWorkflowRun) => boolean
 ): PersistedWorkflowRun | null {
   try {
     const dir = getWorkflowRunsDir(workspacePath, threadId)
@@ -567,7 +570,7 @@ export function findUndeliveredTerminalRun(
     for (const candidate of candidates) {
       const run = loadWorkflowRun(workspacePath, threadId, candidate.runId)
       if (run && run.status !== "running" && !run.notificationDelivered) {
-        if (isEligible && !isEligible(run.runId)) continue
+        if (isEligible && !isEligible(run)) continue
         return run
       }
     }

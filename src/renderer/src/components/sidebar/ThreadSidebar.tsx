@@ -63,6 +63,9 @@ const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
 const PINNED_PROJECTS_STORAGE_KEY = "threads:pinnedProjects"
 const PROJECT_NAME_OVERRIDES_STORAGE_KEY = "threads:projectNameOverrides"
+/** 工作区展开时默认可见的 thread 条数;点"展开显示"每次追加的条数。 */
+const DEFAULT_VISIBLE_THREADS = 5
+const VISIBLE_THREADS_STEP = 10
 type SidebarTab = "chat" | "project"
 type ForkDestinationMode = "local" | "workspace"
 
@@ -517,6 +520,9 @@ export function ThreadSidebar(): React.JSX.Element {
   const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(() =>
     readStoredStringSet(COLLAPSED_PROJECTS_STORAGE_KEY)
   )
+  // 每个工作区当前可见的 thread 条数(无记录 = 默认 5)。会话级状态:
+  // 折叠工作区时清除,重新展开回到默认 5 条;不落盘。
+  const [visibleThreadCounts, setVisibleThreadCounts] = useState<Record<string, number>>({})
   const [pinnedProjectKeys, setPinnedProjectKeys] = useState<Set<string>>(() =>
     readStoredStringSet(PINNED_PROJECTS_STORAGE_KEY)
   )
@@ -695,6 +701,12 @@ export function ThreadSidebar(): React.JSX.Element {
           next.delete(projectKey)
         } else {
           next.add(projectKey)
+          // 折叠即丢弃展开进度,下次展开回到默认 5 条。
+          setVisibleThreadCounts((counts) => {
+            if (!(projectKey in counts)) return counts
+            const { [projectKey]: _dropped, ...rest } = counts
+            return rest
+          })
         }
         persistCollapsedProjects(next)
         return next
@@ -1317,6 +1329,18 @@ export function ThreadSidebar(): React.JSX.Element {
                 const hasSelectedThread = project.threads.some(
                   (thread) => thread.thread_id === currentThreadId
                 )
+                // 折叠切片的有效条数:默认 5 / 用户点"展开显示"追加。但当前选中的
+                // thread 必须始终可见——若它排在可见范围之外(如重启恢复上次会话时
+                // 排到第 6+ 位),把切片扩展到刚好包含它,避免选中项被截断藏掉。
+                const requestedVisibleThreads =
+                  visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS
+                const selectedThreadIndex = currentThreadId
+                  ? project.threads.findIndex((thread) => thread.thread_id === currentThreadId)
+                  : -1
+                const visibleThreadCount =
+                  selectedThreadIndex >= 0
+                    ? Math.max(requestedVisibleThreads, selectedThreadIndex + 1)
+                    : requestedVisibleThreads
                 const unreadCount = project.threads.filter((thread) =>
                   unreadIds.has(thread.thread_id)
                 ).length
@@ -1504,7 +1528,9 @@ export function ThreadSidebar(): React.JSX.Element {
 
                     {!isCollapsed && (
                       <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-                        {project.threads.map((thread) => {
+                        {project.threads
+                          .slice(0, visibleThreadCount)
+                          .map((thread) => {
                           const threadState = allThreadStates[thread.thread_id]
                           const hasRunningCoordinatorWorker = Boolean(
                             threadState?.coordinatorWorkers.some(
@@ -1553,6 +1579,25 @@ export function ThreadSidebar(): React.JSX.Element {
                             />
                           )
                         })}
+                        {project.threads.length > visibleThreadCount && (
+                          <button
+                            type="button"
+                            className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground"
+                            onClick={() =>
+                              setVisibleThreadCounts((counts) => ({
+                                ...counts,
+                                // 基于当前实际可见条数追加,确保"选中项撑开切片"时点击仍能继续展开。
+                                [project.key]: visibleThreadCount + VISIBLE_THREADS_STEP
+                              }))
+                            }
+                          >
+                            <ChevronDown className="size-3 shrink-0" />
+                            展开显示
+                            <span className="text-[10px] text-muted-foreground/60">
+                              还有 {project.threads.length - visibleThreadCount} 条
+                            </span>
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>

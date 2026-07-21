@@ -426,7 +426,10 @@ async function scenario6() {
     env.writeFile
   )
   const calls = logs.filter((l) => l.startsWith("AGENT")).map((l) => l.slice(7))
-  const exploreCalls = calls.filter((c) => c.startsWith("探索：")).length
+  // 需求现状勘察发生在合同之前,属"确定验收标准"阶段,不算探索阶段的视角数。
+  const exploreCalls = calls.filter(
+    (c) => c.startsWith("探索：") && c !== "探索：需求现状勘察"
+  ).length
   console.log("\n== 场景6 simple 档直通 ==")
   console.log(
     "档位判定为 simple:",
@@ -435,12 +438,18 @@ async function scenario6() {
   console.log("跳过规划代理:", !calls.some((c) => /^第\d+轮规划$/.test(c)) ? "PASS" : "FAIL")
   console.log("单视角探索:", exploreCalls === 1 ? "PASS" : "FAIL " + exploreCalls)
   console.log(
+    "现状勘察在合同前执行:",
+    calls.indexOf("探索：需求现状勘察") === 0 && calls.indexOf("确定验收标准") === 1
+      ? "PASS"
+      : "FAIL " + JSON.stringify(calls.slice(0, 2))
+  )
+  console.log(
     "对抗复核与终审保留:",
     calls.includes("对抗复核R1") && calls.includes("终审命令核对") ? "PASS" : "FAIL"
   )
   console.log(
-    "总代理调用数(应为6):",
-    calls.length === 6 ? "PASS" : "FAIL " + calls.length + " " + JSON.stringify(calls)
+    "总代理调用数(应为7:勘察+合同+探索+实现+验证+复核+终审):",
+    calls.length === 7 ? "PASS" : "FAIL " + calls.length + " " + JSON.stringify(calls)
   )
   console.log("最终 ready:", r.状态 === "可交付" ? "PASS" : "FAIL " + r.说明)
 }
@@ -480,6 +489,7 @@ async function scenario7() {
   // 7c: agent 生成合同全是空白文本标准(穿过 schema minLength) → 同样硬性失败
   {
     const behavior = (label) => {
+      if (label === "探索：需求现状勘察") return EXPLORE
       if (label === "确定验收标准") {
         const c = contractOf(2, [], "standard")
         c.criteria = c.criteria.map((x) => ({ ...x, text: "   " }))
@@ -958,6 +968,9 @@ async function scenario14() {
     const files = {}
     const logs = []
     const behavior = (label) => {
+      // 现状勘察发生在合同之前,允许;项目探索阶段的其他探索必须仍不可达
+      // (校验应在进入探索前抛错)。
+      if (label === "探索：需求现状勘察") return EXPLORE
       if (label === "确定验收标准") return contractOf(2, ["mvn test"], "")
       throw new Error("不应到达: " + label)
     }

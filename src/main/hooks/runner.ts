@@ -9,7 +9,8 @@ import { executeHttpHook } from "./http-runner"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
-import { getCustomModelConfigs, getHookLoggingConfig, getUserInfo } from "../storage"
+import { getHookLoggingConfig, getUserInfo } from "../storage"
+import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { persistHookResultRecord } from "./log-record"
 import { trackEvent } from "../services/event-reporter"
 
@@ -779,17 +780,14 @@ function extractFirstJson(text: string): string | null {
 
 /**
  * Get a lightweight ChatOpenAI instance for prompt-hook evaluation.
- * Prefers the modelId specified on the hook; falls back to the first configured model.
+ * Prefers the modelId specified on the hook; falls back to the saved/default available model.
  */
 function getPromptHookModel(modelId: string | undefined, timeout: number): ChatOpenAI | null {
-  const configs = getCustomModelConfigs()
-  if (configs.length === 0) return null
-
   const config = modelId
-    ? (configs.find((c) => c.id === modelId || c.model === modelId) ?? configs[0])
-    : configs[0]
+    ? (getModelConfigByRef(modelId) ?? getAvailableModelConfigOrDefault())
+    : getAvailableModelConfigOrDefault()
 
-  if (!config.apiKey) return null
+  if (!config?.apiKey) return null
 
   return new ChatOpenAI({
     model: config.model,
@@ -1384,7 +1382,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(
@@ -1460,7 +1464,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(
@@ -1502,7 +1512,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(
@@ -1568,7 +1584,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(
@@ -1635,7 +1657,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(

@@ -31,6 +31,7 @@ const HEARTBEAT_THREAD_ID = "heartbeat"
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 let running = false
 let abortController: AbortController | null = null
+let shuttingDown = false
 
 function notifyRenderer(channel: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -147,6 +148,7 @@ function stripHeartbeatToken(raw: string): {
 
 export function startHeartbeat(): void {
   console.log("[Heartbeat] Starting heartbeat service")
+  shuttingDown = false
   scheduleNext(true)
 }
 
@@ -176,6 +178,7 @@ export function restartHeartbeat(): void {
 }
 
 function scheduleNext(compensate = false): void {
+  if (shuttingDown) return
   const config = getHeartbeatConfig()
   if (!config.enabled) {
     console.log("[Heartbeat] Disabled, not scheduling")
@@ -207,6 +210,7 @@ function tick(): void {
 }
 
 export async function runHeartbeatNow(): Promise<void> {
+  if (shuttingDown) throw new Error("The application is quitting; heartbeat cannot start.")
   if (running) throw new Error("Heartbeat is already running")
   await executeHeartbeat()
 }
@@ -219,6 +223,18 @@ export function cancelHeartbeat(): void {
 
 export function isHeartbeatRunning(): boolean {
   return running
+}
+
+export async function stopHeartbeatAndWait(timeoutMs = 5_000): Promise<void> {
+  shuttingDown = true
+  stopHeartbeat()
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (running && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+  }
+  if (running) {
+    console.warn("[Heartbeat] Timed out waiting for the active run to settle")
+  }
 }
 
 async function executeHeartbeat(): Promise<void> {

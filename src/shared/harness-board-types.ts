@@ -39,6 +39,14 @@ export type HarnessFeatureStatus =
 
 export type HarnessAdapterType = "plugin"
 
+/** Project-mode Solo subagent selection supplied by the bound plugin at runtime. */
+export interface HarnessProjectModeSubagentConfig {
+  /** App-bundled subagents to hide. An empty list means all bundled subagents are available. */
+  disabledBuiltinSubagents: string[]
+  /** Absolute paths to user-format subagent Markdown files to load for this project session. */
+  customSubagentFiles: string[]
+}
+
 export type HarnessBoardCompatibilityStatus =
   | "compatible"
   | "missing-plugin"
@@ -224,6 +232,7 @@ export interface HarnessDeployUnitSearchInput {
 
 export interface HarnessDeployUnitSearchItem {
   deployUnit: string
+  deployUnitName: string
   ownerId: string
   ownerName: string
 }
@@ -232,6 +241,51 @@ export interface HarnessDeployUnitSearchResult {
   deployUnits: HarnessDeployUnitSearchItem[]
   total: number
   hasMore: boolean
+}
+
+export interface HarnessPipelineQueryInput {
+  deployUnit: string
+  env: string
+  orgId: string
+  pageNumber: number
+  pageSize: number
+  pipelineTerm: string
+  productTerm: string
+}
+
+export interface HarnessPipelineQueryItem {
+  pipeline: string
+  pipelineAlias: string
+  env: string
+  branch: string
+  latestBuildStatus: string
+  latestCompletedTime: string
+}
+
+export interface HarnessPipelineQueryResult {
+  pipelines: HarnessPipelineQueryItem[]
+  total: number
+  size: number
+  current: number
+  pages: number
+  hasMore: boolean
+}
+
+export interface HarnessPipelineLabelQueryInput {
+  pipelineName: string
+}
+
+export interface HarnessPipelineLabelItem {
+  pipelineName: string
+  pipelineNumber: number
+  status: string
+  startDate: string
+  label: string
+  triggerUser: string
+}
+
+export interface HarnessPipelineLabelQueryResult {
+  labels: HarnessPipelineLabelItem[]
 }
 
 export interface HarnessEnterpriseProjectDetailInput {
@@ -281,6 +335,12 @@ export interface HarnessFeatureCreateResult {
   slug: string
   title: string
   workspacePath: string
+}
+
+export interface HarnessFeatureDeployUnitUpdateInput {
+  projectId: string
+  featureId: string
+  selectedDeployUnits: HarnessDeployUnitMapping[]
 }
 
 export interface HarnessSkipNodeInput {

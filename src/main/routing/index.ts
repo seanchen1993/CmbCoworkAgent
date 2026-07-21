@@ -1,14 +1,14 @@
 import { createHash } from "crypto"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
+import { getGlobalRoutingMode, DEFAULT_MAX_TOKENS, DEFAULT_TOP_P, DEFAULT_TOP_K } from "../storage"
 import {
+  getAvailableModelConfigOrDefault,
   getModelByTier,
-  getCustomModelConfigs,
-  getGlobalRoutingMode,
-  DEFAULT_MAX_TOKENS,
-  DEFAULT_TOP_P,
-  DEFAULT_TOP_K
-} from "../storage"
+  getModelConfigByRef,
+  getModelConfigs,
+  toModelRef
+} from "../models/registry"
 import { getThread, updateThread } from "../db"
 import type { RoutingTrace, RoutingLayerRecord } from "../agent/trace/types"
 
@@ -469,7 +469,7 @@ function getInternalClassifierModel(): {
  *  The internal fallback is invisible to users and never used for task execution.
  */
 function pickClassifierModel() {
-  const configs = getCustomModelConfigs()
+  const configs = getModelConfigs()
   const economyConfigs = configs.filter((c) => (c.tier ?? "premium") === "economy" && c.apiKey)
 
   // 1. User-configured Qwen economy model
@@ -707,16 +707,16 @@ Route "economy" only if BOTH dimensions are clearly NO.
 // ─── Fallback chain builder ───────────────────────────────────────────────────
 
 function buildFallbackChain(primaryTier: "premium" | "economy"): string[] {
-  const configs = getCustomModelConfigs()
+  const configs = getModelConfigs()
   const fallbackTier: "premium" | "economy" = primaryTier === "economy" ? "premium" : "economy"
 
   const primary = configs
     .filter((c) => (c.tier ?? "premium") === primaryTier)
-    .map((c) => `custom:${c.id}`)
+    .map((c) => toModelRef(c))
   const fallback = configs
     .filter((c) => (c.tier ?? "premium") === fallbackTier)
-    .map((c) => `custom:${c.id}`)
-  const all = configs.map((c) => `custom:${c.id}`)
+    .map((c) => toModelRef(c))
+  const all = configs.map((c) => toModelRef(c))
 
   // deduplicate while preserving order
   const seen = new Set<string>()
@@ -763,11 +763,9 @@ function guardContextCapacity(
   const lastInputTokens = state?.lastInputTokens
   if (!lastInputTokens || lastInputTokens <= 0) return result
 
-  const configs = getCustomModelConfigs()
-  const currentCfgId = result.resolvedModelId.startsWith("custom:")
-    ? result.resolvedModelId.slice("custom:".length)
-    : result.resolvedModelId
-  const currentCfg = configs.find((c) => c.id === currentCfgId)
+  const configs = getModelConfigs()
+  const currentCfg = getModelConfigByRef(result.resolvedModelId)
+  const currentCfgRef = currentCfg ? toModelRef(currentCfg) : result.resolvedModelId
   const currentMax = currentCfg?.maxTokens ?? DEFAULT_MAX_TOKENS
   const threshold = Math.floor(currentMax * CONTEXT_CAPACITY_RATIO)
 
@@ -778,7 +776,7 @@ function guardContextCapacity(
 
   // Current economy model is near capacity — try other economy models sorted by maxTokens desc
   const otherEconomy = configs
-    .filter((c) => (c.tier ?? "premium") === "economy" && c.id !== currentCfgId)
+    .filter((c) => (c.tier ?? "premium") === "economy" && toModelRef(c) !== currentCfgRef)
     .sort((a, b) => (b.maxTokens ?? DEFAULT_MAX_TOKENS) - (a.maxTokens ?? DEFAULT_MAX_TOKENS))
 
   for (const candidate of otherEconomy) {
@@ -792,7 +790,7 @@ function guardContextCapacity(
           action: "switch-economy",
           lastInputTokens,
           originalModelMax: currentMax,
-          newModelId: candidate.id,
+          newModelId: toModelRef(candidate),
           newModelMax: candidateMax
         })}`
       )
@@ -804,17 +802,17 @@ function guardContextCapacity(
         detail: {
           lastInputTokens,
           originalMax: currentMax,
-          switchedTo: candidate.id,
+          switchedTo: toModelRef(candidate),
           switchedMax: candidateMax
         }
       })
       return {
         ...result,
-        resolvedModelId: `custom:${candidate.id}`,
+        resolvedModelId: toModelRef(candidate),
         routeReason: `${result.routeReason}→${guardReason}`,
         fallbackChain: [
-          `custom:${candidate.id}`,
-          ...result.fallbackChain.filter((id) => id !== `custom:${candidate.id}`)
+          toModelRef(candidate),
+          ...result.fallbackChain.filter((id) => id !== toModelRef(candidate))
         ]
       }
     }
@@ -861,8 +859,13 @@ function resolveFromTier(
   layer: "layer1" | "thread" | "layer2" | "layer3"
 ): RoutingResult {
   const model = getModelByTier(tier)
-  const configs = getCustomModelConfigs()
-  const fallbackId = model ? `custom:${model.id}` : configs[0] ? `custom:${configs[0].id}` : ""
+  const configs = getModelConfigs()
+  const availableFallback = configs.find((config) => Boolean(config.apiKey))
+  const fallbackId = model
+    ? toModelRef(model)
+    : availableFallback
+      ? toModelRef(availableFallback)
+      : ""
   const fallbackChain = buildFallbackChain(tier)
 
   const result: RoutingResult = {
@@ -916,10 +919,8 @@ function resolveFromExactModel(
 
 /** Resolve the user-configured model name from a resolvedModelId like "custom:minmax2.7". */
 function resolveModelName(resolvedModelId: string): string {
-  const cfgId = resolvedModelId.startsWith("custom:")
-    ? resolvedModelId.slice("custom:".length)
-    : resolvedModelId
-  const cfg = getCustomModelConfigs().find((c) => c.id === cfgId)
+  const cfg = getModelConfigByRef(resolvedModelId)
+  const cfgId = cfg?.id ?? resolvedModelId.replace(/^(?:custom|builtin):/, "")
   // Return the actual model name (e.g. "MiniMax-M2.7"), fall back to display name, then raw id
   return cfg?.model ?? cfg?.name ?? cfgId
 }
@@ -983,29 +984,19 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
   // ── Pinned mode ─────────────────────────────────────────────────────────────
   if (ctx.routingMode === "pinned") {
     const t0 = Date.now()
-    const configs = getCustomModelConfigs()
     const requestedId = ctx.requestedModelId
-    let modelId: string
-    let tier: "premium" | "economy" = "premium"
-
-    if (requestedId) {
-      modelId = requestedId
-      const cfgId = requestedId.startsWith("custom:")
-        ? requestedId.slice("custom:".length)
-        : requestedId
-      const cfg = configs.find((c) => c.id === cfgId)
-      tier = cfg?.tier ?? "premium"
-    } else {
-      const first = configs[0]
-      modelId = first ? `custom:${first.id}` : ""
-      tier = first?.tier ?? "premium"
-    }
+    const requestedConfig = requestedId ? getModelConfigByRef(requestedId) : null
+    const selectedConfig =
+      (requestedConfig?.apiKey ? requestedConfig : null) ?? getAvailableModelConfigOrDefault()
+    const modelId = selectedConfig ? toModelRef(selectedConfig) : ""
+    const tier = selectedConfig?.tier ?? "premium"
+    const usedRequestedModel = Boolean(requestedConfig?.apiKey)
 
     recordLayer({
       layer: "pinned",
       durationMs: Date.now() - t0,
       result: tier,
-      reason: requestedId ? "user-pinned-model" : "fallback-to-first-config",
+      reason: usedRequestedModel ? "user-pinned-model" : "fallback-to-first-config",
       detail: { requestedModelId: requestedId, resolvedModelId: modelId }
     })
 
@@ -1075,30 +1066,34 @@ export async function resolveModel(ctx: RoutingContext): Promise<RoutingResult> 
     if (ctx.taskSource === "chat" && threadState) {
       // resume/interrupt must reuse the exact previous model
       if (ctx.continuation && threadState.lastResolvedModelId) {
-        recordLayer({
-          layer: "thread",
-          durationMs: Date.now() - t0,
-          result: "reuse",
-          reason: `${ctx.continuation}→reuse-last-model`,
-          detail: {
-            lastResolvedModelId: threadState.lastResolvedModelId,
-            lastResolvedTier: threadState.lastResolvedTier
-          }
-        })
-        const r = resolveFromExactModel(
-          threadState.lastResolvedModelId,
-          threadState.lastResolvedTier ?? "premium",
-          `thread:${ctx.continuation}→reuse-last-model`
+        const previousConfig = getModelConfigByRef(threadState.lastResolvedModelId)
+        if (previousConfig?.apiKey) {
+          const previousRef = toModelRef(previousConfig)
+          recordLayer({
+            layer: "thread",
+            durationMs: Date.now() - t0,
+            result: "reuse",
+            reason: `${ctx.continuation}→reuse-last-model`,
+            detail: {
+              lastResolvedModelId: previousRef,
+              lastResolvedTier: threadState.lastResolvedTier
+            }
+          })
+          const r = resolveFromExactModel(
+            previousRef,
+            previousConfig.tier ?? threadState.lastResolvedTier ?? "premium",
+            `thread:${ctx.continuation}→reuse-last-model`
+          )
+          return withTrace(r)
+        }
+        console.warn(
+          `[ROUTING] Previous model ${threadState.lastResolvedModelId} is no longer available; rerouting continuation`
         )
-        return withTrace(r)
       }
 
       // Failover sticky: after a model API failover, prefer the successful model
       if (threadState.failoverStickyModelId && (threadState.failoverStickyUntil ?? 0) > now) {
-        const foCfgId = threadState.failoverStickyModelId.startsWith("custom:")
-          ? threadState.failoverStickyModelId.slice("custom:".length)
-          : threadState.failoverStickyModelId
-        const foCfg = getCustomModelConfigs().find((c) => c.id === foCfgId)
+        const foCfg = getModelConfigByRef(threadState.failoverStickyModelId)
         // Only use sticky if the model is still configured and has an API key
         if (foCfg?.apiKey) {
           const remainingMs = (threadState.failoverStickyUntil ?? 0) - now

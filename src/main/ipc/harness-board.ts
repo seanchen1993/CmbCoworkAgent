@@ -20,11 +20,14 @@ import {
   saveHarnessLeanTokenConfig,
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
+  updateHarnessFeatureDeployUnits,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import {
   getEnterpriseProjectDetails,
   getProjectReviews,
+  queryPipelineLabels,
+  queryPipelines,
   searchDeployUnits,
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
@@ -38,6 +41,10 @@ import type {
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessProjectDetailViewModel,
@@ -52,6 +59,8 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
   HarnessKnowledgePreviewResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
@@ -139,6 +148,23 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:queryPipelines",
+    async (_event, input: HarnessPipelineQueryInput): Promise<HarnessPipelineQueryResult> => {
+      return queryPipelines(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:queryPipelineLabels",
+    async (
+      _event,
+      input: HarnessPipelineLabelQueryInput
+    ): Promise<HarnessPipelineLabelQueryResult> => {
+      return queryPipelineLabels(input)
+    }
+  )
+
+  ipcMain.handle(
     "harnessBoard:getEnterpriseProjectDetails",
     async (
       _event,
@@ -162,6 +188,16 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       // 新建 feature 后立即补一次该项目的快照上报，让面板尽快反映新特性，无需等定时扫描。
       void reportProjectSnapshotNow(result.projectId)
       return result
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:updateFeatureDeployUnits",
+    async (
+      _event,
+      input: HarnessFeatureDeployUnitUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> => {
+      return updateHarnessFeatureDeployUnits(input)
     }
   )
 

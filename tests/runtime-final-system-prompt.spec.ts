@@ -33,6 +33,15 @@ const PLUGIN_AGENTS_PROMPT = [
   "</INSTRUCTIONS>"
 ].join("\n")
 const EXTRA_SYSTEM_PROMPT = "EXTRA_SYSTEM_PROMPT"
+const TASK_PLUGIN_RULE = "TASK_PLUGIN_RULE"
+const TASK_AGENTS_RULE = "TASK_AGENTS_RULE"
+const TASK_AGENTS_CONTEXT = `## AGENTS.md instructions\n\n${TASK_AGENTS_RULE}`
+const TASK_PROJECT_CONTEXT = `## Skills Runtime Context\n\n${TASK_PLUGIN_RULE}\n\n${TASK_AGENTS_CONTEXT}`
+
+interface TaskSubagentPromptSnapshot {
+  name: string
+  systemPrompt: string
+}
 
 interface TempWorkspace {
   tempRoot: string
@@ -269,6 +278,116 @@ function captureFinalSystemPrompt(systemPrompt: string): string {
   return captured
 }
 
+function captureTaskSubagentPrompts(options: {
+  projectMode: boolean
+  projectContext?: string
+  mainSubagentsEnabled?: boolean
+}): Map<string, string> {
+  let captured: TaskSubagentPromptSnapshot[] = []
+  createDeepAgent({
+    model: "test-model",
+    tools: [],
+    systemPrompt: "TASK_SUBAGENT_MAIN_PROMPT",
+    mainFilesystemEnabled: false,
+    mainTodosEnabled: false,
+    mainSubagentsEnabled: options.mainSubagentsEnabled ?? true,
+    subagentExtraSystemPrompt: options.projectContext,
+    subagentExtraSystemPromptForRestrictedRoles: options.projectMode,
+    registrySubagentSpecs: [
+      {
+        name: "Explore",
+        description: "Read-only registry agent",
+        systemPrompt: "EXPLORE_BASE_PROMPT",
+        disallowedTools: ["write_file", "edit_file"],
+        shellAccess: "read_only"
+      },
+      {
+        name: "verification",
+        description: "Full-shell verification registry agent",
+        systemPrompt: "VERIFICATION_BASE_PROMPT",
+        disallowedTools: ["write_file", "edit_file"],
+        shellAccess: "full"
+      },
+      {
+        name: "no-shell",
+        description: "Registry agent without shell access",
+        systemPrompt: "NO_SHELL_BASE_PROMPT",
+        disallowedTools: [],
+        shellAccess: "none"
+      }
+    ],
+    onTaskSubagentPromptsResolved: (prompts: TaskSubagentPromptSnapshot[]) => {
+      captured = prompts
+    }
+  })
+  return new Map(captured.map((snapshot) => [snapshot.name, snapshot.systemPrompt]))
+}
+
+function requireTaskSubagentPrompt(prompts: Map<string, string>, name: string): string {
+  const prompt = prompts.get(name)
+  assert(prompt, `task subagent prompt should be captured for ${name}`)
+  return prompt
+}
+
+function countOccurrences(content: string, marker: string): number {
+  return content.split(marker).length - 1
+}
+
+function testTaskSubagentPromptModeMatrix(): void {
+  const nonProjectPrompts = captureTaskSubagentPrompts({
+    projectMode: false,
+    projectContext: TASK_AGENTS_CONTEXT
+  })
+  for (const name of ["general-purpose", "verification"]) {
+    const prompt = requireTaskSubagentPrompt(nonProjectPrompts, name)
+    assert(prompt.includes(TASK_AGENTS_RULE), `${name} should inherit AGENTS outside project mode`)
+    assert(
+      !prompt.includes(TASK_PLUGIN_RULE),
+      `${name} should not receive plugin context outside project mode`
+    )
+  }
+  for (const name of ["Explore", "no-shell"]) {
+    const prompt = requireTaskSubagentPrompt(nonProjectPrompts, name)
+    assert(
+      !prompt.includes(TASK_AGENTS_RULE) && !prompt.includes(TASK_PLUGIN_RULE),
+      `${name} should omit project context outside project mode`
+    )
+  }
+
+  const projectPrompts = captureTaskSubagentPrompts({
+    projectMode: true,
+    projectContext: TASK_PROJECT_CONTEXT
+  })
+  for (const name of ["general-purpose", "verification", "Explore", "no-shell"]) {
+    const prompt = requireTaskSubagentPrompt(projectPrompts, name)
+    assert(
+      prompt.includes(TASK_PLUGIN_RULE),
+      `${name} should inherit plugin context in project mode`
+    )
+    assert(prompt.includes(TASK_AGENTS_RULE), `${name} should inherit AGENTS in project mode`)
+    assert(
+      countOccurrences(prompt, TASK_PLUGIN_RULE) === 1 &&
+        countOccurrences(prompt, TASK_AGENTS_RULE) === 1,
+      `${name} should receive project context exactly once`
+    )
+  }
+
+  const emptyContextPrompts = captureTaskSubagentPrompts({ projectMode: true })
+  for (const prompt of emptyContextPrompts.values()) {
+    assert(
+      !prompt.includes("## Project Instructions"),
+      "empty project context should not append an empty Project Instructions section"
+    )
+  }
+
+  const disabledPrompts = captureTaskSubagentPrompts({
+    projectMode: true,
+    projectContext: TASK_PROJECT_CONTEXT,
+    mainSubagentsEnabled: false
+  })
+  assert(disabledPrompts.size === 0, "disabled task middleware should not resolve subagent prompts")
+}
+
 function printFinalPrompt(label: string, prompt: string): void {
   console.log(`\n===== ${label} FINAL SYSTEM PROMPT BEGIN =====`)
   console.log(prompt)
@@ -350,6 +469,8 @@ async function run(): Promise<void> {
     const pluginPrompt = testPluginAgentsFinalPrompt(workspacePath)
     printFinalPrompt("PLUGIN AGENTS", pluginPrompt)
     console.log("PASS plugin AGENTS final system prompt")
+    testTaskSubagentPromptModeMatrix()
+    console.log("PASS task subagent prompt mode matrix")
   })
 }
 

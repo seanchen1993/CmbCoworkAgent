@@ -10,7 +10,12 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
-import type { ScheduledTask, ScheduledTaskFrequency, ScheduledTaskType, ScheduledTaskUpsert } from "@/types"
+import type {
+  ScheduledTask,
+  ScheduledTaskFrequency,
+  ScheduledTaskType,
+  ScheduledTaskUpsert
+} from "@/types"
 
 const TASK_TYPE_OPTIONS: { value: ScheduledTaskType; label: string; hint: string }[] = [
   { value: "action", label: "执行任务", hint: "Agent 实际执行操作（修复代码、扫描文件等）" },
@@ -36,7 +41,8 @@ const WEEKDAY_OPTIONS = [
   { value: 0, label: "星期日" }
 ]
 
-const selectClass = "mt-1 w-full h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+const selectClass =
+  "mt-1 w-full h-9 rounded-md border border-input bg-transparent px-3 text-sm shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
 
 function needsTimePicker(freq: ScheduledTaskFrequency): boolean {
   return freq === "daily" || freq === "weekdays" || freq === "weekly"
@@ -66,17 +72,21 @@ export function CreateScheduledTaskDialog(props: {
 
   useEffect(() => {
     if (open) {
-      window.api.models.getCustomConfigs().then((configs) => {
-        const list = configs.map((c) => ({ id: `custom:${c.id}`, name: c.name }))
-        setModels(list)
-        if (list.length > 0) {
+      Promise.all([window.api.models.list(), window.api.models.getDefault()])
+        .then(([configs, defaultModelId]) => {
+          const list = configs
+            .filter((config) => config.available)
+            .map((config) => ({ id: config.id, name: config.name }))
+          const fallbackModelId =
+            list.find((model) => model.id === defaultModelId)?.id ?? list.at(0)?.id ?? ""
+          setModels(list)
           if (!editTask) {
-            setModelId(list[0].id)
-          } else if (!editTask.modelId || !list.some((m) => m.id === editTask.modelId)) {
-            setModelId(list[0].id)
+            setModelId(fallbackModelId)
+          } else if (!editTask.modelId || !list.some((model) => model.id === editTask.modelId)) {
+            setModelId(fallbackModelId)
           }
-        }
-      }).catch(console.error)
+        })
+        .catch(console.error)
     }
   }, [open, editTask])
 
@@ -160,7 +170,22 @@ export function CreateScheduledTaskDialog(props: {
     } finally {
       setSubmitting(false)
     }
-  }, [name, description, prompt, taskType, modelId, workDir, frequency, intervalMinutes, runAtTime, weekday, editTask, existingNames, onSuccess, onOpenChange])
+  }, [
+    name,
+    description,
+    prompt,
+    taskType,
+    modelId,
+    workDir,
+    frequency,
+    intervalMinutes,
+    runAtTime,
+    weekday,
+    editTask,
+    existingNames,
+    onSuccess,
+    onOpenChange
+  ])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -208,7 +233,9 @@ export function CreateScheduledTaskDialog(props: {
               className={selectClass}
             >
               {TASK_TYPE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
               ))}
             </select>
             <p className="mt-1 text-xs text-muted-foreground">
@@ -218,10 +245,15 @@ export function CreateScheduledTaskDialog(props: {
 
           <div>
             <label className="text-xs font-medium">
-              {taskType === "reminder" ? "提醒内容" : "提示词"} <span className="text-red-500">*</span>
+              {taskType === "reminder" ? "提醒内容" : "提示词"}{" "}
+              <span className="text-red-500">*</span>
             </label>
             <textarea
-              placeholder={taskType === "reminder" ? "输入提醒内容，如：该喝水了" : "输入发送给 AI 的具体指令内容"}
+              placeholder={
+                taskType === "reminder"
+                  ? "输入提醒内容，如：该喝水了"
+                  : "输入发送给 AI 的具体指令内容"
+              }
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               className="mt-1 w-full min-h-[100px] rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
@@ -239,7 +271,9 @@ export function CreateScheduledTaskDialog(props: {
             >
               {models.length === 0 && <option value="">请先在设置中配置模型</option>}
               {models.map((m) => (
-                <option key={m.id} value={m.id}>{m.name}</option>
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
               ))}
             </select>
           </div>
@@ -247,14 +281,22 @@ export function CreateScheduledTaskDialog(props: {
           <div>
             <label className="text-xs font-medium">工作目录</label>
             <div className="mt-1 flex items-center gap-2 min-w-0">
-              <div className="min-w-0 flex-1 h-9 rounded-md border border-input bg-transparent px-3 text-sm flex items-center text-muted-foreground overflow-hidden" title={workDir || undefined}>
+              <div
+                className="min-w-0 flex-1 h-9 rounded-md border border-input bg-transparent px-3 text-sm flex items-center text-muted-foreground overflow-hidden"
+                title={workDir || undefined}
+              >
                 {workDir ? (
                   <span className="truncate text-foreground">{workDir}</span>
                 ) : (
                   <span>选择文件夹</span>
                 )}
               </div>
-              <Button variant="outline" size="sm" className="h-9 shrink-0" onClick={handleSelectFolder}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-9 shrink-0"
+                onClick={handleSelectFolder}
+              >
                 <FolderOpen className="size-4 mr-1" />
                 浏览
               </Button>
@@ -269,7 +311,9 @@ export function CreateScheduledTaskDialog(props: {
               className={selectClass}
             >
               {FREQUENCY_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
               ))}
             </select>
           </div>
@@ -308,15 +352,15 @@ export function CreateScheduledTaskDialog(props: {
                 className={selectClass}
               >
                 {WEEKDAY_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
                 ))}
               </select>
             </div>
           )}
 
-          {error && (
-            <p className="text-xs text-red-500">{error}</p>
-          )}
+          {error && <p className="text-xs text-red-500">{error}</p>}
         </div>
 
         <DialogFooter>

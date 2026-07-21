@@ -928,6 +928,16 @@
   }
 }
 
+.workflow-slider-effect {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  pointer-events: none;
+  clip-path: inset(0 round 999px);
+}
+
 /* Apple Intelligence 风格背景光晕 */
 @property --siri-angle {
   syntax: "<angle>";

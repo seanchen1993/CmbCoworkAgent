@@ -1255,6 +1255,79 @@ export function upsertThreadMessages(
   return changed
 }
 
+/**
+ * Place newly durable steering records directly after the latest user/tool
+ * boundary. Stream chunks can arrive out of order around an afterModel jump;
+ * without this splice, a guided follow-up reply can be recorded before the
+ * reply that logically preceded the guide.
+ */
+export function moveThreadMessagesAfterLastNonAssistant(
+  threadId: string,
+  messageIds: readonly string[]
+): boolean {
+  const orderedIds = Array.from(
+    new Set(messageIds.map((id) => id.trim()).filter(Boolean))
+  )
+  if (orderedIds.length === 0) return false
+
+  const database = getDb()
+  const stmt = database.prepare(
+    "SELECT message_id, role, ordinal FROM thread_messages WHERE thread_id = ? ORDER BY ordinal ASC, created_at ASC, message_id ASC"
+  )
+  stmt.bind([threadId])
+  const rows: Array<Pick<ThreadMessageRow, "message_id" | "role" | "ordinal">> = []
+  try {
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as Pick<ThreadMessageRow, "message_id" | "role" | "ordinal">
+      rows.push(row)
+    }
+  } finally {
+    stmt.free()
+  }
+
+  const rowById = new Map(rows.map((row) => [row.message_id, row]))
+  const moved = orderedIds
+    .map((messageId) => rowById.get(messageId))
+    .filter((row): row is Pick<ThreadMessageRow, "message_id" | "role" | "ordinal"> => !!row)
+  if (moved.length !== orderedIds.length) return false
+
+  const movedIds = new Set(orderedIds)
+  const retained = rows.filter((row) => !movedIds.has(row.message_id))
+  let lastNonAssistantIndex = -1
+  for (let index = 0; index < retained.length; index += 1) {
+    if (retained[index].role !== "assistant") lastNonAssistantIndex = index
+  }
+  if (lastNonAssistantIndex < 0) return false
+
+  const reordered = [
+    ...retained.slice(0, lastNonAssistantIndex + 1),
+    ...moved,
+    ...retained.slice(lastNonAssistantIndex + 1)
+  ]
+  if (reordered.every((row, index) => row.message_id === rows[index]?.message_id)) return false
+
+  database.run("BEGIN")
+  try {
+    for (const [ordinal, row] of reordered.entries()) {
+      database.run(
+        "UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?",
+        [ordinal, threadId, row.message_id]
+      )
+    }
+    database.run("COMMIT")
+  } catch (error) {
+    try {
+      database.run("ROLLBACK")
+    } catch {
+      // Preserve the original transaction error.
+    }
+    throw error
+  }
+
+  saveToDisk()
+  return true
+}
+
 export function replaceThreadMessageId(
   threadId: string,
   fromMessageId: string,
