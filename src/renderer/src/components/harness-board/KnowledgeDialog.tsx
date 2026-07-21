@@ -60,6 +60,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
   const [deployUnits, setDeployUnits] = useState<HarnessDeployUnitSearchItem[][]>([[]])
   const [loadingDeployUnits, setLoadingDeployUnits] = useState<boolean[]>([false])
   const [deployUnitPopoverOpen, setDeployUnitPopoverOpen] = useState<boolean[]>([false])
+  const [deployUnitErrors, setDeployUnitErrors] = useState<(string | null)[]>([null])
 
   const [pipelines, setPipelines] = useState<HarnessPipelineQueryItem[][]>([[]])
   const [loadingPipelines, setLoadingPipelines] = useState<boolean[]>([false])
@@ -84,6 +85,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
       setDeployUnits([[]])
       setLoadingDeployUnits([false])
       setDeployUnitPopoverOpen([false])
+      setDeployUnitErrors([null])
       setPipelines([[]])
       setLoadingPipelines([false])
       setLabels([[]])
@@ -116,12 +118,22 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
         newUnits[index] = result.deployUnits || []
         return newUnits
       })
+      setDeployUnitErrors(prev => {
+        const newErrors = [...prev]
+        newErrors[index] = null
+        return newErrors
+      })
     } catch (e) {
       console.error("[KnowledgeDialog] Failed to fetch deploy units:", e)
       setDeployUnits(prev => {
         const newUnits = [...prev]
         newUnits[index] = []
         return newUnits
+      })
+      setDeployUnitErrors(prev => {
+        const newErrors = [...prev]
+        newErrors[index] = e instanceof Error ? e.message : "查询失败"
+        return newErrors
       })
     } finally {
       setLoadingDeployUnits(prev => {
@@ -348,6 +360,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
       setDeployUnits(prev => [...prev, []])
       setLoadingDeployUnits(prev => [...prev, false])
       setDeployUnitPopoverOpen(prev => [...prev, false])
+      setDeployUnitErrors(prev => [...prev, null])
       setPipelines(prev => [...prev, []])
       setLoadingPipelines(prev => [...prev, false])
       setLabels(prev => [...prev, []])
@@ -361,6 +374,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
       setDeployUnits(prev => prev.filter((_, i) => i !== index))
       setLoadingDeployUnits(prev => prev.filter((_, i) => i !== index))
       setDeployUnitPopoverOpen(prev => prev.filter((_, i) => i !== index))
+      setDeployUnitErrors(prev => prev.filter((_, i) => i !== index))
       setPipelines(prev => prev.filter((_, i) => i !== index))
       setLoadingPipelines(prev => prev.filter((_, i) => i !== index))
       setLabels(prev => prev.filter((_, i) => i !== index))
@@ -537,7 +551,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                           <PopoverContent
                             align="start"
                             sideOffset={4}
-                            className="w-[var(--radix-popover-trigger-width)]"
+                            className="z-[70] w-[var(--radix-popover-trigger-width)]"
                           >
                             <div className="max-h-72 overflow-hidden py-1 text-sm">
                               {row.deployUnitSearch.length < DEPLOY_UNIT_SEARCH_MIN_CHARS ? (
@@ -548,6 +562,10 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                                 <div className="flex items-center gap-2 px-3 py-2">
                                   <Loader2 className="h-4 w-4 animate-spin" />
                                   <span className="text-xs">加载中...</span>
+                                </div>
+                              ) : deployUnitErrors[index] ? (
+                                <div className="px-3 py-2 text-xs text-destructive">
+                                  {deployUnitErrors[index]}
                                 </div>
                               ) : deployUnits[index]?.length === 0 ? (
                                 <div className="px-3 py-2 text-xs text-muted-foreground">
