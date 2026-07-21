@@ -450,6 +450,73 @@ function sqliteRows(result: { columns: string[]; values: SqlValue[][] } | undefi
   })
 }
 
+async function readLockedFileWindows(filePath: string, timeoutMs: number): Promise<Buffer> {
+  const escaped = filePath.replace(/'/g, "''")
+  const script = `
+$ErrorActionPreference = 'Stop'
+$fs = [System.IO.File]::Open('${escaped}', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+try {
+  $ms = New-Object System.IO.MemoryStream
+  $fs.CopyTo($ms)
+  [Convert]::ToBase64String($ms.ToArray())
+} finally {
+  $fs.Dispose()
+  if ($ms) { $ms.Dispose() }
+}
+`
+  for (const binary of ["powershell.exe", "pwsh.exe"]) {
+    try {
+      const { stdout } = await execFileAsync(
+        binary,
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+        { encoding: "utf8", timeout: timeoutMs, windowsHide: true }
+      )
+      const b64 = stdout.trim().split(/\r?\n/).filter(Boolean).pop()
+      if (b64) return Buffer.from(b64, "base64")
+    } catch {
+      // Try the next PowerShell binary.
+    }
+  }
+  throw new Error("无法读取被 Chrome 锁定的 Cookies 文件")
+}
+
+async function copyCookieStore(
+  src: string,
+  dest: string,
+  options: BrowserProfileImportReadOptions
+): Promise<void> {
+  try {
+    await copyFile(src, dest)
+    return
+  } catch (err) {
+    if (!isBusyError(err)) throw err
+  }
+
+  // Strategy 2: readFile + writeFile (works on macOS, may fail on Windows if Chrome locks tightly)
+  try {
+    const content = await readFile(src)
+    await writeFile(dest, content)
+    return
+  } catch (err) {
+    if (!isBusyError(err)) throw err
+  }
+
+  // Strategy 3: PowerShell with FileShare.ReadWrite (bypasses Windows file lock)
+  const platform = options.platform ?? process.platform
+  if (platform === "win32") {
+    const content = await readLockedFileWindows(src, options.timeoutMs ?? DEFAULT_DECRYPTION_TIMEOUT_MS)
+    await writeFile(dest, content)
+    return
+  }
+
+  throw new Error(`无法读取 Cookies 文件：${formatError(new Error("EBUSY"))}`)
+}
+
+function isBusyError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException)?.code
+  return code === "EBUSY" || code === "EPERM" || code === "EACCES"
+}
+
 async function readChromeCookies(
   cookieStorePath: string,
   localState: Record<string, unknown> | null,
@@ -458,19 +525,7 @@ async function readChromeCookies(
   const tempDirectory = await mkdtemp(join(tmpdir(), "cmb-browser-profile-import-"))
   try {
     const copiedStorePath = join(tempDirectory, "Cookies")
-    try {
-      await copyFile(cookieStorePath, copiedStorePath)
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code
-      // On Windows, Chrome may lock the Cookies file (EBUSY/EPERM/EACCES).
-      // Fall back to readFile + writeFile which uses compatible sharing modes.
-      if (code === "EBUSY" || code === "EPERM" || code === "EACCES") {
-        const content = await readFile(cookieStorePath)
-        await writeFile(copiedStorePath, content)
-      } else {
-        throw err
-      }
-    }
+    await copyCookieStore(cookieStorePath, copiedStorePath, options)
     const databaseBytes = await readFile(copiedStorePath)
     const SQL = await loadSqlJs()
     const database = new SQL.Database(databaseBytes)

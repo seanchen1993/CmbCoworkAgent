@@ -20,7 +20,6 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
-import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import type {
   BrowserBounds,
   BrowserConsoleEntry,
@@ -104,13 +103,14 @@ function formatSkippedWebsite(site: BrowserProfileImportSkippedWebsite): string 
   return `${url}（${site.skippedCookies} 条，${reasons}）`
 }
 
-function BrowserProfileImportPopoverContent({
+function BrowserProfileImportResultPanel({
   disabled,
   importing,
   onCopy,
   onImport,
   sites,
-  skippedCookieCount
+  skippedCookieCount,
+  onDismiss
 }: {
   disabled: boolean
   importing: boolean
@@ -118,47 +118,100 @@ function BrowserProfileImportPopoverContent({
   onImport: () => void
   sites: BrowserProfileImportSkippedWebsite[]
   skippedCookieCount: number
+  onDismiss: () => void
 }): React.JSX.Element {
-  if (sites.length === 0) {
-    return <span>导入浏览器数据</span>
-  }
+  const partitionedSites = sites.filter((s) => s.reasons.includes("partitioned"))
+  const rejectedSites = sites.filter((s) => s.reasons.includes("browser_rejected"))
+  const partitionedCount = partitionedSites.reduce((t, s) => t + s.skippedCookies, 0)
+  const rejectedCount = rejectedSites.reduce((t, s) => t + s.skippedCookies, 0)
 
   return (
-    <div className="w-80 space-y-3">
-      <div className="space-y-0.5">
-        <p className="text-xs font-medium text-foreground">失败站点 {sites.length}</p>
-        <p className="text-[11px] text-muted-foreground">跳过 Cookie {skippedCookieCount} 条</p>
-      </div>
-      <div className="max-h-56 space-y-1 overflow-auto rounded-sm border border-border/70 bg-muted/20 p-1.5">
-        {sites.map((site) => (
-          <div
-            key={`${site.domain}:${site.reasons.join(",")}`}
-            className="rounded-sm px-1.5 py-1 text-[11px] leading-4 hover:bg-background"
+    <div className="shrink-0 border-b border-border bg-background">
+      <div className="flex items-center justify-between border-b border-border/70 px-3 py-1.5">
+        <div className="space-y-0.5">
+          <p className="text-xs font-medium text-foreground">导入结果</p>
+          <p className="text-[11px] text-muted-foreground">
+            跳过 Cookie {skippedCookieCount} 条，其余已成功导入
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={onCopy}>
+            复制列表
+          </Button>
+          <Button type="button" size="sm" disabled={disabled} onClick={onImport}>
+            {importing ? (
+              <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+            ) : (
+              <KeyRound className="size-3.5" strokeWidth={1.8} />
+            )}
+            重新导入
+          </Button>
+          <button
+            type="button"
+            className="inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={onDismiss}
           >
-            <div className="truncate font-medium text-foreground" title={site.url || site.domain}>
-              {site.url || site.domain}
-            </div>
-            <div className="mt-0.5 flex items-center justify-between gap-2 text-muted-foreground">
-              <span className="min-w-0 truncate">
-                {site.reasons.map(skippedWebsiteReasonLabel).join("、")}
+            <X className="size-3.5" strokeWidth={2} />
+          </button>
+        </div>
+      </div>
+      <div className="flex divide-x divide-border/70">
+        {partitionedSites.length > 0 && (
+          <div className="flex-1 space-y-1 px-3 py-2">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-medium text-foreground">跳过 · 分区 Cookie</span>
+              <span className="tabular-nums text-muted-foreground">
+                {partitionedSites.length} 站 {partitionedCount} 条
               </span>
-              <span className="shrink-0 tabular-nums">{site.skippedCookies}</span>
+            </div>
+            <p className="text-[11px] leading-4 text-muted-foreground">
+              第三方追踪类 Cookie，脱离原站点上下文无法使用。
+            </p>
+            <div className="max-h-32 space-y-0.5 overflow-auto rounded-sm border border-border/70 bg-muted/20 p-1.5">
+              {partitionedSites.map((site) => (
+                <div
+                  key={`part-${site.domain}`}
+                  className="flex items-center justify-between rounded-sm px-1.5 py-0.5 text-[11px] leading-4 hover:bg-background"
+                >
+                  <span className="min-w-0 truncate text-foreground" title={site.url || site.domain}>
+                    {site.url || site.domain}
+                  </span>
+                  <span className="ml-2 shrink-0 tabular-nums text-muted-foreground">
+                    {site.skippedCookies}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
-        ))}
-      </div>
-      <div className="flex items-center justify-end gap-2">
-        <Button type="button" variant="ghost" size="sm" onClick={onCopy}>
-          复制列表
-        </Button>
-        <Button type="button" size="sm" disabled={disabled} onClick={onImport}>
-          {importing ? (
-            <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-          ) : (
-            <KeyRound className="size-3.5" strokeWidth={1.8} />
-          )}
-          导入浏览器数据
-        </Button>
+        )}
+        {rejectedSites.length > 0 && (
+          <div className="flex-1 space-y-1 px-3 py-2">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-medium text-foreground">跳过 · 浏览器拒绝</span>
+              <span className="tabular-nums text-muted-foreground">
+                {rejectedSites.length} 站 {rejectedCount} 条
+              </span>
+            </div>
+            <p className="text-[11px] leading-4 text-muted-foreground">
+              Electron 内核因安全策略或格式校验不通过而拒绝写入。
+            </p>
+            <div className="max-h-32 space-y-0.5 overflow-auto rounded-sm border border-border/70 bg-muted/20 p-1.5">
+              {rejectedSites.map((site) => (
+                <div
+                  key={`rej-${site.domain}`}
+                  className="flex items-center justify-between rounded-sm px-1.5 py-0.5 text-[11px] leading-4 hover:bg-background"
+                >
+                  <span className="min-w-0 truncate text-foreground" title={site.url || site.domain}>
+                    {site.url || site.domain}
+                  </span>
+                  <span className="ml-2 shrink-0 tabular-nums text-muted-foreground">
+                    {site.skippedCookies}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -188,8 +241,6 @@ export function BrowserPanel({
   const [browserProfileImportSkippedWebsites, setBrowserProfileImportSkippedWebsites] = useState<
     BrowserProfileImportSkippedWebsite[]
   >([])
-  const [isBrowserProfileImportPopoverOpen, setIsBrowserProfileImportPopoverOpen] =
-    useState(false)
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -209,7 +260,6 @@ export function BrowserPanel({
     lastInitialNavigationRef.current = null
     setIsImportingBrowserProfile(false)
     setBrowserProfileImportSkippedWebsites([])
-    setIsBrowserProfileImportPopoverOpen(false)
     setCopiedConsole(false)
     setConsoleOpen(false)
     setIsFullscreen(false)
@@ -236,10 +286,8 @@ export function BrowserPanel({
         width: Math.round(rect.width),
         height: Math.round(rect.height)
       }
-      const shouldHideForPopover =
-        isBrowserProfileImportPopoverOpen && browserProfileImportSkippedWebsites.length > 0
-      const visible = !shouldHideForPopover && rect.width >= 8 && rect.height >= 8
-      if (!visible && hasVisibleBoundsRef.current && !shouldHideForPopover) {
+      const visible = rect.width >= 8 && rect.height >= 8
+      if (!visible && hasVisibleBoundsRef.current) {
         return
       }
       if (
@@ -260,8 +308,6 @@ export function BrowserPanel({
     },
     [
       applyBrowserState,
-      browserProfileImportSkippedWebsites.length,
-      isBrowserProfileImportPopoverOpen,
       sessionId
     ]
   )
@@ -334,9 +380,7 @@ export function BrowserPanel({
       window.clearTimeout(timer)
     }
   }, [
-    browserProfileImportSkippedWebsites.length,
     consoleOpen,
-    isBrowserProfileImportPopoverOpen,
     isFullscreen,
     state.created,
     state.isLoading,
@@ -503,7 +547,6 @@ export function BrowserPanel({
       })
       if (!result.success) {
         setBrowserProfileImportSkippedWebsites([])
-        setIsBrowserProfileImportPopoverOpen(false)
         toast.error(result.error || "浏览器数据导入失败")
         return
       }
@@ -511,7 +554,6 @@ export function BrowserPanel({
       applyBrowserState(await window.api.browser.getState(sessionId))
       const skippedWebsites = result.skippedWebsites ?? []
       setBrowserProfileImportSkippedWebsites(skippedWebsites)
-      setIsBrowserProfileImportPopoverOpen(skippedWebsites.length > 0)
       const importedCookies = result.importedCookies ?? 0
       const importedLocalStorage = result.importedLocalStorage ?? 0
       const skipped = (result.skippedCookies ?? 0) + (result.skippedLocalStorage ?? 0)
@@ -668,56 +710,20 @@ export function BrowserPanel({
             <Camera className="size-4" strokeWidth={1.8} />
           )}
         </button>
-        {hasBrowserProfileImportSkippedWebsites ? (
-          <IconPopoverButton
-            icon={
-              isImportingBrowserProfile ? (
-                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-              ) : (
-                <KeyRound className="size-4" strokeWidth={1.8} />
-              )
-            }
-            popoverContent={
-              <BrowserProfileImportPopoverContent
-                disabled={browserProfileImportDisabled}
-                importing={isImportingBrowserProfile}
-                onCopy={copyBrowserProfileImportSkippedWebsites}
-                onImport={() => void importBrowserProfileData()}
-                sites={browserProfileImportSkippedWebsites}
-                skippedCookieCount={browserProfileImportSkippedCookieCount}
-              />
-            }
-            popoverClassName="max-w-none p-3"
-            side="bottom"
-            align="end"
-            closeOnClick={false}
-            openOnHover={false}
-            open={isBrowserProfileImportPopoverOpen}
-            onOpenChange={setIsBrowserProfileImportPopoverOpen}
-            aria-label="查看导入失败站点"
-            className="relative size-8 shrink-0 rounded-md p-0 text-muted-foreground hover:bg-muted hover:text-foreground"
-            onClick={() => {
-              setIsBrowserProfileImportPopoverOpen(true)
-            }}
-          />
-        ) : (
-          <IconPopoverButton
-            icon={
-              isImportingBrowserProfile ? (
-                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-              ) : (
-                <KeyRound className="size-4" strokeWidth={1.8} />
-              )
-            }
-            popoverContent="导入浏览器数据"
-            disabled={browserProfileImportDisabled}
-            side="bottom"
-            align="end"
-            aria-label="导入浏览器数据"
-            className="size-8 shrink-0 rounded-md p-0 text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-            onClick={() => void importBrowserProfileData()}
-          />
-        )}
+        <button
+          type="button"
+          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+          title="导入浏览器数据"
+          aria-label="导入浏览器数据"
+          disabled={browserProfileImportDisabled}
+          onClick={() => void importBrowserProfileData()}
+        >
+          {isImportingBrowserProfile ? (
+            <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+          ) : (
+            <KeyRound className="size-4" strokeWidth={1.8} />
+          )}
+        </button>
         <button
           type="button"
           className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -739,6 +745,18 @@ export function BrowserPanel({
           <ShieldAlert className="size-4 shrink-0" strokeWidth={1.8} />
           <span className="min-w-0 truncate">{state.error}</span>
         </div>
+      )}
+
+      {hasBrowserProfileImportSkippedWebsites && (
+        <BrowserProfileImportResultPanel
+          disabled={browserProfileImportDisabled}
+          importing={isImportingBrowserProfile}
+          onCopy={copyBrowserProfileImportSkippedWebsites}
+          onImport={() => void importBrowserProfileData()}
+          sites={browserProfileImportSkippedWebsites}
+          skippedCookieCount={browserProfileImportSkippedCookieCount}
+          onDismiss={() => setBrowserProfileImportSkippedWebsites([])}
+        />
       )}
 
       <div className="relative min-h-0 flex-1 bg-white">
