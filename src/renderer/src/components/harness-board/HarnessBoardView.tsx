@@ -6276,6 +6276,7 @@ export function HarnessBoardView({
   const [knowledgeDialogOpen, setKnowledgeDialogOpen] = useState(false)
   const [knowledgeDialogProject, setKnowledgeDialogProject] = useState<HarnessProjectListItem | null>(null)
   const [knowledgeDialogConfig, setKnowledgeDialogConfig] = useState<NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]> | null>(null)
+
   const [featureWorkflowTemplate, setFeatureWorkflowTemplate] = useState("")
   const [selectedWorkflowNodeIds, setSelectedWorkflowNodeIds] = useState<Set<string>>(new Set())
   const [featureAgentsReadyDeployUnits, setFeatureAgentsReadyDeployUnits] = useState<string[]>([])

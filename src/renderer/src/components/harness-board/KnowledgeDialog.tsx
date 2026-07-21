@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useEffect } from "react"
-import { Plus, Trash2, Loader2 } from "lucide-react"
+import React, { useState, useCallback, useEffect, useRef } from "react"
+import { Plus, Trash2, Loader2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { toast } from "sonner"
 import type {
   HarnessDeployUnitSearchItem,
   HarnessPipelineQueryItem,
@@ -71,6 +72,8 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
+  const scrollAreaRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => {
     if (!open) {
       setLabelRows([{
@@ -112,7 +115,9 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
     })
 
     try {
+      console.log(`[KnowledgeDialog] [searchDeployUnits] input: ${JSON.stringify({ keyword })}`)
       const result = await window.api.harnessBoard.searchDeployUnits({ keyword })
+      console.log(`[KnowledgeDialog] [searchDeployUnits] response: ${JSON.stringify(result)}`)
       setDeployUnits(prev => {
         const newUnits = [...prev]
         newUnits[index] = result.deployUnits || []
@@ -161,22 +166,27 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
     })
 
     try {
-      const result = await window.api.harnessBoard.queryPipelines({
+      const queryInput = {
         deployUnit,
         env: "UAT",
         orgId: "",
         pageNumber: 1,
-        pageSize: 50,
+        pageSize: 20,
         pipelineTerm: "",
         productTerm: ""
-      })
+      }
+      console.log(`[KnowledgeDialog] [queryPipelines] input: ${JSON.stringify(queryInput)}`)
+      const result = await window.api.harnessBoard.queryPipelines(queryInput)
+      console.log(`[KnowledgeDialog] [queryPipelines] response: ${JSON.stringify(result)}`)
       setPipelines(prev => {
         const newPipelines = [...prev]
         newPipelines[index] = result.pipelines || []
         return newPipelines
       })
     } catch (e) {
+      const message = e instanceof Error ? e.message : "查询流水线失败"
       console.error("[KnowledgeDialog] Failed to fetch pipelines:", e)
+      toast.error(message)
       setPipelines(prev => {
         const newPipelines = [...prev]
         newPipelines[index] = []
@@ -208,14 +218,19 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
     })
 
     try {
-      const result = await window.api.harnessBoard.queryPipelineLabels({ pipelineName })
+      const queryInput = { pipelineName }
+      console.log(`[KnowledgeDialog] [queryPipelineLabels] input: ${JSON.stringify(queryInput)}`)
+      const result = await window.api.harnessBoard.queryPipelineLabels(queryInput)
+      console.log(`[KnowledgeDialog] [queryPipelineLabels] response: ${JSON.stringify(result)}`)
       setLabels(prev => {
         const newLabels = [...prev]
         newLabels[index] = result.labels || []
         return newLabels
       })
     } catch (e) {
+      const message = e instanceof Error ? e.message : "查询Label失败"
       console.error("[KnowledgeDialog] Failed to fetch labels:", e)
+      toast.error(message)
       setLabels(prev => {
         const newLabels = [...prev]
         newLabels[index] = []
@@ -286,6 +301,12 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
       return newOpen
     })
 
+    clearDeployUnitDependentState(index)
+
+    void fetchPipelines(index, deployUnit.deployUnit)
+  }
+
+  const clearDeployUnitDependentState = (index: number) => {
     setPipelines(prev => {
       const newPipelines = [...prev]
       newPipelines[index] = []
@@ -298,7 +319,54 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
       return newLabels
     })
 
-    void fetchPipelines(index, deployUnit.deployUnit)
+    setLoadingPipelines(prev => {
+      const newLoading = [...prev]
+      newLoading[index] = false
+      return newLoading
+    })
+
+    setLoadingLabels(prev => {
+      const newLoading = [...prev]
+      newLoading[index] = false
+      return newLoading
+    })
+  }
+
+  const handleDeployUnitClear = (index: number) => {
+    setLabelRows(prev => {
+      const newRows = [...prev]
+      newRows[index] = {
+        ...newRows[index],
+        deployUnit: "",
+        deployUnitName: "",
+        deployUnitSearch: "",
+        pipeline: "",
+        pipelineAlias: "",
+        baseLabel: "",
+        targetLabel: ""
+      }
+      return newRows
+    })
+
+    setDeployUnits(prev => {
+      const newUnits = [...prev]
+      newUnits[index] = []
+      return newUnits
+    })
+
+    setDeployUnitErrors(prev => {
+      const newErrors = [...prev]
+      newErrors[index] = null
+      return newErrors
+    })
+
+    setDeployUnitPopoverOpen(prev => {
+      const newOpen = [...prev]
+      newOpen[index] = false
+      return newOpen
+    })
+
+    clearDeployUnitDependentState(index)
   }
 
   const handlePipelineSelect = (index: number, value: string) => {
@@ -365,6 +433,15 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
       setLoadingPipelines(prev => [...prev, false])
       setLabels(prev => [...prev, []])
       setLoadingLabels(prev => [...prev, false])
+
+      requestAnimationFrame(() => {
+        const viewport = scrollAreaRef.current?.querySelector<HTMLDivElement>(
+          "[data-radix-scroll-area-viewport]"
+        )
+        if (viewport) {
+          viewport.scrollTop = viewport.scrollHeight
+        }
+      })
     }
   }
 
@@ -454,7 +531,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
           <DialogDescription>填写相关信息，生成知识库同步请求</DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[60vh] pr-3">
+        <ScrollArea ref={scrollAreaRef} className="max-h-[60vh] pr-3">
           <div className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
@@ -481,19 +558,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
             </div>
 
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-foreground">发布单元列表</h3>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={addRow}
-                  disabled={submitting || labelRows.length >= MAX_ROWS}
-                >
-                  <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  添加一行
-                </Button>
-              </div>
+              <h3 className="text-sm font-semibold text-foreground">发布单元列表</h3>
 
               <div className="space-y-3">
                 {labelRows.map((row, index) => (
@@ -517,11 +582,13 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                       </Button>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-                      <div className="space-y-2">
-                        <label className="flex items-center gap-2 text-sm font-medium text-foreground">
-                          <span>
-                            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">Step1</span>
+                    <div className="grid grid-cols-1 gap-3">
+                      {/* Row 1: Step1 + Step2 */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="space-y-2">
+                          <label className="flex items-center gap-2 text-sm font-medium text-foreground">
+                            <span>
+                              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">Step1</span>
                             {" 发布单元"}
                           </span>
                           <span className="text-destructive">*</span>
@@ -539,21 +606,41 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                           }}
                         >
                           <PopoverAnchor asChild>
-                            <Input
-                              value={row.deployUnit || row.deployUnitSearch}
-                              onChange={(e) => handleDeployUnitSearchChange(index, e.target.value)}
-                              onKeyDown={(e) => handleDeployUnitSearchKeyDown(index, e)}
-                              placeholder="请输入关键字"
-                              disabled={submitting}
-                              readOnly={!!row.deployUnit}
-                            />
+                            <div className="relative">
+                              <Input
+                                value={row.deployUnit ? (row.deployUnitName ? `${row.deployUnitName} (${row.deployUnit})` : row.deployUnit) : row.deployUnitSearch}
+                                onChange={(e) => {
+                                  if (row.deployUnit) {
+                                    handleDeployUnitClear(index)
+                                  }
+                                  handleDeployUnitSearchChange(index, e.target.value)
+                                }}
+                                onKeyDown={(e) => handleDeployUnitSearchKeyDown(index, e)}
+                                placeholder="请输入关键字"
+                                disabled={submitting}
+                                className={row.deployUnit ? "pr-7" : ""}
+                              />
+                              {row.deployUnit && !submitting && (
+                                <button
+                                  type="button"
+                                  aria-label="清除发布单元"
+                                  className="absolute right-1.5 top-1/2 -translate-y-1/2 inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                                  onMouseDown={(e) => {
+                                    e.preventDefault()
+                                    handleDeployUnitClear(index)
+                                  }}
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </div>
                           </PopoverAnchor>
                           <PopoverContent
                             align="start"
                             sideOffset={4}
-                            className="z-[70] w-[var(--radix-popover-trigger-width)]"
+                            className="z-[70] w-[var(--radix-popover-trigger-width)] p-1"
                           >
-                            <div className="max-h-72 overflow-hidden py-1 text-sm">
+                            <div className="max-h-72 overflow-hidden text-sm">
                               {row.deployUnitSearch.length < DEPLOY_UNIT_SEARCH_MIN_CHARS ? (
                                 <div className="px-3 py-2 text-xs text-muted-foreground">
                                   输入至少 {DEPLOY_UNIT_SEARCH_MIN_CHARS} 个字符后Enter查询
@@ -576,7 +663,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                                   <button
                                     key={unit.deployUnit}
                                     type="button"
-                                    className="w-full px-3 py-1.5 text-left hover:bg-accent"
+                                    className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground"
                                     onClick={() => handleDeployUnitSelect(index, unit)}
                                   >
                                     {unit.deployUnitName ? `${unit.deployUnitName} (${unit.deployUnit})` : unit.deployUnit}
@@ -604,7 +691,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                           <SelectTrigger className="h-9">
                             <SelectValue placeholder="请选择流水线" />
                           </SelectTrigger>
-                          <SelectContent>
+                          <SelectContent className="z-[70]">
                             {loadingPipelines[index] ? (
                               <div className="flex items-center gap-2 px-2 py-3">
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -624,7 +711,9 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                           </SelectContent>
                         </Select>
                       </div>
-
+                    </div>
+                    {/* Row 2: Step3 + Step4 */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div className="space-y-2">
                         <label className="flex items-center gap-1 text-sm font-medium text-foreground">
                           <span>
@@ -641,7 +730,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                           <SelectTrigger className="h-9">
                             <SelectValue placeholder="请选择基础Label" />
                           </SelectTrigger>
-                          <SelectContent>
+                          <SelectContent className="z-[70]">
                             {loadingLabels[index] ? (
                               <div className="flex items-center gap-2 px-2 py-3">
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -678,7 +767,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                           <SelectTrigger className="h-9">
                             <SelectValue placeholder="请选择目标Label" />
                           </SelectTrigger>
-                          <SelectContent>
+                          <SelectContent className="z-[70]">
                             {loadingLabels[index] ? (
                               <div className="flex items-center gap-2 px-2 py-3">
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -699,9 +788,21 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                         </Select>
                       </div>
                     </div>
+                    </div>
                   </div>
                 ))}
               </div>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={addRow}
+                disabled={submitting || labelRows.length >= MAX_ROWS}
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                添加一行
+              </Button>
 
               {error && (
                 <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
