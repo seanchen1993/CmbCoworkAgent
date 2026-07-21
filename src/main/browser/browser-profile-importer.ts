@@ -1,6 +1,6 @@
 import { execFile } from "child_process"
 import { createDecipheriv, createHash, pbkdf2Sync } from "crypto"
-import { access, copyFile, mkdtemp, readFile, readdir, rm, stat } from "fs/promises"
+import { access, copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from "fs/promises"
 import { homedir, tmpdir } from "os"
 import { join, resolve } from "path"
 import { promisify } from "util"
@@ -458,7 +458,19 @@ async function readChromeCookies(
   const tempDirectory = await mkdtemp(join(tmpdir(), "cmb-browser-profile-import-"))
   try {
     const copiedStorePath = join(tempDirectory, "Cookies")
-    await copyFile(cookieStorePath, copiedStorePath)
+    try {
+      await copyFile(cookieStorePath, copiedStorePath)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code
+      // On Windows, Chrome may lock the Cookies file (EBUSY/EPERM/EACCES).
+      // Fall back to readFile + writeFile which uses compatible sharing modes.
+      if (code === "EBUSY" || code === "EPERM" || code === "EACCES") {
+        const content = await readFile(cookieStorePath)
+        await writeFile(copiedStorePath, content)
+      } else {
+        throw err
+      }
+    }
     const databaseBytes = await readFile(copiedStorePath)
     const SQL = await loadSqlJs()
     const database = new SQL.Database(databaseBytes)
