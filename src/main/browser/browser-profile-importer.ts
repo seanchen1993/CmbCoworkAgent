@@ -452,9 +452,23 @@ function sqliteRows(result: { columns: string[]; values: SqlValue[][] } | undefi
 
 async function readLockedFileWindows(filePath: string, timeoutMs: number): Promise<Buffer> {
   const escaped = filePath.replace(/'/g, "''")
-  const script = `
+  const lastErrors: string[] = []
+
+  // Strategy A: PowerShell with three FileShare modes
+  const sharingModes: [string, string][] = [
+    ["ReadWrite", "ReadWrite"],
+    ["Read", "Read"],
+    ["ReadWrite_Delete", "ReadWrite, Delete"]
+  ]
+  for (const [label, sharing] of sharingModes) {
+    const script = `
 $ErrorActionPreference = 'Stop'
-$fs = [System.IO.File]::Open('${escaped}', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+$fs = [System.IO.File]::Open(
+  '${escaped}',
+  [System.IO.FileMode]::Open,
+  [System.IO.FileAccess]::Read,
+  [System.IO.FileShare]::${sharing}
+)
 try {
   $ms = New-Object System.IO.MemoryStream
   $fs.CopyTo($ms)
@@ -464,20 +478,45 @@ try {
   if ($ms) { $ms.Dispose() }
 }
 `
-  for (const binary of ["powershell.exe", "pwsh.exe"]) {
-    try {
-      const { stdout } = await execFileAsync(
-        binary,
-        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-        { encoding: "utf8", timeout: timeoutMs, windowsHide: true }
-      )
-      const b64 = stdout.trim().split(/\r?\n/).filter(Boolean).pop()
-      if (b64) return Buffer.from(b64, "base64")
-    } catch {
-      // Try the next PowerShell binary.
+    for (const binary of ["powershell.exe", "pwsh.exe"]) {
+      try {
+        const { stdout, stderr } = await execFileAsync(
+          binary,
+          ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+          { encoding: "utf8", timeout: timeoutMs, windowsHide: true }
+        )
+        const b64 = stdout.trim().split(/\r?\n/).filter(Boolean).pop()
+        if (b64) return Buffer.from(b64, "base64")
+        if (stderr) lastErrors.push(`PS ${label} (${binary}): ${stderr.trim()}`)
+      } catch (err) {
+        lastErrors.push(`PS ${label} (${binary}): ${formatError(err)}`)
+      }
     }
   }
-  throw new Error("无法读取被 Chrome 锁定的 Cookies 文件")
+
+  // Strategy B: cmd copy (uses CopyFileEx, different API path than Node.js fs)
+  try {
+    const tempDir = await mkdtemp(join(tmpdir(), "cmb-browser-copy-"))
+    const destFile = join(tempDir, "Cookies")
+    try {
+      await execFileAsync(
+        "cmd.exe",
+        ["/c", "copy", "/y", "/b", filePath, destFile],
+        { encoding: "utf8", timeout: timeoutMs, windowsHide: true }
+      )
+      const content = await readFile(destFile)
+      if (content.length > 0) return content
+      lastErrors.push("cmd copy: copied file is empty")
+    } finally {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {})
+    }
+  } catch (err) {
+    lastErrors.push(`cmd copy: ${formatError(err)}`)
+  }
+
+  throw new Error(
+    `无法读取被 Chrome 锁定的 Cookies 文件:\n${lastErrors.join("\n")}`
+  )
 }
 
 async function copyCookieStore(
