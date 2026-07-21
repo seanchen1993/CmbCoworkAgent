@@ -1,12 +1,90 @@
-import type { BrowserWindow, IpcMain } from "electron"
+import { dialog, type BrowserWindow, type IpcMain, type MessageBoxOptions } from "electron"
 import { BrowserService } from "../browser/browser-service"
+import {
+  importChromeSessionIntoBrowser
+} from "../browser/browser-chrome-session-importer"
+import {
+  openBrowserChromeSetupTarget
+} from "../browser/browser-chrome-discovery"
+import {
+  getBrowserProfileImportPreview,
+  readBrowserProfileImportData
+} from "../browser/browser-profile-importer"
+import { getEnabledBrowserPluginRuntime } from "../browser/browser-plugin"
 import { setGlobalBrowserService } from "../browser/browser-service-registry"
 import type {
   BrowserAttachOptions,
+  BrowserChromeSetupAction,
+  BrowserChromeSetupOpenResult,
+  BrowserChromeSessionImportResult,
   BrowserBounds,
   BrowserClickTarget,
-  BrowserNavigateOptions
+  BrowserNavigateOptions,
+  BrowserProfileImportOptions,
+  BrowserProfileImportPreview,
+  BrowserProfileImportResult,
+  BrowserProfileImportSkippedWebsite
 } from "../../shared/browser-types"
+
+function getHttpOrigin(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return ""
+    return parsed.origin
+  } catch {
+    return ""
+  }
+}
+
+function profileImportFailure(
+  error: string,
+  options?: Partial<BrowserProfileImportOptions>
+): BrowserProfileImportResult {
+  return {
+    success: false,
+    sourceBrowser: options?.sourceBrowser ?? "chrome",
+    profileDirectory: options?.profileDirectory,
+    importedCookies: 0,
+    importedLocalStorage: 0,
+    skippedCookies: 0,
+    skippedLocalStorage: 0,
+    error
+  }
+}
+
+function sanitizeProfileImportError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.replace(/(cookie|token|session|authorization|password)=([^;\s]+)/gi, "$1=[redacted]")
+}
+
+function mergeSkippedWebsites(
+  ...lists: Array<BrowserProfileImportSkippedWebsite[] | undefined>
+): BrowserProfileImportSkippedWebsite[] {
+  const merged = new Map<string, BrowserProfileImportSkippedWebsite>()
+  for (const list of lists) {
+    for (const item of list ?? []) {
+      const key = item.domain || item.url || "(unknown)"
+      const current =
+        merged.get(key) ??
+        {
+          domain: item.domain || "(unknown)",
+          reasons: [],
+          skippedCookies: 0,
+          url: item.url
+        }
+      current.skippedCookies += item.skippedCookies
+      current.url = current.url || item.url
+      for (const reason of item.reasons) {
+        if (!current.reasons.includes(reason)) current.reasons.push(reason)
+      }
+      merged.set(key, current)
+    }
+  }
+  return Array.from(merged.values()).sort(
+    (left, right) =>
+      right.skippedCookies - left.skippedCookies || left.domain.localeCompare(right.domain)
+  )
+}
 
 export function registerBrowserHandlers(
   ipcMain: IpcMain,
@@ -73,6 +151,134 @@ export function registerBrowserHandlers(
 
   ipcMain.handle("browser:press", (_event, sessionId: string, keyCode: string) =>
     browserService.press(sessionId, keyCode)
+  )
+
+  ipcMain.handle(
+    "browser:getProfileImportPreview",
+    async (event): Promise<BrowserProfileImportPreview> => {
+      const window = getMainWindow()
+      if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
+        return {
+          sourceBrowser: "chrome",
+          profiles: [],
+          error: "拒绝来自未知窗口的浏览器数据导入预览请求"
+        }
+      }
+      return getBrowserProfileImportPreview()
+    }
+  )
+
+  ipcMain.handle(
+    "browser:importProfileData",
+    async (
+      event,
+      options?: BrowserProfileImportOptions
+    ): Promise<BrowserProfileImportResult> => {
+      const window = getMainWindow()
+      if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
+        return profileImportFailure("拒绝来自未知窗口的浏览器数据导入请求", options)
+      }
+      if (!options || options.sourceBrowser !== "chrome") {
+        return profileImportFailure("不支持的浏览器数据导入来源", options)
+      }
+
+      try {
+        const imported = await readBrowserProfileImportData({
+          sourceBrowser: "chrome",
+          profileDirectory: options.profileDirectory,
+          importCookies: options.importCookies !== false
+        })
+        const counts = await browserService.importProfileData(imported.data)
+        const skippedCookies = counts.skippedCookies + imported.skippedCookies
+        const skippedWebsites = mergeSkippedWebsites(imported.skippedWebsites, counts.skippedWebsites)
+        return {
+          success: true,
+          sourceBrowser: "chrome",
+          profileDirectory: imported.profileDirectory,
+          importedCookies: counts.importedCookies,
+          importedLocalStorage: counts.importedLocalStorage,
+          skippedCookies,
+          skippedLocalStorage: counts.skippedLocalStorage,
+          skippedWebsites,
+          warning:
+            counts.importedCookies === 0
+              ? "没有成功导入 Cookie，可能是 Chrome profile 没有可导入站点数据或 Cookie 加密不可解"
+              : skippedCookies > 0
+                ? "部分 Cookie 因加密、分区或格式限制被跳过"
+                : undefined
+        }
+      } catch (error) {
+        return profileImportFailure(sanitizeProfileImportError(error), options)
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "browser:importChromeSession",
+    async (
+      event,
+      sessionId: string,
+      options?: { threadId?: string; workspacePath?: string | null }
+    ): Promise<BrowserChromeSessionImportResult> => {
+      const window = getMainWindow()
+      if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
+        return { success: false, error: "拒绝来自未知窗口的 Chrome 登录态导入请求" }
+      }
+      const state = browserService.getState(sessionId)
+      if (!state.created) {
+        return { success: false, error: "内置浏览器还没有打开页面" }
+      }
+      const targetOrigin = state.url ? getHttpOrigin(state.url) : ""
+      if (!targetOrigin) {
+        return { success: false, error: "当前内置浏览器页面不是可导入登录态的 HTTP(S) 页面" }
+      }
+      const messageBoxOptions: MessageBoxOptions = {
+        type: "question",
+        title: "导入 Chrome 登录态",
+        message: "从已打开的 Chrome 导入当前页面的 Cookie 和 localStorage？",
+        detail:
+          targetOrigin.length > 0
+            ? `目标页面：${targetOrigin}\n\n只会导入同源 tab 的 Cookie 和 localStorage，不会导入密码。`
+            : "只会导入同源 tab 的 Cookie 和 localStorage，不会导入密码。",
+        buttons: ["取消", "导入"],
+        defaultId: 1,
+        cancelId: 0
+      }
+      const result = await dialog.showMessageBox(window, messageBoxOptions)
+      if (result.response !== 1) {
+        return { success: false, cancelled: true, targetOrigin: targetOrigin || undefined }
+      }
+
+      return importChromeSessionIntoBrowser({
+        service: browserService,
+        sessionId,
+        threadId: options?.threadId,
+        workspacePath: options?.workspacePath ?? null
+      })
+    }
+  )
+
+  ipcMain.handle(
+    "browser:openChromeSetup",
+    async (event, action: BrowserChromeSetupAction): Promise<BrowserChromeSetupOpenResult> => {
+      const window = getMainWindow()
+      if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
+        return { action, success: false, error: "拒绝来自未知窗口的 Chrome setup 请求" }
+      }
+      if (
+        action !== "open-chrome" &&
+        action !== "install-extension" &&
+        action !== "enable-extension" &&
+        action !== "reinstall-plugin"
+      ) {
+        return { action, success: false, error: "不支持的 Chrome setup action" }
+      }
+      const plugin = getEnabledBrowserPluginRuntime()
+      if (!plugin) {
+        return { action, success: false, error: "Browser 插件 runtime 未启用" }
+      }
+      return openBrowserChromeSetupTarget(plugin, action)
+    }
   )
 
   return browserService

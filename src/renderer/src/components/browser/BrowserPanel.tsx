@@ -7,6 +7,7 @@ import {
   Check,
   Copy,
   Globe2,
+  KeyRound,
   Loader2,
   Maximize2,
   Minimize2,
@@ -18,9 +19,12 @@ import {
   X
 } from "lucide-react"
 import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import type {
   BrowserBounds,
   BrowserConsoleEntry,
+  BrowserProfileImportSkippedWebsite,
   BrowserState
 } from "../../../../shared/browser-types"
 
@@ -77,6 +81,89 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
   )
 }
 
+function skippedWebsiteReasonLabel(reason: string): string {
+  switch (reason) {
+    case "browser_rejected":
+      return "浏览器拒绝"
+    case "encrypted":
+      return "加密不可解"
+    case "invalid":
+      return "格式不合法"
+    case "partitioned":
+      return "分区 Cookie"
+    case "too_large":
+      return "内容过大"
+    default:
+      return reason
+  }
+}
+
+function formatSkippedWebsite(site: BrowserProfileImportSkippedWebsite): string {
+  const url = site.url || site.domain
+  const reasons = site.reasons.map(skippedWebsiteReasonLabel).join("、")
+  return `${url}（${site.skippedCookies} 条，${reasons}）`
+}
+
+function BrowserProfileImportPopoverContent({
+  disabled,
+  importing,
+  onCopy,
+  onImport,
+  sites,
+  skippedCookieCount
+}: {
+  disabled: boolean
+  importing: boolean
+  onCopy: () => void
+  onImport: () => void
+  sites: BrowserProfileImportSkippedWebsite[]
+  skippedCookieCount: number
+}): React.JSX.Element {
+  if (sites.length === 0) {
+    return <span>导入浏览器数据</span>
+  }
+
+  return (
+    <div className="w-80 space-y-3">
+      <div className="space-y-0.5">
+        <p className="text-xs font-medium text-foreground">失败站点 {sites.length}</p>
+        <p className="text-[11px] text-muted-foreground">跳过 Cookie {skippedCookieCount} 条</p>
+      </div>
+      <div className="max-h-56 space-y-1 overflow-auto rounded-sm border border-border/70 bg-muted/20 p-1.5">
+        {sites.map((site) => (
+          <div
+            key={`${site.domain}:${site.reasons.join(",")}`}
+            className="rounded-sm px-1.5 py-1 text-[11px] leading-4 hover:bg-background"
+          >
+            <div className="truncate font-medium text-foreground" title={site.url || site.domain}>
+              {site.url || site.domain}
+            </div>
+            <div className="mt-0.5 flex items-center justify-between gap-2 text-muted-foreground">
+              <span className="min-w-0 truncate">
+                {site.reasons.map(skippedWebsiteReasonLabel).join("、")}
+              </span>
+              <span className="shrink-0 tabular-nums">{site.skippedCookies}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <Button type="button" variant="ghost" size="sm" onClick={onCopy}>
+          复制列表
+        </Button>
+        <Button type="button" size="sm" disabled={disabled} onClick={onImport}>
+          {importing ? (
+            <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+          ) : (
+            <KeyRound className="size-3.5" strokeWidth={1.8} />
+          )}
+          导入浏览器数据
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 export function BrowserPanel({
   threadId,
   workspacePath,
@@ -87,6 +174,7 @@ export function BrowserPanel({
   const sessionId = useMemo(() => getSessionId(threadId), [threadId])
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastBoundsRef = useRef<BrowserBounds | null>(null)
+  const lastBrowserViewVisibleRef = useRef<boolean | null>(null)
   const hasVisibleBoundsRef = useRef(false)
   const isSessionCreatedRef = useRef(false)
   const isUrlFocusedRef = useRef(false)
@@ -96,6 +184,12 @@ export function BrowserPanel({
   const [urlInput, setUrlInput] = useState("")
   const [isUrlFocused, setIsUrlFocused] = useState(false)
   const [isCapturing, setIsCapturing] = useState(false)
+  const [isImportingBrowserProfile, setIsImportingBrowserProfile] = useState(false)
+  const [browserProfileImportSkippedWebsites, setBrowserProfileImportSkippedWebsites] = useState<
+    BrowserProfileImportSkippedWebsite[]
+  >([])
+  const [isBrowserProfileImportPopoverOpen, setIsBrowserProfileImportPopoverOpen] =
+    useState(false)
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -110,8 +204,12 @@ export function BrowserPanel({
     setState({ ...EMPTY_STATE, sessionId })
     setUrlInput("")
     lastBoundsRef.current = null
+    lastBrowserViewVisibleRef.current = null
     hasVisibleBoundsRef.current = false
     lastInitialNavigationRef.current = null
+    setIsImportingBrowserProfile(false)
+    setBrowserProfileImportSkippedWebsites([])
+    setIsBrowserProfileImportPopoverOpen(false)
     setCopiedConsole(false)
     setConsoleOpen(false)
     setIsFullscreen(false)
@@ -138,12 +236,20 @@ export function BrowserPanel({
         width: Math.round(rect.width),
         height: Math.round(rect.height)
       }
-      const visible = rect.width >= 8 && rect.height >= 8
-      if (!visible && hasVisibleBoundsRef.current) {
+      const shouldHideForPopover =
+        isBrowserProfileImportPopoverOpen && browserProfileImportSkippedWebsites.length > 0
+      const visible = !shouldHideForPopover && rect.width >= 8 && rect.height >= 8
+      if (!visible && hasVisibleBoundsRef.current && !shouldHideForPopover) {
         return
       }
-      if (isSameBounds(lastBoundsRef.current, bounds)) return
+      if (
+        isSameBounds(lastBoundsRef.current, bounds) &&
+        lastBrowserViewVisibleRef.current === visible
+      ) {
+        return
+      }
       lastBoundsRef.current = bounds
+      lastBrowserViewVisibleRef.current = visible
       if (visible) hasVisibleBoundsRef.current = true
       void window.api.browser
         .setBounds(sessionId, bounds, visible)
@@ -152,7 +258,12 @@ export function BrowserPanel({
           console.error(`[BrowserPanel] Bounds sync failed: ${formatError(error)}`)
         })
     },
-    [applyBrowserState, sessionId]
+    [
+      applyBrowserState,
+      browserProfileImportSkippedWebsites.length,
+      isBrowserProfileImportPopoverOpen,
+      sessionId
+    ]
   )
 
   useEffect(() => {
@@ -222,7 +333,16 @@ export function BrowserPanel({
       window.cancelAnimationFrame(frame)
       window.clearTimeout(timer)
     }
-  }, [consoleOpen, isFullscreen, state.created, state.isLoading, state.url, syncBounds])
+  }, [
+    browserProfileImportSkippedWebsites.length,
+    consoleOpen,
+    isBrowserProfileImportPopoverOpen,
+    isFullscreen,
+    state.created,
+    state.isLoading,
+    state.url,
+    syncBounds
+  ])
 
   useEffect(() => {
     if (!state.created) return
@@ -372,9 +492,65 @@ export function BrowserPanel({
       })
   }, [applyBrowserState, sessionId])
 
+  const importBrowserProfileData = useCallback(async () => {
+    if (!state.created) return
+
+    setIsImportingBrowserProfile(true)
+    try {
+      const result = await window.api.browser.importProfileData({
+        sourceBrowser: "chrome",
+        importCookies: true
+      })
+      if (!result.success) {
+        setBrowserProfileImportSkippedWebsites([])
+        setIsBrowserProfileImportPopoverOpen(false)
+        toast.error(result.error || "浏览器数据导入失败")
+        return
+      }
+
+      applyBrowserState(await window.api.browser.getState(sessionId))
+      const skippedWebsites = result.skippedWebsites ?? []
+      setBrowserProfileImportSkippedWebsites(skippedWebsites)
+      setIsBrowserProfileImportPopoverOpen(skippedWebsites.length > 0)
+      const importedCookies = result.importedCookies ?? 0
+      const importedLocalStorage = result.importedLocalStorage ?? 0
+      const skipped = (result.skippedCookies ?? 0) + (result.skippedLocalStorage ?? 0)
+      const summary = `导入 Cookie ${importedCookies} 条，localStorage ${importedLocalStorage} 条`
+      const profileLabel = result.profileDirectory ? `（${result.profileDirectory}）` : ""
+      const message = skipped > 0 ? `${summary}${profileLabel}，跳过 ${skipped} 条` : `${summary}${profileLabel}`
+      if (skippedWebsites.length > 0) {
+        const fullList = skippedWebsites.map(formatSkippedWebsite).join("\n")
+        console.info(`[BrowserPanel] Browser profile import skipped websites:\n${fullList}`)
+      }
+      if (result.warning) {
+        toast.warning(`${result.warning}（${message}）`, { duration: 12_000 })
+      } else {
+        toast.success(message, { duration: 10_000 })
+      }
+    } catch (error) {
+      console.error(`[BrowserPanel] Browser profile import failed: ${formatError(error)}`)
+      toast.error("浏览器数据导入失败")
+    } finally {
+      setIsImportingBrowserProfile(false)
+    }
+  }, [applyBrowserState, sessionId, state.created])
+
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
   const consoleToggleTitle = latestConsoleEntry ? `控制台 (${consoleCount})` : "控制台"
+  const browserProfileImportDisabled = isImportingBrowserProfile || !state.created
+  const hasBrowserProfileImportSkippedWebsites = browserProfileImportSkippedWebsites.length > 0
+  const browserProfileImportSkippedCookieCount = browserProfileImportSkippedWebsites.reduce(
+    (total, site) => total + site.skippedCookies,
+    0
+  )
+  const copyBrowserProfileImportSkippedWebsites = useCallback(() => {
+    if (browserProfileImportSkippedWebsites.length === 0) return
+    const text = browserProfileImportSkippedWebsites.map(formatSkippedWebsite).join("\n")
+    void navigator.clipboard.writeText(text).then(() => {
+      toast.success("失败站点列表已复制")
+    })
+  }, [browserProfileImportSkippedWebsites])
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
   }
@@ -492,6 +668,56 @@ export function BrowserPanel({
             <Camera className="size-4" strokeWidth={1.8} />
           )}
         </button>
+        {hasBrowserProfileImportSkippedWebsites ? (
+          <IconPopoverButton
+            icon={
+              isImportingBrowserProfile ? (
+                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+              ) : (
+                <KeyRound className="size-4" strokeWidth={1.8} />
+              )
+            }
+            popoverContent={
+              <BrowserProfileImportPopoverContent
+                disabled={browserProfileImportDisabled}
+                importing={isImportingBrowserProfile}
+                onCopy={copyBrowserProfileImportSkippedWebsites}
+                onImport={() => void importBrowserProfileData()}
+                sites={browserProfileImportSkippedWebsites}
+                skippedCookieCount={browserProfileImportSkippedCookieCount}
+              />
+            }
+            popoverClassName="max-w-none p-3"
+            side="bottom"
+            align="end"
+            closeOnClick={false}
+            openOnHover={false}
+            open={isBrowserProfileImportPopoverOpen}
+            onOpenChange={setIsBrowserProfileImportPopoverOpen}
+            aria-label="查看导入失败站点"
+            className="relative size-8 shrink-0 rounded-md p-0 text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={() => {
+              setIsBrowserProfileImportPopoverOpen(true)
+            }}
+          />
+        ) : (
+          <IconPopoverButton
+            icon={
+              isImportingBrowserProfile ? (
+                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+              ) : (
+                <KeyRound className="size-4" strokeWidth={1.8} />
+              )
+            }
+            popoverContent="导入浏览器数据"
+            disabled={browserProfileImportDisabled}
+            side="bottom"
+            align="end"
+            aria-label="导入浏览器数据"
+            className="size-8 shrink-0 rounded-md p-0 text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            onClick={() => void importBrowserProfileData()}
+          />
+        )}
         <button
           type="button"
           className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"

@@ -1,6 +1,8 @@
 import {
   BrowserWindow,
   WebContentsView,
+  session as electronSession,
+  type CookiesSetDetails,
   type MouseInputEvent,
   type MouseWheelInputEvent,
   type Rectangle,
@@ -20,16 +22,27 @@ import type {
   BrowserMouseButton,
   BrowserMousePoint,
   BrowserNavigateOptions,
+  BrowserProfileImportSkipReason,
+  BrowserProfileImportSkippedWebsite,
   BrowserRenderedState,
   BrowserScrollTarget,
   BrowserScreenshotResult,
   BrowserState
 } from "../../shared/browser-types"
+import type {
+  BrowserSessionCookie,
+  BrowserSessionData,
+  BrowserSessionImportCounts,
+  BrowserSessionStorageEntry
+} from "./browser-session-data"
 
 const MAX_TEXT_CHARS = 80_000
 const MAX_HTML_CHARS = 200_000
 const MAX_BROWSER_CONSOLE_ENTRIES = 200
 const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
+const MAX_IMPORTED_STORAGE_KEY_CHARS = 2_000
+const MAX_IMPORTED_STORAGE_VALUE_CHARS = 200_000
+const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 
 interface BrowserSession {
   id: string
@@ -39,10 +52,6 @@ interface BrowserSession {
   consoleEntries: BrowserConsoleEntry[]
   nextConsoleEntryId: number
   error?: string
-}
-
-function sanitizeSessionId(sessionId: string): string {
-  return sessionId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 80) || "default"
 }
 
 function normalizeBounds(bounds: BrowserBounds): Rectangle {
@@ -64,6 +73,192 @@ function formatBounds(bounds: Rectangle | BrowserBounds): string {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function getHttpOrigin(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null
+    return parsed.origin
+  } catch {
+    return null
+  }
+}
+
+function sameSiteForElectron(value: BrowserSessionCookie["sameSite"]): CookiesSetDetails["sameSite"] {
+  switch ((value ?? "").toLowerCase()) {
+    case "strict":
+      return "strict"
+    case "none":
+    case "no_restriction":
+      return "no_restriction"
+    case "unspecified":
+      return "unspecified"
+    case "lax":
+    default:
+      return "lax"
+  }
+}
+
+function browserCookieDetails(
+  cookie: BrowserSessionCookie,
+  targetUrl: string
+): CookiesSetDetails | null {
+  if (!cookie.name || typeof cookie.value !== "string") return null
+
+  let parsedTarget: URL
+  try {
+    parsedTarget = new URL(targetUrl)
+  } catch {
+    return null
+  }
+  if (parsedTarget.protocol !== "http:" && parsedTarget.protocol !== "https:") return null
+  if (cookie.secure && parsedTarget.protocol !== "https:") return null
+
+  const details: CookiesSetDetails = {
+    url: targetUrl,
+    name: cookie.name,
+    value: cookie.value
+  }
+
+  const normalizedPath = typeof cookie.path === "string" && cookie.path.trim() ? cookie.path : "/"
+  details.path = normalizedPath.startsWith("/") ? normalizedPath : `/${normalizedPath}`
+
+  if (typeof cookie.domain === "string" && cookie.domain.trim()) {
+    const domain = cookie.domain.trim()
+    const normalizedDomain = domain.startsWith(".") ? domain.slice(1) : domain
+    if (
+      normalizedDomain.length === 0 ||
+      (parsedTarget.hostname !== normalizedDomain &&
+        !parsedTarget.hostname.endsWith(`.${normalizedDomain}`))
+    ) {
+      return null
+    }
+    if (domain.startsWith(".") || domain !== parsedTarget.hostname) {
+      details.domain = domain
+    }
+  }
+
+  if (typeof cookie.expires === "number" && Number.isFinite(cookie.expires) && cookie.expires > 0) {
+    details.expirationDate = cookie.expires
+  }
+  if (cookie.httpOnly === true) details.httpOnly = true
+  if (cookie.secure === true) details.secure = true
+  if (cookie.sameSite) details.sameSite = sameSiteForElectron(cookie.sameSite)
+
+  return details
+}
+
+function browserProfileCookieDetails(cookie: BrowserSessionCookie): CookiesSetDetails | null {
+  if (!cookie.name || typeof cookie.value !== "string") return null
+
+  const domain = typeof cookie.domain === "string" ? cookie.domain.trim() : ""
+  const hostname = domain.replace(/^\./, "")
+  if (!hostname) return null
+
+  const normalizedPath = typeof cookie.path === "string" && cookie.path.trim() ? cookie.path : "/"
+  const path = normalizedPath.startsWith("/") ? normalizedPath : `/${normalizedPath}`
+  const protocol = cookie.secure ? "https:" : "http:"
+  const rootUrl = `${protocol}//${hostname}/`
+  try {
+    new URL(rootUrl)
+  } catch {
+    return null
+  }
+
+  const details: CookiesSetDetails = {
+    url: rootUrl,
+    name: cookie.name,
+    value: cookie.value,
+    path
+  }
+
+  if (domain.startsWith(".")) {
+    details.domain = domain
+  }
+  if (typeof cookie.expires === "number" && Number.isFinite(cookie.expires) && cookie.expires > 0) {
+    details.expirationDate = cookie.expires
+  }
+  if (cookie.httpOnly === true) details.httpOnly = true
+  if (cookie.secure === true) details.secure = true
+  if (cookie.sameSite) details.sameSite = sameSiteForElectron(cookie.sameSite)
+
+  return details
+}
+
+function normalizeCookieDomain(domain: string | undefined): string {
+  const value = domain?.trim().replace(/^\./, "").toLowerCase()
+  return value || "(unknown)"
+}
+
+function addSkippedWebsite(
+  skippedWebsites: Map<string, BrowserProfileImportSkippedWebsite>,
+  cookie: BrowserSessionCookie,
+  reason: BrowserProfileImportSkipReason
+): void {
+  const normalizedDomain = normalizeCookieDomain(cookie.domain)
+  const url =
+    normalizedDomain === "(unknown)"
+      ? ""
+      : `${cookie.secure ? "https" : "http"}://${normalizedDomain}/`
+  const current =
+    skippedWebsites.get(normalizedDomain) ??
+    ({
+      domain: normalizedDomain,
+      reasons: [],
+      skippedCookies: 0,
+      url
+    } satisfies BrowserProfileImportSkippedWebsite)
+  current.skippedCookies += 1
+  if (!current.reasons.includes(reason)) current.reasons.push(reason)
+  skippedWebsites.set(normalizedDomain, current)
+}
+
+function sortedSkippedWebsites(
+  skippedWebsites: Map<string, BrowserProfileImportSkippedWebsite>
+): BrowserProfileImportSkippedWebsite[] {
+  return Array.from(skippedWebsites.values()).sort(
+    (left, right) =>
+      right.skippedCookies - left.skippedCookies || left.domain.localeCompare(right.domain)
+  )
+}
+
+function localStorageImportScript(entries: BrowserSessionStorageEntry[]): string {
+  const sanitizedEntries = entries
+    .filter(
+      (entry) =>
+        typeof entry.key === "string" &&
+        typeof entry.value === "string" &&
+        entry.key.length > 0 &&
+        entry.key.length <= MAX_IMPORTED_STORAGE_KEY_CHARS &&
+        entry.value.length <= MAX_IMPORTED_STORAGE_VALUE_CHARS
+    )
+    .slice(0, 200)
+
+  return `
+    (() => {
+      const entries = ${JSON.stringify(sanitizedEntries)};
+      let imported = 0;
+      let skipped = 0;
+      try {
+        for (const entry of entries) {
+          if (!entry || typeof entry.key !== "string" || typeof entry.value !== "string") {
+            skipped += 1;
+            continue;
+          }
+          try {
+            window.localStorage.setItem(entry.key, entry.value);
+            imported += 1;
+          } catch {
+            skipped += 1;
+          }
+        }
+      } catch {
+        skipped += entries.length;
+      }
+      return { imported, skipped };
+    })()
+  `
 }
 
 function normalizeMousePoint(point: BrowserMousePoint): BrowserMousePoint {
@@ -384,6 +579,119 @@ export class BrowserService {
     return (await session.view.webContents.executeJavaScript(script, false)) as T
   }
 
+  async importSessionData(
+    sessionId: string,
+    data: BrowserSessionData
+  ): Promise<BrowserSessionImportCounts> {
+    const session = this.requireSession(sessionId)
+    const webContents = session.view.webContents
+    const targetUrl = webContents.getURL()
+    const targetOrigin = getHttpOrigin(targetUrl)
+    if (!targetOrigin) {
+      throw new Error("当前内置浏览器页面不是可导入登录态的 HTTP(S) 页面")
+    }
+
+    let importedCookies = 0
+    let skippedCookies = 0
+    for (const cookie of data.cookies) {
+      if (cookie.partitionKey !== undefined && cookie.partitionKey !== null) {
+        skippedCookies += 1
+        continue
+      }
+
+      const details = browserCookieDetails(cookie, targetUrl)
+      if (!details) {
+        skippedCookies += 1
+        continue
+      }
+
+      try {
+        await webContents.session.cookies.set(details)
+        importedCookies += 1
+      } catch {
+        skippedCookies += 1
+      }
+    }
+
+    let importedLocalStorage = 0
+    let skippedLocalStorage = 0
+    if (data.localStorage.length > 0) {
+      try {
+        const result = (await webContents.executeJavaScript(
+          localStorageImportScript(data.localStorage),
+          false
+        )) as { imported?: number; skipped?: number } | null
+        importedLocalStorage =
+          typeof result?.imported === "number" && Number.isFinite(result.imported)
+            ? Math.max(0, Math.round(result.imported))
+            : 0
+        skippedLocalStorage =
+          typeof result?.skipped === "number" && Number.isFinite(result.skipped)
+            ? Math.max(0, Math.round(result.skipped))
+            : data.localStorage.length
+      } catch {
+        skippedLocalStorage = data.localStorage.length
+      }
+    }
+
+    webContents.reload()
+    console.info(
+      `[BrowserService] Imported Chrome session data for ${sessionId} cookies=${importedCookies} localStorage=${importedLocalStorage} skipped=${skippedCookies + skippedLocalStorage}.`
+    )
+    return {
+      importedCookies,
+      importedLocalStorage,
+      skippedCookies,
+      skippedLocalStorage
+    }
+  }
+
+  async importProfileData(data: BrowserSessionData): Promise<BrowserSessionImportCounts> {
+    const browserSession = electronSession.fromPartition(BROWSER_PROFILE_PARTITION)
+    const skippedWebsites = new Map<string, BrowserProfileImportSkippedWebsite>()
+    let importedCookies = 0
+    let skippedCookies = 0
+    for (const cookie of data.cookies) {
+      if (cookie.partitionKey !== undefined && cookie.partitionKey !== null) {
+        skippedCookies += 1
+        addSkippedWebsite(skippedWebsites, cookie, "partitioned")
+        continue
+      }
+
+      const details = browserProfileCookieDetails(cookie)
+      if (!details) {
+        skippedCookies += 1
+        addSkippedWebsite(skippedWebsites, cookie, "invalid")
+        continue
+      }
+
+      try {
+        await browserSession.cookies.set(details)
+        importedCookies += 1
+      } catch {
+        skippedCookies += 1
+        addSkippedWebsite(skippedWebsites, cookie, "browser_rejected")
+      }
+    }
+
+    const skippedLocalStorage = data.localStorage.length
+    if (this.activeSession && !this.activeSession.view.webContents.isDestroyed()) {
+      this.activeSession.view.webContents.reload()
+      this.emitState(this.activeSession.id)
+    }
+
+    console.info(
+      `[BrowserService] Imported browser profile data cookies=${importedCookies} localStorage=0 skipped=${skippedCookies + skippedLocalStorage}.`
+    )
+    return {
+      importedCookies,
+      importedLocalStorage: 0,
+      skippedCookies,
+      skippedLocalStorage,
+      skippedWebsites: sortedSkippedWebsites(skippedWebsites)
+    }
+  }
+
   requestPanel(sessionId: string, threadId?: string): void {
     const window = this.getUsableWindow()
     window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, { sessionId, threadId })
@@ -546,7 +854,7 @@ export class BrowserService {
 
     const view = new WebContentsView({
       webPreferences: {
-        partition: `cmbdevclaw-browser-${sanitizeSessionId(sessionId)}`,
+        partition: BROWSER_PROFILE_PARTITION,
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,

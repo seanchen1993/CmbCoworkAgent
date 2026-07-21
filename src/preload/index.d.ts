@@ -94,11 +94,17 @@ import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type {
   BrowserAttachOptions,
+  BrowserChromeSetupAction,
+  BrowserChromeSetupOpenResult,
+  BrowserChromeSessionImportResult,
   BrowserBounds,
   BrowserClickTarget,
   BrowserDomResult,
   BrowserNavigateOptions,
   BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportPreview,
+  BrowserProfileImportResult,
   BrowserScreenshotResult,
   BrowserState
 } from "../shared/browser-types"
@@ -1572,6 +1578,17 @@ interface CustomAPI {
     click: (sessionId: string, target: BrowserClickTarget) => Promise<BrowserState>
     typeText: (sessionId: string, text: string) => Promise<BrowserState>
     press: (sessionId: string, keyCode: string) => Promise<BrowserState>
+    getProfileImportPreview: () => Promise<BrowserProfileImportPreview>
+    importProfileData: (
+      options: BrowserProfileImportOptions
+    ) => Promise<BrowserProfileImportResult>
+    importChromeSession: (
+      sessionId: string,
+      options?: { threadId?: string; workspacePath?: string | null }
+    ) => Promise<BrowserChromeSessionImportResult>
+    openChromeSetup: (
+      action: BrowserChromeSetupAction
+    ) => Promise<BrowserChromeSetupOpenResult>
     onState: (sessionId: string, callback: (state: BrowserState) => void) => () => void
     onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
   }

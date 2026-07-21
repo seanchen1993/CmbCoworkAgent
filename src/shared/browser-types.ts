@@ -84,6 +84,98 @@ export interface BrowserDomResult {
   error?: string
 }
 
+export type BrowserChromeSetupAction =
+  | "open-chrome"
+  | "install-extension"
+  | "enable-extension"
+  | "reinstall-plugin"
+
+export interface BrowserChromeBackendDiagnostics {
+  chromeInstalled: boolean
+  chromeRunning: boolean
+  extensionBackendReady: boolean
+  extensionEnabled: boolean
+  extensionId?: string
+  extensionInstalled: boolean
+  extensionInstallUrl?: string
+  extensionManagerUrl: string
+  nativeHostManifestCorrect: boolean
+  recommendedAction?: BrowserChromeSetupAction
+  recommendedActionLabel?: string
+  selectedProfileDirectory?: string
+}
+
+export interface BrowserChromeSetupOpenResult {
+  action: BrowserChromeSetupAction
+  error?: string
+  success: boolean
+  targetUrl?: string
+}
+
+export interface BrowserChromeSessionImportResult {
+  success: boolean
+  cancelled?: boolean
+  chromeDiagnostics?: BrowserChromeBackendDiagnostics
+  sourceOrigin?: string
+  targetOrigin?: string
+  importedCookies?: number
+  importedLocalStorage?: number
+  skippedCookies?: number
+  skippedLocalStorage?: number
+  warning?: string
+  error?: string
+}
+
+export type BrowserProfileImportSource = "chrome"
+
+export interface BrowserProfileImportProfile {
+  cookieStoreExists: boolean
+  profileDirectory: string
+  profileName?: string
+  selected: boolean
+}
+
+export interface BrowserProfileImportPreview {
+  error?: string
+  profiles: BrowserProfileImportProfile[]
+  sourceBrowser: BrowserProfileImportSource
+  sourceUserDataDirectory?: string
+}
+
+export interface BrowserProfileImportOptions {
+  importCookies?: boolean
+  profileDirectory?: string
+  sourceBrowser: BrowserProfileImportSource
+}
+
+export type BrowserProfileImportSkipReason =
+  | "browser_rejected"
+  | "encrypted"
+  | "invalid"
+  | "partitioned"
+  | "too_large"
+
+export interface BrowserProfileImportSkippedWebsite {
+  domain: string
+  reasons: BrowserProfileImportSkipReason[]
+  skippedCookies: number
+  url: string
+}
+
+export interface BrowserProfileImportResult {
+  cancelled?: boolean
+  error?: string
+  importedCookies: number
+  importedLocalStorage: number
+  profileDirectory?: string
+  skippedCookies: number
+  skippedLocalStorage: number
+  skippedWebsites?: BrowserProfileImportSkippedWebsite[]
+  sourceBrowser: BrowserProfileImportSource
+  success: boolean
+  warning?: string
+}
+
 export type BrowserRuntime = "official"
 export type BrowserBackend = "iab" | "chrome"
 export type BrowserBootstrapState = "idle" | "bootstrapping" | "ready" | "failed"

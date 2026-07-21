@@ -4,6 +4,7 @@ import { join } from "path"
 import { describe, expect, it } from "vitest"
 import {
   BROWSER_CHROME_DISCOVERY_SCRIPT_NAMES,
+  buildBrowserChromeBackendDiagnostics,
   checkBrowserChromeEnvironment,
   getBrowserChromeScriptPaths,
   runBrowserChromeJsonScript
@@ -34,6 +35,9 @@ describe("browser chrome discovery", () => {
     )
     expect(paths.checkNativeHostManifest).toBe(
       "/tmp/browser-plugin/scripts/check-native-host-manifest.js"
+    )
+    expect(paths.openChromeWindow).toBe(
+      "/tmp/browser-plugin/scripts/open-chrome-window.js"
     )
   })
 
@@ -68,12 +72,23 @@ describe("browser chrome discovery", () => {
         chromeRunning: true,
         extensionBackendReady: false,
         extensionEnabled: false,
+        extensionInstalled: true,
         nativeHostManifestCorrect: true
       })
       expect(result.extensionInstalled.exitCode).toBe(1)
       expect(result.extensionInstalled.json).toMatchObject({
         installed: true,
         enabled: false
+      })
+      const diagnostics = await buildBrowserChromeBackendDiagnostics(root, result)
+      expect(diagnostics).toMatchObject({
+        extensionId: "ext",
+        extensionInstalled: true,
+        extensionEnabled: false,
+        extensionInstallUrl: "https://chromewebstore.google.com/detail/codex/ext",
+        extensionManagerUrl: "chrome://extensions/",
+        recommendedAction: "enable-extension",
+        recommendedActionLabel: "打开扩展管理"
       })
     } finally {
       rmSync(root, { recursive: true, force: true })

@@ -99,11 +99,17 @@ import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-ty
 import { BROWSER_PANEL_REQUEST_CHANNEL } from "../shared/browser-types"
 import type {
   BrowserAttachOptions,
+  BrowserChromeSetupAction,
+  BrowserChromeSetupOpenResult,
+  BrowserChromeSessionImportResult,
   BrowserBounds,
   BrowserClickTarget,
   BrowserDomResult,
   BrowserNavigateOptions,
   BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportPreview,
+  BrowserProfileImportResult,
   BrowserScreenshotResult,
   BrowserState
 } from "../shared/browser-types"
@@ -2024,6 +2030,21 @@ const api = {
       ipcRenderer.invoke("browser:typeText", sessionId, text) as Promise<BrowserState>,
     press: (sessionId: string, keyCode: string): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:press", sessionId, keyCode) as Promise<BrowserState>,
+    getProfileImportPreview: (): Promise<BrowserProfileImportPreview> =>
+      ipcRenderer.invoke("browser:getProfileImportPreview") as Promise<BrowserProfileImportPreview>,
+    importProfileData: (
+      options: BrowserProfileImportOptions
+    ): Promise<BrowserProfileImportResult> =>
+      ipcRenderer.invoke("browser:importProfileData", options) as Promise<BrowserProfileImportResult>,
+    importChromeSession: (
+      sessionId: string,
+      options?: { threadId?: string; workspacePath?: string | null }
+    ): Promise<BrowserChromeSessionImportResult> =>
+      ipcRenderer.invoke("browser:importChromeSession", sessionId, options) as Promise<BrowserChromeSessionImportResult>,
+    openChromeSetup: (
+      action: BrowserChromeSetupAction
+    ): Promise<BrowserChromeSetupOpenResult> =>
+      ipcRenderer.invoke("browser:openChromeSetup", action) as Promise<BrowserChromeSetupOpenResult>,
     onState: (sessionId: string, callback: (state: BrowserState) => void): (() => void) => {
       const channel = `browser:state:${sessionId}`
       const handler = (_: unknown, state: BrowserState): void => {

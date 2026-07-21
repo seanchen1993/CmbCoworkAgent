@@ -750,7 +750,7 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 
 部分完成。
 
-完成日期：未完成。当前部分完成日期：2026-07-15。
+完成日期：未完成。当前部分完成日期：2026-07-21。
 
 ### 已完成内容
 
@@ -762,21 +762,36 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
   - `plugins/broswer/scripts/chrome-is-running.js`
   - `plugins/broswer/scripts/check-extension-installed.js`
   - `plugins/broswer/scripts/check-native-host-manifest.js`
+  - `plugins/broswer/scripts/open-chrome-window.js`
 - Chrome 检测按需执行，不在 app 启动时后台扫描，符合 Phase 3 的常驻开销约束。
 - 检测结果会保留官方脚本的 stdout、stderr、exitCode 和 JSON payload；扩展未启用、native host manifest 不正确这类非零退出码不会被吞掉。
 - 外部 pipe passthrough 受安全边界限制：只允许官方 `codex-browser-use` pipe 命名空间，拒绝任意本地 socket / named pipe。
+- 已接通旧 Chrome extension 同源登录态导入 IPC 路径：在用户确认后，从已打开的同源 Chrome tab 导出 Cookie 和 localStorage，并导入当前内置浏览器；导入过程不输出 Cookie、Token、密码或 localStorage 明文值。当前 BrowserPanel 默认导入入口已切换为 Profile import，不再把该旧路径作为主入口。
+- Chrome backend 恢复引导逻辑仍保留在旧同源登录态导入路径中：当 extension backend 未 ready 时，会给出诊断和受控恢复动作，支持打开 Chrome、打开 Codex Chrome Extension Web Store 页面、打开 Google Chrome Extension Manager；native host 仍不会被程序自动修复。
+- Chrome Profile import 已开发完毕：`src/main/browser/browser-profile-importer.ts` 会直接读取 Chrome User Data 目录下的 profile 列表和 Cookies 数据库副本，将可解密、可导入的 Cookie 复制到内置浏览器自己的持久 profile；不调用 `agent.browsers.get("extension")`，不依赖 Chrome extension/native host backend，不直接挂载 Chrome profile，不做实时同步，不导入密码。
+- BrowserPanel 入口已开发完毕：`src/renderer/src/components/browser/BrowserPanel.tsx` 的钥匙图标现在使用 `IconPopoverButton`。没有失败站点记录时，hover 提示 `导入浏览器数据`，点击后直接执行 Chrome Profile import；存在失败站点记录时，点击钥匙图标展示失败站点 popover，并在 popover 内提供 `导入浏览器数据` 按钮重新导入。
+- 内置浏览器持久 profile 已接入：`src/main/browser/browser-service.ts` 使用固定 `persist:cmbdevclaw-browser-profile` partition，使 Profile import 的 Cookie 进入内置浏览器独立 profile，而不是一次性临时 session。
 - 新增 Phase 3 关键日志：
 
   ```text
   [BrowserRuntime] chrome discovery completed with backendReady=<true|false>.
   [BrowserRuntime] external native pipe connected for <threadId>.
+  [BrowserRuntime] Chrome session data exported for <origin> cookies=<n> localStorage=<n>.
+  [BrowserService] Imported Chrome session data for <sessionId> cookies=<n> localStorage=<n> skipped=<n>.
+  [BrowserRuntime] chrome setup opened <action>.
+  [BrowserProfileImport] Chrome profile data read profile=<profileDirectory> cookies=<n> skipped=<n>.
+  [BrowserService] Imported browser profile data cookies=<n> localStorage=0 skipped=<n>.
   ```
 
 ### 不在当前部分完成范围的内容
 
 - Chrome extension/native-host backend 仍依赖官方扩展和 native host 在本机真实暴露 pipe；当前 Phase 3 只保证 host 不再拒绝官方命名空间内的外部 backend pipe。
-- 还没有实现 Chrome 扩展安装、native host manifest 修复、Chrome tab claim、Chrome tab 操作、browserAuth 安全输入流程。
+- native host manifest 的自动修复仍不在当前范围；需要用户从插件 UI 重新安装/修复。
+- browserAuth 安全输入流程仍未补齐。
 - Windows/Linux/macOS 的真实 Chrome 环境检测结果需要按本文档手动验收；自动化测试只验证脚本调用、JSON 解析、非零退出码保留和汇总逻辑。
+- Profile import 当前只导入 Cookie / 站点数据中的 Cookie 部分；localStorage、history、bookmarks、passwords、form autofill 不在当前范围。
+- Profile import 是一次性复制，不是和 Chrome profile 的双向同步；导入后 Chrome 新登录或 Cookie 更新不会自动同步到内置浏览器。
+- Chrome 新版 app-bound / OS 加密 Cookie 如果当前用户上下文无法解密，会被跳过并计入 `skipped`，不会输出 Cookie 明文。
 
 ### 验证方式
 
@@ -786,6 +801,7 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 
 ```bash
 npx vitest run src/main/browser/browser-chrome-discovery.test.ts
+npx vitest run src/main/browser/browser-profile-importer.test.ts
 npx vitest run src/main/agent/tools/browser/browser-runtime-host.test.ts
 npm run typecheck
 ```
@@ -795,6 +811,8 @@ npm run typecheck
 - `browser chrome discovery > resolves the official Browser plugin Chrome diagnostic script paths` 通过。
 - `browser chrome discovery > runs official-style JSON diagnostics and preserves meaningful non-zero status` 通过。
 - `browser chrome discovery > reports missing diagnostic scripts without throwing` 通过。
+- `browser profile importer > discovers Chrome profiles from an explicit user data directory` 通过。
+- `browser profile importer > reads plaintext cookies and skips partitioned or undecryptable cookies` 通过。
 - `browser runtime host native pipe > connects external Browser namespace pipes for Chrome extension backends` 通过。
 - `browser runtime host native pipe > rejects native pipes outside the official Browser namespace` 通过。
 - `npm run typecheck` 无 TypeScript 错误。
@@ -821,6 +839,7 @@ npx tsx -e "import { checkBrowserChromeEnvironment } from './src/main/browser/br
   "chromeRunning": false,
   "extensionBackendReady": false,
   "extensionEnabled": false,
+  "extensionInstalled": false,
   "nativeHostManifestCorrect": false
 }
 ```
@@ -844,6 +863,7 @@ npx tsx -e "import { checkBrowserChromeEnvironment } from './src/main/browser/br
   "chromeRunning": false,
   "extensionBackendReady": false,
   "extensionEnabled": false,
+  "extensionInstalled": false,
   "nativeHostManifestCorrect": false
 }
 ```
@@ -880,6 +900,64 @@ npx tsx -e "import { checkBrowserChromeEnvironment } from './src/main/browser/br
 
 如果只看到 `iab` 或没有 `external native pipe connected for`，说明本机 Chrome extension/native host backend 尚未暴露可连接 pipe；先运行 Chrome 检测 smoke，检查 `extensionEnabled` 和 `nativeHostManifestCorrect`。
 
+#### 真实 Chrome Profile import smoke
+
+这个 smoke 不需要 Chrome extension/native host backend，也不需要 `agent.browsers.get("extension")`。它只从本机 Chrome profile 复制可导入 Cookie 到内置浏览器自己的持久 profile。
+
+1. 用 `npm run dev` 启动桌面 app。
+2. 打开一个普通任务，在任务输入框发给大模型：
+
+   ```text
+   请打开内置浏览器访问 https://example.com/，页面加载后告诉我当前 URL 和标题。
+   ```
+
+3. 等右侧 Browser 面板出现后，点击工具栏里的钥匙图标。按钮 tooltip / aria-label 应为 `导入浏览器数据`。
+4. 看 `npm run dev` 所在终端的主进程日志，以及 Browser 面板 toast。
+5. 如果要验证登录态效果，再在 Browser 面板地址栏访问一个你在 Chrome profile 中已经登录过的网站，观察是否进入已登录状态。不要在日志或对话里输出 Cookie、Token、密码或验证码。
+
+成功标准：
+
+- 主进程日志出现：
+
+  ```text
+  [BrowserProfileImport] Chrome profile data read profile=<profileDirectory> cookies=<n> skipped=<n>.
+  [BrowserService] Imported browser profile data cookies=<n> localStorage=0 skipped=<n>.
+  ```
+
+- Browser 面板 toast 显示导入 Cookie 数量、profileDirectory 和跳过数量。
+- 如果存在失败站点，toast 不展示站点列表；再次点击钥匙图标会在 popover 中展示失败站点 URL、失败原因和跳过 Cookie 数量，并提供 `复制列表` 和 `导入浏览器数据` 按钮。
+- 如果不存在失败站点，hover 钥匙图标只提示 `导入浏览器数据`，点击后直接执行导入。
+- 不应出现 `No browser is available`，也不需要出现 `[BrowserRuntime] Chrome session data exported ...`；如果出现这些，说明走到了旧 Chrome extension 同源登录态导入路径，不是 Profile import。
+- 如果 `cookies=0` 或 toast 提示没有成功导入 Cookie，先确认本机 Chrome profile 存在 Cookie；Chrome 新版 app-bound / OS 加密 Cookie 在当前用户上下文无法解密时会被跳过，这是预期降级。
+
+#### 旧 Chrome extension 登录态导入 smoke
+
+这个 smoke 只用于验证保留的旧 IPC/API 路径。BrowserPanel 默认钥匙按钮已经切换为 Profile import，因此它不是当前默认用户入口。
+
+前置条件：本机 Chrome extension/native host backend 已就绪，并且 Chrome 里已经打开了与当前内置浏览器同源的页面，页面内至少有 Cookie 或 localStorage 可导入。
+
+成功标准：
+
+```text
+[BrowserRuntime] Chrome session data exported for <origin> cookies=<n> localStorage=<n>.
+[BrowserService] Imported Chrome session data for <sessionId> cookies=<n> localStorage=<n> skipped=<n>.
+```
+
+如果当前页面不是 HTTP(S)、Chrome 没有同源 tab、或 backend 未就绪，返回可读错误是预期行为。
+
+#### 旧 Chrome backend 恢复引导 smoke
+
+这个 smoke 只适用于旧 Chrome extension 同源登录态导入路径。Profile import 不依赖 extension backend，因此不会给出 extension/native host 恢复动作。
+
+成功标准：
+
+- 主进程日志出现 `[BrowserRuntime] chrome discovery completed with backendReady=<true|false>.`
+- 如果缺 Chrome，恢复逻辑提示先安装 Chrome。
+- 如果缺扩展，恢复逻辑可以打开 Codex Chrome Extension Web Store 页面。
+- 如果扩展已安装但被禁用，恢复逻辑可以打开 Google Chrome Extension Manager。
+- 如果 Chrome 没启动，恢复逻辑可以打开 Chrome。
+- 看到 `[BrowserRuntime] chrome setup opened <action>.` 说明恢复入口已经成功拉起。
+
 ### 失败排查
 
 - 没看到 `[BrowserRuntime] chrome discovery completed with backendReady=`：检测函数没有被调用，或命令没有在仓库根目录执行。
@@ -889,6 +967,11 @@ npx tsx -e "import { checkBrowserChromeEnvironment } from './src/main/browser/br
 - `extensionBackendReady: false`：代表 Phase 3 Chrome backend 前置条件未满足，不影响 Phase 2 的 iab backend。
 - `extensionBackendReady: true` 但 `agent.browsers.list()` 看不到 `extension`：检查主进程是否出现 `[BrowserRuntime] external native pipe connected for`；如果没有，说明官方 extension/native host 没有在 `codex-browser-use` 命名空间暴露 pipe，或 pipe 文件 stale/不可连接。
 - 出现 `Browser native pipe path is outside the official Browser namespace`：host 正在拒绝非官方命名空间 pipe，这是预期安全边界；不要改成任意本地 socket passthrough。
+- 点击 `导入浏览器数据` 后没有出现 `[BrowserProfileImport] Chrome profile data read`：确认你点击的是 BrowserPanel 工具栏的钥匙图标，而不是旧 extension 同源登录态导入入口；同时确认主进程已注册 `browser:importProfileData` IPC。
+- Profile import 出现 `未找到 Chrome User Data 目录`：确认本机安装过 Chrome 并启动过至少一次；也可以临时设置 `CODEX_CHROME_USER_DATA_DIR=<Chrome User Data 路径>` 后重启 app 再验。
+- Profile import 成功但 `Imported browser profile data cookies=0`：Chrome profile 可能没有 Cookie、Cookie 是分区 Cookie、Cookie 加密不可解，或 Electron 拒绝了不合法 domain/path；看 skipped 数量判断。
+- 旧“从 Chrome 导入登录态”路径没有导入成功：先确认当前内置浏览器页面是 HTTP(S)，再确认 Chrome 里已经打开了同源页面并且 backend ready；如果返回 `Chrome tab 与当前内置浏览器页面不是同一个 origin`，说明打开的是不同站点或不同协议。
+- 旧导入路径失败但有恢复动作：先按 toast 的动作把 Chrome、扩展管理页或 Web Store 打开，再重新导入；如果恢复动作打开失败，优先检查本机是否允许从桌面应用唤起 Chrome。
 
 ### 目标
 
@@ -1673,8 +1756,9 @@ npx tsx -e "import { createBrowserPluginRuntimeTool, clearBrowserPluginRuntimeTo
 | 18 | HTML 资源预览渲染 | 请在当前项目里创建一个名为 browser-preview-smoke.html 的页面，页面标题是“HTML Preview Smoke”，页面正文显示一行大字“HTML rendered in Browser panel”。完成后只告诉我文件已经创建好，不要打开外部网站。 | 点击工具结果里的“在右侧资源预览中打开”按钮后，右侧切到 Browser 面板并显示渲染后的正文，不显示 HTML 源码；日志出现 `Opening initial URL` 和 `file://.../browser-preview-smoke.html`。 |
 | 19 | Phase 3 Chrome 环境检测 | 请检查这台机器的 Chrome Browser 环境。不要访问网页，也不要操作 Chrome tab；只需要告诉我 Chrome 是否安装、Chrome 是否正在运行、扩展 backend 是否 ready、扩展是否启用、native host manifest 是否正确，并把检查 summary 简短列出来。 | 日志出现 `[BrowserRuntime] chrome discovery completed with backendReady=`，summary 字段完整；true/false 按本机状态判定。 |
 | 20 | Phase 3 Chrome backend 发现 | 请检查 Browser runtime 的浏览器列表里是否能发现 Chrome extension backend。不要访问网页，也不要操作 Chrome tab；只需要告诉我列表里有哪些浏览器，以及是否出现 extension/Chrome backend。 | 如果本机 Chrome extension/native host 已就绪，日志出现 `[BrowserRuntime] external native pipe connected for <threadId>.`，列表包含 extension/Chrome backend；未安装时失败是预期，需要回到 Chrome 环境检测。 |
-| 21 | 日志精简 | 请按上面的任一 Browser 验收任务操作一次，然后我会检查主进程日志。 | Browser 相关日志是一句话前缀日志，不打印大对象；高频 IPC/preload bridge 不刷屏。 |
-| 22 | 文件归类和链路文档静态检查 | 无需发给大模型；在仓库里检查 Browser runtime tool 文件位于 `src/main/agent/tools/browser/`，Browser service/adapter 位于 `src/main/browser/`，并阅读本文档“数据状态流转链路”。 | Browser 相关文件已归到 browser 目录；`## 12. 数据状态流转链路` 解释了打开页面、点击/输入、前端显示、重绘和卸载经过哪些函数以及为什么需要这些函数。 |
+| 21 | Phase 3 Chrome Profile import | 请打开内置浏览器访问 https://example.com/，页面加载后告诉我当前 URL 和标题。随后我会点击 Browser 面板工具栏里的“导入浏览器数据”钥匙图标。不要输出 Cookie、Token、密码或 localStorage 的具体值。 | 点击图标后主进程日志出现 `[BrowserProfileImport] Chrome profile data read profile=<profileDirectory> cookies=<n> skipped=<n>.` 和 `[BrowserService] Imported browser profile data cookies=<n> localStorage=0 skipped=<n>.`；无失败站点时 hover 只提示导入，点击直接导入；有失败站点时点击图标展示站点列表 popover，并可在 popover 内重新导入；不应出现 `No browser is available`。 |
+| 22 | 日志精简 | 请按上面的任一 Browser 验收任务操作一次，然后我会检查主进程日志。 | Browser 相关日志是一句话前缀日志，不打印大对象；高频 IPC/preload bridge 不刷屏。 |
+| 23 | 文件归类和链路文档静态检查 | 无需发给大模型；在仓库里检查 Browser runtime tool 文件位于 `src/main/agent/tools/browser/`，Browser service/adapter 位于 `src/main/browser/`，并阅读本文档“数据状态流转链路”。 | Browser 相关文件已归到 browser 目录；`## 12. 数据状态流转链路` 解释了打开页面、点击/输入、前端显示、重绘和卸载经过哪些函数以及为什么需要这些函数。 |
 
 ### URL policy 总结
 
