@@ -1162,13 +1162,6 @@ interface CustomAPI {
       fileName?: string
       error?: string
     }>
-    selectExternalFile: () => Promise<{
-      success: boolean
-      token?: string
-      fileName?: string
-      filePath?: string
-      error?: string
-    }>
     clearWorktreeContext: (threadId: string) => Promise<void>
     saveWorktreeContext: (
       threadId: string,
@@ -1315,7 +1308,7 @@ interface CustomAPI {
       gitRoot: string
     ) => Promise<Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>>
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ) => Promise<{
       success: boolean

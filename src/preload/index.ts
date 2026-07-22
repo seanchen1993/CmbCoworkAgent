@@ -1082,15 +1082,6 @@ const api = {
     }> => {
       return ipcRenderer.invoke("workspace:requestExternalFileRead", filePath)
     },
-    selectExternalFile: (): Promise<{
-      success: boolean
-      token?: string
-      fileName?: string
-      filePath?: string
-      error?: string
-    }> => {
-      return ipcRenderer.invoke("workspace:selectExternalFile")
-    },
     clearWorktreeContext: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("workspace:clearWorktreeContext", threadId) as Promise<void>
     },
@@ -1384,11 +1375,11 @@ const api = {
       >
     },
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:removeWorktree", {
-        gitRoot,
+        threadId,
         worktreePath
       }) as Promise<{ success: boolean; error?: string }>
     },

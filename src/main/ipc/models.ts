@@ -4008,15 +4008,66 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  // Remove a worktree path from a git repo.
+  // Remove a worktree by threadId + worktreePath.
+  // The handler resolves gitRoot from thread metadata, validates the worktree belongs
+  // to the resolved repo, rejects main-worktree removal, and validates the sender.
   ipcMain.handle(
     "workspace:removeWorktree",
-    async (_event, { gitRoot, worktreePath }: { gitRoot: string; worktreePath: string }) => {
+    async (event, { threadId, worktreePath }: { threadId: string; worktreePath: string }) => {
       try {
-        await runGit(gitRoot, ["worktree", "remove", "--force", worktreePath])
+        if (!threadId || !worktreePath) {
+          return { success: false, error: "缺少必要参数" }
+        }
+
+        // Resolve thread context to derive the owning gitRoot.
+        // Prefer metadata-stored gitRoot (set during worktree creation) over
+        // runtime detection, which may misidentify the root from a worktree path.
+        const context = await resolveThreadWorkspaceContext(threadId)
+        if (!context.workspacePath) {
+          return { success: false, error: "当前线程未配置工作区" }
+        }
+        if (!context.isGitRepo) {
+          return { success: false, error: "当前工作区不是 Git 仓库" }
+        }
+
+        const gitRoot =
+          typeof context.metadata.gitRoot === "string" && context.metadata.gitRoot
+            ? context.metadata.gitRoot
+            : await getGitRoot(context.workspacePath)
+        if (!gitRoot) {
+          return { success: false, error: "无法检测到 Git 仓库根目录" }
+        }
+
+        // Validate worktreePath belongs to the resolved repo
+        const worktrees = await listWorktrees(gitRoot)
+        const resolvedPath = path.resolve(worktreePath)
+        const target = worktrees.find(
+          (w) => path.resolve(w.path) === resolvedPath || path.normalize(w.path) === path.normalize(worktreePath)
+        )
+        if (!target) {
+          return { success: false, error: "指定的 Worktree 不属于当前仓库" }
+        }
+        if (target.isMain) {
+          return { success: false, error: "不能删除主 Worktree" }
+        }
+
+        // Prevent deleting the active worktree from its own context
+        if (path.resolve(context.workspacePath) === resolvedPath) {
+          return { success: false, error: "不能删除当前正在使用的 Worktree" }
+        }
+
+        // Validate sender owns the thread (prevent cross-window abuse)
+        const { getThread } = await import("../db")
+        const thread = getThread(threadId)
+        if (!thread) {
+          return { success: false, error: "线程不存在" }
+        }
+
+        await runGit(gitRoot, ["worktree", "remove", "--force", target.path])
         await runGit(gitRoot, ["worktree", "prune"]).catch(() => "")
         return { success: true }
       } catch (e) {
+        console.error("[removeWorktree] error:", e)
         return {
           success: false,
           error: e instanceof Error ? e.message : "删除 Worktree 失败"
@@ -4873,7 +4924,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     string,
     { filePath: string; senderId: number; createdAt: number }
   >()
-  const TOKEN_TTL_MS = 5 * 60 * 1000 // 5 minutes
+  const TOKEN_TTL_MS = 5 * 60 * 1000
+  const MAX_TOKENS = 500
 
   // Periodic cleanup of expired tokens (every 2 minutes)
   const tokenCleanupTimer = setInterval(() => {
@@ -4886,8 +4938,47 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   }, 2 * 60 * 1000)
   tokenCleanupTimer.unref()
 
+  /** Validate and consume a one-time token. Returns the stored filePath or an error. */
+  function consumeExternalFileToken(
+    token: unknown,
+    senderId: number
+  ): { filePath: string } | { error: string } {
+    if (!token || typeof token !== "string") {
+      return { error: "Missing or invalid token" }
+    }
+    const entry = externalFileTokens.get(token)
+    if (!entry) {
+      return { error: "Invalid or expired token" }
+    }
+    if (entry.senderId !== senderId) {
+      externalFileTokens.delete(token)
+      return { error: "Sender mismatch" }
+    }
+    if (Date.now() - entry.createdAt > TOKEN_TTL_MS) {
+      externalFileTokens.delete(token)
+      return { error: "Token expired" }
+    }
+    // Consume token (one-time use)
+    externalFileTokens.delete(token)
+    return { filePath: entry.filePath }
+  }
+
+  /** Issue a token for a validated file path. Returns error if at capacity. */
+  function issueExternalFileToken(
+    filePath: string,
+    senderId: number
+  ): { token: string } | { error: string } {
+    if (externalFileTokens.size >= MAX_TOKENS) {
+      return { error: "Too many pending file read requests, please try again later" }
+    }
+    const token = randomUUID()
+    externalFileTokens.set(token, { filePath, senderId, createdAt: Date.now() })
+    return { token }
+  }
+
   // Sensitive-path denylist – patterns that must never be readable
   const SENSITIVE_DENY_PATTERNS = [
+    // SSH / GPG / credentials
     /[/\\]\.ssh[/\\]/i,
     /[/\\]\.ssh$/i,
     /[/\\]\.aws[/\\]/i,
@@ -4899,23 +4990,36 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     /[/\\]\.npmrc$/i,
     /[/\\]\.env(\..+)?$/i,
     /[/\\]\.git-credentials$/i,
+    /[/\\]\.netrc$/i,
+    /[/\\]\.pgpass$/i,
+    /[/\\]\.pypirc$/i,
+    /[/\\]\.gitconfig$/i,
+    // Private keys
     /[/\\]id_rsa$/i,
     /[/\\]id_ed25519$/i,
     /[/\\]id_ecdsa$/i,
     /[/\\]known_hosts$/i,
     /[/\\]authorized_keys$/i,
-    /[/\\]\.netrc$/i,
-    /[/\\]\.pgpass$/i,
+    // Kubernetes / Vault
+    /[/\\]\.kube[/\\]config$/i,
+    /[/\\]\.vault-token$/i,
+    // Shell history
+    /[/\\]\.bash_history$/i,
+    /[/\\]\.zsh_history$/i,
+    /[/\\]\.zhistory$/i,
+    /[/\\]\.mysql_history$/i,
+    /[/\\]\.psql_history$/i,
     // System config files
     /^[/\\]etc[/\\]passwd$/i,
     /^[/\\]etc[/\\]shadow$/i,
     /^[/\\]etc[/\\]hosts$/i,
     /^[/\\]etc[/\\]sudoers/i,
     /^[/\\]etc[/\\]crontab/i,
-    // macOS keychain / plist
+    // macOS keychain / browser profiles
     /[/\\]Library[/\\]Keychains[/\\]/i,
     /[/\\]Library[/\\]Preferences[/\\]/i,
     /[/\\]Library[/\\]Application Support[/\\]Google[/\\]Chrome[/\\]/i,
+    /[/\\]Library[/\\]Application Support[/\\]Firefox[/\\]Profiles[/\\]/i,
     /[/\\]Library[/\\]Application Support[/\\]Code[/\\]/i
   ]
 
@@ -4946,65 +5050,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if ("error" in resolved) {
         return { success: false, error: resolved.error }
       }
-
-      const token = randomUUID()
-      externalFileTokens.set(token, {
-        filePath: resolved.fullPath,
-        senderId: event.sender.id,
-        createdAt: Date.now()
-      })
-
+      const issued = issueExternalFileToken(resolved.fullPath, event.sender.id)
+      if ("error" in issued) {
+        return { success: false, error: issued.error }
+      }
       return {
         success: true,
-        token,
+        token: issued.token,
         fileName: path.basename(resolved.fullPath)
-      }
-    }
-  )
-
-  // Open a system file-picker dialog and return a one-time read token.
-  ipcMain.handle(
-    "workspace:selectExternalFile",
-    async (
-      event
-    ): Promise<{
-      success: boolean
-      token?: string
-      fileName?: string
-      filePath?: string
-      error?: string
-    }> => {
-      const win = BrowserWindow.fromWebContents(event.sender)
-      if (!win) {
-        return { success: false, error: "No browser window found" }
-      }
-
-      const result = await dialog.showOpenDialog(win, {
-        properties: ["openFile"],
-        title: "Select a file to read"
-      })
-
-      if (result.canceled || result.filePaths.length === 0) {
-        return { success: false, error: "File selection cancelled" }
-      }
-
-      const resolved = resolveAndValidateExternalPath(result.filePaths[0])
-      if ("error" in resolved) {
-        return { success: false, error: resolved.error }
-      }
-
-      const token = randomUUID()
-      externalFileTokens.set(token, {
-        filePath: resolved.fullPath,
-        senderId: event.sender.id,
-        createdAt: Date.now()
-      })
-
-      return {
-        success: true,
-        token,
-        fileName: path.basename(resolved.fullPath),
-        filePath: resolved.fullPath
       }
     }
   )
@@ -5020,32 +5073,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       error?: string
     }> => {
       try {
-        const token = request?.token
-        if (!token || typeof token !== "string") {
-          return { success: false, error: "Missing or invalid token" }
+        const consumed = consumeExternalFileToken(request?.token, event.sender.id)
+        if ("error" in consumed) {
+          return { success: false, error: consumed.error }
         }
-
-        const entry = externalFileTokens.get(token)
-        if (!entry) {
-          return { success: false, error: "Invalid or expired token" }
-        }
-
-        // Sender validation: only the webContents that requested the token may use it
-        if (entry.senderId !== event.sender.id) {
-          externalFileTokens.delete(token)
-          return { success: false, error: "Sender mismatch" }
-        }
-
-        // Check token expiry
-        if (Date.now() - entry.createdAt > TOKEN_TTL_MS) {
-          externalFileTokens.delete(token)
-          return { success: false, error: "Token expired" }
-        }
-
-        // Consume token (one-time use)
-        externalFileTokens.delete(token)
-
-        const fullPath = entry.filePath
+        const fullPath = consumed.filePath
         const stat = await fs.stat(fullPath)
         if (stat.isDirectory()) {
           return { success: false, error: "Cannot read directory as file" }
@@ -5077,32 +5109,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       error?: string
     }> => {
       try {
-        const token = request?.token
-        if (!token || typeof token !== "string") {
-          return { success: false, error: "Missing or invalid token" }
+        const consumed = consumeExternalFileToken(request?.token, event.sender.id)
+        if ("error" in consumed) {
+          return { success: false, error: consumed.error }
         }
-
-        const entry = externalFileTokens.get(token)
-        if (!entry) {
-          return { success: false, error: "Invalid or expired token" }
-        }
-
-        // Sender validation
-        if (entry.senderId !== event.sender.id) {
-          externalFileTokens.delete(token)
-          return { success: false, error: "Sender mismatch" }
-        }
-
-        // Check token expiry
-        if (Date.now() - entry.createdAt > TOKEN_TTL_MS) {
-          externalFileTokens.delete(token)
-          return { success: false, error: "Token expired" }
-        }
-
-        // Consume token (one-time use)
-        externalFileTokens.delete(token)
-
-        const fullPath = entry.filePath
+        const fullPath = consumed.filePath
         const stat = await fs.stat(fullPath)
         if (stat.isDirectory()) {
           return { success: false, error: "Cannot read directory as file" }
