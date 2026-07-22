@@ -1942,16 +1942,26 @@ function ResourcePreview({
     }
 
     try {
-      const result = resolved.inWorkspace
-        ? await window.api.workspace.readFile(threadId, resolved.workspaceFilePath)
-        : await window.api.workspace.readExternalFile(resolved.fullPath)
-
-      if (!result.success || result.content === undefined) {
-        toast.error(result.error || "复制失败，请重试")
-        return
+      if (resolved.inWorkspace) {
+        const result = await window.api.workspace.readFile(threadId, resolved.workspaceFilePath)
+        if (!result.success || result.content === undefined) {
+          toast.error(result.error || "复制失败，请重试")
+          return
+        }
+        await navigator.clipboard.writeText(result.content)
+      } else {
+        const tokenRes = await window.api.workspace.requestExternalFileRead(resolved.fullPath)
+        if (!tokenRes.success || !tokenRes.token) {
+          toast.error(tokenRes.error || "复制失败，请重试")
+          return
+        }
+        const result = await window.api.workspace.readExternalFile(tokenRes.token)
+        if (!result.success || result.content === undefined) {
+          toast.error(result.error || "复制失败，请重试")
+          return
+        }
+        await navigator.clipboard.writeText(result.content)
       }
-
-      await navigator.clipboard.writeText(result.content)
       setCopySuccess(true)
       setTimeout(() => setCopySuccess(false), 2000)
       toast.success("文件内容已复制")

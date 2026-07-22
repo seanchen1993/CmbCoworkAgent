@@ -4864,52 +4864,265 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  // Read a text file from any absolute path (outside workspace allowed)
-  ipcMain.handle("workspace:readExternalFile", async (_event, filePath: string) => {
-    try {
-      const fullPath = path.resolve(filePath)
-      const stat = await fs.stat(fullPath)
-      if (stat.isDirectory()) {
-        return { success: false, error: "Cannot read directory as file" }
-      }
-      const content = await fs.readFile(fullPath, "utf-8")
-      return {
-        success: true,
-        content,
-        size: stat.size,
-        modified_at: stat.mtime.toISOString()
-      }
-    } catch (e) {
-      return {
-        success: false,
-        error: e instanceof Error ? e.message : "Unknown error"
-      }
-    }
-  })
+  // ---------------------------------------------------------------------------
+  // External file read – token-based with sender validation & denylist
+  // ---------------------------------------------------------------------------
 
-  // Read a binary file from any absolute path (outside workspace allowed)
-  ipcMain.handle("workspace:readExternalBinaryFile", async (_event, filePath: string) => {
-    try {
-      const fullPath = path.resolve(filePath)
-      const stat = await fs.stat(fullPath)
-      if (stat.isDirectory()) {
-        return { success: false, error: "Cannot read directory as file" }
-      }
-      const buffer = await fs.readFile(fullPath)
-      const base64 = buffer.toString("base64")
-      return {
-        success: true,
-        content: base64,
-        size: stat.size,
-        modified_at: stat.mtime.toISOString()
-      }
-    } catch (e) {
-      return {
-        success: false,
-        error: e instanceof Error ? e.message : "Unknown error"
+  // One-time tokens: token → { filePath, senderId, createdAt }
+  const externalFileTokens = new Map<
+    string,
+    { filePath: string; senderId: number; createdAt: number }
+  >()
+  const TOKEN_TTL_MS = 5 * 60 * 1000 // 5 minutes
+
+  // Periodic cleanup of expired tokens (every 2 minutes)
+  const tokenCleanupTimer = setInterval(() => {
+    const now = Date.now()
+    for (const [token, entry] of externalFileTokens) {
+      if (now - entry.createdAt > TOKEN_TTL_MS) {
+        externalFileTokens.delete(token)
       }
     }
-  })
+  }, 2 * 60 * 1000)
+  tokenCleanupTimer.unref()
+
+  // Sensitive-path denylist – patterns that must never be readable
+  const SENSITIVE_DENY_PATTERNS = [
+    /[/\\]\.ssh[/\\]/i,
+    /[/\\]\.ssh$/i,
+    /[/\\]\.aws[/\\]/i,
+    /[/\\]\.aws$/i,
+    /[/\\]\.config[/\\]/i,
+    /[/\\]\.gnupg[/\\]/i,
+    /[/\\]\.gnupg$/i,
+    /[/\\]\.docker[/\\]config\.json$/i,
+    /[/\\]\.npmrc$/i,
+    /[/\\]\.env(\..+)?$/i,
+    /[/\\]\.git-credentials$/i,
+    /[/\\]id_rsa$/i,
+    /[/\\]id_ed25519$/i,
+    /[/\\]id_ecdsa$/i,
+    /[/\\]known_hosts$/i,
+    /[/\\]authorized_keys$/i,
+    /[/\\]\.netrc$/i,
+    /[/\\]\.pgpass$/i,
+    // System config files
+    /^[/\\]etc[/\\]passwd$/i,
+    /^[/\\]etc[/\\]shadow$/i,
+    /^[/\\]etc[/\\]hosts$/i,
+    /^[/\\]etc[/\\]sudoers/i,
+    /^[/\\]etc[/\\]crontab/i,
+    // macOS keychain / plist
+    /[/\\]Library[/\\]Keychains[/\\]/i,
+    /[/\\]Library[/\\]Preferences[/\\]/i,
+    /[/\\]Library[/\\]Application Support[/\\]Google[/\\]Chrome[/\\]/i,
+    /[/\\]Library[/\\]Application Support[/\\]Code[/\\]/i
+  ]
+
+  function isSensitivePath(absolutePath: string): boolean {
+    return SENSITIVE_DENY_PATTERNS.some((pattern) => pattern.test(absolutePath))
+  }
+
+  function resolveAndValidateExternalPath(
+    filePath: string
+  ): { fullPath: string } | { error: string } {
+    try {
+      const fullPath = path.resolve(filePath)
+      if (isSensitivePath(fullPath)) {
+        return { error: "Access denied: path is in a protected directory" }
+      }
+      return { fullPath }
+    } catch {
+      return { error: "Invalid file path" }
+    }
+  }
+
+  // Request a one-time read token for an external file path.
+  // The path is validated against the denylist before a token is issued.
+  ipcMain.handle(
+    "workspace:requestExternalFileRead",
+    (event, filePath: string): { success: boolean; token?: string; fileName?: string; error?: string } => {
+      const resolved = resolveAndValidateExternalPath(filePath)
+      if ("error" in resolved) {
+        return { success: false, error: resolved.error }
+      }
+
+      const token = randomUUID()
+      externalFileTokens.set(token, {
+        filePath: resolved.fullPath,
+        senderId: event.sender.id,
+        createdAt: Date.now()
+      })
+
+      return {
+        success: true,
+        token,
+        fileName: path.basename(resolved.fullPath)
+      }
+    }
+  )
+
+  // Open a system file-picker dialog and return a one-time read token.
+  ipcMain.handle(
+    "workspace:selectExternalFile",
+    async (
+      event
+    ): Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      filePath?: string
+      error?: string
+    }> => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      if (!win) {
+        return { success: false, error: "No browser window found" }
+      }
+
+      const result = await dialog.showOpenDialog(win, {
+        properties: ["openFile"],
+        title: "Select a file to read"
+      })
+
+      if (result.canceled || result.filePaths.length === 0) {
+        return { success: false, error: "File selection cancelled" }
+      }
+
+      const resolved = resolveAndValidateExternalPath(result.filePaths[0])
+      if ("error" in resolved) {
+        return { success: false, error: resolved.error }
+      }
+
+      const token = randomUUID()
+      externalFileTokens.set(token, {
+        filePath: resolved.fullPath,
+        senderId: event.sender.id,
+        createdAt: Date.now()
+      })
+
+      return {
+        success: true,
+        token,
+        fileName: path.basename(resolved.fullPath),
+        filePath: resolved.fullPath
+      }
+    }
+  )
+
+  // Read a text file using a one-time token (outside workspace allowed)
+  ipcMain.handle(
+    "workspace:readExternalFile",
+    async (event, request: { token: string }): Promise<{
+      success: boolean
+      content?: string
+      size?: number
+      modified_at?: string
+      error?: string
+    }> => {
+      try {
+        const token = request?.token
+        if (!token || typeof token !== "string") {
+          return { success: false, error: "Missing or invalid token" }
+        }
+
+        const entry = externalFileTokens.get(token)
+        if (!entry) {
+          return { success: false, error: "Invalid or expired token" }
+        }
+
+        // Sender validation: only the webContents that requested the token may use it
+        if (entry.senderId !== event.sender.id) {
+          externalFileTokens.delete(token)
+          return { success: false, error: "Sender mismatch" }
+        }
+
+        // Check token expiry
+        if (Date.now() - entry.createdAt > TOKEN_TTL_MS) {
+          externalFileTokens.delete(token)
+          return { success: false, error: "Token expired" }
+        }
+
+        // Consume token (one-time use)
+        externalFileTokens.delete(token)
+
+        const fullPath = entry.filePath
+        const stat = await fs.stat(fullPath)
+        if (stat.isDirectory()) {
+          return { success: false, error: "Cannot read directory as file" }
+        }
+        const content = await fs.readFile(fullPath, "utf-8")
+        return {
+          success: true,
+          content,
+          size: stat.size,
+          modified_at: stat.mtime.toISOString()
+        }
+      } catch (e) {
+        return {
+          success: false,
+          error: e instanceof Error ? e.message : "Unknown error"
+        }
+      }
+    }
+  )
+
+  // Read a binary file using a one-time token (outside workspace allowed)
+  ipcMain.handle(
+    "workspace:readExternalBinaryFile",
+    async (event, request: { token: string }): Promise<{
+      success: boolean
+      content?: string
+      size?: number
+      modified_at?: string
+      error?: string
+    }> => {
+      try {
+        const token = request?.token
+        if (!token || typeof token !== "string") {
+          return { success: false, error: "Missing or invalid token" }
+        }
+
+        const entry = externalFileTokens.get(token)
+        if (!entry) {
+          return { success: false, error: "Invalid or expired token" }
+        }
+
+        // Sender validation
+        if (entry.senderId !== event.sender.id) {
+          externalFileTokens.delete(token)
+          return { success: false, error: "Sender mismatch" }
+        }
+
+        // Check token expiry
+        if (Date.now() - entry.createdAt > TOKEN_TTL_MS) {
+          externalFileTokens.delete(token)
+          return { success: false, error: "Token expired" }
+        }
+
+        // Consume token (one-time use)
+        externalFileTokens.delete(token)
+
+        const fullPath = entry.filePath
+        const stat = await fs.stat(fullPath)
+        if (stat.isDirectory()) {
+          return { success: false, error: "Cannot read directory as file" }
+        }
+        const buffer = await fs.readFile(fullPath)
+        const base64 = buffer.toString("base64")
+        return {
+          success: true,
+          content: base64,
+          size: stat.size,
+          modified_at: stat.mtime.toISOString()
+        }
+      } catch (e) {
+        return {
+          success: false,
+          error: e instanceof Error ? e.message : "Unknown error"
+        }
+      }
+    }
+  )
 
   // Parse a file and extract text content for chat attachments
   ipcMain.handle(

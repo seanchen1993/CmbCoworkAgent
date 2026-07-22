@@ -1051,7 +1051,7 @@ const api = {
       return ipcRenderer.invoke("workspace:readBinaryFile", { threadId, filePath })
     },
     readExternalFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -1059,10 +1059,10 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalFile", { token })
     },
     readExternalBinaryFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -1070,7 +1070,26 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalBinaryFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalBinaryFile", { token })
+    },
+    requestExternalFileRead: (
+      filePath: string
+    ): Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:requestExternalFileRead", filePath)
+    },
+    selectExternalFile: (): Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      filePath?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:selectExternalFile")
     },
     clearWorktreeContext: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("workspace:clearWorktreeContext", threadId) as Promise<void>

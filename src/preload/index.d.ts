@@ -1142,18 +1142,31 @@ interface CustomAPI {
       modified_at?: string
       error?: string
     }>
-    readExternalFile: (filePath: string) => Promise<{
+    readExternalFile: (token: string) => Promise<{
       success: boolean
       content?: string
       size?: number
       modified_at?: string
       error?: string
     }>
-    readExternalBinaryFile: (filePath: string) => Promise<{
+    readExternalBinaryFile: (token: string) => Promise<{
       success: boolean
       content?: string
       size?: number
       modified_at?: string
+      error?: string
+    }>
+    requestExternalFileRead: (filePath: string) => Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      error?: string
+    }>
+    selectExternalFile: () => Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      filePath?: string
       error?: string
     }>
     clearWorktreeContext: (threadId: string) => Promise<void>
