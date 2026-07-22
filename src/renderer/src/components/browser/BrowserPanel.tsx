@@ -553,9 +553,11 @@ export function BrowserPanel({
             duration: 15_000
           })
         } else if (result.errorCode === "extension_not_connected") {
-          toast.error("Chrome 扩展未连接，请确认扩展已安装并启用，且 Chrome 正在运行", {
-            duration: 15_000
-          })
+          const extensionIdHint = result.extensionId ? `；预期扩展 ID：${result.extensionId}` : ""
+          toast.error(
+            `Chrome 扩展未连接，请确认扩展已安装并启用，且 Chrome 正在运行${extensionIdHint}`,
+            { duration: 15_000 }
+          )
         } else if (result.errorCode === "permission_required") {
           toast.error("请在 CmbCoworkAgent Chrome 扩展中授权网站 Cookie 访问", {
             duration: 15_000

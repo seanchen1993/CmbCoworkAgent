@@ -66,6 +66,7 @@ export type CmbChromeToHostMessage =
 
 export interface CmbHostStatusMessage {
   connected: boolean
+  error?: string
   protocolVersion: number
   type: "host-status"
 }

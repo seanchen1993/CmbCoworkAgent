@@ -49,8 +49,9 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
   let reconnectTimer: NodeJS.Timeout | null = null
   let closed = false
 
-  const statusMessage = (connected: boolean): CmbHostStatusMessage => ({
+  const statusMessage = (connected: boolean, error?: unknown): CmbHostStatusMessage => ({
     connected,
+    ...(error instanceof Error && error.message ? { error: error.message.slice(0, 500) } : {}),
     protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
     type: "host-status"
   })
@@ -93,15 +94,15 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
       }
     })
 
-    const disconnect = (): void => {
+    const disconnect = (error?: Error): void => {
       if (mainSocket !== socket) return
       mainConnected = false
       mainSocket = null
-      writeChromeMessage(statusMessage(false))
+      writeChromeMessage(statusMessage(false, error))
       scheduleReconnect()
     }
-    socket.once("error", disconnect)
-    socket.once("close", disconnect)
+    socket.once("error", (error: Error) => disconnect(error))
+    socket.once("close", () => disconnect())
   }
 
   process.stdin.on("data", (chunk: Buffer) => {

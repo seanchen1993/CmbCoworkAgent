@@ -48,6 +48,35 @@ function waitForMessage(
 }
 
 describe("browser cookie bridge server", () => {
+  it("reports a native host authentication failure before closing the socket", async () => {
+    const pipePath = join(tmpdir(), `cmb-cookie-bridge-test-${randomUUID()}.sock`)
+    const server = new BrowserCookieBridgeServer(pipePath, "expected-secret")
+    servers.push(server)
+    await server.start()
+
+    const socket = connect(pipePath)
+    sockets.push(socket)
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve)
+      socket.once("error", reject)
+    })
+    const response = waitForMessage(socket, new NativeMessageDecoder())
+    socket.write(
+      encodeNativeMessage({
+        origin: CMB_CHROME_EXTENSION_ORIGIN,
+        protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
+        secret: "wrong-secret",
+        type: "native-host-hello"
+      })
+    )
+
+    await expect(response).resolves.toMatchObject({
+      connected: false,
+      error: "Native host authentication failed",
+      type: "host-status"
+    })
+  })
+
   it("authenticates a native host and completes a chunked cookie export", async () => {
     const pipePath = join(tmpdir(), `cmb-cookie-bridge-test-${randomUUID()}.sock`)
     const secret = "test-secret"

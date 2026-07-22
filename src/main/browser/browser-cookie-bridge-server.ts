@@ -189,7 +189,19 @@ export class BrowserCookieBridgeServer {
       try {
         for (const message of client.decoder.push(chunk)) this.handleMessage(client, message)
       } catch (error) {
-        socket.destroy()
+        try {
+          socket.end(
+            encodeNativeMessage({
+              connected: false,
+              error:
+                error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+              protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
+              type: "host-status"
+            })
+          )
+        } catch {
+          socket.destroy()
+        }
         if (this.pending?.client === client) {
           this.failPending(
             new BrowserCookieBridgeError(
