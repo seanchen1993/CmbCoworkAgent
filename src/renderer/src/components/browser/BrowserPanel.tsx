@@ -547,7 +547,22 @@ export function BrowserPanel({
       })
       if (!result.success) {
         setBrowserProfileImportSkippedWebsites([])
-        toast.error(result.error || "浏览器数据导入失败", { duration: 15_000 })
+        if (result.cancelled) return
+        if (result.errorCode === "native_host_not_registered") {
+          void window.api.browser.openCookieBridgeSetup()
+          toast.error(result.error || "尚未配置 CmbCoworkAgent Chrome 扩展，请先安装并启用扩展", {
+            duration: 15_000
+          })
+        } else if (result.errorCode === "extension_not_connected") {
+          void window.api.browser.openCookieBridgeSetup()
+          toast.error("Chrome 扩展未连接，请打开 Chrome 后重试", { duration: 15_000 })
+        } else if (result.errorCode === "permission_required") {
+          toast.error("请在 CmbCoworkAgent Chrome 扩展中授权网站 Cookie 访问", {
+            duration: 15_000
+          })
+        } else {
+          toast.error(result.error || "浏览器数据导入失败", { duration: 15_000 })
+        }
         return
       }
 

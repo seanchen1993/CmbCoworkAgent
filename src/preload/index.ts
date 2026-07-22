@@ -113,6 +113,7 @@ import type {
   BrowserScreenshotResult,
   BrowserState
 } from "../shared/browser-types"
+import type { BrowserCookieBridgeStatus } from "../shared/browser-cookie-bridge"
 import {
   APP_ATTENTION_CHANNEL,
   getAgentStreamAttentionKind,
@@ -2036,6 +2037,14 @@ const api = {
       options: BrowserProfileImportOptions
     ): Promise<BrowserProfileImportResult> =>
       ipcRenderer.invoke("browser:importProfileData", options) as Promise<BrowserProfileImportResult>,
+    getCookieBridgeStatus: (): Promise<BrowserCookieBridgeStatus> =>
+      ipcRenderer.invoke("browser:getCookieBridgeStatus") as Promise<BrowserCookieBridgeStatus>,
+    openCookieBridgeSetup: (): Promise<{ error?: string; extensionPath: string; success: boolean }> =>
+      ipcRenderer.invoke("browser:openCookieBridgeSetup") as Promise<{
+        error?: string
+        extensionPath: string
+        success: boolean
+      }>,
     importChromeSession: (
       sessionId: string,
       options?: { threadId?: string; workspacePath?: string | null }

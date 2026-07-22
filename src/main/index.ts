@@ -1,4 +1,10 @@
 import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
+import {
+  isBrowserNativeMessagingHostLaunch,
+  runBrowserNativeMessagingHost
+} from "./browser/browser-native-messaging-host"
+
+const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -175,43 +181,45 @@ function withMainFileLogging<T extends (...args: unknown[]) => void>(level: stri
   }) as T
 }
 
-// Guard console writes so broken stdout/stderr pipes don't crash main process.
-console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
-console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
-console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
-console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
-console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
+if (!browserNativeMessagingHostLaunch) {
+  // Native messaging reserves stdout exclusively for length-prefixed protocol frames.
+  console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
+  console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
+  console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
+  console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
+  console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
 
-// Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
-// or when the renderer window is destroyed while the main process is still logging).
-process.stdout.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return
-  console.error("[Main] stdout error:", err)
-})
-process.stderr.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return
-  // Don't re-log to stderr here to avoid infinite loop
-})
-process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return // silently ignore broken pipe
-  console.error("[Main] Uncaught exception:", err)
-  // Persist the buffered tail (incl. this error) in case the process dies next.
-  flushLogsSync()
-})
-process.on("unhandledRejection", (reason) => {
-  console.error("[Main] Unhandled rejection:", reason)
-})
+  // Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
+  // or when the renderer window is destroyed while the main process is still logging).
+  process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return
+    console.error("[Main] stdout error:", err)
+  })
+  process.stderr.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return
+    // Don't re-log to stderr here to avoid infinite loop
+  })
+  process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return // silently ignore broken pipe
+    console.error("[Main] Uncaught exception:", err)
+    // Persist the buffered tail (incl. this error) in case the process dies next.
+    flushLogsSync()
+  })
+  process.on("unhandledRejection", (reason) => {
+    console.error("[Main] Unhandled rejection:", reason)
+  })
 
-// Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
-// does not fire Node's `exit` event, so flush the log tail before quitting.
-// `once` lets a second signal fall through to default force-kill if quit hangs.
-const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
-  console.warn(`[Main] received ${signal}, flushing logs and quitting`)
-  flushLogsSync()
-  app.quit()
+  // Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
+  // does not fire Node's `exit` event, so flush the log tail before quitting.
+  // `once` lets a second signal fall through to default force-kill if quit hangs.
+  const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
+    console.warn(`[Main] received ${signal}, flushing logs and quitting`)
+    flushLogsSync()
+    app.quit()
+  }
+  process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
+  process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 }
-process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
-process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
@@ -610,9 +618,19 @@ function prewarmRecentSandboxWorkspaces(): void {
   LocalSandbox.prewarmForWorkspaces(workspaces)
 }
 
-// Ensure only a single instance is running (prevents duplicate schedulers on Windows)
-const gotTheLock = app.requestSingleInstanceLock()
-if (!gotTheLock) {
+// Native hosts must not participate in the desktop app's single-instance lifecycle.
+const gotTheLock = browserNativeMessagingHostLaunch ? false : app.requestSingleInstanceLock()
+if (browserNativeMessagingHostLaunch) {
+  void runBrowserNativeMessagingHost().then(
+    () => app.exit(typeof process.exitCode === "number" ? process.exitCode : 0),
+    (error) => {
+      process.stderr.write(
+        `[CmbBrowserNativeHost] ${error instanceof Error ? error.message : String(error)}\n`
+      )
+      app.exit(1)
+    }
+  )
+} else if (!gotTheLock) {
   app.quit()
 } else {
   app.on("second-instance", () => {

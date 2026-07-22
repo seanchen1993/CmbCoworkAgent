@@ -10,6 +10,16 @@ import {
   getBrowserProfileImportPreview,
   readBrowserProfileImportData
 } from "../browser/browser-profile-importer"
+import { sanitizeExtensionCookieExport } from "../browser/browser-extension-cookie-importer"
+import {
+  BrowserCookieBridgeError,
+  BrowserCookieBridgeServer
+} from "../browser/browser-cookie-bridge-server"
+import {
+  ensureCmbChromeNativeHostRegistration,
+  getCmbChromeNativeHostRegistrationStatus,
+  openCmbChromeExtensionSetup
+} from "../browser/browser-native-host-installer"
 import { getEnabledBrowserPluginRuntime } from "../browser/browser-plugin"
 import { setGlobalBrowserService } from "../browser/browser-service-registry"
 import type {
@@ -25,6 +35,9 @@ import type {
   BrowserProfileImportResult,
   BrowserProfileImportSkippedWebsite
 } from "../../shared/browser-types"
+import type { BrowserCookieBridgeStatus } from "../../shared/browser-cookie-bridge"
+
+const cookieBridgeServer = new BrowserCookieBridgeServer()
 
 function getHttpOrigin(url: string): string {
   try {
@@ -49,6 +62,23 @@ function profileImportFailure(
     skippedCookies: 0,
     skippedLocalStorage: 0,
     error
+  }
+}
+
+function extensionImportFailure(
+  error: string,
+  errorCode: BrowserProfileImportResult["errorCode"]
+): BrowserProfileImportResult {
+  return {
+    error,
+    errorCode,
+    importMethod: "extension",
+    importedCookies: 0,
+    importedLocalStorage: 0,
+    skippedCookies: 0,
+    skippedLocalStorage: 0,
+    sourceBrowser: "chrome",
+    success: false
   }
 }
 
@@ -92,6 +122,12 @@ export function registerBrowserHandlers(
 ): BrowserService {
   const browserService = new BrowserService(getMainWindow)
   setGlobalBrowserService(browserService)
+  void cookieBridgeServer.start().catch((error) => {
+    console.warn(`[BrowserCookieBridge] failed to start: ${error instanceof Error ? error.message : String(error)}`)
+  })
+  void ensureCmbChromeNativeHostRegistration().catch((error) => {
+    console.warn(`[BrowserCookieBridge] registration failed: ${error instanceof Error ? error.message : String(error)}`)
+  })
 
   ipcMain.handle("browser:attach", (_event, sessionId: string, options?: BrowserAttachOptions) => {
     return browserService.attach(sessionId, options)
@@ -107,6 +143,33 @@ export function registerBrowserHandlers(
       return browserService.setBounds(sessionId, bounds, visible)
     }
   )
+
+  ipcMain.handle("browser:getCookieBridgeStatus", async (event): Promise<BrowserCookieBridgeStatus> => {
+    const window = getMainWindow()
+    if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
+      return {
+        connected: false,
+        error: "拒绝来自未知窗口的浏览器扩展状态请求",
+        extensionId: "",
+        nativeHostRegistered: false,
+        platformSupported: false
+      }
+    }
+    const status = await getCmbChromeNativeHostRegistrationStatus()
+    return {
+      ...status,
+      connected: cookieBridgeServer.connected,
+      profileInstanceId: cookieBridgeServer.profileInstanceId
+    }
+  })
+
+  ipcMain.handle("browser:openCookieBridgeSetup", async (event) => {
+    const window = getMainWindow()
+    if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
+      return { success: false, error: "拒绝来自未知窗口的浏览器扩展安装请求", extensionPath: "" }
+    }
+    return openCmbChromeExtensionSetup()
+  })
 
   ipcMain.handle(
     "browser:navigate",
@@ -182,6 +245,10 @@ export function registerBrowserHandlers(
         return profileImportFailure("不支持的浏览器数据导入来源", options)
       }
 
+      if (process.platform === "win32") {
+        return importWindowsCookieData(window, browserService)
+      }
+
       try {
         const imported = await readBrowserProfileImportData({
           sourceBrowser: "chrome",
@@ -194,6 +261,7 @@ export function registerBrowserHandlers(
         return {
           success: true,
           sourceBrowser: "chrome",
+          importMethod: "profile",
           profileDirectory: imported.profileDirectory,
           importedCookies: counts.importedCookies,
           importedLocalStorage: counts.importedLocalStorage,
@@ -208,14 +276,7 @@ export function registerBrowserHandlers(
                 : undefined
         }
       } catch (error) {
-        let errMsg = sanitizeProfileImportError(error)
-        if (process.platform === "win32") {
-          errMsg +=
-            "\n\nWindows须知：" +
-            "\nChrome 127 以下：关闭 Chrome 后即可导入。" +
-            "\nChrome 127 及以上：关闭了也无法导入，Cookie 加密 key 与 Chrome 进程绑定，第三方程序解不开。（Chrome 127+：即使关闭 Chrome，v20 Cookie 的 App-Bound 加密也绑定 Chrome 进程身份，第三方程序无法通过 DPAPI 解密 key，导入必然失败）"
-        }
-        return profileImportFailure(errMsg, options)
+        return profileImportFailure(sanitizeProfileImportError(error), options)
       }
     }
   )
@@ -289,4 +350,66 @@ export function registerBrowserHandlers(
   )
 
   return browserService
+}
+
+async function importWindowsCookieData(
+  window: BrowserWindow,
+  browserService: BrowserService
+): Promise<BrowserProfileImportResult> {
+  const registration = await ensureCmbChromeNativeHostRegistration()
+  if (!registration.nativeHostRegistered) {
+    return {
+      ...extensionImportFailure(
+        registration.error || "CmbCoworkAgent Chrome 扩展尚未配置",
+        "native_host_not_registered"
+      ),
+      extensionId: registration.extensionId,
+      extensionPath: registration.extensionPath
+    }
+  }
+
+  const confirmation = await dialog.showMessageBox(window, {
+    type: "question",
+    title: "导入 Chrome Cookie",
+    message: "从当前 Chrome Profile 导入全部网站 Cookie？",
+    detail:
+      "Cookie 将由 CmbCoworkAgent Chrome 扩展读取，不会读取 Chrome 的 Cookies 文件。请确认你已在扩展中授予网站访问权限。",
+    buttons: ["取消", "导入"],
+    defaultId: 1,
+    cancelId: 0
+  })
+  if (confirmation.response !== 1) {
+    return { ...extensionImportFailure("用户取消导入", undefined), cancelled: true }
+  }
+
+  try {
+    const exported = await cookieBridgeServer.exportCookies()
+    const imported = sanitizeExtensionCookieExport(exported.cookies)
+    const counts = await browserService.importProfileData(imported.data)
+    const skippedCookies =
+      exported.skippedCookies + imported.skippedCookies + counts.skippedCookies
+    return {
+      success: true,
+      sourceBrowser: "chrome",
+      importMethod: "extension",
+      importedCookies: counts.importedCookies,
+      importedLocalStorage: 0,
+      skippedCookies,
+      skippedLocalStorage: 0,
+      skippedWebsites: counts.skippedWebsites,
+      warning:
+        counts.importedCookies === 0
+          ? "Chrome 扩展没有返回可导入 Cookie，请确认已授权网站访问权限"
+          : skippedCookies > 0
+            ? "部分 Cookie 因分区、格式或内置浏览器限制被跳过"
+            : undefined
+    }
+  } catch (error) {
+    const code = error instanceof BrowserCookieBridgeError ? error.code : "export_failed"
+    return {
+      ...extensionImportFailure(error instanceof Error ? error.message : String(error), code),
+      extensionId: registration.extensionId,
+      extensionPath: registration.extensionPath
+    }
+  }
 }

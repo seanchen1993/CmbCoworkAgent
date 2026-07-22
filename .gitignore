@@ -44,3 +44,5 @@ EnsoAI-main/
 output/
 .playwright-cli/
 git.md
+
+chrome-extension/

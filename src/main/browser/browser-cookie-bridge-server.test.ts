@@ -1,0 +1,126 @@
+import { connect, type Socket } from "net"
+import { join } from "path"
+import { tmpdir } from "os"
+import { randomUUID } from "crypto"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import {
+  CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
+  CMB_CHROME_EXTENSION_ORIGIN
+} from "../../shared/browser-cookie-bridge"
+import { BrowserCookieBridgeServer } from "./browser-cookie-bridge-server"
+import { encodeNativeMessage, NativeMessageDecoder } from "./native-messaging-framing"
+
+const servers: BrowserCookieBridgeServer[] = []
+const sockets: Socket[] = []
+
+afterEach(() => {
+  for (const socket of sockets.splice(0)) socket.destroy()
+  for (const server of servers.splice(0)) server.stop()
+})
+
+function waitForMessage(
+  socket: Socket,
+  decoder: NativeMessageDecoder
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const onData = (chunk: Buffer): void => {
+      try {
+        const messages = decoder.push(chunk)
+        if (messages.length === 0) return
+        cleanup()
+        resolve(messages[0] as Record<string, unknown>)
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
+    }
+    const onError = (error: Error): void => {
+      cleanup()
+      reject(error)
+    }
+    const cleanup = (): void => {
+      socket.off("data", onData)
+      socket.off("error", onError)
+    }
+    socket.on("data", onData)
+    socket.on("error", onError)
+  })
+}
+
+describe("browser cookie bridge server", () => {
+  it("authenticates a native host and completes a chunked cookie export", async () => {
+    const pipePath = join(tmpdir(), `cmb-cookie-bridge-test-${randomUUID()}.sock`)
+    const secret = "test-secret"
+    const server = new BrowserCookieBridgeServer(pipePath, secret)
+    servers.push(server)
+    await server.start()
+
+    const socket = connect(pipePath)
+    sockets.push(socket)
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve)
+      socket.once("error", reject)
+    })
+    socket.write(
+      encodeNativeMessage({
+        origin: CMB_CHROME_EXTENSION_ORIGIN,
+        protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
+        secret,
+        type: "native-host-hello"
+      })
+    )
+    socket.write(
+      encodeNativeMessage({
+        extensionVersion: "0.1.0",
+        profileInstanceId: "profile-test",
+        protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
+        type: "extension-ready"
+      })
+    )
+
+    await vi.waitFor(() => expect(server.connected).toBe(true))
+    const decoder = new NativeMessageDecoder()
+    const exportPromise = server.exportCookies(2_000)
+    const request = await waitForMessage(socket, decoder)
+    expect(request.type).toBe("export-cookies")
+    const requestId = String(request.requestId)
+
+    socket.write(
+      encodeNativeMessage({ type: "cookie-export-begin", requestId, skipped: 2, total: 1 })
+    )
+    socket.write(
+      encodeNativeMessage({
+        type: "cookie-export-chunk",
+        requestId,
+        index: 0,
+        cookies: [
+          {
+            domain: ".example.com",
+            httpOnly: true,
+            name: "sid",
+            path: "/",
+            secure: true,
+            value: "secret"
+          }
+        ]
+      })
+    )
+    socket.write(
+      encodeNativeMessage({ type: "cookie-export-complete", requestId, skipped: 2, total: 1 })
+    )
+
+    await expect(exportPromise).resolves.toEqual({
+      cookies: [
+        {
+          domain: ".example.com",
+          httpOnly: true,
+          name: "sid",
+          path: "/",
+          secure: true,
+          value: "secret"
+        }
+      ],
+      skippedCookies: 2
+    })
+  })
+})

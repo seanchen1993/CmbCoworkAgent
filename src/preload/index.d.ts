@@ -108,6 +108,7 @@ import type {
   BrowserScreenshotResult,
   BrowserState
 } from "../shared/browser-types"
+import type { BrowserCookieBridgeStatus } from "../shared/browser-cookie-bridge"
 import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent
@@ -1582,6 +1583,8 @@ interface CustomAPI {
     importProfileData: (
       options: BrowserProfileImportOptions
     ) => Promise<BrowserProfileImportResult>
+    getCookieBridgeStatus: () => Promise<BrowserCookieBridgeStatus>
+    openCookieBridgeSetup: () => Promise<{ error?: string; extensionPath: string; success: boolean }>
     importChromeSession: (
       sessionId: string,
       options?: { threadId?: string; workspacePath?: string | null }
