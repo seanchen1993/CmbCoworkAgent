@@ -1373,7 +1373,7 @@ interface CustomAPI {
       error?: string
     }>
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string }) => void
+      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
     ) => () => void
   }
   pet: {

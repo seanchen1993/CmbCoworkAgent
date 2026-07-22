@@ -826,8 +826,9 @@ export function GitPanelView({
         return
       }
       if (refreshTimer) clearTimeout(refreshTimer)
+      const isMetaChange = data.changeType === "meta"
       refreshTimer = setTimeout(() => {
-        void refresh({ meta: false, diff: true })
+        void refresh({ meta: isMetaChange, diff: true })
       }, 120)
     })
     return () => {
