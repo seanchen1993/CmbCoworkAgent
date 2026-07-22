@@ -2039,12 +2039,6 @@ const api = {
       ipcRenderer.invoke("browser:importProfileData", options) as Promise<BrowserProfileImportResult>,
     getCookieBridgeStatus: (): Promise<BrowserCookieBridgeStatus> =>
       ipcRenderer.invoke("browser:getCookieBridgeStatus") as Promise<BrowserCookieBridgeStatus>,
-    openCookieBridgeSetup: (): Promise<{ error?: string; extensionPath: string; success: boolean }> =>
-      ipcRenderer.invoke("browser:openCookieBridgeSetup") as Promise<{
-        error?: string
-        extensionPath: string
-        success: boolean
-      }>,
     importChromeSession: (
       sessionId: string,
       options?: { threadId?: string; workspacePath?: string | null }

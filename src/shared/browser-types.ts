@@ -167,7 +167,6 @@ export interface BrowserProfileImportResult {
   error?: string
   errorCode?: import("./browser-cookie-bridge").BrowserCookieBridgeErrorCode
   extensionId?: string
-  extensionPath?: string
   importMethod?: "extension" | "profile"
   importedCookies: number
   importedLocalStorage: number

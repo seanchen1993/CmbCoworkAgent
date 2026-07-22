@@ -1584,7 +1584,6 @@ interface CustomAPI {
       options: BrowserProfileImportOptions
     ) => Promise<BrowserProfileImportResult>
     getCookieBridgeStatus: () => Promise<BrowserCookieBridgeStatus>
-    openCookieBridgeSetup: () => Promise<{ error?: string; extensionPath: string; success: boolean }>
     importChromeSession: (
       sessionId: string,
       options?: { threadId?: string; workspacePath?: string | null }

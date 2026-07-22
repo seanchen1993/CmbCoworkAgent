@@ -17,8 +17,7 @@ import {
 } from "../browser/browser-cookie-bridge-server"
 import {
   ensureCmbChromeNativeHostRegistration,
-  getCmbChromeNativeHostRegistrationStatus,
-  openCmbChromeExtensionSetup
+  getCmbChromeNativeHostRegistrationStatus
 } from "../browser/browser-native-host-installer"
 import { getEnabledBrowserPluginRuntime } from "../browser/browser-plugin"
 import { setGlobalBrowserService } from "../browser/browser-service-registry"
@@ -161,14 +160,6 @@ export function registerBrowserHandlers(
       connected: cookieBridgeServer.connected,
       profileInstanceId: cookieBridgeServer.profileInstanceId
     }
-  })
-
-  ipcMain.handle("browser:openCookieBridgeSetup", async (event) => {
-    const window = getMainWindow()
-    if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
-      return { success: false, error: "拒绝来自未知窗口的浏览器扩展安装请求", extensionPath: "" }
-    }
-    return openCmbChromeExtensionSetup()
   })
 
   ipcMain.handle(
@@ -360,11 +351,10 @@ async function importWindowsCookieData(
   if (!registration.nativeHostRegistered) {
     return {
       ...extensionImportFailure(
-        registration.error || "CmbCoworkAgent Chrome 扩展尚未配置",
+        registration.error || "Chrome Native Messaging Host 尚未注册",
         "native_host_not_registered"
       ),
-      extensionId: registration.extensionId,
-      extensionPath: registration.extensionPath
+      extensionId: registration.extensionId
     }
   }
 
@@ -408,8 +398,7 @@ async function importWindowsCookieData(
     const code = error instanceof BrowserCookieBridgeError ? error.code : "export_failed"
     return {
       ...extensionImportFailure(error instanceof Error ? error.message : String(error), code),
-      extensionId: registration.extensionId,
-      extensionPath: registration.extensionPath
+      extensionId: registration.extensionId
     }
   }
 }

@@ -549,13 +549,13 @@ export function BrowserPanel({
         setBrowserProfileImportSkippedWebsites([])
         if (result.cancelled) return
         if (result.errorCode === "native_host_not_registered") {
-          void window.api.browser.openCookieBridgeSetup()
-          toast.error(result.error || "尚未配置 CmbCoworkAgent Chrome 扩展，请先安装并启用扩展", {
+          toast.error(result.error || "Chrome Native Messaging Host 尚未注册，请重启应用", {
             duration: 15_000
           })
         } else if (result.errorCode === "extension_not_connected") {
-          void window.api.browser.openCookieBridgeSetup()
-          toast.error("Chrome 扩展未连接，请打开 Chrome 后重试", { duration: 15_000 })
+          toast.error("Chrome 扩展未连接，请确认扩展已安装并启用，且 Chrome 正在运行", {
+            duration: 15_000
+          })
         } else if (result.errorCode === "permission_required") {
           toast.error("请在 CmbCoworkAgent Chrome 扩展中授权网站 Cookie 访问", {
             duration: 15_000

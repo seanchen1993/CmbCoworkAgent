@@ -109,7 +109,6 @@ export interface BrowserCookieBridgeStatus {
   connected: boolean
   error?: string
   extensionId: string
-  extensionPath?: string
   nativeHostRegistered: boolean
   platformSupported: boolean
   profileInstanceId?: string
