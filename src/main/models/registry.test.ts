@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   storedDefault: "",
   sourceBaseUrl: "https://updates.example.com",
   localApiKey: "local-test-key",
+  bundledApiKey: "bundled-test-key",
   fetchGate: null as Promise<void> | null
 }))
 
@@ -30,7 +31,9 @@ vi.mock("../storage", () => ({
   MAX_TOP_K: 1_000,
   DEFAULT_THINKING_EFFORT: "high",
   getBuiltinModelOverrides: () => state.overrides,
-  getBuiltinModelApiKey: () => state.localApiKey || undefined,
+  getBuiltinModelApiKey: (options?: { allowBundledFallback?: boolean }) =>
+    state.localApiKey ||
+    (options?.allowBundledFallback === false ? undefined : state.bundledApiKey || undefined),
   setBuiltinModelOverride: (id: string, value: Record<string, unknown>) => {
     state.overrides[id] = value
   },
@@ -77,6 +80,7 @@ beforeEach(() => {
   state.storedDefault = ""
   state.sourceBaseUrl = "https://updates.example.com"
   state.localApiKey = "local-test-key"
+  state.bundledApiKey = "bundled-test-key"
   state.fetchGate = null
   vi.restoreAllMocks()
 })
@@ -153,10 +157,24 @@ describe("builtin model registry", () => {
 
   it("does not invent a credential when neither local nor remote key is configured", async () => {
     state.localApiKey = ""
+    state.bundledApiKey = ""
     await refreshBuiltinModelCatalog(true)
 
     expect(getBuiltinModelConfigs().every((config) => config.apiKey === undefined)).toBe(true)
     expect(getBuiltinModelPublicConfigs().every((config) => config.hasApiKey === false)).toBe(true)
+  })
+
+  it("injects the bundled fallback credential into MiniMax only", async () => {
+    state.localApiKey = ""
+    await refreshBuiltinModelCatalog(true)
+
+    const configs = getBuiltinModelConfigs()
+    expect(configs.find((config) => config.model === "minimax-m2p5-229b-w8a8")?.apiKey).toBe(
+      "bundled-test-key"
+    )
+    expect(
+      configs.find((config) => config.model === "deepseek-v4-flash-284b-a13b-w8a8")?.apiKey
+    ).toBeUndefined()
   })
 
   it("uses remote values when provided and keeps credentials out of public config", async () => {
