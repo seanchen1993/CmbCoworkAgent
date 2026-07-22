@@ -1,6 +1,6 @@
 import { execFile } from "child_process"
 import { createDecipheriv, createHash, pbkdf2Sync } from "crypto"
-import { access, copyFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from "fs/promises"
+import { access, copyFile, mkdtemp, readFile, readdir, rm, stat } from "fs/promises"
 import { homedir, tmpdir } from "os"
 import { join, resolve } from "path"
 import { promisify } from "util"
@@ -450,112 +450,6 @@ function sqliteRows(result: { columns: string[]; values: SqlValue[][] } | undefi
   })
 }
 
-async function readLockedFileWindows(filePath: string, timeoutMs: number): Promise<Buffer> {
-  const escaped = filePath.replace(/'/g, "''")
-  const lastErrors: string[] = []
-
-  // Strategy A: PowerShell with three FileShare modes
-  const sharingModes: [string, string][] = [
-    ["ReadWrite", "ReadWrite"],
-    ["Read", "Read"],
-    ["ReadWrite_Delete", "ReadWrite, Delete"]
-  ]
-  for (const [label, sharing] of sharingModes) {
-    const script = `
-$ErrorActionPreference = 'Stop'
-$fs = [System.IO.File]::Open(
-  '${escaped}',
-  [System.IO.FileMode]::Open,
-  [System.IO.FileAccess]::Read,
-  [System.IO.FileShare]::${sharing}
-)
-try {
-  $ms = New-Object System.IO.MemoryStream
-  $fs.CopyTo($ms)
-  [Convert]::ToBase64String($ms.ToArray())
-} finally {
-  $fs.Dispose()
-  if ($ms) { $ms.Dispose() }
-}
-`
-    for (const binary of ["powershell.exe", "pwsh.exe"]) {
-      try {
-        const { stdout, stderr } = await execFileAsync(
-          binary,
-          ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-          { encoding: "utf8", timeout: timeoutMs, windowsHide: true }
-        )
-        const b64 = stdout.trim().split(/\r?\n/).filter(Boolean).pop()
-        if (b64) return Buffer.from(b64, "base64")
-        if (stderr) lastErrors.push(`PS ${label} (${binary}): ${stderr.trim()}`)
-      } catch (err) {
-        lastErrors.push(`PS ${label} (${binary}): ${formatError(err)}`)
-      }
-    }
-  }
-
-  // Strategy B: cmd copy (uses CopyFileEx, different API path than Node.js fs)
-  try {
-    const tempDir = await mkdtemp(join(tmpdir(), "cmb-browser-copy-"))
-    const destFile = join(tempDir, "Cookies")
-    try {
-      await execFileAsync(
-        "cmd.exe",
-        ["/c", "copy", "/y", "/b", filePath, destFile],
-        { encoding: "utf8", timeout: timeoutMs, windowsHide: true }
-      )
-      const content = await readFile(destFile)
-      if (content.length > 0) return content
-      lastErrors.push("cmd copy: copied file is empty")
-    } finally {
-      await rm(tempDir, { recursive: true, force: true }).catch(() => {})
-    }
-  } catch (err) {
-    lastErrors.push(`cmd copy: ${formatError(err)}`)
-  }
-
-  throw new Error(
-    `无法读取被 Chrome 锁定的 Cookies 文件:\n${lastErrors.join("\n")}`
-  )
-}
-
-async function copyCookieStore(
-  src: string,
-  dest: string,
-  options: BrowserProfileImportReadOptions
-): Promise<void> {
-  try {
-    await copyFile(src, dest)
-    return
-  } catch (err) {
-    if (!isBusyError(err)) throw err
-  }
-
-  // Strategy 2: readFile + writeFile (works on macOS, may fail on Windows if Chrome locks tightly)
-  try {
-    const content = await readFile(src)
-    await writeFile(dest, content)
-    return
-  } catch (err) {
-    if (!isBusyError(err)) throw err
-  }
-
-  // Strategy 3: PowerShell with FileShare.ReadWrite (bypasses Windows file lock)
-  const platform = options.platform ?? process.platform
-  if (platform === "win32") {
-    const content = await readLockedFileWindows(src, options.timeoutMs ?? DEFAULT_DECRYPTION_TIMEOUT_MS)
-    await writeFile(dest, content)
-    return
-  }
-
-  throw new Error(`无法读取 Cookies 文件：${formatError(new Error("EBUSY"))}`)
-}
-
-function isBusyError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException)?.code
-  return code === "EBUSY" || code === "EPERM" || code === "EACCES"
-}
-
 async function readChromeCookies(
   cookieStorePath: string,
   localState: Record<string, unknown> | null,
@@ -564,7 +458,7 @@ async function readChromeCookies(
   const tempDirectory = await mkdtemp(join(tmpdir(), "cmb-browser-profile-import-"))
   try {
     const copiedStorePath = join(tempDirectory, "Cookies")
-    await copyCookieStore(cookieStorePath, copiedStorePath, options)
+    await copyFile(cookieStorePath, copiedStorePath)
     const databaseBytes = await readFile(copiedStorePath)
     const SQL = await loadSqlJs()
     const database = new SQL.Database(databaseBytes)

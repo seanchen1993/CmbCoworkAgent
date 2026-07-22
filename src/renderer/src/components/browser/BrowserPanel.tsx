@@ -547,7 +547,7 @@ export function BrowserPanel({
       })
       if (!result.success) {
         setBrowserProfileImportSkippedWebsites([])
-        toast.error(result.error || "浏览器数据导入失败")
+        toast.error(result.error || "浏览器数据导入失败", { duration: 15_000 })
         return
       }
 
@@ -571,7 +571,7 @@ export function BrowserPanel({
       }
     } catch (error) {
       console.error(`[BrowserPanel] Browser profile import failed: ${formatError(error)}`)
-      toast.error("浏览器数据导入失败")
+      toast.error("浏览器数据导入失败", { duration: 15_000 })
     } finally {
       setIsImportingBrowserProfile(false)
     }

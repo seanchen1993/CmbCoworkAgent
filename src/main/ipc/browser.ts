@@ -208,7 +208,14 @@ export function registerBrowserHandlers(
                 : undefined
         }
       } catch (error) {
-        return profileImportFailure(sanitizeProfileImportError(error), options)
+        let errMsg = sanitizeProfileImportError(error)
+        if (process.platform === "win32") {
+          errMsg +=
+            "\n\nWindows须知：" +
+            "\nChrome 127 以下：关闭 Chrome 后即可导入。" +
+            "\nChrome 127 及以上：关闭了也无法导入，Cookie 加密 key 与 Chrome 进程绑定，第三方程序解不开。（Chrome 127+：即使关闭 Chrome，v20 Cookie 的 App-Bound 加密也绑定 Chrome 进程身份，第三方程序无法通过 DPAPI 解密 key，导入必然失败）"
+        }
+        return profileImportFailure(errMsg, options)
       }
     }
   )
