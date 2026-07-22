@@ -80,6 +80,7 @@ export default defineConfig({
       lib: {
         entry: {
           index: "src/main/index.ts",
+          "browser-native-host": "src/main/browser/browser-native-host-entry.ts",
           "pty-host": "src/main/pty-host.ts",
           "code-exec-helper": "src/main/code-exec/helper-entry.ts"
         },

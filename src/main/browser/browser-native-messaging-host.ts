@@ -13,6 +13,7 @@ import {
 import { encodeNativeMessage, NativeMessageDecoder } from "./native-messaging-framing"
 
 const RECONNECT_DELAY_MS = 2_000
+export const CMB_BROWSER_NATIVE_HOST_FLAG = "--cmb-browser-native-host"
 
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -26,7 +27,15 @@ export function getNativeMessagingOrigin(args: string[] = process.argv): string 
 }
 
 export function isBrowserNativeMessagingHostLaunch(args: string[] = process.argv): boolean {
+  // Older registrations launched the Electron executable directly and only supplied the
+  // Chrome origin. Keep accepting those launches while upgrades replace the manifest.
   return getNativeMessagingOrigin(args) !== null
+}
+
+export function isDedicatedBrowserNativeMessagingHostLaunch(
+  args: string[] = process.argv
+): boolean {
+  return args.includes(CMB_BROWSER_NATIVE_HOST_FLAG) && getNativeMessagingOrigin(args) !== null
 }
 
 function writeChromeMessage(message: unknown): void {
