@@ -538,22 +538,14 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                 <label className="flex items-center gap-1 text-sm font-medium text-foreground">
                   <span>项目编号</span>
                 </label>
-                <Input
-                  value={projectNumber}
-                  readOnly
-                  className="bg-muted/50"
-                />
+                <Input value={projectNumber} readOnly className="bg-muted/50" />
               </div>
 
               <div className="space-y-2">
                 <label className="flex items-center gap-1 text-sm font-medium text-foreground">
                   <span>精益平台token</span>
                 </label>
-                <Input
-                  value={leanToken}
-                  readOnly
-                  className="bg-muted/50"
-                />
+                <Input value={leanToken} readOnly className="bg-muted/50" />
               </div>
             </div>
 
@@ -588,206 +580,271 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
                         <div className="space-y-2">
                           <label className="flex items-center gap-2 text-sm font-medium text-foreground">
                             <span>
-                              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">Step1</span>
-                            {" 发布单元"}
-                          </span>
-                          <span className="text-destructive">*</span>
-                          <span className="text-xs font-normal text-muted-foreground">Enter查询</span>
-                        </label>
-                        <Popover
-                          modal={false}
-                          open={deployUnitPopoverOpen[index]}
-                          onOpenChange={(nextOpen) => {
-                            setDeployUnitPopoverOpen(prev => {
-                              const newOpen = [...prev]
-                              newOpen[index] = nextOpen
-                              return newOpen
-                            })
-                          }}
-                        >
-                          <PopoverAnchor asChild>
-                            <div className="relative">
-                              <Input
-                                value={row.deployUnit ? (row.deployUnitName ? `${row.deployUnitName} (${row.deployUnit})` : row.deployUnit) : row.deployUnitSearch}
-                                onChange={(e) => {
-                                  if (row.deployUnit) {
-                                    handleDeployUnitClear(index)
-                                  }
-                                  handleDeployUnitSearchChange(index, e.target.value)
-                                }}
-                                onKeyDown={(e) => handleDeployUnitSearchKeyDown(index, e)}
-                                placeholder="请输入关键字"
-                                disabled={submitting}
-                                className={row.deployUnit ? "pr-7" : ""}
-                              />
-                              {row.deployUnit && !submitting && (
-                                <button
-                                  type="button"
-                                  aria-label="清除发布单元"
-                                  className="absolute right-1.5 top-1/2 -translate-y-1/2 inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-                                  onMouseDown={(e) => {
-                                    e.preventDefault()
-                                    handleDeployUnitClear(index)
-                                  }}
-                                >
-                                  <X className="h-3.5 w-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          </PopoverAnchor>
-                          <PopoverContent
-                            align="start"
-                            sideOffset={4}
-                            className="z-[70] w-[var(--radix-popover-trigger-width)] p-1"
+                              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">
+                                Step1
+                              </span>
+                              {" 发布单元"}
+                            </span>
+                            <span className="text-destructive">*</span>
+                            <span className="text-xs font-normal text-muted-foreground">
+                              Enter查询
+                            </span>
+                          </label>
+                          <Popover
+                            modal={false}
+                            open={deployUnitPopoverOpen[index]}
+                            onOpenChange={(nextOpen) => {
+                              setDeployUnitPopoverOpen((prev) => {
+                                const newOpen = [...prev]
+                                newOpen[index] = nextOpen
+                                return newOpen
+                              })
+                            }}
                           >
-                            <div className="max-h-72 overflow-hidden text-sm">
-                              {row.deployUnitSearch.length < DEPLOY_UNIT_SEARCH_MIN_CHARS ? (
-                                <div className="px-3 py-2 text-xs text-muted-foreground">
-                                  输入至少 {DEPLOY_UNIT_SEARCH_MIN_CHARS} 个字符后Enter查询
-                                </div>
-                              ) : loadingDeployUnits[index] ? (
-                                <div className="flex items-center gap-2 px-3 py-2">
+                            <PopoverAnchor asChild>
+                              <div className="relative">
+                                <Input
+                                  value={
+                                    row.deployUnit
+                                      ? row.deployUnitName
+                                        ? `${row.deployUnitName} (${row.deployUnit})`
+                                        : row.deployUnit
+                                      : row.deployUnitSearch
+                                  }
+                                  onChange={(e) => {
+                                    if (row.deployUnit) {
+                                      handleDeployUnitClear(index)
+                                    }
+                                    handleDeployUnitSearchChange(index, e.target.value)
+                                  }}
+                                  onKeyDown={(e) => handleDeployUnitSearchKeyDown(index, e)}
+                                  placeholder="请输入关键字"
+                                  disabled={submitting}
+                                  className={row.deployUnit ? "pr-7" : ""}
+                                />
+                                {row.deployUnit && !submitting && (
+                                  <button
+                                    type="button"
+                                    aria-label="清除发布单元"
+                                    className="absolute right-1.5 top-1/2 -translate-y-1/2 inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                                    onMouseDown={(e) => {
+                                      e.preventDefault()
+                                      handleDeployUnitClear(index)
+                                    }}
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </PopoverAnchor>
+                            <PopoverContent
+                              align="start"
+                              sideOffset={4}
+                              className="z-[70] w-[var(--radix-popover-trigger-width)] p-1"
+                            >
+                              <div className="max-h-72 overflow-hidden text-sm">
+                                {row.deployUnitSearch.length < DEPLOY_UNIT_SEARCH_MIN_CHARS ? (
+                                  <div className="px-3 py-2 text-xs text-muted-foreground">
+                                    输入至少 {DEPLOY_UNIT_SEARCH_MIN_CHARS} 个字符后Enter查询
+                                  </div>
+                                ) : loadingDeployUnits[index] ? (
+                                  <div className="flex items-center gap-2 px-3 py-2">
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    <span className="text-xs">加载中...</span>
+                                  </div>
+                                ) : deployUnitErrors[index] ? (
+                                  <div className="px-3 py-2 text-xs text-destructive">
+                                    {deployUnitErrors[index]}
+                                  </div>
+                                ) : deployUnits[index]?.length === 0 ? (
+                                  <div className="px-3 py-2 text-xs text-muted-foreground">
+                                    未找到匹配的发布单元
+                                  </div>
+                                ) : (
+                                  deployUnits[index]?.map((unit) => (
+                                    <button
+                                      key={unit.deployUnit}
+                                      type="button"
+                                      className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground"
+                                      onClick={() => handleDeployUnitSelect(index, unit)}
+                                    >
+                                      {unit.deployUnitName
+                                        ? `${unit.deployUnitName} (${unit.deployUnit})`
+                                        : unit.deployUnit}
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="flex items-center gap-1 text-sm font-medium text-foreground">
+                            <span>
+                              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">
+                                Step2
+                              </span>
+                              {" 流水线"}
+                            </span>
+                            <span className="text-destructive">*</span>
+                          </label>
+                          <Select
+                            value={row.pipeline}
+                            onValueChange={(value) => handlePipelineSelect(index, value)}
+                            disabled={submitting || !row.deployUnit}
+                          >
+                            <SelectTrigger className="h-9">
+                              <SelectValue placeholder="请选择流水线" />
+                            </SelectTrigger>
+                            <SelectContent className="z-[70]">
+                              {loadingPipelines[index] ? (
+                                <div className="flex items-center gap-2 px-2 py-3">
                                   <Loader2 className="h-4 w-4 animate-spin" />
-                                  <span className="text-xs">加载中...</span>
+                                  <span className="text-sm">加载中...</span>
                                 </div>
-                              ) : deployUnitErrors[index] ? (
-                                <div className="px-3 py-2 text-xs text-destructive">
-                                  {deployUnitErrors[index]}
-                                </div>
-                              ) : deployUnits[index]?.length === 0 ? (
-                                <div className="px-3 py-2 text-xs text-muted-foreground">
-                                  未找到匹配的发布单元
+                              ) : pipelines[index]?.length === 0 ? (
+                                <div className="px-2 py-3 text-sm text-muted-foreground">
+                                  请先选择发布单元
                                 </div>
                               ) : (
-                                deployUnits[index]?.map((unit) => (
-                                  <button
-                                    key={unit.deployUnit}
-                                    type="button"
-                                    className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground"
-                                    onClick={() => handleDeployUnitSelect(index, unit)}
-                                  >
-                                    {unit.deployUnitName ? `${unit.deployUnitName} (${unit.deployUnit})` : unit.deployUnit}
-                                  </button>
+                                pipelines[index]?.map((p) => (
+                                  <SelectItem key={p.pipeline} value={p.pipeline}>
+                                    {p.pipelineAlias} ({p.pipeline})
+                                  </SelectItem>
                                 ))
                               )}
-                            </div>
-                          </PopoverContent>
-                        </Popover>
+                            </SelectContent>
+                          </Select>
+                        </div>
                       </div>
+                      {/* Row 2: Step3 + Step4 */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="space-y-2">
+                          <label className="flex items-center gap-1 text-sm font-medium text-foreground">
+                            <span>
+                              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">
+                                Step3
+                              </span>
+                              {" 基础Label"}
+                            </span>
+                            <span className="text-destructive">*</span>
+                          </label>
+                          <Select
+                            value={row.baseLabel}
+                            onValueChange={(value) => handleBaseLabelSelect(index, value)}
+                            disabled={submitting || !row.pipeline}
+                          >
+                            <SelectTrigger className="h-12 text-left">
+                              <SelectValue placeholder="请选择基础Label" />
+                            </SelectTrigger>
+                            <SelectContent className="z-[70]">
+                              {loadingLabels[index] ? (
+                                <div className="flex items-center gap-2 px-2 py-3">
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                  <span className="text-sm">加载中...</span>
+                                </div>
+                              ) : labels[index]?.length === 0 ? (
+                                <div className="px-2 py-3 text-sm text-muted-foreground">
+                                  请先选择流水线
+                                </div>
+                              ) : (
+                                labels[index]?.map((label) => {
+                                  const isSuccess = label.status === "SUCCESS"
+                                  const statusText = isSuccess ? "成功" : label.status
+                                  const tagColor = isSuccess
+                                    ? "bg-emerald-500/15 text-emerald-600 border-emerald-500/30"
+                                    : "bg-muted text-muted-foreground border-border"
+                                  return (
+                                    <SelectItem
+                                      key={label.label}
+                                      value={label.label}
+                                      itemText={label.label}
+                                      className="focus:bg-accent/10 focus:text-black [&>span]:flex-1 [&>span]:min-w-0"
+                                    >
+                                      <div>
+                                        <div>{label.label}</div>
+                                        <div className="flex items-center justify-between mt-0.5 gap-3">
+                                          <span className="text-xs text- truncate">
+                                            {label.triggerUser}（{label.startDate}）
+                                          </span>
+                                          <span
+                                            className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[10px] font-semibold shrink-0 ${tagColor}`}
+                                          >
+                                            {statusText}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </SelectItem>
+                                  )
+                                })
+                              )}
+                            </SelectContent>
+                          </Select>
+                        </div>
 
-                      <div className="space-y-2">
-                        <label className="flex items-center gap-1 text-sm font-medium text-foreground">
-                          <span>
-                            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">Step2</span>
-                            {" 流水线"}
-                          </span>
-                          <span className="text-destructive">*</span>
-                        </label>
-                        <Select
-                          value={row.pipeline}
-                          onValueChange={(value) => handlePipelineSelect(index, value)}
-                          disabled={submitting || !row.deployUnit}
-                        >
-                          <SelectTrigger className="h-9">
-                            <SelectValue placeholder="请选择流水线" />
-                          </SelectTrigger>
-                          <SelectContent className="z-[70]">
-                            {loadingPipelines[index] ? (
-                              <div className="flex items-center gap-2 px-2 py-3">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                <span className="text-sm">加载中...</span>
-                              </div>
-                            ) : pipelines[index]?.length === 0 ? (
-                              <div className="px-2 py-3 text-sm text-muted-foreground">
-                                请先选择发布单元
-                              </div>
-                            ) : (
-                              pipelines[index]?.map((p) => (
-                                <SelectItem key={p.pipeline} value={p.pipeline}>
-                                  {p.pipelineAlias} ({p.pipeline})
-                                </SelectItem>
-                              ))
-                            )}
-                          </SelectContent>
-                        </Select>
+                        <div className="space-y-2">
+                          <label className="flex items-center gap-1 text-sm font-medium text-foreground">
+                            <span>
+                              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">
+                                Step4
+                              </span>
+                              {" 目标Label"}
+                            </span>
+                            <span className="text-destructive">*</span>
+                          </label>
+                          <Select
+                            value={row.targetLabel}
+                            onValueChange={(value) => handleTargetLabelSelect(index, value)}
+                            disabled={submitting || !row.pipeline}
+                          >
+                            <SelectTrigger className="h-12 text-left">
+                              <SelectValue placeholder="请选择目标Label" />
+                            </SelectTrigger>
+                            <SelectContent className="z-[70]">
+                              {loadingLabels[index] ? (
+                                <div className="flex items-center gap-2 px-2 py-3">
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                  <span className="text-sm">加载中...</span>
+                                </div>
+                              ) : labels[index]?.length === 0 ? (
+                                <div className="px-2 py-3 text-sm text-muted-foreground">
+                                  请先选择流水线
+                                </div>
+                              ) : (
+                                labels[index]?.map((label) => {
+                                  const isSuccess = label.status === "SUCCESS"
+                                  const statusText = isSuccess ? "成功" : label.status
+                                  const tagColor = isSuccess
+                                    ? "bg-emerald-500/15 text-emerald-600 border-emerald-500/30"
+                                    : "bg-muted text-muted-foreground border-border"
+                                  return (
+                                    <SelectItem
+                                      key={label.label}
+                                      value={label.label}
+                                      className="focus:bg-accent/10 focus:text-black [&>span]:flex-1 [&>span]:min-w-0"
+                                    >
+                                      <div>
+                                        <div>{label.label}</div>
+                                        <div className="flex items-center justify-between mt-0.5 gap-3">
+                                          <span className="text-xs text-black truncate">
+                                            {label.triggerUser}（{label.startDate}）
+                                          </span>
+                                          <span
+                                            className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[10px] font-semibold shrink-0 ${tagColor}`}
+                                          >
+                                            {statusText}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </SelectItem>
+                                  )
+                                })
+                              )}
+                            </SelectContent>
+                          </Select>
+                        </div>
                       </div>
-                    </div>
-                    {/* Row 2: Step3 + Step4 */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div className="space-y-2">
-                        <label className="flex items-center gap-1 text-sm font-medium text-foreground">
-                          <span>
-                            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">Step3</span>
-                            {" 基础Label"}
-                          </span>
-                          <span className="text-destructive">*</span>
-                        </label>
-                        <Select
-                          value={row.baseLabel}
-                          onValueChange={(value) => handleBaseLabelSelect(index, value)}
-                          disabled={submitting || !row.pipeline}
-                        >
-                          <SelectTrigger className="h-9">
-                            <SelectValue placeholder="请选择基础Label" />
-                          </SelectTrigger>
-                          <SelectContent className="z-[70]">
-                            {loadingLabels[index] ? (
-                              <div className="flex items-center gap-2 px-2 py-3">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                <span className="text-sm">加载中...</span>
-                              </div>
-                            ) : labels[index]?.length === 0 ? (
-                              <div className="px-2 py-3 text-sm text-muted-foreground">
-                                请先选择流水线
-                              </div>
-                            ) : (
-                              labels[index]?.map((label) => (
-                                <SelectItem key={label.label} value={label.label}>
-                                  {label.label}
-                                </SelectItem>
-                              ))
-                            )}
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <div className="space-y-2">
-                        <label className="flex items-center gap-1 text-sm font-medium text-foreground">
-                          <span>
-                            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-primary/10 px-1.5 text-[11px] font-semibold text-primary">Step4</span>
-                            {" 目标Label"}
-                          </span>
-                          <span className="text-destructive">*</span>
-                        </label>
-                        <Select
-                          value={row.targetLabel}
-                          onValueChange={(value) => handleTargetLabelSelect(index, value)}
-                          disabled={submitting || !row.pipeline}
-                        >
-                          <SelectTrigger className="h-9">
-                            <SelectValue placeholder="请选择目标Label" />
-                          </SelectTrigger>
-                          <SelectContent className="z-[70]">
-                            {loadingLabels[index] ? (
-                              <div className="flex items-center gap-2 px-2 py-3">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                <span className="text-sm">加载中...</span>
-                              </div>
-                            ) : labels[index]?.length === 0 ? (
-                              <div className="px-2 py-3 text-sm text-muted-foreground">
-                                请先选择流水线
-                              </div>
-                            ) : (
-                              labels[index]?.map((label) => (
-                                <SelectItem key={label.label} value={label.label}>
-                                  {label.label}
-                                </SelectItem>
-                              ))
-                            )}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
                     </div>
                   </div>
                 ))}
@@ -822,11 +879,7 @@ export function KnowledgeDialog({ open, onOpenChange, onSubmit, projectNumber, l
           >
             取消
           </Button>
-          <Button
-            type="button"
-            onClick={handleSubmit}
-            disabled={submitting}
-          >
+          <Button type="button" onClick={handleSubmit} disabled={submitting}>
             {submitting ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
