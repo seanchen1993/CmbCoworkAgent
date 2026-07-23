@@ -1177,6 +1177,12 @@ export function registerGitHandlers(): void {
       console.log("[IPC] Git命令执行成功:", command, "结果:", result)
 
       // Only emit adoption measurement once the commit actually succeeded.
+      //
+      // NOTE: unlike the git-panel / auto-commit paths, this path emits no
+      // git.commit.created of its own, so it must NOT call
+      // markInAppCommitProcessed — the hook/reconcile backstop is the intended
+      // reporter for commits made through this passthrough (the durable commit
+      // job created below is what lets the backstop pick them up).
       if (stagedCapture && stagedCapture.snapshots.length > 0) {
         try {
           const sha = extractCommitSha(result, stagedCapture.workingDir) ?? undefined
