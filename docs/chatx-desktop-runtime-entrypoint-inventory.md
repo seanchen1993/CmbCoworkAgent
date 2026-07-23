@@ -1,6 +1,6 @@
 # Desktop Runtime / Checkpoint 入口清单
 
-> 状态：PR-A 桌面零回归基线
+> 状态：PR-C 本地 Thread 运行租约已接入
 >
 > 对应规格：`docs/chatx-unified-bot-v1-implementation-spec.md` §11、§19、§21
 >
@@ -10,18 +10,18 @@
 
 ## 直接 Runtime 入口
 
-| 所有者               | 源文件 / 入口                                     | 直接调用数 | Runtime / Checkpoint `threadId`        | 当前所有权与清理                                                                                       | PR-B / PR-C 处理                                                                                        |
-| -------------------- | ------------------------------------------------- | ---------: | -------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| Desktop              | `agent:invoke`                                    |          0 | 当前桌面 Thread                        | `activeRuns`、replacement lock、run token、settled promise；3 个模型/failover 执行点均调用共享 factory | PR-B 已改走共享 factory；PR-C 在进入现有 replacement 逻辑前做 foreign-owner guard，不重写同来源 Replace |
-| Desktop              | `agent:resume`                                    |          0 | 当前桌面 Thread                        | 复用 TurnState；新的物理 run token；2 个恢复/failover 执行点均调用共享 factory                         | PR-B 已改走共享 factory；PR-C 做同一 foreign-owner guard，保留 `Command({ resume })`                    |
-| Desktop              | `agent:interrupt`                                 |          0 | 当前桌面 Thread                        | 复用 TurnState；新的物理 run token；2 个继续/failover 执行点均调用共享 factory                         | PR-B 已改走共享 factory；PR-C 做同一 foreign-owner guard，保留旧 HITL 兼容语义                          |
-| Shared standard turn | `prepareStandardThreadRuntimeFactory`             |          1 | 调用方准备的目标 Thread                | 合并 Harness Context、受限 `remotePolicy` 与 Runtime options；统一调用现有 Runtime                     | Desktop 已接入；后续 IM/Scheduler 必须复用，不得新增裸 Runtime 调用                                     |
-| Scheduler            | `executeTask`                                     |          1 | 每次任务新建的 UUID Thread             | `runningTasks` + AbortController；显式 pin/release Checkpointer                                        | PR-B 评估共享 factory；PR-C 获取 `owner: scheduler` 租约后才能创建 Runtime/pin                          |
-| Heartbeat            | `runHeartbeat`                                    |          1 | 固定 `heartbeat` Thread                | 单实例 `running` + AbortController；显式 pin/release/close                                             | 作为 service owner 单独分类；不得与普通 Thread 租约混淆                                                 |
-| Legacy ChatX         | `processMessage`                                  |          1 | `chatId + fromId` 复用或新建 Thread    | `runningChats` + 队列 + AbortController；显式 pin/release                                              | V1 clean cut 删除；不得包装成新统一机器人入口                                                           |
-| Workflow leaf        | `createWorkflowTool().subagentDeps.createRuntime` |          1 | `subagentOptions.threadId` 子 Thread   | Workflow manager 拥有 abort；子 Thread 独立 Checkpoint                                                 | 保持父 run 内部子 owner；不作为可被 Desktop/IM 直接争抢的根 Thread                                      |
-| Coordinator worker   | worker 首次 / 流中 failover                       |          2 | `workerInput.workerThreadId` 子 Thread | Worker manager 拥有 abort；finally 关闭子 Checkpointer                                                 | 保持 worker 子 owner；父 Thread 租约必须覆盖其启动生命周期                                              |
-| Coordinator handoff  | 缺少最终交接时补跑                                |          1 | 同一 `workerInput.workerThreadId`      | 只读 continuation；复用 worker Checkpoint，随后统一清理                                                | 与 coordinator worker 同一内部 owner，不新增根 Thread owner                                             |
+| 所有者               | 源文件 / 入口                                     | 直接调用数 | Runtime / Checkpoint `threadId`        | 当前所有权与清理                                                                                       | PR-B / PR-C 处理                                                                  |
+| -------------------- | ------------------------------------------------- | ---------: | -------------------------------------- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
+| Desktop              | `agent:invoke`                                    |          0 | 当前桌面 Thread                        | `activeRuns`、replacement lock、run token、settled promise；3 个模型/failover 执行点均调用共享 factory | `owner: desktop` 早期拒绝 + mutation-lock 内二次 CAS；同来源只按精确旧 runId 交接 |
+| Desktop              | `agent:resume`                                    |          0 | 当前桌面 Thread                        | 复用 TurnState；新的物理 run token；2 个恢复/failover 执行点均调用共享 factory                         | 同一 foreign-owner 守卫；保留 `Command({ resume })` 与旧同来源交接语义            |
+| Desktop              | `agent:interrupt`                                 |          0 | 当前桌面 Thread                        | 复用 TurnState；新的物理 run token；2 个继续/failover 执行点均调用共享 factory                         | 同一 foreign-owner 守卫；保留旧 HITL 兼容语义                                     |
+| Shared standard turn | `prepareStandardThreadRuntimeFactory`             |          1 | 调用方准备的目标 Thread                | 合并 Harness Context、受限 `remotePolicy` 与 Runtime options；统一调用现有 Runtime                     | 创建 Runtime 前校验调用方提供的 owner/runId 仍精确持有租约                        |
+| Scheduler            | `executeTask`                                     |          1 | 每次任务新建的 UUID Thread             | `runningTasks` + AbortController；显式 pin/release Checkpointer                                        | `owner: scheduler`；先 claim、再 pin/Runtime，close 后才 identity-fenced release  |
+| Heartbeat            | `runHeartbeat`                                    |          1 | 固定 `heartbeat` Thread                | 单实例 `running` + AbortController；显式 pin/release/close                                             | 归入 `owner: scheduler`；冲突时跳过本次 beat，不抢占；close 后释放                |
+| Legacy ChatX         | `processMessage`                                  |          1 | `chatId + fromId` 复用或新建 Thread    | `runningChats` + 队列 + AbortController；显式 pin/release                                              | 临时归入 `owner: im` 以防 clean cut 前双写；V1 仍删除，不复用为统一机器人入口     |
+| Workflow leaf        | `createWorkflowTool().subagentDeps.createRuntime` |          1 | `subagentOptions.threadId` 子 Thread   | Workflow manager 拥有 abort；子 Thread 独立 Checkpoint                                                 | 保持父 run 内部子 owner；不作为可被 Desktop/IM 直接争抢的根 Thread                |
+| Coordinator worker   | worker 首次 / 流中 failover                       |          2 | `workerInput.workerThreadId` 子 Thread | Worker manager 拥有 abort；finally 关闭子 Checkpointer                                                 | 保持 worker 子 owner；父 Thread 租约必须覆盖其启动生命周期                        |
+| Coordinator handoff  | 缺少最终交接时补跑                                |          1 | 同一 `workerInput.workerThreadId`      | 只读 continuation；复用 worker Checkpoint，随后统一清理                                                | 与 coordinator worker 同一内部 owner，不新增根 Thread owner                       |
 
 PR-B 后直接调用点基线为 8：共享 standard-turn factory 1、Scheduler 1、Heartbeat 1、Legacy ChatX 1、Runtime 内部子执行 4。Desktop 的 7 个模型/failover 执行点全部汇入同一个受控 factory。`createAgentRuntime()` 内部通过 `getCheckpointer(threadId)` 取得同名 Checkpointer，因此任何新增的裸 Runtime 入口也是潜在的并发 Checkpoint 写入口。
 
@@ -37,15 +37,15 @@ PR-B 后直接调用点基线为 8：共享 standard-turn factory 1、Scheduler 
 
 ## PR-C foreign-owner 守卫边界
 
-必须经过统一守卫的根 Thread 执行入口：
+已经过统一守卫的根 Thread 执行入口：
 
 1. `agent:invoke`
 2. `agent:resume`
 3. `agent:interrupt`
-4. Scheduler 在目标 Thread 上执行的未来路径
-5. 新 IM Standard Turn Runner
+4. Scheduler、Heartbeat 与 clean cut 前的 Legacy ChatX
+5. 新 IM Standard Turn Runner（后续 PR-E 只能调用同一 claim/factory）
 
-守卫只拒绝不同来源 owner。Desktop 自身现有 Abort → await settle → install controller、Stop/Replace/Steer、Goal、Coordinator、Workflow 和 finally 清理顺序全部保留。Workflow leaf 与 Coordinator worker 是已获父 run 所有权后创建的内部子 Thread，不单独参加根 Thread 的 Desktop/IM 争抢；它们的父 run 生命周期仍受根 Thread 租约约束。
+守卫只拒绝不同来源 owner。租约存于主进程内存，因为 Runtime 不能跨进程存活；它没有 TTL、超时抢占或强制释放接口。同来源物理 run 交接必须携带精确 `handoffFromRunId`，旧 run 的迟到 finally 不能释放新 run 的租约。Desktop 自身现有 Abort → await settle → install controller、Stop/Replace/Steer、Goal、Coordinator、Workflow 顺序保留；终态清理会等待 ACL 清理完成后再释放租约。Workflow leaf 与 Coordinator worker 是已获父 run 所有权后创建的内部子 Thread，不单独参加根 Thread 的 Desktop/IM 争抢；它们的父 run 生命周期仍受根 Thread 租约约束。
 
 ## PR-A 回归门槛
 

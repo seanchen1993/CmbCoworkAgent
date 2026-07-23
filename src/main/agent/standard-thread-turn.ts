@@ -36,6 +36,7 @@ import { resolveModel, type RoutingContext, type RoutingResult } from "../routin
 import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
 import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
 import { createAgentRuntime, type CreateAgentRuntimeOptions, type DeepAgent } from "./runtime"
+import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
 
 export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat"
 
@@ -619,6 +620,7 @@ export interface RemoteTurnPolicy {
 
 export interface StandardThreadRuntimeFactoryInput {
   source: StandardTurnSource
+  runLease: { owner: LocalThreadRunOwner; runId: string }
   baseOptions:
     | Omit<CreateAgentRuntimeOptions, "modelId">
     | (() => Omit<CreateAgentRuntimeOptions, "modelId">)
@@ -678,6 +680,10 @@ export function prepareStandardThreadRuntimeFactory(
   return {
     source: input.source,
     optionsForModel,
-    create: (modelId?: string) => createAgentRuntime(optionsForModel(modelId))
+    create: (modelId?: string) => {
+      const options = optionsForModel(modelId)
+      assertLocalThreadRunLease(options.threadId, input.runLease.owner, input.runLease.runId)
+      return createAgentRuntime(options)
+    }
   }
 }

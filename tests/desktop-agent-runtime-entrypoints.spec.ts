@@ -58,7 +58,7 @@ for (const [owner, source] of Object.entries(sources) as [keyof typeof sources, 
 }
 
 assert(
-  count(sources.standardTurn, "createAgentRuntime(optionsForModel(modelId))") === 1,
+  count(sources.standardTurn, "return createAgentRuntime(options)") === 1,
   "the controlled standard-turn factory must be the only shared top-level Runtime constructor"
 )
 
@@ -96,7 +96,7 @@ assert(
 
 assert(
   sources.scheduler.includes("const threadId = uuid()") &&
-    sources.scheduler.includes("const releaseCheckpointerPin = pinCheckpointer(threadId)"),
+    sources.scheduler.includes("releaseCheckpointerPin = pinCheckpointer(threadId)"),
   "scheduler Runtime must use a fresh, pinned thread"
 )
 assert(
@@ -106,7 +106,7 @@ assert(
 )
 assert(
   sources.legacyChatx.includes("findChatXThread(msg.chatId, msg.fromId)") &&
-    sources.legacyChatx.includes("const releaseCheckpointerPin = pinCheckpointer(threadId)"),
+    sources.legacyChatx.includes("releaseCheckpointerPin = pinCheckpointer(threadId)"),
   "legacy ChatX Runtime must remain classified until clean-cut deletion"
 )
 assert(

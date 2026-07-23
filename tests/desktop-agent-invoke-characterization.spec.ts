@@ -142,7 +142,7 @@ function testFreshTurnGoalAndTranscriptSemantics(): void {
       "flushPendingStreamTranscriptMessages(threadId)",
       "const durableRuntimeTail = await getDurableRuntimeTail(threadId",
       "persistVisibleUserTranscriptMessage(",
-      "const runToken = startTurnStateRun(turnState)",
+      "const runToken = startTurnStateRun(turnState, nextInvokeRunToken)",
       "setCurrentRunMessageQueueOwner(threadId, runToken)"
     ],
     "new invoke turn setup"

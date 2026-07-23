@@ -2452,6 +2452,9 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     1,
     "the stop reason may be consulted ONCE, in the abort CLASSIFICATION only — never for a handler-side dedup release (stopChatX's synchronous release is the single point; a second delete can strip a redelivered copy's fresh mark)"
   )
+  const chatxRunFinally = chatxService.slice(
+    chatxService.indexOf('  } finally {\n    try {\n      trackEvent("chatx.message.processed"')
+  )
   assertSourceOrder(
     chatxService,
     "const replySent = lastAssistantText",
@@ -2519,9 +2522,16 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
       `${label}'s discarded-thread cleanup must RETIRE before purging (writers poisoned before the disk sweep) — dbDelete + purge without retire would let the finally's reusable close resurrect the file`
     )
   }
-  assertMatches(
+  assertSourceOrder(
     chatxService,
-    /await closeCheckpointer\(threadId\)[^\n]*\n\s*runningChats\.delete\(chatKey\)/,
+    "await closeCheckpointer(threadId)",
+    'releaseLocalThreadRunLease(threadId, "im", chatxRunId)',
+    "chatx releases its local Thread lease only after checkpointer close"
+  )
+  assertSourceOrder(
+    chatxRunFinally,
+    'releaseLocalThreadRunLease(threadId, "im", chatxRunId)',
+    "runningChats.delete(chatKey)",
     "chatx keeps its runningChats gate up until the checkpointer close settles — an inbound in the close window would pin, skip the pending-close wait, and dual-write the reused thread's sqlite (heartbeat's finally, same family)"
   )
   {
@@ -2573,9 +2583,17 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "const existing = dbGetThread(threadId)",
     "heartbeat revives UNCONDITIONALLY (before the row-exists branch) — a row-missing-only revive deadlocks when a deletion's late retire re-tombstones a mid-deletion recreation"
   )
-  assertMatches(
-    heartbeatService,
-    /await closeCheckpointer\(HEARTBEAT_THREAD_ID\)[^\n]*\n(?:\s*\}\n)?\s*running = false/,
+  const heartbeatRunFinally = heartbeatService.slice(heartbeatService.lastIndexOf("  } finally {"))
+  assertSourceOrder(
+    heartbeatRunFinally,
+    "await closeCheckpointer(HEARTBEAT_THREAD_ID)",
+    'releaseLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)',
+    "heartbeat releases its local Thread lease only after checkpointer close"
+  )
+  assertSourceOrder(
+    heartbeatRunFinally,
+    'releaseLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)',
+    "running = false",
     "heartbeat keeps `running` up until its checkpointer close settles — a run-now in the close window would pin, skip the pending-close wait, and dual-write the same file"
   )
   assertSourceOrder(

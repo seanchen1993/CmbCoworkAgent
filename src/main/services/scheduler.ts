@@ -24,6 +24,11 @@ import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
 import { emitAppAttention } from "../app-attention-events"
+import {
+  assertLocalThreadRunLease,
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../agent/thread-run-lease"
 
 const TICK_INTERVAL_MS = 60_000
 const ONCE_EXPIRE_MS = 30 * 60_000 // once tasks older than 30 min are auto-disabled instead of executed
@@ -189,9 +194,22 @@ async function executeTask(taskId: string): Promise<void> {
   const tracer = new TraceCollector(threadId, finalPrompt, task.modelId ?? "unknown", {
     triggerSource: schedulerSource
   })
-  const releaseCheckpointerPin = pinCheckpointer(threadId)
+  const schedulerRunId = uuid()
+  let leaseAcquired = false
+  let releaseCheckpointerPin: (() => void) | null = null
 
   try {
+    const leaseClaim = claimLocalThreadRunLease({
+      threadId,
+      owner: "scheduler",
+      runId: schedulerRunId
+    })
+    if (!leaseClaim.acquired) {
+      throw new Error(`Thread ${threadId} is already owned by ${leaseClaim.conflict.owner}`)
+    }
+    leaseAcquired = true
+    releaseCheckpointerPin = pinCheckpointer(threadId)
+
     const workspacePath = task.workDir
     if (!workspacePath) {
       await tracer.finish("error", "No workspace directory")
@@ -232,6 +250,7 @@ async function executeTask(taskId: string): Promise<void> {
       if (cfg?.model) tracer.setModelName(cfg.model)
     }
 
+    assertLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
     const agent = await createAgentRuntime({
       threadId,
       workspacePath,
@@ -420,7 +439,7 @@ async function executeTask(taskId: string): Promise<void> {
       }
     }
   } finally {
-    releaseCheckpointerPin()
+    releaseCheckpointerPin?.()
     // Close FIRST, then release run state, then broadcast — two contracts at
     // once: (1) owner-finally principle (same as chatx/heartbeat): the task
     // counts as running until its checkpointer close settles, so a runNow in
@@ -428,7 +447,12 @@ async function executeTask(taskId: string): Promise<void> {
     // run; (2) renderer contract: runningTasks is deleted BEFORE the done/
     // error broadcast, so loadThreadHistory → isRunning never races back to
     // scheduledTaskLoading = true.
-    await closeCheckpointer(threadId).catch(() => {})
+    if (releaseCheckpointerPin) {
+      await closeCheckpointer(threadId).catch(() => {})
+    }
+    if (leaseAcquired) {
+      releaseLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
+    }
     runningTasks.delete(taskId)
     activeAbortControllers.delete(taskId)
 

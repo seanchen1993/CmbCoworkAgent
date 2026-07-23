@@ -55,8 +55,13 @@ for (const sharedApi of [
 
 assertIncludes(
   shared,
-  "createAgentRuntime(optionsForModel(modelId))",
+  "return createAgentRuntime(options)",
   "controlled factory delegates to the existing Runtime"
+)
+assertIncludes(
+  shared,
+  "assertLocalThreadRunLease(options.threadId, input.runLease.owner, input.runLease.runId)",
+  "controlled factory refuses Runtime creation without the exact local lease"
 )
 assertNotIncludes(
   desktop,

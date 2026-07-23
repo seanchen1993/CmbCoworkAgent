@@ -24,6 +24,11 @@ import type { ChatXRobotConfig } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import { getChatXUserMessageId, namespaceChatXStreamEventIds } from "./chatx-stream-ids"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
+import {
+  assertLocalThreadRunLease,
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../agent/thread-run-lease"
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -324,7 +329,9 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
   }
   const channel = `scheduler:stream:${threadId}`
   let hasStreamedContent = false
-  const releaseCheckpointerPin = pinCheckpointer(threadId)
+  const chatxRunId = uuid()
+  let leaseAcquired = false
+  let releaseCheckpointerPin: (() => void) | null = null
 
   // Telemetry: ChatX runs its own runtime with no TraceCollector, so the only
   // record that a remote message was handled (and whether it got replied) is
@@ -333,6 +340,17 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
   let repliedWithContent = false
 
   try {
+    const leaseClaim = claimLocalThreadRunLease({
+      threadId,
+      owner: "im",
+      runId: chatxRunId
+    })
+    if (!leaseClaim.acquired) {
+      throw new Error(`Thread is busy with ${leaseClaim.conflict.owner}`)
+    }
+    leaseAcquired = true
+    releaseCheckpointerPin = pinCheckpointer(threadId)
+
     const thread = getThread(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string
@@ -350,6 +368,7 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
       )
     }
 
+    assertLocalThreadRunLease(threadId, "im", chatxRunId)
     const agent = await createAgentRuntime({
       threadId,
       workspacePath,
@@ -512,7 +531,7 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
     activeAbortControllers.delete(chatKey)
     inFlightMsgIds.delete(chatKey)
     threadIdToChatKey.delete(threadId)
-    releaseCheckpointerPin()
+    releaseCheckpointerPin?.()
     // Close BEFORE dropping the runningChats gate (mirrors heartbeat's finally):
     // ChatX reuses one threadId per (chatId, sender), and an inbound landing in
     // this close window would pass the gate, pin first, and — pinned callers
@@ -520,7 +539,12 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
     // the old close is still flushing (dual writer). Keeping the gate up makes
     // the newcomer queue instead; the queue drain below runs after the gate
     // clears, so queued messages are not starved.
-    await closeCheckpointer(threadId).catch(() => {})
+    if (releaseCheckpointerPin) {
+      await closeCheckpointer(threadId).catch(() => {})
+    }
+    if (leaseAcquired) {
+      releaseLocalThreadRunLease(threadId, "im", chatxRunId)
+    }
     runningChats.delete(chatKey)
     notifyRenderer("threads:changed")
 

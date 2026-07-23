@@ -277,6 +277,13 @@ import {
   type PreparedUserPrompt,
   type PromptPreparationTurnState
 } from "../agent/standard-thread-turn"
+import {
+  claimLocalThreadRunLease,
+  getLocalThreadRunLease,
+  releaseLocalThreadRunLease,
+  type LocalThreadRunLease,
+  type LocalThreadRunLeaseClaim
+} from "../agent/thread-run-lease"
 import { emitAppAttention } from "../app-attention-events"
 
 const MIN_CHARS_FOR_MEMORY = 200
@@ -608,6 +615,43 @@ function rejectAgentStartDuringShutdown(window: BrowserWindow, channel: string):
   })
   safeSendToWindow(window, channel, { type: "done" })
   return true
+}
+
+function sendDesktopForeignOwnerBusy(
+  window: BrowserWindow,
+  channel: string,
+  lease: LocalThreadRunLease
+): void {
+  const sourceLabel = lease.owner === "im" ? "招乎远程任务" : "定时任务"
+  safeSendToWindow(window, channel, {
+    type: "error",
+    error: "THREAD_RUN_OWNED_BY_ANOTHER_SOURCE",
+    message: `该会话正在由${sourceLabel}执行，请等待其结束后再从桌面操作。`,
+    owner: lease.owner,
+    runId: lease.runId
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+}
+
+function rejectDesktopRunForForeignOwner(
+  threadId: string,
+  window: BrowserWindow,
+  channel: string
+): boolean {
+  const lease = getLocalThreadRunLease(threadId)
+  if (!lease || lease.owner === "desktop") return false
+  sendDesktopForeignOwnerBusy(window, channel, lease)
+  return true
+}
+
+function claimDesktopThreadRunLease(threadId: string, runId: string): LocalThreadRunLeaseClaim {
+  const current = getLocalThreadRunLease(threadId)
+  return claimLocalThreadRunLease({
+    threadId,
+    owner: "desktop",
+    runId,
+    ...(current?.owner === "desktop" ? { handoffFromRunId: current.runId } : {})
+  })
 }
 
 export function isActiveAgentRunAborting(threadId: string): boolean {
@@ -1189,12 +1233,6 @@ function shouldDisposeTurnState(threadId: string, runToken: string): boolean {
 function shouldCleanupRunScopedResources(threadId: string, controller: AbortController): boolean {
   const currentController = activeRuns.get(threadId)
   return !currentController || currentController === controller
-}
-
-function revokeSandboxAclsForRun(threadId: string): void {
-  LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-    console.warn("[Agent] ACL cleanup error:", err)
-  })
 }
 
 /**
@@ -4450,6 +4488,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
       if (rejectAgentStartDuringShutdown(window, channel)) return
+      if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
       let modelInputMessage = message
       let routingMessage = message
       let rootUserPrompt = message
@@ -4727,11 +4766,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Abort any existing stream for this thread before starting a new one
       // This prevents concurrent streams which can cause checkpoint corruption
+      const nextInvokeRunToken = uuid()
       const replacement = await withThreadRunMutationLock(threadId, () =>
         withActiveRunReplacementLock(threadId, async () => {
           const initialController = activeRuns.get(threadId)
           if (initialController && isTrustedCoordinatorNotificationInvoke) {
             return { ignoredInternalNotification: true as const }
+          }
+          const leaseClaim = claimDesktopThreadRunLease(threadId, nextInvokeRunToken)
+          if (!leaseClaim.acquired) {
+            return { leaseConflict: leaseClaim.conflict }
           }
           // Invalidate any steer preparation immediately. Its async hooks may
           // finish, but token checks and the captured run-state snapshot prevent
@@ -4771,6 +4815,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           data: { type: "coordinator_notification_deferred" }
         })
         safeSendToWindow(window, channel, { type: "done" })
+        return
+      }
+      if ("leaseConflict" in replacement) {
+        sendDesktopForeignOwnerBusy(window, channel, replacement.leaseConflict!)
         return
       }
       const { abortController, activeRunSettledPromise, resolveActiveRunSettled } = replacement
@@ -4819,7 +4867,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         userTranscriptMessagePersisted = true
       }
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
-      const runToken = startTurnStateRun(turnState)
+      const runToken = startTurnStateRun(turnState, nextInvokeRunToken)
       setCurrentRunMessageQueueOwner(threadId, runToken)
       let turnStateShouldDispose = false
       const runGoal = goalManager.getActive(threadId)
@@ -5886,6 +5934,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({
           source: "desktop",
+          runLease: { owner: "desktop", runId: runToken },
           baseOptions: () => ({
             threadId,
             currentRunMessageQueueOwnerToken: runToken,
@@ -7773,12 +7822,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeRuns.delete(threadId)
         }
         if (!replacedByNewRun) {
-          LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+          const aclCleanup = LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
             console.warn("[Agent] ACL cleanup error:", err)
           })
           // Replacement clears the old queue before installing its controller;
           // this branch owns the non-replaced run's final cleanup.
           clearCurrentRunMessageQueue(threadId, runToken)
+          await aclCleanup
         }
         if (activeRunSettled.get(threadId) === activeRunSettledPromise) {
           activeRunSettled.delete(threadId)
@@ -7788,6 +7838,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           disposeTurnRuntimeState(threadId, turnState)
         }
         discardAgentAutoCommitTracking(threadId)
+        releaseLocalThreadRunLease(threadId, "desktop", runToken)
         // SessionEnd is NOT fired here — it belongs to thread lifecycle (delete / app quit),
         // not turn completion. See fireSessionEnd call in threads:delete handler.
       }
@@ -7813,6 +7864,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return
       }
       if (rejectAgentStartDuringShutdown(window, channel)) return
+      if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
 
       // Get workspace path from thread metadata
       const thread = getThread(threadId)
@@ -7892,6 +7944,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const nextResumeRunToken = uuid()
       const resumeReplacement = await withThreadRunMutationLock(threadId, () =>
         withActiveRunReplacementLock(threadId, async () => {
+          const leaseClaim = claimDesktopThreadRunLease(threadId, nextResumeRunToken)
+          if (!leaseClaim.acquired) {
+            return { leaseConflict: leaseClaim.conflict }
+          }
           invalidateCurrentRunMessagePreparer(threadId)
           // Transfer ownership before aborting. Even if settlement times out, the
           // old graph's token can no longer drain or clear continuation messages.
@@ -7915,6 +7971,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         })
       )
+      if ("leaseConflict" in resumeReplacement) {
+        sendDesktopForeignOwnerBusy(window, channel, resumeReplacement.leaseConflict!)
+        return
+      }
       const { abortController, resumeRunSettledPromise, resolveResumeRunSettled } =
         resumeReplacement
       const resumeCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
@@ -8222,6 +8282,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const resumeCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         const resumeRuntimeFactory = prepareStandardThreadRuntimeFactory({
           source: "desktop",
+          runLease: { owner: "desktop", runId: runToken },
           baseOptions: () => ({
             threadId,
             currentRunMessageQueueOwnerToken: runToken,
@@ -8649,12 +8710,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeRuns.delete(threadId)
         }
         if (!replacedByNewRun) {
-          LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+          const aclCleanup = LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
             console.warn("[Agent] ACL cleanup error:", err)
           })
           // A continuation handoff suppresses the prior controller's cleanup;
           // the terminal controller owns the queue's final cleanup.
           clearCurrentRunMessageQueue(threadId, runToken)
+          await aclCleanup
         }
         if (activeRunSettled.get(threadId) === resumeRunSettledPromise) {
           activeRunSettled.delete(threadId)
@@ -8665,6 +8727,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           disposeTurnRuntimeState(threadId, turnState)
         }
         discardAgentAutoCommitTracking(threadId)
+        releaseLocalThreadRunLease(threadId, "desktop", runToken)
       }
     }
   )
@@ -8687,6 +8750,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       return
     }
     if (rejectAgentStartDuringShutdown(window, channel)) return
+    if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
     if (
       rejectRuntimeRestoredCheckpointResume(
         threadId,
@@ -8733,6 +8797,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const nextInterruptRunToken = uuid()
     const interruptReplacement = await withThreadRunMutationLock(threadId, () =>
       withActiveRunReplacementLock(threadId, async () => {
+        const leaseClaim = claimDesktopThreadRunLease(threadId, nextInterruptRunToken)
+        if (!leaseClaim.acquired) {
+          return { leaseConflict: leaseClaim.conflict }
+        }
         invalidateCurrentRunMessagePreparer(threadId)
         // Interrupt responses continue the same logical turn but use a new
         // physical run token, preventing a timed-out old graph from draining it.
@@ -8756,6 +8824,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       })
     )
+    if ("leaseConflict" in interruptReplacement) {
+      sendDesktopForeignOwnerBusy(window, channel, interruptReplacement.leaseConflict!)
+      return
+    }
     const { abortController, interruptRunSettledPromise, resolveInterruptRunSettled } =
       interruptReplacement
     const interruptCoordinatorSelectedSkill = getActiveOrPersistedCoordinatorSelectedSkill(
@@ -9042,6 +9114,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const interruptCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
         const interruptRuntimeFactory = prepareStandardThreadRuntimeFactory({
           source: "desktop",
+          runLease: { owner: "desktop", runId: runToken },
           baseOptions: () => ({
             threadId,
             currentRunMessageQueueOwnerToken: runToken,
@@ -9476,12 +9549,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         activeRuns.delete(threadId)
       }
       if (!replacedByNewRun) {
-        LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
+        const aclCleanup = LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
           console.warn("[Agent] ACL cleanup error:", err)
         })
         // A continuation handoff suppresses the prior controller's cleanup;
         // the terminal controller owns the queue's final cleanup.
         clearCurrentRunMessageQueue(threadId, runToken)
+        await aclCleanup
       }
       if (activeRunSettled.get(threadId) === interruptRunSettledPromise) {
         activeRunSettled.delete(threadId)
@@ -9493,8 +9567,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       if (shouldCleanupRunScopedResources(threadId, abortController)) {
         discardAgentAutoCommitTracking(threadId)
-        revokeSandboxAclsForRun(threadId)
       }
+      releaseLocalThreadRunLease(threadId, "desktop", runToken)
     }
   })
 
@@ -9503,6 +9577,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     "agent:cancel",
     async (event, { threadId, cancelWorkers = false }: AgentCancelParams) => {
       return withThreadRunMutationLock(threadId, async () => {
+        const lease = getLocalThreadRunLease(threadId)
+        if (lease && lease.owner !== "desktop") {
+          const window = BrowserWindow.fromWebContents(event.sender)
+          if (window) {
+            sendDesktopForeignOwnerBusy(window, `agent:stream:${threadId}`, lease)
+          }
+          return false
+        }
         const controller = activeRuns.get(threadId)
         console.log(
           `[Agent] cancel: threadId=${threadId}, hasController=${!!controller}, cancelWorkers=${cancelWorkers}, activeRuns=[${Array.from(activeRuns.keys()).join(", ")}]`

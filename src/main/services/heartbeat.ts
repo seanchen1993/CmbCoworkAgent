@@ -24,6 +24,12 @@ import { StreamConverter } from "../agent/stream-converter"
 import { notifyIfBackground } from "./notify"
 import { emitAppAttention } from "../app-attention-events"
 import { trackEvent } from "./event-reporter"
+import { v4 as uuid } from "uuid"
+import {
+  assertLocalThreadRunLease,
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../agent/thread-run-lease"
 
 /** Fixed thread ID for heartbeat (aligns with Nanobot session_key="heartbeat"). Resets won't orphan it. */
 const HEARTBEAT_THREAD_ID = "heartbeat"
@@ -261,6 +267,8 @@ async function executeHeartbeat(): Promise<void> {
   // Pinned only after the pre-run gates pass; the finally must not close a
   // checkpointer this run never opened.
   let releaseCheckpointerPin: (() => void) | null = null
+  const heartbeatRunId = uuid()
+  let leaseAcquired = false
 
   try {
     const config = getHeartbeatConfig()
@@ -305,6 +313,24 @@ async function executeHeartbeat(): Promise<void> {
       return
     }
 
+    const leaseClaim = claimLocalThreadRunLease({
+      threadId,
+      owner: "scheduler",
+      runId: heartbeatRunId
+    })
+    if (!leaseClaim.acquired) {
+      console.log(
+        `[Heartbeat] Thread is busy with ${leaseClaim.conflict.owner}; skipping this beat`
+      )
+      saveHeartbeatConfig({
+        lastRunStatus: "skipped",
+        lastRunError: "Heartbeat thread is busy",
+        lastRunAt: new Date().toISOString()
+      })
+      notifyRenderer("heartbeat:changed")
+      return
+    }
+    leaseAcquired = true
     releaseCheckpointerPin = pinCheckpointer(threadId)
 
     // Assert the fixed heartbeat id alive on EVERY beat, not only when the DB
@@ -361,6 +387,7 @@ async function executeHeartbeat(): Promise<void> {
       "- 主动但不打扰：有事做事，无事安静"
     ].join("\n")
     const heartbeatContext = `${heartbeatGuidelines}\n\n# Project Context\n\n## HEARTBEAT.md\n\n${content}`
+    assertLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)
     const agent = await createAgentRuntime({
       threadId,
       workspacePath: config.workDir,
@@ -513,6 +540,9 @@ async function executeHeartbeat(): Promise<void> {
     // this run never opened a checkpointer, so there is nothing to close.
     if (releaseCheckpointerPin) {
       await closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
+    }
+    if (leaseAcquired) {
+      releaseLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)
     }
     running = false
     notifyRenderer("heartbeat:changed")

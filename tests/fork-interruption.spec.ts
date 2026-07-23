@@ -246,7 +246,7 @@ async function testTerminalAndCancelledRunsFlushDurableTranscript(): Promise<voi
 
   const cleanupFlushes =
     source.match(
-      /flushPendingStreamTranscriptMessages\(threadId\)[\s\S]{0,900}resolve(?:Active|Resume|Interrupt)RunSettled\(\)/g
+      /flushPendingStreamTranscriptMessages\(threadId\)[\s\S]{0,1200}resolve(?:Active|Resume|Interrupt)RunSettled\(\)/g
     )?.length ?? 0
   assert(
     cleanupFlushes >= 3,
