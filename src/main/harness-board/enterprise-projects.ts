@@ -166,8 +166,8 @@ function isEnterpriseProjectQueryMockEnabled(): boolean {
   return value === "1" || value === "true" || value === "yes" || value === "on"
 }
 
-function isDeployUnitQueryMockEnabled(): boolean {
-  const value = (import.meta.env.VITE_DEPLOY_UNIT_QUERY_MOCK as string | undefined)
+function isKnowledgeMockEnabled(): boolean {
+  const value = (import.meta.env.VITE_KNOWLEDGE_MOCK as string | undefined)
     ?.trim()
     .toLowerCase()
   return value === "1" || value === "true" || value === "yes" || value === "on"
@@ -504,6 +504,73 @@ function makeMockDeployUnitSearchResult(): HarnessDeployUnitSearchResult {
   }
 }
 
+function makeMockPipelineQueryResult(): HarnessPipelineQueryResult {
+  return {
+    total: 3,
+    size: 20,
+    current: 1,
+    pages: 1,
+    hasMore: false,
+    pipelines: [
+      {
+        pipeline: "p-wealth-box-api-build",
+        pipelineAlias: "财富盒子API构建流水线",
+        env: "UAT",
+        branch: "master",
+        latestBuildStatus: "SUCCESS",
+        latestCompletedTime: "2026-07-20 16:30:00"
+      },
+      {
+        pipeline: "p-wealth-box-web-build",
+        pipelineAlias: "财富盒子前端构建流水线",
+        env: "UAT",
+        branch: "release/1.0",
+        latestBuildStatus: "SUCCESS",
+        latestCompletedTime: "2026-07-20 15:00:00"
+      },
+      {
+        pipeline: "p-wealth-box-job-build",
+        pipelineAlias: "财富盒子批处理构建流水线",
+        env: "UAT",
+        branch: "develop",
+        latestBuildStatus: "FAILED",
+        latestCompletedTime: "2026-07-19 10:00:00"
+      }
+    ]
+  }
+}
+
+function makeMockPipelineLabelQueryResult(): HarnessPipelineLabelQueryResult {
+  return {
+    labels: [
+      {
+        pipelineName: "mock-pipeline",
+        pipelineNumber: 1001,
+        status: "SUCCESS",
+        startDate: "2026-07-20 10:00:00",
+        label: "v1.2.0",
+        triggerUser: "zhangsan"
+      },
+      {
+        pipelineName: "mock-pipeline",
+        pipelineNumber: 1000,
+        status: "SUCCESS",
+        startDate: "2026-07-19 10:00:00",
+        label: "v1.1.0",
+        triggerUser: "lisi"
+      },
+      {
+        pipelineName: "mock-pipeline",
+        pipelineNumber: 999,
+        status: "FAILED",
+        startDate: "2026-07-18 10:00:00",
+        label: "v1.0.0",
+        triggerUser: "wangwu"
+      }
+    ]
+  }
+}
+
 function makeMockProjectReviewResult(projectCode: string): HarnessProjectReviewResult {
   if (!projectCode) {
     return { tokenConfigured: true, reviews: [] }
@@ -610,7 +677,7 @@ export async function searchDeployUnits(
     return { deployUnits: [], total: 0, hasMore: false }
   }
 
-  if (isDeployUnitQueryMockEnabled()) {
+  if (isKnowledgeMockEnabled()) {
     return makeMockDeployUnitSearchResult()
   }
 
@@ -654,6 +721,7 @@ export async function searchDeployUnits(
     const json = (await response.json()) as DeployUnitQueryResponse
     const result = normalizeDeployUnitSearchResponse(json)
     requestSucceeded = true
+    console.log(`[HarnessBoard] [deploy_unit_search] response: ${JSON.stringify(result)}`)
     return result
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
@@ -669,19 +737,27 @@ export async function searchDeployUnits(
 export async function queryPipelines(
   input: HarnessPipelineQueryInput
 ): Promise<HarnessPipelineQueryResult> {
+  if (isKnowledgeMockEnabled()) {
+    console.log(`[HarnessBoard] [pipeline_query] mock input=${JSON.stringify(input)}`)
+    return makeMockPipelineQueryResult()
+  }
+
   const queryUrl = getPipelineQueryUrl()
   if (!queryUrl) {
     throw new Error("未配置流水线查询地址")
   }
 
+  const userInfo = getUserInfo()
+  const orgId = resolveDeployUnitOrgId(userInfo?.originPathId)
+
   const requestPayload: HarnessPipelineQueryInput = {
     deployUnit: normalizeText(input.deployUnit),
     env: normalizeText(input.env),
-    orgId: normalizeText(input.orgId),
-    pageNumber: numberValue(input.pageNumber),
-    pageSize: numberValue(input.pageSize),
-    pipelineTerm: normalizeText(input.pipelineTerm),
-    productTerm: normalizeText(input.productTerm)
+    orgId,
+    pageNumber: 1,
+    pageSize: DEPLOY_UNIT_SEARCH_PAGE_SIZE,
+    pipelineTerm: "",
+    productTerm: ""
   }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
@@ -707,7 +783,9 @@ export async function queryPipelines(
     }
 
     const json = (await response.json()) as PipelineQueryResponse
-    return normalizePipelineQueryResponse(json)
+    const result = normalizePipelineQueryResponse(json)
+    console.log(`[HarnessBoard] [pipeline_query] response: ${JSON.stringify(result)}`)
+    return result
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("流水线查询超时")
@@ -721,6 +799,11 @@ export async function queryPipelines(
 export async function queryPipelineLabels(
   input: HarnessPipelineLabelQueryInput
 ): Promise<HarnessPipelineLabelQueryResult> {
+  if (isKnowledgeMockEnabled()) {
+    console.log(`[HarnessBoard] [pipeline_label_query] mock input=${JSON.stringify(input)}`)
+    return makeMockPipelineLabelQueryResult()
+  }
+
   const pipelineName = normalizeText(input.pipelineName)
   if (!pipelineName) {
     return { labels: [] }
@@ -753,7 +836,9 @@ export async function queryPipelineLabels(
     }
 
     const json = (await response.json()) as PipelineLabelQueryResponse
-    return normalizePipelineLabelQueryResponse(json)
+    const result = normalizePipelineLabelQueryResponse(json)
+    console.log(`[HarnessBoard] [pipeline_label_query] response: ${JSON.stringify(result)}`)
+    return result
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("流水线标签查询超时")

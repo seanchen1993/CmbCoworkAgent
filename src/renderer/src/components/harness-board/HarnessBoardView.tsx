@@ -65,6 +65,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
+import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
 import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
@@ -5432,6 +5433,8 @@ function ProjectDetailPage({
   loading,
   creatingFeature,
   creatingSystemConstraintUpdate,
+  leanToken,
+  leanTokenLoading,
   onBackToList,
   onCreateFeature,
   onOpenSystemConstraintUpdate,
@@ -5450,6 +5453,8 @@ function ProjectDetailPage({
   loading: boolean
   creatingFeature: boolean
   creatingSystemConstraintUpdate: boolean
+  leanToken: string
+  leanTokenLoading: boolean
   onBackToList: () => void
   onCreateFeature: (project: HarnessProjectListItem) => void
   onOpenSystemConstraintUpdate: (
@@ -5471,6 +5476,9 @@ function ProjectDetailPage({
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const projectStatus = detail?.projectState
   const projectRootPath = resolveProjectRootPath(project)
+  const hasProjectCode = project.projectCode.trim().length > 0
+  const hasLeanToken = leanToken.trim().length > 0
+  const canOpenSystemConstraintUpdate = hasProjectCode && hasLeanToken && !leanTokenLoading
   const openProjectWorkspaceInFileManager = useCallback((): void => {
     void openPathInFileManager(projectRootPath, "无法打开项目工作区")
   }, [projectRootPath])
@@ -5497,11 +5505,11 @@ function ProjectDetailPage({
                         size="sm"
                         className={harnessDetailSecondaryButtonClassName}
                         onClick={() => {
-                          if (detail.systemConstraintUpdate) {
+                          if (detail.systemConstraintUpdate && canOpenSystemConstraintUpdate) {
                             onOpenSystemConstraintUpdate(project, detail.systemConstraintUpdate)
                           }
                         }}
-                        disabled={creatingSystemConstraintUpdate}
+                        disabled={creatingSystemConstraintUpdate || !canOpenSystemConstraintUpdate}
                       >
                         {creatingSystemConstraintUpdate ? (
                           <Loader2 className="size-4 animate-spin" />
@@ -5513,7 +5521,13 @@ function ProjectDetailPage({
                     </span>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" sideOffset={6}>
-                    沉淀本项目的变更，更新知识库
+                    {!hasProjectCode
+                      ? "请先编辑项目信息，填写项目编号"
+                      : !hasLeanToken
+                        ? "请先配置精益平台token"
+                        : leanTokenLoading
+                          ? "正在加载配置..."
+                          : "沉淀本项目的变更，更新知识库"}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -7046,6 +7060,10 @@ export function HarnessBoardView({
   const [featureError, setFeatureError] = useState<string | null>(null)
   const [featureWorkflowConfig, setFeatureWorkflowConfig] = useState<HarnessDynamicWorkflowConfig | null>(null)
   const [featureWorkflowLoading, setFeatureWorkflowLoading] = useState(false)
+  const [knowledgeDialogOpen, setKnowledgeDialogOpen] = useState(false)
+  const [knowledgeDialogProject, setKnowledgeDialogProject] = useState<HarnessProjectListItem | null>(null)
+  const [knowledgeDialogConfig, setKnowledgeDialogConfig] = useState<NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]> | null>(null)
+
   const [featureWorkflowTemplate, setFeatureWorkflowTemplate] = useState("")
   const [selectedWorkflowNodeIds, setSelectedWorkflowNodeIds] = useState<Set<string>>(new Set())
   const [featureAgentsReadyDeployUnits, setFeatureAgentsReadyDeployUnits] = useState<string[]>([])
@@ -8700,34 +8718,45 @@ export function HarnessBoardView({
   }, [loadProjectDetail])
 
   const handleOpenSystemConstraintUpdate = useCallback(
-    async (
+    (
       project: HarnessProjectListItem,
       config: NonNullable<HarnessProjectDetailViewModel["systemConstraintUpdate"]>
-    ): Promise<void> => {
+    ): void => {
       if (creatingProjectSessionProjectId) return
-      setCreatingProjectSessionProjectId(project.projectId)
+      setKnowledgeDialogProject(project)
+      setKnowledgeDialogConfig(config)
+      setKnowledgeDialogOpen(true)
+    },
+    [creatingProjectSessionProjectId]
+  )
+
+  const handleKnowledgeDialogSubmit = useCallback(
+    async (content: string): Promise<void> => {
+      if (!knowledgeDialogProject || !knowledgeDialogConfig || creatingProjectSessionProjectId) return
+      setCreatingProjectSessionProjectId(knowledgeDialogProject.projectId)
       try {
         const thread = await createThread(
           {
-            workspacePath: config.knowledgePath ?? null,
+            workspacePath: knowledgeDialogConfig.knowledgePath ?? null,
             disableAgentsPrompt: true,
             harnessProjectSession: {
-              projectId: project.projectId,
+              projectId: knowledgeDialogProject.projectId,
               kind: SYSTEM_CONSTRAINT_UPDATE_KIND
             }
           },
           { preserveView: true }
         )
         setPendingHarnessNextAction(thread.thread_id, {
-          ...config.nextAction,
+          ...knowledgeDialogConfig.nextAction,
+          userMessage: content,
           preferredPlugin: {
-            id: project.harnessAdapter.id,
-            name: project.harnessAdapter.name
+            id: knowledgeDialogProject.harnessAdapter.id,
+            name: knowledgeDialogProject.harnessAdapter.name
           }
         })
-        setSelectedProjectId(project.projectId)
+        setSelectedProjectId(knowledgeDialogProject.projectId)
         setSelectedFeature(null)
-        setSelectedProjectSession({ projectId: project.projectId, threadId: thread.thread_id })
+        setSelectedProjectSession({ projectId: knowledgeDialogProject.projectId, threadId: thread.thread_id })
         setIsViewingSession(true)
         markRead(thread.thread_id)
         await selectThread(thread.thread_id, { preserveView: true })
@@ -8735,9 +8764,11 @@ export function HarnessBoardView({
         toast.error(cleanIpcError(error))
       } finally {
         setCreatingProjectSessionProjectId(null)
+        setKnowledgeDialogProject(null)
+        setKnowledgeDialogConfig(null)
       }
     },
-    [createThread, creatingProjectSessionProjectId, markRead, selectThread]
+    [createThread, creatingProjectSessionProjectId, knowledgeDialogConfig, knowledgeDialogProject, markRead, selectThread]
   )
 
   const projectSidebarGroups = useMemo<ProjectSessionProjectGroup[]>(() => {
@@ -9273,6 +9304,8 @@ export function HarnessBoardView({
           loading={loadingDetailIds.has(selectedProject.projectId)}
           creatingFeature={creatingFeatureProjectId === selectedProject.projectId}
           creatingSystemConstraintUpdate={creatingProjectSessionProjectId === selectedProject.projectId}
+          leanToken={leanTokenConfig.leanToken}
+          leanTokenLoading={leanTokenLoading}
           onBackToList={handleBackToProjectList}
           onCreateFeature={openFeatureCreateDialog}
           onOpenSystemConstraintUpdate={(project, config) => {
@@ -9328,6 +9361,13 @@ export function HarnessBoardView({
           onInstallPlugin={handleInstallMarketPlugin}
           onPickSessionWorkspace={() => void handlePickEditSessionWorkspace()}
           onSubmit={() => void handleSubmitEdit()}
+        />
+        <KnowledgeDialog
+          open={knowledgeDialogOpen}
+          onOpenChange={setKnowledgeDialogOpen}
+          onSubmit={handleKnowledgeDialogSubmit}
+          projectNumber={knowledgeDialogProject?.projectCode ?? ""}
+          leanToken={leanTokenConfig.leanToken}
         />
         {sidebarDeleteDialog}
         {sidebarPortal}
@@ -9618,6 +9658,13 @@ export function HarnessBoardView({
           }
         }}
         onConfirm={handleConfirmProjectAction}
+      />
+      <KnowledgeDialog
+        open={knowledgeDialogOpen}
+        onOpenChange={setKnowledgeDialogOpen}
+        onSubmit={handleKnowledgeDialogSubmit}
+        projectNumber={knowledgeDialogProject?.projectCode ?? ""}
+        leanToken={leanTokenConfig.leanToken}
       />
       {sidebarDeleteDialog}
       {sidebarPortal}
