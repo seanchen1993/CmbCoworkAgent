@@ -29,6 +29,7 @@ export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 // Agent IPC
 export interface AgentInvokeParams {
   threadId: string
+  streamRequestId?: string
   message: string
   modelId?: string
   agentMode?: "normal" | "coordinator" | "workflow"
@@ -39,6 +40,7 @@ export interface AgentInvokeParams {
 
 export interface AgentResumeParams {
   threadId: string
+  streamRequestId?: string
   command: {
     resume?: {
       decision?: string
@@ -52,6 +54,7 @@ export interface AgentResumeParams {
 
 export interface AgentInterruptParams {
   threadId: string
+  streamRequestId?: string
   decision: HITLDecision
 }
 
@@ -173,6 +176,8 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  provider_source_id?: string
+  provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number

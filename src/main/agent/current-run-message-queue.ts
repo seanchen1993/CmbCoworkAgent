@@ -27,6 +27,14 @@ import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
+import {
+  advanceCompletedMessageContentRoute,
+  getMessageProviderOccurrence,
+  getMessageProviderSourceId,
+  MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
+  MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY,
+  normalizeAppendedMessageIds
+} from "../../shared/message-role-collision"
 
 export interface CurrentRunQueuedMessage {
   id: string
@@ -41,6 +49,229 @@ export interface CurrentRunCompletedAssistantMessage {
   content: Message["content"]
   /** The provider id emitted by the outer stream, if one was supplied. */
   sourceId?: string
+}
+
+export interface CurrentRunCompletedAssistantIdentity {
+  sourceId?: string
+  providerSourceId?: string
+  providerOccurrence?: number
+}
+
+export interface CurrentRunInjectionAnchor {
+  id: string
+  role: Message["role"]
+  providerSourceId?: string
+  providerOccurrence?: number
+}
+
+interface CurrentRunCompletedAssistantRoute {
+  runToken: string
+  rawSourceId: string
+  stableId: string
+  providerSourceId: string
+  providerOccurrence: number
+  content: Message["content"]
+  observedContent?: Message["content"]
+}
+
+export interface CurrentRunCompletedAssistantRouteIdentity {
+  stableId: string
+  providerSourceId: string
+  providerOccurrence: number
+  /** Cumulative content observed for this delayed completed-message route. */
+  content: Message["content"]
+}
+
+const completedAssistantRoutes = new Map<string, CurrentRunCompletedAssistantRoute>()
+
+export function registerCurrentRunCompletedAssistantRoute(
+  threadId: string,
+  runToken: string,
+  route: Omit<CurrentRunCompletedAssistantRoute, "runToken">
+): void {
+  if (!threadId || !runToken || !isCurrentRunMessageQueueOwner(threadId, runToken)) return
+  const rawSourceId = route.rawSourceId.trim()
+  const stableId = route.stableId.trim()
+  const providerSourceId =
+    typeof route.providerSourceId === "string" ? route.providerSourceId.trim() : ""
+  if (
+    !rawSourceId ||
+    !stableId ||
+    rawSourceId === stableId ||
+    !providerSourceId ||
+    !Number.isInteger(route.providerOccurrence) ||
+    route.providerOccurrence < 1
+  ) {
+    return
+  }
+  completedAssistantRoutes.set(threadId, {
+    ...route,
+    runToken,
+    rawSourceId,
+    stableId,
+    providerSourceId
+  })
+}
+
+export function routeCurrentRunCompletedAssistantMessage(
+  threadId: string,
+  message: Pick<Message, "id" | "role" | "content">,
+  runToken?: string
+): CurrentRunCompletedAssistantRouteIdentity | undefined {
+  const route = completedAssistantRoutes.get(threadId)
+  if (!route || message.role !== "assistant") return undefined
+  // Production stream persistence always supplies the physical run token. An
+  // obsolete run must neither consume nor mutate the replacement run's route.
+  if (
+    runToken &&
+    (route.runToken !== runToken || !isCurrentRunMessageQueueOwner(threadId, runToken))
+  ) {
+    return undefined
+  }
+  const messageId = message.id.trim()
+  const isCompletedId = messageId === route.rawSourceId || messageId === route.stableId
+  if (!isCompletedId) {
+    completedAssistantRoutes.delete(threadId)
+    return undefined
+  }
+  const contentRoute = advanceCompletedMessageContentRoute(
+    route.content,
+    route.observedContent,
+    message.content
+  )
+  if (!contentRoute.matched || contentRoute.complete) {
+    completedAssistantRoutes.delete(threadId)
+  } else {
+    route.observedContent = contentRoute.observedContent as Message["content"]
+  }
+  return contentRoute.matched
+    ? {
+        stableId: route.stableId,
+        providerSourceId: route.providerSourceId,
+        providerOccurrence: route.providerOccurrence,
+        content: (contentRoute.observedContent ?? message.content) as Message["content"]
+      }
+    : undefined
+}
+
+export function resolveCurrentRunCompletedAssistantIdentity(
+  baselineMessages: readonly Message[],
+  completedMessage: CurrentRunCompletedAssistantMessage
+): CurrentRunCompletedAssistantIdentity {
+  const rawSourceId = completedMessage.sourceId?.trim()
+  if (!rawSourceId || rawSourceId === completedMessage.id) return {}
+
+  const durableCompletedMessage = baselineMessages.find(
+    (message) => message.id.trim() === completedMessage.id.trim() && message.role === "assistant"
+  )
+  if (durableCompletedMessage) {
+    return {
+      sourceId: durableCompletedMessage.id,
+      providerSourceId:
+        durableCompletedMessage.provider_source_id?.trim() || rawSourceId,
+      providerOccurrence: getMessageProviderOccurrence(durableCompletedMessage) ?? 1
+    }
+  }
+
+  const [normalizedSource] = normalizeAppendedMessageIds(
+    baselineMessages,
+    [
+      {
+        id: rawSourceId,
+        role: "assistant",
+        content: completedMessage.content
+      }
+    ],
+    { splitAssistantAfterTool: true }
+  )
+  if (!normalizedSource) return {}
+
+  return {
+    sourceId: normalizedSource.id,
+    providerSourceId: getMessageProviderSourceId(normalizedSource),
+    providerOccurrence: getMessageProviderOccurrence(normalizedSource) ?? 1
+  }
+}
+
+/** Resolve a graph-state predecessor to its durable render id. Graph messages
+ * may still carry a reused raw provider id after DB role/occurrence collision
+ * normalization, so an exact id lookup alone is not a safe ordering anchor. */
+export function resolveCurrentRunInjectionAnchorId(
+  baselineMessages: readonly Message[],
+  anchor: CurrentRunInjectionAnchor
+): string | undefined {
+  const anchorId = anchor.id.trim()
+  const providerSourceId = anchor.providerSourceId?.trim() || anchorId
+  if (!anchorId || !providerSourceId) return undefined
+
+  const candidates = baselineMessages.filter(
+    (message) =>
+      message.role === anchor.role && getMessageProviderSourceId(message) === providerSourceId
+  )
+  if (anchor.providerOccurrence !== undefined) {
+    return candidates.find(
+      (message) => getMessageProviderOccurrence(message) === anchor.providerOccurrence
+    )?.id
+  }
+  // Graph state is ordered and this anchor is its tail predecessor. When a raw
+  // provider id was reused without explicit occurrence metadata, the last
+  // durable same-role occurrence is the only safe implicit match.
+  if (candidates.length > 0) return candidates.at(-1)?.id
+  return baselineMessages.find(
+    (message) => message.role === anchor.role && message.id.trim() === anchorId
+  )?.id
+}
+
+function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectionAnchor | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const message = value as Record<string, unknown>
+  const id = typeof message.id === "string" ? message.id.trim() : ""
+  if (!id) return undefined
+  const getType = message._getType
+  let rawType: unknown
+  if (typeof getType === "function") {
+    try {
+      rawType = getType.call(value)
+    } catch {
+      return undefined
+    }
+  }
+  const role: Message["role"] | undefined =
+    rawType === "human"
+      ? "user"
+      : rawType === "ai"
+        ? "assistant"
+        : rawType === "tool"
+          ? "tool"
+          : rawType === "system"
+            ? "system"
+            : undefined
+  if (!role) return undefined
+
+  const additionalKwargs =
+    message.additional_kwargs &&
+    typeof message.additional_kwargs === "object" &&
+    !Array.isArray(message.additional_kwargs)
+      ? (message.additional_kwargs as Record<string, unknown>)
+      : undefined
+  const rawProviderSourceId = additionalKwargs?.[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
+  const providerSourceId =
+    typeof rawProviderSourceId === "string" && rawProviderSourceId.trim()
+      ? rawProviderSourceId.trim()
+      : undefined
+  const rawProviderOccurrence = additionalKwargs?.[MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]
+  const providerOccurrence =
+    typeof rawProviderOccurrence === "number" &&
+    Number.isInteger(rawProviderOccurrence) &&
+    rawProviderOccurrence > 0
+      ? rawProviderOccurrence
+      : undefined
+  return {
+    id,
+    role,
+    ...(providerSourceId ? { providerSourceId } : {}),
+    ...(providerOccurrence !== undefined ? { providerOccurrence } : {})
+  }
 }
 
 const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
@@ -99,8 +330,16 @@ export function assertCurrentRunMessagesDurablyPersisted(
 export type CurrentRunInjectionNotifier = (
   threadId: string,
   messages: CurrentRunQueuedMessage[],
-  context?: { completedAssistantMessage?: CurrentRunCompletedAssistantMessage }
-) => void | Promise<void>
+  context?: {
+    completedAssistantMessage?: CurrentRunCompletedAssistantMessage
+    /** Message that immediately preceded this injected batch in graph state. */
+    anchorMessage?: CurrentRunInjectionAnchor
+    runToken?: string
+  }
+) =>
+  | void
+  | { completedAssistantIdentity?: CurrentRunCompletedAssistantIdentity }
+  | Promise<void | { completedAssistantIdentity?: CurrentRunCompletedAssistantIdentity }>
 
 let notifyInjected: CurrentRunInjectionNotifier = () => {}
 
@@ -113,6 +352,10 @@ export function setCurrentRunInjectionNotifier(notifier: CurrentRunInjectionNoti
  * longer drain or clear messages transferred to the continuation. */
 export function setCurrentRunMessageQueueOwner(threadId: string, runToken: string): void {
   if (!threadId || !runToken) return
+  const pendingRoute = completedAssistantRoutes.get(threadId)
+  if (pendingRoute && pendingRoute.runToken !== runToken) {
+    completedAssistantRoutes.delete(threadId)
+  }
   currentRunMessageQueueOwners.set(threadId, runToken)
 }
 
@@ -161,12 +404,16 @@ export function deleteCurrentRunQueuedMessage(threadId: string, messageId: strin
 export function clearCurrentRunMessageQueue(threadId: string, runToken?: string): void {
   if (runToken && !isCurrentRunMessageQueueOwner(threadId, runToken)) {
     completedAssistantMessagesByRun.delete(runScopedKey(threadId, runToken))
+    if (completedAssistantRoutes.get(threadId)?.runToken === runToken) {
+      completedAssistantRoutes.delete(threadId)
+    }
     return
   }
   currentRunMessageQueues.delete(threadId)
   currentRunMessageQueueOwners.delete(threadId)
   injectedMessageIds.delete(threadId)
   withdrawnMessageIds.delete(threadId)
+  completedAssistantRoutes.delete(threadId)
   if (runToken) {
     completedAssistantMessagesByRun.delete(runScopedKey(threadId, runToken))
   } else {
@@ -196,8 +443,17 @@ async function drainCurrentRunMessagesForInjection(
   threadId: string,
   runToken: string,
   phase: "beforeModel" | "afterModel",
-  context?: { completedAssistantMessage?: CurrentRunCompletedAssistantMessage }
-): Promise<{ messages: HumanMessage[] } | undefined> {
+  context?: {
+    completedAssistantMessage?: CurrentRunCompletedAssistantMessage
+    anchorMessage?: CurrentRunInjectionAnchor
+  }
+): Promise<
+  | {
+      messages: HumanMessage[]
+      completedAssistantIdentity?: CurrentRunCompletedAssistantIdentity
+    }
+  | undefined
+> {
   const queued = drainCurrentRunMessageQueue(threadId, runToken).filter((message) =>
     message.content.trim()
   )
@@ -206,8 +462,11 @@ async function drainCurrentRunMessagesForInjection(
   // The notifier durably persists these user turns before acknowledging them to
   // the renderer. If persistence fails, restore the queue and let the graph fail
   // this hook instead of losing the only durable copy of the user's instruction.
+  let acknowledgement:
+    | void
+    | { completedAssistantIdentity?: CurrentRunCompletedAssistantIdentity }
   try {
-    await notifyInjected(threadId, queued, context)
+    acknowledgement = await notifyInjected(threadId, queued, { ...context, runToken })
   } catch (error) {
     // The run can be replaced while durable persistence is in flight. Never
     // restore an old owner's messages into the replacement run's shared queue.
@@ -241,7 +500,10 @@ async function drainCurrentRunMessagesForInjection(
             : {})
         })
       }
-    )
+    ),
+    ...(acknowledgement?.completedAssistantIdentity
+      ? { completedAssistantIdentity: acknowledgement.completedAssistantIdentity }
+      : {})
   }
 }
 
@@ -304,17 +566,20 @@ export function createCurrentRunMessageQueueMiddleware(
       }
       return response
     },
-    beforeModel: async (_state, runtime) => {
+    beforeModel: async (state, runtime) => {
       const threadId =
         typeof runtime.configurable?.thread_id === "string"
           ? runtime.configurable.thread_id
           : undefined
       if (!threadId || !ownerRunToken) return undefined
 
+      const messages = Array.isArray(state.messages) ? state.messages : []
+      const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-1))
       const injection = await drainCurrentRunMessagesForInjection(
         threadId,
         ownerRunToken,
-        "beforeModel"
+        "beforeModel",
+        { anchorMessage }
       )
       return injection ? { messages: injection.messages } : undefined
     },
@@ -344,24 +609,31 @@ export function createCurrentRunMessageQueueMiddleware(
           completedAssistantMessagesByRun.get(completedKey) ??
           completedAssistantMessageForTranscript(lastMessage)
         completedAssistantMessagesByRun.delete(completedKey)
+        const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-2))
 
         const injection = await drainCurrentRunMessagesForInjection(
           threadId,
           ownerRunToken,
           "afterModel",
-          { completedAssistantMessage }
+          { completedAssistantMessage, anchorMessage }
         )
         // The preceding reply is persisted with a fresh id so providers that
         // reuse AI message ids cannot overwrite it with the guided reply. Keep
         // LangGraph state on that same id before the next values snapshot is
         // emitted; otherwise the renderer sees the provider id and the durable
         // id as two separate assistant messages after a reload.
-        if (
-          injection &&
-          completedAssistantMessage &&
-          lastMessage.id !== completedAssistantMessage.id
-        ) {
-          lastMessage.id = completedAssistantMessage.id
+        if (injection && completedAssistantMessage) {
+          if (lastMessage.id !== completedAssistantMessage.id) {
+            lastMessage.id = completedAssistantMessage.id
+          }
+          const completedIdentity = injection.completedAssistantIdentity
+          if (completedIdentity?.providerSourceId && completedIdentity.providerOccurrence) {
+            lastMessage.additional_kwargs = {
+              ...lastMessage.additional_kwargs,
+              [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: completedIdentity.providerSourceId,
+              [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: completedIdentity.providerOccurrence
+            }
+          }
         }
         return injection ? { messages: injection.messages, jumpTo: "model" as const } : undefined
       }

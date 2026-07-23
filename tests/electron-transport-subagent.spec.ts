@@ -13,6 +13,14 @@ import { ElectronIPCTransport } from "../src/renderer/src/lib/electron-transport
 import { useAppStore, type WorkerFocusView } from "../src/renderer/src/lib/store.ts"
 import { CONTEXT_COMPACTION_MODEL_TAG } from "../src/shared/context-compaction-events.ts"
 import {
+  buildWorkerCheckpointHistory,
+  isExplicitWorkerOccurrenceAfter,
+  isCompleteWorkerSnapshotCoveringHistory,
+  mergeWorkerCheckpointSparseContent,
+  normalizeWorkerMessagesAfterHistory
+} from "../src/renderer/src/lib/worker-checkpoint-history.ts"
+import {
+  buildToolResultAssociations,
   getWorkerToolResultKey,
   getWorkerToolUiKey
 } from "../src/renderer/src/lib/worker-tool-result-key.ts"
@@ -111,7 +119,7 @@ function aiMessageChunk(input: {
 
 function toolMessage(input: {
   id?: string
-  name: string
+  name?: string
   toolCallId: string
   content?: unknown
   status?: string
@@ -707,6 +715,2460 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       "worker message side-channel should hide structurally marked summaries"
     )
 
+    const hiddenMessageShapes = [
+      {
+        id: ["langchain_core", "messages", "HumanMessage"],
+        kwargs: { id: "hidden-human", content: "secret human" }
+      },
+      {
+        id: ["langchain_core", "messages", "AIMessage"],
+        kwargs: { id: "hidden-ai", content: "secret assistant" }
+      },
+      {
+        id: ["langchain_core", "messages", "ToolMessage"],
+        kwargs: {
+          id: "hidden-tool",
+          content: "secret tool",
+          tool_call_id: "hidden-call"
+        }
+      },
+      {
+        id: ["langchain_core", "messages", "SystemMessage"],
+        kwargs: { id: "hidden-system", content: "secret system" }
+      }
+    ].map((message) => ({
+      ...message,
+      kwargs: {
+        ...message.kwargs,
+        additional_kwargs: { cmb_internal_coordinator_notification: true }
+      }
+    }))
+    for (const hiddenMessage of hiddenMessageShapes) {
+      const hiddenMessages = transport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(hiddenMessage, {}) as object),
+          workerTurn: 3
+        } as never,
+        "thread-123"
+      )
+      assert(
+        hiddenMessages.length === 0,
+        "worker messages mode must hide internal coordinator notifications for every role"
+      )
+    }
+
+    const hiddenTurnStateTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "hidden-turn-state-worker",
+      workerThreadId: "thread-123__worker__hidden-turn-state-worker"
+    })
+    const visibleChunkA = hiddenTurnStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "hidden-turn-state-shared", content: "A" }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__hidden-turn-state-worker",
+        visibleChunkA
+      )
+    const hiddenTurnChunk = aiMessageChunk({
+      id: "hidden-turn-state-internal",
+      content: "secret"
+    }) as { kwargs: Record<string, unknown> }
+    hiddenTurnChunk.kwargs.additional_kwargs = {
+      cmb_internal_coordinator_notification: true
+    }
+    const hiddenTurnOutput =
+      hiddenTurnStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(hiddenTurnChunk, {}) as object),
+          workerTurn: 2
+        } as never,
+        "thread-123"
+      )
+    const visibleChunkB = hiddenTurnStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "hidden-turn-state-shared", content: "B" }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__hidden-turn-state-worker",
+        visibleChunkB
+      )
+    assert(
+      hiddenTurnOutput.length === 0 &&
+        visibleChunkB.at(-1)?.content === "AB" &&
+        useAppStore.getState().workerFocusMessages.at(-1)?.content === "AB",
+      "an internal message from another turn must not reset visible assistant accumulation"
+    )
+
+    const hiddenValuesStateTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "hidden-values-state-worker",
+      workerThreadId: "thread-123__worker__hidden-values-state-worker"
+    })
+    const visibleBeforeHiddenValues =
+      hiddenValuesStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "hidden-values-state-shared", content: "A" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__hidden-values-state-worker",
+        visibleBeforeHiddenValues
+      )
+    const hiddenValuesOutput =
+      hiddenValuesStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            {
+              id: ["langchain_core", "messages", "AIMessage"],
+              kwargs: {
+                id: "hidden-values-internal",
+                content: "secret",
+                additional_kwargs: { cmb_internal_coordinator_notification: true }
+              }
+            }
+          ]) as object),
+          workerTurn: 2
+        } as never,
+        "thread-123"
+      )
+    const visibleAfterHiddenValues =
+      hiddenValuesStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "hidden-values-state-shared", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__hidden-values-state-worker",
+        visibleAfterHiddenValues
+      )
+    assert(
+      hiddenValuesOutput.length === 0 &&
+        visibleAfterHiddenValues.at(-1)?.content === "AB" &&
+        useAppStore.getState().workerFocusMessages.at(-1)?.content === "AB",
+      "an internal-only values snapshot must not reset visible assistant accumulation"
+    )
+
+    const emptyValuesStateTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "empty-values-state-worker",
+      workerThreadId: "thread-123__worker__empty-values-state-worker"
+    })
+    const visibleBeforeEmptyValues =
+      emptyValuesStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "empty-values-state-shared", content: "A" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__empty-values-state-worker",
+        visibleBeforeEmptyValues
+      )
+    const emptyValuesOutput =
+      emptyValuesStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    const visibleAfterEmptyValues =
+      emptyValuesStateTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "empty-values-state-shared", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__empty-values-state-worker",
+        visibleAfterEmptyValues
+      )
+    assert(
+      emptyValuesOutput.length === 0 &&
+        visibleAfterEmptyValues.at(-1)?.content === "AB" &&
+        useAppStore.getState().workerFocusMessages.at(-1)?.content === "AB",
+      "an empty values snapshot must not reset visible assistant accumulation"
+    )
+
+    const lateTurnMetadataTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "late-turn-metadata-worker",
+      workerThreadId: "thread-123__worker__late-turn-metadata-worker"
+    })
+    const beforeTurnMetadata =
+      lateTurnMetadataTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessageChunk({ id: "late-turn-metadata-ai", content: "A" }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__late-turn-metadata-worker",
+        beforeTurnMetadata
+      )
+    const afterTurnMetadata =
+      lateTurnMetadataTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "late-turn-metadata-ai", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__late-turn-metadata-worker",
+        afterTurnMetadata
+      )
+    const lateTurnMetadataMessages = useAppStore.getState().workerFocusMessages
+    assert(
+      beforeTurnMetadata[0]?.id === afterTurnMetadata[0]?.id &&
+        afterTurnMetadata[0]?.content === "AB" &&
+        lateTurnMetadataMessages.length === 1 &&
+        lateTurnMetadataMessages[0]?.content === "AB",
+      "first workerTurn metadata must adopt the active unscoped assistant without splitting it"
+    )
+
+    const lateTurnValuesTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "late-turn-values-worker",
+      workerThreadId: "thread-123__worker__late-turn-values-worker"
+    })
+    const lateTurnValuesStart =
+      lateTurnValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessageChunk({ id: "late-turn-values-ai", content: "A" }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__late-turn-values-worker",
+        lateTurnValuesStart
+      )
+    const lateTurnValuesSnapshot =
+      lateTurnValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({ id: "late-turn-values-ai", content: "AB" })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__late-turn-values-worker",
+      lateTurnValuesSnapshot,
+      { orderedSnapshot: true }
+    )
+    const lateTurnValuesTail =
+      lateTurnValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "late-turn-values-ai", content: "C" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__late-turn-values-worker",
+        lateTurnValuesTail
+      )
+    const lateTurnValuesMessages = useAppStore.getState().workerFocusMessages
+    assert(
+      lateTurnValuesSnapshot[0]?.id === lateTurnValuesStart[0]?.id &&
+        lateTurnValuesTail[0]?.id === lateTurnValuesStart[0]?.id &&
+        lateTurnValuesTail[0]?.content === "ABC" &&
+        lateTurnValuesMessages.length === 1 &&
+        lateTurnValuesMessages[0]?.content === "ABC",
+      "messages-values-messages must retain one active id across first workerTurn adoption"
+    )
+
+    const sparseLateTurnValuesTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "sparse-late-turn-values-worker",
+      workerThreadId: "thread-123__worker__sparse-late-turn-values-worker"
+    })
+    const sparseLateTurnStart =
+      sparseLateTurnValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessageChunk({ id: "sparse-late-turn-values-ai", content: "A" }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__sparse-late-turn-values-worker",
+        sparseLateTurnStart
+      )
+    const sparseLateTurnSnapshot =
+      sparseLateTurnValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({ id: "sparse-late-turn-values-ai", content: "", toolCalls: [] })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__sparse-late-turn-values-worker",
+      sparseLateTurnSnapshot,
+      { orderedSnapshot: true }
+    )
+    const sparseLateTurnTail =
+      sparseLateTurnValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "sparse-late-turn-values-ai", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__sparse-late-turn-values-worker",
+        sparseLateTurnTail
+      )
+    const sparseLateTurnMessages = useAppStore.getState().workerFocusMessages
+    assert(
+      sparseLateTurnSnapshot[0]?.id === sparseLateTurnStart[0]?.id &&
+        sparseLateTurnTail[0]?.id === sparseLateTurnStart[0]?.id &&
+      sparseLateTurnTail[0]?.content === "AB" &&
+        sparseLateTurnMessages.length === 1 &&
+        sparseLateTurnMessages[0]?.content === "AB",
+      "sparse values must retain the active unscoped id during first workerTurn adoption"
+    )
+
+    const repeatedSparseAdoptionTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "repeated-sparse-adoption-worker",
+      workerThreadId: "thread-123__worker__repeated-sparse-adoption-worker"
+    })
+    const repeatedSparseFirst =
+      repeatedSparseAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            id: "repeated-sparse-adoption-ai",
+            content: "first",
+            toolCalls: [
+              { id: "repeated-sparse-adoption-call", name: "read_file", args: {} }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__repeated-sparse-adoption-worker",
+        repeatedSparseFirst
+      )
+    const repeatedSparseTool =
+      repeatedSparseAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          toolMessage({
+            id: "repeated-sparse-adoption-tool",
+            name: "read_file",
+            toolCallId: "repeated-sparse-adoption-call",
+            content: "result"
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__repeated-sparse-adoption-worker",
+        repeatedSparseTool
+      )
+    const repeatedSparseSecond =
+      repeatedSparseAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessageChunk({ id: "repeated-sparse-adoption-ai", content: "second" }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__repeated-sparse-adoption-worker",
+        repeatedSparseSecond
+      )
+    const repeatedSparseSnapshot =
+      repeatedSparseAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "repeated-sparse-adoption-ai",
+              content: "first",
+              toolCalls: [
+                { id: "repeated-sparse-adoption-call", name: "read_file", args: {} }
+              ]
+            }),
+            toolMessage({
+              id: "repeated-sparse-adoption-tool",
+              name: "read_file",
+              toolCallId: "repeated-sparse-adoption-call",
+              content: "result"
+            }),
+            aiMessage({ id: "repeated-sparse-adoption-ai", content: "" })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__repeated-sparse-adoption-worker",
+      repeatedSparseSnapshot,
+      { orderedSnapshot: true }
+    )
+    const repeatedSparseTail =
+      repeatedSparseAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "repeated-sparse-adoption-ai", content: " tail" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__repeated-sparse-adoption-worker",
+        repeatedSparseTail
+      )
+    const repeatedSparseAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      repeatedSparseSecond[0]?.id.includes("::cmb-same-role-duplicate:assistant:2") &&
+        repeatedSparseSnapshot.at(-1)?.id === repeatedSparseSecond[0]?.id &&
+        repeatedSparseTail[0]?.id === repeatedSparseSecond[0]?.id &&
+        repeatedSparseAssistants.map((message) => message.content).join("|") ===
+          "first|second tail",
+      "sparse adoption must preserve the active repeated provider occurrence"
+    )
+
+    const differentProviderAdoptionTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "different-provider-adoption-worker",
+      workerThreadId: "thread-123__worker__different-provider-adoption-worker"
+    })
+    const differentProviderStart =
+      differentProviderAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            id: "different-provider-first",
+            content: "first",
+            toolCalls: [
+              { id: "different-provider-call", name: "read_file", args: {} }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__different-provider-adoption-worker",
+        differentProviderStart
+      )
+    const differentProviderSnapshot =
+      differentProviderAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "different-provider-first",
+              content: "",
+              toolCalls: [
+                { id: "different-provider-call", name: "read_file", args: {} }
+              ]
+            }),
+            toolMessage({
+              id: "different-provider-tool",
+              name: "read_file",
+              toolCallId: "different-provider-call",
+              content: "result"
+            }),
+            aiMessage({ id: "different-provider-second", content: "second" })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__different-provider-adoption-worker",
+      differentProviderSnapshot,
+      { orderedSnapshot: true }
+    )
+    const differentProviderTail =
+      differentProviderAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "different-provider-second", content: " tail" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__different-provider-adoption-worker",
+        differentProviderTail
+      )
+    const differentProviderAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      differentProviderSnapshot[0]?.id === differentProviderStart[0]?.id &&
+        differentProviderTail[0]?.id !== differentProviderStart[0]?.id &&
+        differentProviderAssistants.map((message) => message.content).join("|") ===
+          "first|second tail",
+      "known-provider adoption must not rebind a later different-provider assistant"
+    )
+
+    const baseOccurrenceAdoptionTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "base-occurrence-adoption-worker",
+      workerThreadId: "thread-123__worker__base-occurrence-adoption-worker"
+    })
+    const baseOccurrenceStart =
+      baseOccurrenceAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            id: "base-occurrence-adoption-ai",
+            content: "first",
+            toolCalls: [
+              { id: "base-occurrence-adoption-call", name: "read_file", args: {} }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__base-occurrence-adoption-worker",
+        baseOccurrenceStart
+      )
+    const baseOccurrenceSnapshot =
+      baseOccurrenceAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "base-occurrence-adoption-ai",
+              content: "",
+              toolCalls: [
+                { id: "base-occurrence-adoption-call", name: "read_file", args: {} }
+              ]
+            }),
+            toolMessage({
+              id: "base-occurrence-adoption-tool",
+              name: "read_file",
+              toolCallId: "base-occurrence-adoption-call",
+              content: "result"
+            }),
+            aiMessage({ id: "base-occurrence-adoption-ai", content: "second" })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__base-occurrence-adoption-worker",
+      baseOccurrenceSnapshot,
+      { orderedSnapshot: true }
+    )
+    const baseOccurrenceTail =
+      baseOccurrenceAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "base-occurrence-adoption-ai", content: " tail" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__base-occurrence-adoption-worker",
+        baseOccurrenceTail
+      )
+    const baseOccurrenceAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      baseOccurrenceSnapshot[0]?.id === baseOccurrenceStart[0]?.id &&
+        baseOccurrenceTail[0]?.id !== baseOccurrenceStart[0]?.id &&
+        baseOccurrenceAssistants.map((message) => message.content).join("|") ===
+          "first|second tail",
+      "base occurrence adoption must use its exact raw id before a later same-provider occurrence"
+    )
+
+    const unknownProviderMultiTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "unknown-provider-multi-worker",
+      workerThreadId: "thread-123__worker__unknown-provider-multi-worker"
+    })
+    const unknownProviderMultiStart =
+      unknownProviderMultiTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "first",
+            toolCalls: [{ id: "unknown-provider-call", name: "read_file", args: {} }]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__unknown-provider-multi-worker",
+        unknownProviderMultiStart
+      )
+    const unknownProviderMultiSnapshot =
+      unknownProviderMultiTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "unknown-provider-first",
+              content: "first",
+              toolCalls: [
+                { id: "unknown-provider-call", name: "read_file", args: {} }
+              ]
+            }),
+            toolMessage({
+              id: "unknown-provider-tool",
+              name: "read_file",
+              toolCallId: "unknown-provider-call",
+              content: "result"
+            }),
+            aiMessage({ id: "unknown-provider-second", content: "second" })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__unknown-provider-multi-worker",
+      unknownProviderMultiSnapshot,
+      { orderedSnapshot: true }
+    )
+    const unknownProviderMultiTail =
+      unknownProviderMultiTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "unknown-provider-second", content: " tail" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__unknown-provider-multi-worker",
+        unknownProviderMultiTail
+      )
+    const unknownProviderMultiAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      unknownProviderMultiSnapshot[0]?.id === unknownProviderMultiStart[0]?.id &&
+        unknownProviderMultiTail[0]?.id !== unknownProviderMultiStart[0]?.id &&
+        unknownProviderMultiAssistants.map((message) => message.content).join("|") ===
+          "first|second tail" &&
+        unknownProviderMultiAssistants[0]?.tool_calls?.length === 1 &&
+        !unknownProviderMultiAssistants[1]?.tool_calls?.length,
+      "id-less adoption must use unique content or tool evidence before the latest assistant"
+    )
+
+    const ambiguousFallbackTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "ambiguous-fallback-worker",
+      workerThreadId: "thread-123__worker__ambiguous-fallback-worker"
+    })
+    const ambiguousFallbackStart =
+      ambiguousFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "same",
+            toolCalls: [{ id: "ambiguous-fallback-call", name: "read_file", args: {} }]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__ambiguous-fallback-worker",
+        ambiguousFallbackStart
+      )
+    const ambiguousFallbackSnapshot =
+      ambiguousFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "ambiguous-fallback-first",
+              content: "same",
+              toolCalls: [
+                { id: "ambiguous-fallback-call", name: "read_file", args: {} }
+              ]
+            }),
+            toolMessage({
+              id: "ambiguous-fallback-tool",
+              name: "read_file",
+              toolCallId: "ambiguous-fallback-call",
+              content: "result"
+            }),
+            aiMessage({
+              id: "ambiguous-fallback-second",
+              content: "same",
+              toolCalls: [
+                { id: "ambiguous-fallback-call", name: "read_file", args: {} }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__ambiguous-fallback-worker",
+      ambiguousFallbackSnapshot,
+      { orderedSnapshot: true }
+    )
+    const ambiguousFallbackMessages = useAppStore.getState().workerFocusMessages
+    const ambiguousFallbackAssistants = ambiguousFallbackMessages.filter(
+      (message) => message.role === "assistant"
+    )
+    const ambiguousFallbackResults = buildToolResultAssociations(
+      ambiguousFallbackMessages
+    )
+    const ambiguousFirstKey = getWorkerToolUiKey(
+      ambiguousFallbackAssistants[0]?.id ?? "",
+      "ambiguous-fallback-call",
+      0
+    )
+    const ambiguousSecondKey = getWorkerToolUiKey(
+      ambiguousFallbackAssistants[1]?.id ?? "",
+      "ambiguous-fallback-call",
+      0
+    )
+    assert(
+      ambiguousFallbackAssistants.length === 2 &&
+        ambiguousFallbackAssistants[0]?.id !== ambiguousFallbackAssistants[1]?.id &&
+        ambiguousFallbackAssistants.some(
+          (message) => message.id === ambiguousFallbackStart[0]?.id
+        ) &&
+        ambiguousFallbackResults.get(ambiguousFirstKey)?.content === "result" &&
+        ambiguousFallbackResults.get(ambiguousSecondKey) === undefined,
+      "ambiguous id-less adoption must consume the fallback without duplicating occurrences"
+    )
+
+    const strongToolEvidenceTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "strong-tool-evidence-worker",
+      workerThreadId: "thread-123__worker__strong-tool-evidence-worker"
+    })
+    const strongToolEvidenceStart =
+      strongToolEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "same",
+            toolCalls: [{ id: "strong-tool-call-one", name: "read_file", args: {} }]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__strong-tool-evidence-worker",
+        strongToolEvidenceStart
+      )
+    const strongToolEvidenceSnapshot =
+      strongToolEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "strong-tool-evidence-first",
+              content: "same",
+              toolCalls: [
+                { id: "strong-tool-call-one", name: "read_file", args: {} }
+              ]
+            }),
+            toolMessage({
+              id: "strong-tool-evidence-result",
+              name: "read_file",
+              toolCallId: "strong-tool-call-one",
+              content: "result"
+            }),
+            aiMessage({
+              id: "strong-tool-evidence-second",
+              content: "same",
+              toolCalls: [
+                { id: "strong-tool-call-two", name: "read_file", args: {} }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__strong-tool-evidence-worker",
+      strongToolEvidenceSnapshot,
+      { orderedSnapshot: true }
+    )
+    const strongToolEvidenceAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      strongToolEvidenceSnapshot[0]?.id === strongToolEvidenceStart[0]?.id &&
+        strongToolEvidenceAssistants.length === 2 &&
+        strongToolEvidenceAssistants[0]?.tool_calls?.[0]?.id ===
+          "strong-tool-call-one" &&
+        strongToolEvidenceAssistants[1]?.tool_calls?.[0]?.id ===
+          "strong-tool-call-two",
+      "tool identity must take precedence over ambiguous equal assistant text"
+    )
+
+    const reorderedArgsEvidenceTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "reordered-args-evidence-worker",
+      workerThreadId: "thread-123__worker__reordered-args-evidence-worker"
+    })
+    const reorderedArgsEvidenceStart =
+      reorderedArgsEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "active",
+            toolCalls: [
+              {
+                id: "reordered-args-evidence-call",
+                name: "read_file",
+                args: { a: 1, b: 2 }
+              }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__reordered-args-evidence-worker",
+        reorderedArgsEvidenceStart
+      )
+    const reorderedArgsEvidenceSnapshot =
+      reorderedArgsEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({ id: "reordered-args-evidence-earlier", content: "earlier" }),
+            aiMessage({
+              id: "reordered-args-evidence-active",
+              content: "",
+              toolCalls: [
+                {
+                  id: "reordered-args-evidence-call",
+                  name: "read_file",
+                  args: { b: 2, a: 1 }
+                }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__reordered-args-evidence-worker",
+      reorderedArgsEvidenceSnapshot,
+      { orderedSnapshot: true }
+    )
+    const reorderedArgsEvidenceAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      reorderedArgsEvidenceSnapshot.at(-1)?.id === reorderedArgsEvidenceStart[0]?.id &&
+        reorderedArgsEvidenceAssistants.length === 2 &&
+        reorderedArgsEvidenceAssistants.at(-1)?.content === "active",
+      "tool evidence must compare reordered JSON objects by semantic value"
+    )
+
+    const sparseArgsEvidenceTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "sparse-args-evidence-worker",
+      workerThreadId: "thread-123__worker__sparse-args-evidence-worker"
+    })
+    const sparseArgsEvidenceStart =
+      sparseArgsEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "active",
+            toolCalls: [
+              {
+                id: "sparse-args-evidence-call",
+                name: "read_file",
+                args: { path: "a.txt" }
+              }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__sparse-args-evidence-worker",
+        sparseArgsEvidenceStart
+      )
+    const sparseArgsEvidenceSnapshot =
+      sparseArgsEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({ id: "sparse-args-evidence-earlier", content: "earlier" }),
+            aiMessage({
+              id: "sparse-args-evidence-active",
+              content: "",
+              toolCalls: [
+                { id: "sparse-args-evidence-call", name: "read_file", args: {} }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__sparse-args-evidence-worker",
+      sparseArgsEvidenceSnapshot,
+      { orderedSnapshot: true }
+    )
+    const sparseArgsEvidenceAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    const sparseArgsEvidenceActive = sparseArgsEvidenceAssistants.find(
+      (message) => message.id === sparseArgsEvidenceStart[0]?.id
+    )
+    assert(
+      sparseArgsEvidenceSnapshot.at(-1)?.id === sparseArgsEvidenceStart[0]?.id &&
+        sparseArgsEvidenceAssistants.length === 2 &&
+        sparseArgsEvidenceActive?.content === "active" &&
+        sparseArgsEvidenceActive.tool_calls?.[0]?.args?.path === "a.txt",
+      "sparse empty args must not reject matching complete active tool evidence"
+    )
+
+    const sparseArgsPriorityTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "sparse-args-priority-worker",
+      workerThreadId: "thread-123__worker__sparse-args-priority-worker"
+    })
+    const sparseArgsPriorityStart =
+      sparseArgsPriorityTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "first",
+            toolCalls: [
+              {
+                id: "sparse-args-priority-call",
+                name: "read_file",
+                args: { path: "one" }
+              }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__sparse-args-priority-worker",
+        sparseArgsPriorityStart
+      )
+    const sparseArgsPrioritySnapshot =
+      sparseArgsPriorityTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "sparse-args-priority-first",
+              content: "first",
+              toolCalls: [
+                {
+                  id: "sparse-args-priority-call",
+                  name: "read_file",
+                  args: { path: "one" }
+                }
+              ]
+            }),
+            toolMessage({
+              toolCallId: "sparse-args-priority-call",
+              content: "first result"
+            }),
+            aiMessage({
+              id: "sparse-args-priority-second",
+              content: "second",
+              toolCalls: [
+                { id: "sparse-args-priority-call", name: "read_file", args: {} }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__sparse-args-priority-worker",
+      sparseArgsPrioritySnapshot,
+      { orderedSnapshot: true }
+    )
+    const sparseArgsPriorityAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    const sparseArgsPriorityFirst = sparseArgsPriorityAssistants.find(
+      (message) => message.content === "first"
+    )
+    const sparseArgsPrioritySecond = sparseArgsPriorityAssistants.find(
+      (message) => message.content === "second"
+    )
+    assert(
+      sparseArgsPriorityFirst?.id === sparseArgsPriorityStart[0]?.id &&
+        sparseArgsPriorityAssistants.length === 2 &&
+        sparseArgsPriorityFirst.tool_calls?.[0]?.args?.path === "one" &&
+        Object.keys(sparseArgsPrioritySecond?.tool_calls?.[0]?.args ?? {}).length === 0,
+      "exact complete args evidence must outrank a later sparse same-id occurrence"
+    )
+
+    const sparseArgsTieTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "sparse-args-tie-worker",
+      workerThreadId: "thread-123__worker__sparse-args-tie-worker"
+    })
+    const sparseArgsTieStart =
+      sparseArgsTieTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "old",
+            toolCalls: [
+              { id: "sparse-tie-call-1", name: "tool_one", args: { x: 1 } },
+              { id: "sparse-tie-call-2", name: "tool_two", args: { y: 2 } }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__sparse-args-tie-worker",
+        sparseArgsTieStart
+      )
+    const sparseArgsTieSnapshot =
+      sparseArgsTieTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "sparse-args-tie-old",
+              content: "old",
+              toolCalls: [
+                { id: "sparse-tie-call-1", name: "tool_one", args: { x: 1 } },
+                { id: "sparse-tie-call-2", name: "tool_two", args: {} }
+              ]
+            }),
+            toolMessage({ toolCallId: "sparse-tie-call-1", content: "one" }),
+            toolMessage({ toolCallId: "sparse-tie-call-2", content: "two" }),
+            aiMessage({
+              id: "sparse-args-tie-new",
+              content: "new",
+              toolCalls: [
+                { id: "sparse-tie-call-1", name: "tool_one", args: {} },
+                { id: "sparse-tie-call-2", name: "tool_two", args: { y: 2 } }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__sparse-args-tie-worker",
+      sparseArgsTieSnapshot,
+      { orderedSnapshot: true }
+    )
+    const sparseArgsTieAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    const sparseArgsTieOld = sparseArgsTieAssistants.find(
+      (message) => message.content === "old"
+    )
+    const sparseArgsTieNew = sparseArgsTieAssistants.find(
+      (message) => message.content === "new"
+    )
+    assert(
+      sparseArgsTieOld?.id === sparseArgsTieStart[0]?.id &&
+        sparseArgsTieAssistants.length === 2 &&
+        sparseArgsTieOld.tool_calls?.[0]?.args?.x === 1 &&
+        sparseArgsTieOld.tool_calls?.[1]?.args?.y === 2 &&
+        Object.keys(sparseArgsTieNew?.tool_calls?.[0]?.args ?? {}).length === 0 &&
+        sparseArgsTieNew?.tool_calls?.[1]?.args?.y === 2,
+      "unique content evidence must break tied partial tool-args matches"
+    )
+
+    const sparseToolSubsetTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "sparse-tool-subset-worker",
+      workerThreadId: "thread-123__worker__sparse-tool-subset-worker"
+    })
+    const sparseToolSubsetStart =
+      sparseToolSubsetTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "active",
+            toolCalls: [
+              { id: "sparse-subset-call-1", name: "tool_one", args: { path: "one" } },
+              { id: "sparse-subset-call-2", name: "tool_two", args: { path: "two" } }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__sparse-tool-subset-worker",
+        sparseToolSubsetStart
+      )
+    const sparseToolSubsetSnapshot =
+      sparseToolSubsetTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({ id: "sparse-tool-subset-earlier", content: "earlier" }),
+            aiMessage({
+              id: "sparse-tool-subset-active",
+              content: "",
+              toolCalls: [
+                { id: "sparse-subset-call-1", name: "tool_one", args: {} }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__sparse-tool-subset-worker",
+      sparseToolSubsetSnapshot,
+      { orderedSnapshot: true }
+    )
+    const sparseToolSubsetAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    const sparseToolSubsetActive = sparseToolSubsetAssistants.find(
+      (message) => message.id === sparseToolSubsetStart[0]?.id
+    )
+    assert(
+      sparseToolSubsetAssistants.length === 2 &&
+        sparseToolSubsetActive?.content === "active" &&
+        sparseToolSubsetActive.tool_calls?.length === 2 &&
+        sparseToolSubsetActive.tool_calls[0]?.args?.path === "one" &&
+        sparseToolSubsetActive.tool_calls[1]?.args?.path === "two",
+      "a sparse tool-call subset must adopt and retain omitted active calls"
+    )
+
+    const toolOverlapPriorityTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "tool-overlap-priority-worker",
+      workerThreadId: "thread-123__worker__tool-overlap-priority-worker"
+    })
+    const toolOverlapPriorityStart =
+      toolOverlapPriorityTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "active",
+            toolCalls: [
+              { id: "overlap-priority-call-1", name: "tool_one", args: { path: "one" } },
+              { id: "overlap-priority-call-2", name: "tool_two", args: { path: "two" } }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__tool-overlap-priority-worker",
+        toolOverlapPriorityStart
+      )
+    const toolOverlapPrioritySnapshot =
+      toolOverlapPriorityTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "tool-overlap-priority-earlier",
+              content: "",
+              toolCalls: [
+                {
+                  id: "overlap-priority-call-1",
+                  name: "tool_one",
+                  args: { path: "one" }
+                }
+              ]
+            }),
+            toolMessage({
+              toolCallId: "overlap-priority-call-1",
+              content: "earlier result"
+            }),
+            aiMessage({
+              id: "tool-overlap-priority-active",
+              content: "",
+              toolCalls: [
+                { id: "overlap-priority-call-1", name: "tool_one", args: {} },
+                { id: "overlap-priority-call-2", name: "tool_two", args: {} }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__tool-overlap-priority-worker",
+      toolOverlapPrioritySnapshot,
+      { orderedSnapshot: true }
+    )
+    const toolOverlapPriorityAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    const toolOverlapPriorityActive = toolOverlapPriorityAssistants.find(
+      (message) => message.id === toolOverlapPriorityStart[0]?.id
+    )
+    const toolOverlapPriorityEarlier = toolOverlapPriorityAssistants.find(
+      (message) => message.id !== toolOverlapPriorityStart[0]?.id
+    )
+    assert(
+      toolOverlapPriorityAssistants.length === 2 &&
+        toolOverlapPriorityActive?.content === "active" &&
+        toolOverlapPriorityActive.tool_calls?.length === 2 &&
+        toolOverlapPriorityActive.tool_calls[1]?.args?.path === "two" &&
+        toolOverlapPriorityEarlier?.tool_calls?.length === 1,
+      "more overlapping tool-call ids must outrank fewer exact args matches"
+    )
+
+    const sparseContentPriorityTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "sparse-content-priority-worker",
+      workerThreadId: "thread-123__worker__sparse-content-priority-worker"
+    })
+    const sparseContentPriorityStart =
+      sparseContentPriorityTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessage({
+            content: "old",
+            toolCalls: [
+              {
+                id: "sparse-content-priority-call",
+                name: "read_file",
+                args: { path: "one" }
+              }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__sparse-content-priority-worker",
+        sparseContentPriorityStart
+      )
+    const sparseContentPrioritySnapshot =
+      sparseContentPriorityTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({
+              id: "sparse-content-priority-old",
+              content: "old",
+              toolCalls: [
+                { id: "sparse-content-priority-call", name: "read_file", args: {} }
+              ]
+            }),
+            toolMessage({
+              toolCallId: "sparse-content-priority-call",
+              content: "old result"
+            }),
+            aiMessage({
+              id: "sparse-content-priority-new",
+              content: "new",
+              toolCalls: [
+                {
+                  id: "sparse-content-priority-call",
+                  name: "read_file",
+                  args: { path: "one" }
+                }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__sparse-content-priority-worker",
+      sparseContentPrioritySnapshot,
+      { orderedSnapshot: true }
+    )
+    const sparseContentPriorityAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    const sparseContentPriorityOld = sparseContentPriorityAssistants.find(
+      (message) => message.content === "old"
+    )
+    assert(
+      sparseContentPriorityAssistants.length === 2 &&
+        sparseContentPriorityOld?.id === sparseContentPriorityStart[0]?.id &&
+        sparseContentPriorityOld.tool_calls?.[0]?.args?.path === "one",
+      "unique content identity must outrank exact args reused by a later occurrence"
+    )
+
+    const pendingToolEvidenceTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "pending-tool-evidence-worker",
+      workerThreadId: "thread-123__worker__pending-tool-evidence-worker"
+    })
+    const pendingToolEvidenceStart =
+      pendingToolEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(
+          aiMessageChunk({
+            content: "active",
+            toolCallChunks: [
+              { id: "pending-tool-evidence-call", name: "read_file", args: '{"path":"' }
+            ]
+          }),
+          {}
+        ) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__pending-tool-evidence-worker",
+        pendingToolEvidenceStart
+      )
+    const pendingToolEvidenceSnapshot =
+      pendingToolEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({ id: "pending-tool-evidence-earlier", content: "earlier" }),
+            aiMessage({
+              id: "pending-tool-evidence-active",
+              content: "",
+              toolCalls: [
+                { id: "pending-tool-evidence-call", name: "read_file", args: {} }
+              ]
+            })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__pending-tool-evidence-worker",
+      pendingToolEvidenceSnapshot,
+      { orderedSnapshot: true }
+    )
+    const pendingToolEvidenceTail =
+      pendingToolEvidenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({
+              id: "pending-tool-evidence-active",
+              toolCallChunks: [
+                { id: "pending-tool-evidence-call", args: 'a.txt"}' }
+              ]
+            }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__pending-tool-evidence-worker",
+        pendingToolEvidenceTail
+      )
+    const pendingToolEvidenceAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    const pendingToolEvidenceActive = pendingToolEvidenceAssistants.find(
+      (message) => message.id === pendingToolEvidenceStart[0]?.id
+    )
+    assert(
+      pendingToolEvidenceSnapshot.at(-1)?.id === pendingToolEvidenceStart[0]?.id &&
+        pendingToolEvidenceTail.at(-1)?.id === pendingToolEvidenceStart[0]?.id &&
+        pendingToolEvidenceAssistants.length === 2 &&
+        pendingToolEvidenceActive?.content === "active" &&
+        pendingToolEvidenceActive.tool_calls?.[0]?.args?.path === "a.txt",
+      "pending partial tool identity must survive id-less sparse values adoption"
+    )
+
+    const idAdoptionMessagesTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "id-adoption-messages-worker",
+      workerThreadId: "thread-123__worker__id-adoption-messages-worker"
+    })
+    const idAdoptionMessageStart =
+      idAdoptionMessagesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(aiMessageChunk({ content: "A" }), {}) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__id-adoption-messages-worker",
+        idAdoptionMessageStart
+      )
+    const idAdoptionMessageTail =
+      idAdoptionMessagesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "id-adoption-provider", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__id-adoption-messages-worker",
+        idAdoptionMessageTail
+      )
+    assert(
+      idAdoptionMessageTail[0]?.id === idAdoptionMessageStart[0]?.id &&
+        idAdoptionMessageTail[0]?.content === "AB" &&
+        useAppStore.getState().workerFocusMessages.length === 1,
+      "first scoped provider id must adopt the active id-less message"
+    )
+
+    const idAdoptionValuesTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "id-adoption-values-worker",
+      workerThreadId: "thread-123__worker__id-adoption-values-worker"
+    })
+    const idAdoptionValuesStart =
+      idAdoptionValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamMessageEvent(aiMessageChunk({ content: "A" }), {}) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__id-adoption-values-worker",
+        idAdoptionValuesStart
+      )
+    const idAdoptionValuesSnapshot =
+      idAdoptionValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamValuesEvent([
+            aiMessage({ id: "id-adoption-values-provider", content: "AB" })
+          ]) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__id-adoption-values-worker",
+      idAdoptionValuesSnapshot,
+      { orderedSnapshot: true }
+    )
+    const idAdoptionValuesTail =
+      idAdoptionValuesTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "id-adoption-values-provider", content: "C" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__id-adoption-values-worker",
+        idAdoptionValuesTail
+      )
+    assert(
+      idAdoptionValuesSnapshot[0]?.id === idAdoptionValuesStart[0]?.id &&
+        idAdoptionValuesTail[0]?.id === idAdoptionValuesStart[0]?.id &&
+        idAdoptionValuesTail[0]?.content === "ABC" &&
+        useAppStore.getState().workerFocusMessages.length === 1,
+      "first values provider id must adopt the active id-less message"
+    )
+
+    const valuesFirstAdoptionTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    const valuesFirstWorkerThreadId =
+      "thread-123__worker__values-first-id-adoption-worker"
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "values-first-id-adoption-worker",
+      workerThreadId: valuesFirstWorkerThreadId
+    })
+    const valuesFirstSnapshot =
+      valuesFirstAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([aiMessage({ content: "A" })]) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(valuesFirstWorkerThreadId, valuesFirstSnapshot, {
+        orderedSnapshot: true
+      })
+    const valuesFirstTail =
+      valuesFirstAdoptionTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "values-first-provider", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(valuesFirstWorkerThreadId, valuesFirstTail)
+    assert(
+      valuesFirstTail[0]?.id === valuesFirstSnapshot[0]?.id &&
+        valuesFirstTail[0]?.content === "AB" &&
+        useAppStore.getState().workerFocusMessages.length === 1,
+      "a formal messages chunk must adopt an id-less values fallback"
+    )
+
+    const valuesFirstHistoryTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    const valuesFirstHistoryThreadId =
+      "thread-123__worker__values-first-history-adoption-worker"
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "values-first-history-adoption-worker",
+      workerThreadId: valuesFirstHistoryThreadId
+    })
+    const valuesFirstHistorySnapshot =
+      valuesFirstHistoryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([
+          aiMessage({ id: "values-first-history-provider", content: "historical" }),
+          aiMessage({ content: "A" })
+        ]) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(valuesFirstHistoryThreadId, valuesFirstHistorySnapshot, {
+        orderedSnapshot: true
+      })
+    const valuesFirstHistoryTail =
+      valuesFirstHistoryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "values-first-history-provider", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(valuesFirstHistoryThreadId, valuesFirstHistoryTail)
+    const valuesFirstHistoryAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      valuesFirstHistoryTail[0]?.id === valuesFirstHistorySnapshot.at(-1)?.id &&
+        valuesFirstHistoryTail[0]?.content === "AB" &&
+        valuesFirstHistoryTail[0]?.provider_occurrence === 2 &&
+        valuesFirstHistoryAssistants.length === 2,
+      "values-first adoption must allocate after an existing provider occurrence"
+    )
+
+    const occupiedFallbackTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    const occupiedFallbackThreadId =
+      "thread-123__worker__occupied-values-fallback-worker"
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "occupied-values-fallback-worker",
+      workerThreadId: occupiedFallbackThreadId
+    })
+    useAppStore.getState().appendWorkerFocusMessages(occupiedFallbackThreadId, [
+      {
+        id: "worker-snapshot-0",
+        role: "user",
+        content: "occupied fallback",
+        created_at: new Date()
+      }
+    ])
+    const occupiedFallbackSnapshot =
+      occupiedFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([aiMessage({ content: "A" })]) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(occupiedFallbackThreadId, occupiedFallbackSnapshot, {
+        orderedSnapshot: true
+      })
+    const occupiedFallbackTail =
+      occupiedFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "occupied-fallback-provider", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(occupiedFallbackThreadId, occupiedFallbackTail)
+    let occupiedFallbackAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      occupiedFallbackTail[0]?.id === occupiedFallbackSnapshot[0]?.id &&
+        occupiedFallbackAssistants.length === 1 &&
+        occupiedFallbackAssistants[0]?.content === "AB",
+      "values adoption must retain the Store-normalized fallback render id"
+    )
+    const occupiedFallbackReplay =
+      occupiedFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([aiMessage({ content: "A" })]) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(occupiedFallbackThreadId, occupiedFallbackReplay, {
+        orderedSnapshot: true
+      })
+    const occupiedFallbackFinal =
+      occupiedFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "occupied-fallback-provider", content: "C" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(occupiedFallbackThreadId, occupiedFallbackFinal)
+    occupiedFallbackAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      occupiedFallbackAssistants.length === 1 &&
+        occupiedFallbackAssistants[0]?.content === "ABC",
+      `a repeated sparse values snapshot must not reset adopted assistant content: ${occupiedFallbackAssistants
+        .map((message) => `${message.id}=${String(message.content)}`)
+        .join("|")}`
+    )
+
+    const sameRoleFallbackTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    const sameRoleFallbackThreadId =
+      "thread-123__worker__same-role-values-fallback-worker"
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "same-role-values-fallback-worker",
+      workerThreadId: sameRoleFallbackThreadId
+    })
+    useAppStore.getState().appendWorkerFocusMessages(sameRoleFallbackThreadId, [
+      {
+        id: "worker-snapshot-0",
+        role: "assistant",
+        content: "old answer",
+        created_at: new Date()
+      },
+      { id: "same-role-new-user", role: "user", content: "new prompt", created_at: new Date() }
+    ])
+    const sameRoleFallbackSnapshot =
+      sameRoleFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([aiMessage({ content: "A" })]) as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(sameRoleFallbackThreadId, sameRoleFallbackSnapshot, {
+        orderedSnapshot: true
+      })
+    const sameRoleFallbackTail =
+      sameRoleFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "same-role-fallback-provider", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(sameRoleFallbackThreadId, sameRoleFallbackTail)
+    const sameRoleFallbackFinal =
+      sameRoleFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "same-role-fallback-provider", content: "C" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(sameRoleFallbackThreadId, sameRoleFallbackFinal)
+    const sameRoleFallbackMessages = useAppStore.getState().workerFocusMessages
+    const sameRoleFallbackSummary = sameRoleFallbackMessages
+      .map((message) => `${message.role}:${String(message.content)}`)
+      .join("|")
+    assert(
+      sameRoleFallbackSummary === "assistant:old answer|user:new prompt|assistant:ABC" &&
+        new Set(sameRoleFallbackMessages.map((message) => message.id)).size === 3,
+      `an adopted id-less values fallback must remain one row across later provider chunks: ${sameRoleFallbackMessages
+        .map((message) => `${message.role}:${message.id}:${String(message.content)}`)
+        .join("|")}; tail=${sameRoleFallbackTail
+        .map(
+          (message) =>
+            `${message.id},source=${message.provider_source_id},occ=${message.provider_occurrence}`
+        )
+        .join("|")}; final=${sameRoleFallbackFinal
+        .map(
+          (message) =>
+            `${message.id},source=${message.provider_source_id},occ=${message.provider_occurrence}`
+        )
+        .join("|")}`
+    )
+
+    const historicalOccurrenceTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    const historicalOccurrenceThreadId =
+      "thread-123__worker__historical-provider-occurrence-worker"
+    const historicalOccurrenceProvider =
+      `worker-turn-${historicalOccurrenceThreadId}-1::historical-provider`
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "historical-provider-occurrence-worker",
+      workerThreadId: historicalOccurrenceThreadId
+    })
+    useAppStore.getState().appendWorkerFocusMessages(historicalOccurrenceThreadId, [
+      {
+        id: "historical-provider-answer",
+        provider_source_id: historicalOccurrenceProvider,
+        provider_occurrence: 1,
+        role: "assistant",
+        content: "historical answer",
+        created_at: new Date()
+      }
+    ])
+    const historicalOccurrenceSnapshot =
+      historicalOccurrenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([aiMessage({ content: "A" })]) as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      historicalOccurrenceThreadId,
+      historicalOccurrenceSnapshot,
+      { orderedSnapshot: true }
+    )
+    const historicalOccurrenceTail =
+      historicalOccurrenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "historical-provider", content: "B" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(historicalOccurrenceThreadId, historicalOccurrenceTail)
+    const historicalOccurrenceFinal =
+      historicalOccurrenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "historical-provider", content: "C" }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(historicalOccurrenceThreadId, historicalOccurrenceFinal)
+    const historicalOccurrenceAssistants = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    assert(
+      historicalOccurrenceAssistants.map((message) => message.content).join("|") ===
+        "historical answer|ABC" &&
+        new Set(historicalOccurrenceAssistants.map((message) => message.id)).size === 2 &&
+        historicalOccurrenceAssistants
+          .map((message) => message.provider_occurrence)
+          .join("|") === "1|2",
+      "formal adoption after id-less values must continue after a stored provider occurrence"
+    )
+
+    const unknownTurnToolBoundaryTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    const unknownTurnToolBoundaryThreadId =
+      "thread-123__worker__unknown-turn-tool-boundary-worker"
+    const unknownTurnToolBoundaryProvider =
+      `worker-turn-${unknownTurnToolBoundaryThreadId}-1::tool-boundary-provider`
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "unknown-turn-tool-boundary-worker",
+      workerThreadId: unknownTurnToolBoundaryThreadId
+    })
+    useAppStore.getState().appendWorkerFocusMessages(unknownTurnToolBoundaryThreadId, [
+      {
+        id: "unknown-turn-tool-boundary-history",
+        provider_source_id: unknownTurnToolBoundaryProvider,
+        provider_occurrence: 1,
+        role: "assistant",
+        content: "H1",
+        created_at: new Date()
+      }
+    ])
+    const unknownTurnToolBoundarySnapshot =
+      unknownTurnToolBoundaryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        streamValuesEvent([
+          aiMessage({
+            content: "A",
+            toolCalls: [
+              { id: "unknown-turn-tool-boundary-call", name: "read_file", args: {} }
+            ]
+          }),
+          toolMessage({
+            toolCallId: "unknown-turn-tool-boundary-call",
+            name: "read_file",
+            content: "R"
+          })
+        ]) as never,
+        "thread-123"
+      )
+    useAppStore.getState().appendWorkerFocusMessages(
+      unknownTurnToolBoundaryThreadId,
+      unknownTurnToolBoundarySnapshot,
+      { orderedSnapshot: true }
+    )
+    for (const content of ["B", "C"]) {
+      const chunk = unknownTurnToolBoundaryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({ id: "tool-boundary-provider", content }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+      useAppStore
+        .getState()
+        .appendWorkerFocusMessages(unknownTurnToolBoundaryThreadId, chunk)
+    }
+    const unknownTurnToolBoundaryMessages = useAppStore.getState().workerFocusMessages
+    assert(
+      unknownTurnToolBoundaryMessages.map((message) => message.content).join("|") ===
+        "H1|A|R|BC" &&
+        unknownTurnToolBoundaryMessages.map((message) => message.role).join("|") ===
+          "assistant|assistant|tool|assistant" &&
+        unknownTurnToolBoundaryMessages.at(-1)?.provider_occurrence === 2,
+      "a formal post-tool assistant must not reuse a historical provider occurrence"
+    )
+
+    const lateTurnToolChunkTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "late-turn-tool-chunk-worker",
+      workerThreadId: "thread-123__worker__late-turn-tool-chunk-worker"
+    })
+    lateTurnToolChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      streamMessageEvent(
+        aiMessageChunk({
+          id: "late-turn-tool-chunk-ai",
+          toolCallChunks: [
+            { id: "late-turn-tool-chunk-call", name: "read_file", args: '{"path":"' }
+          ]
+        }),
+        {}
+      ) as never,
+      "thread-123"
+    )
+    const completedAfterTurnMetadata =
+      lateTurnToolChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({
+              id: "late-turn-tool-chunk-ai",
+              toolCallChunks: [{ id: "late-turn-tool-chunk-call", args: 'a.txt"}' }]
+            }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    assert(
+      completedAfterTurnMetadata[0]?.id === "late-turn-tool-chunk-ai" &&
+        completedAfterTurnMetadata[0]?.tool_calls?.[0]?.name === "read_file" &&
+        completedAfterTurnMetadata[0]?.tool_calls?.[0]?.args?.path === "a.txt",
+      "first workerTurn metadata must preserve active tool-call chunk accumulation"
+    )
+
+    const staleTurnToolTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "stale-turn-tool-worker",
+      workerThreadId: "thread-123__worker__stale-turn-tool-worker"
+    })
+    const currentTurnChunkA = staleTurnToolTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-turn-current-ai", content: "A" }),
+          {}
+        ) as object),
+        workerTurn: 2
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-turn-tool-worker",
+        currentTurnChunkA
+      )
+    const staleTurnTool = staleTurnToolTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          toolMessage({
+            id: "stale-turn-old-tool",
+            name: "read_file",
+            toolCallId: "stale-turn-old-call",
+            content: "late old result"
+          }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-turn-tool-worker",
+        staleTurnTool
+      )
+    const currentTurnChunkB = staleTurnToolTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-turn-current-ai", content: "B" }),
+          {}
+        ) as object),
+        workerTurn: 2
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-turn-tool-worker",
+        currentTurnChunkB
+      )
+    const staleTurnStoreAssistant = useAppStore
+      .getState()
+      .workerFocusMessages.find((message) => message.role === "assistant")
+    assert(
+      staleTurnTool[0]?.id.startsWith(
+        "worker-turn-thread-123__worker__stale-turn-tool-worker-1::"
+      ) &&
+        currentTurnChunkB.at(-1)?.content === "AB" &&
+        staleTurnStoreAssistant?.content === "AB",
+      "a late old-turn tool result must not reset the current assistant accumulator"
+    )
+
+    const staleChunkTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "stale-chunk-worker",
+      workerThreadId: "thread-123__worker__stale-chunk-worker"
+    })
+    const newerTurnMessage = staleChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-chunk-newer", content: "newer" }),
+          {}
+        ) as object),
+        workerTurn: 2
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__stale-chunk-worker", newerTurnMessage)
+    const staleChunkA = staleChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-chunk-old", content: "A" }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__stale-chunk-worker", staleChunkA)
+    const staleChunkB = staleChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-chunk-old", content: "B" }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__stale-chunk-worker", staleChunkB)
+    const staleChunkStoreMessages = useAppStore.getState().workerFocusMessages
+    assert(
+      staleChunkB[0]?.content === "AB" &&
+        staleChunkStoreMessages.map((message) => message.content).join("|") === "AB|newer",
+      "stale assistant chunks must accumulate independently and sort before newer turns"
+    )
+
+    const staleBoundaryTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "stale-boundary-worker",
+      workerThreadId: "thread-123__worker__stale-boundary-worker"
+    })
+    const staleBoundaryNewer = staleBoundaryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-boundary-newer", content: "newer" }),
+          {}
+        ) as object),
+        workerTurn: 2
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-boundary-worker",
+        staleBoundaryNewer
+      )
+    const staleBoundaryA = staleBoundaryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-boundary-shared", content: "A" }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-boundary-worker",
+        staleBoundaryA
+      )
+    const staleBoundaryTool = staleBoundaryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          toolMessage({
+            id: "stale-boundary-tool",
+            name: "read_file",
+            toolCallId: "stale-boundary-call",
+            content: "result"
+          }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-boundary-worker",
+        staleBoundaryTool
+      )
+    const staleBoundaryB = staleBoundaryTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-boundary-shared", content: "B" }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-boundary-worker",
+        staleBoundaryB
+      )
+    const staleBoundaryMessages = useAppStore.getState().workerFocusMessages
+    const staleBoundaryAssistants = staleBoundaryMessages.filter(
+      (message) => message.role === "assistant" && message.content !== "newer"
+    )
+    assert(
+      staleBoundaryAssistants.length === 2 &&
+        staleBoundaryAssistants[0]?.content === "A" &&
+        staleBoundaryAssistants[1]?.content === "B" &&
+        staleBoundaryAssistants[0]?.id !== staleBoundaryAssistants[1]?.id &&
+        staleBoundaryMessages.map((message) => message.content).join("|") ===
+          "A|result|B|newer",
+      "stale assistants reusing a provider id across a tool boundary must stay distinct"
+    )
+
+    const staleToolChunkTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "stale-tool-chunk-worker",
+      workerThreadId: "thread-123__worker__stale-tool-chunk-worker"
+    })
+    staleToolChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-tool-chunk-newer", content: "newer" }),
+          {}
+        ) as object),
+        workerTurn: 2
+      } as never,
+      "thread-123"
+    )
+    const staleToolChunkFirst =
+      staleToolChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({
+              id: "stale-tool-chunk-ai",
+              toolCallChunks: [
+                { id: "stale-tool-chunk-call", name: "read_file", args: '{"path":"' }
+              ]
+            }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-tool-chunk-worker",
+        staleToolChunkFirst
+      )
+    const staleToolChunkSecond =
+      staleToolChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          ...(streamMessageEvent(
+            aiMessageChunk({
+              id: "stale-tool-chunk-ai",
+              toolCallChunks: [{ id: "stale-tool-chunk-call", args: 'a.txt"}' }]
+            }),
+            {}
+          ) as object),
+          workerTurn: 1
+        } as never,
+        "thread-123"
+      )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages(
+        "thread-123__worker__stale-tool-chunk-worker",
+        staleToolChunkSecond
+      )
+    const staleToolChunkCall = staleToolChunkSecond[0]?.tool_calls?.[0]
+    const storedStaleToolChunkCall = useAppStore
+      .getState()
+      .workerFocusMessages.find((message) => message.id === staleToolChunkSecond[0]?.id)
+      ?.tool_calls?.[0]
+    assert(
+      staleToolChunkCall?.name === "read_file" &&
+        staleToolChunkCall.args?.path === "a.txt" &&
+        storedStaleToolChunkCall?.name === "read_file" &&
+        storedStaleToolChunkCall.args?.path === "a.txt",
+      "stale tool-call chunks must retain the name and assemble split JSON args"
+    )
+
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "mixed-scope-worker",
+      workerThreadId: "thread-123__worker__mixed-scope-worker"
+    })
+    useAppStore.getState().appendWorkerFocusMessages(
+      "thread-123__worker__mixed-scope-worker",
+      [
+        {
+          id: "legacy-unscoped-message",
+          role: "assistant",
+          content: "legacy",
+          created_at: new Date()
+        },
+        {
+          id: "worker-turn-thread-123__worker__mixed-scope-worker-2::newer",
+          role: "assistant",
+          content: "newer",
+          created_at: new Date()
+        },
+        {
+          id: "worker-turn-thread-123__worker__mixed-scope-worker-1::older",
+          role: "assistant",
+          content: "older",
+          created_at: new Date()
+        }
+      ]
+    )
+    assert(
+      useAppStore
+        .getState()
+        .workerFocusMessages.map((message) => message.content)
+        .join("|") === "legacy|older|newer",
+      "unscoped legacy rows must not disable ordering among known worker turns"
+    )
+
+    const staleFallbackTransport = new ElectronIPCTransport()
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: "thread-123",
+      workerId: "stale-fallback-worker",
+      workerThreadId: "thread-123__worker__stale-fallback-worker"
+    })
+    staleFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          aiMessageChunk({ id: "stale-fallback-newer", content: "newer" }),
+          {}
+        ) as object),
+        workerTurn: 2
+      } as never,
+      "thread-123"
+    )
+    const staleFallbackA = staleFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(aiMessageChunk({ content: "A" }), {}) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    const staleFallbackB = staleFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(aiMessageChunk({ content: "B" }), {}) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    assert(
+      staleFallbackA[0]?.id === staleFallbackB[0]?.id &&
+        staleFallbackB[0]?.content === "AB",
+      "id-less stale assistant chunks must share one stable turn-scoped fallback"
+    )
+
+    const staleToolPartial = staleFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          toolMessage({ toolCallId: "stale-growing-call", content: "partial" }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__stale-fallback-worker", staleToolPartial)
+    const staleToolComplete = staleFallbackTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(
+          toolMessage({
+            toolCallId: "stale-growing-call",
+            content: "partial complete"
+          }),
+          {}
+        ) as object),
+        workerTurn: 1
+      } as never,
+      "thread-123"
+    )
+    useAppStore
+      .getState()
+      .appendWorkerFocusMessages("thread-123__worker__stale-fallback-worker", staleToolComplete)
+    const staleGrowingTools = useAppStore
+      .getState()
+      .workerFocusMessages.filter(
+        (message) => message.role === "tool" && message.tool_call_id === "stale-growing-call"
+      )
+    assert(
+      staleToolPartial[0]?.id === staleToolComplete[0]?.id &&
+        staleGrowingTools.length === 1 &&
+        staleGrowingTools[0]?.content === "partial complete",
+      "id-less stale tool growth must update one stable result row"
+    )
+
     const repeatedHumanIdAcrossTurnsTransport = new ElectronIPCTransport()
     resetWorkerFocusStore()
     openWorkerFocusViewForTest({
@@ -1030,8 +3492,9 @@ async function testFocusedAsyncWorkerStreamsToWorkerPanel(): Promise<void> {
       "thread-123"
     )
     assert(
-      valuesAfterTool.find((message) => message.role === "assistant")?.id === "worker-snapshot-1",
-      "worker values snapshots should keep checkpoint-compatible fallback ids"
+      valuesAfterTool.find((message) => message.role === "assistant")?.id ===
+        "worker-turn-thread-123__worker__worker-1-1::worker-snapshot-1",
+      "focused worker values fallback ids should retain their checkpoint index and turn scope"
     )
     useAppStore
       .getState()
@@ -1844,8 +4307,49 @@ async function testCoordinatorToolCallChunksHandleCumulativeProviderArgs(): Prom
     args?: Record<string, unknown>
   }>
   assert(
-    overlapToolCalls[0]?.args?.description === "调研项目",
-    "overlapping tool-call chunks should not duplicate string argument suffixes"
+    overlapToolCalls[0]?.args?.description === "调研调研项目",
+    "ambiguous provider overlap must preserve bytes instead of guessing replay"
+  )
+
+  const boundaryRepeatTransport = new ElectronIPCTransport()
+  convertCoordinator(
+    boundaryRepeatTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-boundary-repeat",
+        toolCallChunks: [
+          {
+            id: "start-worker-boundary-repeat",
+            name: "start_worker",
+            args: '{"description":"bana'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const boundaryRepeatEvents = convertCoordinator(
+    boundaryRepeatTransport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-boundary-repeat",
+        toolCallChunks: [
+          {
+            id: "start-worker-boundary-repeat",
+            args: 'nana","prompt":"done"}'
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const boundaryRepeatMessage = firstMessage(boundaryRepeatEvents)
+  const boundaryRepeatToolCalls = boundaryRepeatMessage.tool_calls as Array<{
+    args?: Record<string, unknown>
+  }>
+  assert(
+    boundaryRepeatToolCalls[0]?.args?.description === "bananana",
+    "real AIMessageChunk deltas preserve legitimate repeated boundary bytes"
   )
 
   const repeatedSuffixTransport = new ElectronIPCTransport()
@@ -3579,9 +6083,4176 @@ function testSummarizationMessagesAreHiddenByMarkerOnly(): void {
   )
 }
 
+function testCrossRoleProviderIdCollisionSurvivesTransportConversion(): void {
+  const transport = new ElectronIPCTransport()
+  const converted = transport.convertWorkflowAgentValuesSnapshot(
+    [
+      aiMessage({
+        id: "shared-provider-id",
+        content: "calling tool",
+        toolCalls: [{ id: "call-1", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "shared-provider-id",
+        name: "read_file",
+        toolCallId: "call-1",
+        content: "tool result"
+      })
+    ],
+    "wfagent:wf_collision:0"
+  )
+
+  assert(converted.length === 2, "transport should preserve both cross-role snapshot messages")
+  assert(
+    new Set(converted.map((message) => message.id)).size === 2,
+    "transport should assign cross-role snapshot messages unique internal ids"
+  )
+  assert(
+    converted.map((message) => message.role).join(",") === "assistant,tool",
+    "transport should keep cross-role snapshot message roles"
+  )
+}
+
+function testWorkflowSnapshotPreservesSameRoleProviderIdOccurrences(): void {
+  const transport = new ElectronIPCTransport()
+  const converted = transport.convertWorkflowAgentValuesSnapshot(
+    [
+      aiMessage({ id: "same-workflow-provider-id", content: "first answer" }),
+      aiMessage({ id: "same-workflow-provider-id", content: "second answer" })
+    ],
+    "wfagent:wf_same_role:0"
+  )
+
+  assert(converted.length === 2, "workflow snapshots must keep same-role id occurrences")
+  assert(
+    new Set(converted.map((message) => message.id)).size === 2,
+    "workflow snapshot occurrences must receive unique React/render ids"
+  )
+  assert(
+    converted.map((message) => message.content).join("|") === "first answer|second answer",
+    "workflow snapshot occurrences must not overwrite each other"
+  )
+}
+
+function testMainStreamNormalizesCrossRoleIdsBeforeSdkMerge(): void {
+  const transport = new ElectronIPCTransport()
+  const sharedId = "main-stream-shared-provider-id"
+  const assistant = firstMessage(
+    convert(
+      transport,
+      streamMessageEvent(
+        aiMessage({
+          id: sharedId,
+          content: "calling tool",
+          toolCalls: [{ id: "call-main-collision", name: "read_file", args: {} }]
+        }),
+        { langgraph_node: "agent" }
+      )
+    )
+  )
+  const tool = firstMessage(
+    convert(
+      transport,
+      streamMessageEvent(
+        toolMessage({
+          id: sharedId,
+          name: "read_file",
+          toolCallId: "call-main-collision",
+          content: "tool result"
+        }),
+        { langgraph_node: "tools" }
+      )
+    )
+  )
+
+  assert(
+    assistant.id !== tool.id,
+    "main assistant/tool collisions must be disambiguated before the SDK merges chunks by id"
+  )
+  assert(assistant.id === sharedId, "the first main-stream role should keep the provider id")
+  assert(
+    tool.id === `${sharedId}::cmb-id-collision:tool`,
+    "the later tool role should receive a stable role-scoped id"
+  )
+
+  const repeatedTool = firstMessage(
+    convert(
+      transport,
+      streamMessageEvent(
+        toolMessage({
+          id: sharedId,
+          name: "read_file",
+          toolCallId: "call-main-collision",
+          content: "tool result updated"
+        }),
+        { langgraph_node: "tools" }
+      )
+    )
+  )
+  assert(
+    repeatedTool.id === tool.id,
+    "repeated chunks for the colliding role must keep the same SDK-facing id"
+  )
+
+  const valuesEvent = convert(
+    transport,
+    streamValuesEvent([
+      aiMessage({
+        id: sharedId,
+        content: "calling tool",
+        toolCalls: [{ id: "call-main-collision", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: sharedId,
+        name: "read_file",
+        toolCallId: "call-main-collision",
+        content: "tool result updated"
+      })
+    ])
+  ).find((event) => event.event === "values")
+  const valuesMessages = asRecord(valuesEvent?.data).messages as Array<Record<string, unknown>>
+  assert(
+    valuesMessages[0]?.id === assistant.id && valuesMessages[1]?.id === tool.id,
+    "the full values snapshot must preserve the SDK-facing role-scoped ids"
+  )
+}
+
+function testWorkerFocusStorePreservesCrossRoleProviderIdCollision(): void {
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "parent-cross-role",
+    workerThreadId: "worker-cross-role",
+    workerId: "worker-cross-role"
+  })
+  useAppStore.getState().appendWorkerFocusMessages("worker-cross-role", [
+    {
+      id: "shared-provider-id",
+      role: "assistant",
+      content: "calling tool",
+      created_at: new Date()
+    },
+    {
+      id: "shared-provider-id",
+      role: "tool",
+      content: "tool result",
+      tool_call_id: "call-1",
+      created_at: new Date()
+    }
+  ])
+
+  const messages = useAppStore.getState().workerFocusMessages
+  assert(messages.length === 2, "worker focus should preserve both cross-role messages")
+  assert(
+    new Set(messages.map((message) => message.id)).size === 2,
+    "worker focus should assign cross-role messages unique internal ids"
+  )
+  resetWorkerFocusStore()
+}
+
+function testWorkerFocusStoreNormalizesLegacyCrossRoleBaseline(): void {
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "parent-legacy-cross-role",
+    workerThreadId: "worker-legacy-cross-role",
+    workerId: "worker-legacy-cross-role"
+  })
+  const sharedId = "legacy-worker-shared-id"
+  useAppStore.setState({
+    workerFocusMessagesThreadId: "worker-legacy-cross-role",
+    workerFocusMessages: [
+      {
+        id: sharedId,
+        role: "assistant",
+        content: "old assistant",
+        created_at: new Date()
+      },
+      {
+        id: sharedId,
+        role: "tool",
+        content: "tool result",
+        tool_call_id: "legacy-call",
+        created_at: new Date()
+      }
+    ]
+  })
+  useAppStore.getState().appendWorkerFocusMessages("worker-legacy-cross-role", [
+    {
+      id: sharedId,
+      role: "assistant",
+      content: "updated assistant",
+      created_at: new Date()
+    }
+  ])
+
+  const messages = useAppStore.getState().workerFocusMessages
+  assert(messages.length === 2, "worker focus must preserve both legacy cross-role rows")
+  assert(
+    messages.find((message) => message.role === "assistant")?.content === "updated assistant",
+    "worker focus must update the assistant instead of overwriting the tool row"
+  )
+  assert(
+    messages.find((message) => message.role === "tool")?.content === "tool result",
+    "worker focus must preserve the legacy tool result"
+  )
+  resetWorkerFocusStore()
+}
+
+function testWorkerFocusDoesNotMergeAssistantGrowthAcrossUserTurns(): void {
+  const workerThreadId = "worker-cross-turn-text-growth"
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-cross-turn-text-growth",
+    workerId: "worker-cross-turn-text-growth",
+    workerThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    [
+      {
+        id: "worker-snapshot-0",
+        role: "assistant",
+        content: "repeat",
+        created_at: new Date("2026-07-21T00:00:00.000Z")
+      },
+      {
+        id: "worker-user-2",
+        role: "user",
+        content: "next turn",
+        created_at: new Date("2026-07-21T00:00:01.000Z")
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    {
+      id: "worker-live-cross-turn-2",
+      role: "assistant",
+      content: "repeat expanded",
+      created_at: new Date("2026-07-21T00:00:02.000Z")
+    }
+  ])
+
+  const messages = useAppStore.getState().workerFocusMessages
+  assert(messages.length === 3, "worker text replay matching must not cross a user boundary")
+  assert(
+    messages[0]?.content === "repeat" && messages[2]?.content === "repeat expanded",
+    "new-turn assistant growth must append without rewriting the previous turn"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-cross-turn-text-growth",
+    workerId: "worker-cross-turn-text-growth",
+    workerThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    {
+      id: `worker-turn-${workerThreadId}-2::worker-live-current`,
+      role: "assistant",
+      content: "current complete",
+      created_at: new Date("2026-07-21T00:01:04.000Z")
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    [
+      {
+        id: "worker-user-history-1",
+        role: "user",
+        content: "first prompt",
+        created_at: new Date("2026-07-21T00:01:00.000Z")
+      },
+      {
+        id: "worker-snapshot-history-1",
+        role: "assistant",
+        content: "old answer",
+        created_at: new Date("2026-07-21T00:01:01.000Z")
+      },
+      {
+        id: "worker-user-history-2",
+        role: "user",
+        content: "second prompt",
+        created_at: new Date("2026-07-21T00:01:02.000Z")
+      },
+      {
+        id: "worker-snapshot-current-2",
+        role: "assistant",
+        content: "current complete",
+        created_at: new Date("2026-07-21T00:01:03.000Z")
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  const liveThenFullValues = useAppStore.getState().workerFocusMessages
+  assert(
+    liveThenFullValues.length === 4,
+    "a multi-turn values snapshot must merge the current live assistant only into the last turn"
+  )
+  assert(
+    liveThenFullValues.map((message) => message.role).join(">") ===
+      "user>assistant>user>assistant",
+    "late full values must restore history order without duplicating the current live assistant"
+  )
+  resetWorkerFocusStore()
+}
+
+function testWorkerFullValuesSnapshotsKeepHistoricalIdsStableAcrossTurns(): void {
+  const workerThreadId = "worker-full-values-turns"
+  const transport = new ElectronIPCTransport()
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+
+  const firstSnapshot = transport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        humanMessage("question one", { id: "worker-user-one" }),
+        aiMessage({ id: "worker-answer-one", content: "answer one" })
+      ]) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, firstSnapshot, {
+    orderedSnapshot: true
+  })
+
+  const secondSnapshot = transport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        humanMessage("question one", { id: "worker-user-one" }),
+        aiMessage({ id: "worker-answer-one", content: "answer one" }),
+        humanMessage("question two", { id: "worker-user-two" }),
+        aiMessage({
+          id: "worker-answer-two",
+          content: "answer two",
+          toolCalls: [{ id: "worker-call-two", name: "read_file", args: {} }]
+        }),
+        toolMessage({
+          id: "worker-tool-two",
+          name: "read_file",
+          toolCallId: "worker-call-two",
+          content: "tool answer two"
+        })
+      ]) as object),
+      workerTurn: 2
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, secondSnapshot, {
+    orderedSnapshot: true
+  })
+
+  const messages = useAppStore.getState().workerFocusMessages
+  assert(messages.length === 5, "later full values must not duplicate earlier worker turns")
+  const firstSnapshotIds = firstSnapshot.map((message) => message.id).join("|")
+  assert(
+    secondSnapshot.slice(0, 2).map((message) => message.id).join("|") === firstSnapshotIds,
+    "historical provider ids in full values snapshots must keep their original turn prefixes"
+  )
+  assert(
+    messages[2]?.id === `worker-turn-${workerThreadId}-2::worker-user-two` &&
+      messages[3]?.id === `worker-turn-${workerThreadId}-2::worker-answer-two` &&
+      messages[4]?.id === `worker-turn-${workerThreadId}-2::worker-tool-two`,
+    "new values messages must use the same turn-scoped ids as live provider messages"
+  )
+
+  const liveAssistant = transport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        aiMessage({
+          id: "worker-answer-two",
+          content: "answer two expanded",
+          toolCalls: [{ id: "worker-call-two", name: "read_file", args: {} }]
+        }),
+        {}
+      ) as object),
+      workerTurn: 2
+    } as never,
+    "thread-full-values-turns"
+  )
+  const liveTool = transport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        toolMessage({
+          id: "worker-tool-two",
+          name: "read_file",
+          toolCallId: "worker-call-two",
+          content: "tool answer two expanded"
+        }),
+        {}
+      ) as object),
+      workerTurn: 2
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    ...liveAssistant,
+    ...liveTool
+  ])
+  const valuesThenLive = useAppStore.getState().workerFocusMessages
+  assert(valuesThenLive.length === 5, "provider-id live updates must reuse their values rows")
+  assert(
+    valuesThenLive[3]?.content === "answer two expanded" &&
+      valuesThenLive[4]?.content === "tool answer two expanded",
+    "assistant and tool provider-id live updates must merge into the current values turn"
+  )
+
+  const reverseTransport = new ElectronIPCTransport()
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  const reverseLiveAssistant = reverseTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        aiMessage({
+          id: "worker-answer-two",
+          content: "answer two expanded",
+          toolCalls: [{ id: "worker-call-two", name: "read_file", args: {} }]
+        }),
+        {}
+      ) as object),
+      workerTurn: 2
+    } as never,
+    "thread-full-values-turns"
+  )
+  const reverseLiveTool = reverseTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        toolMessage({
+          id: "worker-tool-two",
+          name: "read_file",
+          toolCallId: "worker-call-two",
+          content: "tool answer two expanded"
+        }),
+        {}
+      ) as object),
+      workerTurn: 2
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    ...reverseLiveAssistant,
+    ...reverseLiveTool
+  ])
+  const reverseValues = reverseTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        humanMessage("question one", { id: "worker-user-one" }),
+        aiMessage({ id: "worker-answer-one", content: "answer one" }),
+        humanMessage("question two", { id: "worker-user-two" }),
+        aiMessage({
+          id: "worker-answer-two",
+          content: "answer two",
+          toolCalls: [{ id: "worker-call-two", name: "read_file", args: {} }]
+        }),
+        toolMessage({
+          id: "worker-tool-two",
+          name: "read_file",
+          toolCallId: "worker-call-two",
+          content: "tool answer two"
+        })
+      ]) as object),
+      workerTurn: 2
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, reverseValues, {
+    orderedSnapshot: true
+  })
+  const liveThenValues = useAppStore.getState().workerFocusMessages
+  assert(liveThenValues.length === 5, "provider-id values must reuse prior live rows")
+  assert(
+    liveThenValues[3]?.content === "answer two expanded" &&
+      liveThenValues[4]?.content === "tool answer two expanded",
+    "assistant and tool provider-id values must preserve fuller prior live content"
+  )
+
+  const idlessTransport = new ElectronIPCTransport()
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  const idlessLiveAssistant = idlessTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        aiMessage({
+          content: "idless current answer",
+          toolCalls: [{ id: "idless-current-call", name: "read_file", args: {} }]
+        }),
+        {}
+      ) as object),
+      workerTurn: 3
+    } as never,
+    "thread-full-values-turns"
+  )
+  const idlessLiveTool = idlessTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        toolMessage({
+          name: "read_file",
+          toolCallId: "idless-current-call",
+          content: "idless current tool result"
+        }),
+        {}
+      ) as object),
+      workerTurn: 3
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    ...idlessLiveAssistant,
+    ...idlessLiveTool
+  ])
+  const idlessValues = idlessTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        aiMessage({
+          content: "idless current answer",
+          toolCalls: [{ id: "idless-current-call", name: "read_file", args: {} }]
+        }),
+        toolMessage({
+          name: "read_file",
+          toolCallId: "idless-current-call",
+          content: "idless current tool result"
+        })
+      ]) as object),
+      workerTurn: 3
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, idlessValues, {
+    orderedSnapshot: true
+  })
+  const idlessLiveThenValues = useAppStore.getState().workerFocusMessages
+  assert(
+    idlessLiveThenValues.length === 2 &&
+      idlessLiveThenValues.map((message) => message.role).join(">") === "assistant>tool",
+    "idless values slices without a user must reuse current-turn live assistant and tool rows"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    {
+      id: "history-user-provider",
+      role: "user",
+      content: "history prompt",
+      created_at: new Date()
+    },
+    {
+      id: "history-assistant-provider",
+      role: "assistant",
+      content: "history answer",
+      created_at: new Date()
+    },
+    {
+      id: "history-tool-provider",
+      role: "tool",
+      tool_call_id: "history-call",
+      content: "history tool result",
+      created_at: new Date()
+    }
+  ])
+  const scopedHistoryReplay = new ElectronIPCTransport().convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        humanMessage("history prompt", { id: "history-user-provider" }),
+        aiMessage({ id: "history-assistant-provider", content: "history answer" }),
+        toolMessage({
+          id: "history-tool-provider",
+          name: "read_file",
+          toolCallId: "history-call",
+          content: "history tool result"
+        })
+      ]) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, scopedHistoryReplay, {
+    orderedSnapshot: true
+  })
+  assert(
+    useAppStore.getState().workerFocusMessages.length === 3,
+    "turn-scoped provider replay must reuse unscoped checkpoint history rows"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    {
+      id: "worker-snapshot-0",
+      role: "user",
+      content: "fallback history prompt",
+      created_at: new Date()
+    },
+    {
+      id: "worker-snapshot-1",
+      role: "assistant",
+      content: "fallback history answer",
+      created_at: new Date()
+    },
+    {
+      id: "worker-snapshot-2",
+      role: "tool",
+      tool_call_id: "fallback-history-call",
+      content: "fallback history tool result",
+      created_at: new Date()
+    }
+  ])
+  const scopedFallbackReplay = new ElectronIPCTransport().convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        {
+          id: ["langchain_core", "messages", "HumanMessage"],
+          kwargs: { content: "fallback history prompt" }
+        },
+        aiMessage({ content: "fallback history answer" }),
+        toolMessage({
+          name: "read_file",
+          toolCallId: "fallback-history-call",
+          content: "fallback history tool result"
+        })
+      ]) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, scopedFallbackReplay, {
+    orderedSnapshot: true
+  })
+  assert(
+    useAppStore.getState().workerFocusMessages.length === 3,
+    "turn-scoped fallback replay must reuse unscoped checkpoint history rows"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    { id: "truncated-user-9", role: "user", content: "turn nine", created_at: new Date() },
+    {
+      id: "truncated-answer-9",
+      role: "assistant",
+      content: "answer nine",
+      created_at: new Date()
+    },
+    { id: "truncated-user-10", role: "user", content: "turn ten", created_at: new Date() },
+    {
+      id: "truncated-answer-10",
+      role: "assistant",
+      content: "answer ten",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    {
+      id: `worker-turn-${workerThreadId}-10::truncated-answer-10`,
+      role: "assistant",
+      content: "answer ten expanded",
+      created_at: new Date()
+    }
+  ])
+  const truncatedHistoryReplay = useAppStore.getState().workerFocusMessages
+  assert(
+    truncatedHistoryReplay.length === 5 &&
+      truncatedHistoryReplay[3]?.content === "answer ten" &&
+      truncatedHistoryReplay.at(-1)?.content === "answer ten expanded",
+    "an unscoped truncated window must not guess that a scoped replay belongs to its last turn"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    { id: "reuse-user-9", role: "user", content: "turn nine", created_at: new Date() },
+    { id: "reused-worker-id", role: "assistant", content: "old answer", created_at: new Date() },
+    { id: "reuse-user-10", role: "user", content: "turn ten", created_at: new Date() }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    {
+      id: `worker-turn-${workerThreadId}-10::reused-worker-id`,
+      role: "assistant",
+      content: "new answer",
+      created_at: new Date()
+    }
+  ])
+  const reusedTruncatedHistory = useAppStore.getState().workerFocusMessages
+  assert(
+    reusedTruncatedHistory.length === 4 &&
+      reusedTruncatedHistory[1]?.content === "old answer" &&
+      reusedTruncatedHistory[3]?.content === "new answer",
+    "a scoped new-turn reuse must not overwrite an older raw history occurrence"
+  )
+
+  const oversizedCheckpoint = [
+    humanMessage("oversized turn prompt", { id: "oversized-turn-user" }),
+    ...Array.from({ length: 500 }, (_, index) =>
+      aiMessage({
+        id: index === 499 ? "oversized-current-answer" : `oversized-answer-${index}`,
+        content: index === 499 ? "oversized current answer" : `oversized answer ${index}`
+      })
+    )
+  ]
+  const oversizedHistory = buildWorkerCheckpointHistory(oversizedCheckpoint, workerThreadId)
+  assert(
+    oversizedHistory.truncatedCount === 1 &&
+      oversizedHistory.messages.length === 500 &&
+      oversizedHistory.messages.every((message) =>
+        message.id.startsWith(`worker-turn-${workerThreadId}-1::`)
+      ),
+    "checkpoint history must retain the absolute worker turn when its user row is clipped"
+  )
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, oversizedHistory.messages, {
+    orderedSnapshot: true
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    {
+      id: `worker-turn-${workerThreadId}-1::oversized-current-answer`,
+      role: "assistant",
+      content: "oversized current answer expanded",
+      created_at: new Date()
+    }
+  ])
+  const oversizedHistoryReplay = useAppStore.getState().workerFocusMessages
+  assert(
+    oversizedHistoryReplay.length === 500 &&
+      oversizedHistoryReplay.at(-1)?.content === "oversized current answer expanded",
+    "a scoped replay must reuse clipped same-turn checkpoint history without duplication"
+  )
+
+  const repeatedOccurrenceTransport = new ElectronIPCTransport()
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  for (const message of [
+    aiMessage({
+      id: "same-turn-shared",
+      content: "first occurrence",
+      toolCalls: [{ id: "same-turn-call", name: "read_file", args: {} }]
+    }),
+    toolMessage({
+      id: "same-turn-tool",
+      name: "read_file",
+      toolCallId: "same-turn-call",
+      content: "tool boundary"
+    }),
+    aiMessage({ id: "same-turn-shared", content: "second occurrence" })
+  ]) {
+    const converted = repeatedOccurrenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        ...(streamMessageEvent(message, {}) as object),
+        workerTurn: 1
+      } as never,
+      "thread-full-values-turns"
+    )
+    useAppStore.getState().appendWorkerFocusMessages(workerThreadId, converted)
+  }
+  const liveOccurrenceAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    liveOccurrenceAssistants.length === 2 &&
+      liveOccurrenceAssistants[0]?.content === "first occurrence" &&
+      liveOccurrenceAssistants[0]?.tool_calls?.length === 1 &&
+      liveOccurrenceAssistants[1]?.content === "second occurrence" &&
+      !liveOccurrenceAssistants[1]?.tool_calls?.length,
+    "messages-only live updates must preserve assistant occurrences across a tool boundary"
+  )
+
+  const repeatedChunkTransport = new ElectronIPCTransport()
+  const firstChunk = repeatedChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        aiMessageChunk({
+          id: "repeated-chunk-message",
+          toolCallChunks: [
+            {
+              id: "repeated-chunk-call",
+              name: "read_file",
+              args: '{"file_path":"one"}'
+            }
+          ]
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  repeatedChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        toolMessage({
+          id: "repeated-chunk-tool",
+          name: "read_file",
+          toolCallId: "repeated-chunk-call",
+          content: "first chunk boundary"
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  const secondChunk = repeatedChunkTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        aiMessageChunk({
+          id: "repeated-chunk-message",
+          toolCallChunks: [
+            {
+              id: "repeated-chunk-call",
+              name: "read_file",
+              args: '{"file_path":"two"}'
+            }
+          ]
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  const firstChunkCall = firstChunk[0]?.tool_calls?.[0]
+  const secondChunkCall = secondChunk[0]?.tool_calls?.[0]
+  assert(
+    firstChunkCall?.args?.file_path === "one" && secondChunkCall?.args?.file_path === "two",
+    "reused tool-call ids must not inherit args from an earlier assistant occurrence"
+  )
+  const occurrenceValues = repeatedOccurrenceTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        humanMessage("same turn prompt", { id: "same-turn-user" }),
+        aiMessage({
+          id: "same-turn-shared",
+          content: "first occurrence",
+          toolCalls: [{ id: "same-turn-call", name: "read_file", args: {} }]
+        }),
+        toolMessage({
+          id: "same-turn-tool",
+          name: "read_file",
+          toolCallId: "same-turn-call",
+          content: "tool boundary"
+        }),
+        aiMessage({ id: "same-turn-shared", content: "second occurrence" })
+      ]) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, occurrenceValues, {
+    orderedSnapshot: true
+  })
+  const repeatedOccurrenceMessages = useAppStore.getState().workerFocusMessages
+  const repeatedOccurrenceAssistants = repeatedOccurrenceMessages.filter(
+    (message) => message.role === "assistant"
+  )
+  assert(
+    repeatedOccurrenceAssistants.length === 2 &&
+      repeatedOccurrenceAssistants[0]?.content === "first occurrence" &&
+      repeatedOccurrenceAssistants[0]?.tool_calls?.length === 1 &&
+      repeatedOccurrenceAssistants[1]?.content === "second occurrence" &&
+      !repeatedOccurrenceAssistants[1]?.tool_calls?.length,
+    "a complete values snapshot must restore repeated same-turn provider occurrences"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    {
+      id: `worker-turn-${workerThreadId}-1::split-shared`,
+      role: "assistant",
+      content: "second occurrence",
+      tool_calls: [{ id: "split-call", name: "read_file", args: {} }],
+      created_at: new Date()
+    }
+  ])
+  const splitValues = new ElectronIPCTransport().convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        humanMessage("split prompt", { id: "split-user" }),
+        aiMessage({ id: "split-shared", content: "first occurrence" }),
+        toolMessage({
+          id: "split-tool",
+          name: "read_file",
+          toolCallId: "split-call",
+          content: "split boundary"
+        }),
+        aiMessage({
+          id: "split-shared",
+          content: "second occurrence",
+          toolCalls: [{ id: "split-call", name: "read_file", args: {} }]
+        })
+      ]) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, splitValues, {
+    orderedSnapshot: true
+  })
+  const splitAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    splitAssistants.length === 2 &&
+      !splitAssistants[0]?.tool_calls?.length &&
+      splitAssistants[1]?.tool_calls?.length === 1,
+    "an authoritative occurrence snapshot must not leak tool calls into another occurrence"
+  )
+
+  const valuesBeforeLiveTransport = new ElectronIPCTransport()
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "thread-full-values-turns",
+    workerId: "worker-full-values-turns",
+    workerThreadId
+  })
+  const valuesBeforeLive = valuesBeforeLiveTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamValuesEvent([
+        humanMessage("values before live", { id: "values-before-live-user" }),
+        aiMessage({
+          id: "values-before-live-shared",
+          content: "first values occurrence",
+          toolCalls: [{ id: "values-before-live-call", name: "read_file", args: {} }]
+        }),
+        toolMessage({
+          id: "values-before-live-tool",
+          name: "read_file",
+          toolCallId: "values-before-live-call",
+          content: "values tool boundary"
+        })
+      ]) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, valuesBeforeLive, {
+    orderedSnapshot: true
+  })
+  const liveAfterValues = valuesBeforeLiveTransport.convertFocusedCoordinatorWorkerIPCEvent(
+    {
+      ...(streamMessageEvent(
+        aiMessage({ id: "values-before-live-shared", content: "second live occurrence" }),
+        {}
+      ) as object),
+      workerTurn: 1
+    } as never,
+    "thread-full-values-turns"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, liveAfterValues)
+  const valuesBeforeLiveAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    valuesBeforeLiveAssistants.length === 2 &&
+      valuesBeforeLiveAssistants[0]?.content === "first values occurrence" &&
+      valuesBeforeLiveAssistants[1]?.content === "second live occurrence",
+    "a tool-ending values snapshot must seed occurrence identity for the next live assistant"
+  )
+  resetWorkerFocusStore()
+}
+
+function testWorkerOccurrenceReplayStateRegressions(): void {
+  const parentThreadId = "thread-worker-replay-regressions"
+  const workerThreadId = "worker-replay-regressions"
+  const openFocus = (): void => {
+    resetWorkerFocusStore()
+    openWorkerFocusViewForTest({
+      threadId: parentThreadId,
+      workerId: "worker-replay-regressions",
+      workerThreadId
+    })
+  }
+  const convert = (transport: ElectronIPCTransport, event: unknown): ReturnType<
+    ElectronIPCTransport["convertFocusedCoordinatorWorkerIPCEvent"]
+  > => transport.convertFocusedCoordinatorWorkerIPCEvent(event as never, parentThreadId)
+
+  openFocus()
+  const multiReplayTransport = new ElectronIPCTransport()
+  const multiValues = convert(multiReplayTransport, {
+    ...(streamValuesEvent([
+      humanMessage("multi replay", { id: "multi-replay-user" }),
+      aiMessage({
+        id: "multi-replay-shared",
+        content: "first replay candidate",
+        toolCalls: [{ id: "multi-replay-call-1", name: "read_file", args: { path: "one" } }]
+      }),
+      toolMessage({
+        id: "multi-replay-tool-1",
+        name: "read_file",
+        toolCallId: "multi-replay-call-1",
+        content: "one"
+      }),
+      aiMessage({
+        id: "multi-replay-shared",
+        content: "second replay candidate",
+        toolCalls: [{ id: "multi-replay-call-2", name: "read_file", args: { path: "two" } }]
+      }),
+      toolMessage({
+        id: "multi-replay-tool-2",
+        name: "read_file",
+        toolCallId: "multi-replay-call-2",
+        content: "two"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, multiValues, {
+    orderedSnapshot: true
+  })
+  const delayedFirstReplay = convert(multiReplayTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "multi-replay-shared",
+        content: "first replay candidate expanded",
+        toolCalls: [{ id: "multi-replay-call-1", name: "read_file", args: { path: "one" } }]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, delayedFirstReplay)
+  assert(
+    delayedFirstReplay.length === 0,
+    "a post-tool exact replay must wait for the following tool evidence"
+  )
+  const committedFirstReplay = convert(multiReplayTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "multi-replay-tool-1",
+        name: "read_file",
+        toolCallId: "multi-replay-call-1",
+        content: "one"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, committedFirstReplay)
+  const multiReplayAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    multiReplayAssistants.length === 2 &&
+      multiReplayAssistants[0]?.content === "first replay candidate expanded" &&
+      multiReplayAssistants[1]?.content === "second replay candidate",
+    "a uniquely matching delayed replay must update its earlier provider occurrence"
+  )
+  const partialDelayedReplay = convert(multiReplayTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "multi-replay-shared",
+          content: "",
+          tool_call_chunks: [
+            {
+              id: "multi-replay-call-2",
+              name: "read_file",
+              args: '{"path":"t',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  assert(
+    partialDelayedReplay.length === 0,
+    "an unresolved replay fragment must wait for enough identity evidence"
+  )
+  const completedDelayedReplay = convert(multiReplayTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "multi-replay-shared",
+          content: "",
+          tool_call_chunks: [{ args: 'wo"}', index: 0 }]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, completedDelayedReplay)
+  assert(
+    useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant").length === 2,
+    "a completed fragmented replay must rebind to its uniquely matching old occurrence"
+  )
+  const newAfterReplayPin = convert(multiReplayTransport, {
+    ...(streamMessageEvent(
+      aiMessage({ id: "multi-replay-shared", content: "brand new answer" }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, newAfterReplayPin)
+  const afterReplayPinAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    afterReplayPinAssistants.length === 3 &&
+      afterReplayPinAssistants.at(-1)?.content === "brand new answer",
+    "an incompatible message after a replay pin must start a new occurrence"
+  )
+
+  openFocus()
+  const prefixTransport = new ElectronIPCTransport()
+  const prefixValues = convert(prefixTransport, {
+    ...(streamValuesEvent([
+      humanMessage("prefix replay", { id: "prefix-user" }),
+      aiMessage({ id: "prefix-answer", content: "complete long answer" })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, prefixValues, {
+    orderedSnapshot: true
+  })
+  const shortPrefixReplay = convert(prefixTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: { id: "prefix-answer", content: "complete " }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, shortPrefixReplay)
+  assert(
+    useAppStore.getState().workerFocusMessages.at(-1)?.content === "complete long answer",
+    "a shorter cumulative prefix chunk must not truncate or append to a complete values answer"
+  )
+
+  openFocus()
+  const dualEmissionTransport = new ElectronIPCTransport()
+  for (const message of [
+    aiMessage({
+      id: "dual-emission-shared",
+      content: "first",
+      toolCalls: [{ id: "dual-emission-call-1", name: "read_file", args: {} }]
+    }),
+    toolMessage({
+      id: "dual-emission-tool-1",
+      name: "read_file",
+      toolCallId: "dual-emission-call-1",
+      content: "boundary"
+    })
+  ]) {
+    useAppStore.getState().appendWorkerFocusMessages(
+      workerThreadId,
+      convert(dualEmissionTransport, {
+        ...(streamMessageEvent(message, {}) as object),
+        workerTurn: 1
+      })
+    )
+  }
+  const dualEmission = convert(dualEmissionTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "dual-emission-shared",
+          content: "second",
+          tool_call_chunks: [
+            {
+              id: "dual-emission-call-2",
+              name: "read_file",
+              args: '{"path":"two"}',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  assert(
+    dualEmission.length === 2 && dualEmission[0]?.id === dualEmission[1]?.id,
+    "one chunk with text and completed tool args should emit two updates for one occurrence"
+  )
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, dualEmission)
+  const dualEmissionAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    dualEmissionAssistants.length === 2 &&
+      dualEmissionAssistants[1]?.content === "second" &&
+      dualEmissionAssistants[1]?.tool_calls?.[0]?.args?.path === "two",
+    "same-batch updates for one internal occurrence id must merge instead of creating occurrence 3"
+  )
+
+  openFocus()
+  const valuesToolResetTransport = new ElectronIPCTransport()
+  convert(valuesToolResetTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({
+        id: "values-reset-shared",
+        toolCallChunks: [
+          {
+            id: "values-reset-call",
+            name: "read_file",
+            args: '{"file_path":"one"}'
+          }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const resetValues = convert(valuesToolResetTransport, {
+    ...(streamValuesEvent([
+      humanMessage("reset values", { id: "values-reset-user" }),
+      aiMessage({
+        id: "values-reset-shared",
+        toolCalls: [{ id: "values-reset-call", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "values-reset-tool",
+        name: "read_file",
+        toolCallId: "values-reset-call",
+        content: "boundary"
+      }),
+      aiMessage({
+        id: "values-reset-shared",
+        toolCalls: [{ id: "values-reset-call", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "values-reset-tool-2",
+        name: "read_file",
+        toolCallId: "values-reset-call",
+        content: "second boundary"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, resetValues, {
+    orderedSnapshot: true
+  })
+  const resetValueAssistants = resetValues.filter((message) => message.role === "assistant")
+  assert(
+    resetValueAssistants.length === 2 &&
+      resetValueAssistants.every(
+        (message) => message.tool_calls?.[0]?.args?.file_path === undefined
+      ),
+    "values conversion must not inject one occurrence accumulator into another occurrence"
+  )
+  const partialResetChunk = convert(valuesToolResetTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "values-reset-shared",
+          content: "",
+          tool_calls: [{ id: "values-reset-call", name: "read_file", args: {} }],
+          tool_call_chunks: [
+            {
+              id: "values-reset-call",
+              name: "read_file",
+              args: '{"file_path":"t',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, partialResetChunk)
+  const afterResetChunk = convert(valuesToolResetTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "values-reset-shared",
+          content: "",
+          tool_call_chunks: [{ args: 'wo"}', index: 0 }]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, afterResetChunk)
+  const afterResetAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    afterResetChunk.at(-1)?.tool_calls?.[0]?.args?.file_path === "two" &&
+      afterResetAssistants.length === 3 &&
+      afterResetAssistants.at(-1)?.tool_calls?.[0]?.args?.file_path === "two",
+    "partial evidence after a tool boundary must start a fresh occurrence with fresh args"
+  )
+
+  openFocus()
+  const sparseValuesReplayTransport = new ElectronIPCTransport()
+  const sparseLive = convert(sparseValuesReplayTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "sparse-values-shared",
+          content: "sparse answer",
+          tool_call_chunks: [
+            {
+              id: "sparse-values-call",
+              name: "read_file",
+              args: '{"file_path":"one"}',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, sparseLive)
+  const sparseValues = convert(sparseValuesReplayTransport, {
+    ...(streamValuesEvent([
+      humanMessage("sparse values", { id: "sparse-values-user" }),
+      aiMessage({
+        id: "sparse-values-shared",
+        content: "sparse answer",
+        toolCalls: [{ id: "sparse-values-call", name: "read_file", args: {} }]
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, sparseValues, {
+    orderedSnapshot: true
+  })
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(sparseValuesReplayTransport, {
+      ...(streamMessageEvent(
+        toolMessage({
+          id: "sparse-values-tool",
+          name: "read_file",
+          toolCallId: "sparse-values-call",
+          content: "done"
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const sparseDelayedReplay = convert(sparseValuesReplayTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "sparse-values-shared",
+        content: "sparse answer",
+        toolCalls: [
+          { id: "sparse-values-call", name: "read_file", args: { file_path: "one" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, sparseDelayedReplay)
+  const sparseReplayTool = convert(sparseValuesReplayTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "sparse-values-tool",
+        name: "read_file",
+        toolCallId: "sparse-values-call",
+        content: "done"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, sparseReplayTool)
+  assert(
+    sparseDelayedReplay.length === 0 &&
+      sparseReplayTool[0]?.id === `worker-turn-${workerThreadId}-1::sparse-values-shared` &&
+      useAppStore
+        .getState()
+        .workerFocusMessages.filter((message) => message.role === "assistant").length === 1,
+    "a sparse values refresh must retain the active occurrence args for delayed replay matching"
+  )
+
+  openFocus()
+  const midOccurrenceTransport = new ElectronIPCTransport()
+  const joinedLive = convert(midOccurrenceTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "joined-shared",
+        content: "second joined occurrence",
+        toolCalls: [{ id: "joined-call", name: "read_file", args: { path: "two" } }]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, joinedLive)
+  const joinedValues = convert(midOccurrenceTransport, {
+    ...(streamValuesEvent([
+      humanMessage("joined midway", { id: "joined-user" }),
+      aiMessage({
+        id: "joined-shared",
+        content: "first joined occurrence",
+        toolCalls: [{ id: "joined-call", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "joined-tool",
+        name: "read_file",
+        toolCallId: "joined-call",
+        content: "boundary"
+      }),
+      aiMessage({
+        id: "joined-shared",
+        content: "second joined occurrence",
+        toolCalls: [{ id: "joined-call", name: "read_file", args: { path: "two" } }]
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, joinedValues, {
+    orderedSnapshot: true
+  })
+  const joinedAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    joinedAssistants.length === 2 &&
+      joinedAssistants[0]?.tool_calls?.[0]?.args?.path === undefined &&
+      joinedAssistants[1]?.tool_calls?.[0]?.args?.path === "two",
+    "a complete repeated-occurrence snapshot must align a preexisting live row by content"
+  )
+
+  openFocus()
+  const grownOccurrenceTransport = new ElectronIPCTransport()
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(grownOccurrenceTransport, {
+      ...(streamMessageEvent(
+        aiMessage({
+          id: "grown-shared",
+          content: "second expanded",
+          toolCalls: [{ id: "grown-call", name: "read_file", args: { path: "two" } }]
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const grownValues = convert(grownOccurrenceTransport, {
+    ...(streamValuesEvent([
+      humanMessage("grown midway", { id: "grown-user" }),
+      aiMessage({
+        id: "grown-shared",
+        content: "first",
+        toolCalls: [{ id: "grown-call", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "grown-tool",
+        name: "read_file",
+        toolCallId: "grown-call",
+        content: "boundary"
+      }),
+      aiMessage({
+        id: "grown-shared",
+        content: "second",
+        toolCalls: [{ id: "grown-call", name: "read_file", args: {} }]
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, grownValues, {
+    orderedSnapshot: true
+  })
+  const grownAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    grownAssistants.length === 2 &&
+      grownAssistants[0]?.content === "first" &&
+      grownAssistants[0]?.tool_calls?.[0]?.args?.path === undefined &&
+      grownAssistants[1]?.content === "second expanded" &&
+      grownAssistants[1]?.tool_calls?.[0]?.args?.path === "two",
+    "a lagging repeated-occurrence snapshot must preserve uniquely matched live growth"
+  )
+
+  openFocus()
+  const omittedCallsTransport = new ElectronIPCTransport()
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(omittedCallsTransport, {
+      ...(streamMessageEvent(
+        aiMessage({
+          id: "omitted-calls-shared",
+          content: "second expanded",
+          toolCalls: [
+            { id: "omitted-calls-two", name: "read_file", args: { path: "two" } }
+          ]
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const omittedCallsValues = convert(omittedCallsTransport, {
+    ...(streamValuesEvent([
+      humanMessage("omitted calls midway", { id: "omitted-calls-user" }),
+      aiMessage({
+        id: "omitted-calls-shared",
+        content: "first",
+        toolCalls: [
+          { id: "omitted-calls-one", name: "read_file", args: { path: "one" } }
+        ]
+      }),
+      toolMessage({
+        id: "omitted-calls-tool",
+        name: "read_file",
+        toolCallId: "omitted-calls-one",
+        content: "boundary"
+      }),
+      aiMessage({ id: "omitted-calls-shared", content: "second" })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, omittedCallsValues, {
+    orderedSnapshot: true
+  })
+  const omittedCallsAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    omittedCallsAssistants.length === 2 &&
+      omittedCallsAssistants[0]?.content === "first" &&
+      omittedCallsAssistants[1]?.content === "second expanded" &&
+      omittedCallsAssistants[1]?.tool_calls?.[0]?.id === "omitted-calls-two" &&
+      omittedCallsAssistants[1]?.tool_calls?.[0]?.args?.path === "two",
+    "a repeated-occurrence snapshot with omitted calls must preserve its uniquely matched live growth"
+  )
+
+  openFocus()
+  const grownFinalTransport = new ElectronIPCTransport()
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(grownFinalTransport, {
+      ...(streamMessageEvent(
+        aiMessage({ id: "grown-final-shared", content: "second final expanded" }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const grownFinalValues = convert(grownFinalTransport, {
+    ...(streamValuesEvent([
+      humanMessage("grown final", { id: "grown-final-user" }),
+      aiMessage({
+        id: "grown-final-shared",
+        content: "first final",
+        toolCalls: [{ id: "grown-final-call", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "grown-final-tool",
+        name: "read_file",
+        toolCallId: "grown-final-call",
+        content: "boundary"
+      }),
+      aiMessage({ id: "grown-final-shared", content: "second final" })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, grownFinalValues, {
+    orderedSnapshot: true
+  })
+  const grownFinalAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    grownFinalAssistants.length === 2 &&
+      grownFinalAssistants[0]?.content === "first final" &&
+      grownFinalAssistants[1]?.content === "second final expanded",
+    "a no-tool final answer must reserve its compatible grown live occurrence"
+  )
+
+  openFocus()
+  const exactOccurrenceOneId = `worker-turn-${workerThreadId}-1::exact-shared`
+  const exactOccurrenceTwoId = `${exactOccurrenceOneId}::cmb-same-role-duplicate:assistant:2`
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    [
+      {
+        id: `worker-turn-${workerThreadId}-1::exact-user`,
+        role: "user",
+        content: "exact ids",
+        created_at: new Date()
+      },
+      {
+        id: exactOccurrenceOneId,
+        role: "assistant",
+        content: "first exact",
+        tool_calls: [{ id: "exact-call-one", name: "read_file", args: { path: "one" } }],
+        created_at: new Date()
+      },
+      {
+        id: `worker-turn-${workerThreadId}-1::exact-tool`,
+        role: "tool",
+        content: "boundary",
+        tool_call_id: "exact-call-one",
+        name: "read_file",
+        created_at: new Date()
+      },
+      {
+        id: exactOccurrenceTwoId,
+        provider_source_id: exactOccurrenceOneId,
+        role: "assistant",
+        content: "second exact",
+        tool_calls: [{ id: "exact-call-two", name: "read_file", args: { path: "two" } }],
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    [
+      {
+        id: `worker-turn-${workerThreadId}-1::exact-user`,
+        role: "user",
+        content: "exact ids",
+        created_at: new Date()
+      },
+      {
+        id: exactOccurrenceOneId,
+        role: "assistant",
+        content: "first exact",
+        tool_calls: [{ id: "exact-call-one", name: "read_file", args: { path: "one" } }],
+        created_at: new Date()
+      },
+      {
+        id: `worker-turn-${workerThreadId}-1::exact-tool`,
+        role: "tool",
+        content: "boundary",
+        tool_call_id: "exact-call-one",
+        name: "read_file",
+        created_at: new Date()
+      },
+      {
+        id: exactOccurrenceTwoId,
+        provider_source_id: exactOccurrenceOneId,
+        role: "assistant",
+        content: "second exact",
+        tool_calls: [{ id: "exact-call-two", name: "read_file", args: {} }],
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  const exactOccurrenceAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    exactOccurrenceAssistants.length === 2 &&
+      new Set(exactOccurrenceAssistants.map((message) => message.id)).size === 2 &&
+      exactOccurrenceAssistants[1]?.tool_calls?.[0]?.args?.path === "two",
+    "an exact occurrence id must not be blocked by another reservation in the same identity"
+  )
+
+  openFocus()
+  const multiCallReplayTransport = new ElectronIPCTransport()
+  const multiCallValues = convert(multiCallReplayTransport, {
+    ...(streamValuesEvent([
+      humanMessage("multi call replay", { id: "multi-call-user" }),
+      aiMessage({
+        id: "multi-call-shared",
+        content: "multi call answer",
+        toolCalls: [
+          { id: "multi-call-one", name: "read_file", args: { path: "one" } },
+          { id: "multi-call-two", name: "read_file", args: { path: "two" } }
+        ]
+      }),
+      toolMessage({
+        id: "multi-call-tool-one",
+        name: "read_file",
+        toolCallId: "multi-call-one",
+        content: "one"
+      }),
+      toolMessage({
+        id: "multi-call-tool-two",
+        name: "read_file",
+        toolCallId: "multi-call-two",
+        content: "two"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, multiCallValues, {
+    orderedSnapshot: true
+  })
+  const firstCompleteCall = convert(multiCallReplayTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({
+        id: "multi-call-shared",
+        toolCallChunks: [
+          { id: "multi-call-one", name: "read_file", args: '{"path":"one"}' }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const secondCompleteCall = convert(multiCallReplayTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({
+        id: "multi-call-shared",
+        toolCallChunks: [
+          { id: "multi-call-two", name: "read_file", args: '{"path":"two"}' }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, secondCompleteCall)
+  assert(
+    firstCompleteCall.length === 0 &&
+      secondCompleteCall.length === 0 &&
+      useAppStore
+        .getState()
+        .workerFocusMessages.filter((message) => message.role === "assistant").length === 1,
+    "a multi-call replay split by completed calls must remain buffered until tool evidence"
+  )
+
+  openFocus()
+  const partialReplayTransport = new ElectronIPCTransport()
+  const partialReplayValues = convert(partialReplayTransport, {
+    ...(streamValuesEvent([
+      humanMessage("partial replay", { id: "partial-replay-user" }),
+      aiMessage({
+        id: "partial-replay-shared",
+        content: "A",
+        toolCalls: [
+          { id: "partial-replay-call", name: "read_file", args: { value: 1 } }
+        ]
+      }),
+      toolMessage({
+        id: "partial-replay-old-tool",
+        name: "read_file",
+        toolCallId: "partial-replay-call",
+        content: "old"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, partialReplayValues, {
+    orderedSnapshot: true
+  })
+  const partialReplayStart = convert(partialReplayTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "partial-replay-shared",
+          content: "A",
+          reasoning_content: "R1",
+          tool_call_chunks: [
+            {
+              id: "partial-replay-call",
+              name: "read_file",
+              args: '{"value":',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const partialReplayCompletion = convert(partialReplayTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "partial-replay-shared",
+          content: "",
+          tool_call_chunks: [{ args: "1}", index: 0 }]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const partialReplayNewTool = convert(partialReplayTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "partial-replay-new-tool",
+        name: "read_file",
+        toolCallId: "partial-replay-call",
+        content: "new"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    ...partialReplayStart,
+    ...partialReplayCompletion,
+    ...partialReplayNewTool
+  ])
+  const partialReplayAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    partialReplayStart.length === 0 &&
+      partialReplayCompletion.length === 0 &&
+      partialReplayNewTool[0]?.role === "assistant" &&
+      partialReplayAssistants.length === 2 &&
+      !partialReplayAssistants[0]?.reasoning &&
+      partialReplayAssistants[1]?.reasoning === "R1",
+    "a provisional partial call rebind must stay ambiguous until a new tool result proves the occurrence"
+  )
+
+  openFocus()
+  const expandingCallTransport = new ElectronIPCTransport()
+  const expandingValues = convert(expandingCallTransport, {
+    ...(streamValuesEvent([
+      humanMessage("expanding calls", { id: "expanding-user" }),
+      aiMessage({
+        id: "expanding-shared",
+        content: "",
+        toolCalls: [{ id: "expanding-call-one", name: "read_file", args: { path: "one" } }]
+      }),
+      toolMessage({
+        id: "expanding-old-tool",
+        name: "read_file",
+        toolCallId: "expanding-call-one",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, expandingValues, {
+    orderedSnapshot: true
+  })
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(expandingCallTransport, {
+      ...(streamMessageEvent(
+        aiMessageChunk({
+          id: "expanding-shared",
+          toolCallChunks: [
+            { id: "expanding-call-one", name: "read_file", args: '{"path":"one"}' }
+          ]
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const expandingSecondCall = convert(expandingCallTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({
+        id: "expanding-shared",
+        toolCallChunks: [
+          { id: "expanding-call-two", name: "read_file", args: '{"path":"two"}' }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, expandingSecondCall)
+  const expandingAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    expandingAssistants.length === 2 &&
+      expandingAssistants[1]?.tool_calls?.length === 2 &&
+      expandingAssistants[1]?.tool_calls?.[0]?.id === "expanding-call-one" &&
+      expandingAssistants[1]?.tool_calls?.[1]?.id === "expanding-call-two",
+    "a later extra call must migrate an ambiguous first call into the new occurrence"
+  )
+
+  openFocus()
+  const ambiguousTextTransport = new ElectronIPCTransport()
+  const ambiguousTextValues = convert(ambiguousTextTransport, {
+    ...(streamValuesEvent([
+      humanMessage("ambiguous text", { id: "ambiguous-text-user" }),
+      aiMessage({
+        id: "ambiguous-text-shared",
+        content: "A",
+        toolCalls: [
+          { id: "ambiguous-text-call-one", name: "read_file", args: { path: "one" } }
+        ]
+      }),
+      toolMessage({
+        id: "ambiguous-text-old-tool",
+        name: "read_file",
+        toolCallId: "ambiguous-text-call-one",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, ambiguousTextValues, {
+    orderedSnapshot: true
+  })
+  const ambiguousTextFirstFrame = convert(ambiguousTextTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "ambiguous-text-shared",
+          content: "A",
+          reasoning_content: "R1",
+          tool_call_chunks: [
+            {
+              id: "ambiguous-text-call-one",
+              name: "read_file",
+              args: '{"path":"one"}',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, ambiguousTextFirstFrame)
+  const ambiguousTextSecondFrame = convert(ambiguousTextTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "ambiguous-text-shared",
+          content: "B",
+          tool_calls: [
+            {
+              id: "ambiguous-text-call-one",
+              name: "read_file",
+              args: { path: "one" }
+            },
+            {
+              id: "ambiguous-text-call-two",
+              name: "read_file",
+              args: { path: "two" }
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, ambiguousTextSecondFrame)
+  const ambiguousTextAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    ambiguousTextFirstFrame.length === 0 &&
+      ambiguousTextAssistants.length === 2 &&
+      ambiguousTextAssistants[0]?.content === "A" &&
+      !ambiguousTextAssistants[0]?.reasoning &&
+      ambiguousTextAssistants[1]?.content === "AB" &&
+      ambiguousTextAssistants[1]?.reasoning === "R1" &&
+      ambiguousTextAssistants[1]?.tool_calls?.length === 2,
+    "ambiguous text and reasoning must stay buffered until an extra call identifies the new occurrence"
+  )
+
+  openFocus()
+  const incompatibleChunkTransport = new ElectronIPCTransport()
+  const incompatibleChunkValues = convert(incompatibleChunkTransport, {
+    ...(streamValuesEvent([
+      humanMessage("incompatible same frame", { id: "incompatible-chunk-user" }),
+      aiMessage({
+        id: "incompatible-chunk-shared",
+        content: "old",
+        toolCalls: [
+          { id: "incompatible-chunk-call-one", name: "read_file", args: { path: "one" } }
+        ]
+      }),
+      toolMessage({
+        id: "incompatible-chunk-old-tool",
+        name: "read_file",
+        toolCallId: "incompatible-chunk-call-one",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, incompatibleChunkValues, {
+    orderedSnapshot: true
+  })
+  convert(incompatibleChunkTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "incompatible-chunk-shared",
+        content: "old",
+        toolCalls: [
+          { id: "incompatible-chunk-call-one", name: "read_file", args: { path: "one" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const incompatibleSameFrame = convert(incompatibleChunkTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({
+        id: "incompatible-chunk-shared",
+        content: "brand new",
+        toolCallChunks: [
+          {
+            id: "incompatible-chunk-call-two",
+            name: "read_file",
+            args: '{"path":"two"}'
+          }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, incompatibleSameFrame)
+  const incompatibleChunkAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    incompatibleChunkAssistants.length === 2 &&
+      incompatibleChunkAssistants[1]?.content === "brand new" &&
+      incompatibleChunkAssistants[1]?.tool_calls?.length === 1 &&
+      incompatibleChunkAssistants[1]?.tool_calls?.[0]?.id ===
+        "incompatible-chunk-call-two",
+    "an incompatible text-and-call frame must not inherit the replay candidate prefix or calls"
+  )
+
+  openFocus()
+  const reasoningPinTransport = new ElectronIPCTransport()
+  const reasoningValues = convert(reasoningPinTransport, {
+    ...(streamValuesEvent([
+      humanMessage("reasoning pin", { id: "reasoning-pin-user" }),
+      aiMessage({
+        id: "reasoning-pin-shared",
+        content: "old answer",
+        toolCalls: [{ id: "reasoning-pin-call", name: "read_file", args: { path: "old" } }]
+      }),
+      toolMessage({
+        id: "reasoning-pin-tool",
+        name: "read_file",
+        toolCallId: "reasoning-pin-call",
+        content: "old"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, reasoningValues, {
+    orderedSnapshot: true
+  })
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(reasoningPinTransport, {
+      ...(streamMessageEvent(
+        aiMessage({
+          id: "reasoning-pin-shared",
+          content: "old answer",
+          toolCalls: [
+            { id: "reasoning-pin-call", name: "read_file", args: { path: "old" } }
+          ]
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const deferredReasoning = convert(reasoningPinTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "reasoning-pin-shared",
+          content: "",
+          reasoning_content: "new private reasoning"
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const emptyAfterDeferredReasoning = convert(reasoningPinTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({ id: "reasoning-pin-shared", content: "" }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const answerAfterReasoning = convert(reasoningPinTransport, {
+    ...(streamMessageEvent(
+      aiMessage({ id: "reasoning-pin-shared", content: "brand new answer" }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, answerAfterReasoning)
+  const reasoningAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    deferredReasoning.length === 0 &&
+      emptyAfterDeferredReasoning.length === 0 &&
+      reasoningAssistants.length === 2 &&
+      !reasoningAssistants[0]?.reasoning &&
+      reasoningAssistants[1]?.reasoning === "new private reasoning",
+    "reasoning before an incompatible post-replay answer must move to the new occurrence"
+  )
+
+  openFocus()
+  const replayDoubleEmissionTransport = new ElectronIPCTransport()
+  const replayDoubleValues = convert(replayDoubleEmissionTransport, {
+    ...(streamValuesEvent([
+      humanMessage("double replay", { id: "double-replay-user" }),
+      aiMessage({
+        id: "double-replay-shared",
+        content: "old replay answer",
+        toolCalls: [{ id: "double-replay-call", name: "read_file", args: { path: "one" } }]
+      }),
+      toolMessage({
+        id: "double-replay-tool",
+        name: "read_file",
+        toolCallId: "double-replay-call",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, replayDoubleValues, {
+    orderedSnapshot: true
+  })
+  const replayDoubleEmission = convert(replayDoubleEmissionTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "double-replay-shared",
+          content: "old replay answer",
+          tool_call_chunks: [
+            {
+              id: "double-replay-call",
+              name: "read_file",
+              args: '{"path":"one"}',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, replayDoubleEmission)
+  const committedDoubleReplay = convert(replayDoubleEmissionTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "double-replay-tool",
+        name: "read_file",
+        toolCallId: "double-replay-call",
+        content: "one"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, committedDoubleReplay)
+  assert(
+    replayDoubleEmission.length === 0 &&
+      committedDoubleReplay[0]?.role === "assistant" &&
+      useAppStore
+        .getState()
+        .workerFocusMessages.filter((message) => message.role === "assistant").length === 1,
+    "a delayed replay with two internal updates must commit once after known tool evidence"
+  )
+  convert(replayDoubleEmissionTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "double-replay-shared",
+          content: "old replay answer",
+          tool_call_chunks: [
+            {
+              id: "double-replay-call",
+              name: "read_file",
+              args: '{"path":"one"}',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const newContentAfterReplayPin = convert(replayDoubleEmissionTransport, {
+    ...(streamMessageEvent(
+      aiMessage({ id: "double-replay-shared", content: "new replay answer" }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, newContentAfterReplayPin)
+  const newCallAfterReplayPin = convert(replayDoubleEmissionTransport, {
+    ...(streamMessageEvent(
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: {
+          id: "double-replay-shared",
+          content: "",
+          tool_calls: [{ id: "double-replay-call", name: "read_file", args: {} }],
+          tool_call_chunks: [
+            {
+              id: "double-replay-call",
+              name: "read_file",
+              args: '{"path":"two"}',
+              index: 0
+            }
+          ]
+        }
+      },
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, newCallAfterReplayPin)
+  const afterPinnedCallAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    afterPinnedCallAssistants.length === 2 &&
+      afterPinnedCallAssistants[1]?.content === "new replay answer" &&
+      afterPinnedCallAssistants[1]?.tool_calls?.[0]?.args?.path === "two",
+    "a new call after replay pin incompatibility must use a fresh tool accumulator"
+  )
+
+  openFocus()
+  const identicalOccurrenceTransport = new ElectronIPCTransport()
+  const identicalValues = convert(identicalOccurrenceTransport, {
+    ...(streamValuesEvent([
+      humanMessage("identical occurrence", { id: "identical-user" }),
+      aiMessage({
+        id: "identical-shared",
+        content: "same answer",
+        toolCalls: [{ id: "identical-call", name: "read_file", args: { path: "one" } }]
+      }),
+      toolMessage({
+        id: "identical-tool-one",
+        name: "read_file",
+        toolCallId: "identical-call",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, identicalValues, {
+    orderedSnapshot: true
+  })
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(identicalOccurrenceTransport, {
+      ...(streamMessageEvent(
+        aiMessage({
+          id: "identical-shared",
+          content: "same answer",
+          toolCalls: [
+            { id: "identical-call", name: "read_file", args: { path: "one" } }
+          ]
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const identicalNewTool = convert(identicalOccurrenceTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "identical-tool-two",
+        name: "read_file",
+        toolCallId: "identical-call",
+        content: "one again"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, identicalNewTool)
+  const identicalMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    identicalMessages.filter((message) => message.role === "assistant").length === 2 &&
+      identicalMessages.filter((message) => message.role === "tool").length === 2 &&
+      identicalNewTool[0]?.role === "assistant" &&
+      identicalNewTool[1]?.role === "tool",
+    "a new tool message must materialize an otherwise identical post-tool assistant occurrence"
+  )
+
+  openFocus()
+  const reusedToolIdTransport = new ElectronIPCTransport()
+  const reusedToolIdValues = convert(reusedToolIdTransport, {
+    ...(streamValuesEvent([
+      humanMessage("reused tool id", { id: "reused-tool-user" }),
+      aiMessage({
+        id: "reused-tool-shared",
+        content: "same",
+        toolCalls: [{ id: "reused-tool-call", name: "read_file", args: { path: "one" } }]
+      }),
+      toolMessage({
+        id: "reused-tool-message",
+        name: "read_file",
+        toolCallId: "reused-tool-call",
+        content: "old result"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, reusedToolIdValues, {
+    orderedSnapshot: true
+  })
+  convert(reusedToolIdTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "reused-tool-shared",
+        content: "same expanded",
+        toolCalls: [{ id: "reused-tool-call", name: "read_file", args: { path: "one" } }]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const changedReusedTool = convert(reusedToolIdTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "reused-tool-message",
+        name: "read_file",
+        toolCallId: "reused-tool-call",
+        content: "new result"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, changedReusedTool)
+  assert(
+    changedReusedTool[0]?.role === "assistant" &&
+      changedReusedTool[0]?.content === "same expanded" &&
+      useAppStore
+        .getState()
+        .workerFocusMessages.filter((message) => message.role === "assistant").length === 2,
+    "a reused tool message id with changed payload must materialize an identical new assistant"
+  )
+
+  openFocus()
+  const pendingParallelTransport = new ElectronIPCTransport()
+  const pendingParallelValues = convert(pendingParallelTransport, {
+    ...(streamValuesEvent([
+      humanMessage("pending parallel", { id: "pending-parallel-user" }),
+      aiMessage({
+        id: "pending-parallel-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "pending-parallel-call-one", name: "read_file", args: { path: "one" } },
+          { id: "pending-parallel-call-two", name: "read_file", args: { path: "two" } },
+          { id: "pending-parallel-call-three", name: "read_file", args: { path: "three" } }
+        ]
+      }),
+      toolMessage({
+        id: "pending-parallel-tool-one",
+        name: "read_file",
+        toolCallId: "pending-parallel-call-one",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, pendingParallelValues, {
+    orderedSnapshot: true
+  })
+  convert(pendingParallelTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "pending-parallel-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "pending-parallel-call-one", name: "read_file", args: { path: "one" } },
+          { id: "pending-parallel-call-two", name: "read_file", args: { path: "two" } },
+          { id: "pending-parallel-call-three", name: "read_file", args: { path: "three" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const pendingSecondResult = convert(pendingParallelTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "pending-parallel-tool-two",
+        toolCallId: "pending-parallel-call-two",
+        content: ""
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, pendingSecondResult)
+  assert(
+    useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant").length === 1,
+    "the first result for a pending parallel call must not materialize a second assistant"
+  )
+  const repeatedPendingSecondResult = convert(pendingParallelTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "pending-parallel-tool-two",
+        toolCallId: "pending-parallel-call-two",
+        content: ""
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const grownPendingSecondResult = convert(pendingParallelTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "pending-parallel-tool-two",
+        name: "read_file",
+        toolCallId: "pending-parallel-call-two",
+        content: "partial complete",
+        status: "error"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const reusedIdThirdResult = convert(pendingParallelTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "pending-parallel-tool-two",
+        name: "read_file",
+        toolCallId: "pending-parallel-call-three",
+        content: "three"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const pendingFirstResult = convert(pendingParallelTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "pending-parallel-tool-one-new",
+        name: "read_file",
+        toolCallId: "pending-parallel-call-one",
+        content: "one again"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, pendingFirstResult)
+  const pendingParallelMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    pendingSecondResult.length === 0 &&
+      repeatedPendingSecondResult.length === 0 &&
+      grownPendingSecondResult.length === 0 &&
+      reusedIdThirdResult.length === 0 &&
+      pendingFirstResult.map((message) => message.role).join(",") ===
+        "assistant,tool,tool,tool" &&
+      pendingParallelMessages.filter((message) => message.role === "assistant").length === 2 &&
+      pendingParallelMessages.filter((message) => message.role === "tool").length === 4,
+    "pending result replay/growth must stay deferred until later evidence materializes its assistant"
+  )
+
+  openFocus()
+  const deferredFinalTransport = new ElectronIPCTransport()
+  const deferredFinalValues = convert(deferredFinalTransport, {
+    ...(streamValuesEvent([
+      humanMessage("deferred final", { id: "deferred-final-user" }),
+      aiMessage({
+        id: "deferred-final-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "deferred-final-call-one", name: "read_file", args: { path: "one" } },
+          { id: "deferred-final-call-two", name: "read_file", args: { path: "two" } }
+        ]
+      }),
+      toolMessage({
+        id: "deferred-final-tool-one",
+        name: "read_file",
+        toolCallId: "deferred-final-call-one",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, deferredFinalValues, {
+    orderedSnapshot: true
+  })
+  convert(deferredFinalTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "deferred-final-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "deferred-final-call-one", name: "read_file", args: { path: "one" } },
+          { id: "deferred-final-call-two", name: "read_file", args: { path: "two" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const deferredFinalSecondTool = convert(deferredFinalTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "deferred-final-tool-two",
+        name: "read_file",
+        toolCallId: "deferred-final-call-two",
+        content: "two"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const finalAfterDeferredTool = convert(deferredFinalTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({ id: "deferred-final-shared", content: "parallel" }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, finalAfterDeferredTool)
+  assert(
+    deferredFinalSecondTool.length === 0 &&
+      finalAfterDeferredTool.map((message) => message.role).join(",") ===
+        "tool,assistant" &&
+      useAppStore
+        .getState()
+        .workerFocusMessages.map((message) => message.role)
+        .join(",") === "user,assistant,tool,tool,assistant",
+    "a final assistant boundary must flush an old pending result before the final answer"
+  )
+
+  openFocus()
+  const deferredSubsetTransport = new ElectronIPCTransport()
+  const deferredSubsetValues = convert(deferredSubsetTransport, {
+    ...(streamValuesEvent([
+      humanMessage("deferred subset", { id: "deferred-subset-user" }),
+      aiMessage({
+        id: "deferred-subset-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "deferred-subset-call-one", name: "read_file", args: { path: "one" } },
+          { id: "deferred-subset-call-two", name: "read_file", args: { path: "two" } }
+        ]
+      }),
+      toolMessage({
+        id: "deferred-subset-tool-one",
+        name: "read_file",
+        toolCallId: "deferred-subset-call-one",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, deferredSubsetValues, {
+    orderedSnapshot: true
+  })
+  convert(deferredSubsetTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "deferred-subset-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "deferred-subset-call-one", name: "read_file", args: { path: "one" } },
+          { id: "deferred-subset-call-two", name: "read_file", args: { path: "two" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const deferredSubsetSecondTool = convert(deferredSubsetTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "deferred-subset-tool-two",
+        name: "read_file",
+        toolCallId: "deferred-subset-call-two",
+        content: "two"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const assistantAfterDeferredSubset = convert(deferredSubsetTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "deferred-subset-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "deferred-subset-call-one", name: "read_file", args: { path: "one" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    assistantAfterDeferredSubset
+  )
+  const deferredSubsetAssistants = useAppStore
+    .getState()
+    .workerFocusMessages.filter((message) => message.role === "assistant")
+  assert(
+    deferredSubsetSecondTool.length === 0 &&
+      assistantAfterDeferredSubset.map((message) => message.role).join(",") ===
+        "tool,assistant" &&
+      deferredSubsetAssistants.length === 2 &&
+      deferredSubsetAssistants[1]?.tool_calls?.length === 1 &&
+      deferredSubsetAssistants[1]?.tool_calls?.[0]?.id ===
+        "deferred-subset-call-one",
+    "an explicit subset call list must start a new assistant after flushing old pending tools"
+  )
+
+  openFocus()
+  const deferredHumanTransport = new ElectronIPCTransport()
+  const deferredHumanValues = convert(deferredHumanTransport, {
+    ...(streamValuesEvent([
+      humanMessage("deferred human first", { id: "deferred-human-user-one" }),
+      aiMessage({
+        id: "deferred-human-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "deferred-human-call-one", name: "read_file", args: { path: "one" } },
+          { id: "deferred-human-call-two", name: "read_file", args: { path: "two" } }
+        ]
+      }),
+      toolMessage({
+        id: "deferred-human-tool-one",
+        name: "read_file",
+        toolCallId: "deferred-human-call-one",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, deferredHumanValues, {
+    orderedSnapshot: true
+  })
+  convert(deferredHumanTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "deferred-human-shared",
+        content: "parallel",
+        toolCalls: [
+          { id: "deferred-human-call-one", name: "read_file", args: { path: "one" } },
+          { id: "deferred-human-call-two", name: "read_file", args: { path: "two" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const deferredHumanSecondTool = convert(deferredHumanTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "deferred-human-tool-two",
+        name: "read_file",
+        toolCallId: "deferred-human-call-two",
+        content: "two"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const humanAfterDeferredTool = convert(deferredHumanTransport, {
+    ...(streamMessageEvent(
+      humanMessage("deferred human second", { id: "deferred-human-user-two" }),
+      {}
+    ) as object),
+    workerTurn: 2
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, humanAfterDeferredTool)
+  assert(
+    deferredHumanSecondTool.length === 0 &&
+      humanAfterDeferredTool.map((message) => message.role).join(",") === "tool,user" &&
+      useAppStore
+        .getState()
+        .workerFocusMessages.map((message) => message.role)
+        .join(",") === "user,assistant,tool,tool,user",
+    "a human turn boundary must flush old pending tools before the next user message"
+  )
+
+  openFocus()
+  const multiCandidateReplayTransport = new ElectronIPCTransport()
+  const multiCandidateValues = convert(multiCandidateReplayTransport, {
+    ...(streamValuesEvent([
+      humanMessage("multi candidate old replay", { id: "multi-candidate-user" }),
+      aiMessage({
+        id: "multi-candidate-shared",
+        content: "same",
+        toolCalls: [{ id: "multi-candidate-call", name: "read_file", args: { path: "one" } }]
+      }),
+      toolMessage({
+        id: "multi-candidate-tool-one",
+        name: "read_file",
+        toolCallId: "multi-candidate-call",
+        content: "one"
+      }),
+      aiMessage({
+        id: "multi-candidate-shared",
+        content: "same",
+        toolCalls: [{ id: "multi-candidate-call", name: "read_file", args: { path: "one" } }]
+      }),
+      toolMessage({
+        id: "multi-candidate-tool-two",
+        name: "read_file",
+        toolCallId: "multi-candidate-call",
+        content: "two"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, multiCandidateValues, {
+    orderedSnapshot: true
+  })
+  const multiCandidateReplay = convert(multiCandidateReplayTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "multi-candidate-shared",
+        content: "same",
+        toolCalls: [{ id: "multi-candidate-call", name: "read_file", args: { path: "one" } }]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const multiCandidateOldToolReplay = convert(multiCandidateReplayTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "multi-candidate-tool-one",
+        name: "read_file",
+        toolCallId: "multi-candidate-call",
+        content: "one"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, [
+    ...multiCandidateReplay,
+    ...multiCandidateOldToolReplay
+  ])
+  assert(
+    multiCandidateReplay.length === 0 &&
+      multiCandidateOldToolReplay.every((message) => message.role === "tool") &&
+      useAppStore
+        .getState()
+        .workerFocusMessages.filter((message) => message.role === "assistant").length === 2,
+    "a known old tool replay must discard an unresolved multi-candidate provisional occurrence"
+  )
+
+  openFocus()
+  const switchedValuesTransport = new ElectronIPCTransport()
+  convert(switchedValuesTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({
+        id: "switched-values-shared",
+        content: "first",
+        toolCallChunks: [
+          { id: "switched-values-call", name: "read_file", args: '{"path":"one"}' }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const switchedValues = convert(switchedValuesTransport, {
+    ...(streamValuesEvent([
+      humanMessage("switch values", { id: "switched-values-user" }),
+      aiMessage({
+        id: "switched-values-shared",
+        content: "first",
+        toolCalls: [{ id: "switched-values-call", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "switched-values-tool",
+        name: "read_file",
+        toolCallId: "switched-values-call",
+        content: "boundary"
+      }),
+      aiMessage({
+        id: "switched-values-shared",
+        content: "second",
+        toolCalls: [{ id: "switched-values-call", name: "read_file", args: {} }]
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, switchedValues, {
+    orderedSnapshot: true
+  })
+  const switchedLive = convert(switchedValuesTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "switched-values-shared",
+        content: "second expanded",
+        toolCalls: [{ id: "switched-values-call", name: "read_file", args: {} }]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  assert(
+    switchedLive.at(-1)?.tool_calls?.[0]?.args?.path === undefined,
+    "values switching to a later occurrence must clear the previous occurrence accumulator"
+  )
+
+  openFocus()
+  const exactActiveTransport = new ElectronIPCTransport()
+  const exactActiveHistory = convert(exactActiveTransport, {
+    ...(streamValuesEvent([
+      humanMessage("exact active", { id: "exact-active-user" }),
+      aiMessage({
+        id: "exact-active-shared",
+        toolCalls: [
+          { id: "exact-active-call-one", name: "read_file", args: { path: "one" } }
+        ]
+      }),
+      toolMessage({
+        id: "exact-active-tool-one",
+        name: "read_file",
+        toolCallId: "exact-active-call-one",
+        content: "one"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, exactActiveHistory, {
+    orderedSnapshot: true
+  })
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(exactActiveTransport, {
+      ...(streamMessageEvent(
+        aiMessageChunk({
+          id: "exact-active-shared",
+          toolCallChunks: [
+            { id: "exact-active-call-two", name: "read_file", args: '{"path":"two"}' }
+          ]
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const exactActiveValues = convert(exactActiveTransport, {
+    ...(streamValuesEvent([
+      humanMessage("exact active", { id: "exact-active-user" }),
+      aiMessage({
+        id: "exact-active-shared",
+        toolCalls: [
+          { id: "exact-active-call-one", name: "read_file", args: { path: "one" } }
+        ]
+      }),
+      toolMessage({
+        id: "exact-active-tool-one",
+        name: "read_file",
+        toolCallId: "exact-active-call-one",
+        content: "one"
+      }),
+      aiMessage({
+        id: "exact-active-shared",
+        toolCalls: [{ id: "exact-active-call-two", name: "read_file", args: {} }]
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, exactActiveValues, {
+    orderedSnapshot: true
+  })
+  useAppStore.getState().appendWorkerFocusMessages(
+    workerThreadId,
+    convert(exactActiveTransport, {
+      ...(streamMessageEvent(
+        toolMessage({
+          id: "exact-active-tool-two",
+          name: "read_file",
+          toolCallId: "exact-active-call-two",
+          content: "two"
+        }),
+        {}
+      ) as object),
+      workerTurn: 1
+    })
+  )
+  const exactActiveReplay = convert(exactActiveTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "exact-active-shared",
+        toolCalls: [
+          { id: "exact-active-call-two", name: "read_file", args: { path: "two" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const exactActiveReplayTool = convert(exactActiveTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "exact-active-tool-two",
+        name: "read_file",
+        toolCallId: "exact-active-call-two",
+        content: "two"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  assert(
+    exactActiveReplay.length === 0 &&
+      exactActiveReplayTool[0]?.id ===
+      `worker-turn-${workerThreadId}-1::exact-active-shared::cmb-same-role-duplicate:assistant:2`,
+    "an exact active occurrence id must hydrate even when its assistant content is empty"
+  )
+
+  openFocus()
+  const basePinTransport = new ElectronIPCTransport()
+  const basePinValues = convert(basePinTransport, {
+    ...(streamValuesEvent([
+      humanMessage("base pin", { id: "base-pin-user" }),
+      aiMessage({
+        id: "base-pin-shared",
+        toolCalls: [{ id: "base-pin-call-one", name: "read_file", args: { path: "one" } }]
+      }),
+      toolMessage({
+        id: "base-pin-tool-one",
+        name: "read_file",
+        toolCallId: "base-pin-call-one",
+        content: "one"
+      }),
+      aiMessage({
+        id: "base-pin-shared",
+        toolCalls: [{ id: "base-pin-call-two", name: "read_file", args: { path: "two" } }]
+      }),
+      toolMessage({
+        id: "base-pin-tool-two",
+        name: "read_file",
+        toolCallId: "base-pin-call-two",
+        content: "two"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, basePinValues, {
+    orderedSnapshot: true
+  })
+  convert(basePinTransport, {
+    ...(streamMessageEvent(
+      aiMessageChunk({
+        id: "base-pin-shared",
+        toolCallChunks: [
+          { id: "base-pin-call-one", name: "read_file", args: '{"path":"one"}' }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const sparseBasePinValues = convert(basePinTransport, {
+    ...(streamValuesEvent([
+      humanMessage("base pin", { id: "base-pin-user" }),
+      aiMessage({
+        id: "base-pin-shared",
+        toolCalls: [{ id: "base-pin-call-one", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "base-pin-tool-one",
+        name: "read_file",
+        toolCallId: "base-pin-call-one",
+        content: "one"
+      }),
+      aiMessage({
+        id: "base-pin-shared",
+        toolCalls: [{ id: "base-pin-call-two", name: "read_file", args: {} }]
+      }),
+      toolMessage({
+        id: "base-pin-tool-two",
+        name: "read_file",
+        toolCallId: "base-pin-call-two",
+        content: "two"
+      })
+    ]) as object),
+    workerTurn: 1
+  })
+  useAppStore.getState().appendWorkerFocusMessages(workerThreadId, sparseBasePinValues, {
+    orderedSnapshot: true
+  })
+  const basePinReplay = convert(basePinTransport, {
+    ...(streamMessageEvent(
+      aiMessage({
+        id: "base-pin-shared",
+        toolCalls: [
+          { id: "base-pin-call-one", name: "read_file", args: { path: "one" } }
+        ]
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  const basePinToolReplay = convert(basePinTransport, {
+    ...(streamMessageEvent(
+      toolMessage({
+        id: "base-pin-tool-one",
+        name: "read_file",
+        toolCallId: "base-pin-call-one",
+        content: "one"
+      }),
+      {}
+    ) as object),
+    workerTurn: 1
+  })
+  assert(
+    basePinReplay.length === 0 &&
+      basePinToolReplay[0]?.id === `worker-turn-${workerThreadId}-1::base-pin-shared`,
+    "a pinned base occurrence must remain the active hydration target for sparse values"
+  )
+
+  openFocus()
+  const longHistoryTransport = new ElectronIPCTransport()
+  const longHistoryRaw = [
+    humanMessage("long history", { id: "long-history-user" }),
+    ...Array.from({ length: 501 }, (_, index) =>
+      aiMessage({ id: "long-history-shared", content: `answer-${index + 1}` })
+    )
+  ]
+  const longHistory = buildWorkerCheckpointHistory(longHistoryRaw, workerThreadId)
+  const longLive = convert(longHistoryTransport, {
+    ...(streamValuesEvent(longHistoryRaw) as object),
+    workerTurn: 1
+  })
+  assert(
+    longHistory.truncatedCount === 2 &&
+      isCompleteWorkerSnapshotCoveringHistory(longHistory.messages, longLive),
+    "a complete values snapshot must be recognized as covering a truncated checkpoint suffix"
+  )
+  const explicitOccurrenceHistory = [
+    {
+      id: `worker-turn-${workerThreadId}-1::explicit-successor-shared`,
+      role: "assistant" as const,
+      content: "same answer",
+      created_at: new Date()
+    }
+  ]
+  const explicitOccurrenceLive = [
+    {
+      id:
+        `worker-turn-${workerThreadId}-1::explicit-successor-shared` +
+        "::cmb-same-role-duplicate:assistant:2",
+      provider_source_id: `worker-turn-${workerThreadId}-1::explicit-successor-shared`,
+      role: "assistant" as const,
+      content: "same answer",
+      created_at: new Date()
+    }
+  ]
+  assert(
+    !isCompleteWorkerSnapshotCoveringHistory(
+      explicitOccurrenceHistory,
+      explicitOccurrenceLive
+    ),
+    "an equal-length explicit next occurrence must not replace checkpoint history"
+  )
+  const aliasedExplicitOccurrenceLive = [
+    {
+      id: "worker-live-explicit-successor",
+      provider_source_id: explicitOccurrenceHistory[0].id,
+      provider_occurrence: 2,
+      role: "assistant" as const,
+      content: "same answer",
+      created_at: new Date()
+    }
+  ]
+  assert(
+    !isCompleteWorkerSnapshotCoveringHistory(
+      explicitOccurrenceHistory,
+      aliasedExplicitOccurrenceLive
+    ) &&
+      isExplicitWorkerOccurrenceAfter(
+        explicitOccurrenceHistory[0],
+        aliasedExplicitOccurrenceLive[0]
+      ),
+    "persisted occurrence metadata must survive an alias without a duplicate-id marker"
+  )
+  assert(
+    !isCompleteWorkerSnapshotCoveringHistory(explicitOccurrenceHistory, [
+      ...explicitOccurrenceLive,
+      {
+        ...explicitOccurrenceLive[0],
+        id:
+          `worker-turn-${workerThreadId}-1::explicit-successor-shared` +
+          "::cmb-same-role-duplicate:assistant:3"
+      }
+    ]),
+    "multiple explicit successors must not masquerade as a longer complete snapshot"
+  )
+  assert(
+    !isCompleteWorkerSnapshotCoveringHistory(explicitOccurrenceHistory, [
+      {
+        id: "explicit-successor-leading-tool",
+        role: "tool",
+        content: "tool result",
+        tool_call_id: "explicit-successor-call",
+        created_at: new Date()
+      },
+      explicitOccurrenceLive[0]
+    ]),
+    "an unrelated leading tool must not make a new occurrence cover history"
+  )
+  assert(
+    isCompleteWorkerSnapshotCoveringHistory(
+      longHistory.messages,
+      longHistory.messages.map((message) => ({ ...message, content: message.content }))
+    ),
+    "an equal-length truncated replay must retain its global occurrence alignment"
+  )
+
+  const tailHistory = [
+    {
+      id: "tail-history-user",
+      role: "user" as const,
+      content: "tail history",
+      created_at: new Date()
+    },
+    {
+      id: "tail-history-shared",
+      role: "assistant" as const,
+      content: "first",
+      created_at: new Date()
+    },
+    {
+      id: "tail-history-tool",
+      role: "tool" as const,
+      content: "one",
+      tool_call_id: "tail-history-call-one",
+      created_at: new Date()
+    }
+  ]
+  const normalizedTail = normalizeWorkerMessagesAfterHistory(tailHistory, [
+    {
+      id: "tail-history-shared::cmb-same-role-duplicate:assistant:2",
+      provider_source_id: "tail-history-shared",
+      role: "assistant",
+      content: "second",
+      created_at: new Date()
+    },
+    {
+      id: "tail-history-tool::cmb-same-role-duplicate:tool:2",
+      provider_source_id: "tail-history-tool",
+      role: "tool",
+      content: "two",
+      tool_call_id: "tail-history-call-two",
+      created_at: new Date()
+    },
+    {
+      id: "tail-history-shared::cmb-same-role-duplicate:assistant:3",
+      provider_source_id: "tail-history-shared",
+      role: "assistant",
+      content: "third",
+      created_at: new Date()
+    }
+  ])
+  assert(
+    normalizedTail.map((message) => message.id).join("|") ===
+      [
+        "tail-history-shared::cmb-same-role-duplicate:assistant:2",
+        "tail-history-tool::cmb-same-role-duplicate:tool:2",
+        "tail-history-shared::cmb-same-role-duplicate:assistant:3"
+      ].join("|"),
+    "a replay-aligned tail must allocate every new occurrence against the full history"
+  )
+  const sparseGlobalHistory = [
+    {
+      id: "sparse-global-shared::cmb-same-role-duplicate:assistant:300",
+      provider_source_id: "sparse-global-shared",
+      role: "assistant" as const,
+      content: "three hundred",
+      created_at: new Date()
+    },
+    {
+      id: "sparse-global-shared::cmb-same-role-duplicate:assistant:301",
+      provider_source_id: "sparse-global-shared",
+      role: "assistant" as const,
+      content: "three hundred one",
+      created_at: new Date()
+    }
+  ]
+  const sparseGlobalSuccessor = {
+    id: "sparse-global-shared::cmb-same-role-duplicate:assistant:302",
+    provider_source_id: "sparse-global-shared",
+    role: "assistant" as const,
+    content: "three hundred two",
+    created_at: new Date()
+  }
+  assert(
+    normalizeWorkerMessagesAfterHistory(sparseGlobalHistory, [sparseGlobalSuccessor])[0]?.id ===
+      sparseGlobalSuccessor.id,
+    "tail rebasing must continue from the largest explicit global occurrence"
+  )
+  assert(
+    isExplicitWorkerOccurrenceAfter(sparseGlobalHistory[1], {
+      ...sparseGlobalSuccessor,
+      id: "sparse-global-shared::cmb-same-role-duplicate:assistant:303"
+    }),
+    "a skipped explicit occurrence must still be recognized as newer than history"
+  )
+
+  const hiddenInternalHuman = (id: string) => ({
+    id: ["langchain_core", "messages", "HumanMessage"],
+    kwargs: {
+      id,
+      content: "internal notification",
+      additional_kwargs: { cmb_internal_coordinator_notification: true }
+    }
+  })
+  const internalTurnRaw = [
+    hiddenInternalHuman("hidden-turn-zero"),
+    humanMessage("visible turn one", { id: "visible-turn-one" }),
+    aiMessage({ id: "visible-answer-one", content: "answer one" }),
+    hiddenInternalHuman("hidden-turn-one"),
+    humanMessage("visible turn two", { id: "visible-turn-two" }),
+    aiMessage({ id: "visible-answer-two", content: "answer two" })
+  ]
+  const internalTurnHistory = buildWorkerCheckpointHistory(internalTurnRaw, workerThreadId)
+  const internalTurnLive = convert(new ElectronIPCTransport(), {
+    ...(streamValuesEvent(internalTurnRaw) as object),
+    workerTurn: 2
+  })
+  assert(
+    internalTurnHistory.messages.map((message) => message.id).join("|") ===
+      internalTurnLive.map((message) => message.id).join("|"),
+    "hidden internal humans must not advance checkpoint or live worker turns"
+  )
+  const sparseLongRaw = [
+    humanMessage("sparse long history", { id: "sparse-long-user" }),
+    ...Array.from({ length: 501 }, (_, index) =>
+      aiMessage({
+        id: "sparse-long-shared",
+        content: `sparse-answer-${index + 1}`,
+        toolCalls: [
+          {
+            id: `sparse-long-call-${index + 1}`,
+            name: "read_file",
+            args: { path: index + 1 }
+          }
+        ]
+      })
+    )
+  ]
+  const sparseLongHistory = buildWorkerCheckpointHistory(sparseLongRaw, workerThreadId)
+  const sparseLongLive = convert(new ElectronIPCTransport(), {
+    ...(streamValuesEvent([
+      humanMessage("sparse long history", { id: "sparse-long-user" }),
+      ...Array.from({ length: 501 }, (_, index) =>
+        aiMessage({
+          id: "sparse-long-shared",
+          content: `sparse-answer-${index + 1}`,
+          toolCalls: [
+            { id: `sparse-long-call-${index + 1}`, name: "read_file", args: {} }
+          ]
+        })
+      )
+    ]) as object),
+    workerTurn: 1
+  })
+  assert(
+    isCompleteWorkerSnapshotCoveringHistory(sparseLongHistory.messages, sparseLongLive),
+    "a sparse values snapshot must still cover its truncated checkpoint suffix"
+  )
+  const omittedLongCalls = sparseLongLive.map((message) =>
+    message.role === "assistant" ? { ...message, tool_calls: undefined } : message
+  )
+  assert(
+    isCompleteWorkerSnapshotCoveringHistory(
+      sparseLongHistory.messages,
+      omittedLongCalls
+    ),
+    "a values suffix that omits assistant calls must still cover checkpoint history"
+  )
+  const emptyLongContent = sparseLongLive.map((message) => ({ ...message, content: "" }))
+  assert(
+    isCompleteWorkerSnapshotCoveringHistory(
+      sparseLongHistory.messages,
+      emptyLongContent
+    ),
+    "an empty-content values suffix must still align with visible checkpoint history"
+  )
+  const twoCallLongHistory = sparseLongHistory.messages.map((message, index) =>
+    message.role === "assistant"
+      ? {
+          ...message,
+          tool_calls: [
+            ...(message.tool_calls ?? []),
+            {
+              id: `sparse-long-extra-call-${index}`,
+              name: "read_file",
+              args: { path: `extra-${index}` }
+            }
+          ]
+        }
+      : message
+  )
+  assert(
+    isCompleteWorkerSnapshotCoveringHistory(twoCallLongHistory, sparseLongLive),
+    "a values suffix carrying only a subset of calls must align with checkpoint history"
+  )
+  const blockContentHistoryRaw = [
+    humanMessage("block long history", { id: "block-long-user" }),
+    ...Array.from({ length: 501 }, (_, index) => ({
+      id: ["langchain_core", "messages", "AIMessage"],
+      kwargs: {
+        id: "block-long-shared",
+        content: [{ type: "text", text: `block-answer-${index + 1}` }],
+        tool_calls: [
+          {
+            id: `block-long-call-${index + 1}`,
+            name: "read_file",
+            args: { path: index + 1 }
+          }
+        ]
+      }
+    }))
+  ]
+  const blockContentHistory = buildWorkerCheckpointHistory(
+    blockContentHistoryRaw,
+    workerThreadId
+  )
+  const blockContentLive = convert(new ElectronIPCTransport(), {
+    ...(streamValuesEvent([
+      humanMessage("block long history", { id: "block-long-user" }),
+      ...Array.from({ length: 501 }, (_, index) =>
+        aiMessage({
+          id: "block-long-shared",
+          content: `block-answer-${index + 1}`,
+          toolCalls: [
+            { id: `block-long-call-${index + 1}`, name: "read_file", args: {} }
+          ]
+        })
+      )
+    ]) as object),
+    workerTurn: 1
+  })
+  assert(
+    isCompleteWorkerSnapshotCoveringHistory(
+      blockContentHistory.messages,
+      blockContentLive
+    ) &&
+      Array.isArray(
+        mergeWorkerCheckpointSparseContent(
+          blockContentHistory.messages[0],
+          blockContentLive[2]
+        )
+      ),
+    "block-array checkpoint history must align with string live values and retain its blocks"
+  )
+  const multiTurnLongRaw = [
+    humanMessage("long turn one", { id: "long-turn-user-one" }),
+    ...Array.from({ length: 100 }, (_, index) =>
+      aiMessage({ id: "long-turn-shared-one", content: `t1-a${index + 1}` })
+    ),
+    humanMessage("long turn two", { id: "long-turn-user-two" }),
+    ...Array.from({ length: 450 }, (_, index) =>
+      aiMessage({ id: "long-turn-shared-two", content: `t2-a${index + 1}` })
+    )
+  ]
+  const multiTurnLongHistory = buildWorkerCheckpointHistory(multiTurnLongRaw, workerThreadId)
+  const multiTurnLongLive = convert(new ElectronIPCTransport(), {
+    ...(streamValuesEvent(multiTurnLongRaw) as object),
+    workerTurn: 2
+  })
+  assert(
+    multiTurnLongHistory.truncatedCount === 52 &&
+      isCompleteWorkerSnapshotCoveringHistory(
+        multiTurnLongHistory.messages,
+        multiTurnLongLive
+      ),
+    "a complete multi-turn values snapshot must cover a truncated history that still has users"
+  )
+
+  resetWorkerFocusStore()
+  const occurrenceStoreThreadId = "worker-occurrence-store-thread"
+  openWorkerFocusViewForTest({
+    threadId: "worker-occurrence-parent-thread",
+    workerId: "worker-occurrence-store",
+    workerThreadId: occurrenceStoreThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(occurrenceStoreThreadId, [
+    {
+      id: "worker-live-occurrence-one",
+      provider_source_id: "worker-occurrence-source",
+      provider_occurrence: 1,
+      role: "assistant",
+      content: "same",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    occurrenceStoreThreadId,
+    [
+      {
+        id: "worker-snapshot-occurrence-two",
+        provider_source_id: "worker-occurrence-source",
+        provider_occurrence: 2,
+        role: "assistant",
+        content: "same",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  assert(
+    useAppStore.getState().workerFocusMessages.length === 2,
+    "ordered worker snapshots must not merge different explicit occurrences"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "worker-occurrence-parent-thread",
+    workerId: "worker-occurrence-store",
+    workerThreadId: occurrenceStoreThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(occurrenceStoreThreadId, [
+    {
+      id: "worker-live-occurrence-alias-one",
+      provider_source_id: "worker-occurrence-alias-source",
+      provider_occurrence: 1,
+      role: "assistant",
+      content: "old one",
+      created_at: new Date()
+    },
+    {
+      id: "worker-live-occurrence-alias-two",
+      provider_source_id: "worker-occurrence-alias-source",
+      provider_occurrence: 2,
+      role: "assistant",
+      content: "old two",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    occurrenceStoreThreadId,
+    [
+      {
+        id: "worker-snapshot-occurrence-alias-one",
+        provider_source_id: "worker-occurrence-alias-source",
+        provider_occurrence: 1,
+        role: "assistant",
+        content: "new alpha",
+        created_at: new Date()
+      },
+      {
+        id: "worker-snapshot-occurrence-alias-two",
+        provider_source_id: "worker-occurrence-alias-source",
+        provider_occurrence: 2,
+        role: "assistant",
+        content: "new beta",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  const occurrenceAliasMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    occurrenceAliasMessages.length === 2 &&
+      occurrenceAliasMessages[0]?.content === "new alpha" &&
+      occurrenceAliasMessages[1]?.content === "new beta",
+    "ordered worker snapshots must update matching explicit alias occurrences"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "worker-occurrence-parent-thread",
+    workerId: "worker-occurrence-store",
+    workerThreadId: occurrenceStoreThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(occurrenceStoreThreadId, [
+    {
+      id: "worker-snapshot-occurrence-enrichment",
+      role: "assistant",
+      content: "old",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    occurrenceStoreThreadId,
+    [
+      {
+        id: "worker-snapshot-occurrence-enrichment",
+        provider_source_id: "worker-occurrence-enrichment-source",
+        provider_occurrence: 2,
+        role: "assistant",
+        content: "new",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  const enrichedOccurrenceMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    enrichedOccurrenceMessages.length === 1 &&
+      enrichedOccurrenceMessages[0]?.provider_occurrence === 2 &&
+      enrichedOccurrenceMessages[0]?.content === "new",
+    "an exact legacy worker id must accept compatible occurrence metadata enrichment"
+  )
+
+  resetWorkerFocusStore()
+  openWorkerFocusViewForTest({
+    threadId: "worker-occurrence-parent-thread",
+    workerId: "worker-occurrence-store",
+    workerThreadId: occurrenceStoreThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(occurrenceStoreThreadId, [
+    {
+      id: "worker-live-occurrence-reservation",
+      provider_source_id: "worker-occurrence-reservation-source",
+      role: "assistant",
+      content: "second",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    occurrenceStoreThreadId,
+    [
+      {
+        id: "worker-snapshot-occurrence-reservation-one",
+        provider_source_id: "worker-occurrence-reservation-source",
+        provider_occurrence: 1,
+        role: "assistant",
+        content: "first",
+        created_at: new Date()
+      },
+      {
+        id: "worker-snapshot-occurrence-reservation-two",
+        provider_source_id: "worker-occurrence-reservation-source",
+        provider_occurrence: 2,
+        role: "assistant",
+        content: "second",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  const occurrenceReservationMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    occurrenceReservationMessages.length === 2 &&
+      occurrenceReservationMessages[0]?.content === "first" &&
+      occurrenceReservationMessages[1]?.content === "second" &&
+      occurrenceReservationMessages[0]?.provider_occurrence === 1 &&
+      occurrenceReservationMessages[1]?.provider_occurrence === 2,
+    "an explicit occurrence must not steal a legacy row reserved for another snapshot entry"
+  )
+
+  resetWorkerFocusStore()
+  const sparseOrderThreadId = "worker-sparse-values-order-thread"
+  openWorkerFocusViewForTest({
+    threadId: "worker-sparse-values-parent-thread",
+    workerId: "worker-sparse-values-order",
+    workerThreadId: sparseOrderThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(sparseOrderThreadId, [
+    {
+      id: "worker-sparse-order-user",
+      role: "user",
+      content: "question",
+      created_at: new Date()
+    },
+    {
+      id: "worker-sparse-order-call",
+      role: "assistant",
+      content: "calling",
+      tool_calls: [{ id: "worker-sparse-order-tool-call", name: "read_file", args: {} }],
+      created_at: new Date()
+    },
+    {
+      id: "worker-sparse-order-tool",
+      role: "tool",
+      tool_call_id: "worker-sparse-order-tool-call",
+      content: "result",
+      created_at: new Date()
+    },
+    {
+      id: "worker-sparse-order-final",
+      role: "assistant",
+      content: "old final",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    sparseOrderThreadId,
+    [
+      {
+        id: "worker-sparse-order-user",
+        role: "user",
+        content: "question",
+        created_at: new Date()
+      },
+      {
+        id: "worker-sparse-order-final",
+        role: "assistant",
+        content: "updated final",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  const sparseOrderMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    sparseOrderMessages.map((message) => message.id).join("|") ===
+      [
+        "worker-sparse-order-user",
+        "worker-sparse-order-call",
+        "worker-sparse-order-tool",
+        "worker-sparse-order-final"
+      ].join("|"),
+    "a sparse ordered snapshot must not move omitted call and tool rows after the final answer"
+  )
+  assert(
+    sparseOrderMessages[3]?.content === "updated final",
+    "a sparse ordered snapshot must still update its matched final answer"
+  )
+
+  resetWorkerFocusStore()
+  const lowOccurrenceThreadId = "worker-low-occurrence-order-thread"
+  openWorkerFocusViewForTest({
+    threadId: "worker-low-occurrence-parent-thread",
+    workerId: "worker-low-occurrence-order",
+    workerThreadId: lowOccurrenceThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(lowOccurrenceThreadId, [
+    {
+      id: "worker-low-occurrence-two",
+      provider_source_id: "worker-low-occurrence-source",
+      provider_occurrence: 2,
+      role: "assistant",
+      content: "two",
+      created_at: new Date()
+    },
+    {
+      id: "worker-low-occurrence-three",
+      provider_source_id: "worker-low-occurrence-source",
+      provider_occurrence: 3,
+      role: "assistant",
+      content: "three",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    lowOccurrenceThreadId,
+    [
+      {
+        id: "worker-low-occurrence-one",
+        provider_source_id: "worker-low-occurrence-source",
+        provider_occurrence: 1,
+        role: "assistant",
+        content: "one",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  assert(
+    useAppStore
+      .getState()
+      .workerFocusMessages.map((message) => message.content)
+      .join("|") === "one|two|three",
+    "a single lower worker occurrence must insert before higher same-turn occurrences"
+  )
+
+  resetWorkerFocusStore()
+  const crossTurnLowOccurrenceThreadId = "worker-cross-turn-low-occurrence-thread"
+  openWorkerFocusViewForTest({
+    threadId: "worker-cross-turn-low-occurrence-parent",
+    workerId: "worker-cross-turn-low-occurrence",
+    workerThreadId: crossTurnLowOccurrenceThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(crossTurnLowOccurrenceThreadId, [
+    {
+      id: "worker-cross-turn-user-one",
+      role: "user",
+      content: "question one",
+      created_at: new Date()
+    },
+    {
+      id: "worker-cross-turn-occurrence-two",
+      provider_source_id: "worker-cross-turn-occurrence-source",
+      provider_occurrence: 2,
+      role: "assistant",
+      content: "two",
+      created_at: new Date()
+    },
+    {
+      id: "worker-cross-turn-occurrence-three",
+      provider_source_id: "worker-cross-turn-occurrence-source",
+      provider_occurrence: 3,
+      role: "assistant",
+      content: "three",
+      created_at: new Date()
+    },
+    {
+      id: "worker-cross-turn-user-two",
+      role: "user",
+      content: "question two",
+      created_at: new Date()
+    },
+    {
+      id: "worker-cross-turn-current",
+      role: "assistant",
+      content: "current",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    crossTurnLowOccurrenceThreadId,
+    [
+      {
+        id: "worker-cross-turn-user-one",
+        role: "user",
+        content: "question one",
+        created_at: new Date()
+      },
+      {
+        id: "worker-cross-turn-occurrence-one",
+        provider_source_id: "worker-cross-turn-occurrence-source",
+        provider_occurrence: 1,
+        role: "assistant",
+        content: "one",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  assert(
+    useAppStore
+      .getState()
+      .workerFocusMessages.map((message) => message.content)
+      .join("|") === "question one|one|two|three|question two|current",
+    "an exact older user must anchor a sparse lower occurrence to its original worker turn"
+  )
+
+  resetWorkerFocusStore()
+  const explicitUserOccurrenceThreadId = "worker-explicit-user-occurrence-thread"
+  openWorkerFocusViewForTest({
+    threadId: "worker-explicit-user-occurrence-parent",
+    workerId: "worker-explicit-user-occurrence",
+    workerThreadId: explicitUserOccurrenceThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(explicitUserOccurrenceThreadId, [
+    {
+      id: "worker-reused-user-id",
+      provider_source_id: "worker-reused-user-source",
+      provider_occurrence: 1,
+      role: "user",
+      content: "question one",
+      created_at: new Date()
+    },
+    {
+      id: "worker-explicit-user-answer-one",
+      role: "assistant",
+      content: "answer one",
+      created_at: new Date()
+    },
+    {
+      id: "worker-reused-user-id-two",
+      provider_source_id: "worker-reused-user-source",
+      provider_occurrence: 2,
+      role: "user",
+      content: "question two",
+      created_at: new Date()
+    },
+    {
+      id: "worker-explicit-user-answer-two",
+      role: "assistant",
+      content: "answer two",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    explicitUserOccurrenceThreadId,
+    [
+      {
+        id: "worker-reused-user-id",
+        provider_source_id: "worker-reused-user-source",
+        provider_occurrence: 2,
+        role: "user",
+        content: "question two refreshed",
+        created_at: new Date()
+      },
+      {
+        id: "worker-explicit-user-new-answer-two",
+        role: "assistant",
+        content: "new answer two",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  const explicitUserOccurrenceMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    explicitUserOccurrenceMessages.length === 5 &&
+      explicitUserOccurrenceMessages[2]?.provider_occurrence === 2 &&
+      explicitUserOccurrenceMessages[2]?.content === "question two refreshed" &&
+      explicitUserOccurrenceMessages[4]?.content === "new answer two" &&
+      new Set(explicitUserOccurrenceMessages.map((message) => message.id)).size ===
+        explicitUserOccurrenceMessages.length,
+    "an explicit user occurrence must update and anchor its own worker turn without duplicate ids"
+  )
+
+  resetWorkerFocusStore()
+  const reservationIdCollisionThreadId = "worker-reservation-id-collision-thread"
+  openWorkerFocusViewForTest({
+    threadId: "worker-reservation-id-collision-parent",
+    workerId: "worker-reservation-id-collision",
+    workerThreadId: reservationIdCollisionThreadId
+  })
+  useAppStore.getState().appendWorkerFocusMessages(reservationIdCollisionThreadId, [
+    {
+      id: "worker-reservation-existing",
+      provider_source_id: "worker-reservation-source",
+      provider_occurrence: 1,
+      role: "assistant",
+      content: "matching answer",
+      created_at: new Date()
+    },
+    {
+      id: "worker-reservation-occupied-id",
+      provider_source_id: "worker-unrelated-source",
+      provider_occurrence: 1,
+      role: "assistant",
+      content: "unrelated answer",
+      created_at: new Date()
+    }
+  ])
+  useAppStore.getState().appendWorkerFocusMessages(
+    reservationIdCollisionThreadId,
+    [
+      {
+        id: "worker-reservation-occupied-id",
+        provider_source_id: "worker-reservation-source",
+        provider_occurrence: 1,
+        role: "assistant",
+        content: "matching answer",
+        created_at: new Date()
+      },
+      {
+        id: "worker-reservation-second",
+        provider_source_id: "worker-reservation-source",
+        provider_occurrence: 2,
+        role: "assistant",
+        content: "new answer",
+        created_at: new Date()
+      }
+    ],
+    { orderedSnapshot: true }
+  )
+  const reservationIdCollisionMessages = useAppStore.getState().workerFocusMessages
+  assert(
+    reservationIdCollisionMessages.length === 3 &&
+      reservationIdCollisionMessages[0]?.id === "worker-reservation-existing" &&
+      reservationIdCollisionMessages[1]?.id === "worker-reservation-occupied-id" &&
+      new Set(reservationIdCollisionMessages.map((message) => message.id)).size ===
+        reservationIdCollisionMessages.length,
+    "a repeated occurrence reservation must not adopt an id owned by another worker message"
+  )
+  resetWorkerFocusStore()
+}
+
+function testRepeatedToolCallIdsUseOccurrenceScopedResults(): void {
+  const firstCallKey = getWorkerToolUiKey("reused-call-assistant-one", "reused-call", 0)
+  const secondCallKey = getWorkerToolUiKey("reused-call-assistant-two", "reused-call", 0)
+  const results = buildToolResultAssociations([
+    {
+      id: "reused-call-assistant-one",
+      role: "assistant",
+      content: "first call",
+      tool_calls: [{ id: "reused-call", name: "read_file", args: { path: "one" } }],
+      created_at: new Date()
+    },
+    {
+      id: "reused-call-assistant-two",
+      role: "assistant",
+      content: "second call",
+      tool_calls: [{ id: "reused-call", name: "read_file", args: { path: "two" } }],
+      created_at: new Date()
+    },
+    {
+      id: "reused-call-result-one",
+      role: "tool",
+      content: "result one",
+      tool_call_id: "reused-call",
+      created_at: new Date()
+    },
+    {
+      id: "reused-call-result-two",
+      role: "tool",
+      content: "result two",
+      tool_call_id: "reused-call",
+      is_error: true,
+      created_at: new Date()
+    }
+  ])
+
+  assert(
+    firstCallKey !== secondCallKey &&
+      results.size === 2 &&
+      results.get(firstCallKey)?.content === "result one" &&
+      results.get(firstCallKey)?.is_error !== true &&
+      results.get(secondCallKey)?.content === "result two" &&
+      results.get(secondCallKey)?.is_error === true,
+    "reused tool-call ids must associate results with transcript call occurrences in order"
+  )
+
+  const oldTurnKey = getWorkerToolUiKey("reused-turn-assistant-one", "reused-turn-call", 0)
+  const currentTurnKey = getWorkerToolUiKey(
+    "reused-turn-assistant-two",
+    "reused-turn-call",
+    0
+  )
+  const crossTurnResults = buildToolResultAssociations([
+    {
+      id: "reused-turn-user-one",
+      role: "user",
+      content: "first turn",
+      created_at: new Date()
+    },
+    {
+      id: "reused-turn-assistant-one",
+      role: "assistant",
+      content: "interrupted call",
+      tool_calls: [{ id: "reused-turn-call", name: "read_file", args: { path: "old" } }],
+      created_at: new Date()
+    },
+    {
+      id: "reused-turn-user-two",
+      role: "user",
+      content: "second turn",
+      created_at: new Date()
+    },
+    {
+      id: "reused-turn-assistant-two",
+      role: "assistant",
+      content: "current call",
+      tool_calls: [{ id: "reused-turn-call", name: "read_file", args: { path: "new" } }],
+      created_at: new Date()
+    },
+    {
+      id: "reused-turn-result-two",
+      role: "tool",
+      content: "current result",
+      tool_call_id: "reused-turn-call",
+      created_at: new Date()
+    }
+  ])
+  assert(
+    crossTurnResults.get(oldTurnKey) === undefined &&
+      crossTurnResults.get(currentTurnKey)?.content === "current result",
+    "a reused call id must prefer the latest user turn over an old interrupted call"
+  )
+
+  const unscopedCallKey = getWorkerToolUiKey(
+    "mixed-scope-assistant",
+    "mixed-scope-call",
+    0
+  )
+  const mixedScopeResult = buildToolResultAssociations([
+    {
+      id: "mixed-scope-assistant",
+      role: "assistant",
+      content: "legacy live call",
+      tool_calls: [{ id: "mixed-scope-call", name: "read_file", args: {} }],
+      created_at: new Date()
+    },
+    {
+      id: "worker-turn-mixed-scope-worker-1::mixed-scope-result",
+      role: "tool",
+      content: "scoped result",
+      tool_call_id: "mixed-scope-call",
+      created_at: new Date()
+    }
+  ])
+  assert(
+    mixedScopeResult.get(unscopedCallKey)?.content === "scoped result",
+    "a scoped tool result must bridge to one unscoped pending call with the same raw id"
+  )
+
+  const scopedCallKey = getWorkerToolUiKey(
+    "worker-turn-mixed-scope-worker-2::scoped-assistant",
+    "mixed-scope-reverse-call",
+    0
+  )
+  const reverseMixedScopeResult = buildToolResultAssociations([
+    {
+      id: "worker-turn-mixed-scope-worker-2::scoped-assistant",
+      role: "assistant",
+      content: "scoped live call",
+      tool_calls: [{ id: "mixed-scope-reverse-call", name: "read_file", args: {} }],
+      created_at: new Date()
+    },
+    {
+      id: "legacy-unscoped-result",
+      role: "tool",
+      content: "legacy result",
+      tool_call_id: "mixed-scope-reverse-call",
+      created_at: new Date()
+    }
+  ])
+  assert(
+    reverseMixedScopeResult.get(scopedCallKey)?.content === "legacy result",
+    "an unscoped tool result must bridge to the latest scoped pending call"
+  )
+
+  const oldMixedCallKey = getWorkerToolUiKey(
+    "legacy-old-mixed-assistant",
+    "mixed-latest-call",
+    0
+  )
+  const latestMixedCallKey = getWorkerToolUiKey(
+    "worker-turn-mixed-scope-worker-2::latest-mixed-assistant",
+    "mixed-latest-call",
+    0
+  )
+  const latestMixedScopeResult = buildToolResultAssociations([
+    {
+      id: "legacy-old-mixed-assistant",
+      role: "assistant",
+      content: "old interrupted call",
+      tool_calls: [{ id: "mixed-latest-call", name: "read_file", args: {} }],
+      created_at: new Date()
+    },
+    {
+      id: "worker-turn-mixed-scope-worker-2::latest-mixed-assistant",
+      role: "assistant",
+      content: "latest call",
+      tool_calls: [{ id: "mixed-latest-call", name: "read_file", args: {} }],
+      created_at: new Date()
+    },
+    {
+      id: "legacy-latest-result",
+      role: "tool",
+      content: "latest result",
+      tool_call_id: "mixed-latest-call",
+      created_at: new Date()
+    }
+  ])
+  assert(
+    latestMixedScopeResult.get(oldMixedCallKey) === undefined &&
+      latestMixedScopeResult.get(latestMixedCallKey)?.content === "latest result",
+    "an unscoped result must not prefer an older unscoped call over a newer scoped call"
+  )
+
+  const wrongTurnCallKey = getWorkerToolUiKey(
+    "worker-turn-mixed-scope-worker-1::wrong-turn-assistant",
+    "wrong-turn-call",
+    0
+  )
+  const wrongTurnResult = buildToolResultAssociations([
+    {
+      id: "worker-turn-mixed-scope-worker-1::wrong-turn-assistant",
+      role: "assistant",
+      content: "turn one call",
+      tool_calls: [{ id: "wrong-turn-call", name: "read_file", args: {} }],
+      created_at: new Date()
+    },
+    {
+      id: "worker-turn-mixed-scope-worker-2::wrong-turn-user",
+      role: "user",
+      content: "turn two",
+      created_at: new Date()
+    },
+    {
+      id: "worker-turn-mixed-scope-worker-2::wrong-turn-result",
+      role: "tool",
+      content: "turn two orphan result",
+      tool_call_id: "wrong-turn-call",
+      created_at: new Date()
+    }
+  ])
+  assert(
+    wrongTurnResult.get(wrongTurnCallKey) === undefined,
+    "a scoped result must never fall back to a call from a different scoped turn"
+  )
+}
+
 async function run(): Promise<void> {
   testSummarizationMessagesAreHiddenByMarkerOnly()
   console.log("PASS electron transport filters summarization by structural marker only")
+  testWorkerFocusStorePreservesCrossRoleProviderIdCollision()
+  console.log("PASS worker focus preserves cross-role provider id collisions")
+  testWorkerFocusStoreNormalizesLegacyCrossRoleBaseline()
+  console.log("PASS worker focus normalizes legacy cross-role baseline")
+  testWorkerFocusDoesNotMergeAssistantGrowthAcrossUserTurns()
+  console.log("PASS worker focus replay matching respects user turn boundaries")
+  testWorkerFullValuesSnapshotsKeepHistoricalIdsStableAcrossTurns()
+  console.log("PASS worker full values preserve historical ids across turns")
+  testWorkerOccurrenceReplayStateRegressions()
+  console.log("PASS worker occurrence replay state regressions")
+  testRepeatedToolCallIdsUseOccurrenceScopedResults()
+  console.log("PASS repeated tool-call ids use occurrence-scoped results")
+  testCrossRoleProviderIdCollisionSurvivesTransportConversion()
+  console.log("PASS electron transport preserves cross-role provider id collisions")
+  testWorkflowSnapshotPreservesSameRoleProviderIdOccurrences()
+  console.log("PASS electron transport preserves same-role workflow snapshot occurrences")
+  testMainStreamNormalizesCrossRoleIdsBeforeSdkMerge()
+  console.log("PASS electron transport normalizes cross-role ids before SDK merge")
   testWorkflowSnapshotConverterSurvivesCorruptToolCalls()
   console.log("PASS electron transport workflow converter survives corrupt tool_calls")
   await testSubagentInternalsAreHiddenButObservable()

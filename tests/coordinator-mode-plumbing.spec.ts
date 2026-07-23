@@ -380,8 +380,13 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertMatches(
     preload,
-    /ipcRenderer\.send\("agent:resume", \{ threadId, command, modelId, agentMode \}\)/,
-    "preload resume forwards agentMode"
+    /ipcRenderer\.send\("agent:resume", \{\s*threadId,\s*streamRequestId,\s*command,\s*modelId,\s*agentMode\s*\}\)/,
+    "preload resume forwards agentMode and its request-scoped stream id"
+  )
+  assertIncludes(
+    preload,
+    'if (classifyAgentStreamDelivery("ambient", data.type) === "ignore") return',
+    "ambient thread events cannot terminate another request-scoped listener"
   )
   assertIncludes(
     preload,
@@ -1248,11 +1253,11 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "extractRawText(kwargs.content)",
     "agent IPC compares raw checkpoint message text before trace truncation"
   )
-  assertOccurrenceCount(
-    agentIpc,
-    "data: sanitizeStreamDataForRenderer(mode, serialized)",
-    2,
-    "resume and interrupt streams sanitize renderer payloads"
+  const stableValuesSanitizations =
+    agentIpc.match(/sanitizeStreamDataForRenderer\(mode, serialized\)/g)?.length ?? 0
+  assert(
+    stableValuesSanitizations === 3,
+    "invoke, resume, and interrupt sanitize stable values before retaining them"
   )
   assertSourceOrder(
     agentIpc,
