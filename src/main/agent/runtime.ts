@@ -4654,14 +4654,12 @@ The workspace root is: ${workspacePath}`
     )
   }
   if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
-    let chatxRobotChatId: string | null = null
     let imDeliveryContext: ScheduledTaskImDeliveryContext | null = null
     if (options.threadId) {
       try {
         const threadRow = getThread(options.threadId)
         if (threadRow?.metadata) {
           const meta = JSON.parse(threadRow.metadata)
-          chatxRobotChatId = (meta.chatxRobotChatId as string) || null
           const delivery = meta.imDeliveryContext as Record<string, unknown> | undefined
           if (
             meta.targetKind === "inbox" &&
@@ -4687,7 +4685,6 @@ The workspace root is: ${workspacePath}`
         workspacePath,
         modelId: options.modelId,
         threadId: options.threadId,
-        chatxRobotChatId,
         imDeliveryContext
       })
     )

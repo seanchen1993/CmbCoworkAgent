@@ -89,8 +89,6 @@ import type {
   HeartbeatConfig,
   PluginMetadata,
   PluginManifest,
-  ChatXConfig,
-  ChatXRobotConfig,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -180,8 +178,6 @@ export type {
   HeartbeatConfig,
   PluginMetadata,
   PluginManifest,
-  ChatXConfig,
-  ChatXRobotConfig,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -461,3 +457,13 @@ export type {
   HookInjectUserContext,
   HookUserContextField
 } from "../../main/hooks/types"
+export type {
+  BuiltinRobotConnectionState,
+  BuiltinRobotIdentityState,
+  BuiltinRobotFeatureBindingStatus,
+  BuiltinRobotRouteStatus,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
+  BuiltinRobotTakeoverRequest,
+  BuiltinRobotTakeoverResult
+} from "../../main/types"

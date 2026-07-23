@@ -14,6 +14,9 @@ import {
   segmentImReplyText
 } from "../src/main/services/im/reply-segmentation"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
+import { ImReplyClient } from "../src/main/services/im/reply-client"
+import type { ImGatewayClientPort } from "../src/main/services/im/gateway-client"
+import type { ImEventStore, ImReplyOutboxRecord } from "../src/main/services/im/event-store"
 
 async function testManagedInboxCreationAndReuse(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "cmb-im-inbox-"))
@@ -119,9 +122,142 @@ function testReplySegmentationAndStableEnvelope(): void {
   assert.match(eventShortCode("event-stable-id"), /^[A-F0-9]{8}$/)
 }
 
+async function testConcurrentOutboxDrainUsesSingleSender(): Promise<void> {
+  const record: ImReplyOutboxRecord = {
+    outboxId: "outbox-1",
+    deliveryId: "delivery-1",
+    eventId: "event-1",
+    conversationKey: "conversation-1",
+    expectedDeviceEpoch: 1,
+    idempotencyKey: "delivery-1:reply:0",
+    segmentIndex: 0,
+    segmentCount: 1,
+    content: "done",
+    state: "pending",
+    platformReplyId: null,
+    attemptCount: 0,
+    nextAttemptAt: null,
+    reasonCode: null,
+    createdAt: 1,
+    updatedAt: 1
+  }
+  let submitCount = 0
+  let releaseSubmit: () => void = () => undefined
+  const submitGate = new Promise<void>((resolve) => {
+    releaseSubmit = resolve
+  })
+  const gateway = {
+    submitReply: async () => {
+      submitCount += 1
+      await submitGate
+      return { state: "accepted" as const, platformReplyId: "platform-1" }
+    }
+  } as ImGatewayClientPort
+  const eventStore = {
+    listOutbox: (state?: string) =>
+      (!state || state === "pending") && record.state === "pending" ? [record] : [],
+    markOutboxSending: async () => {
+      record.state = "sending"
+      record.attemptCount += 1
+      return record
+    },
+    markOutboxSent: async () => {
+      record.state = "sent"
+      return record
+    }
+  } as unknown as ImEventStore
+  const firstClient = new ImReplyClient(gateway, eventStore)
+  const secondClient = new ImReplyClient(gateway, eventStore)
+  const first = firstClient.sendPending()
+  const second = secondClient.sendPending()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(submitCount, 1)
+  releaseSubmit()
+  const [firstResult, secondResult] = await Promise.all([first, second])
+  assert.deepEqual(secondResult, firstResult)
+  assert.equal(record.attemptCount, 1)
+}
+
+async function testSegmentDeliveryStopsBehindUnconfirmedPredecessor(): Promise<void> {
+  const records: ImReplyOutboxRecord[] = [0, 1].map((segmentIndex) => ({
+    outboxId: `outbox-${segmentIndex}`,
+    deliveryId: "delivery-ordered",
+    eventId: "event-ordered",
+    conversationKey: "conversation-1",
+    expectedDeviceEpoch: 1,
+    idempotencyKey: `delivery-ordered:reply:${segmentIndex}`,
+    segmentIndex,
+    segmentCount: 2,
+    content: `segment-${segmentIndex}`,
+    state: "pending",
+    platformReplyId: null,
+    attemptCount: 0,
+    nextAttemptAt: null,
+    reasonCode: null,
+    createdAt: 1,
+    updatedAt: 1
+  }))
+  let now = 1
+  let failFirstAttempt = true
+  const submitted: number[] = []
+  const gateway = {
+    submitReply: async (reply: { segment: { index: number } }) => {
+      submitted.push(reply.segment.index)
+      if (failFirstAttempt) {
+        failFirstAttempt = false
+        throw new Error("transient")
+      }
+      return { state: "accepted" as const, platformReplyId: `platform-${reply.segment.index}` }
+    }
+  } as ImGatewayClientPort
+  const eventStore = {
+    listOutbox: () => records,
+    markOutboxSending: async (outboxId: string) => {
+      const record = records.find((candidate) => candidate.outboxId === outboxId)!
+      record.state = "sending"
+      record.attemptCount += 1
+      return record
+    },
+    markOutboxSent: async (outboxId: string) => {
+      const record = records.find((candidate) => candidate.outboxId === outboxId)!
+      record.state = "sent"
+      return record
+    },
+    rescheduleOutbox: async (outboxId: string, nextAttemptAt: number) => {
+      const record = records.find((candidate) => candidate.outboxId === outboxId)!
+      record.state = "pending"
+      record.nextAttemptAt = nextAttemptAt
+      return record
+    }
+  } as unknown as ImEventStore
+  const client = new ImReplyClient(gateway, eventStore, () => now)
+
+  assert.deepEqual(await client.sendPending(), {
+    sent: 0,
+    unknown: 0,
+    failed: 0,
+    deferred: 1
+  })
+  assert.deepEqual(submitted, [0], "segment 1 must stay blocked while segment 0 is unconfirmed")
+
+  now = 5_000
+  assert.deepEqual(await client.sendPending(), {
+    sent: 2,
+    unknown: 0,
+    failed: 0,
+    deferred: 0
+  })
+  assert.deepEqual(submitted, [0, 0, 1])
+}
+
 const tests: Array<[string, () => void | Promise<void>]> = [
   ["testManagedInboxCreationAndReuse", testManagedInboxCreationAndReuse],
-  ["testReplySegmentationAndStableEnvelope", testReplySegmentationAndStableEnvelope]
+  ["testReplySegmentationAndStableEnvelope", testReplySegmentationAndStableEnvelope],
+  ["testConcurrentOutboxDrainUsesSingleSender", testConcurrentOutboxDrainUsesSingleSender],
+  [
+    "testSegmentDeliveryStopsBehindUnconfirmedPredecessor",
+    testSegmentDeliveryStopsBehindUnconfirmedPredecessor
+  ]
 ]
 
 async function main(): Promise<void> {

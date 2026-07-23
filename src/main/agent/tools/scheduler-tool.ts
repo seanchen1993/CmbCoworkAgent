@@ -122,7 +122,6 @@ interface SchedulerToolContext {
   workspacePath: string
   modelId?: string
   threadId?: string
-  chatxRobotChatId?: string | null
   imDeliveryContext?: ScheduledTaskImDeliveryContext | null
 }
 
@@ -305,7 +304,6 @@ export function createSchedulerTool(context: SchedulerToolContext) {
             taskType,
             modelId: context.modelId ?? null,
             workDir: context.workspacePath,
-            chatxRobotChatId: context.chatxRobotChatId ?? null,
             imDeliveryContext: context.imDeliveryContext ?? null,
             frequency: freq,
             intervalMinutes: input.intervalMinutes ?? null,
@@ -354,7 +352,6 @@ export function createSchedulerTool(context: SchedulerToolContext) {
             taskType,
             modelId: existing.modelId,
             workDir: existing.workDir,
-            chatxRobotChatId: existing.chatxRobotChatId ?? null,
             imDeliveryContext: existing.imDeliveryContext ?? null,
             frequency: input.frequency ?? existing.frequency,
             intervalMinutes: input.intervalMinutes ?? existing.intervalMinutes,

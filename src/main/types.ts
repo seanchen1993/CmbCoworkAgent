@@ -381,7 +381,6 @@ export interface ScheduledTask {
   taskType: ScheduledTaskType // "action" = agent 执行操作, "reminder" = 暖心提醒
   modelId: string | null
   workDir: string | null
-  chatxRobotChatId: string | null // 关联的机器人会话ID，执行完后 HTTP 回复
   imDeliveryContext: ScheduledTaskImDeliveryContext | null
   frequency: ScheduledTaskFrequency
   intervalMinutes: number | null // 仅 interval 类型使用，如 5 表示每5分钟
@@ -404,7 +403,6 @@ export interface ScheduledTaskUpsert {
   taskType?: ScheduledTaskType
   modelId: string | null
   workDir: string | null
-  chatxRobotChatId?: string | null
   imDeliveryContext?: ScheduledTaskImDeliveryContext | null
   frequency: ScheduledTaskFrequency
   intervalMinutes?: number | null
@@ -428,6 +426,62 @@ export interface TaskRunRecord {
 export interface BuiltinRobotSettings {
   enabled: boolean
   remoteAccess: "inbox-only" | "inbox-and-features"
+  waitingDesktopTtlMinutes: number
+}
+
+export type BuiltinRobotConnectionState = "connecting" | "online" | "offline" | "error"
+export type BuiltinRobotIdentityState = "mapped" | "missing" | "error"
+
+export interface BuiltinRobotRouteStatus {
+  conversationKey: string
+  deviceEpoch: number
+  state: "active" | "suspended" | "revoked"
+  deviceId?: string
+  deviceName?: string
+  ownedByCurrentDevice: boolean
+}
+
+export interface BuiltinRobotFeatureBindingStatus {
+  conversationKey: string
+  bindingId: string
+  projectId: string
+  featureSlug: string
+  threadId: string
+  state: "pending" | "active" | "suspended" | "revoked" | "historical"
+  suspendReason: string | null
+  activeTarget: boolean
+}
+
+export interface BuiltinRobotStatus {
+  settings: BuiltinRobotSettings
+  connectionState: BuiltinRobotConnectionState
+  identityState: BuiltinRobotIdentityState
+  deviceId: string
+  deviceName: string
+  sessionId: string | null
+  lastConnectedAt: string | null
+  lastError: string | null
+  legacyConfigDetected: boolean
+  routes: BuiltinRobotRouteStatus[]
+  featureBindings: BuiltinRobotFeatureBindingStatus[]
+  eventCounts: Record<string, number>
+  pendingOutboxCount: number
+}
+
+export interface BuiltinRobotTakeoverRequest {
+  conversationKey: string
+  expectedDeviceEpoch: number
+  mode: "normal" | "force"
+}
+
+export interface BuiltinRobotTakeoverResult {
+  success: boolean
+  conversationKey: string
+  principalId?: string
+  previousDeviceEpoch: number
+  deviceEpoch?: number
+  reasonCode?: string
+  message?: string
 }
 
 // Heartbeat types
@@ -802,26 +856,6 @@ export interface UserInputResponse {
   answers: Record<string, UserInputAnswer>
   submittedAt?: string
   ignored?: boolean
-}
-
-// ChatX types
-export interface ChatXRobotConfig {
-  chatId: string
-  httpUrl: string
-  fromId: string
-  clientId: string
-  clientSecret: string
-  channel: string
-  toUserList: string[]
-  modelId: string | null
-  workDir: string | null
-}
-
-export interface ChatXConfig {
-  enabled: boolean
-  wsUrl: string
-  userIp: string
-  robots: ChatXRobotConfig[]
 }
 
 /**

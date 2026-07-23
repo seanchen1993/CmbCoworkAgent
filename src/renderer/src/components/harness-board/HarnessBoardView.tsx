@@ -5,12 +5,14 @@ import {
   AlertCircle,
   ArrowLeft,
   Archive,
+  Bot,
   ChevronDown,
   ChevronRight,
   CheckCircle2,
   Circle,
   CircleDashed,
   CircleHelp,
+  ExternalLink,
   FileText,
   FolderOpen,
   GitBranch,
@@ -110,7 +112,8 @@ import type {
   HarnessWorkflowNextAction,
   HarnessWorkflow,
   PluginMetadata,
-  Thread
+  Thread,
+  BuiltinRobotStatus
 } from "@/types"
 import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
 
@@ -4922,6 +4925,118 @@ function ProjectSessionPage({
   )
 }
 
+const REMOTE_BINDING_STATE_LABELS: Record<
+  BuiltinRobotStatus["featureBindings"][number]["state"],
+  string
+> = {
+  pending: "校验中",
+  active: "已绑定",
+  suspended: "已暂停",
+  revoked: "已解除",
+  historical: "历史会话"
+}
+
+function RemoteFeatureAccessPanel({
+  projectId,
+  featureSlug,
+  onOpenThread
+}: {
+  projectId: string
+  featureSlug: string
+  onOpenThread: (threadId: string) => void
+}): React.JSX.Element {
+  const [status, setStatus] = useState<BuiltinRobotStatus | null>(null)
+
+  useEffect(() => {
+    let active = true
+    void window.api.builtinRobot
+      .getStatus()
+      .then((next) => {
+        if (active) setStatus(next)
+      })
+      .catch(() => undefined)
+    const unsubscribe = window.api.builtinRobot.onStatus((next) => {
+      if (active) setStatus(next)
+    })
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [])
+
+  const bindings = (status?.featureBindings ?? []).filter(
+    (binding) => binding.projectId === projectId && binding.featureSlug === featureSlug
+  )
+  const available =
+    status?.settings.enabled === true &&
+    status.identityState === "mapped" &&
+    status.settings.remoteAccess === "inbox-and-features"
+  const availabilityText = !status
+    ? "正在读取远程访问状态…"
+    : !status.settings.enabled
+      ? "内置统一机器人未启用"
+      : status.identityState !== "mapped"
+        ? "需要先完成企业身份映射"
+        : status.settings.remoteAccess !== "inbox-and-features"
+          ? "机器人管理中尚未开放 Feature"
+          : "可从招乎查看并绑定此 Feature"
+
+  return (
+    <section className="rounded-md border border-border bg-background">
+      <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3 text-sm font-semibold">
+        <Bot className="size-4 shrink-0 text-muted-foreground" />
+        <span className="truncate">招乎远程访问</span>
+      </div>
+      <div className="space-y-3 p-3">
+        <div className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
+          <span
+            className={cn(
+              "mt-1.5 size-2 shrink-0 rounded-full",
+              available ? "bg-emerald-500" : "bg-amber-500"
+            )}
+          />
+          <span>{availabilityText}</span>
+        </div>
+        {bindings.length === 0 ? (
+          <p className="rounded border border-dashed px-2.5 py-3 text-xs text-muted-foreground">
+            当前没有远程 Binding。启用后可在招乎发送 /项目、/功能 和 /绑定。
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {bindings.map((binding) => (
+              <div key={binding.bindingId} className="rounded border px-2.5 py-2">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-medium">
+                    {REMOTE_BINDING_STATE_LABELS[binding.state]}
+                    {binding.activeTarget ? " · 当前目标" : ""}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => onOpenThread(binding.threadId)}
+                  >
+                    <ExternalLink className="mr-1 size-3" /> 打开 Thread
+                  </Button>
+                </div>
+                {binding.suspendReason && (
+                  <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                    {binding.suspendReason}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-[11px] leading-4 text-muted-foreground">
+          招乎只显示项目与 Feature 名称，本地路径不会上传。
+        </p>
+      </div>
+    </section>
+  )
+}
+
 function FeatureDetailPage({
   detail,
   loading,
@@ -5428,6 +5543,11 @@ function FeatureDetailPage({
               </div>
 
               <aside className="min-w-0 space-y-4">
+                <RemoteFeatureAccessPanel
+                  projectId={detail.project.projectId}
+                  featureSlug={detail.run.slug}
+                  onOpenThread={handleHookSessionSelect}
+                />
                 <FeatureDeployUnitsPanel deployUnits={detail.run.selectedDeployUnits} />
                 <FeatureWorkspaceChangesPanel sessions={detail.sessions} threadsById={threadsById} />
 

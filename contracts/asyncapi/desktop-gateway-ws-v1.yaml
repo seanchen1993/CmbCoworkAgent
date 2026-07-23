@@ -1,0 +1,50 @@
+asyncapi: 3.0.0
+info:
+  title: ChatX Desktop Gateway WebSocket V1
+  version: 1.0.0
+  description: >-
+    企业统一机器人网关与 CMBDevClaw Desktop 的认证 WSS 契约。所有帧必须通过
+    ../schema/desktop-gateway-ws-v1.schema.json；平台 webhook 不属于本契约。
+servers:
+  production:
+    host: gateway.internal.example
+    pathname: /ws/v1/desktop
+    protocol: wss
+    security:
+      - $ref: "#/components/securitySchemes/bearerJwt"
+channels:
+  desktopGateway:
+    address: /ws/v1/desktop
+    messages:
+      envelope:
+        $ref: "#/components/messages/envelope"
+operations:
+  desktopSends:
+    action: send
+    channel:
+      $ref: "#/channels/desktopGateway"
+    messages:
+      - $ref: "#/channels/desktopGateway/messages/envelope"
+  desktopReceives:
+    action: receive
+    channel:
+      $ref: "#/channels/desktopGateway"
+    messages:
+      - $ref: "#/channels/desktopGateway/messages/envelope"
+components:
+  securitySchemes:
+    bearerJwt:
+      type: httpApiKey
+      name: Authorization
+      in: header
+      scheme: bearer
+      bearerFormat: JWT
+  messages:
+    envelope:
+      name: DesktopGatewayWsEnvelopeV1
+      title: Desktop/Gateway WSS V1 envelope
+      contentType: application/json
+      payload:
+        schemaFormat: application/schema+json;version=draft-2020-12
+        schema:
+          $ref: ../schema/desktop-gateway-ws-v1.schema.json

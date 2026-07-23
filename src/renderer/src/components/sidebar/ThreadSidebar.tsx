@@ -10,7 +10,6 @@ import {
   Briefcase,
   LayoutDashboard,
   Workflow,
-  Cpu,
   BarChart3,
   ChevronDown,
   ChevronRight,
@@ -24,7 +23,6 @@ import {
   HeartPulse
 } from "lucide-react"
 import { toast } from "sonner"
-import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -299,6 +297,7 @@ function ThreadListItemImpl({
 
   const displayTitle = getDisplayThreadTitle(thread)
   const remoteThreadKind = getRemoteThreadKind(thread)
+  const remoteThreadHistorical = remoteThreadKind && thread.metadata?.remoteState === "historical"
   const pendingUserInputBadge = hasPendingUserInput ? (
     <span className="ml-1 shrink-0 rounded-sm border border-status-warning/45 bg-status-warning/10 px-1.5 py-0.5 text-[10px] leading-none text-status-warning">
       等待用户回复
@@ -350,7 +349,11 @@ function ThreadListItemImpl({
                   <>
                     <span className="mr-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-blue-500/15 px-1 py-px text-[10px] font-medium text-blue-700 dark:text-blue-300">
                       <MessageSquare className="size-2.5" />
-                      {remoteThreadKind === "inbox" ? "远程收件箱" : "远程 Feature"}
+                      {remoteThreadHistorical
+                        ? "远程历史"
+                        : remoteThreadKind === "inbox"
+                          ? "远程收件箱"
+                          : "远程 Feature"}
                     </span>
                     <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
                     {pendingUserInputBadge}
@@ -501,7 +504,6 @@ export function ThreadSidebar(): React.JSX.Element {
     mainView,
     previousThreadId,
     pendingEvolution,
-    showCustomizeView,
     setShowCustomizeView,
     showKanbanView,
     setShowKanbanView,
@@ -516,20 +518,6 @@ export function ThreadSidebar(): React.JSX.Element {
   const allThreadStates = useAllThreadStates()
   const allStreamLoadingStates = useAllStreamLoadingStates()
 
-  const [robots, setRobots] = useState<ChatXRobotConfig[]>([])
-  const [showRobotPicker, setShowRobotPicker] = useState(false)
-  const robotPickerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!showRobotPicker) return
-    const handleClickOutside = (e: MouseEvent): void => {
-      if (robotPickerRef.current && !robotPickerRef.current.contains(e.target as Node)) {
-        setShowRobotPicker(false)
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside)
-    return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [showRobotPicker])
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const [unreadIds, setUnreadIds] = useState<Set<string>>(() =>
@@ -826,33 +814,6 @@ export function ThreadSidebar(): React.JSX.Element {
     setEditingTitle("")
   }
 
-  const loadRobots = useCallback(async () => {
-    try {
-      const config = await window.api.chatx.getConfig()
-      if (!config.enabled) {
-        setRobots([])
-        return
-      }
-      // Only show robots that have all required fields filled
-      const valid = (config.robots || []).filter(
-        (r) =>
-          r.chatId &&
-          r.fromId &&
-          r.clientId &&
-          r.clientSecret &&
-          r.workDir &&
-          r.toUserList.length > 0
-      )
-      setRobots(valid)
-    } catch {
-      /* ignore */
-    }
-  }, [])
-
-  useEffect(() => {
-    loadRobots()
-  }, [loadRobots, showCustomizeView])
-
   const handleNewThread = async (): Promise<void> => {
     const metadata: Record<string, unknown> = {
       title: `Thread ${new Date().toLocaleDateString()}`
@@ -875,8 +836,6 @@ export function ThreadSidebar(): React.JSX.Element {
     })
   }
 
-  const [creatingRobot, setCreatingRobot] = useState(false)
-
   const handleAddProject = async (): Promise<void> => {
     if (selectingProjectFolder) return
     setSelectingProjectFolder(true)
@@ -889,29 +848,6 @@ export function ThreadSidebar(): React.JSX.Element {
       })
     } finally {
       setSelectingProjectFolder(false)
-    }
-  }
-
-  const handleNewRobotThread = async (robot: ChatXRobotConfig): Promise<void> => {
-    if (creatingRobot) return
-    setCreatingRobot(true)
-    setShowRobotPicker(false)
-    try {
-      if (!robot.workDir) {
-        alert("该机器人未配置工作目录")
-        return
-      }
-      const now = new Date()
-      const timeTag = `${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`
-      await createThread({
-        workspacePath: robot.workDir,
-        title: `[机器人] ${robot.chatId} · ${timeTag}`,
-        chatxChatId: robot.chatId,
-        chatxRobotChatId: robot.chatId,
-        model: robot.modelId || undefined
-      })
-    } finally {
-      setCreatingRobot(false)
     }
   }
 
@@ -1259,35 +1195,6 @@ export function ThreadSidebar(): React.JSX.Element {
                 </div>
                 <span className="text-muted-foreground">运营面板</span>
               </Button>
-            )}
-            {robots.length > 0 && (
-              <div className="relative" ref={robotPickerRef}>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="w-full justify-start gap-2 text-sm font-semibold"
-                  onClick={() => setShowRobotPicker(!showRobotPicker)}
-                >
-                  <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                    <Cpu className="size-3" />
-                  </div>
-                  <span className="text-muted-foreground">机器人</span>
-                </Button>
-                {showRobotPicker && (
-                  <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-md border border-border bg-popover p-1 shadow-md">
-                    {robots.map((robot, i) => (
-                      <button
-                        key={i}
-                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted transition-colors"
-                        onClick={() => handleNewRobotThread(robot)}
-                      >
-                        <Cpu className="size-3 shrink-0 text-blue-400" />
-                        <span className="truncate">{robot.chatId || `机器人 ${i + 1}`}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
             )}
           </>
         ) : null}

@@ -62,7 +62,6 @@ import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
-import { trySendChatXReply } from "../services/chatx"
 import { clearAdoptionContext, setAdoptionContext } from "../services/adoption-tracker"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -644,17 +643,21 @@ function rejectDesktopRunForForeignOwner(
   return true
 }
 
-function rejectDesktopRunForRemoteReadOnlyInbox(
+function rejectDesktopRunForRemoteReadOnlyThread(
   threadId: string,
   window: BrowserWindow,
   channel: string
 ): boolean {
   const metadata = parseStandardThreadMetadata(getThread(threadId)?.metadata).metadata
-  if (metadata.targetKind !== "inbox" || metadata.remoteReadOnly !== true) return false
+  const historical = metadata.remoteState === "historical"
+  const readOnlyInbox = metadata.targetKind === "inbox" && metadata.remoteReadOnly === true
+  if (!historical && !readOnlyInbox) return false
   safeSendToWindow(window, channel, {
     type: "error",
     error: "REMOTE_INBOX_DESKTOP_READ_ONLY",
-    message: "远程收件箱在桌面仅可查看，请从招乎继续发送消息。"
+    message: historical
+      ? "设备接管前的远程历史 Thread 仅可查看。"
+      : "远程收件箱在桌面仅可查看，请从招乎继续发送消息。"
   })
   safeSendToWindow(window, channel, { type: "done" })
   return true
@@ -4504,7 +4507,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
       if (rejectAgentStartDuringShutdown(window, channel)) return
-      if (rejectDesktopRunForRemoteReadOnlyInbox(threadId, window, channel)) return
+      if (rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)) return
       if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
       let modelInputMessage = message
       let routingMessage = message
@@ -5221,7 +5224,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       > = {}
       let isCoordinatorNotificationTurn = false
       // True for ANY internal notification turn (coordinator OR workflow). Used
-      // to suppress user-facing side effects (pet notices, ChatX, memory write,
+      // to suppress user-facing side effects (pet notices, memory write,
       // skill evolution) that must not fire for an internal "report the result"
       // turn. auto-commit is intentionally NOT suppressed: it still commits any
       // edits THIS turn itself makes via a fresh snapshot. It does NOT commit a
@@ -6677,7 +6680,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        let lastFinalText = "" // 最终回复（不含中间工具推理），用于 ChatX HTTP 回复
+        let lastFinalText = ""
         let currentTurnAssistantStart = 0
         const getCurrentAssistantResponse = (): string =>
           getCurrentTurnAssistantResponse({
@@ -7474,17 +7477,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             resetSkillEvolutionSession(threadId)
           }
 
-          // If this is a ChatX-linked thread, also send reply via HTTP (only final answer, no tool reasoning)
-          const chatxReply = lastFinalText || stripThink(postRunAssistantText).trim()
-          if (
-            invokeFinalOutcome === "success" &&
-            !isInternalNotificationTurn &&
-            metadata.chatxRobotChatId &&
-            chatxReply
-          ) {
-            trySendChatXReply(metadata.chatxRobotChatId as string, chatxReply)
-          }
-
           const conversation =
             invokeFinalOutcome === "success" && !isInternalNotificationTurn && postRunAssistantText
               ? `User: ${rootUserPrompt}\n\nAssistant: ${postRunAssistantText}`
@@ -7881,6 +7873,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return
       }
       if (rejectAgentStartDuringShutdown(window, channel)) return
+      if (rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)) return
       if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
 
       // Get workspace path from thread metadata
@@ -8767,6 +8760,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       return
     }
     if (rejectAgentStartDuringShutdown(window, channel)) return
+    if (rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)) return
     if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
     if (
       rejectRuntimeRestoredCheckpointResume(

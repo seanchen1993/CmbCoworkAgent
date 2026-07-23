@@ -1,4 +1,4 @@
-import { homedir } from "os"
+import { homedir, hostname } from "os"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
@@ -2074,7 +2074,6 @@ export function upsertScheduledTask(
     taskType: config.taskType ?? existing?.taskType ?? "action",
     modelId: config.modelId,
     workDir: config.workDir,
-    chatxRobotChatId: config.chatxRobotChatId ?? existing?.chatxRobotChatId ?? null,
     imDeliveryContext: config.imDeliveryContext ?? existing?.imDeliveryContext ?? null,
     frequency: config.frequency,
     intervalMinutes: config.intervalMinutes ?? existing?.intervalMinutes ?? null,
@@ -2626,54 +2625,9 @@ export function parseMcpJsonFile(filePath: string): Record<string, PluginMcpServ
   }
 }
 
-// ── ChatX ──────────────────────────────────────────────────────────────────────
+// ── Legacy robot credential cleanup ───────────────────────────────────────────
 
 const CHATX_CONFIG_FILE = join(OPENWORK_DIR, "chatx-config.json")
-
-function defaultChatXConfig(): import("./types").ChatXConfig {
-  return {
-    enabled: false,
-    wsUrl: "",
-    userIp: "",
-    robots: []
-  }
-}
-
-export function getChatXConfig(): import("./types").ChatXConfig {
-  getOpenworkDir()
-  if (!existsSync(CHATX_CONFIG_FILE)) return defaultChatXConfig()
-  try {
-    const content = readFileSync(CHATX_CONFIG_FILE, "utf-8")
-    const parsed = JSON.parse(content) as Record<string, unknown>
-    const defaults = defaultChatXConfig()
-    return {
-      enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
-      wsUrl: typeof parsed.wsUrl === "string" ? parsed.wsUrl : defaults.wsUrl,
-      userIp: typeof parsed.userIp === "string" ? parsed.userIp : defaults.userIp,
-      robots: Array.isArray(parsed.robots)
-        ? (parsed.robots as unknown[]).filter(
-            (item): item is import("./types").ChatXRobotConfig =>
-              item != null &&
-              typeof item === "object" &&
-              typeof (item as Record<string, unknown>).chatId === "string" &&
-              typeof (item as Record<string, unknown>).fromId === "string" &&
-              typeof (item as Record<string, unknown>).clientId === "string" &&
-              typeof (item as Record<string, unknown>).clientSecret === "string" &&
-              Array.isArray((item as Record<string, unknown>).toUserList)
-          )
-        : defaults.robots
-    }
-  } catch {
-    return defaultChatXConfig()
-  }
-}
-
-export function saveChatXConfig(updates: Partial<import("./types").ChatXConfig>): void {
-  getOpenworkDir()
-  const current = getChatXConfig()
-  const merged = { ...current, ...updates }
-  writeFileSync(CHATX_CONFIG_FILE, JSON.stringify(merged, null, 2))
-}
 
 // ── Unified built-in IM robot ─────────────────────────────────────────────────
 
@@ -2681,7 +2635,8 @@ const BUILTIN_ROBOT_SETTINGS_FILE = join(OPENWORK_DIR, "builtin-robot-settings.j
 
 const DEFAULT_BUILTIN_ROBOT_SETTINGS: import("./types").BuiltinRobotSettings = {
   enabled: true,
-  remoteAccess: "inbox-only"
+  remoteAccess: "inbox-only",
+  waitingDesktopTtlMinutes: 10
 }
 
 export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSettings {
@@ -2695,7 +2650,13 @@ export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSetting
     return {
       enabled: value.enabled !== false,
       remoteAccess:
-        value.remoteAccess === "inbox-and-features" ? "inbox-and-features" : "inbox-only"
+        value.remoteAccess === "inbox-and-features" ? "inbox-and-features" : "inbox-only",
+      waitingDesktopTtlMinutes:
+        Number.isSafeInteger(value.waitingDesktopTtlMinutes) &&
+        Number(value.waitingDesktopTtlMinutes) >= 1 &&
+        Number(value.waitingDesktopTtlMinutes) <= 60
+          ? Number(value.waitingDesktopTtlMinutes)
+          : DEFAULT_BUILTIN_ROBOT_SETTINGS.waitingDesktopTtlMinutes
     }
   } catch {
     return { ...DEFAULT_BUILTIN_ROBOT_SETTINGS }
@@ -2712,14 +2673,67 @@ export function saveBuiltinRobotSettings(
     remoteAccess:
       updates.remoteAccess === "inbox-and-features" || updates.remoteAccess === "inbox-only"
         ? updates.remoteAccess
-        : current.remoteAccess
+        : current.remoteAccess,
+    waitingDesktopTtlMinutes:
+      Number.isSafeInteger(updates.waitingDesktopTtlMinutes) &&
+      Number(updates.waitingDesktopTtlMinutes) >= 1 &&
+      Number(updates.waitingDesktopTtlMinutes) <= 60
+        ? Number(updates.waitingDesktopTtlMinutes)
+        : current.waitingDesktopTtlMinutes
   }
   writeFileSync(BUILTIN_ROBOT_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf-8")
   return next
 }
 
 export function hasLegacyChatXRobotCredentials(): boolean {
-  return getChatXConfig().robots.length > 0
+  getOpenworkDir()
+  // Clean cut: existence is the only permitted legacy read. Never parse or
+  // migrate the file because it may contain obsolete plaintext credentials.
+  return existsSync(CHATX_CONFIG_FILE)
+}
+
+export function deleteLegacyChatXRobotCredentials(confirmed: boolean): boolean {
+  getOpenworkDir()
+  if (confirmed !== true) throw new Error("Explicit confirmation is required")
+  if (!existsSync(CHATX_CONFIG_FILE)) return false
+  unlinkSync(CHATX_CONFIG_FILE)
+  return true
+}
+
+const BUILTIN_ROBOT_DEVICE_FILE = join(OPENWORK_DIR, "builtin-robot-device.json")
+
+export function getBuiltinRobotDeviceIdentity(): { deviceId: string; deviceName: string } {
+  getOpenworkDir()
+  if (existsSync(BUILTIN_ROBOT_DEVICE_FILE)) {
+    try {
+      const value = JSON.parse(readFileSync(BUILTIN_ROBOT_DEVICE_FILE, "utf-8")) as Record<
+        string,
+        unknown
+      >
+      if (
+        typeof value.deviceId === "string" &&
+        value.deviceId.trim() &&
+        typeof value.deviceName === "string" &&
+        value.deviceName.trim()
+      ) {
+        return { deviceId: value.deviceId, deviceName: value.deviceName }
+      }
+    } catch {
+      // Replace an invalid non-secret identity file with a fresh stable id.
+    }
+  }
+  const identity = {
+    deviceId: uuid(),
+    deviceName: hostname().trim() || "CMBDevClaw Desktop"
+  }
+  const tempFile = `${BUILTIN_ROBOT_DEVICE_FILE}.tmp`
+  try {
+    writeFileSync(tempFile, JSON.stringify(identity, null, 2), { encoding: "utf-8", mode: 0o600 })
+    renameSync(tempFile, BUILTIN_ROBOT_DEVICE_FILE)
+  } finally {
+    if (existsSync(tempFile)) unlinkSync(tempFile)
+  }
+  return identity
 }
 
 // ── Hook Logging ──────────────────────────────────────────────────────────────

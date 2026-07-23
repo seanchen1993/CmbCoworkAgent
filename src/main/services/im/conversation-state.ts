@@ -154,6 +154,13 @@ export class ImConversationStateStore {
     return row ? hydrateConversation(row) : null
   }
 
+  listConversations(): ImConversationRecord[] {
+    return readAll<ImConversationRow>(
+      this.dependencies.getDatabase(),
+      "SELECT * FROM im_conversations ORDER BY updated_at DESC, conversation_key ASC"
+    ).map(hydrateConversation)
+  }
+
   async ensureConversation(input: {
     conversationKey: string
     principalId: string

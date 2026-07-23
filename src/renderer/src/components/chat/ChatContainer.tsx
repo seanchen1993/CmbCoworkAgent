@@ -1338,6 +1338,7 @@ interface RemoteThreadDisplayInfo {
   kind: "inbox" | "feature"
   conversationKey: string
   deviceEpoch: number | null
+  historical: boolean
   projectId?: string
   featureSlug?: string
 }
@@ -1355,7 +1356,8 @@ function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayI
     return {
       kind: "inbox",
       conversationKey: context.conversationKey,
-      deviceEpoch: typeof context.deviceEpoch === "number" ? context.deviceEpoch : null
+      deviceEpoch: typeof context.deviceEpoch === "number" ? context.deviceEpoch : null,
+      historical: metadata.remoteState === "historical"
     }
   }
   const harnessFeature = metadata.harnessFeature
@@ -1368,6 +1370,7 @@ function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayI
     kind: "feature",
     conversationKey: context.conversationKey,
     deviceEpoch: typeof context.deviceEpoch === "number" ? context.deviceEpoch : null,
+    historical: metadata.remoteState === "historical",
     projectId: feature.projectId,
     featureSlug: feature.slug
   }
@@ -2036,7 +2039,11 @@ export function ChatContainer({
   const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
   const resolvedReadOnlyReason =
     readOnlyReason ??
-    (remoteThreadInfo?.kind === "inbox" ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息" : null)
+    (remoteThreadInfo?.historical
+      ? "设备接管前的远程历史 Thread 仅可查看"
+      : remoteThreadInfo?.kind === "inbox"
+        ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息"
+        : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const readOnly = Boolean(resolvedReadOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
@@ -5303,13 +5310,9 @@ export function ChatContainer({
       }
       threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
-      // ChatX bot thread: scheduledTaskLoading is true but no scheduledTaskId
-      try {
-        const cancelled = await window.api.chatx.cancelByThread(threadId)
-        if (!cancelled) console.warn("[ChatContainer] ChatX thread not found for cancel:", threadId)
-      } catch (err) {
-        console.error("[ChatContainer] Failed to cancel ChatX thread:", err)
-      }
+      // Passive remote streams are owned by IM. Desktop must not cross-source
+      // cancel them; use /停止 from the originating conversation instead.
+      return
     } else {
       // Match Claude Code coordinator semantics: the main stop button stops the
       // foreground turn only. Durable background workers are stopped explicitly
@@ -6570,10 +6573,18 @@ export function ChatContainer({
     ? "等待桌面审批"
     : pendingUserInput
       ? "等待桌面补充输入"
-      : remoteLifecycleState === "suspended"
-        ? "绑定已暂停"
+      : remoteLifecycleState === "historical"
+        ? "接管前历史"
+        : remoteLifecycleState === "waiting_desktop"
+          ? "等待桌面处理"
+        : remoteLifecycleState === "suspended"
+          ? "绑定已暂停"
         : remoteLifecycleState === "outcome_unknown"
           ? "执行结果未知"
+          : remoteLifecycleState === "rejected"
+            ? "远程能力不支持"
+            : remoteLifecycleState === "failed"
+              ? "执行失败"
           : isLoading
             ? "任务执行中"
             : remoteThread?.status === "error"
@@ -6605,7 +6616,11 @@ export function ChatContainer({
             </div>
             <p className="text-muted-foreground">
               {remoteThreadInfo.kind === "inbox"
-                ? "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                ? remoteThreadInfo.historical
+                  ? "此 Thread 属于接管前设备，仅保留历史，不会接收新消息。"
+                  : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                : remoteThreadInfo.historical
+                  ? "此 Feature Thread 属于接管前设备，仅保留历史；请在新设备重新绑定。"
                 : isLoading
                   ? "当前任务占用远程运行租约，结束后可在桌面继续。"
                   : "可在桌面继续处理；桌面发出的本轮结果只保留在本机，不会自动发送到招乎。"}

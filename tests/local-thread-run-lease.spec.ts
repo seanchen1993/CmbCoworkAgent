@@ -142,7 +142,7 @@ function testRuntimeEntryPointArchitecture(): void {
   const desktop = read("src/main/ipc/agent.ts")
   const scheduler = read("src/main/services/scheduler.ts")
   const heartbeat = read("src/main/services/heartbeat.ts")
-  const legacyChatx = read("src/main/services/chatx.ts")
+  const imRunner = read("src/main/services/im/remote-runner.ts")
 
   assert(!leaseSource.includes("setTimeout("), "leases cannot expire or be timeout-stolen")
   assert(!leaseSource.includes("forceRelease"), "leases expose no force-release escape hatch")
@@ -221,8 +221,7 @@ function testRuntimeEntryPointArchitecture(): void {
 
   for (const [label, source, owner, runId] of [
     ["scheduler", scheduler, "scheduler", "schedulerRunId"],
-    ["heartbeat", heartbeat, "scheduler", "heartbeatRunId"],
-    ["legacy ChatX", legacyChatx, "im", "chatxRunId"]
+    ["heartbeat", heartbeat, "scheduler", "heartbeatRunId"]
   ] as const) {
     assertSourceOrder(
       source,
@@ -240,6 +239,20 @@ function testRuntimeEntryPointArchitecture(): void {
       `${label} releases only after checkpointer close`
     )
   }
+  assert(
+    imRunner.includes('owner: "im"') &&
+      imRunner.includes("prepareStandardThreadRuntimeFactory({") &&
+      !imRunner.includes("createAgentRuntime("),
+    "IM claims its local owner and can only construct a Runtime through the shared factory"
+  )
+  assertSourceOrder(
+    imRunner,
+    [
+      "await closeCheckpointer(threadId)",
+      'releaseLocalThreadRunLease(target.threadId, "im", runId)'
+    ],
+    "IM releases its local Thread lease only after checkpointer close"
+  )
 }
 
 for (const test of [

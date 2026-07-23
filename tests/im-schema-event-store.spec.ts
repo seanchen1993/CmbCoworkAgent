@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync, readdirSync } from "node:fs"
 import { join, resolve } from "node:path"
 import initSqlJs, { type Database as SqlJsDatabase } from "sql.js"
+import { parse as parseYaml } from "yaml"
 import {
   ImGatewayContractError,
   assertRemoteImAckV1,
@@ -161,6 +162,7 @@ async function testFrozenContractFixtures(): Promise<void> {
   )
 
   for (const schemaName of [
+    "desktop-gateway-ws-v1.schema.json",
     "remote-im-event-v1.schema.json",
     "remote-im-ack-v1.schema.json",
     "remote-im-reply-v1.schema.json"
@@ -170,6 +172,17 @@ async function testFrozenContractFixtures(): Promise<void> {
     ) as Record<string, unknown>
     assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema")
   }
+  const asyncApi = parseYaml(
+    readFileSync(join(PROJECT_ROOT, "contracts/asyncapi/desktop-gateway-ws-v1.yaml"), "utf8")
+  ) as Record<string, unknown>
+  assert.equal(asyncApi.asyncapi, "3.0.0")
+  assert.equal(
+    (
+      ((asyncApi.components as Record<string, unknown>).messages as Record<string, unknown>)
+        .envelope as Record<string, unknown>
+    ).name,
+    "DesktopGatewayWsEnvelopeV1"
+  )
 }
 
 async function testImArchitectureBoundaries(): Promise<void> {
@@ -462,9 +475,30 @@ async function testRestartRecoveryAndConversationQueue(): Promise<void> {
       expiresAt: third.lease.expiresAt
     })
     await context.eventStore.beginExecution(third.eventId, "run-before-crash")
+    const [replyBeforeCrash] = await context.eventStore.enqueueProactiveReplies([
+      {
+        schemaVersion: 1,
+        deliveryId: "reply-before-client-crash",
+        conversationKey: "conversation-1",
+        expectedDeviceEpoch: 1,
+        idempotencyKey: "reply-before-client-crash:reply:0",
+        segment: { index: 0, count: 1 },
+        message: { type: "text", content: "durable reply" }
+      }
+    ])
+    await context.eventStore.markOutboxSending(replyBeforeCrash.outboxId)
     const recovered = await context.eventStore.recoverInterruptedEvents()
     assert.deepEqual(recovered, [third.eventId])
     assert.equal(context.eventStore.getEvent(third.eventId)?.state, "outcome_unknown")
+    assert.deepEqual(await context.eventStore.recoverInterruptedOutbox(), [
+      replyBeforeCrash.outboxId
+    ])
+    const recoveredReply = context.eventStore
+      .listOutbox()
+      .find((record) => record.outboxId === replyBeforeCrash.outboxId)
+    assert.equal(recoveredReply?.state, "pending")
+    assert.equal(recoveredReply?.idempotencyKey, replyBeforeCrash.idempotencyKey)
+    assert.equal(recoveredReply?.attemptCount, 1)
   } finally {
     context.database.close()
   }
@@ -602,6 +636,110 @@ async function testMockGatewayFaultMatrix(): Promise<void> {
   now += 100_000
 }
 
+async function testDeviceTakeoverTerminalizesOldEpoch(): Promise<void> {
+  const context = await createContext()
+  try {
+    await seedConversation(context)
+    const queuedEvent = eventFixture(1)
+    const runningEvent = eventFixture(2)
+    await context.eventStore.receiveEvent(queuedEvent, inboxTarget)
+    await context.eventStore.queueEvent(queuedEvent.eventId)
+    await context.eventStore.receiveEvent(runningEvent, inboxTarget)
+    await context.eventStore.queueEvent(runningEvent.eventId)
+    await context.eventStore.recordExecutionPermit({
+      eventId: runningEvent.eventId,
+      deviceEpoch: 1,
+      leaseId: runningEvent.lease.id,
+      expiresAt: runningEvent.lease.expiresAt
+    })
+    await context.eventStore.beginExecution(runningEvent.eventId, "running-before-takeover")
+    const proactive = (deliveryId: string): RemoteImReplyV1 => ({
+      schemaVersion: 1,
+      deliveryId,
+      conversationKey: "conversation-1",
+      expectedDeviceEpoch: 1,
+      idempotencyKey: `${deliveryId}:reply:0`,
+      segment: { index: 0, count: 1 },
+      message: { type: "text", content: deliveryId }
+    })
+    const [pending] = await context.eventStore.enqueueProactiveReplies([proactive("pending-old")])
+    const [sending] = await context.eventStore.enqueueProactiveReplies([proactive("sending-old")])
+    await context.eventStore.markOutboxSending(sending.outboxId)
+
+    const changed = await context.eventStore.applyDeviceTakeover("conversation-1", 1)
+    assert.deepEqual(changed.cancelledEventIds, [queuedEvent.eventId])
+    assert.deepEqual(changed.outcomeUnknownEventIds, [runningEvent.eventId])
+    assert.equal(context.eventStore.getEvent(queuedEvent.eventId)?.state, "cancelled")
+    assert.equal(context.eventStore.getEvent(runningEvent.eventId)?.state, "outcome_unknown")
+    assert.equal(
+      context.eventStore.listOutbox().find((item) => item.outboxId === pending.outboxId)?.state,
+      "failed"
+    )
+    assert.equal(
+      context.eventStore.listOutbox().find((item) => item.outboxId === sending.outboxId)?.state,
+      "unknown"
+    )
+    await context.conversationStore.resetForDeviceTakeover("conversation-1", 1, 2)
+    assert.equal(context.conversationStore.getConversation("conversation-1")?.deviceEpoch, 2)
+    assert(
+      context.conversationStore
+        .listTargets("conversation-1")
+        .every((item) => item.state === "revoked")
+    )
+  } finally {
+    context.database.close()
+  }
+}
+
+async function testRetentionKeepsLiveAndUncertainDeliveryState(): Promise<void> {
+  const context = await createContext()
+  try {
+    await seedConversation(context)
+    const deliveredEvent = eventFixture(1)
+    const uncertainEvent = eventFixture(2)
+    const queuedEvent = eventFixture(3)
+    for (const event of [deliveredEvent, uncertainEvent]) {
+      await context.eventStore.receiveEvent(event, inboxTarget)
+      await context.eventStore.queueEvent(event.eventId)
+      await context.eventStore.recordExecutionPermit({
+        eventId: event.eventId,
+        deviceEpoch: 1,
+        leaseId: event.lease.id,
+        expiresAt: event.lease.expiresAt
+      })
+      await context.eventStore.beginExecution(event.eventId, `run:${event.eventId}`)
+      await context.eventStore.completeEvent(
+        event.eventId,
+        repliesFor(event, [event.eventId]),
+        "done"
+      )
+    }
+    for (const segment of context.eventStore
+      .listOutbox()
+      .filter((item) => item.eventId === deliveredEvent.eventId)) {
+      await context.eventStore.markOutboxSending(segment.outboxId)
+      await context.eventStore.markOutboxSent(segment.outboxId, `platform:${segment.outboxId}`)
+    }
+    const uncertainSegment = context.eventStore
+      .listOutbox()
+      .find((item) => item.eventId === uncertainEvent.eventId)!
+    await context.eventStore.markOutboxSending(uncertainSegment.outboxId)
+    await context.eventStore.markOutboxUnknown(uncertainSegment.outboxId, "PLATFORM_RESULT_UNKNOWN")
+    await context.eventStore.receiveEvent(queuedEvent, inboxTarget)
+    await context.eventStore.queueEvent(queuedEvent.eventId)
+
+    context.clock.now += 8 * 24 * 60 * 60 * 1_000
+    const removed = await context.eventStore.cleanupExpiredTerminalData()
+    assert.equal(removed.deletedEvents, 1)
+    assert.equal(context.eventStore.getEvent(deliveredEvent.eventId), null)
+    assert.equal(context.eventStore.getEvent(uncertainEvent.eventId)?.state, "completed")
+    assert.equal(context.eventStore.getEvent(queuedEvent.eventId)?.state, "queued")
+    assert.equal(context.eventStore.listOutbox("unknown").length, 1)
+  } finally {
+    context.database.close()
+  }
+}
+
 async function main(): Promise<void> {
   for (const test of [
     testFrozenContractFixtures,
@@ -612,6 +750,8 @@ async function main(): Promise<void> {
     testFlushFailureIsNeverAcknowledgedAsDurable,
     testIngressAckBoundariesAndReplay,
     testRestartRecoveryAndConversationQueue,
+    testDeviceTakeoverTerminalizesOldEpoch,
+    testRetentionKeepsLiveAndUncertainDeliveryState,
     testMockGatewayFaultMatrix
   ]) {
     await test()

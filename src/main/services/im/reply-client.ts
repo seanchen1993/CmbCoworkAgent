@@ -41,6 +41,18 @@ function errorDetails(error: unknown): {
   }
 }
 
+export interface ImReplyDrainResult {
+  sent: number
+  unknown: number
+  failed: number
+  deferred: number
+}
+
+// Scheduler, ingress and Agent completion can all request an outbox drain.
+// Serialize by store rather than by client instance so those entry points can
+// never submit the same durable segment concurrently.
+const activeDrains = new WeakMap<ImEventStore, Promise<ImReplyDrainResult>>()
+
 export class ImReplyClient {
   constructor(
     private readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
@@ -48,19 +60,53 @@ export class ImReplyClient {
     private readonly now: () => number = Date.now
   ) {}
 
-  async sendPending(): Promise<{
-    sent: number
-    unknown: number
-    failed: number
-    deferred: number
-  }> {
+  async sendPending(): Promise<ImReplyDrainResult> {
+    const active = activeDrains.get(this.eventStore)
+    if (active) return active
+    const drain = this.drainPending().finally(() => {
+      if (activeDrains.get(this.eventStore) === drain) activeDrains.delete(this.eventStore)
+    })
+    activeDrains.set(this.eventStore, drain)
+    return drain
+  }
+
+  private async drainPending(): Promise<ImReplyDrainResult> {
     const result = { sent: 0, unknown: 0, failed: 0, deferred: 0 }
-    const candidates = this.eventStore
-      .listOutbox("pending")
-      .filter((record) => record.nextAttemptAt === null || record.nextAttemptAt <= this.now())
-    for (const record of candidates) {
+    const records = this.eventStore.listOutbox()
+    const deliveryStates = new Map<string, Map<number, ImReplyOutboxRecord["state"]>>()
+    for (const record of records) {
+      const states = deliveryStates.get(record.deliveryId) ?? new Map()
+      states.set(record.segmentIndex, record.state)
+      deliveryStates.set(record.deliveryId, states)
+    }
+    for (const record of records) {
+      if (
+        record.state !== "pending" ||
+        (record.nextAttemptAt !== null && record.nextAttemptAt > this.now())
+      ) {
+        continue
+      }
+      const states = deliveryStates.get(record.deliveryId)!
+      let precedingSegmentsSent = true
+      for (let index = 0; index < record.segmentIndex; index += 1) {
+        if (states.get(index) !== "sent") {
+          precedingSegmentsSent = false
+          break
+        }
+      }
+      if (!precedingSegmentsSent) continue
       const outcome = await this.sendOne(record)
       result[outcome] += 1
+      states.set(
+        record.segmentIndex,
+        outcome === "sent"
+          ? "sent"
+          : outcome === "unknown"
+            ? "unknown"
+            : outcome === "failed"
+              ? "failed"
+              : "pending"
+      )
     }
     return result
   }

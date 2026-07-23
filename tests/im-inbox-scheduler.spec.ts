@@ -34,7 +34,6 @@ function taskFixture(expectedDeviceEpoch = 1): ScheduledTask {
     taskType: "reminder",
     modelId: null,
     workDir: target.workspacePath,
-    chatxRobotChatId: null,
     imDeliveryContext: {
       provider: "zhaohu",
       conversationKey: "conversation-1",

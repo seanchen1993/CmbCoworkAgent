@@ -4,6 +4,8 @@
 
 当前冻结范围：
 
+- `DesktopGatewayWsEnvelopeV1`：Desktop 与 Java Gateway 的完整 WSS envelope、握手、
+  心跳、ACK、permit、reply、takeover、sync 与错误关联；
 - `RemoteImEventV1`：网关向固定设备投递的单聊文本事件；
 - `RemoteImAckV1`：Desktop 在持久化边界后发送的事件 ACK；
 - `RemoteImReplyV1`：Desktop 写入本地 outbox 后提交给网关的文本分段。
@@ -19,6 +21,9 @@
 7. `completed` ACK 表示 Desktop 已把结果与完整回复 outbox 严格落盘，不表示平台已经送达；
 8. 相同 `idempotencyKey` 的重试必须逐字段相同，不得用新 key 绕过发送结果未知。
 
-TypeScript 的同构类型和额外跨字段校验位于 `src/shared/im-gateway-contract.ts`。文件名含 `.valid.json` 的 Golden fixtures 必须同时通过 Desktop 测试和 Java Gateway 的 schema validator；`.invalid-*.json` 必须得到对应的稳定拒绝。其中 `remote-reply.invalid-segment-relation.json` 是 JSON Schema 不能表达的跨字段反例，双方还必须执行 `index < count` 的业务校验。任一端需要增删字段时，必须先升级 schema/fixture 并由双方评审。
+TypeScript 的同构 payload 类型和额外跨字段校验位于 `src/shared/im-gateway-contract.ts`。文件名含 `.valid.json` 的 Golden fixtures 必须同时通过 Desktop 测试和 Java Gateway 的 schema validator；`.invalid-*.json` 必须得到对应的稳定拒绝。其中 `remote-reply.invalid-segment-relation.json` 是 JSON Schema 不能表达的跨字段反例，双方还必须执行 `index < count` 的业务校验。任一端需要增删字段时，必须先升级 schema/fixture 并由双方评审。
 
-WSS envelope、HELLO/permit/takeover/sync 以及平台 webhook 的完整 GW-00 契约仍由 `docs/chatx-unified-bot-gateway-java-development-plan.md` 规定的 Gateway 交付线冻结，不能用本目录当前三个 payload schema 冒充生产契约已全部关闭。
+WSS 入口见 `asyncapi/desktop-gateway-ws-v1.yaml`，全部帧以
+`schema/desktop-gateway-ws-v1.schema.json` 为准。平台 webhook、身份同步和平台下行 HTTP
+仍需由 `docs/chatx-unified-bot-gateway-java-development-plan.md` 的 GW-00 交付线冻结；WSS
+契约完成不代表生产外部依赖已经关闭。

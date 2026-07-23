@@ -4,7 +4,7 @@ import type { ImIngressResult } from "./ingress-sequencer"
 import { ImIngressSequencer } from "./ingress-sequencer"
 import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
 import { registerImInboxSchedulerGateway } from "./inbox-scheduler"
-import { ImRemoteRunner, createImTurnQueueHandler } from "./remote-runner"
+import { ImRemoteRunner, createImTurnQueueHandler, setRemoteThreadLifecycle } from "./remote-runner"
 import { ImCommandRouter, parseImCommand } from "./command-router"
 import { ImReplyClient } from "./reply-client"
 import { getBuiltinRobotSettings } from "../../storage"
@@ -25,11 +25,19 @@ export class ImUnifiedBotService {
   readonly commandRouter: ImCommandRouter
   readonly replyClient: ImReplyClient
   private readonly unregisterSchedulerGateway: () => void
+  private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
-  constructor(readonly gateway: ImGatewayClientPort = unavailableImGatewayClient) {
-    this.unregisterSchedulerGateway = registerImInboxSchedulerGateway(gateway)
-    this.runner = new ImRemoteRunner({ gateway })
+  constructor(
+    readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
+    options: { waitingDesktopTtlMs?: number } = {}
+  ) {
     this.replyClient = new ImReplyClient(gateway)
+    this.unregisterSchedulerGateway = registerImInboxSchedulerGateway(gateway, this.replyClient)
+    this.runner = new ImRemoteRunner({
+      gateway,
+      replyClient: this.replyClient,
+      ...(options.waitingDesktopTtlMs ? { waitingDesktopTtlMs: options.waitingDesktopTtlMs } : {})
+    })
     this.ingress = new ImIngressSequencer({
       emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack),
       replyClient: this.replyClient
@@ -105,15 +113,58 @@ export class ImUnifiedBotService {
     // Numbered selection lists are intentionally session-local. A restart must
     // never let an old number bind to a newly reordered project/Feature list.
     await imSelectionContextStore.clearAll()
-    return this.turnQueue.recoverAndStart()
+    await imEventStore.cleanupExpiredTerminalData()
+    await imEventStore.recoverInterruptedOutbox()
+    const recovered = await this.turnQueue.recoverAndStart(async (eventIds) => {
+      await Promise.all(
+        eventIds.map(async (eventId) => {
+          const event = imEventStore.getEvent(eventId)
+          if (event) await setRemoteThreadLifecycle(event, "outcome_unknown")
+        })
+      )
+    })
+    this.startOutboxRetryLoop()
+    return recovered
   }
 
   abortCurrent(conversationKey: string, eventId?: string): boolean {
     return this.turnQueue.abortCurrentImEvent(conversationKey, eventId)
   }
 
+  hasActiveRuns(): boolean {
+    return this.turnQueue.hasActiveRuns()
+  }
+
+  async resumeQueued(): Promise<void> {
+    await this.replyClient.sendPending()
+    await Promise.all(
+      imEventStore.listQueuedConversationKeys().map((key) => this.turnQueue.notify(key))
+    )
+  }
+
+  async handleLeaseRevoked(eventId: string, reasonCode = "LEASE_REVOKED"): Promise<void> {
+    if (this.runner.revokeExecutionPermit(eventId, reasonCode)) return
+    const event = imEventStore.getEvent(eventId)
+    if (!event) return
+    const terminal = await imEventStore.handlePermitRevoked(eventId, reasonCode)
+    if (terminal.state === "outcome_unknown") {
+      await setRemoteThreadLifecycle(terminal, "outcome_unknown")
+    }
+  }
+
   stop(): Promise<void> {
+    if (this.outboxRetryTimer) clearInterval(this.outboxRetryTimer)
+    this.outboxRetryTimer = undefined
     this.unregisterSchedulerGateway()
     return this.turnQueue.stop()
+  }
+
+  private startOutboxRetryLoop(): void {
+    if (this.outboxRetryTimer) return
+    this.outboxRetryTimer = setInterval(() => {
+      if (!this.gateway.isAuthenticated()) return
+      void this.replyClient.sendPending().catch(() => undefined)
+    }, 1_000)
+    this.outboxRetryTimer.unref?.()
   }
 }

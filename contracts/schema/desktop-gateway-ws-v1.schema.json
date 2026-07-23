@@ -1,0 +1,341 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatx.cmb.local/contracts/desktop-gateway-ws-v1.schema.json",
+  "title": "DesktopGatewayWsEnvelopeV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "type", "sentAt", "payload"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "type": {
+      "enum": [
+        "HELLO",
+        "HEARTBEAT",
+        "EVENT_ACK",
+        "EXECUTION_PERMIT_ACQUIRE",
+        "EXECUTION_PERMIT_RENEW",
+        "REMOTE_REPLY",
+        "ROUTE_TAKEOVER_REQUEST",
+        "SYNC_REQUEST",
+        "WELCOME",
+        "REMOTE_EVENT",
+        "PERMIT_RESULT",
+        "LEASE_REVOKED",
+        "REPLY_ACCEPTED",
+        "REPLY_RESULT",
+        "TAKEOVER_RESULT",
+        "SYNC_STATE",
+        "ERROR"
+      ]
+    },
+    "commandId": { "type": "string", "minLength": 1 },
+    "messageId": { "type": "string", "minLength": 1 },
+    "sentAt": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": [
+              "HELLO",
+              "HEARTBEAT",
+              "EVENT_ACK",
+              "EXECUTION_PERMIT_ACQUIRE",
+              "EXECUTION_PERMIT_RENEW",
+              "REMOTE_REPLY",
+              "ROUTE_TAKEOVER_REQUEST",
+              "SYNC_REQUEST",
+              "WELCOME",
+              "PERMIT_RESULT",
+              "REPLY_ACCEPTED",
+              "REPLY_RESULT",
+              "TAKEOVER_RESULT",
+              "SYNC_STATE"
+            ]
+          }
+        },
+        "required": ["type"]
+      },
+      "then": { "properties": { "commandId": {} }, "required": ["commandId"] }
+    },
+    {
+      "if": {
+        "properties": { "type": { "enum": ["REMOTE_EVENT", "LEASE_REVOKED"] } },
+        "required": ["type"]
+      },
+      "then": { "properties": { "messageId": {} }, "required": ["messageId"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "HELLO" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/hello" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "HEARTBEAT" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/heartbeat" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "EVENT_ACK" } }, "required": ["type"] },
+      "then": {
+        "properties": { "payload": { "$ref": "remote-im-ack-v1.schema.json" } }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "enum": ["EXECUTION_PERMIT_ACQUIRE", "EXECUTION_PERMIT_RENEW"] }
+        },
+        "required": ["type"]
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/permitRequest" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "REMOTE_REPLY" } }, "required": ["type"] },
+      "then": {
+        "properties": { "payload": { "$ref": "remote-im-reply-v1.schema.json" } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "ROUTE_TAKEOVER_REQUEST" } },
+        "required": ["type"]
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/takeoverRequest" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "SYNC_REQUEST" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/emptyPayload" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "WELCOME" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/welcome" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "REMOTE_EVENT" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/remoteEvent" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "PERMIT_RESULT" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/permitResult" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "LEASE_REVOKED" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/leaseRevoked" } } }
+    },
+    {
+      "if": {
+        "properties": { "type": { "enum": ["REPLY_ACCEPTED", "REPLY_RESULT"] } },
+        "required": ["type"]
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/replyResult" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "TAKEOVER_RESULT" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/takeoverResult" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "SYNC_STATE" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/syncState" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ERROR" } }, "required": ["type"] },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/error" } } }
+    }
+  ],
+  "$defs": {
+    "emptyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "hello": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceId", "deviceName", "appVersion", "capabilities"],
+      "properties": {
+        "deviceId": { "type": "string", "minLength": 1 },
+        "deviceName": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "appVersion": { "type": "string", "minLength": 1 },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["inbox", "feature", "scheduler", "hitl"] }
+        }
+      }
+    },
+    "heartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceId", "sessionId"],
+      "properties": {
+        "deviceId": { "type": "string", "minLength": 1 },
+        "sessionId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "permitRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventId", "lastLeaseId", "deviceEpoch"],
+      "properties": {
+        "eventId": { "type": "string", "minLength": 1 },
+        "lastLeaseId": { "type": "string", "minLength": 1 },
+        "deviceEpoch": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "takeoverRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationKey", "expectedEpoch", "mode"],
+      "properties": {
+        "conversationKey": { "type": "string", "minLength": 1 },
+        "expectedEpoch": { "type": "integer", "minimum": 1 },
+        "mode": { "enum": ["NORMAL", "FORCE"] }
+      }
+    },
+    "welcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "serverTime", "heartbeatIntervalSeconds"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "serverTime": { "type": "string", "format": "date-time" },
+        "heartbeatIntervalSeconds": { "type": "integer", "minimum": 5, "maximum": 300 }
+      }
+    },
+    "remoteEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event"],
+      "properties": { "event": { "$ref": "remote-im-event-v1.schema.json" } }
+    },
+    "permitResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["eventId", "status", "leaseId", "expiresAt"],
+          "properties": {
+            "eventId": { "type": "string", "minLength": 1 },
+            "status": { "const": "GRANTED" },
+            "leaseId": { "type": "string", "minLength": 1 },
+            "expiresAt": { "type": "string", "format": "date-time" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["eventId", "status", "reasonCode"],
+          "properties": {
+            "eventId": { "type": "string", "minLength": 1 },
+            "status": { "const": "DENIED" },
+            "reasonCode": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "leaseRevoked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventId", "reasonCode"],
+      "properties": {
+        "eventId": { "type": "string", "minLength": 1 },
+        "reasonCode": { "type": "string", "minLength": 1 }
+      }
+    },
+    "replyResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deliveryId", "idempotencyKey", "segmentIndex", "state"],
+          "properties": {
+            "deliveryId": { "type": "string", "minLength": 1 },
+            "idempotencyKey": { "type": "string", "minLength": 1 },
+            "segmentIndex": { "type": "integer", "minimum": 0, "maximum": 7 },
+            "state": { "const": "ACCEPTED" },
+            "platformReplyId": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deliveryId", "idempotencyKey", "segmentIndex", "state"],
+          "properties": {
+            "deliveryId": { "type": "string", "minLength": 1 },
+            "idempotencyKey": { "type": "string", "minLength": 1 },
+            "segmentIndex": { "type": "integer", "minimum": 0, "maximum": 7 },
+            "state": { "enum": ["UNKNOWN", "PLATFORM_UNKNOWN"] }
+          }
+        }
+      ]
+    },
+    "takeoverResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "conversationKey",
+            "principalId",
+            "previousDeviceEpoch",
+            "deviceEpoch",
+            "status"
+          ],
+          "properties": {
+            "conversationKey": { "type": "string", "minLength": 1 },
+            "principalId": { "type": "string", "minLength": 1 },
+            "previousDeviceEpoch": { "type": "integer", "minimum": 1 },
+            "deviceEpoch": { "type": "integer", "minimum": 2 },
+            "status": { "const": "SUCCESS" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["conversationKey", "previousDeviceEpoch", "status", "reasonCode"],
+          "properties": {
+            "conversationKey": { "type": "string", "minLength": 1 },
+            "previousDeviceEpoch": { "type": "integer", "minimum": 1 },
+            "status": { "const": "FAILED" },
+            "reasonCode": { "type": "string", "minLength": 1 },
+            "message": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationKey", "deviceEpoch", "state", "deviceId"],
+      "properties": {
+        "conversationKey": { "type": "string", "minLength": 1 },
+        "deviceEpoch": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["active", "suspended", "revoked"] },
+        "deviceId": { "type": "string", "minLength": 1 },
+        "deviceName": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "syncState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routes"],
+      "properties": {
+        "routes": { "type": "array", "items": { "$ref": "#/$defs/route" } }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reasonCode"],
+      "properties": {
+        "reasonCode": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "eventId": { "type": "string", "minLength": 1 },
+        "idempotencyKey": { "type": "string", "minLength": 1 },
+        "conversationKey": { "type": "string", "minLength": 1 },
+        "expectedEpoch": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

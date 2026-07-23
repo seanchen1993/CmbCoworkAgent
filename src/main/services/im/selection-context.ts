@@ -154,6 +154,13 @@ export class ImSelectionContextStore {
     if (database.getRowsModified() > 0) this.dependencies.markDirty()
     await this.dependencies.flushStrict()
   }
+
+  async clearConversation(conversationKey: string): Promise<void> {
+    const database = this.dependencies.getDatabase()
+    database.run("DELETE FROM im_selection_contexts WHERE conversation_key = ?", [conversationKey])
+    if (database.getRowsModified() > 0) this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
+  }
 }
 
 export const imSelectionContextStore = new ImSelectionContextStore({

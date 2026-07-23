@@ -33,18 +33,18 @@ function sliceBetween(source: string, start: string, end: string, label: string)
 const sources = {
   desktop: read("src/main/ipc/agent.ts"),
   standardTurn: read("src/main/agent/standard-thread-turn.ts"),
+  imRunner: read("src/main/services/im/remote-runner.ts"),
   scheduler: read("src/main/services/scheduler.ts"),
   heartbeat: read("src/main/services/heartbeat.ts"),
-  legacyChatx: read("src/main/services/chatx.ts"),
   runtime: read("src/main/agent/runtime.ts")
 }
 
 const expectedDirectCalls: Record<keyof typeof sources, number> = {
   desktop: 0,
   standardTurn: 0,
+  imRunner: 0,
   scheduler: 1,
   heartbeat: 1,
-  legacyChatx: 1,
   runtime: 4
 }
 
@@ -105,9 +105,9 @@ assert(
   "heartbeat Runtime must use its fixed, pinned service thread"
 )
 assert(
-  sources.legacyChatx.includes("findChatXThread(msg.chatId, msg.fromId)") &&
-    sources.legacyChatx.includes("releaseCheckpointerPin = pinCheckpointer(threadId)"),
-  "legacy ChatX Runtime must remain classified until clean-cut deletion"
+  sources.imRunner.includes("prepareStandardThreadRuntimeFactory({") &&
+    sources.imRunner.includes("executePreparedRemoteStandardTurn"),
+  "the IM runner must use the controlled standard-turn factory"
 )
 assert(
   count(sources.runtime, "threadId: workerInput.workerThreadId") >= 3 &&

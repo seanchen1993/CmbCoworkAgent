@@ -11,7 +11,6 @@ import {
 import { getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
-import { trySendChatXReply } from "./chatx"
 import {
   createAgentRuntime,
   closeCheckpointer,
@@ -92,7 +91,7 @@ export function stopScheduler(): void {
   }
   // Abort only — run state (runningTasks / activeAbortControllers) is released
   // by each executeTask's finally AFTER its own cleanup and checkpointer close
-  // settle (same owner-finally principle as stopChatX/stopHeartbeat). Clearing
+  // settle (the same owner-finally principle as heartbeat). Clearing
   // here would make isTaskRunning()/cancelTask() lie during the unwind window,
   // and a stop→start could re-run a task whose previous run is still settling.
   console.log("[Scheduler] Stopped scheduler service")
@@ -407,10 +406,6 @@ async function executeTask(taskId: string): Promise<void> {
         threadId,
         key: `scheduled-task:${taskId}:${startedAt.toISOString()}`
       })
-      // If task is linked to a ChatX robot, send reply via HTTP
-      if (task.chatxRobotChatId && lastAssistantText) {
-        trySendChatXReply(task.chatxRobotChatId, lastAssistantText)
-      }
       console.log(`[Scheduler] Task completed: ${task.name}`)
     } else {
       updateScheduledTaskRunResult(taskId, "error", "Cancelled by user")
@@ -499,7 +494,7 @@ async function executeTask(taskId: string): Promise<void> {
   } finally {
     releaseCheckpointerPin?.()
     // Close FIRST, then release run state, then broadcast — two contracts at
-    // once: (1) owner-finally principle (same as chatx/heartbeat): the task
+    // once: (1) owner-finally principle (same as heartbeat): the task
     // counts as running until its checkpointer close settles, so a runNow in
     // the close window is refused instead of overlapping a still-settling
     // run; (2) renderer contract: runningTasks is deleted BEFORE the done/

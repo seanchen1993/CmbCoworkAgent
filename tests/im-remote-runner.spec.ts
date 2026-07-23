@@ -240,6 +240,7 @@ async function testSuccessfulRunAndDurableOutbox(): Promise<void> {
     eventStore: context.events,
     capabilityGuard: capabilityGuard(context),
     replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    setThreadLifecycle: async () => undefined,
     createRunId: () => "run-1",
     executeTurn: async ({ event }) => {
       executions += 1
@@ -271,6 +272,7 @@ async function testForeignOwnerDefersWithoutRuntime(): Promise<void> {
     eventStore: context.events,
     capabilityGuard: capabilityGuard(context),
     replyClient: new ImReplyClient(gateway, context.events),
+    setThreadLifecycle: async () => undefined,
     createRunId: () => "run-im",
     executeTurn: async () => {
       executions += 1
@@ -298,6 +300,7 @@ async function testPermitRevocationBecomesOutcomeUnknown(): Promise<void> {
     eventStore: context.events,
     capabilityGuard: capabilityGuard(context),
     replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    setThreadLifecycle: async () => undefined,
     permitRenewIntervalMs: 5,
     createRunId: () => "run-revoked",
     executeTurn: ({ signal }) =>
@@ -326,6 +329,7 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
     conversationState: context.conversations,
     capabilityGuard: featureCapabilityGuard(context),
     replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    setThreadLifecycle: async () => undefined,
     createRunId: () => "run-feature-wait",
     executeTurn: async ({ event, interactionWaitHooks }) => {
       assert(interactionWaitHooks)
@@ -372,6 +376,7 @@ async function testFeatureDesktopWaitTimeoutCancelsOnlyEvent(): Promise<void> {
     conversationState: context.conversations,
     capabilityGuard: featureCapabilityGuard(context),
     replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    setThreadLifecycle: async () => undefined,
     createRunId: () => "run-feature-timeout",
     waitingDesktopTtlMs: 5,
     executeTurn: async ({ interactionWaitHooks, signal }) => {

@@ -31,32 +31,32 @@ V1 不需要微服务拆分，也不建议先引入 Redis。平台 webhook 落�
 
 主要风险与处理：
 
-| 风险 | 判断 | V1 处理 |
-| --- | --- | --- |
-| 平台签名、Token、回调 ACK 尚未闭合 | 高，生产阻塞 | GW-00 冻结正式 Adapter；Agent 不得猜测 |
-| OpenID 权威映射未确定 | 高，生产阻塞 | 身份同步先于消息使用；未知身份不投递桌面 |
-| 多实例 WSS 路由 | 中，可控 | node-local socket + DB session/generation + DB polling |
-| 外部副作用 exactly-once | 无法普遍保证 | lease、稳定幂等键和 `OUTCOME_UNKNOWN`，不自动重跑 |
-| 代码 Agent 能力有限 | 高，可控 | 一次一个 PR、冻结 schema、Testcontainers 和人工 gate |
+| 风险                               | 判断         | V1 处理                                                |
+| ---------------------------------- | ------------ | ------------------------------------------------------ |
+| 平台签名、Token、回调 ACK 尚未闭合 | 高，生产阻塞 | GW-00 冻结正式 Adapter；Agent 不得猜测                 |
+| OpenID 权威映射未确定              | 高，生产阻塞 | 身份同步先于消息使用；未知身份不投递桌面               |
+| 多实例 WSS 路由                    | 中，可控     | node-local socket + DB session/generation + DB polling |
+| 外部副作用 exactly-once            | 无法普遍保证 | lease、稳定幂等键和 `OUTCOME_UNKNOWN`，不自动重跑      |
+| 代码 Agent 能力有限                | 高，可控     | 一次一个 PR、冻结 schema、Testcontainers 和人工 gate   |
 
 ## 2. 开发前必须冻结的输入
 
 代码 Agent 不得猜测下列配置。负责人先填写“生产决定”，再开始 GW-01：
 
-| 决策项 | 本计划开发默认 | 生产决定/阻塞条件 |
-| --- | --- | --- |
-| 部署边界 | 单企业、单官方机器人、一套网关部署 | 若需要多企业，必须先补 tenant 隔离规格 |
-| JDK | Java 21 LTS | 若内网只允许 Java 17，在建仓前改定 |
-| Spring Boot | 使用内网批准的 Spring Boot 3.x parent/BOM | Agent 不得自行选择“最新版” |
-| 构建 | Maven Wrapper | 冻结内网仓库和 parent 坐标 |
-| 数据库 | PostgreSQL 15+ | 若改 MySQL/Oracle，先重写锁与迁移测试 |
-| 平台上行 | webhook 优先 | Kafka 只作为后续入站 Adapter，不与 webhook 同时首发 |
-| 桌面认证 | Bearer JWT，由 Spring Security Resource Server 验证 | 冻结 issuer/JWKS、audience 和 `principalId` claim |
-| 平台回调验真 | 入口网段 allowlist + 平台正式签名/认证 | 原文未定义签名；生产不得只信任请求体 |
-| 身份映射 | 权威服务同步 `principalId ↔ OpenID` 到网关 | 冻结同步方式、解绑和冲突处理 |
-| 敏感字段加密 | 内网 KMS/密码服务提供 approved codec | 禁止 Agent 自制生产加密算法 |
-| 机器人 Token | 内网 Vault/凭据服务 + 正式 Token Provider | 冻结获取、刷新、过期和轮换接口 |
-| 运行环境 | 至少两个实例 + 负载均衡；WSS 保持长连接 | 冻结 pod/nodeId、TLS、超时和容量 |
+| 决策项       | 本计划开发默认                                      | 生产决定/阻塞条件                                   |
+| ------------ | --------------------------------------------------- | --------------------------------------------------- |
+| 部署边界     | 单企业、单官方机器人、一套网关部署                  | 若需要多企业，必须先补 tenant 隔离规格              |
+| JDK          | Java 21 LTS                                         | 若内网只允许 Java 17，在建仓前改定                  |
+| Spring Boot  | 使用内网批准的 Spring Boot 3.x parent/BOM           | Agent 不得自行选择“最新版”                          |
+| 构建         | Maven Wrapper                                       | 冻结内网仓库和 parent 坐标                          |
+| 数据库       | PostgreSQL 15+                                      | 若改 MySQL/Oracle，先重写锁与迁移测试               |
+| 平台上行     | webhook 优先                                        | Kafka 只作为后续入站 Adapter，不与 webhook 同时首发 |
+| 桌面认证     | Bearer JWT，由 Spring Security Resource Server 验证 | 冻结 issuer/JWKS、audience 和 `principalId` claim   |
+| 平台回调验真 | 入口网段 allowlist + 平台正式签名/认证              | 原文未定义签名；生产不得只信任请求体                |
+| 身份映射     | 权威服务同步 `principalId ↔ OpenID` 到网关          | 冻结同步方式、解绑和冲突处理                        |
+| 敏感字段加密 | 内网 KMS/密码服务提供 approved codec                | 禁止 Agent 自制生产加密算法                         |
+| 机器人 Token | 内网 Vault/凭据服务 + 正式 Token Provider           | 冻结获取、刷新、过期和轮换接口                      |
+| 运行环境     | 至少两个实例 + 负载均衡；WSS 保持长连接             | 冻结 pod/nodeId、TLS、超时和容量                    |
 
 开发环境允许使用 Mock Identity、Mock Token Provider 和测试加密 codec，但这些 Bean 只能存在于 `local/test` profile。`prod` profile 缺少任何正式实现时必须启动失败，不能静默降级。
 
@@ -199,123 +199,123 @@ flowchart LR
 
 所有通过验真的平台回调先写本表，因此未知身份、不支持类型和重复回调也有稳定去重结果：
 
-| 字段 | 说明 |
-| --- | --- |
-| `inbox_id uuid PK` | 入站记录 |
-| `platform_message_id varchar(256)` | 平台 msgId，全局唯一 |
-| `from_id_fingerprint varchar(128)` | keyed fingerprint |
-| `from_id_ciphertext text` | 加密发送人 OpenID |
-| `robot_open_id_fingerprint varchar(128)` | 接收机器人标识 |
-| `message_type varchar(64)` | 原始 msgType |
-| `message_ciphertext text null` | 支持的文本正文 |
-| `occurred_at timestamptz` | 平台时间 |
-| `state varchar(32)` | `RECEIVED/NORMALIZED/IGNORED/IDENTITY_UNKNOWN` |
-| `event_id uuid null` | 成功归一化后的 event |
-| `result_code varchar(64)` | 稳定处理结果 |
+| 字段                                     | 说明                                           |
+| ---------------------------------------- | ---------------------------------------------- |
+| `inbox_id uuid PK`                       | 入站记录                                       |
+| `platform_message_id varchar(256)`       | 平台 msgId，全局唯一                           |
+| `from_id_fingerprint varchar(128)`       | keyed fingerprint                              |
+| `from_id_ciphertext text`                | 加密发送人 OpenID                              |
+| `robot_open_id_fingerprint varchar(128)` | 接收机器人标识                                 |
+| `message_type varchar(64)`               | 原始 msgType                                   |
+| `message_ciphertext text null`           | 支持的文本正文                                 |
+| `occurred_at timestamptz`                | 平台时间                                       |
+| `state varchar(32)`                      | `RECEIVED/NORMALIZED/IGNORED/IDENTITY_UNKNOWN` |
+| `event_id uuid null`                     | 成功归一化后的 event                           |
+| `result_code varchar(64)`                | 稳定处理结果                                   |
 
 唯一约束：`platform_message_id` 唯一。重复回调读取原记录并返回同一平台 ACK，不重新查身份、分配 seq 或生成提示消息。
 
 #### `chatx_gw_identity_binding`
 
-| 字段 | 说明 |
-| --- | --- |
-| `binding_id uuid PK` | 映射标识 |
-| `principal_id varchar(128)` | 企业主体 |
+| 字段                               | 说明              |
+| ---------------------------------- | ----------------- |
+| `binding_id uuid PK`               | 映射标识          |
+| `principal_id varchar(128)`        | 企业主体          |
 | `open_id_fingerprint varchar(128)` | keyed fingerprint |
-| `open_id_ciphertext text` | 加密 OpenID |
-| `status varchar(32)` | `ACTIVE/REVOKED` |
-| `version bigint` | CAS |
+| `open_id_ciphertext text`          | 加密 OpenID       |
+| `status varchar(32)`               | `ACTIVE/REVOKED`  |
+| `version bigint`                   | CAS               |
 
 唯一约束：active 映射中 `principal_id` 唯一、`open_id_fingerprint` 唯一。映射冲突必须拒绝并告警，不能覆盖。
 
 #### `chatx_gw_device`
 
-| 字段 | 说明 |
-| --- | --- |
+| 字段                        | 说明                  |
+| --------------------------- | --------------------- |
 | `device_id varchar(128) PK` | 桌面生成的稳定设备 ID |
 | `principal_id varchar(128)` | 必须等于认证 JWT 主体 |
-| `display_name varchar(128)` | 脱敏设备名 |
-| `preferred_remote boolean` | 首次 route 优先设备 |
-| `status varchar(32)` | `ACTIVE/REVOKED` |
-| `last_seen_at timestamptz` | 最近心跳 |
-| `version bigint` | CAS |
+| `display_name varchar(128)` | 脱敏设备名            |
+| `preferred_remote boolean`  | 首次 route 优先设备   |
+| `status varchar(32)`        | `ACTIVE/REVOKED`      |
+| `last_seen_at timestamptz`  | 最近心跳              |
+| `version bigint`            | CAS                   |
 
 唯一约束：一个 principal 最多一台 `preferred_remote=true` 设备；更新主设备必须事务化。
 
 #### `chatx_gw_device_session`
 
-| 字段 | 说明 |
-| --- | --- |
-| `session_id uuid PK` | 每次 WSS 连接唯一 |
-| `device_id varchar(128)` | 设备 |
-| `node_id varchar(128)` | 当前网关实例 |
-| `connection_generation bigint` | 防止旧 close 覆盖新连接 |
-| `state varchar(32)` | `ONLINE/OFFLINE/REVOKED` |
-| `connected_at/heartbeat_at/expires_at` | 在线窗口 |
+| 字段                                   | 说明                     |
+| -------------------------------------- | ------------------------ |
+| `session_id uuid PK`                   | 每次 WSS 连接唯一        |
+| `device_id varchar(128)`               | 设备                     |
+| `node_id varchar(128)`                 | 当前网关实例             |
+| `connection_generation bigint`         | 防止旧 close 覆盖新连接  |
+| `state varchar(32)`                    | `ONLINE/OFFLINE/REVOKED` |
+| `connected_at/heartbeat_at/expires_at` | 在线窗口                 |
 
 同一设备只允许最高 generation 为 ONLINE。旧连接的 heartbeat/close 必须被忽略。
 
 #### `chatx_gw_conversation`
 
-| 字段 | 说明 |
-| --- | --- |
-| `conversation_key uuid PK` | 发给客户端的 opaque key |
-| `principal_id varchar(128)` | 企业主体 |
-| `platform_conversation_fingerprint varchar(128)` | 单聊来源 fingerprint |
-| `next_sequence bigint` | 下一入站 seq，初始 1 |
-| `delivery_cursor_sequence bigint` | 已 durable received 或投递前已终结的连续最大 seq，初始 0 |
-| `device_wait_active boolean` | 当前是否处于“无设备等待”窗口 |
-| `device_wait_generation bigint` | 每次进入新等待窗口递增，用于提示幂等 |
-| `last_offline_notice_at timestamptz null` | 防止重复离线提示 |
-| `status varchar(32)` | `ACTIVE/SUSPENDED/REVOKED` |
-| `version bigint` | CAS |
+| 字段                                             | 说明                                                     |
+| ------------------------------------------------ | -------------------------------------------------------- |
+| `conversation_key uuid PK`                       | 发给客户端的 opaque key                                  |
+| `principal_id varchar(128)`                      | 企业主体                                                 |
+| `platform_conversation_fingerprint varchar(128)` | 单聊来源 fingerprint                                     |
+| `next_sequence bigint`                           | 下一入站 seq，初始 1                                     |
+| `delivery_cursor_sequence bigint`                | 已 durable received 或投递前已终结的连续最大 seq，初始 0 |
+| `device_wait_active boolean`                     | 当前是否处于“无设备等待”窗口                             |
+| `device_wait_generation bigint`                  | 每次进入新等待窗口递增，用于提示幂等                     |
+| `last_offline_notice_at timestamptz null`        | 防止重复离线提示                                         |
+| `status varchar(32)`                             | `ACTIVE/SUSPENDED/REVOKED`                               |
+| `version bigint`                                 | CAS                                                      |
 
 V1 单企业单机器人下，`platform_conversation_fingerprint` 唯一。
 
 #### `chatx_gw_conversation_route`
 
-| 字段 | 说明 |
-| --- | --- |
-| `conversation_key uuid PK/FK` | 会话 |
-| `device_id varchar(128)` | 固定设备 |
-| `device_epoch bigint` | 首次为 1，接管递增 |
-| `state varchar(32)` | `ACTIVE/SUSPENDED/REVOKED` |
-| `route_reason varchar(32)` | `PRIMARY/RECENT/TAKEOVER` |
-| `version bigint` | CAS |
+| 字段                          | 说明                       |
+| ----------------------------- | -------------------------- |
+| `conversation_key uuid PK/FK` | 会话                       |
+| `device_id varchar(128)`      | 固定设备                   |
+| `device_epoch bigint`         | 首次为 1，接管递增         |
+| `state varchar(32)`           | `ACTIVE/SUSPENDED/REVOKED` |
+| `route_reason varchar(32)`    | `PRIMARY/RECENT/TAKEOVER`  |
+| `version bigint`              | CAS                        |
 
 route 只在首次选路或显式接管时改变。普通重连、目标切换和消息处理不得递增 epoch。
 
 #### `chatx_gw_inbound_event`
 
-| 字段 | 说明 |
-| --- | --- |
-| `event_id uuid PK` | 网关事件 ID |
-| `platform_message_id varchar(256)` | 平台去重 ID |
-| `conversation_key uuid` | 会话 |
-| `conversation_sequence bigint` | 网关分配 seq |
-| `message_type varchar(32)` | V1 只允许 `TEXT` |
-| `message_ciphertext text` | 加密消息正文 |
-| `occurred_at timestamptz` | 平台消息时间 |
-| `state varchar(32)` | 见第 7 节 |
-| `reason_code varchar(64)` | 稳定原因码 |
-| `next_delivery_at timestamptz` | 重投时间 |
-| `received_ack_at/terminal_at` | 状态时间 |
-| `version bigint` | CAS |
+| 字段                               | 说明             |
+| ---------------------------------- | ---------------- |
+| `event_id uuid PK`                 | 网关事件 ID      |
+| `platform_message_id varchar(256)` | 平台去重 ID      |
+| `conversation_key uuid`            | 会话             |
+| `conversation_sequence bigint`     | 网关分配 seq     |
+| `message_type varchar(32)`         | V1 只允许 `TEXT` |
+| `message_ciphertext text`          | 加密消息正文     |
+| `occurred_at timestamptz`          | 平台消息时间     |
+| `state varchar(32)`                | 见第 7 节        |
+| `reason_code varchar(64)`          | 稳定原因码       |
+| `next_delivery_at timestamptz`     | 重投时间         |
+| `received_ack_at/terminal_at`      | 状态时间         |
+| `version bigint`                   | CAS              |
 
 唯一约束：`platform_message_id` 唯一；`conversation_key + conversation_sequence` 唯一。
 
 #### `chatx_gw_event_lease`
 
-| 字段 | 说明 |
-| --- | --- |
-| `lease_id uuid PK` | 下发给客户端 |
-| `event_id uuid` | 事件 |
-| `device_id varchar(128)` | 被授权设备 |
-| `device_epoch bigint` | 被授权 epoch |
-| `status varchar(32)` | `ACTIVE/REVOKED/EXPIRED` |
-| `expires_at/last_renewed_at/revoked_at` | 生命周期 |
-| `permit_acquired_at timestamptz null` | 客户端真正启动 Runtime 前置许可时间 |
-| `revoke_reason varchar(64)` | 接管、断开或终态 |
+| 字段                                    | 说明                                |
+| --------------------------------------- | ----------------------------------- |
+| `lease_id uuid PK`                      | 下发给客户端                        |
+| `event_id uuid`                         | 事件                                |
+| `device_id varchar(128)`                | 被授权设备                          |
+| `device_epoch bigint`                   | 被授权 epoch                        |
+| `status varchar(32)`                    | `ACTIVE/REVOKED/EXPIRED`            |
+| `expires_at/last_renewed_at/revoked_at` | 生命周期                            |
+| `permit_acquired_at timestamptz null`   | 客户端真正启动 Runtime 前置许可时间 |
+| `revoke_reason varchar(64)`             | 接管、断开或终态                    |
 
 一个 event 任一时刻只能有一个 ACTIVE lease。重投允许创建新 lease，但旧 lease 必须先失效。
 
@@ -325,26 +325,26 @@ route 只在首次选路或显式接管时改变。普通重连、目标切换�
 
 #### `chatx_gw_reply_outbox`
 
-| 字段 | 说明 |
-| --- | --- |
-| `reply_id uuid PK` | 回复记录 |
-| `source varchar(32)` | `CLIENT_REPLY/SYSTEM_NOTICE` |
-| `idempotency_key varchar(256)` | 客户端稳定键或网关生成的 system notice 稳定键 |
-| `platform_idempotency_uuid uuid` | 固定 `ROBOT-MESSAGE-ID` |
-| `delivery_id varchar(256)` | 一次完整回复/主动消息 |
-| `event_id uuid null` | Scheduler 主动消息可空 |
-| `conversation_key uuid null` | 正常回复/离线提示的会话目标 |
-| `direct_to_id_ciphertext text null` | 仅未知身份系统提示使用 |
-| `expected_device_epoch bigint null` | 客户端回复必须有；系统提示可空 |
-| `segment_index int` | **0-based** |
-| `segment_count int` | 1～8 |
-| `content_ciphertext text` | 加密正文 |
-| `state varchar(32)` | `PENDING/SENDING/SENT/UNKNOWN/PERMANENT_FAILED` |
-| `attempt_count/next_attempt_at` | 重试 |
-| `first_attempt_at timestamptz null` | 计算平台幂等安全窗口 |
-| `platform_message_id varchar(256)` | 成功后保存 |
-| `last_error_code varchar(64)` | 脱敏错误 |
-| `version bigint` | CAS |
+| 字段                                | 说明                                            |
+| ----------------------------------- | ----------------------------------------------- |
+| `reply_id uuid PK`                  | 回复记录                                        |
+| `source varchar(32)`                | `CLIENT_REPLY/SYSTEM_NOTICE`                    |
+| `idempotency_key varchar(256)`      | 客户端稳定键或网关生成的 system notice 稳定键   |
+| `platform_idempotency_uuid uuid`    | 固定 `ROBOT-MESSAGE-ID`                         |
+| `delivery_id varchar(256)`          | 一次完整回复/主动消息                           |
+| `event_id uuid null`                | Scheduler 主动消息可空                          |
+| `conversation_key uuid null`        | 正常回复/离线提示的会话目标                     |
+| `direct_to_id_ciphertext text null` | 仅未知身份系统提示使用                          |
+| `expected_device_epoch bigint null` | 客户端回复必须有；系统提示可空                  |
+| `segment_index int`                 | **0-based**                                     |
+| `segment_count int`                 | 1～8                                            |
+| `content_ciphertext text`           | 加密正文                                        |
+| `state varchar(32)`                 | `PENDING/SENDING/SENT/UNKNOWN/PERMANENT_FAILED` |
+| `attempt_count/next_attempt_at`     | 重试                                            |
+| `first_attempt_at timestamptz null` | 计算平台幂等安全窗口                            |
+| `platform_message_id varchar(256)`  | 成功后保存                                      |
+| `last_error_code varchar(64)`       | 脱敏错误                                        |
+| `version bigint`                    | CAS                                             |
 
 唯一约束：`idempotency_key` 唯一；`delivery_id + segment_index` 唯一。Check 约束要求 `conversation_key` 与 `direct_to_id_ciphertext` 恰好一个非空；direct target 只允许 `SYSTEM_NOTICE`。同 delivery 的 segmentCount 必须一致，只有 0..count-1 全部落库后才允许发送，并按 index 依次发送。
 
@@ -409,14 +409,14 @@ PENDING → SENDING → SENT
 
 ### 7.3 事务与锁边界
 
-| 操作 | 同一短事务内必须锁定/写入 | 事务外动作 |
-| --- | --- | --- |
-| webhook 入站 | platform inbox、identity lookup、conversation seq、event、route/system notice | 无；commit 后返回平台 ACK |
-| received ACK/投递前终结 | event、ACTIVE lease（如有）、conversation `delivery_cursor_sequence` | 推动下一次 dispatcher poll |
-| permit acquire/renew | session、route、event、lease | 返回 PERMIT_RESULT |
-| remote reply 接收 | route/epoch、幂等键、完整 outbox segment | 返回 REPLY_ACCEPTED |
-| outbox claim | reply 从 PENDING CAS 到 SENDING | 平台 HTTP；随后新事务写结果 |
-| takeover | route CAS、旧 epoch leases、旧 epoch 非终态 events、audit | 推送 LEASE_REVOKED/system notice |
+| 操作                    | 同一短事务内必须锁定/写入                                                     | 事务外动作                       |
+| ----------------------- | ----------------------------------------------------------------------------- | -------------------------------- |
+| webhook 入站            | platform inbox、identity lookup、conversation seq、event、route/system notice | 无；commit 后返回平台 ACK        |
+| received ACK/投递前终结 | event、ACTIVE lease（如有）、conversation `delivery_cursor_sequence`          | 推动下一次 dispatcher poll       |
+| permit acquire/renew    | session、route、event、lease                                                  | 返回 PERMIT_RESULT               |
+| remote reply 接收       | route/epoch、幂等键、完整 outbox segment                                      | 返回 REPLY_ACCEPTED              |
+| outbox claim            | reply 从 PENDING CAS 到 SENDING                                               | 平台 HTTP；随后新事务写结果      |
+| takeover                | route CAS、旧 epoch leases、旧 epoch 非终态 events、audit                     | 推送 LEASE_REVOKED/system notice |
 
 任何外部身份查询、平台 HTTP、WSS send、Vault/KMS 网络调用都不得发生在数据库事务中。生产 CryptoPort 应提供本地可调用的已初始化 codec，不能在每行加解密时远程请求 KMS。
 
@@ -493,6 +493,17 @@ ROBOT-MESSAGE-ID: <chatx_gw_reply_outbox.platform_idempotency_uuid>
 
 客户端命令必须有 `commandId`；服务端推送使用 `messageId`。所有命令先做 schema 校验和 command 去重。
 
+**响应关联是硬契约：**凡是命令产生的服务端响应，顶层必须原样回显请求的
+`commandId`。客户端按 `commandId` 关联 Promise，不允许只用 `eventId`、
+`deliveryId` 或 `conversationKey` 猜测响应，否则超时后的迟到响应会误完成下一条命令。
+`REMOTE_EVENT`、`LEASE_REVOKED` 等服务端主动推送使用 `messageId`，不复用
+`commandId`。
+
+客户端到网关的 WSS 超时或断线不等于平台发送结果未知：客户端会保留同一
+`idempotencyKey` 重新提交，网关必须用持久 reply outbox 返回第一次结果。只有网关在
+平台幂等窗口或结果查询后仍无法判断时，才返回 `UNKNOWN/PLATFORM_UNKNOWN`；客户端收到
+该明确状态后停止自动补发。
+
 ### 9.2 V1 消息类型
 
 客户端到网关：
@@ -511,12 +522,20 @@ ROBOT-MESSAGE-ID: <chatx_gw_reply_outbox.platform_idempotency_uuid>
 
 - `WELCOME`：`sessionId/serverTime/heartbeatIntervalSeconds`；
 - `REMOTE_EVENT`：`RemoteImEventV1`；
-- `PERMIT_RESULT`：`GRANTED/DENIED`、当前/新 leaseId、expiresAt 和 reasonCode；
+- `PERMIT_RESULT`：回显 `commandId`；payload 含 `eventId/status=GRANTED|DENIED`，
+  GRANTED 必须含当前/新 `leaseId/expiresAt`，DENIED 必须含稳定 `reasonCode`；
 - `LEASE_REVOKED`：接管或 route 撤销；
-- `REPLY_ACCEPTED/REPLY_RESULT`：outbox 持久化与最终平台状态；
-- `TAKEOVER_RESULT`；
+- `REPLY_ACCEPTED/REPLY_RESULT`：回显 `commandId`；payload 必须回显
+  `deliveryId/idempotencyKey`，并含 `state=ACCEPTED|UNKNOWN|PLATFORM_UNKNOWN` 与可选
+  `platformReplyId`；每个分段按自己的 idempotencyKey 独立确认；
+- `TAKEOVER_RESULT`：回显 `commandId`；payload 含
+  `conversationKey/principalId/previousDeviceEpoch/deviceEpoch/status/reasonCode?`。
+  SUCCESS 必须返回网关生成的不可逆 `principalId`，新设备不得用本地 sapId/ystId
+  自报主体；
 - `SYNC_STATE`；
-- `ERROR`：稳定 reasonCode，不含内部异常。
+- `ERROR`：稳定 reasonCode，不含内部异常。若用于拒绝某条命令，必须回显该命令的
+  `commandId`，并按命令类型同时回显 `eventId`、`idempotencyKey` 或
+  `conversationKey`；字段不匹配时客户端按协议错误断开，不能误完成其他请求。
 
 完整字段必须以 `contracts/asyncapi/desktop-gateway-ws-v1.yaml` 和 JSON Schema 为准；本文示例不是让 Agent自行增加字段的授权。
 
@@ -556,6 +575,13 @@ PLATFORM_RETRYABLE_FAILURE
 PLATFORM_PERMANENT_FAILURE
 PLATFORM_RESULT_UNKNOWN
 ```
+
+回复错误的客户端处置必须固定：`DEVICE_OFFLINE/AUTH_REQUIRED/PLATFORM_RETRYABLE_FAILURE`
+保留原 outbox 与 `idempotencyKey` 退避重试；`PLATFORM_RESULT_UNKNOWN` 进入 UNKNOWN、停止
+自动补发；`ROUTE_NOT_FOUND/ROUTE_EPOCH_CONFLICT/ROUTE_OWNED_BY_OTHER_DEVICE/DEVICE_REVOKED/
+REPLY_IDEMPOTENCY_CONFLICT/SEGMENT_INVALID/OUTBOX_INCOMPLETE/PLATFORM_PERMANENT_FAILURE`
+进入永久失败。其他新增 reasonCode 在契约冻结时必须明确归类，客户端对未知错误默认按
+可重试处理，不能静默丢回复。
 
 对外 reasonCode 与内部异常类型分离；数据库错误、堆栈、SQL、URL、OpenID 和 Token 不得进入 ERROR payload。
 
@@ -641,17 +667,17 @@ V1 不使用 Redis，采用以下方案：
 
 这些是开发默认，不是生产 SLO：
 
-| 配置 | 默认 |
-| --- | --- |
-| WSS heartbeat | 15 秒 |
-| session offline | 45 秒 |
-| event lease | 90 秒 |
-| lease renew | 30 秒 |
-| received ACK 超时 | 15 秒后重投 |
-| 无设备等待 | 24 小时 |
-| 终态事件/命令去重保留 | 7 天 |
-| 平台幂等安全重试窗口 | 最多 8 分钟 |
-| dispatcher/outbox batch | 100 |
+| 配置                    | 默认        |
+| ----------------------- | ----------- |
+| WSS heartbeat           | 15 秒       |
+| session offline         | 45 秒       |
+| event lease             | 90 秒       |
+| lease renew             | 30 秒       |
+| received ACK 超时       | 15 秒后重投 |
+| 无设备等待              | 24 小时     |
+| 终态事件/命令去重保留   | 7 天        |
+| 平台幂等安全重试窗口    | 最多 8 分钟 |
+| dispatcher/outbox batch | 100         |
 
 ### 13.2 启动恢复
 

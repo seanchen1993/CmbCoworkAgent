@@ -23,6 +23,10 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
+  BuiltinRobotTakeoverRequest,
+  BuiltinRobotTakeoverResult,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -36,7 +40,6 @@ import type {
   PluginDetail,
   PluginMetadata,
   SkillHookMetadata,
-  ChatXConfig,
   HookLoggingConfig,
   AgentAutoCommitSettings,
   AgentAutoCommitWorkspaceCard,
@@ -2141,6 +2144,25 @@ const api = {
       }
     }
   },
+  builtinRobot: {
+    getStatus: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:getStatus") as Promise<BuiltinRobotStatus>,
+    saveSettings: (updates: Partial<BuiltinRobotSettings>): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:saveSettings", updates) as Promise<BuiltinRobotStatus>,
+    reconnect: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:reconnect") as Promise<BuiltinRobotStatus>,
+    disconnect: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:disconnect") as Promise<BuiltinRobotStatus>,
+    takeover: (request: BuiltinRobotTakeoverRequest): Promise<BuiltinRobotTakeoverResult> =>
+      ipcRenderer.invoke("builtinRobot:takeover", request) as Promise<BuiltinRobotTakeoverResult>,
+    cleanupLegacy: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:cleanupLegacy", { confirmed: true }) as Promise<BuiltinRobotStatus>,
+    onStatus: (callback: (status: BuiltinRobotStatus) => void): (() => void) => {
+      const handler = (_event: unknown, status: BuiltinRobotStatus): void => callback(status)
+      ipcRenderer.on("builtinRobot:status", handler)
+      return () => ipcRenderer.removeListener("builtinRobot:status", handler)
+    }
+  },
   skillEvolution: {
     // ── Phase 1: Intent banner ("Want to save as skill?") ──────────
     onIntentRequest: (
@@ -2339,15 +2361,6 @@ const api = {
         success: boolean
         error?: string
       }>
-  },
-  chatx: {
-    getConfig: (): Promise<ChatXConfig> =>
-      ipcRenderer.invoke("chatx:get-config") as Promise<ChatXConfig>,
-    saveConfig: (updates: Partial<ChatXConfig>): Promise<void> =>
-      ipcRenderer.invoke("chatx:save-config", updates) as Promise<void>,
-    restart: (): Promise<void> => ipcRenderer.invoke("chatx:restart") as Promise<void>,
-    cancelByThread: (threadId: string): Promise<boolean> =>
-      ipcRenderer.invoke("chatx:cancel-by-thread", threadId) as Promise<boolean>
   },
   sandbox: {
     getMode: (): Promise<"none" | "unelevated" | "readonly" | "elevated"> =>

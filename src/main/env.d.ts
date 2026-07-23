@@ -1,10 +1,7 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  readonly VITE_CHATX_WS_URL?: string
-  readonly VITE_CHATX_HTTP_URL?: string
-  readonly VITE_CHATX_CHANNEL?: string
-  readonly VITE_CHATX_CALLBACK_URL?: string
+  readonly VITE_UNIFIED_IM_GATEWAY_WS_URL?: string
   readonly VITE_API_BASE_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_LIST?: string

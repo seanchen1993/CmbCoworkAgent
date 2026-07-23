@@ -14,11 +14,18 @@ export type ImInboxScheduledRunResult =
   | { status: "deferred"; reasonCode: string }
 
 let configuredGateway: ImGatewayClientPort = unavailableImGatewayClient
+let configuredReplyClient: ImReplyClient | null = null
 
-export function registerImInboxSchedulerGateway(gateway: ImGatewayClientPort): () => void {
+export function registerImInboxSchedulerGateway(
+  gateway: ImGatewayClientPort,
+  replyClient: ImReplyClient
+): () => void {
   configuredGateway = gateway
+  configuredReplyClient = replyClient
   return () => {
-    if (configuredGateway === gateway) configuredGateway = unavailableImGatewayClient
+    if (configuredGateway !== gateway) return
+    configuredGateway = unavailableImGatewayClient
+    configuredReplyClient = null
   }
 }
 
@@ -99,7 +106,11 @@ export async function executeImInboxScheduledTask(
   const conversationState = options.conversationState ?? imConversationStateStore
   const eventStore = options.eventStore ?? imEventStore
   const capabilityGuard = options.capabilityGuard ?? imRemoteCapabilityGuard
-  const replyClient = options.replyClient ?? new ImReplyClient(gateway, eventStore)
+  const replyClient =
+    options.replyClient ??
+    (gateway === configuredGateway && configuredReplyClient
+      ? configuredReplyClient
+      : new ImReplyClient(gateway, eventStore))
   const executeTurn = options.executeTurn ?? executePreparedRemoteStandardTurn
   const now = options.now ?? Date.now
   if (!gateway.isAuthenticated()) {

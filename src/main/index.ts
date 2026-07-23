@@ -50,7 +50,7 @@ const EVENT_CATEGORIES = new Set<EventCategory>([
   "heartbeat",
   "memory",
   "hook",
-  "chatx",
+  "im",
   "workspace"
 ])
 
@@ -222,7 +222,6 @@ import { registerPluginHandlers } from "./ipc/plugins"
 import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
-import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
 import { flushHookLogs, pruneOldHookLogs } from "./hooks/persistence"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
@@ -238,6 +237,7 @@ import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
+import { registerBuiltinRobotHandlers } from "./ipc/builtin-robot"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -261,7 +261,6 @@ import {
   stopHeartbeat,
   stopHeartbeatAndWait
 } from "./services/heartbeat"
-import { hasActiveChatXRuns, startChatX, stopChatX, stopChatXAndWait } from "./services/chatx"
 import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
@@ -280,6 +279,7 @@ import {
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
+import { builtinRobotManager } from "./services/im/manager"
 import {
   configurePetWindow,
   createPetWindow,
@@ -417,9 +417,9 @@ function clearCloseToTrayPromptState(): void {
 function hasActiveForegroundRuns(): boolean {
   return (
     hasAnyActiveAgentTasks() ||
-    hasActiveChatXRuns() ||
     hasActiveScheduledTaskRuns() ||
-    isHeartbeatRunning()
+    isHeartbeatRunning() ||
+    builtinRobotManager.hasActiveRuns()
   )
 }
 
@@ -737,7 +737,6 @@ if (!gotTheLock) {
     registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
     registerOptimizerHandlers(ipcMain)
-    registerChatXHandlers(ipcMain)
     registerHooksHandlers(ipcMain)
     // Best-effort cleanup of stale hook-log jsonl files. Doesn't block startup.
     void pruneOldHookLogs().catch((e) => console.warn("[Main] pruneOldHookLogs error:", e))
@@ -757,6 +756,7 @@ if (!gotTheLock) {
     registerTaskCardHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
+    registerBuiltinRobotHandlers(ipcMain)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -812,8 +812,8 @@ if (!gotTheLock) {
         return
       }
 
-      // A background ChatX message can start while the ordinary close prompt is
-      // open. Upgrade to the non-suppressible safety prompt before quitting.
+      // A background task can start while the ordinary close prompt is open.
+      // Upgrade to the non-suppressible safety prompt before quitting.
       if (needsActiveRunConfirmation()) {
         clearCloseToTrayPromptState()
         requestWindowCloseChoice(promptWindow, "active-runs")
@@ -977,9 +977,9 @@ if (!gotTheLock) {
     await initialModelCatalogLoad
 
     // Start scheduled task scheduler and heartbeat service
+    await builtinRobotManager.start(app.getVersion())
     startScheduler()
     startHeartbeat()
-    startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
     markFullBackupCleanupReady(selfCheckResult)
@@ -1046,9 +1046,9 @@ if (!gotTheLock) {
       try {
         const shutdownResults = await Promise.allSettled([
           shutdownAllAgentTasks(5_000),
-          stopChatXAndWait(5_000),
           stopSchedulerAndWait(5_000),
-          stopHeartbeatAndWait(5_000)
+          stopHeartbeatAndWait(5_000),
+          builtinRobotManager.stop()
         ])
         for (const result of shutdownResults) {
           if (result.status === "rejected") {
@@ -1090,7 +1090,6 @@ if (!gotTheLock) {
     LocalSandbox.killAll()
     stopScheduler()
     stopHeartbeat()
-    stopChatX()
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
@@ -1103,6 +1102,9 @@ if (!gotTheLock) {
     }
 
     const cleanup = Promise.all([
+      builtinRobotManager.stop().catch((err) =>
+        console.warn("[Main] stop built-in robot error:", err)
+      ),
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))

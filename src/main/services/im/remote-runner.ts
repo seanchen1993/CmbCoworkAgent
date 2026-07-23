@@ -36,7 +36,7 @@ import { runCompletionHooksWithRevision } from "../../agent/skill-lifecycle/comp
 import { createSkillUseTracker } from "../../agent/skill-lifecycle/tracker"
 import { createPersistentThreadHookScope } from "../../hooks/thread-scope-persistence"
 import { makeBroadcastHookResultCallback } from "../../hooks/result-callback"
-import { flushStrict, updateThread } from "../../db"
+import { flushStrict, getThread, updateThread } from "../../db"
 import { rememberRoutingDecision } from "../../routing"
 import {
   discardAgentAutoCommitTracking,
@@ -63,6 +63,7 @@ import {
 } from "./gateway-client"
 import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
 import { ImReplyClient } from "./reply-client"
+import { trackEvent } from "../event-reporter"
 
 const IM_INBOX_BLOCKED_TOOLS = [
   "execute",
@@ -126,7 +127,15 @@ export interface ImRemoteRunnerDependencies {
   createRunId: () => string
   permitRenewIntervalMs: number
   waitingDesktopTtlMs: number
+  setThreadLifecycle: (event: ImEventRecord, state: ImRemoteThreadLifecycleState) => Promise<void>
 }
+
+export type ImRemoteThreadLifecycleState =
+  | "active"
+  | "waiting_desktop"
+  | "failed"
+  | "rejected"
+  | "outcome_unknown"
 
 class ImPreparedPromptRejectedError extends Error {
   readonly reasonCode = "REMOTE_PROMPT_BLOCKED"
@@ -175,6 +184,31 @@ function failureReply(reasonCode: string, retryable: boolean, eventId: string): 
   return retryable
     ? `处理失败，可稍后重试。事件短码：${code}。`
     : `处理失败。事件短码：${code}，请在桌面查看详情。`
+}
+
+export async function setRemoteThreadLifecycle(
+  event: ImEventRecord,
+  state: ImRemoteThreadLifecycleState
+): Promise<void> {
+  const threadId = event.targetSnapshot?.threadId
+  if (!threadId) return
+  const thread = getThread(threadId)
+  if (!thread) return
+  let metadata: Record<string, unknown> = {}
+  try {
+    metadata = thread.metadata ? (JSON.parse(thread.metadata) as Record<string, unknown>) : {}
+  } catch {
+    metadata = {}
+  }
+  if (metadata.remoteState === "historical") return
+  if (state === "rejected" && metadata.remoteState === "suspended") {
+    await flushStrict()
+    notifyRemoteThreadChanged()
+    return
+  }
+  updateThread(threadId, { metadata: JSON.stringify({ ...metadata, remoteState: state }) })
+  await flushStrict()
+  notifyRemoteThreadChanged()
 }
 
 export function createImInboxRemotePolicy(): RemoteTurnPolicy {
@@ -444,6 +478,7 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
 
 export class ImRemoteRunner {
   private readonly dependencies: ImRemoteRunnerDependencies
+  private readonly activePermitRevocations = new Map<string, (reasonCode: string) => void>()
 
   constructor(dependencies: Partial<ImRemoteRunnerDependencies> = {}) {
     const gateway = dependencies.gateway ?? unavailableImGatewayClient
@@ -457,8 +492,16 @@ export class ImRemoteRunner {
       executeTurn: dependencies.executeTurn ?? executePreparedImStandardTurn,
       createRunId: dependencies.createRunId ?? randomUUID,
       permitRenewIntervalMs: dependencies.permitRenewIntervalMs ?? 30_000,
-      waitingDesktopTtlMs: dependencies.waitingDesktopTtlMs ?? DEFAULT_WAITING_DESKTOP_TTL_MS
+      waitingDesktopTtlMs: dependencies.waitingDesktopTtlMs ?? DEFAULT_WAITING_DESKTOP_TTL_MS,
+      setThreadLifecycle: dependencies.setThreadLifecycle ?? setRemoteThreadLifecycle
     }
+  }
+
+  revokeExecutionPermit(eventId: string, reasonCode = "LEASE_REVOKED"): boolean {
+    const revoke = this.activePermitRevocations.get(eventId)
+    if (!revoke) return false
+    revoke(reasonCode)
+    return true
   }
 
   async invoke(event: ImEventRecord, queueSignal: AbortSignal): Promise<ImRemoteRunDisposition> {
@@ -500,6 +543,11 @@ export class ImRemoteRunner {
     const abortExecution = (reason: Error): void => {
       if (!executionAbort.signal.aborted) executionAbort.abort(reason)
     }
+    const revokeActivePermit = (reasonCode: string): void => {
+      permitRevokedReason = reasonCode
+      abortExecution(new Error("IM execution permit was revoked"))
+    }
+    this.activePermitRevocations.set(event.eventId, revokeActivePermit)
     const interactionWaitHooks: RuntimeInteractionWaitHooks | undefined =
       target.kind === "feature"
         ? {
@@ -517,6 +565,7 @@ export class ImRemoteRunner {
                   const waiting = await this.dependencies.eventStore.markWaitingDesktop(
                     latest.eventId
                   )
+                  await this.dependencies.setThreadLifecycle(waiting, "waiting_desktop")
                   await this.dependencies.eventStore.enqueueProactiveReplies(
                     buildImProactiveReplies({
                       deliveryId: `${event.eventId}:waiting-desktop`,
@@ -582,7 +631,10 @@ export class ImRemoteRunner {
                     }
                     throw new Error(`IM capability changed while waiting: ${capability.reasonCode}`)
                   }
-                  await this.dependencies.eventStore.resumeFromDesktop(permitted.eventId)
+                  const resumed = await this.dependencies.eventStore.resumeFromDesktop(
+                    permitted.eventId
+                  )
+                  await this.dependencies.setThreadLifecycle(resumed, "active")
                   if (waitingTimer) {
                     clearTimeout(waitingTimer)
                     waitingTimer = undefined
@@ -650,7 +702,8 @@ export class ImRemoteRunner {
       if (!decision.allowed) {
         return await this.finalizeRejected(latest, decision.reasonCode, decision.message)
       }
-      await this.dependencies.eventStore.beginExecution(latest.eventId, runId)
+      const begun = await this.dependencies.eventStore.beginExecution(latest.eventId, runId)
+      await this.dependencies.setThreadLifecycle(begun, "active")
       const result = await this.dependencies.executeTurn({
         event: this.dependencies.eventStore.getEvent(latest.eventId) ?? latest,
         runId,
@@ -771,6 +824,9 @@ export class ImRemoteRunner {
       await this.deliverAndAcknowledge(terminal)
       return "failed"
     } finally {
+      if (this.activePermitRevocations.get(event.eventId) === revokeActivePermit) {
+        this.activePermitRevocations.delete(event.eventId)
+      }
       clearInterval(renewTimer)
       if (waitingTimer) clearTimeout(waitingTimer)
       queueSignal.removeEventListener("abort", abortFromQueue)
@@ -813,6 +869,27 @@ export class ImRemoteRunner {
   }
 
   private async deliverAndAcknowledge(event: ImEventRecord): Promise<void> {
+    await this.dependencies.setThreadLifecycle(
+      event,
+      event.state === "completed" || event.state === "cancelled"
+        ? "active"
+        : event.state === "outcome_unknown"
+          ? "outcome_unknown"
+          : event.state === "rejected"
+            ? "rejected"
+            : "failed"
+    )
+    trackEvent("im.event.processed", "im", {
+      outcome:
+        event.state === "completed"
+          ? "completed"
+          : event.state === "cancelled"
+            ? "cancelled"
+            : event.state === "outcome_unknown"
+              ? "outcome_unknown"
+              : "error",
+      targetKind: event.targetSnapshot?.kind ?? "unknown"
+    })
     await this.dependencies.replyClient.sendPending()
     await this.dependencies.gateway.sendAcknowledgement(acknowledgementForTerminal(event))
   }

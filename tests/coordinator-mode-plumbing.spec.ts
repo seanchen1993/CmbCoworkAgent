@@ -2440,64 +2440,6 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     /finally \{\s*if \(deletingThreads\.get\(threadId\) === deletion\) deletingThreads\.delete\(threadId\)/,
     "the deletion mutex entry is released on success AND failure (finally), so a failed delete can be retried"
   )
-  const chatxService = await readProjectFile("src/main/services/chatx.ts")
-  assertIncludes(
-    chatxService,
-    "handleInbound(next, true)",
-    "chatx queue drain must skip receipt-dedup — the entry's id was marked when it was queued, so re-checking silently dropped every queued message"
-  )
-  assertOccurrenceCount(
-    chatxService,
-    "abortController.signal.reason === CHATX_STOP_ABORT_REASON",
-    1,
-    "the stop reason may be consulted ONCE, in the abort CLASSIFICATION only — never for a handler-side dedup release (stopChatX's synchronous release is the single point; a second delete can strip a redelivered copy's fresh mark)"
-  )
-  const chatxRunFinally = chatxService.slice(
-    chatxService.indexOf('  } finally {\n    try {\n      trackEvent("chatx.message.processed"')
-  )
-  assertSourceOrder(
-    chatxService,
-    "const replySent = lastAssistantText",
-    'processedOutcome = "replied"',
-    "the replied outcome is claimed only AFTER the HTTP send is verified — a swallowed send failure must not masquerade as 回复完成 while the remote got nothing"
-  )
-  assertOccurrenceCount(
-    chatxService,
-    "drainNextQueued(",
-    5,
-    "queue draining continues on EVERY requeued exit (definition + main finally + robot-gone + workspace-missing + setup-failure) — an early-exiting requeued message must not strand the backlog"
-  )
-  {
-    const stopChatXBody = chatxService.slice(
-      chatxService.indexOf("export function stopChatX"),
-      chatxService.indexOf("export function cancelChatXByThreadId")
-    )
-    assertIncludes(
-      stopChatXBody,
-      "processedMsgIds.delete(queued.msgId)",
-      "stopChatX releases the dedup marks of the queued messages it drops — dropped ≠ processed, broker redeliveries must still land after a restart"
-    )
-    assertMatches(
-      chatxService,
-      /inFlightMsgIds\.delete\(chatKey\)[\s\S]{0,900}?sendChatXReply/,
-      "the success branch removes the message from the stop-releasable set BEFORE the reply is sent — a stop landing after the reply must not re-open an already-answered msgId for redelivery (duplicate tools/replies)"
-    )
-    assertIncludes(
-      stopChatXBody,
-      "processedMsgIds.delete(activeMsgId)",
-      "stopChatX releases the ACTIVE message's dedup mark synchronously at abort — the handler's finally-release loses the race against a quick reconnect's broker redelivery"
-    )
-    assertIncludes(
-      stopChatXBody,
-      "controller.abort(CHATX_STOP_ABORT_REASON)",
-      "stopChatX carries its intent ON the abort signal — the global `stopped` flag is reset by restartChatX before the aborted handler's catch runs, so a flag check there swallows broker redeliveries"
-    )
-    assertNotIncludes(
-      stopChatXBody,
-      "runningChats.clear()",
-      "stopChatX must NOT clear owner-managed run state — the handler's finally does, after its close settles (else stop→restart reopens the dual-writer window on a reused chat thread)"
-    )
-  }
   const schedulerService = await readProjectFile("src/main/services/scheduler.ts")
   assertSourceOrder(
     schedulerService,
@@ -2505,34 +2447,17 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "runningTasks.delete(taskId)",
     "scheduler run state survives until the checkpointer close settles (owner-finally), while still deleting before the renderer broadcast"
   )
-  for (const [label, source] of [
-    ["chatx", chatxService],
-    ["scheduler", schedulerService]
-  ] as const) {
-    assertSourceOrder(
-      source,
-      "dbDeleteThread(threadId)",
-      "purgeThreadCheckpointArtifacts(threadId)",
-      `${label}'s discarded-thread cleanup deletes the transcript too (retire + purge), matching threads:delete semantics — a bare DB-row delete leaves an orphan checkpoint the finally's reusable close just flushed`
-    )
-    assertSourceOrder(
-      source,
-      "await retireThreadCheckpointers(threadId)",
-      "purgeThreadCheckpointArtifacts(threadId)",
-      `${label}'s discarded-thread cleanup must RETIRE before purging (writers poisoned before the disk sweep) — dbDelete + purge without retire would let the finally's reusable close resurrect the file`
-    )
-  }
   assertSourceOrder(
-    chatxService,
-    "await closeCheckpointer(threadId)",
-    'releaseLocalThreadRunLease(threadId, "im", chatxRunId)',
-    "chatx releases its local Thread lease only after checkpointer close"
+    schedulerService,
+    "dbDeleteThread(threadId)",
+    "purgeThreadCheckpointArtifacts(threadId)",
+    "scheduler discarded-thread cleanup deletes the transcript and checkpoint artifacts"
   )
   assertSourceOrder(
-    chatxRunFinally,
-    'releaseLocalThreadRunLease(threadId, "im", chatxRunId)',
-    "runningChats.delete(chatKey)",
-    "chatx keeps its runningChats gate up until the checkpointer close settles — an inbound in the close window would pin, skip the pending-close wait, and dual-write the reused thread's sqlite (heartbeat's finally, same family)"
+    schedulerService,
+    "await retireThreadCheckpointers(threadId)",
+    "purgeThreadCheckpointArtifacts(threadId)",
+    "scheduler discarded-thread cleanup retires writers before purging"
   )
   {
     const stopSchedulerBody = schedulerService.slice(
@@ -2547,7 +2472,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     assertNotIncludes(
       stopSchedulerBody,
       "runningTasks.clear()",
-      "stopScheduler must NOT clear run state — executeTask's finally releases it after its own cleanup settles (owner-finally principle, same as stopChatX/stopHeartbeat)"
+      "stopScheduler must NOT clear run state — executeTask's finally releases it after its own cleanup settles"
     )
     assertNotIncludes(
       stopSchedulerBody,

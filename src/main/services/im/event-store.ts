@@ -864,6 +864,29 @@ export class ImEventStore {
     return interrupted
   }
 
+  async recoverInterruptedOutbox(): Promise<string[]> {
+    const database = this.dependencies.getDatabase()
+    const interrupted = readAll<{ outbox_id: string }>(
+      database,
+      "SELECT outbox_id FROM im_reply_outbox WHERE state = 'sending' ORDER BY created_at ASC, segment_index ASC"
+    ).map((row) => row.outbox_id)
+    if (interrupted.length === 0) {
+      await this.dependencies.flushStrict()
+      return []
+    }
+    const now = this.dependencies.now()
+    database.run(
+      `UPDATE im_reply_outbox
+       SET state = 'pending', next_attempt_at = ?,
+           reason_code = 'CLIENT_RESTART_RETRY', updated_at = ?
+       WHERE state = 'sending'`,
+      [now, now]
+    )
+    this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
+    return interrupted
+  }
+
   listOutbox(state?: ImReplyOutboxState): ImReplyOutboxRecord[] {
     const rows = state
       ? readAll<ImReplyOutboxRow>(
@@ -907,6 +930,118 @@ export class ImEventStore {
       nextAttemptAt,
       reasonCode
     })
+  }
+
+  getStatusSummary(): { eventCounts: Record<string, number>; pendingOutboxCount: number } {
+    const eventCounts: Record<string, number> = {}
+    for (const row of readAll<{ state: string; count: number }>(
+      this.dependencies.getDatabase(),
+      "SELECT state, COUNT(*) AS count FROM im_events GROUP BY state"
+    )) {
+      eventCounts[row.state] = Number(row.count)
+    }
+    const pending = readOne<{ count: number }>(
+      this.dependencies.getDatabase(),
+      "SELECT COUNT(*) AS count FROM im_reply_outbox WHERE state IN ('pending', 'sending', 'unknown')"
+    )
+    return { eventCounts, pendingOutboxCount: Number(pending?.count ?? 0) }
+  }
+
+  async applyDeviceTakeover(
+    conversationKey: string,
+    expectedDeviceEpoch: number
+  ): Promise<{ cancelledEventIds: string[]; outcomeUnknownEventIds: string[] }> {
+    const database = this.dependencies.getDatabase()
+    const cancellable = readAll<{ event_id: string }>(
+      database,
+      `SELECT event_id FROM im_events
+       WHERE conversation_key = ? AND device_epoch = ? AND state IN ('received', 'queued')`,
+      [conversationKey, expectedDeviceEpoch]
+    ).map((row) => row.event_id)
+    const uncertain = readAll<{ event_id: string }>(
+      database,
+      `SELECT event_id FROM im_events
+       WHERE conversation_key = ? AND device_epoch = ? AND state IN ('executing', 'waiting_desktop')`,
+      [conversationKey, expectedDeviceEpoch]
+    ).map((row) => row.event_id)
+    const now = this.dependencies.now()
+    withImTransaction(database, () => {
+      database.run(
+        `UPDATE im_events
+         SET state = 'cancelled', permit_state = 'revoked',
+             reason_code = 'DEVICE_TAKEOVER_CANCELLED', retryable = 0,
+             updated_at = ?, finished_at = ?
+         WHERE conversation_key = ? AND device_epoch = ? AND state IN ('received', 'queued')`,
+        [now, now, conversationKey, expectedDeviceEpoch]
+      )
+      database.run(
+        `UPDATE im_events
+         SET state = 'outcome_unknown', permit_state = 'revoked',
+             reason_code = 'EVENT_OUTCOME_UNKNOWN', retryable = 1,
+             updated_at = ?, finished_at = ?
+         WHERE conversation_key = ? AND device_epoch = ?
+           AND state IN ('executing', 'waiting_desktop')`,
+        [now, now, conversationKey, expectedDeviceEpoch]
+      )
+      database.run(
+        `UPDATE im_reply_outbox
+         SET state = CASE WHEN state = 'sending' THEN 'unknown' ELSE 'failed' END,
+             reason_code = 'ROUTE_EPOCH_CONFLICT', next_attempt_at = NULL, updated_at = ?
+         WHERE conversation_key = ? AND expected_device_epoch = ?
+           AND state IN ('pending', 'sending')`,
+        [now, conversationKey, expectedDeviceEpoch]
+      )
+    })
+    this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
+    return { cancelledEventIds: cancellable, outcomeUnknownEventIds: uncertain }
+  }
+
+  async cleanupExpiredTerminalData(retentionMs = 7 * 24 * 60 * 60 * 1_000): Promise<{
+    deletedEvents: number
+    deletedOutboxSegments: number
+  }> {
+    if (!Number.isSafeInteger(retentionMs) || retentionMs < 60_000) {
+      throw new Error("IM retention must be at least one minute")
+    }
+    const database = this.dependencies.getDatabase()
+    const cutoff = this.dependencies.now() - retentionMs
+    const eligibleEventIds = readAll<{ event_id: string }>(
+      database,
+      `SELECT event.event_id
+       FROM im_events event
+       WHERE event.state IN ('completed', 'cancelled', 'failed', 'rejected', 'outcome_unknown')
+         AND event.finished_at IS NOT NULL AND event.finished_at < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM im_reply_outbox outbox
+           WHERE outbox.event_id = event.event_id
+             AND outbox.state IN ('pending', 'sending', 'unknown')
+         )`,
+      [cutoff]
+    ).map((row) => row.event_id)
+    let deletedEvents = 0
+    let deletedOutboxSegments = 0
+    withImTransaction(database, () => {
+      if (eligibleEventIds.length > 0) {
+        const placeholders = eligibleEventIds.map(() => "?").join(",")
+        database.run(
+          `DELETE FROM im_reply_outbox WHERE event_id IN (${placeholders})`,
+          eligibleEventIds
+        )
+        deletedOutboxSegments += database.getRowsModified()
+        database.run(`DELETE FROM im_events WHERE event_id IN (${placeholders})`, eligibleEventIds)
+        deletedEvents += database.getRowsModified()
+      }
+      database.run(
+        `DELETE FROM im_reply_outbox
+         WHERE event_id IS NULL AND updated_at < ? AND state IN ('sent', 'failed')`,
+        [cutoff]
+      )
+      deletedOutboxSegments += database.getRowsModified()
+    })
+    if (deletedEvents > 0 || deletedOutboxSegments > 0) this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
+    return { deletedEvents, deletedOutboxSegments }
   }
 
   private requireEvent(eventId: string): ImEventRecord {

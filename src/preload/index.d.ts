@@ -16,6 +16,10 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
+  BuiltinRobotTakeoverRequest,
+  BuiltinRobotTakeoverResult,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -25,7 +29,6 @@ import type {
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
   LspStatus,
-  ChatXConfig,
   HookLoggingConfig,
   PluginHookMetadata,
   PluginDetail,
@@ -1748,6 +1751,15 @@ interface CustomAPI {
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
   }
+  builtinRobot: {
+    getStatus: () => Promise<BuiltinRobotStatus>
+    saveSettings: (updates: Partial<BuiltinRobotSettings>) => Promise<BuiltinRobotStatus>
+    reconnect: () => Promise<BuiltinRobotStatus>
+    disconnect: () => Promise<BuiltinRobotStatus>
+    takeover: (request: BuiltinRobotTakeoverRequest) => Promise<BuiltinRobotTakeoverResult>
+    cleanupLegacy: () => Promise<BuiltinRobotStatus>
+    onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
+  }
   plugins: {
     list: () => Promise<PluginMetadata[]>
     install: (
@@ -1790,12 +1802,6 @@ interface CustomAPI {
       filePath: string,
       content: string
     ) => Promise<{ success: boolean; error?: string }>
-  }
-  chatx: {
-    getConfig: () => Promise<ChatXConfig>
-    saveConfig: (updates: Partial<ChatXConfig>) => Promise<void>
-    restart: () => Promise<void>
-    cancelByThread: (threadId: string) => Promise<boolean>
   }
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">

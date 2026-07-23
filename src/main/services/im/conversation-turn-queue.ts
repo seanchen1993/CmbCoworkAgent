@@ -31,8 +31,9 @@ export class ImConversationTurnQueue {
     return pump
   }
 
-  async recoverAndStart(): Promise<string[]> {
+  async recoverAndStart(onRecovered?: (eventIds: string[]) => Promise<void>): Promise<string[]> {
     const recovered = await this.eventStore.recoverInterruptedEvents()
+    await onRecovered?.(recovered)
     await Promise.all(this.eventStore.listQueuedConversationKeys().map((key) => this.notify(key)))
     return recovered
   }
@@ -46,6 +47,29 @@ export class ImConversationTurnQueue {
 
   getCurrentEventId(conversationKey: string): string | null {
     return this.currentRuns.get(conversationKey)?.eventId ?? null
+  }
+
+  hasActiveRuns(): boolean {
+    return this.currentRuns.size > 0
+  }
+
+  async waitForIdle(conversationKey: string, timeoutMs = 5_000): Promise<boolean> {
+    if (!this.currentRuns.has(conversationKey)) return true
+    const deadline = Date.now() + Math.max(0, timeoutMs)
+    return new Promise<boolean>((resolve) => {
+      const poll = (): void => {
+        if (!this.currentRuns.has(conversationKey)) {
+          resolve(true)
+          return
+        }
+        if (Date.now() >= deadline) {
+          resolve(false)
+          return
+        }
+        setTimeout(poll, 25)
+      }
+      poll()
+    })
   }
 
   async stop(): Promise<void> {

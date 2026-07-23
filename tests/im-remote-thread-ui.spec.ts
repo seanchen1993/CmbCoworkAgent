@@ -16,19 +16,31 @@ function testRemoteInboxIsReadOnlyAtRendererAndMainBoundary(): void {
       "const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly"
     )
   )
-  assert(agent.includes("rejectDesktopRunForRemoteReadOnlyInbox"))
+  assert(agent.includes("rejectDesktopRunForRemoteReadOnlyThread"))
   assert(agent.includes("REMOTE_INBOX_DESKTOP_READ_ONLY"))
+  assert(agent.includes('metadata.remoteState === "historical"'))
+  assert.equal(
+    agent.match(/rejectDesktopRunForRemoteReadOnlyThread/g)?.length,
+    4,
+    "invoke, resume and interrupt must all enforce the remote read-only boundary"
+  )
 }
 
 function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   const chat = source("src/renderer/src/components/chat/ChatContainer.tsx")
   const sidebar = source("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
+  const robotPanel = source("src/renderer/src/components/customize/BuiltinRobotPanel.tsx")
   assert(chat.includes('remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程 Feature"'))
   assert(chat.includes("桌面发出的本轮结果只保留在本机，不会自动发送到招乎"))
   assert(chat.includes("等待桌面审批"))
   assert(chat.includes("执行结果未知"))
   assert(sidebar.includes("getRemoteThreadKind"))
-  assert(sidebar.includes('remoteThreadKind === "inbox" ? "远程收件箱" : "远程 Feature"'))
+  assert(sidebar.includes("remoteThreadHistorical"))
+  assert(sidebar.includes('"远程收件箱"'))
+  assert(sidebar.includes('"远程 Feature"'))
+  assert(sidebar.includes('"远程历史"'))
+  assert(robotPanel.includes('{ state: "waiting_desktop", label: "等待桌面"'))
+  assert(robotPanel.includes('{ state: "outcome_unknown", label: "结果未知"'))
 }
 
 testRemoteInboxIsReadOnlyAtRendererAndMainBoundary()
