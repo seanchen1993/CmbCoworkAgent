@@ -102,6 +102,29 @@ function storeLocalCandidatePromptSignature(signature: string): void {
 interface TraceEntry {
   traceId: string
   threadId: string
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
   startedAt: string
   durationMs: number
   userMessage: string
@@ -115,9 +138,11 @@ interface TraceEntry {
 
 interface TraceThreadGroup {
   threadId: string
+  rootTraceId?: string
   threadTitle: string
   traces: TraceEntry[]
   latestStartedAt: string
+  subagentCount: number
   totalToolCalls: number
   totalDurationMs: number
   totalInputTokens: number
@@ -353,6 +378,49 @@ function outcomeColor(outcome: string): string {
   }[outcome] ?? "bg-zinc-500/15 text-zinc-500 border-zinc-500/20"
 }
 
+function shortTraceId(value?: string): string {
+  return value ? value.slice(0, 8) : ""
+}
+
+function isSubagentTrace(trace: TraceEntry): boolean {
+  return trace.traceKind === "subagent" || Boolean(trace.parentTraceId || trace.subagentKind)
+}
+
+function traceThreadGroupKey(trace: TraceEntry): string {
+  return trace.rootThreadId || trace.threadId
+}
+
+function traceDisplayLabel(trace: TraceEntry): string {
+  if (trace.subagentKind === "coordinator_worker") {
+    const role = trace.coordinatorWorkerRole === "verifier" ? "Verifier" : "Worker"
+    return trace.coordinatorWorkerId ? `${role} ${trace.coordinatorWorkerId}` : role
+  }
+  if (trace.subagentKind === "workflow_agent") {
+    return trace.workflowAgentLabel || `Workflow Agent ${trace.workflowAgentIndex ?? ""}`.trim()
+  }
+  if (trace.subagentKind === "task") return "Task Agent"
+  if (trace.traceKind === "subagent") return "子 Agent"
+  if (trace.executionMode === "coordinator") return "Agent Team"
+  if (trace.executionMode === "workflow") return "Ultra Workflow"
+  return "主 Agent"
+}
+
+function traceDisplayClass(trace: TraceEntry): string {
+  if (isSubagentTrace(trace)) {
+    if (trace.subagentKind === "workflow_agent") {
+      return "border-violet-500/25 bg-violet-500/10 text-violet-700 dark:text-violet-300"
+    }
+    return "border-blue-500/25 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+  }
+  if (trace.executionMode === "workflow") {
+    return "border-violet-500/25 bg-violet-500/10 text-violet-700 dark:text-violet-300"
+  }
+  if (trace.executionMode === "coordinator") {
+    return "border-cyan-500/25 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
+  }
+  return "border-border bg-background text-muted-foreground"
+}
+
 function nodeIcon(node: TraceNode): React.JSX.Element {
   if (node.type === "trace") return <Activity className="size-3.5" />
   if (node.type === "llm") return <Bot className="size-3.5" />
@@ -478,7 +546,10 @@ function TraceDetailView({ detail, onClose }: { detail: TraceDetail; onClose: ()
         </button>
         <span className="text-muted-foreground/40">/</span>
         <span className="text-xs font-mono text-muted-foreground">{detail.traceId.slice(0, 16)}</span>
-        <Badge className={cn("ml-auto border text-[10px]", outcomeColor(detail.outcome))}>
+        <Badge className={cn("ml-auto border text-[10px]", traceDisplayClass(detail))}>
+          {traceDisplayLabel(detail)}
+        </Badge>
+        <Badge className={cn("border text-[10px]", outcomeColor(detail.outcome))}>
           {traceOutcomeLabel(detail.outcome)}
         </Badge>
       </div>
@@ -543,9 +614,13 @@ function TraceCard({
   onOpen: (traceId: string) => void
   onDelete: (traceId: string) => void
 }): React.JSX.Element {
+  const isChild = isSubagentTrace(trace)
   return (
     <div
-      className="w-full text-left rounded-lg border border-border bg-card hover:bg-muted/30 transition-colors group overflow-hidden"
+      className={cn(
+        "w-full text-left rounded-lg border border-border bg-card hover:bg-muted/30 transition-colors group overflow-hidden",
+        isChild && "ml-3 w-[calc(100%-0.75rem)] border-l-4 border-l-blue-400/50"
+      )}
       role="button"
       tabIndex={0}
       onClick={() => onOpen(trace.traceId)}
@@ -572,7 +647,15 @@ function TraceCard({
           <Badge className={cn("border text-[10px] px-1.5 py-0 shrink-0", outcomeColor(trace.outcome))}>
             {traceOutcomeLabel(trace.outcome)}
           </Badge>
-          <span className="text-[10px] font-mono text-muted-foreground/60">{trace.traceId.slice(0, 8)}</span>
+          <Badge className={cn("border text-[10px] px-1.5 py-0 shrink-0", traceDisplayClass(trace))}>
+            {traceDisplayLabel(trace)}
+          </Badge>
+          <span className="text-[10px] font-mono text-muted-foreground/60">{shortTraceId(trace.traceId)}</span>
+          {isChild && trace.parentTraceId ? (
+            <span className="text-[10px] font-mono text-muted-foreground/50">
+              parent {shortTraceId(trace.parentTraceId)}
+            </span>
+          ) : null}
           <button
             className="ml-auto text-muted-foreground/50 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
             onClick={(e) => {
@@ -644,6 +727,16 @@ function TraceThreadGroupCard({
             <Badge variant="outline" className="text-[10px] px-1.5 py-0">
               {group.traces.length} 条 traces
             </Badge>
+            {group.subagentCount > 0 ? (
+              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                子 {group.subagentCount}
+              </Badge>
+            ) : null}
+            {group.rootTraceId ? (
+              <span className="text-[10px] font-mono text-muted-foreground/50">
+                root {shortTraceId(group.rootTraceId)}
+              </span>
+            ) : null}
           </div>
           <p className="text-[11px] text-muted-foreground mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span>最近运行：{new Date(group.latestStartedAt).toLocaleString()}</span>
@@ -2167,14 +2260,16 @@ export function EvolutionPanel(): React.JSX.Element {
   const traceGroups = useMemo<TraceThreadGroup[]>(() => {
     const grouped = new Map<string, TraceEntry[]>()
     for (const trace of traces) {
-      const list = grouped.get(trace.threadId) ?? []
+      const threadId = traceThreadGroupKey(trace)
+      const list = grouped.get(threadId) ?? []
       list.push(trace)
-      grouped.set(trace.threadId, list)
+      grouped.set(threadId, list)
     }
 
     return Array.from(grouped.entries())
       .map(([threadId, threadTraces]) => {
         const sortedTraces = [...threadTraces].sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+        const rootTrace = sortedTraces.find((trace) => !isSubagentTrace(trace)) ?? sortedTraces[0]
         const totals = threadTraces.reduce(
           (acc, t) => {
             acc.totalToolCalls += t.totalToolCalls
@@ -2189,8 +2284,10 @@ export function EvolutionPanel(): React.JSX.Element {
         return {
           threadId,
           threadTitle: threadTitleById.get(threadId) ?? `会话 ${threadId.slice(0, 8)}`,
+          rootTraceId: rootTrace?.rootTraceId || rootTrace?.traceId,
           traces: sortedTraces,
           latestStartedAt: sortedTraces[0]?.startedAt ?? "",
+          subagentCount: sortedTraces.filter(isSubagentTrace).length,
           totalToolCalls: totals.totalToolCalls,
           totalDurationMs: totals.totalDurationMs,
           totalInputTokens: totals.totalInputTokens,
@@ -2240,7 +2337,7 @@ export function EvolutionPanel(): React.JSX.Element {
 
   const toggleThreadChecked = useCallback((threadId: string, checked: boolean) => {
     const next = new Set(selectedTraceIds)
-    const traceIds = traces.filter((trace) => trace.threadId === threadId).map((trace) => trace.traceId)
+    const traceIds = traces.filter((trace) => traceThreadGroupKey(trace) === threadId).map((trace) => trace.traceId)
     for (const traceId of traceIds) {
       if (checked) next.add(traceId)
       else next.delete(traceId)
@@ -2249,7 +2346,7 @@ export function EvolutionPanel(): React.JSX.Element {
   }, [selectedTraceIds, setEvolutionSelectedTraceIds, traces])
 
   const handleDeleteThread = useCallback(async (threadId: string) => {
-    const traceIds = traces.filter((trace) => trace.threadId === threadId).map((trace) => trace.traceId)
+    const traceIds = traces.filter((trace) => traceThreadGroupKey(trace) === threadId).map((trace) => trace.traceId)
     if (traceIds.length === 0) return
     await handleDeleteTraces(traceIds)
   }, [handleDeleteTraces, traces])

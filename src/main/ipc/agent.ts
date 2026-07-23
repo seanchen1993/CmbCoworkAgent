@@ -72,10 +72,11 @@ import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
-import type {
-  HarnessAgentmdLoadStatusItem,
-  HarnessDeployUnitMapping,
-  HarnessProjectModeSubagentConfig
+import {
+  didHarnessSystemConstraintsLoadSuccessfully,
+  type HarnessAgentmdLoadStatusItem,
+  type HarnessDeployUnitMapping,
+  type HarnessProjectModeSubagentConfig
 } from "../../shared/harness-board-types"
 import {
   checkpointHasInterrupt,
@@ -83,11 +84,24 @@ import {
   isWorkflowPlumbingTranscriptContent,
   neutralizeWorkflowPlumbingUserText
 } from "../../shared/checkpoint-transcript"
+import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
+import {
+  CONTEXT_COMPACTION_EVENT_TYPE,
+  isContextCompactionStreamPayload,
+  type ContextCompactionLifecycleEvent
+} from "../../shared/context-compaction-events"
+import {
+  extractVisibleReasoning,
+  isTraceReasoningTruncated,
+  mergeStreamingReasoning,
+  truncateReasoningForTrace
+} from "../../shared/model-reasoning"
 import {
   FORK_BOUNDARY_MARKER_VERSION,
   FORK_BOUNDARY_THREAD_METADATA_KEY
 } from "../../shared/checkpoint-forkability"
 import { TraceCollector } from "../agent/trace/collector"
+import { getSoloTaskOwnerIdFromStreamPayload, SoloTaskTraceManager } from "../agent/trace/solo-task"
 import {
   requestSkillIntent,
   requestSkillConfirmation,
@@ -143,10 +157,15 @@ import { workflowRunManager } from "../agent/workflow/run-manager"
 import { resolveWorkflowOutputFile } from "../agent/workflow/run-store"
 import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT,
   WORKFLOW_NOTIFICATION_TURN_TRIGGER,
   buildWorkflowNotificationMessage,
   isWorkflowNotificationTurnMessage
 } from "../agent/workflow/notification"
+import {
+  COORDINATOR_NOTIFICATION_PROMPT_PREFIX,
+  INTERNAL_NOTIFICATION_TRIGGER_SOURCE
+} from "../../shared/internal-notification-turn"
 import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot
@@ -243,9 +262,11 @@ import {
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
   buildHarnessFeatureAgentContext,
+  markHarnessProjectSystemConstraintsLoaded,
   readHarnessFeatureMetadata,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
+import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
 import type { AgentAutoCommitResult } from "../types"
 import { formatAutoCommitLines } from "../../shared/auto-commit-format"
@@ -2047,6 +2068,17 @@ function sendHookNotice(window: BrowserWindow, channel: string, message: string)
   })
 }
 
+function sendContextCompactionLifecycleEvent(
+  window: BrowserWindow,
+  channel: string,
+  compaction: ContextCompactionLifecycleEvent
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: { type: CONTEXT_COMPACTION_EVENT_TYPE, compaction }
+  })
+}
+
 function sendHarnessSessionContextInjectWarning(
   window: BrowserWindow,
   channel: string,
@@ -2103,6 +2135,23 @@ function createHarnessAgentmdLoadStatusHandler(
       loader,
       promptPreview
     )
+
+    const projectId = context.harnessProjectId?.trim()
+    if (!projectId || !didHarnessSystemConstraintsLoadSuccessfully(items)) return
+    try {
+      const firstSuccess = markHarnessProjectSystemConstraintsLoaded(projectId)
+      if (firstSuccess) {
+        // reportProjectSnapshotNow performs a synchronous project inspect before
+        // its first await; defer it so telemetry never delays runtime creation.
+        setImmediate(() => void reportProjectSnapshotNow(projectId))
+      }
+    } catch (error) {
+      // Telemetry must never block or fail the agent run.
+      console.warn("[HarnessBoard] Failed to persist system-constraint load success:", {
+        projectId,
+        error
+      })
+    }
   }
 }
 
@@ -2190,6 +2239,7 @@ function sendCoordinatorWorkerStream(
   let data: unknown
   try {
     const serialized = serializeStreamData(stream.data)
+    if (isContextCompactionStreamPayload(stream.mode, serialized)) return
     data = sanitizeStreamDataForRenderer(stream.mode, serialized)
   } catch (error) {
     console.warn("[Agent] Failed to serialize coordinator worker stream event:", error)
@@ -2859,7 +2909,6 @@ function buildCoordinatorTurnContextPrompt(workerContext: string): string | unde
 ${sections.join("\n\n")}`
 }
 
-const COORDINATOR_NOTIFICATION_PROMPT_PREFIX = "[[CMB_COORDINATOR_WORKER_NOTIFICATION]]"
 const COORDINATOR_INTERNAL_CONTEXT_START = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_START]]"
 const COORDINATOR_INTERNAL_CONTEXT_END = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_END]]"
 const COORDINATOR_INTERNAL_NOTIFICATION_START = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_START]]"
@@ -3263,6 +3312,8 @@ function shouldSkipMainTranscriptStreamPayload(
   threadId: string
 ): boolean {
   if (mode !== "messages") return true
+  if (isContextCompactionStreamPayload(mode, payload)) return true
+  if (Array.isArray(payload) && isSerializedSummarizationMessage(payload[0])) return true
   if (isCoordinatorWorkerStreamChunk(mode, payload, threadId)) return true
   const metadata = messageStreamMetadata(mode, payload)
   const checkpointNs =
@@ -5297,11 +5348,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // events are sliceable by stage and by status-within-stage. Best-effort: any
       // failure leaves nodeName/nodeStatus absent (we never report the raw node id).
       let harnessFeatureBinding: HarnessFeatureBindingContext | undefined
+      let isWorkflowNotificationTrace = false
       try {
         const bindingThread = getThread(threadId)
         if (bindingThread?.metadata) {
-          harnessFeatureBinding =
-            readHarnessFeatureMetadata(JSON.parse(bindingThread.metadata)) ?? undefined
+          const bindingMetadata = JSON.parse(bindingThread.metadata) as Record<string, unknown>
+          harnessFeatureBinding = readHarnessFeatureMetadata(bindingMetadata) ?? undefined
+          isWorkflowNotificationTrace =
+            message.trim() === WORKFLOW_NOTIFICATION_TURN_PROMPT &&
+            getAgentModeFromMetadata(bindingMetadata) === "workflow"
         }
       } catch {
         // Non-project threads or unparsable metadata: leave the trace untagged.
@@ -5320,8 +5375,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
 
       // Start trace collection for this invocation (modelId resolved later)
+      const isInternalNotificationTrace =
+        isTrustedCoordinatorNotificationInvoke || isWorkflowNotificationTrace
       const tracer = new TraceCollector(threadId, rootUserPrompt, modelId ?? "unknown", {
-        triggerSource: "chat",
+        triggerSource: isInternalNotificationTrace ? INTERNAL_NOTIFICATION_TRIGGER_SOURCE : "chat",
+        includeSkillEval: !isInternalNotificationTrace,
         ...(harnessFeatureBinding ? { harnessFeature: harnessFeatureBinding } : {})
       })
       const skillUsageDetector = new SkillUsageDetector()
@@ -5550,6 +5608,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
       const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
         sendFailureFuseNotice(window, channel, decision)
+      const onContextCompaction = (event: ContextCompactionLifecycleEvent): void =>
+        sendContextCompactionLifecycleEvent(window, channel, event)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -5595,6 +5655,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let highWaterInputTokens = 0
       // Actual model used after failover — hoisted for catch/finally routing feedback
       let usedModelId: string | undefined
+      let soloTaskTraceManager: SoloTaskTraceManager | undefined
       let invokeFinalOutcome: "success" | "unknown" = "success"
       let invokeFinalReason: string | undefined
       const markInvokeIncomplete = (reason: string): void => {
@@ -5947,6 +6008,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const effectiveAgentMode: AgentMode = coordinatorForcedByRequest
           ? "coordinator"
           : (requestedMode ?? (coordinatorFromMetadata ? "coordinator" : metadataAgentMode))
+        tracer.setExecutionMode(effectiveAgentMode)
+        const runtimeTraceContext = tracer.getTraceContext()
         if (
           isCoordinatorNotificationTurn &&
           hasExplicitNormalAgentMode &&
@@ -6257,6 +6320,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           routingMode: getGlobalRoutingMode()
         }).catch(() => null)
         let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
+        if (effectiveAgentMode === "normal") {
+          try {
+            soloTaskTraceManager = new SoloTaskTraceManager({
+              parent: runtimeTraceContext,
+              modelId: effectiveModelId
+            })
+          } catch (error) {
+            console.warn(
+              "[SoloTask] sidecar initialization failed; continuing with root trace only:",
+              error
+            )
+          }
+        }
 
         // Persist routing decision for thread continuity (sticky/force logic next turn)
         if (invokeRoutingResult) rememberRoutingDecision(threadId, invokeRoutingResult)
@@ -6336,6 +6412,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         for (const candidateId of orderedChain) {
           if (abortController.signal.aborted) break
           try {
+            soloTaskTraceManager?.setModelId(candidateId)
             agent = await createAgentRuntime({
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
@@ -6350,10 +6427,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
+              traceContext: runtimeTraceContext,
+              soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -6463,10 +6543,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const _countedAiMsgIds = new Set<string>()
         const _countedModelMsgIds = new Set<string>()
         const _countedToolResultMsgIds = new Set<string>()
+        const _soloTaskAiMessageIds = new Set<string>()
+        const _soloTaskToolCallIds = new Set<string>()
         // Track which subagent tool-call IDs we've already emitted SubagentStop for (dedupe)
         const _subagentStopFired = new Set<string>()
         const _subagentStartFired = new Set<string>()
         const _llmNodeByMessageId = new Map<string, string>()
+        const _reasoningByAiMessageId = new Map<string, string>()
         const _toolNodeByRef = new Map<string, string>()
         const _toolNameByCallId = new Map<string, string>()
         const MODEL_INPUT_WINDOW = 12
@@ -6625,6 +6708,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const className = classId[classId.length - 1] || ""
             const isAI = className.includes("AI")
             const isTool = className.includes("Tool")
+            const soloTaskOwnerId =
+              effectiveAgentMode === "normal"
+                ? getSoloTaskOwnerIdFromStreamPayload(payload)
+                : undefined
+            const isCapturedSoloTaskMessage =
+              isAI && soloTaskTraceManager?.hasCapturedTask(soloTaskOwnerId) === true
 
             // SubagentStop — a "task" tool message signals subagent completion
             if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
@@ -6658,6 +6747,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }>
               | undefined
             const msgId = (kwargs.id as string) || ""
+            const streamedReasoning = extractVisibleReasoning(kwargs, MAX_TRACE_CONTENT + 1)
+            if (msgId && streamedReasoning) {
+              const existingReasoning = _reasoningByAiMessageId.get(msgId) ?? ""
+              const reasoning = className.includes("AIMessageChunk")
+                ? isTraceReasoningTruncated(existingReasoning)
+                  ? existingReasoning
+                  : mergeStreamingReasoning(existingReasoning, streamedReasoning)
+                : streamedReasoning
+              _reasoningByAiMessageId.set(
+                msgId,
+                truncateReasoningForTrace(reasoning, MAX_TRACE_CONTENT)
+              )
+            }
+            if (isCapturedSoloTaskMessage) {
+              if (msgId) _soloTaskAiMessageIds.add(msgId)
+              for (const toolCall of toolCalls ?? []) {
+                if (toolCall.id) _soloTaskToolCallIds.add(toolCall.id)
+              }
+            }
             if (!toolCalls || toolCalls.length === 0) return
             maybeRunSubagentStartHooksFromToolCalls({
               toolCalls,
@@ -6672,13 +6780,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (msgId && _countedAiMsgIds.has(msgId)) return
             if (msgId) _countedAiMsgIds.add(msgId)
 
-            tracer.beginStep()
+            if (!isCapturedSoloTaskMessage) tracer.beginStep()
             for (let tcIndex = 0; tcIndex < toolCalls.length; tcIndex++) {
               const tc = toolCalls[tcIndex]
               const tcName = tc.name ?? "unknown"
               if (tc.id) _toolNameByCallId.set(tc.id, tcName)
               goalEvidenceBuffer.rememberToolCall(tc.id, tc.args)
-              tracer.recordToolCall({ name: tcName, args: tc.args ?? {} })
+              if (!isCapturedSoloTaskMessage) {
+                tracer.recordToolCall({ name: tcName, args: tc.args ?? {} })
+              }
               const counted = toolCallCounter.register(tc, msgId, tcIndex)
 
               if (tcName === "read_file") {
@@ -6715,7 +6825,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 )
               }
             }
-            tracer.endStep(visibleText)
+            if (!isCapturedSoloTaskMessage) tracer.endStep(visibleText)
           } catch (e) {
             console.error("[Agent] Tool-call extraction error:", e)
           }
@@ -6805,7 +6915,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const isToolMessage = className.includes("Tool") || kwargs.type === "tool"
               const rawAiMsgId = typeof kwargs.id === "string" ? kwargs.id : ""
               const aiMsgKey = rawAiMsgId || `values:${i}:${stableJson(tcs ?? [])}`
-              if (isAI && !_countedModelMsgIds.has(aiMsgKey)) {
+              const isSoloTaskAiMessage =
+                rawAiMsgId.length > 0 && _soloTaskAiMessageIds.has(rawAiMsgId)
+              const isNewAiMessage = isAI && !_countedModelMsgIds.has(aiMsgKey)
+              // Runtime routing feedback must retain its original accounting across
+              // the whole run. Solo child messages are excluded only from the root
+              // Trace document, never from control-plane token measurements.
+              const usageForRunAccounting = isNewAiMessage
+                ? normalizeTokenUsage(getUsageMetadata(kwargs))
+                : undefined
+              if (
+                usageForRunAccounting?.inputTokens &&
+                usageForRunAccounting.inputTokens > highWaterInputTokens
+              ) {
+                highWaterInputTokens = usageForRunAccounting.inputTokens
+              }
+              if (isAI && isSoloTaskAiMessage) {
+                _countedModelMsgIds.add(aiMsgKey)
+              } else if (isNewAiMessage) {
                 _countedModelMsgIds.add(aiMsgKey)
 
                 // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
@@ -6849,15 +6976,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 })
                 _llmNodeByMessageId.set(aiMsgKey, llmNodeId)
 
-                const usageForTrace = normalizeTokenUsage(getUsageMetadata(kwargs))
-
-                // Track high-water mark of input tokens for context window capacity guard
-                if (
-                  usageForTrace?.inputTokens &&
-                  usageForTrace.inputTokens > highWaterInputTokens
-                ) {
-                  highWaterInputTokens = usageForTrace.inputTokens
-                }
+                const usageForTrace = usageForRunAccounting
+                const reasoning = truncateReasoningForTrace(
+                  extractVisibleReasoning(kwargs, MAX_TRACE_CONTENT + 1) ||
+                    _reasoningByAiMessageId.get(rawAiMsgId) ||
+                    "",
+                  MAX_TRACE_CONTENT
+                )
 
                 tracer.recordModelCall({
                   messageId: rawAiMsgId || aiMsgKey,
@@ -6865,7 +6990,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   inputMessages: inputSlice,
                   outputMessage: {
                     role: "assistant",
-                    content: extractText(kwargs.content)
+                    content: extractText(kwargs.content),
+                    ...(reasoning ? { reasoning } : {})
                   },
                   toolCalls: outputToolCalls,
                   tokenUsage: usageForTrace
@@ -6876,7 +7002,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   output: extractText(kwargs.content),
                   status: "success",
                   metadata: {
-                    tokenUsage: usageForTrace
+                    tokenUsage: usageForTrace,
+                    ...(reasoning ? { reasoning } : {})
                   }
                 })
               }
@@ -6885,12 +7012,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 for (let tcIndex = 0; tcIndex < tcs.length; tcIndex++) {
                   const tc = tcs[tcIndex]
                   const tcId = typeof tc?.id === "string" ? tc.id : ""
+                  if (isSoloTaskAiMessage && tcId) _soloTaskToolCallIds.add(tcId)
+                  const isSoloTaskToolCall =
+                    isSoloTaskAiMessage || (tcId.length > 0 && _soloTaskToolCallIds.has(tcId))
                   if (tcId) _toolNameByCallId.set(tcId, tc?.name ?? "unknown")
                   goalEvidenceBuffer.rememberToolCall(tcId, tc?.args)
                   const toolRef =
                     tcId || `${aiMsgKey}:${tcIndex}:args:${stableToolArgsDigest(tc?.args ?? {})}`
                   const counted = toolCallCounter.register(tc, aiMsgKey, tcIndex)
-                  if (!_toolNodeByRef.has(toolRef)) {
+                  if (!isSoloTaskToolCall && !_toolNodeByRef.has(toolRef)) {
                     const parentId = _llmNodeByMessageId.get(aiMsgKey)
                     const toolNodeId = tracer.addToolNode({
                       name: tc?.name ?? "unknown",
@@ -6954,15 +7084,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   additionalKwargs?.is_error === true ||
                   /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
                 if (isToolError) toolErrorCount += 1
-                tracer.addToolResultNode({
-                  parentId,
-                  toolCallId: toolCallId || undefined,
-                  output: toolOutput,
-                  status: isToolError ? "error" : "success",
-                  metadata: {
-                    messageId: toolMsgId
-                  }
-                })
+                if (!toolCallId || !_soloTaskToolCallIds.has(toolCallId)) {
+                  tracer.addToolResultNode({
+                    parentId,
+                    toolCallId: toolCallId || undefined,
+                    output: toolOutput,
+                    status: isToolError ? "error" : "success",
+                    metadata: {
+                      messageId: toolMsgId
+                    }
+                  })
+                }
               }
             }
 
@@ -7056,6 +7188,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await acknowledgeDeliveredCoordinatorNotificationsIfNeeded()
               const serialized = serializeStreamData(data)
+              if (isContextCompactionStreamPayload(mode, serialized)) continue
               if (mode === "values") {
                 latestSerializedValuesMessagesForGoalFlush =
                   extractSerializedValuesMessages(serialized)
@@ -7119,6 +7252,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
 
           const nextCandidate = remainingCandidates.shift()!
+          soloTaskTraceManager?.setModelId(nextCandidate)
           agent = await createAgentRuntime({
             threadId,
             currentRunMessageQueueOwnerToken: runToken,
@@ -7133,10 +7267,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             agentMode: effectiveAgentMode,
+            traceContext: runtimeTraceContext,
+            soloTaskTraceManager,
             retryHooks: buildModelRetryHooks(window, channel),
             maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
             onHookResult,
             onFailureFuseNotice,
+            onContextCompaction,
             hookTurnId: turnState.turnId,
             onHookSkippedFactory,
             hookScope,
@@ -7247,6 +7384,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
             // Try next candidate with resume semantics
             const nextCandidate = remainingCandidates.shift()!
+            soloTaskTraceManager?.setModelId(nextCandidate)
             agent = await createAgentRuntime({
               threadId,
               currentRunMessageQueueOwnerToken: runToken,
@@ -7261,10 +7399,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
+              traceContext: runtimeTraceContext,
+              soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel),
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -8162,6 +8303,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
         }
       } finally {
+        soloTaskTraceManager?.finishActiveTasks(
+          abortController.signal.aborted ? "cancelled" : "error",
+          abortController.signal.aborted
+            ? "Parent Solo run was cancelled"
+            : "Parent Solo run ended before task completion"
+        )
         // Safety net for EARLY RETURNS inside the try (Stop hook blocked
         // completion, PostSkillUse max revisions, goal-continuation halts…):
         // success settles on the ack path and thrown errors settle in the
@@ -8444,6 +8591,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
       const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
         sendFailureFuseNotice(window, channel, decision)
+      const onContextCompaction = (event: ContextCompactionLifecycleEvent): void =>
+        sendContextCompactionLifecycleEvent(window, channel, event)
       const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
         window,
         threadId,
@@ -8680,6 +8829,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -8805,6 +8955,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 continue
               }
               const serialized = serializeStreamData(data)
+              if (isContextCompactionStreamPayload(mode, serialized)) continue
               if (mode === "values") {
                 resumeStableStreamMessages = extractSerializedValuesMessages(
                   sanitizeStreamDataForRenderer(mode, serialized)
@@ -8899,6 +9050,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -9304,6 +9456,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const onHookResult = makeHookResultCallback(window, channel, turnState.turnId)
     const onFailureFuseNotice = (decision: FailureFuseDecision): void =>
       sendFailureFuseNotice(window, channel, decision)
+    const onContextCompaction = (event: ContextCompactionLifecycleEvent): void =>
+      sendContextCompactionLifecycleEvent(window, channel, event)
     const onCoordinatorWorkerHookResult = makeCoordinatorWorkerHookResultCallback(
       window,
       threadId,
@@ -9524,6 +9678,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,
@@ -9646,6 +9801,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 continue
               }
               const serialized = serializeStreamData(data)
+              if (isContextCompactionStreamPayload(mode, serialized)) continue
               if (mode === "values") {
                 intStableStreamMessages = extractSerializedValuesMessages(
                   sanitizeStreamDataForRenderer(mode, serialized)
@@ -9739,6 +9895,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
               onHookResult,
               onFailureFuseNotice,
+              onContextCompaction,
               hookTurnId: turnState.turnId,
               onHookSkippedFactory,
               hookScope,

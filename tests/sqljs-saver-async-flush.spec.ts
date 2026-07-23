@@ -153,7 +153,7 @@ async function testFlushStrictReportsPersistenceFailure(dir: string): Promise<vo
   let failed = false
   const originalWarn = console.warn
   try {
-    console.warn = (..._args: unknown[]) => undefined
+    console.warn = () => undefined
     await saver.flushStrict()
   } catch {
     failed = true

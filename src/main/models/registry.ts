@@ -49,6 +49,8 @@ interface BuiltinModelDefinition extends CustomModelConfig {
   origin: BuiltinModelOrigin
 }
 
+const BUNDLED_CREDENTIAL_MODEL = "minimax-m2p5-229b-w8a8"
+
 const FALLBACK_CATALOG: RemoteModelCatalogItem[] = [
   {
     id: "minimax-m2p5-229b-w8a8",
@@ -56,13 +58,6 @@ const FALLBACK_CATALOG: RemoteModelCatalogItem[] = [
     baseUrl: "http://open-llm.uat.cmbchina.cn/llm/minimax-m2p5-229b-w8a8/v1",
     model: "minimax-m2p5-229b-w8a8",
     tier: "premium"
-  },
-  {
-    id: "deepseek-v4-flash-284b-a13b-w8a8",
-    name: "DeepSeek V4 Flash",
-    baseUrl: "http://open-llm.uat.cmbchina.cn/llm/deepseek-v4-flash-284b-a13b-w8a8/v1",
-    model: "deepseek-v4-flash-284b-a13b-w8a8",
-    tier: "economy"
   }
 ]
 
@@ -300,7 +295,9 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
     return {
       ...base,
       ...override,
-      apiKey: base.apiKey?.trim() || getBuiltinModelApiKey(),
+      apiKey:
+        base.apiKey?.trim() ||
+        getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
       ref: `builtin:${base.id}`,
       source: "builtin",
       origin: base.origin

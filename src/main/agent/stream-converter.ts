@@ -6,6 +6,7 @@
  * the need for a second parsing layer on the client.
  */
 import type { Subagent } from "../types"
+import { extractVisibleReasoning } from "../../shared/model-reasoning"
 
 // ---------------------------------------------------------------------------
 // Standardised event types broadcast from scheduler → renderer
@@ -109,57 +110,6 @@ function extractContent(raw: unknown): string {
   return ""
 }
 
-function extractReasoningText(reasoning: unknown): string {
-  if (typeof reasoning === "string") return reasoning
-  if (Array.isArray(reasoning)) return reasoning.map(extractReasoningText).filter(Boolean).join("")
-  if (reasoning && typeof reasoning === "object") {
-    const record = reasoning as Record<string, unknown>
-    if (typeof record.text === "string") return record.text
-    if (typeof record.reasoning === "string") return record.reasoning
-    if (typeof record.reasoning_content === "string") return record.reasoning_content
-    if (typeof record.reasoning_text === "string") return record.reasoning_text
-    if (typeof record.content === "string") return record.content
-    if (typeof record.summary === "string") return record.summary
-    if (typeof record.delta === "string") return record.delta
-    if (Array.isArray(record.parts)) {
-      return record.parts.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.reasoning_details)) {
-      return record.reasoning_details.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.summary)) {
-      return record.summary.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.details)) {
-      return record.details.map(extractReasoningText).filter(Boolean).join("")
-    }
-  }
-  return ""
-}
-
-function extractReasoningFromKwargs(kwargs: Record<string, unknown>): string {
-  const additionalKwargs =
-    kwargs.additional_kwargs && typeof kwargs.additional_kwargs === "object"
-      ? (kwargs.additional_kwargs as Record<string, unknown>)
-      : undefined
-  return extractReasoningText(
-    kwargs.reasoning ??
-      kwargs.reasoning_content ??
-      kwargs.reasoning_text ??
-      kwargs.reasoning_details ??
-      kwargs.summary ??
-      kwargs.details ??
-      kwargs.delta ??
-      additionalKwargs?.reasoning ??
-      additionalKwargs?.reasoning_content ??
-      additionalKwargs?.reasoning_text ??
-      additionalKwargs?.reasoning_details ??
-      additionalKwargs?.summary ??
-      additionalKwargs?.details ??
-      additionalKwargs?.delta
-  )
-}
-
 function isToolMessageError(kwargs: Record<string, unknown>): boolean {
   return (
     kwargs.status === "error" ||
@@ -237,12 +187,14 @@ export class StreamConverter {
     const events: SchedulerEvent[] = []
     const [msgChunk, metadata] = data as [
       SerializedMsg,
-      | {
-          langgraph_checkpoint_ns?: string
-          checkpoint_ns?: string
-          [SUBAGENT_OWNER_METADATA_KEY]?: string
-        }
-      | undefined
+      (
+        | {
+            langgraph_checkpoint_ns?: string
+            checkpoint_ns?: string
+            [SUBAGENT_OWNER_METADATA_KEY]?: string
+          }
+        | undefined
+      )
     ]
     if (!msgChunk) return events
 
@@ -276,7 +228,7 @@ export class StreamConverter {
 
     if (className.includes("AI")) {
       const content = extractContent(kwargs.content ?? msgChunk.content)
-      const reasoning = extractReasoningFromKwargs(kwargs)
+      const reasoning = extractVisibleReasoning(kwargs)
       const msgId = kwargs.id as string | undefined
       if (!msgId) return events
 
@@ -434,9 +386,7 @@ export class StreamConverter {
     const state = data as {
       messages?: SerializedMsg[]
       todos?: Array<{ id?: string; content?: string; status?: string }>
-      files?:
-        | Record<string, unknown>
-        | Array<{ path: string; is_dir?: boolean; size?: number }>
+      files?: Record<string, unknown> | Array<{ path: string; is_dir?: boolean; size?: number }>
       workspacePath?: string
       __interrupt__?: Array<{
         value?: {
@@ -468,7 +418,11 @@ export class StreamConverter {
           }
         }
 
-        if (cn.includes("Tool") && kw.tool_call_id && this.activeSubagents.has(kw.tool_call_id as string)) {
+        if (
+          cn.includes("Tool") &&
+          kw.tool_call_id &&
+          this.activeSubagents.has(kw.tool_call_id as string)
+        ) {
           const sa = this.activeSubagents.get(kw.tool_call_id as string)
           if (sa && sa.status === "running") {
             sa.status = isToolMessageError(kw) ? "failed" : "completed"
@@ -491,14 +445,16 @@ export class StreamConverter {
         else if (cn.includes("Tool")) role = "tool"
         else if (cn.includes("System")) role = "system"
 
-        const reasoning = role === "assistant" ? extractReasoningFromKwargs(kw) : ""
+        const reasoning = role === "assistant" ? extractVisibleReasoning(kw) : ""
         return {
           id: (kw.id as string) || `msg-${index}`,
           role,
           content: extractContent(kw.content ?? msg.content),
           ...(reasoning ? { reasoning } : {}),
           tool_calls: kw.tool_calls as unknown[] | undefined,
-          ...(role === "tool" && kw.tool_call_id ? { tool_call_id: kw.tool_call_id as string } : {}),
+          ...(role === "tool" && kw.tool_call_id
+            ? { tool_call_id: kw.tool_call_id as string }
+            : {}),
           ...(role === "tool" && kw.name ? { name: kw.name as string } : {})
         }
       })
@@ -621,9 +577,7 @@ export class StreamConverter {
   private resolveToolCallChunkId(chunk: ToolCallChunkLike): string | undefined {
     const msgId = this.currentChunkMessageId
     const key =
-      msgId !== undefined && typeof chunk.index === "number"
-        ? `${msgId}:${chunk.index}`
-        : undefined
+      msgId !== undefined && typeof chunk.index === "number" ? `${msgId}:${chunk.index}` : undefined
     if (chunk.id) {
       if (key) this.toolCallChunkIndexToId.set(key, chunk.id)
       return chunk.id

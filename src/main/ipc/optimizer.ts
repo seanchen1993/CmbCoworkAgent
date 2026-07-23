@@ -82,6 +82,34 @@ function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
   )
 }
 
+function traceObservabilityFields(trace: AgentTrace): Partial<AgentTrace> {
+  return {
+    observabilitySchemaVersion: trace.observabilitySchemaVersion,
+    traceKind: trace.traceKind,
+    executionMode: trace.executionMode,
+    rootTraceId: trace.rootTraceId,
+    rootThreadId: trace.rootThreadId,
+    parentTraceId: trace.parentTraceId,
+    parentThreadId: trace.parentThreadId,
+    parentSpanId: trace.parentSpanId,
+    linkType: trace.linkType,
+    subagentKind: trace.subagentKind,
+    subagentRunId: trace.subagentRunId,
+    subagentThreadId: trace.subagentThreadId,
+    handoffAction: trace.handoffAction,
+    handoffSourceAgent: trace.handoffSourceAgent,
+    handoffTargetAgent: trace.handoffTargetAgent,
+    coordinatorWorkerId: trace.coordinatorWorkerId,
+    coordinatorWorkerTurn: trace.coordinatorWorkerTurn,
+    coordinatorWorkerRole: trace.coordinatorWorkerRole,
+    coordinatorWorkerWorkload: trace.coordinatorWorkerWorkload,
+    workflowRunId: trace.workflowRunId,
+    workflowAgentIndex: trace.workflowAgentIndex,
+    workflowPhase: trace.workflowPhase,
+    workflowAgentLabel: trace.workflowAgentLabel
+  }
+}
+
 function getDefaultModel(): ChatOpenAI | null {
   const config = getDefaultModelConfig()
   if (!config || !config.apiKey) return null
@@ -423,6 +451,29 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
       Array<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         durationMs: number
         userMessage: string
@@ -447,6 +498,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         return {
           traceId: trace.traceId,
           threadId: trace.threadId,
+          ...traceObservabilityFields(trace),
           startedAt: trace.startedAt,
           durationMs: trace.durationMs,
           userMessage: trace.userMessage,
