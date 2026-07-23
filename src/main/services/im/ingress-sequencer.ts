@@ -6,6 +6,7 @@ import {
 import type { ImTargetSnapshot } from "./conversation-state"
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
 import { imEventStore, type ImEventRecord, type ImEventStore } from "./event-store"
+import { imInboxService, type ImInboxService } from "./inbox-service"
 
 export interface ImIngressResult {
   duplicate: boolean
@@ -16,6 +17,7 @@ export interface ImIngressResult {
 export interface ImIngressSequencerOptions {
   conversationState?: ImConversationStateStore
   eventStore?: ImEventStore
+  inboxService?: ImInboxService
   resolveTarget?: (event: RemoteImEventV1) => Promise<ImTargetSnapshot>
   emitAcknowledgement?: (ack: RemoteImAckV1) => Promise<void>
 }
@@ -58,12 +60,19 @@ export class ImIngressSequencer {
   constructor(options: ImIngressSequencerOptions = {}) {
     this.conversationState = options.conversationState ?? imConversationStateStore
     this.eventStore = options.eventStore ?? imEventStore
+    const inboxService = options.inboxService ?? imInboxService
     this.resolveTarget =
       options.resolveTarget ??
       (async (event) => {
         const target = this.conversationState.getActiveTarget(event.conversationKey)
-        if (!target) throw new Error("Conversation has no active IM target")
-        return target
+        return (
+          target ??
+          inboxService.ensureInbox({
+            conversationKey: event.conversationKey,
+            principalId: event.principalId,
+            deviceEpoch: event.deviceEpoch
+          })
+        )
       })
     this.emitAcknowledgement = options.emitAcknowledgement
   }

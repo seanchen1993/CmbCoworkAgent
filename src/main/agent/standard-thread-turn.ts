@@ -615,6 +615,8 @@ export interface RemoteTurnPolicy {
   disableMemoryInjection?: boolean
   disableAgentsPrompt?: boolean
   disableTaskTool?: boolean
+  disableMcpTools?: boolean
+  blockedToolNames?: string[]
   filesystemAccess?: CreateAgentRuntimeOptions["filesystemAccess"]
 }
 
@@ -656,6 +658,8 @@ function applyRemoteTurnPolicy(
     ...(policy.disableMemoryInjection ? { disableMemoryInjection: true } : {}),
     ...(policy.disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
     ...(policy.disableTaskTool ? { enableTaskTool: false } : {}),
+    ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
+    ...(policy.blockedToolNames ? { blockedToolNames: policy.blockedToolNames } : {}),
     ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {})
   }
 }

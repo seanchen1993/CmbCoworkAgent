@@ -604,28 +604,46 @@ export class ImEventStore {
     replies: readonly RemoteImReplyV1[],
     resultText: string
   ): Promise<ImEventRecord> {
+    return this.finalizeEventWithReplies({
+      eventId,
+      state: "completed",
+      replies,
+      resultText,
+      retryable: false
+    })
+  }
+
+  async finalizeEventWithReplies(input: {
+    eventId: string
+    state: "completed" | "cancelled" | "failed" | "rejected" | "outcome_unknown"
+    replies: readonly RemoteImReplyV1[]
+    resultText: string
+    reasonCode?: string
+    retryable: boolean
+  }): Promise<ImEventRecord> {
+    const { eventId } = input
     const event = this.requireEvent(eventId)
-    const normalizedReplies = normalizeReplies(event, replies)
+    const normalizedReplies = normalizeReplies(event, input.replies)
     const database = this.dependencies.getDatabase()
     const persisted = readAll<ImReplyOutboxRow>(
       database,
       "SELECT * FROM im_reply_outbox WHERE event_id = ? ORDER BY segment_index ASC",
       [eventId]
     )
-    if (event.state === "completed") {
+    if (event.state === input.state) {
       if (
         persisted.length !== normalizedReplies.length ||
         persisted.some((row, index) => !samePersistedReply(row, normalizedReplies[index]))
       ) {
         throw new ImEventStoreError(
           "REPLY_IDEMPOTENCY_CONFLICT",
-          "Completed event reply differs from its durable outbox"
+          "Terminal event reply differs from its durable outbox"
         )
       }
       await this.dependencies.flushStrict()
       return event
     }
-    this.assertTransition(event.state, "completed")
+    this.assertTransition(event.state, input.state)
     if (persisted.length > 0) {
       throw new ImEventStoreError(
         "REPLY_IDEMPOTENCY_CONFLICT",
@@ -660,10 +678,19 @@ export class ImEventStore {
       }
       database.run(
         `UPDATE im_events
-         SET state = 'completed', result_text = ?, reason_code = NULL, retryable = 0,
+         SET state = ?, result_text = ?, reason_code = ?, retryable = ?,
              permit_state = 'revoked', updated_at = ?, finished_at = ?
-         WHERE event_id = ? AND state IN ('executing', 'received')`,
-        [resultText, now, now, eventId]
+         WHERE event_id = ? AND state = ?`,
+        [
+          input.state,
+          input.resultText,
+          input.reasonCode?.trim() || null,
+          input.retryable ? 1 : 0,
+          now,
+          now,
+          eventId,
+          event.state
+        ]
       )
       if (database.getRowsModified() !== 1) {
         throw new ImEventStoreError(
@@ -771,6 +798,12 @@ export class ImEventStore {
 
   async markOutboxUnknown(outboxId: string, reasonCode: string): Promise<ImReplyOutboxRecord> {
     return this.updateOutbox(outboxId, ["sending", "unknown"], "unknown", { reasonCode })
+  }
+
+  async markOutboxFailed(outboxId: string, reasonCode: string): Promise<ImReplyOutboxRecord> {
+    return this.updateOutbox(outboxId, ["pending", "sending", "failed"], "failed", {
+      reasonCode
+    })
   }
 
   async rescheduleOutbox(

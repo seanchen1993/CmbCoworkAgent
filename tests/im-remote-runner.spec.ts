@@ -1,0 +1,281 @@
+import assert from "node:assert/strict"
+import initSqlJs from "sql.js"
+import type {
+  RemoteImAckV1,
+  RemoteImEventV1,
+  RemoteImReplyV1
+} from "../src/shared/im-gateway-contract"
+import { ImRemoteCapabilityGuard } from "../src/main/services/im/capability-guard"
+import {
+  ImConversationStateStore,
+  type ImTargetSnapshot
+} from "../src/main/services/im/conversation-state"
+import { ImEventStore } from "../src/main/services/im/event-store"
+import type {
+  ImExecutionPermitResult,
+  ImGatewayClientPort,
+  ImReplySubmissionResult
+} from "../src/main/services/im/gateway-client"
+import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
+import { ImReplyClient } from "../src/main/services/im/reply-client"
+import { ImRemoteRunner, createImInboxRemotePolicy } from "../src/main/services/im/remote-runner"
+import { ensureImServiceSchema } from "../src/main/services/im/schema"
+import {
+  claimLocalThreadRunLease,
+  getLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../src/main/agent/thread-run-lease"
+import type { ThreadRow } from "../src/main/db"
+
+interface Context {
+  database: Awaited<ReturnType<typeof initSqlJs>>["Database"]["prototype"]
+  conversations: ImConversationStateStore
+  events: ImEventStore
+  clock: { now: number }
+}
+
+const target: ImTargetSnapshot = {
+  kind: "inbox",
+  targetId: "target-inbox",
+  threadId: "thread-inbox",
+  workspacePath: "/managed/inbox"
+}
+
+function eventFixture(index: number): RemoteImEventV1 {
+  return {
+    schemaVersion: 1,
+    eventId: `event-${index}`,
+    platformMessageId: `platform-${index}`,
+    principalId: "principal-1",
+    conversationKey: "conversation-1",
+    conversationSeq: index,
+    deviceEpoch: 1,
+    message: { type: "text", text: `message-${index}` },
+    occurredAt: `2026-07-23T08:00:${String(index).padStart(2, "0")}.000Z`,
+    lease: { id: `lease-${index}`, expiresAt: "2026-07-23T09:00:00.000Z" }
+  }
+}
+
+async function createContext(): Promise<Context> {
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  ensureImServiceSchema(database)
+  const clock = { now: Date.parse("2026-07-23T08:00:00.000Z") }
+  const dependencies: ImPersistenceDependencies = {
+    getDatabase: () => database,
+    markDirty: () => undefined,
+    flushStrict: async () => undefined,
+    now: () => clock.now
+  }
+  const conversations = new ImConversationStateStore(dependencies)
+  const events = new ImEventStore(dependencies)
+  await conversations.ensureConversation({
+    conversationKey: "conversation-1",
+    principalId: "principal-1",
+    deviceEpoch: 1
+  })
+  await conversations.registerTarget("conversation-1", target, { activate: true })
+  return { database: database as never, conversations, events, clock }
+}
+
+async function queueEvent(context: Context, index: number) {
+  const remote = eventFixture(index)
+  await context.events.receiveEvent(remote, target)
+  return context.events.queueEvent(remote.eventId)
+}
+
+class TestGateway implements ImGatewayClientPort {
+  readonly acknowledgements: RemoteImAckV1[] = []
+  readonly replies: RemoteImReplyV1[] = []
+  authenticated = true
+  denyRenewal = false
+
+  isAuthenticated(): boolean {
+    return this.authenticated
+  }
+
+  async sendAcknowledgement(ack: RemoteImAckV1): Promise<void> {
+    this.acknowledgements.push(ack)
+  }
+
+  async acquireExecutionPermit(event: { leaseId: string }): Promise<ImExecutionPermitResult> {
+    return {
+      status: "granted",
+      leaseId: event.leaseId,
+      expiresAt: "2026-07-23T09:00:00.000Z"
+    }
+  }
+
+  async renewExecutionPermit(event: { leaseId: string }): Promise<ImExecutionPermitResult> {
+    return this.denyRenewal
+      ? { status: "denied", reasonCode: "LEASE_REVOKED" }
+      : {
+          status: "granted",
+          leaseId: event.leaseId,
+          expiresAt: "2026-07-23T09:00:00.000Z"
+        }
+  }
+
+  async submitReply(reply: RemoteImReplyV1): Promise<ImReplySubmissionResult> {
+    this.replies.push(reply)
+    return { state: "accepted", platformReplyId: `platform-reply-${this.replies.length}` }
+  }
+}
+
+function testThreadRow(): ThreadRow {
+  return {
+    thread_id: target.threadId,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+    status: "idle",
+    title: "远程收件箱",
+    thread_values: null,
+    metadata: JSON.stringify({
+      workspacePath: target.workspacePath,
+      targetKind: "inbox",
+      agentMode: "normal",
+      memoryEnabled: false,
+      imDeliveryContext: {
+        provider: "zhaohu",
+        conversationKey: "conversation-1",
+        deviceEpoch: 1,
+        targetId: target.targetId
+      }
+    })
+  }
+}
+
+function capabilityGuard(context: Context): ImRemoteCapabilityGuard {
+  return new ImRemoteCapabilityGuard({
+    conversationState: context.conversations,
+    getThread: () => testThreadRow(),
+    getGoal: () => null,
+    coordinator: {
+      hasRunningWorkersForThread: () => false,
+      hasNotifications: () => false,
+      hasTerminalWorkerAwaitingNotificationForThread: () => false
+    },
+    workflow: { isBusyForThread: () => false },
+    hasPendingApproval: () => false,
+    hasPendingUserInput: () => false
+  })
+}
+
+async function testSuccessfulRunAndDurableOutbox(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  let executions = 0
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    capabilityGuard: capabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    createRunId: () => "run-1",
+    executeTurn: async ({ event }) => {
+      executions += 1
+      assert.equal(context.events.getEvent(event.eventId)?.state, "executing")
+      assert.equal(getLocalThreadRunLease(target.threadId)?.owner, "im")
+      return "完成回复"
+    }
+  })
+  try {
+    const queued = await queueEvent(context, 1)
+    assert.equal(await runner.invoke(queued, new AbortController().signal), "completed")
+    assert.equal(executions, 1)
+    assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
+    assert.equal(context.events.listOutbox("sent").length, 1)
+    assert.equal(gateway.replies[0].message.content, "完成回复")
+    assert.equal(gateway.acknowledgements.at(-1)?.type, "completed")
+    assert.equal(getLocalThreadRunLease(target.threadId), undefined)
+  } finally {
+    context.database.close()
+  }
+}
+
+async function testForeignOwnerDefersWithoutRuntime(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  let executions = 0
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    capabilityGuard: capabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events),
+    createRunId: () => "run-im",
+    executeTurn: async () => {
+      executions += 1
+      return "should not run"
+    }
+  })
+  claimLocalThreadRunLease({ threadId: target.threadId, owner: "desktop", runId: "desktop-run" })
+  try {
+    const queued = await queueEvent(context, 1)
+    assert.equal(await runner.invoke(queued, new AbortController().signal), "deferred_thread_busy")
+    assert.equal(executions, 0)
+    assert.equal(context.events.getEvent(queued.eventId)?.state, "queued")
+  } finally {
+    releaseLocalThreadRunLease(target.threadId, "desktop", "desktop-run")
+    context.database.close()
+  }
+}
+
+async function testPermitRevocationBecomesOutcomeUnknown(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  gateway.denyRenewal = true
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    capabilityGuard: capabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    permitRenewIntervalMs: 5,
+    createRunId: () => "run-revoked",
+    executeTurn: ({ signal }) =>
+      new Promise<string>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+      })
+  })
+  try {
+    const queued = await queueEvent(context, 1)
+    assert.equal(await runner.invoke(queued, new AbortController().signal), "outcome_unknown")
+    const terminal = context.events.getEvent(queued.eventId)
+    assert.equal(terminal?.state, "outcome_unknown")
+    assert.equal(terminal?.reasonCode, "LEASE_REVOKED")
+    assert(gateway.replies[0].message.content.includes("事件短码"))
+  } finally {
+    context.database.close()
+  }
+}
+
+function testInboxPolicyKeepsSchedulerButCutsRemoteRisks(): void {
+  const policy = createImInboxRemotePolicy()
+  assert.equal(policy.disableScheduler, undefined)
+  assert.equal(policy.disableMcpTools, true)
+  assert.equal(policy.disableRequestUserInput, true)
+  assert.equal(policy.disableSubagents, true)
+  assert(policy.blockedToolNames?.includes("execute"))
+  assert(!policy.blockedToolNames?.includes("manage_scheduler"))
+}
+
+const tests: Array<[string, () => void | Promise<void>]> = [
+  ["testSuccessfulRunAndDurableOutbox", testSuccessfulRunAndDurableOutbox],
+  ["testForeignOwnerDefersWithoutRuntime", testForeignOwnerDefersWithoutRuntime],
+  ["testPermitRevocationBecomesOutcomeUnknown", testPermitRevocationBecomesOutcomeUnknown],
+  [
+    "testInboxPolicyKeepsSchedulerButCutsRemoteRisks",
+    testInboxPolicyKeepsSchedulerButCutsRemoteRisks
+  ]
+]
+
+async function main(): Promise<void> {
+  for (const [name, test] of tests) {
+    await test()
+    console.log(`PASS ${name}`)
+  }
+  console.log("im-remote-runner.spec.ts passed")
+}
+
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

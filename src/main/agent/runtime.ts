@@ -1547,6 +1547,46 @@ export function createAgentToolGuardMiddleware(
   })
 }
 
+/**
+ * Exact main-runtime tool denylist used by transport capability policies.
+ *
+ * This stays separate from the registry/coordinator worker access model: a
+ * remote inbox is still the main agent and may keep `manage_scheduler`, while
+ * transport-incompatible tools such as `execute` are removed. Hiding and
+ * hard-rejecting use the same set so a recovered tool call cannot bypass the
+ * advertised policy.
+ */
+export function createRuntimeToolDenylistMiddleware(
+  disallowedTools: readonly string[]
+): ReturnType<typeof createMiddleware> {
+  const blocked = new Set(disallowedTools.map((name) => name.trim()).filter(Boolean))
+  return createMiddleware({
+    name: "runtimeToolDenylist",
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapModelCall: (request: any, handler: any) => {
+      const tools = Array.isArray(request.tools)
+        ? request.tools.filter((tool: { name?: string }) => !tool.name || !blocked.has(tool.name))
+        : request.tools
+      return handler({
+        ...request,
+        tools,
+        systemMessage: stripBlockedToolDocs(request.systemMessage, blocked)
+      })
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapToolCall: (request: any, handler: any) => {
+      const name: string | undefined = request.toolCall?.name
+      if (!name || !blocked.has(name)) return handler(request)
+      return new ToolMessage({
+        content: `Tool "${name}" is unavailable for this message source. Continue using the available tools.`,
+        tool_call_id: request.toolCall?.id ?? "",
+        name,
+        status: "error"
+      })
+    }
+  })
+}
+
 function describeRegistrySubagentAccess(
   disallowedTools: readonly string[],
   shellAccess: AgentShellAccess
@@ -1708,6 +1748,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     includeGeneralPurposeSubagent = true,
     mainSubagentsEnabled = true,
     filesystemAccess,
+    mainBlockedToolNames = [],
     registrySubagentSpecs = [],
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
@@ -2320,6 +2361,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       })
     ]
   }
+  const mainToolDenylistMiddleware =
+    mainBlockedToolNames.length > 0
+      ? [createRuntimeToolDenylistMiddleware(mainBlockedToolNames)]
+      : []
   const systemPromptPreviewCaptureMiddleware =
     threadId && typeof threadId === "string"
       ? [
@@ -2352,6 +2397,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
       ...postFsToolDocStripMiddleware,
+      // The filesystem middleware appends execute documentation dynamically;
+      // run the transport denylist after it so the docs and tool disappear
+      // together.
+      ...mainToolDenylistMiddleware,
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
       gradedToolConcurrencyMiddleware,
@@ -3748,6 +3797,10 @@ export interface CreateAgentRuntimeOptions {
   /** Optional filesystem access limits for leaf runtimes: coordinator async
    * workers (workload/ownedFiles) or registry agents (disallowedTools/shellAccess). */
   filesystemAccess?: CoordinatorWorkerFilesystemAccess
+  /** Skip eager/lazy MCP tools and saved/deferred code-exec bridges. */
+  disableMcpTools?: boolean
+  /** Exact main-agent tool names hidden and hard-blocked by a transport policy. */
+  blockedToolNames?: string[]
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -3855,6 +3908,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     traceContext,
     soloTaskTraceManager,
     disableSubagents = false,
+    disableMcpTools = false,
+    blockedToolNames = [],
     onHookResult,
     onFailureFuseNotice,
     onContextCompaction,
@@ -3869,6 +3924,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onFileMutation
   } = options
   const approvalThreadId = requestedApprovalThreadId ?? threadId
+  const runtimeBlockedToolNames = new Set(
+    blockedToolNames.map((name) => name.trim()).filter(Boolean)
+  )
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
 
@@ -4249,9 +4307,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   //    builds/installs/tests, so the guidance would steer the agent into commands
   //    the gate rejects (contradicting its access prompt). Suppress it there too.
   // The main agent (no filesystemAccess), verify, and whole-workspace write keep it.
-  const executeToolAvailable = options.filesystemAccess
-    ? !blockedToolNamesForAccess(options.filesystemAccess).has("execute")
-    : true
+  const executeToolAvailable =
+    !runtimeBlockedToolNames.has("execute") &&
+    (options.filesystemAccess
+      ? !blockedToolNamesForAccess(options.filesystemAccess).has("execute")
+      : true)
   const isReadOnlyRuntime =
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
@@ -4484,13 +4544,18 @@ The workspace root is: ${workspacePath}`
   let eagerMcpMetadata: McpCapabilityTool[] = []
   let lazyMcpMetadata: McpCapabilityTool[] = []
   const deferredSavedTools =
-    !isConstrainedCoordinatorWorker && codeExecEnabled && runtimePolicy.includeSavedCodeExecTools
+    !disableMcpTools &&
+    !isConstrainedCoordinatorWorker &&
+    codeExecEnabled &&
+    runtimePolicy.includeSavedCodeExecTools
       ? listSavedCodeExecTools()
       : []
   let mcpTools: ReturnType<typeof createEagerMcpTools> = []
   let toolSearchTools: unknown[] = []
 
-  if (isConstrainedCoordinatorWorker) {
+  if (disableMcpTools) {
+    console.log("[Runtime] MCP and deferred code-exec tools disabled by runtime policy")
+  } else if (isConstrainedCoordinatorWorker) {
     // Keep EAGER MCP (a structured single tool call, bounded by the MCP server's
     // own permissions — safe for a restricted worker, and matching CC subagents +
     // the Solo/workflow read-only baseline which both keep eager MCP). WITHHOLD the
@@ -4844,7 +4909,10 @@ The workspace root is: ${workspacePath}`
   const finalTools = filterCoordinatorWorkerFinalTools(
     [...mcpTools, ...memoryTools, ...extraTools, ...toolSearchTools],
     options.filesystemAccess
-  )
+  ).filter((tool) => {
+    const name = (tool as { name?: string }).name
+    return !name || !runtimeBlockedToolNames.has(name)
+  })
   const hasNamedTool = (name: string): boolean => {
     return finalTools.some((tool) => (tool as { name?: string }).name === name)
   }
@@ -5714,6 +5782,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     mainFilesystemEnabled: !isCoordinatorMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && runtimePolicy.includeSubagents,
     filesystemAccess: options.filesystemAccess,
+    mainBlockedToolNames: [...runtimeBlockedToolNames],
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
     // that's PowerShell. Pass that to the read-only execute gate so PS read-only

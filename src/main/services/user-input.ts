@@ -22,6 +22,10 @@ const pendingUserInputs = new Map<string, PendingUserInput>()
 const pendingUserInputThreads = new Map<string, string>()
 const USER_INPUT_ACK_TIMEOUT_MS = 5_000
 
+export function hasPendingUserInputForThread(threadId: string): boolean {
+  return pendingUserInputThreads.has(threadId)
+}
+
 export class UserInputRequestRejectedError extends Error {
   readonly code: string
 
