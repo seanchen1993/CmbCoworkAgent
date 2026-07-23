@@ -2,6 +2,8 @@ import type {
   CoordinatorWorkerProgressEvent,
   CoordinatorWorkerTokenUsage
 } from "./coordinator-worker-manager"
+import type { SkillUsageDetector } from "./skill-evolution/usage-detector"
+import { extractVisibleReasoning, TRACE_REASONING_MAX_CHARS } from "../../shared/model-reasoning"
 
 const TRANSCRIPT_FIELD_MAX_CHARS = 8_000
 
@@ -65,6 +67,34 @@ export function extractWorkerFinalText(
   }
 
   return ""
+}
+
+export function extractWorkerVisibleReasoning(
+  mode: string,
+  payload: unknown,
+  currentTurnPrompt?: string,
+  valuesContext?: WorkerValuesSnapshotContext
+): { text: string; isDelta: boolean } | undefined {
+  if (mode === "messages") {
+    if (!Array.isArray(payload)) return undefined
+    const data = getSerializedObject(payload[0])
+    if (!data || !getMessageClassName(data).includes("AI")) return undefined
+    const text = extractVisibleReasoning(data, TRACE_REASONING_MAX_CHARS + 1)
+    if (!text) return undefined
+    return { text, isDelta: getMessageClassName(data).includes("AIMessageChunk") }
+  }
+
+  if (mode === "values") {
+    const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
+    if (!messages) return undefined
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const data = getSerializedObject(messages[index])
+      if (!data || !getMessageClassName(data).includes("AI")) continue
+      const text = extractVisibleReasoning(data, TRACE_REASONING_MAX_CHARS + 1).trim()
+      if (text) return { text, isDelta: false }
+    }
+  }
+  return undefined
 }
 
 export function isWorkerFinalTextDelta(mode: string, payload: unknown): boolean {
@@ -264,6 +294,59 @@ export function createWorkerValuesSnapshotContext(
     skillsMetadata: Array.isArray(state.skillsMetadata)
       ? (state.skillsMetadata as Array<{ name?: string; path?: string }>)
       : []
+  }
+}
+
+/** Observe Skill reads from either messages- or values-mode agent streams.
+ * Returns true when the effective Skill attribution changed, allowing callers
+ * to refresh trace and code-adoption context before a following file write. */
+export function observeSkillUsageFromStream(
+  mode: string,
+  payload: unknown,
+  detector: SkillUsageDetector,
+  valuesContext?: WorkerValuesSnapshotContext,
+  currentTurnPrompt?: string
+): boolean {
+  try {
+    const priorUsedCount = detector.getUsedSkillNames().length
+    const priorEvolvedCount = detector.getUsedEvolvedSkillNames().length
+    const priorSourceCount = detector.getUsedSkillSourceRefs().length
+
+    const observeMessage = (message: unknown): void => {
+      const data = getSerializedObject(message)
+      if (!data) return
+      for (const rawToolCall of getWorkerToolCalls(data)) {
+        if (extractToolCallName(rawToolCall) !== "read_file") continue
+        const args = getSerializedObject(extractToolCallArgs(rawToolCall)) ?? {}
+        const readPathRaw =
+          (typeof args.path === "string" && args.path) ||
+          (typeof args.file_path === "string" && args.file_path) ||
+          ""
+        if (readPathRaw) detector.onReadFilePath(readPathRaw)
+      }
+    }
+
+    if (mode === "messages") {
+      if (Array.isArray(payload)) observeMessage(payload[0])
+    } else if (mode === "values") {
+      const resolvedContext =
+        valuesContext ?? createWorkerValuesSnapshotContext(mode, payload, currentTurnPrompt)
+      if (resolvedContext) {
+        if (resolvedContext.skillsMetadata.length > 0) {
+          detector.onSkillsMetadata(resolvedContext.skillsMetadata)
+        }
+        resolvedContext.messages.forEach(observeMessage)
+      }
+    }
+
+    return (
+      detector.getUsedSkillNames().length !== priorUsedCount ||
+      detector.getUsedEvolvedSkillNames().length !== priorEvolvedCount ||
+      detector.getUsedSkillSourceRefs().length !== priorSourceCount
+    )
+  } catch (error) {
+    console.warn("[SkillUsage] stream observation failed; continuing without attribution:", error)
+    return false
   }
 }
 

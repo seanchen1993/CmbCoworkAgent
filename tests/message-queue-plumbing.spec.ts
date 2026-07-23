@@ -92,7 +92,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*createSummarizationMiddleware\(summarizationOptions\)/,
+    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*createSummarizationMiddleware\(mainSummarizationOptions\)/,
     "queue middleware immediately precedes summarization on the main stack"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts

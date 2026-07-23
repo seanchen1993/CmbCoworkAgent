@@ -11,6 +11,6 @@ describe("bundled built-in model credential", () => {
       createHash("sha256")
         .update(value ?? "")
         .digest("hex")
-    ).toBe("873e672443ff41ceb479482131852e18461c0b6d37088930a04ca320357b7af7")
+    ).toBe("1511e4d9acefcedcaf4cf2a1ccdf76b0cc92932d5220c624b425b58e815b7e02")
   })
 })

@@ -255,11 +255,14 @@ function writeEnvFile(env: Record<string, string>): void {
 }
 
 /** Resolve the managed-model credential, keeping runtime values overridable. */
-export function getBuiltinModelApiKey(): string | undefined {
+export function getBuiltinModelApiKey(options?: {
+  allowBundledFallback?: boolean
+}): string | undefined {
   const processValue = process.env[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
   if (processValue) return processValue
   const localValue = parseEnvFile()[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
   if (localValue) return localValue
+  if (options?.allowBundledFallback === false) return undefined
   return getBundledBuiltinModelApiKey()
 }
 

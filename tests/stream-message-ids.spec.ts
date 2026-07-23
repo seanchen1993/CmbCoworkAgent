@@ -13,6 +13,7 @@ import {
   ElectronIPCTransport,
   transformSerializedValuesMessages
 } from "../src/renderer/src/lib/electron-transport.ts"
+import { isSerializedSummarizationMessage } from "../src/shared/context-compaction-messages.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
@@ -35,6 +36,55 @@ function testExplicitIdWins(): void {
   })
 
   assertEqual(id, "provider-id", "provider ids should remain authoritative")
+}
+
+function testSummarizationMessagesUseStructuralFiltering(): void {
+  const canonicalSummary = {
+    id: ["langchain_core", "messages", "HumanMessage"],
+    kwargs: {
+      id: "context-summary",
+      content: "You are in the middle of a conversation that has been summarized.\nsummary",
+      additional_kwargs: { lc_source: "summarization" }
+    }
+  }
+  const deserializedSummary = {
+    additional_kwargs: { lc_source: "summarization" },
+    content: "Here is a summary of the conversation to date:\nsummary"
+  }
+  const ordinaryAssistant = {
+    id: ["langchain_core", "messages", "AIMessage"],
+    kwargs: {
+      id: "ordinary-assistant",
+      content: "Here is a summary of the conversation to date:\n用户要求原样输出"
+    }
+  }
+
+  assertEqual(
+    isSerializedSummarizationMessage(canonicalSummary),
+    true,
+    "canonical serialized summary should be identified by lc_source"
+  )
+  assertEqual(
+    isSerializedSummarizationMessage(deserializedSummary),
+    true,
+    "deserialized checkpoint summary should be identified by top-level lc_source"
+  )
+  assertEqual(
+    isSerializedSummarizationMessage(ordinaryAssistant),
+    false,
+    "visible assistant prose should not be classified without lc_source"
+  )
+
+  const transformed = transformSerializedValuesMessages([
+    canonicalSummary,
+    ordinaryAssistant
+  ] as never)
+  assertEqual(transformed.length, 1, "values conversion should drop only marked summaries")
+  assertEqual(
+    transformed[0]?.id,
+    "ordinary-assistant",
+    "values conversion should preserve ordinary assistant prose"
+  )
 }
 
 function testFallbackIdIsStableForSameValuesMessage(): void {
@@ -1865,6 +1915,10 @@ function testStreamRetryResetRestoresStableValuesAndClearsPartialDeltaState(): v
 
 const tests: Array<[string, () => void]> = [
   ["testExplicitIdWins", testExplicitIdWins],
+  [
+    "testSummarizationMessagesUseStructuralFiltering",
+    testSummarizationMessagesUseStructuralFiltering
+  ],
   ["testFallbackIdIsStableForSameValuesMessage", testFallbackIdIsStableForSameValuesMessage],
   ["testFallbackIdIgnoresGrowingContent", testFallbackIdIgnoresGrowingContent],
   [

@@ -14,6 +14,9 @@ import {
   buildToolMessageFallbackId
 } from "./stream-message-ids"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
+import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
+import { isContextCompactionStreamPayload } from "../../../shared/context-compaction-events"
+import { extractVisibleReasoning } from "../../../shared/model-reasoning"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -161,56 +164,6 @@ function extractSerializedContent(
   return ""
 }
 
-function extractReasoningText(reasoning: unknown): string {
-  if (typeof reasoning === "string") return reasoning
-  if (Array.isArray(reasoning)) return reasoning.map(extractReasoningText).filter(Boolean).join("")
-  if (reasoning && typeof reasoning === "object") {
-    const record = reasoning as Record<string, unknown>
-    if (typeof record.text === "string") return record.text
-    if (typeof record.reasoning === "string") return record.reasoning
-    if (typeof record.reasoning_content === "string") return record.reasoning_content
-    if (typeof record.reasoning_text === "string") return record.reasoning_text
-    if (typeof record.content === "string") return record.content
-    if (typeof record.summary === "string") return record.summary
-    if (typeof record.delta === "string") return record.delta
-    if (Array.isArray(record.parts)) {
-      return record.parts.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.reasoning_details)) {
-      return record.reasoning_details.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.summary)) {
-      return record.summary.map(extractReasoningText).filter(Boolean).join("")
-    }
-    if (Array.isArray(record.details)) {
-      return record.details.map(extractReasoningText).filter(Boolean).join("")
-    }
-  }
-  return ""
-}
-
-function extractReasoningFromKwargs(kwargs?: SerializedMessageChunk["kwargs"]): string {
-  if (!kwargs) return ""
-  const kwargsRecord = kwargs as Record<string, unknown>
-  const additionalKwargs = kwargs.additional_kwargs
-  return extractReasoningText(
-    kwargsRecord.reasoning ??
-      kwargsRecord.reasoning_content ??
-      kwargsRecord.reasoning_text ??
-      kwargsRecord.reasoning_details ??
-      kwargsRecord.summary ??
-      kwargsRecord.details ??
-      kwargsRecord.delta ??
-      additionalKwargs?.reasoning ??
-      additionalKwargs?.reasoning_content ??
-      additionalKwargs?.reasoning_text ??
-      additionalKwargs?.reasoning_details ??
-      additionalKwargs?.summary ??
-      additionalKwargs?.details ??
-      additionalKwargs?.delta
-  )
-}
-
 export function transformSerializedValuesMessages(
   messages: SerializedMessageChunk[] | undefined
 ): TransformedValuesMessage[] {
@@ -223,6 +176,7 @@ export function transformSerializedValuesMessages(
   }
 
   for (const msg of messages ?? []) {
+    if (isSerializedSummarizationMessage(msg)) continue
     const className = getSerializedMessageClassName(msg)
     if (className.includes("Human")) {
       // Local user bubbles are appended before stream submit. Internal goal
@@ -246,7 +200,7 @@ export function transformSerializedValuesMessages(
           ? "human"
           : "ai"
     const content = extractSerializedContent(kwargs.content)
-    const reasoning = type === "ai" ? extractReasoningFromKwargs(kwargs) : ""
+    const reasoning = type === "ai" ? extractVisibleReasoning(kwargs) : ""
     const fallbackIndex = fallbackIndexes[type]++
     const id =
       kwargs.id ||
@@ -538,12 +492,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
     event: IPCStreamEvent,
     parentThreadId: string
   ): Message[] {
+    if (isContextCompactionStreamPayload(event.mode, event.data)) return []
     const focused = useAppStore.getState().workerFocusView
     if (!focused || focused.threadId !== parentThreadId) return []
     this.syncWorkerTurnBoundary(focused.workerThreadId, event.workerTurn)
 
     if (event.mode === "messages") {
       const [msgChunk, metadata] = event.data as [SerializedMessageChunk, MessageMetadata]
+      if (isSerializedSummarizationMessage(msgChunk)) return []
       const kwargs = msgChunk?.kwargs || {}
       const classId = Array.isArray(msgChunk?.id) ? msgChunk.id : []
       const className = classId[classId.length - 1] || ""
@@ -977,6 +933,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const converted: Message[] = []
     let latestAiIndex = -1
     for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (isSerializedSummarizationMessage(messages[index])) continue
       if (this.isSerializedAIMessage(messages[index])) {
         latestAiIndex = index
         break
@@ -984,6 +941,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     for (let index = 0; index < messages.length; index += 1) {
       const message = messages[index]
+      if (isSerializedSummarizationMessage(message)) continue
       const kwargs = message.kwargs || {}
       const className = this.getSerializedMessageClassName(message)
       const additionalKwargs = kwargs.additional_kwargs
@@ -992,7 +950,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       const isAssistantMessage = this.isSerializedAIMessage(message)
       const content = this.extractContent(kwargs.content)
-      const reasoning = isAssistantMessage ? extractReasoningFromKwargs(kwargs) : ""
+      const reasoning = isAssistantMessage ? extractVisibleReasoning(kwargs) : ""
       const toolCalls = this.isSerializedAIMessage(message)
         ? this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
         : []
@@ -1178,9 +1136,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.currentSubagentOwnerHint = undefined
     this.currentChunkMessageId = undefined
 
+    if (isContextCompactionStreamPayload(mode, data)) return events
+
     if (mode === "messages") {
       // Messages mode returns [message, metadata] tuples
       const [msgChunk, metadata] = data as [SerializedMessageChunk, MessageMetadata]
+      if (isSerializedSummarizationMessage(msgChunk)) return events
 
       // LangChain serialization: actual data is in kwargs
       const kwargs = msgChunk?.kwargs || {}
@@ -1213,9 +1174,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const isAIMessage = className.includes("AI") || className.includes("AIMessageChunk")
 
       const isTaskResultMessage =
-        isToolMessage &&
-        !!kwargs.tool_call_id &&
-        this.activeSubagents.has(kwargs.tool_call_id)
+        isToolMessage && !!kwargs.tool_call_id && this.activeSubagents.has(kwargs.tool_call_id)
       const isKnownSubagentToolCall =
         isToolMessage &&
         !!kwargs.tool_call_id &&
@@ -1331,7 +1290,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         } else {
           // Main agent message
           const content = this.extractContent(kwargs.content)
-          const reasoning = extractReasoningFromKwargs(kwargs)
+          const reasoning = extractVisibleReasoning(kwargs)
           const observedProviderMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
           const observedMessageIndex =
             !isCoordinatorMode && observedProviderMessageId
@@ -1389,18 +1348,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
             if (observedProviderMessageId) {
               this.mainAssistantIndexByObservedId.set(observedProviderMessageId, messageIndex)
             }
-            pruneMapToLimit(
-              this.mainAssistantMessageIdByIndex,
-              MAX_TRACKED_EMITTED_MESSAGES
-            )
-            pruneMapToLimit(
-              this.mainAssistantIndexByObservedId,
-              MAX_TRACKED_EMITTED_MESSAGES
-            )
-            pruneSetToLimit(
-              this.streamedMainAssistantIndexes,
-              MAX_TRACKED_EMITTED_MESSAGES
-            )
+            pruneMapToLimit(this.mainAssistantMessageIdByIndex, MAX_TRACKED_EMITTED_MESSAGES)
+            pruneMapToLimit(this.mainAssistantIndexByObservedId, MAX_TRACKED_EMITTED_MESSAGES)
+            pruneSetToLimit(this.streamedMainAssistantIndexes, MAX_TRACKED_EMITTED_MESSAGES)
           }
           this.currentMessageId = msgId
           this.currentMessageIndex = messageIndex
@@ -1708,7 +1658,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
 
           // Check for ToolMessage (subagent completion)
-          if (className.includes("ToolMessage") && kwargs.tool_call_id && this.activeSubagents.has(kwargs.tool_call_id)) {
+          if (
+            className.includes("ToolMessage") &&
+            kwargs.tool_call_id &&
+            this.activeSubagents.has(kwargs.tool_call_id)
+          ) {
             const subagent = this.activeSubagents.get(kwargs.tool_call_id)
             if (subagent && subagent.status === "running") {
               subagent.status = this.isToolMessageError(kwargs) ? "failed" : "completed"
@@ -1913,7 +1867,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (isAIMessage) {
       const isChunk = input.className.includes("Chunk")
       const extractedContent = this.extractContent(kwargs.content)
-      const extractedReasoning = extractReasoningFromKwargs(kwargs)
+      const extractedReasoning = extractVisibleReasoning(kwargs)
       const providerMessageId =
         typeof kwargs.id === "string"
           ? this.createFocusedWorkerTurnScopedMessageId(focused.workerThreadId, kwargs.id)
@@ -2137,10 +2091,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return merged.slice(existing.length)
   }
 
-  private prepareMainAssistantReasoning(
-    messageId: string,
-    incoming: string
-  ): string | undefined {
+  private prepareMainAssistantReasoning(messageId: string, incoming: string): string | undefined {
     if (!incoming) return undefined
     const existing = this.mainAssistantReasoningByMessageId.get(messageId) ?? ""
     const merged = this.mergeWorkerAssistantTextChunk(existing, incoming)
@@ -2380,6 +2331,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const events: StreamEvent[] = []
     let currentTurnStart = 0
     for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (isSerializedSummarizationMessage(messages[index])) continue
       if (this.isSerializedHumanMessage(messages[index])) {
         currentTurnStart = index + 1
         break
@@ -2388,6 +2340,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     let latestCurrentTurnAiIndex = -1
     for (let index = currentTurnStart; index < messages.length; index += 1) {
+      if (isSerializedSummarizationMessage(messages[index])) continue
       if (this.isSerializedAIMessage(messages[index])) latestCurrentTurnAiIndex = index
     }
     const reusableCurrentMessageId =
@@ -2403,6 +2356,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       let sawToolAfterCandidate = false
       for (let index = currentTurnStart; index < messages.length; index += 1) {
         const message = messages[index]
+        if (isSerializedSummarizationMessage(message)) continue
         if (candidateIndex >= 0 && this.isSerializedToolMessage(message)) {
           sawToolAfterCandidate = true
         }
@@ -2424,7 +2378,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
       currentMessageValuesIndex = candidateIndex
       if (currentMessageValuesIndex < 0 && latestCurrentTurnAiIndex >= 0) {
-        const latestContent = this.extractContent(messages[latestCurrentTurnAiIndex]?.kwargs?.content)
+        const latestContent = this.extractContent(
+          messages[latestCurrentTurnAiIndex]?.kwargs?.content
+        )
         if (this.snapshotReplaysMainAssistantText(reusableCurrentMessageId, latestContent)) {
           currentMessageValuesIndex = latestCurrentTurnAiIndex
         }
@@ -2441,6 +2397,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     let sawToolAfterCurrentMessageCandidate = false
     for (let index = 0; index < messages.length; index += 1) {
       const message = messages[index]
+      if (isSerializedSummarizationMessage(message)) continue
       const kwargs = message.kwargs || {}
       const className = this.getSerializedMessageClassName(message)
       const fallbackType = this.isSerializedToolMessage(message)
@@ -2462,7 +2419,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       if (this.isSerializedAIMessage(message)) {
         const content = this.extractContent(kwargs.content)
-        const reasoning = extractReasoningFromKwargs(kwargs)
+        const reasoning = extractVisibleReasoning(kwargs)
         const visibleToolCalls = this.hydrateToolCallsWithAccumulatedArgs(
           this.filterVisibleMainToolCalls(kwargs.tool_calls, true)
         )
@@ -2480,8 +2437,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
         const reusableCurrentMessageIdForIndex =
           index === currentMessageValuesIndex ? reusableCurrentMessageId : undefined
         const providerMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
-        const shouldReuseCurrentMessageId =
-          this.canSafelyApplyMainAssistantSnapshot(reusableCurrentMessageIdForIndex, content)
+        const shouldReuseCurrentMessageId = this.canSafelyApplyMainAssistantSnapshot(
+          reusableCurrentMessageIdForIndex,
+          content
+        )
         let msgId =
           shouldReuseCurrentMessageId && reusableCurrentMessageIdForIndex
             ? reusableCurrentMessageIdForIndex
@@ -2950,9 +2909,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       byToolId.set(toolCall.id, {
         id: toolCall.id,
         name: toolCall.name || prev?.name || "",
-        args: this.hasToolArgs(toolCall.args)
-          ? toolCall.args!
-          : (prev?.args ?? toolCall.args ?? {})
+        args: this.hasToolArgs(toolCall.args) ? toolCall.args! : (prev?.args ?? toolCall.args ?? {})
       })
     }
 
@@ -3061,9 +3018,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private resolveToolCallChunkId(chunk: { id?: string; index?: number }): string | undefined {
     const msgId = this.currentChunkMessageId
     const key =
-      msgId !== undefined && typeof chunk.index === "number"
-        ? `${msgId}:${chunk.index}`
-        : undefined
+      msgId !== undefined && typeof chunk.index === "number" ? `${msgId}:${chunk.index}` : undefined
     if (chunk.id) {
       if (key) {
         this.toolCallChunkIndexToId.set(key, chunk.id)

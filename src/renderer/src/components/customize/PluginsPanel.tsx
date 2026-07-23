@@ -727,6 +727,7 @@ export function PluginsPanel(): React.JSX.Element {
         type: "plugin",
         name: plugin.name,
         description: plugin.description,
+        version: plugin.version,
         category: marketPluginMap[key]?.category,
         chineseName: marketPluginMap[key]?.chinese_name,
         guidance: marketPluginMap[key]?.guidance,

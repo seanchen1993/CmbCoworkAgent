@@ -179,6 +179,13 @@ import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
 import type { ApprovalRequest, ApprovalDecision, Message } from "../types"
 import { emitAppAttention } from "../app-attention-events"
+import {
+  isTraceReasoningTruncated,
+  mergeStreamingReasoning,
+  truncateReasoningForTrace
+} from "../../shared/model-reasoning"
+import type { ContextCompactionLifecycleCallback } from "../../shared/context-compaction-events"
+import { configureContextCompactionModel } from "./context-compaction"
 import type {
   McpCapabilityService,
   McpCapabilityTool,
@@ -247,13 +254,16 @@ import {
 import {
   createWorkerValuesSnapshotContext,
   extractWorkerFinalText,
+  extractWorkerVisibleReasoning,
   extractWorkerUsage,
   isWorkerFinalTextDelta,
+  observeSkillUsageFromStream,
   shouldClearWorkerFinalText,
   observeWorkerProgress,
   summarizeWorkerText,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
+import { setAdoptionContext } from "../services/adoption-tracker"
 import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool } from "./read-file-tool"
@@ -270,6 +280,14 @@ import {
   type WorkflowSubagentRuntime
 } from "./workflow/subagent"
 import { isWorkflowSubagentThreadOf } from "./workflow/types"
+import {
+  createTraceCollectorSafely,
+  finishTraceInBackground,
+  runTraceSideEffect,
+  type TraceCollector
+} from "./trace/collector"
+import { SOLO_TASK_OWNER_METADATA_KEY, type SoloTaskTraceManager } from "./trace/solo-task"
+import type { TraceContext, TraceOutcome } from "./trace/types"
 
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -1555,7 +1573,7 @@ function appendRegistrySubagentAccessDescription(
  * Mirrored as a literal in electron-transport.ts and stream-converter.ts; the
  * renderer cannot import from main, so keep the three in sync.
  */
-export const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
+export const SUBAGENT_OWNER_METADATA_KEY = SOLO_TASK_OWNER_METADATA_KEY
 
 /**
  * Wrap deepagents' internal `task` tool so each subagent invocation stamps its
@@ -1566,7 +1584,10 @@ export const SUBAGENT_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
  * with the ToolCall as input re-establishes `config.toolCall` inside it (see
  * @langchain/core tools `invoke`), preserving its Command/result contract.
  */
-function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): DynamicStructuredTool {
+function wrapTaskToolWithOwnerMetadata(
+  taskTool: DynamicStructuredTool,
+  soloTaskTraceManager?: SoloTaskTraceManager
+): DynamicStructuredTool {
   return tool(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async (input: Record<string, unknown>, config: any) => {
@@ -1574,12 +1595,42 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
       const patchedConfig = ownerId
         ? {
             ...config,
-            metadata: { ...(config?.metadata ?? {}), [SUBAGENT_OWNER_METADATA_KEY]: ownerId }
+            metadata: { ...(config?.metadata ?? {}), [SUBAGENT_OWNER_METADATA_KEY]: ownerId },
+            configurable: {
+              ...(config?.configurable ?? {}),
+              [SUBAGENT_OWNER_METADATA_KEY]: ownerId
+            }
           }
         : config
-      // Pass the ToolCall as input so the original re-derives config.toolCall.id
-      // and returns its Command (state update + task ToolMessage) unchanged.
-      return taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+      const taskInput =
+        config?.toolCall?.args && typeof config.toolCall.args === "object"
+          ? (config.toolCall.args as Record<string, unknown>)
+          : input
+      if (ownerId) {
+        soloTaskTraceManager?.startTask({
+          ownerId,
+          description:
+            typeof taskInput.description === "string" ? taskInput.description : undefined,
+          subagentType:
+            typeof taskInput.subagent_type === "string" ? taskInput.subagent_type : undefined
+        })
+      }
+      try {
+        // Pass the ToolCall as input so the original re-derives config.toolCall.id
+        // and returns its Command (state update + task ToolMessage) unchanged.
+        const result = await taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+        if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", result)
+        return result
+      } catch (error) {
+        if (ownerId) {
+          soloTaskTraceManager?.finishTask(
+            ownerId,
+            isAbortError(error) ? "cancelled" : "error",
+            error
+          )
+        }
+        throw error
+      }
     },
     {
       name: taskTool.name,
@@ -1594,10 +1645,15 @@ function wrapTaskToolWithOwnerMetadata(taskTool: DynamicStructuredTool): Dynamic
  * Replace the `task` tool inside a subagent middleware with the owner-stamping
  * wrapper, leaving the middleware's wrapModelCall (task system prompt) intact.
  */
-function stampSubagentOwnerMetadata<T>(middleware: T): T {
+function stampSubagentOwnerMetadata<T>(
+  middleware: T,
+  soloTaskTraceManager?: SoloTaskTraceManager
+): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
-    mw.tools = mw.tools.map((t) => (t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t) : t))
+    mw.tools = mw.tools.map((t) =>
+      t?.name === "task" ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager) : t
+    )
   }
   return middleware
 }
@@ -1636,6 +1692,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     trimTokensToSummarize,
     summarizationSummaryPrompt,
     summarizationTruncateArgsSettings,
+    onContextCompaction,
     subagentExtraSystemPrompt,
     subagentExtraSystemPromptForRestrictedRoles = false,
     mainFilesystemEnabled = true,
@@ -1656,6 +1713,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
+    soloTaskTraceManager,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
@@ -1723,8 +1781,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   // Summarization options: pass explicit trigger/keep if provided, otherwise let
   // createSummarizationMiddleware auto-compute from the model profile.
-  const summarizationOptions = {
-    model,
+  const summarizationBaseOptions = {
     backend: filesystemBackend,
     historyPathPrefix: ".cmbdevclaw/conversation_history",
     ...(summarizationSummaryPrompt && { summaryPrompt: summarizationSummaryPrompt }),
@@ -1734,6 +1791,14 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ...(summarizationTruncateArgsSettings && {
       truncateArgsSettings: summarizationTruncateArgsSettings
     })
+  }
+  const mainSummarizationOptions = {
+    ...summarizationBaseOptions,
+    model: configureContextCompactionModel(model, onContextCompaction)
+  }
+  const subagentSummarizationOptions = {
+    ...summarizationBaseOptions,
+    model: configureContextCompactionModel(model)
   }
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
@@ -2111,6 +2176,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
+    ...(soloTaskTraceManager ? [soloTaskTraceManager.middleware] : []),
     // FIRST for the same reason as the main agent: reject recovered-malformed
     // calls before any tool lifecycle (hooks/fuse/task-mmd) can observe them.
     createMalformedToolCallGuardMiddleware(),
@@ -2121,7 +2187,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     subagentToolConcurrencyMiddleware,
     ...(toolHookMiddleware ? [toolHookMiddleware] : []),
     toolErrorMiddleware,
-    createSummarizationMiddleware(summarizationOptions),
+    createSummarizationMiddleware(subagentSummarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     // Same malformed tool-call recovery as the main agent — task subagents call
     // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
@@ -2312,7 +2378,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 subagents: availableSubagents,
                 generalPurposeAgent: false,
                 systemPrompt: taskSystemPrompt
-              } as Parameters<typeof createSubAgentMiddleware>[0])
+              } as Parameters<typeof createSubAgentMiddleware>[0]),
+              soloTaskTraceManager
             )
           ]
         : []),
@@ -2321,7 +2388,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // and BEFORE humanInTheLoop (a steered message must never race a pending
       // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
       createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
-      createSummarizationMiddleware(summarizationOptions),
+      createSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
       // invalid_tool_calls into normalized tool_calls (the guard middleware above
@@ -3409,58 +3476,13 @@ async function applyWorkerPromptSubmitHooks({
   return effectivePrompt
 }
 
-function getWorkerStreamObject(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : null
-}
-
 function observeWorkerSkillUsage(
   mode: string,
   payload: unknown,
   detector: SkillUsageDetector,
   valuesContext?: WorkerValuesSnapshotContext
-): void {
-  const observeMessage = (message: unknown): void => {
-    const data = getWorkerStreamObject(message)
-    if (!data) return
-    const kwargs = getWorkerStreamObject(data.kwargs) ?? {}
-    const toolCalls = Array.isArray(kwargs.tool_calls)
-      ? kwargs.tool_calls
-      : Array.isArray(data.tool_calls)
-        ? data.tool_calls
-        : []
-    for (const rawToolCall of toolCalls) {
-      const toolCall = getWorkerStreamObject(rawToolCall)
-      if (!toolCall || toolCall.name !== "read_file") continue
-      const args = getWorkerStreamObject(toolCall.args) ?? {}
-      const readPathRaw =
-        (typeof args.path === "string" && args.path) ||
-        (typeof args.file_path === "string" && args.file_path) ||
-        ""
-      if (readPathRaw) {
-        detector.onReadFilePath(readPathRaw)
-      }
-    }
-  }
-
-  if (mode === "messages") {
-    if (!Array.isArray(payload)) return
-    const [message] = payload as [unknown]
-    observeMessage(message)
-    return
-  }
-
-  if (mode !== "values") return
-  const resolvedValuesContext = valuesContext ?? createWorkerValuesSnapshotContext(mode, payload)
-  if (!resolvedValuesContext) return
-  if (resolvedValuesContext.skillsMetadata.length > 0) {
-    detector.onSkillsMetadata(
-      resolvedValuesContext.skillsMetadata as Array<{
-        name?: string
-        path?: string
-      }>
-    )
-  }
-  resolvedValuesContext.messages.forEach((message) => observeMessage(message))
+): boolean {
+  return observeSkillUsageFromStream(mode, payload, detector, valuesContext)
 }
 
 async function runWorkerStopHooksWithRevision({
@@ -3729,6 +3751,10 @@ export interface CreateAgentRuntimeOptions {
   coordinatorWorkerTurnPlanning?: CoordinatorWorkerTurnPlanningState
   /** Runtime mode. "normal" preserves the existing agent; "coordinator" enables async worker orchestration. */
   agentMode?: AgentMode
+  /** Parent/root trace context used to link async worker and workflow subagent traces. */
+  traceContext?: TraceContext
+  /** Solo-mode sidecar that records each synchronous task subagent as its own linked trace. */
+  soloTaskTraceManager?: SoloTaskTraceManager
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
   /** Optional filesystem access limits for leaf runtimes: coordinator async
@@ -3746,6 +3772,8 @@ export interface CreateAgentRuntimeOptions {
   onHookResult?: HookResultCallback
   /** Callback invoked when repeated tool failures should be shown to the user. */
   onFailureFuseNotice?: FailureFuseNoticeCallback
+  /** Foreground-only callback for the main agent's context compaction lifecycle. */
+  onContextCompaction?: ContextCompactionLifecycleCallback
   /**
    * Hook-result sink for coordinator workers. Workers run detached/async so
    * their hooks must be delivered on a durable channel rather than the spawning
@@ -3837,9 +3865,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     disableMemoryInjection = false,
     memoryEnabled: inheritedMemoryEnabled,
     agentMode = "normal",
+    traceContext,
+    soloTaskTraceManager,
     disableSubagents = false,
     onHookResult,
     onFailureFuseNotice,
+    onContextCompaction,
     onCoordinatorWorkerHookResult,
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
@@ -4237,16 +4268,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const isReadOnlyRuntime =
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
-  let systemPrompt = getSystemPrompt(
-    workspacePath,
-    windowsSandbox,
-    {
-      includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-      includeSubagents: runtimePolicy.includeSubagents,
-      includeMemory: runtimePolicy.includeMemory,
-      includeCurrentTime: runtimePolicy.includeCurrentTime
-    }
-  )
+  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, {
+    includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
+    includeSubagents: runtimePolicy.includeSubagents,
+    includeMemory: runtimePolicy.includeMemory,
+    includeCurrentTime: runtimePolicy.includeCurrentTime
+  })
   let agentsPrompt: AgentsPromptRuntimeResult = {
     type: "workspace",
     prompt: null,
@@ -4644,6 +4671,7 @@ The workspace root is: ${workspacePath}`
         runExclusiveFileWrite: <T>(fn: () => Promise<T>): Promise<T> =>
           getToolConcurrencyLock(threadId).write(fn),
         subagentDeps: {
+          traceContext,
           createRuntime: async (subagentOptions): Promise<WorkflowSubagentRuntime> => {
             // read_only AND none are both restricted roles → skip AGENTS.md +
             // MEMORY.md (CC omitClaudeMd parity). Only full (write/verify) keeps
@@ -4962,10 +4990,25 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let messageModeFinalText = ""
     let messageModeAssistantText = ""
     let messageModeAssistantTextTruncated = false
+    let workerReasoning = ""
     let tokenUsage: CoordinatorWorkerTokenUsage | undefined
     const seenWorkerToolCallKeys = new Set<string>()
     const workerToolNames = new Set<string>()
+    let workerToolCallCount = 0
     const workerSkillUsageDetector = new SkillUsageDetector()
+    let workerTracer: TraceCollector | undefined
+    let workerTraceTerminalRecorded = false
+    let workerTraceOutcome: TraceOutcome = "success"
+    let workerTraceError: string | undefined
+    const syncWorkerSkillAttribution = (): void => {
+      if (!workerTracer) return
+      const usedSkills = workerSkillUsageDetector.getUsedSkillNames()
+      const skillSource = workerSkillUsageDetector.getUsedSkillSourceRefs()
+      workerTracer.setUsedSkills(usedSkills)
+      workerTracer.setSkillSource(skillSource)
+      workerTracer.setEvolvedSkills(workerSkillUsageDetector.getUsedEvolvedSkillNames())
+      setAdoptionContext(workerInput.workerThreadId, { usedSkills, skillSource })
+    }
     const cancelWorkerBackgroundTasks = (): void => {
       LocalSandbox.cancelBackgroundTasks(workerInput.workerThreadId)
     }
@@ -5043,6 +5086,36 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         workerRoutingResult?.resolvedTier ?? "premium",
         workerRoutingResult?.layer !== "pinned"
       )
+      if (traceContext) {
+        workerTracer = createTraceCollectorSafely(
+          workerInput.workerThreadId,
+          effectiveWorkerPrompt,
+          workerRoutingResult?.resolvedModelId ?? modelId ?? "unknown",
+          {
+            traceKind: "subagent",
+            executionMode: "coordinator",
+            rootTraceId: traceContext.rootTraceId,
+            rootThreadId: traceContext.rootThreadId,
+            parentTraceId: traceContext.traceId,
+            parentThreadId: traceContext.threadId,
+            parentSpanId: traceContext.rootNodeId,
+            linkType: "async_span_link",
+            subagentKind: "coordinator_worker",
+            subagentRunId: `${workerInput.workerId}:turn:${workerInput.workerTurn}`,
+            subagentThreadId: workerInput.workerThreadId,
+            handoffAction: workerInput.workerTurn > 1 ? "continue_worker" : "start_worker",
+            handoffSourceAgent: "coordinator",
+            handoffTargetAgent: workerInput.role,
+            coordinatorWorkerId: workerInput.workerId,
+            coordinatorWorkerTurn: workerInput.workerTurn,
+            coordinatorWorkerRole: workerInput.role,
+            coordinatorWorkerWorkload: workerInput.workload,
+            harnessFeature: traceContext.harnessFeature,
+            includeSkillEval: false
+          },
+          "CoordinatorWorker"
+        )
+      }
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
         callbacks: [],
@@ -5061,14 +5134,21 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             })
           }
           const valuesContext = createWorkerValuesSnapshotContext(mode, data, effectiveWorkerPrompt)
-          observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)
+          runTraceSideEffect("CoordinatorWorker Skill observer", () => {
+            if (observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)) {
+              syncWorkerSkillAttribution()
+            }
+          })
           observeWorkerProgress(
             mode,
             data,
             seenWorkerToolCallKeys,
             (event) => {
-              if (event.type === "tool_call" && event.toolName) {
-                workerToolNames.add(event.toolName)
+              if (event.type === "tool_call") {
+                workerToolCallCount += 1
+                if (event.toolName) {
+                  workerToolNames.add(event.toolName)
+                }
               }
               workerInput.onProgress(event)
             },
@@ -5079,6 +5159,24 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             tokenUsage,
             extractWorkerUsage(mode, data, effectiveWorkerPrompt, valuesContext)
           )
+          if (workerTracer) {
+            runTraceSideEffect("CoordinatorWorker reasoning observer", () => {
+              const reasoning = extractWorkerVisibleReasoning(
+                mode,
+                data,
+                effectiveWorkerPrompt,
+                valuesContext
+              )
+              if (reasoning?.text) {
+                if (reasoning.isDelta && isTraceReasoningTruncated(workerReasoning)) return
+                workerReasoning = truncateReasoningForTrace(
+                  reasoning.isDelta
+                    ? mergeStreamingReasoning(workerReasoning, reasoning.text)
+                    : reasoning.text
+                )
+              }
+            })
+          }
           const extracted = extractWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)
           if (shouldClearWorkerFinalText(mode, data, effectiveWorkerPrompt, valuesContext)) {
             messageModeAssistantText = ""
@@ -5157,6 +5255,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             streamConfig
           )
           usedWorkerModelId = candidateId
+          runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(candidateId))
           break
         } catch (error) {
           if (!isRetryableApiError(error)) throw error
@@ -5224,6 +5323,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           })
           activeWorkerStream = await workerAgent.stream(null, streamConfig)
           usedWorkerModelId = nextCandidate
+          runTraceSideEffect("CoordinatorWorker", () => workerTracer?.setModelId(nextCandidate))
         }
       }
 
@@ -5329,12 +5429,55 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         throw new Error(workerStopHookFailure ?? "Stop hook blocked worker completion.")
       }
 
+      const summary = summarizeWorkerText(finalText)
+      runTraceSideEffect("CoordinatorWorker", () => {
+        if (!workerTracer) return
+        workerTracer.addTerminalNode({
+          type: "message",
+          output: summary,
+          metadata: {
+            tokenUsage,
+            toolNames: Array.from(workerToolNames),
+            toolCallCount: workerToolCallCount,
+            ...(workerReasoning ? { reasoning: workerReasoning } : {})
+          }
+        })
+        workerTraceTerminalRecorded = true
+      })
       return {
-        summary: summarizeWorkerText(finalText),
+        summary,
         rawText: finalText,
         tokenUsage
       }
+    } catch (error) {
+      workerTraceOutcome =
+        workerInput.abortSignal.aborted || isAbortError(error) ? "cancelled" : "error"
+      workerTraceError = describeToolError(error)
+      throw error
     } finally {
+      if (workerTracer) {
+        const tracerToFinish = workerTracer
+        runTraceSideEffect("CoordinatorWorker", () => {
+          if (!workerTraceTerminalRecorded && workerToolCallCount > 0) {
+            tracerToFinish.addTerminalNode({
+              type: workerTraceOutcome === "cancelled" ? "cancel" : "error",
+              output: workerTraceError,
+              metadata: {
+                tokenUsage,
+                toolNames: Array.from(workerToolNames),
+                toolCallCount: workerToolCallCount
+              }
+            })
+            workerTraceTerminalRecorded = true
+          }
+        })
+        finishTraceInBackground(
+          tracerToFinish,
+          workerTraceOutcome,
+          workerTraceError,
+          "CoordinatorWorker"
+        )
+      }
       workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)
       const cleanupResults = await Promise.allSettled([
         Promise.resolve().then(cancelWorkerBackgroundTasks),
@@ -5628,9 +5771,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     },
     threadId: options.threadId,
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
+    soloTaskTraceManager,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
     onFailureFuseNotice,
+    onContextCompaction,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
     // hook chain without knowing per-thread context.
