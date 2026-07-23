@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "eventId": "event-invalid-extra",
+  "platformMessageId": "zhaohu-message-invalid-extra",
+  "principalId": "principal-opaque-001",
+  "conversationKey": "conversation-opaque-001",
+  "conversationSeq": 1,
+  "deviceEpoch": 3,
+  "message": { "type": "text", "text": "invalid extra field" },
+  "occurredAt": "2026-07-23T08:00:00.000Z",
+  "lease": { "id": "lease-invalid-extra", "expiresAt": "2026-07-23T08:01:30.000Z" },
+  "targetRef": "must-not-cross-the-gateway"
+}

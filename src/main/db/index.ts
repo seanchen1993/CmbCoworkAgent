@@ -14,6 +14,7 @@ import {
 } from "../../shared/goal-events"
 import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
 import type { Message } from "../types"
+import { ensureImServiceSchema } from "../services/im/schema"
 
 let db: SqlJsDatabase | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
@@ -660,6 +661,8 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_thread_goal_events_thread_order ON thread_goal_events(thread_id, created_at, event_id)`
   )
+
+  ensureImServiceSchema(db)
 
   migrateLegacyMemorySessionOptIn(db)
   saveToDisk()

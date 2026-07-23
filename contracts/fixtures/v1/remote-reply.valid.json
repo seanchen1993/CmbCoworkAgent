@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "deliveryId": "event-0001-reply",
+  "eventId": "event-0001",
+  "conversationKey": "conversation-opaque-001",
+  "expectedDeviceEpoch": 3,
+  "idempotencyKey": "event-0001-reply:reply:0",
+  "segment": { "index": 0, "count": 1 },
+  "message": { "type": "text", "content": "今天的工作已整理完成。" }
+}
