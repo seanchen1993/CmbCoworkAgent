@@ -715,7 +715,9 @@ V1 的可靠性承诺是：
 
 断连、租约过期或 epoch 落后时，事件保持 queued/suspended，不得开始本地副作用。执行中失去设备许可时必须 Abort；由于副作用可能已经发生，事件进入 `outcome_unknown`，新设备不得自动重跑同一事件。
 
-设备接管需要处理正在执行的旧设备事件：正常接管等待其终结；强制接管撤销旧许可并把未确认事件视为结果未知，不得同时投递给新设备执行。
+事件在客户端持久队列等待过久、旧 lease 已过期但从未取得执行许可时，可向网关为同一 event/device/epoch 换发新 lease；获得新许可前仍不得执行，这不算重投或第二次运行。
+
+设备接管需要处理旧 epoch 的全部非终态事件：正常接管等待已取得执行许可的事件终结；强制接管撤销旧许可，已取得执行许可的事件进入 `outcome_unknown`，未取得许可的事件取消并提示重发。两类事件都不得自动投递给新设备执行。
 
 ## 13. 网关协议
 
@@ -773,6 +775,8 @@ interface RemoteImReplyV1 {
 
 `deliveryId` 对普通消息等于稳定 event 派生值，对 Scheduler 等主动消息等于稳定 run ID。分段幂等键由稳定数据生成，例如 `deliveryId:reply:index`，超时重试不得生成新键。
 
+`segment.index` 固定为 0-based，`segment.count` 取值 1～8；用户可见的 `[i/n]` 使用 `index + 1`。
+
 文本分段策略：
 
 - 平台硬上限为 3,000 字符；
@@ -797,6 +801,7 @@ V1 网关契约必须保证以下全部行为：
 - 每个 conversation 分配单调递增 `conversationSeq`；
 - 同一 conversation 的首次投递严格按 seq；
 - 较早事件未收到 `received` 前不首次投递较晚事件；
+- 较早事件若在首次投递前已因无设备 TTL 或设备接管稳定终结，网关必须事务化推进连续 delivery cursor，避免形成永久 seq 空洞；
 - 重投可以晚到，但客户端通过 eventId/seq 去重，不得改变已固化 snapshot；
 - 网关只接受当前 route device/epoch 的 ACK、回复和主动下行；
 - 平台下行超时视为结果未知，使用原幂等键查询或补发，不盲目创建第二条回复。
@@ -936,6 +941,8 @@ src/main/services/im/
 - 运维安全：限流、保留期、审计、指标、告警、凭据隔离和故障演练。
 
 生产联调前必须单独冻结网关 API/状态机规格，并明确负责团队、部署拓扑、容量和 SLO。客户端 Mock Gateway 只用于并行开发和故障注入，不能作为生产网关验收替代品。
+
+网关 Java + Spring Boot 的模块、数据模型、协议状态机、分 PR 任务和代码 Agent 约束见 `docs/chatx-unified-bot-gateway-java-development-plan.md`。
 
 ## 17. 旧机器人 Clean Cut
 
@@ -1091,8 +1098,8 @@ Feature 客户端执行可以同时针对 Mock Gateway 开发，不必等待收�
 33. outcome_unknown 和可重试 failed 回复显示事件短码；只有桌面显式操作或匹配短码的 `/重试` 才创建新 run，并保留 `retryOfEventId`。
 34. Runtime 启动前必须得到当前 event/lease/epoch 的网关设备执行许可；无效许可不产生本地副作用。
 35. 执行中许可被撤销会 Abort 并进入 outcome_unknown；新设备不自动重跑。
-36. 每个下行分段不超过 2,800 个 Unicode 字符、单次最多 8 段；超长结果稳定截断并可在桌面查看，全部分段在首次发送前持久化。
-37. 严格 seq 的 ACK 队头阻塞有延迟指标、用户可见超时和故障压测，不形成无界死锁。
+36. 下行 segment index 为 0-based；每段不超过 2,800 个 Unicode 字符、单次最多 8 段；超长结果稳定截断并可在桌面查看，全部分段在首次发送前持久化。
+37. 严格 seq 的 ACK 队头阻塞有延迟指标、用户可见超时和故障压测；首次投递前终结的事件会推进连续 cursor，不形成永久 seq 空洞或无界死锁。
 
 ### 20.5 审批、设备与 Scheduler
 
