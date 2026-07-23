@@ -49,6 +49,8 @@ interface BuiltinModelDefinition extends CustomModelConfig {
   origin: BuiltinModelOrigin
 }
 
+const BUNDLED_CREDENTIAL_MODEL = "minimax-m2p5-229b-w8a8"
+
 const FALLBACK_CATALOG: RemoteModelCatalogItem[] = [
   {
     id: "minimax-m2p5-229b-w8a8",
@@ -300,7 +302,9 @@ export function getBuiltinModelConfigs(): ResolvedModelConfig[] {
     return {
       ...base,
       ...override,
-      apiKey: base.apiKey?.trim() || getBuiltinModelApiKey(),
+      apiKey:
+        base.apiKey?.trim() ||
+        getBuiltinModelApiKey({ allowBundledFallback: base.model === BUNDLED_CREDENTIAL_MODEL }),
       ref: `builtin:${base.id}`,
       source: "builtin",
       origin: base.origin
