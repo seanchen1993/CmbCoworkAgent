@@ -57,6 +57,7 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
 
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
+const standardTurn = read("src/main/agent/standard-thread-turn.ts")
 const agentIpc = read("src/main/ipc/agent.ts")
 const preload = read("src/preload/index.ts")
 const threadContext = read("src/renderer/src/lib/thread-context.tsx")
@@ -182,8 +183,8 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "active runs expose a thread-scoped prompt preparer"
   )
   assertIncludes(
-    agentIpc,
-    "async function prepareUserPromptForRun({",
+    standardTurn,
+    "export async function prepareStandardUserPrompt({",
     "normal and steered prompts share one preparation pipeline"
   )
   assertIncludes(
@@ -193,7 +194,7 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
   )
   assertIncludes(
     agentIpc,
-    "const prepared = await prepareUserPromptForRun({",
+    "const prepared = await prepareStandardUserPrompt({",
     "the current-run preparer delegates steered messages to the shared pipeline"
   )
   assertOccurrences(
@@ -203,12 +204,12 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "invoke, resume, and interrupt each register the shared preparer"
   )
   assertIncludes(
-    agentIpc,
+    standardTurn,
     '"UserPromptSubmit",\n    promptSubmitContext,',
     "shared preparation executes UserPromptSubmit hooks"
   )
   assertIncludes(
-    agentIpc,
+    standardTurn,
     "activateExplicitSkillFromMessage({",
     "shared preparation activates explicit skills"
   )
@@ -223,7 +224,7 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "async steer preparation snapshots run-scoped hook state"
   )
   assertIncludes(
-    agentIpc,
+    standardTurn,
     "isPreparationCurrent && !isPreparationCurrent()",
     "stale async hook results stop before committing skill and prompt side effects"
   )
@@ -335,8 +336,8 @@ function testClearOnEveryRunExit(): void {
   assertOccurrences(
     agentIpc,
     "currentRunMessageQueueOwnerToken: runToken",
-    7,
-    "invoke, resume, interrupt, and failover runtimes all receive the owner token"
+    3,
+    "invoke, resume, and interrupt factories pass the owner token to every failover runtime"
   )
 }
 

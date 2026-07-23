@@ -32,6 +32,7 @@ function sliceBetween(source: string, start: string, end: string, label: string)
 
 const sources = {
   desktop: read("src/main/ipc/agent.ts"),
+  standardTurn: read("src/main/agent/standard-thread-turn.ts"),
   scheduler: read("src/main/services/scheduler.ts"),
   heartbeat: read("src/main/services/heartbeat.ts"),
   legacyChatx: read("src/main/services/chatx.ts"),
@@ -39,7 +40,8 @@ const sources = {
 }
 
 const expectedDirectCalls: Record<keyof typeof sources, number> = {
-  desktop: 7,
+  desktop: 0,
+  standardTurn: 0,
   scheduler: 1,
   heartbeat: 1,
   legacyChatx: 1,
@@ -54,6 +56,11 @@ for (const [owner, source] of Object.entries(sources) as [keyof typeof sources, 
       "classify the new/removed entry in docs/chatx-desktop-runtime-entrypoint-inventory.md"
   )
 }
+
+assert(
+  count(sources.standardTurn, "createAgentRuntime(optionsForModel(modelId))") === 1,
+  "the controlled standard-turn factory must be the only shared top-level Runtime constructor"
+)
 
 const invoke = sliceBetween(
   sources.desktop,
@@ -74,11 +81,17 @@ const interrupt = sliceBetween(
   "interrupt"
 )
 
-assert(count(invoke, "createAgentRuntime({") === 3, "desktop invoke must own three failover sites")
-assert(count(resume, "createAgentRuntime({") === 2, "desktop resume must own two failover sites")
 assert(
-  count(interrupt, "createAgentRuntime({") === 2,
-  "desktop interrupt must own two failover sites"
+  count(invoke, "invokeRuntimeFactory.create(") === 3,
+  "desktop invoke must retain three controlled factory failover sites"
+)
+assert(
+  count(resume, "resumeRuntimeFactory.create(") === 2,
+  "desktop resume must retain two controlled factory failover sites"
+)
+assert(
+  count(interrupt, "interruptRuntimeFactory.create(") === 2,
+  "desktop interrupt must retain two controlled factory failover sites"
 )
 
 assert(

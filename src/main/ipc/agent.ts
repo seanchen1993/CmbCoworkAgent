@@ -6,7 +6,6 @@ import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/m
 import { getDurableRuntimeTail } from "./thread-runtime-tail"
 import { Command } from "@langchain/langgraph"
 import {
-  createAgentRuntime,
   getCapturedSystemPromptPreview,
   getSkillEvolutionThreshold,
   withCheckpointer,
@@ -55,10 +54,7 @@ import {
   getWorkspaceHooks,
   getEnabledPluginHooks,
   getEnabledSkillHooks,
-  getEnabledSkillsSources,
   getUserInfo,
-  getEnabledPluginSkillSourceMetadata,
-  getDisabledSkillDirs,
   getHookLoggingConfig
 } from "../storage"
 import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
@@ -74,8 +70,7 @@ import {
 } from "../../shared/goal-events"
 import {
   didHarnessSystemConstraintsLoadSuccessfully,
-  type HarnessAgentmdLoadStatusItem,
-  type HarnessDeployUnitMapping
+  type HarnessAgentmdLoadStatusItem
 } from "../../shared/harness-board-types"
 import {
   checkpointHasInterrupt,
@@ -99,7 +94,6 @@ import {
   FORK_BOUNDARY_MARKER_VERSION,
   FORK_BOUNDARY_THREAD_METADATA_KEY
 } from "../../shared/checkpoint-forkability"
-import { TraceCollector } from "../agent/trace/collector"
 import { getSoloTaskOwnerIdFromStreamPayload, SoloTaskTraceManager } from "../agent/trace/solo-task"
 import {
   requestSkillIntent,
@@ -107,7 +101,7 @@ import {
   sanitizeSkillId
 } from "../agent/tools/skill-evolution-tool"
 import { mkdirSync, writeFileSync } from "fs"
-import { join, resolve } from "path"
+import { join } from "path"
 import { v4 as uuid } from "uuid"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { SkillUsageDetector } from "../agent/skill-evolution/usage-detector"
@@ -172,7 +166,6 @@ import {
 import {
   isRetryableApiError,
   isStreamDisconnectLikeError,
-  buildOrderedChain,
   extractErrorDetail,
   type FailoverAttempt,
   type ApiErrorDetail
@@ -196,13 +189,8 @@ import {
   type FailureFuseDecision,
   type FailureFuseHaltError
 } from "../agent/failure-fuse"
-import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
-import {
-  formatSkillUseBlock,
-  parseSkillUseBlock,
-  type ParsedSkillUseBlock
-} from "../agent/skill-lifecycle/marker"
-import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
+import { formatSkillUseBlock, parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
+import type { SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
 import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
 import {
   runCompletionHooksWithRevision,
@@ -224,11 +212,7 @@ import {
   isGoalBoundaryStillCurrent,
   validateGoalText
 } from "../agent/goals/goal-manager"
-import {
-  applyPromptRewritePreservingGoalMarker,
-  buildGoalContinuationPromptFromHookContexts,
-  buildInternalGoalPromptFromHookResult
-} from "../agent/goals/internal-prompt"
+import { buildGoalContinuationPromptFromHookContexts } from "../agent/goals/internal-prompt"
 import { SqlGoalStore } from "../agent/goals/goal-store"
 import {
   extractGoalTransportAttachmentNames,
@@ -259,12 +243,7 @@ import {
   type ThreadGoal
 } from "../agent/goals/types"
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
-import {
-  buildHarnessFeatureAgentContext,
-  markHarnessProjectSystemConstraintsLoaded,
-  readHarnessFeatureMetadata,
-  resolveHarnessFeatureCurrentStage
-} from "../harness-board/service"
+import { markHarnessProjectSystemConstraintsLoaded } from "../harness-board/service"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
 import type { AgentAutoCommitResult } from "../types"
@@ -283,6 +262,21 @@ import type {
   AgentCancelParams,
   Message
 } from "../types"
+import {
+  createStandardTurnTrace,
+  getHarnessAgentContext,
+  getHarnessHookContext,
+  parseStandardThreadMetadata,
+  prepareStandardThreadRuntimeFactory,
+  prepareStandardUserPrompt,
+  resolveHarnessFeatureBindingContext,
+  resolveStandardTurnRouting,
+  validateExplicitSkillReference,
+  type HarnessAgentContext,
+  type HarnessFeatureBindingContext,
+  type PreparedUserPrompt,
+  type PromptPreparationTurnState
+} from "../agent/standard-thread-turn"
 import { emitAppAttention } from "../app-attention-events"
 
 const MIN_CHARS_FOR_MEMORY = 200
@@ -658,142 +652,6 @@ async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" |
 
 async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
   return activeRunReplacementLocks.withKey(threadId, fn)
-}
-
-interface HarnessAgentContext {
-  pluginPromptInject?: string
-  enableAgentsPrompt?: boolean
-  enableTaskTool?: boolean
-  isHarnessProjectSession?: boolean
-  harnessAgentsPrompt?: string
-  additionalAgentsWorkspacePaths?: string[]
-  additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
-  sessionContextInjectWarning?: string
-  agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
-  pluginOutputDir?: string
-  systemId?: string
-  pluginRoot?: string
-  pluginId?: string
-  pluginName?: string
-  pluginWorkspace?: string
-  featureId?: string
-  harnessProjectId?: string
-  harnessAdapterName?: string
-  harnessAdapterVersion?: string
-  harnessNodeName?: string
-  harnessNodeStatus?: string
-  projectCode?: string
-  projectDir?: string
-}
-
-type HarnessFeatureBindingContext = {
-  projectId: string
-  slug: string
-  nodeName?: string
-  nodeStatus?: string
-}
-
-function getHarnessHookContext(
-  context: HarnessAgentContext
-): Pick<
-  HookContext,
-  | "pluginWorkspace"
-  | "featureId"
-  | "harnessProjectId"
-  | "harnessAdapterName"
-  | "harnessAdapterVersion"
-  | "harnessNodeName"
-  | "harnessNodeStatus"
-  | "projectCode"
-  | "projectDir"
-> {
-  return {
-    pluginWorkspace: context.pluginWorkspace,
-    featureId: context.featureId,
-    harnessProjectId: context.harnessProjectId,
-    harnessAdapterName: context.harnessAdapterName,
-    harnessAdapterVersion: context.harnessAdapterVersion,
-    harnessNodeName: context.harnessNodeName,
-    harnessNodeStatus: context.harnessNodeStatus,
-    projectCode: context.projectCode,
-    projectDir: context.projectDir
-  }
-}
-
-function resolveHarnessCurrentStageForContext(
-  projectId?: string,
-  slug?: string
-): Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus"> {
-  if (!projectId || !slug) return {}
-  const currentStage = resolveHarnessFeatureCurrentStage(projectId, slug)
-  if (!currentStage?.name) return {}
-  return {
-    harnessNodeName: currentStage.name,
-    ...(currentStage.status ? { harnessNodeStatus: currentStage.status } : {})
-  }
-}
-
-function getHarnessAgentContext(
-  metadata: Record<string, unknown>,
-  options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
-): HarnessAgentContext {
-  const isHarnessProjectSession =
-    Boolean(metadata.harnessProjectSession) &&
-    typeof metadata.harnessProjectSession === "object" &&
-    !Array.isArray(metadata.harnessProjectSession)
-  const disableAgentsPrompt = metadata.disableAgentsPrompt === true
-  try {
-    const featureContext = buildHarnessFeatureAgentContext(metadata, {
-      workspacePath: options.workspacePath
-    })
-    if (!featureContext) {
-      return {
-        ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-        ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
-      }
-    }
-    const currentStage =
-      options.featureBinding !== undefined
-        ? {
-            harnessNodeName: options.featureBinding.nodeName,
-            harnessNodeStatus: options.featureBinding.nodeStatus
-          }
-        : resolveHarnessCurrentStageForContext(
-            featureContext.harnessProjectId,
-            featureContext.featureId
-          )
-
-    return {
-      pluginPromptInject: featureContext.systemPromptInject,
-      enableAgentsPrompt: featureContext.enableAgentsPrompt,
-      enableTaskTool: featureContext.enableTaskTool,
-      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
-      harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
-      additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
-      additionalAgentsWorkspaceMappings: featureContext.additionalAgentsWorkspaceMappings,
-      sessionContextInjectWarning: featureContext.sessionContextInjectWarning,
-      agentmdLoadStatus: featureContext.agentmdLoadStatus,
-      pluginOutputDir: featureContext.pluginOutputDir,
-      systemId: featureContext.systemId,
-      pluginRoot: featureContext.pluginRoot,
-      pluginId: featureContext.pluginId,
-      pluginName: featureContext.pluginName,
-      pluginWorkspace: featureContext.pluginWorkspace,
-      featureId: featureContext.featureId,
-      harnessProjectId: featureContext.harnessProjectId,
-      harnessAdapterName: featureContext.harnessAdapterName,
-      harnessAdapterVersion: featureContext.harnessAdapterVersion,
-      ...currentStage,
-      projectCode: featureContext.projectCode,
-      projectDir: featureContext.projectDir
-    }
-  } catch (error) {
-    console.warn("[HarnessBoard] Failed to build harness agent context:", error)
-    return {
-      ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
-    }
-  }
 }
 
 type GoalControlResult = {
@@ -1221,11 +1079,6 @@ interface TurnState {
   turnId?: string
 }
 
-type PromptPreparationTurnState = Pick<
-  TurnState,
-  "hookScope" | "skillUseTracker" | "skillHookKeys" | "turnId"
->
-
 const turnStates = new Map<string, TurnState>()
 
 function createTurnState(
@@ -1317,15 +1170,11 @@ function disposeTurnRuntimeState(threadId: string, state: TurnState): void {
 
 function getThreadWorkspacePath(threadId: string): string | undefined {
   const thread = getThread(threadId)
-  if (!thread?.metadata) return undefined
-  try {
-    const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
-    const workspacePath = metadata.workspacePath
-    return typeof workspacePath === "string" && workspacePath.trim() ? workspacePath : undefined
-  } catch {
-    console.warn("[Agent] Failed to parse thread metadata, using empty object")
-    return undefined
-  }
+  const { workspacePath } = parseStandardThreadMetadata(thread?.metadata, {
+    onParseError: () =>
+      console.warn("[Agent] Failed to parse thread metadata, using empty object")
+  })
+  return workspacePath?.trim() ? workspacePath : undefined
 }
 
 function startTurnStateRun(state: TurnState, runToken = uuid()): string {
@@ -1562,322 +1411,6 @@ function pruneTurnStateAtInterrupt(state: TurnState, allHooks: readonly HookConf
   }
 }
 
-interface ExplicitSkillActivation {
-  parsed: ParsedSkillUseBlock
-  skill?: SkillLifecycleMatch
-  hookContext?: string
-  blocked: boolean
-  reason?: string
-}
-
-type PreparedUserPrompt =
-  | {
-      accepted: true
-      content: string
-      explicitSkillHookContext?: string
-    }
-  | {
-      accepted: false
-      blockedBy: "explicit_skill"
-      reason: string
-    }
-  | {
-      accepted: false
-      blockedBy: "user_prompt_submit"
-      reason: string
-      hookResult: HookResult
-    }
-  | {
-      accepted: false
-      blockedBy: "run_not_ready"
-      reason: string
-    }
-
-function normalizeSkillPathKey(input: string): string {
-  return normalizePathKey(resolve(input))
-}
-
-function isSameOrChildSkillPath(targetPath: string, parentPath: string): boolean {
-  const target = normalizeSkillPathKey(targetPath)
-  const parent = normalizeSkillPathKey(parentPath)
-  return target === parent || target.startsWith(`${parent}/`)
-}
-
-function isDisabledSkillMatch(skill: SkillLifecycleMatch): boolean {
-  return getDisabledSkillDirs().some((dir) => isSameOrChildSkillPath(skill.rootDir, dir))
-}
-
-async function buildSkillLifecycleRegistryForHooks(): Promise<SkillLifecycleRegistry | null> {
-  const rootSources = await getEnabledSkillsSources()
-  const pluginSources = getEnabledPluginSkillSourceMetadata()
-  const sources = [...rootSources, ...pluginSources]
-  return sources.length > 0 ? new SkillLifecycleRegistry(sources) : null
-}
-
-async function activateExplicitSkillFromMessage({
-  message,
-  workspacePath,
-  pluginOutputDir,
-  systemId,
-  pluginWorkspace,
-  featureId,
-  harnessProjectId,
-  harnessAdapterName,
-  harnessAdapterVersion,
-  harnessNodeName,
-  harnessNodeStatus,
-  projectCode,
-  projectDir,
-  sessionId,
-  turnId,
-  hookScope,
-  firedSkillKeys,
-  skillUseTracker,
-  onHookResult,
-  onHookSkippedFactory
-}: {
-  message: string
-  workspacePath: string
-  pluginOutputDir?: string
-  systemId?: string
-  pluginWorkspace?: string
-  featureId?: string
-  harnessProjectId?: string
-  harnessAdapterName?: string
-  harnessAdapterVersion?: string
-  harnessNodeName?: string
-  harnessNodeStatus?: string
-  projectCode?: string
-  projectDir?: string
-  sessionId: string
-  turnId?: string
-  hookScope: HookScopeController
-  firedSkillKeys: Set<string>
-  skillUseTracker: SkillUseTracker
-  onHookResult?: HookResultCallback
-  /**
-   * Factory that builds a per-event scope-skip callback. `resolveHooks` is
-   * called with the actual event, so we construct the callback there with
-   * the matching event bound in its closure. Optional — diagnostic-only.
-   */
-  onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
-}): Promise<ExplicitSkillActivation | null> {
-  const parsed = parseSkillUseBlock(message)
-  if (!parsed) return null
-
-  const registry = await buildSkillLifecycleRegistryForHooks()
-  const skill = registry?.resolveExplicit({
-    skillName: parsed.skillName,
-    skillPath: parsed.skillPath
-  })
-
-  if (!skill || isDisabledSkillMatch(skill)) {
-    return {
-      parsed,
-      blocked: true,
-      reason: `显式选择的技能不存在或已禁用：${parsed.skillName}`
-    }
-  }
-
-  const result = await activateSkillLifecycle({
-    skill,
-    trigger: "explicit",
-    toolName: "skill_select",
-    toolArgs: {
-      skillName: parsed.skillName,
-      skillPath: parsed.skillPath
-    },
-    toolResult: JSON.stringify({
-      selected: true,
-      trigger: "explicit",
-      skillName: skill.name,
-      skillPath: skill.path
-    }),
-    workspacePath,
-    pluginOutputDir,
-    systemId,
-    pluginWorkspace,
-    featureId,
-    harnessProjectId,
-    harnessAdapterName,
-    harnessAdapterVersion,
-    harnessNodeName,
-    harnessNodeStatus,
-    projectCode,
-    projectDir,
-    sessionId,
-    turnId,
-    hookScope,
-    firedSkillKeys,
-    skillUseTracker,
-    resolveHooks: (event: HookEvent, context: HookContext): HookConfig[] =>
-      resolveEnabledHooksForRun(
-        workspacePath,
-        event,
-        context,
-        hookScope,
-        onHookSkippedFactory?.(event)
-      ),
-    onHookResult
-  })
-
-  return {
-    parsed,
-    skill,
-    hookContext: formatSkillHookContext(skill, result.notes) ?? undefined,
-    blocked: result.blocked,
-    reason: result.reason
-  }
-}
-
-async function prepareUserPromptForRun({
-  rawMessage,
-  initialModelInput,
-  threadId,
-  workspacePath,
-  turnState,
-  harnessAgentContext,
-  onHookResult,
-  onHookSkippedFactory,
-  onExplicitSkillActivated,
-  onSystemMessage,
-  isPreparationCurrent
-}: {
-  rawMessage: string
-  initialModelInput: string
-  threadId: string
-  workspacePath: string
-  turnState: PromptPreparationTurnState
-  harnessAgentContext: HarnessAgentContext
-  onHookResult: HookResultCallback
-  onHookSkippedFactory: (event: HookEvent) => ScopeSkipCallback
-  onExplicitSkillActivated?: (skill: SkillLifecycleMatch) => void
-  onSystemMessage?: (message: string) => void
-  isPreparationCurrent?: () => boolean
-}): Promise<PreparedUserPrompt> {
-  let preparedMessage = initialModelInput
-  const explicitSkillActivationMessage = parseSkillUseBlock(rawMessage)
-    ? rawMessage
-    : initialModelInput
-  const explicitSkillActivation = await activateExplicitSkillFromMessage({
-    message: explicitSkillActivationMessage,
-    workspacePath,
-    pluginOutputDir: harnessAgentContext.pluginOutputDir,
-    systemId: harnessAgentContext.systemId,
-    ...getHarnessHookContext(harnessAgentContext),
-    sessionId: threadId,
-    turnId: turnState.turnId,
-    hookScope: turnState.hookScope,
-    firedSkillKeys: turnState.skillHookKeys,
-    skillUseTracker: turnState.skillUseTracker,
-    onHookResult,
-    onHookSkippedFactory
-  })
-  if (isPreparationCurrent && !isPreparationCurrent()) {
-    return {
-      accepted: false,
-      blockedBy: "run_not_ready",
-      reason: "当前运行已结束或被替换"
-    }
-  }
-  if (explicitSkillActivation?.blocked) {
-    return {
-      accepted: false,
-      blockedBy: "explicit_skill",
-      reason: explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
-    }
-  }
-  const isInternalGoalModelInput =
-    initialModelInput.startsWith("[Starting active goal]") ||
-    initialModelInput.startsWith("[Continuing active goal]")
-  const hookVisibleMessage = isInternalGoalModelInput ? initialModelInput : rawMessage
-  const promptSubmitContext: HookContext = {
-    toolArgs: { message: hookVisibleMessage, rawMessage },
-    userPrompt: hookVisibleMessage,
-    workspacePath,
-    sessionId: threadId,
-    turnId: turnState.turnId,
-    pluginOutputDir: harnessAgentContext.pluginOutputDir,
-    systemId: harnessAgentContext.systemId,
-    ...getHarnessHookContext(harnessAgentContext)
-  }
-  const promptSubmitResult = await runHooksEnriched(
-    resolveEnabledHooksForRun(
-      workspacePath,
-      "UserPromptSubmit",
-      promptSubmitContext,
-      turnState.hookScope,
-      onHookSkippedFactory("UserPromptSubmit")
-    ),
-    "UserPromptSubmit",
-    promptSubmitContext,
-    onHookResult
-  )
-  if (isPreparationCurrent && !isPreparationCurrent()) {
-    return {
-      accepted: false,
-      blockedBy: "run_not_ready",
-      reason: "当前运行已结束或被替换"
-    }
-  }
-  if (promptSubmitResult?.blocked || promptSubmitResult?.continue === false) {
-    return {
-      accepted: false,
-      blockedBy: "user_prompt_submit",
-      reason:
-        promptSubmitResult.stopReason ||
-        promptSubmitResult.reason ||
-        promptSubmitResult.stderr ||
-        promptSubmitResult.stdout ||
-        "消息被 Hook 策略拦截",
-      hookResult: promptSubmitResult
-    }
-  }
-
-  const updatedMessage =
-    promptSubmitResult?.updatedInput?.message ??
-    promptSubmitResult?.updatedInput?.prompt ??
-    promptSubmitResult?.updatedInput?.userPrompt
-  if (isInternalGoalModelInput) {
-    preparedMessage = buildInternalGoalPromptFromHookResult(initialModelInput, {
-      updatedInput: promptSubmitResult?.updatedInput,
-      additionalContexts: [
-        explicitSkillActivation?.hookContext,
-        promptSubmitResult?.additionalContext
-      ]
-    })
-  } else if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
-    preparedMessage = applyPromptRewritePreservingGoalMarker(initialModelInput, updatedMessage)
-  }
-  if (
-    !isInternalGoalModelInput &&
-    explicitSkillActivation?.parsed &&
-    !parseSkillUseBlock(preparedMessage)
-  ) {
-    preparedMessage = [preparedMessage.trimEnd(), explicitSkillActivation.parsed.block]
-      .filter(Boolean)
-      .join("\n\n")
-  }
-  const promptContextBlocks = [
-    explicitSkillActivation?.hookContext,
-    promptSubmitResult?.additionalContext
-  ].filter((item): item is string => Boolean(item?.trim()))
-  if (!isInternalGoalModelInput && promptContextBlocks.length > 0) {
-    preparedMessage = `${promptContextBlocks.join("\n\n")}\n\n${preparedMessage}`
-  }
-  if (promptSubmitResult?.systemMessage) {
-    onSystemMessage?.(promptSubmitResult.systemMessage)
-  }
-  if (explicitSkillActivation?.skill) {
-    onExplicitSkillActivated?.(explicitSkillActivation.skill)
-  }
-  return {
-    accepted: true,
-    content: preparedMessage,
-    explicitSkillHookContext: explicitSkillActivation?.hookContext
-  }
-}
-
 function registerCurrentRunMessagePreparer({
   threadId,
   runToken,
@@ -1917,7 +1450,7 @@ function registerCurrentRunMessagePreparer({
     runToken,
     prepare: async (queuedMessage) => {
       const initialQueuedModelInput = neutralizeWorkflowPlumbingUserText(queuedMessage.content)
-      const prepared = await prepareUserPromptForRun({
+      const prepared = await prepareStandardUserPrompt({
         rawMessage: queuedMessage.content,
         initialModelInput: initialQueuedModelInput,
         threadId,
@@ -1967,17 +1500,7 @@ async function validateExplicitGoalSkillContext(
 ): Promise<string | null> {
   const explicitSkill = context?.explicitSkill
   if (!explicitSkill) return null
-
-  const registry = await buildSkillLifecycleRegistryForHooks()
-  const skill = registry?.resolveExplicit({
-    skillName: explicitSkill.name,
-    skillPath: explicitSkill.path
-  })
-
-  if (!skill || isDisabledSkillMatch(skill)) {
-    return `显式选择的技能不存在或已禁用：${explicitSkill.name}`
-  }
-  return null
+  return validateExplicitSkillReference(explicitSkill)
 }
 
 interface ActiveHookSummary {
@@ -4605,12 +4128,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       try {
         const window = BrowserWindow.fromWebContents(event.sender)
         const thread = getThread(threadId)
-        const metadata =
-          thread?.metadata && typeof thread.metadata === "string"
-            ? (JSON.parse(thread.metadata) as Record<string, unknown>)
-            : {}
-        const workspacePath =
-          typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+        const { workspacePath } = parseStandardThreadMetadata(thread?.metadata)
         const updateKey =
           subscribeUpdates && window && !window.isDestroyed()
             ? trackCoordinatorWorkerUpdateBinding(window, threadId)
@@ -4670,12 +4188,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)) {
         try {
           const thread = getThread(threadId)
-          const metadata =
-            thread?.metadata && typeof thread.metadata === "string"
-              ? (JSON.parse(thread.metadata) as Record<string, unknown>)
-              : {}
-          const workspacePath =
-            typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+          const { workspacePath } = parseStandardThreadMetadata(thread?.metadata)
           if (workspacePath) {
             await coordinatorWorkerManager.restoreWorkersForThread({
               parentThreadId: threadId,
@@ -4725,12 +4238,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (!workerBelongsToThread) {
           try {
             const thread = getThread(threadId)
-            const metadata =
-              thread?.metadata && typeof thread.metadata === "string"
-                ? (JSON.parse(thread.metadata) as Record<string, unknown>)
-                : {}
-            const workspacePath =
-              typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+            const { workspacePath } = parseStandardThreadMetadata(thread?.metadata)
             if (workspacePath) {
               await coordinatorWorkerManager.restoreWorkersForThread({
                 parentThreadId: threadId,
@@ -4935,14 +4443,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const isWorkflowNotificationInvoke =
         isWorkflowNotificationTurnMessage(message) &&
         ((): boolean => {
-          try {
-            const thread = getThread(threadId)
-            if (!thread?.metadata) return false
-            const parsedMetadata = JSON.parse(thread.metadata) as Record<string, unknown>
-            return getAgentModeFromMetadata(parsedMetadata) === "workflow"
-          } catch {
-            return false
-          }
+          const thread = getThread(threadId)
+          return parseStandardThreadMetadata(thread?.metadata).agentMode === "workflow"
         })()
       const channel = isTrustedCoordinatorNotificationInvoke
         ? `${baseChannel}:coordinator-internal`
@@ -4956,13 +4458,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       const getRequestedModelIdForGoalEvaluator = (): string | undefined => {
         const thread = getThread(threadId)
-        if (!thread?.metadata) return modelId
-        try {
-          const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
-          return modelId || (typeof metadata.model === "string" ? metadata.model : undefined)
-        } catch {
-          return modelId
-        }
+        return modelId || parseStandardThreadMetadata(thread?.metadata).modelId
       }
       const ensureGoalEvaluatorConfigured = (): boolean => {
         const requestedModelId = getRequestedModelIdForGoalEvaluator()
@@ -5350,7 +4846,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const bindingThread = getThread(threadId)
         if (bindingThread?.metadata) {
           const bindingMetadata = JSON.parse(bindingThread.metadata) as Record<string, unknown>
-          harnessFeatureBinding = readHarnessFeatureMetadata(bindingMetadata) ?? undefined
+          harnessFeatureBinding = resolveHarnessFeatureBindingContext(bindingMetadata)
           isWorkflowNotificationTrace =
             message.trim() === WORKFLOW_NOTIFICATION_TURN_PROMPT &&
             getAgentModeFromMetadata(bindingMetadata) === "workflow"
@@ -5358,26 +4854,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       } catch {
         // Non-project threads or unparsable metadata: leave the trace untagged.
       }
-      if (harnessFeatureBinding) {
-        const currentStage = resolveHarnessFeatureCurrentStage(
-          harnessFeatureBinding.projectId,
-          harnessFeatureBinding.slug
-        )
-        if (currentStage?.name)
-          harnessFeatureBinding = {
-            ...harnessFeatureBinding,
-            nodeName: currentStage.name,
-            ...(currentStage.status ? { nodeStatus: currentStage.status } : {})
-          }
-      }
-
       // Start trace collection for this invocation (modelId resolved later)
       const isInternalNotificationTrace =
         isTrustedCoordinatorNotificationInvoke || isWorkflowNotificationTrace
-      const tracer = new TraceCollector(threadId, rootUserPrompt, modelId ?? "unknown", {
-        triggerSource: isInternalNotificationTrace ? INTERNAL_NOTIFICATION_TRIGGER_SOURCE : "chat",
-        includeSkillEval: !isInternalNotificationTrace,
-        ...(harnessFeatureBinding ? { harnessFeature: harnessFeatureBinding } : {})
+      const tracer = createStandardTurnTrace({
+        threadId,
+        rawMessage: rootUserPrompt,
+        requestedModelId: modelId,
+        options: {
+          triggerSource: isInternalNotificationTrace
+            ? INTERNAL_NOTIFICATION_TRIGGER_SOURCE
+            : "chat",
+          includeSkillEval: !isInternalNotificationTrace,
+          ...(harnessFeatureBinding ? { harnessFeature: harnessFeatureBinding } : {})
+        }
       })
       const skillUsageDetector = new SkillUsageDetector()
       const toolCallCounter = new ToolCallCounter()
@@ -5715,17 +5205,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       try {
         // Get workspace path from thread metadata - REQUIRED
         const thread = getThread(threadId)
-        if (thread?.metadata) {
-          try {
-            metadata = JSON.parse(thread.metadata)
-          } catch {
+        const parsedThreadMetadata = parseStandardThreadMetadata(thread?.metadata, {
+          onParseError: () =>
             console.warn("[Agent] Failed to parse thread metadata, using empty object")
-          }
-        }
+        })
+        metadata = parsedThreadMetadata.metadata
         ensureThreadForkBoundaryMarkerEra(threadId, metadata)
         console.log("[Agent] Thread metadata:", metadata)
 
-        const workspacePath = metadata.workspacePath as string | undefined
+        const workspacePath = parsedThreadMetadata.workspacePath
         sessionWorkspacePath = workspacePath ?? undefined
         const harnessAgentContext = getHarnessAgentContext(metadata, {
           workspacePath,
@@ -5784,7 +5272,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
         if (
           matchesWorkflowNotificationPrompt &&
-          getAgentModeFromMetadata(metadata) === "workflow"
+          parsedThreadMetadata.agentMode === "workflow"
         ) {
           const pendingWorkflowRun = workflowRunManager.findPendingNotification(
             workspacePath,
@@ -5890,7 +5378,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           rawMessage: string,
           initialModelInput: string
         ): Promise<PreparedUserPrompt> =>
-          prepareUserPromptForRun({
+          prepareStandardUserPrompt({
             rawMessage,
             initialModelInput,
             threadId,
@@ -5969,7 +5457,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const persistedCoordinatorTurnPrompt = parseCoordinatorTurnPromptMetadata(metadata)
         const persistedCoordinatorNotificationSelectedSkills =
           parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
-        const metadataAgentMode = getAgentModeFromMetadata(metadata)
+        const metadataAgentMode = parsedThreadMetadata.agentMode
         const hasExplicitNormalAgentMode = metadata.agentMode === "normal"
         const requestedMode =
           requestedAgentMode === "coordinator" ||
@@ -6297,7 +5785,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           updateThread(threadId, { metadata: JSON.stringify(metadata) })
         }
 
-        const requestedModelId = modelId || (metadata.model as string | undefined)
+        const requestedModelId = modelId || parsedThreadMetadata.modelId
         const routingDecisionMessage = (
           effectiveAgentMode === "coordinator"
             ? [
@@ -6309,14 +5797,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         )
           .filter((part): part is string => typeof part === "string" && part.length > 0)
           .join("\n\n")
-        invokeRoutingResult = await resolveModel({
+        const preparedRouting = await resolveStandardTurnRouting({
           taskSource: "chat",
           message: routingDecisionMessage || effectiveMessage,
           threadId,
           requestedModelId,
           routingMode: getGlobalRoutingMode()
-        }).catch(() => null)
-        let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
+        })
+        invokeRoutingResult = preparedRouting.result
+        let effectiveModelId = preparedRouting.effectiveModelId
         if (effectiveAgentMode === "normal") {
           try {
             soloTaskTraceManager = new SoloTaskTraceManager({
@@ -6390,59 +5879,56 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
-        const primaryTier = invokeRoutingResult?.resolvedTier ?? "premium"
-        const orderedChain = buildOrderedChain(
-          effectiveModelId,
-          invokeRoutingResult?.fallbackChain,
-          primaryTier,
-          invokeRoutingResult?.layer !== "pinned"
-        )
+        const orderedChain = preparedRouting.orderedModelIds
         const failoverAttempts: FailoverAttempt[] = []
         // Expose this turn's attempts to the catch handler (same array ref).
         lastFailoverByChannel.set(channel, failoverAttempts)
         const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
+        const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({
+          source: "desktop",
+          baseOptions: () => ({
+            threadId,
+            currentRunMessageQueueOwnerToken: runToken,
+            workspacePath,
+            coordinatorTurnPrompt,
+            coordinatorSelectedSkill,
+            coordinatorExplicitSelectedSkill,
+            coordinatorNotificationSelectedSkills,
+            coordinatorWorkerTurnPlanning,
+            abortSignal: abortController.signal,
+            enableRequestUserInput: true,
+            noSkillEvolutionTool: true,
+            agentMode: effectiveAgentMode,
+            traceContext: runtimeTraceContext,
+            soloTaskTraceManager,
+            retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            onHookResult,
+            onFailureFuseNotice,
+            onContextCompaction,
+            hookTurnId: turnState.turnId,
+            onHookSkippedFactory,
+            hookScope,
+            skillHookKeys,
+            skillUseTracker,
+            onAgentsPromptLoadStatus,
+            onFileMutation: autoCommit.onFileMutation,
+            onCoordinatorWorkerHookResult,
+            onCoordinatorWorkerEvent,
+            onCoordinatorNotificationAction
+          }),
+          harnessContext: harnessAgentContext
+        })
         usedModelId = effectiveModelId
         const isFirstAttempt = true
-        let agent: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
+        let agent: Awaited<ReturnType<typeof invokeRuntimeFactory.create>> | null = null
         let stream: AsyncIterable<unknown> | null = null
 
         for (const candidateId of orderedChain) {
           if (abortController.signal.aborted) break
           try {
             soloTaskTraceManager?.setModelId(candidateId)
-            agent = await createAgentRuntime({
-              threadId,
-              currentRunMessageQueueOwnerToken: runToken,
-              workspacePath,
-              modelId: candidateId,
-              coordinatorTurnPrompt,
-              coordinatorSelectedSkill,
-              coordinatorExplicitSelectedSkill,
-              coordinatorNotificationSelectedSkills,
-              coordinatorWorkerTurnPlanning,
-              abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
-              agentMode: effectiveAgentMode,
-              traceContext: runtimeTraceContext,
-              soloTaskTraceManager,
-              retryHooks: buildModelRetryHooks(window, channel),
-              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult,
-              onFailureFuseNotice,
-              onContextCompaction,
-              hookTurnId: turnState.turnId,
-              onHookSkippedFactory,
-              hookScope,
-              skillHookKeys,
-              skillUseTracker,
-              ...harnessAgentContext,
-              onAgentsPromptLoadStatus,
-              onFileMutation: autoCommit.onFileMutation,
-              onCoordinatorWorkerHookResult,
-              onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
-            })
+            agent = await invokeRuntimeFactory.create(candidateId)
             // First attempt sends the message; subsequent attempts resume from checkpoint
             const input = isFirstAttempt ? { messages: humanMessages } : null
             stream = await agent.stream(input, streamConfig)
@@ -7250,39 +6736,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const nextCandidate = remainingCandidates.shift()!
           soloTaskTraceManager?.setModelId(nextCandidate)
-          agent = await createAgentRuntime({
-            threadId,
-            currentRunMessageQueueOwnerToken: runToken,
-            workspacePath,
-            modelId: nextCandidate,
-            coordinatorTurnPrompt,
-            coordinatorSelectedSkill,
-            coordinatorExplicitSelectedSkill,
-            coordinatorNotificationSelectedSkills,
-            coordinatorWorkerTurnPlanning,
-            abortSignal: abortController.signal,
-            enableRequestUserInput: true,
-            noSkillEvolutionTool: true,
-            agentMode: effectiveAgentMode,
-            traceContext: runtimeTraceContext,
-            soloTaskTraceManager,
-            retryHooks: buildModelRetryHooks(window, channel),
-            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-            onHookResult,
-            onFailureFuseNotice,
-            onContextCompaction,
-            hookTurnId: turnState.turnId,
-            onHookSkippedFactory,
-            hookScope,
-            skillHookKeys,
-            skillUseTracker,
-            ...harnessAgentContext,
-            onAgentsPromptLoadStatus,
-            onFileMutation: autoCommit.onFileMutation,
-            onCoordinatorWorkerHookResult,
-            onCoordinatorWorkerEvent,
-            onCoordinatorNotificationAction
-          })
+          agent = await invokeRuntimeFactory.create(nextCandidate)
           usedModelId = nextCandidate
           notifyFailover()
           return true
@@ -7382,39 +6836,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             // Try next candidate with resume semantics
             const nextCandidate = remainingCandidates.shift()!
             soloTaskTraceManager?.setModelId(nextCandidate)
-            agent = await createAgentRuntime({
-              threadId,
-              currentRunMessageQueueOwnerToken: runToken,
-              workspacePath,
-              modelId: nextCandidate,
-              coordinatorTurnPrompt,
-              coordinatorSelectedSkill,
-              coordinatorExplicitSelectedSkill,
-              coordinatorNotificationSelectedSkills,
-              coordinatorWorkerTurnPlanning,
-              abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
-              agentMode: effectiveAgentMode,
-              traceContext: runtimeTraceContext,
-              soloTaskTraceManager,
-              retryHooks: buildModelRetryHooks(window, channel),
-              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult,
-              onFailureFuseNotice,
-              onContextCompaction,
-              hookTurnId: turnState.turnId,
-              onHookSkippedFactory,
-              hookScope,
-              skillHookKeys,
-              skillUseTracker,
-              ...harnessAgentContext,
-              onAgentsPromptLoadStatus,
-              onFileMutation: autoCommit.onFileMutation,
-              onCoordinatorWorkerHookResult,
-              onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
-            })
+            agent = await invokeRuntimeFactory.create(nextCandidate)
             activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
             usedModelId = nextCandidate
             notifyFailover()
@@ -8394,9 +7816,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       // Get workspace path from thread metadata
       const thread = getThread(threadId)
-      const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+      const parsedThreadMetadata = parseStandardThreadMetadata(thread?.metadata, {
+        onParseError: () =>
+          console.warn("[Agent] Failed to parse thread metadata, using empty object")
+      })
+      const metadata = parsedThreadMetadata.metadata
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
-      const workspacePath = metadata.workspacePath as string | undefined
+      const workspacePath = parsedThreadMetadata.workspacePath
       const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
@@ -8412,7 +7838,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             requestedAgentMode === "normal" ||
             requestedAgentMode === "workflow"
           ? requestedAgentMode
-          : getAgentModeFromMetadata(metadata)
+          : parsedThreadMetadata.agentMode
 
       if (
         !resumeForcedByEnvironment &&
@@ -8757,16 +8183,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       let resumeErrorModelId: string | undefined
       try {
-        const requestedModelIdResume = modelId || (metadata.model as string | undefined)
-        const resumeRoutingResult = await resolveModel({
+        const requestedModelIdResume = modelId || parsedThreadMetadata.modelId
+        const preparedResumeRouting = await resolveStandardTurnRouting({
           taskSource: "chat",
           threadId,
           continuation: "resume",
           requestedModelId: requestedModelIdResume,
           routingMode: getGlobalRoutingMode()
-        }).catch(() => null)
-        const effectiveResumeModelId =
-          resumeRoutingResult?.resolvedModelId ?? requestedModelIdResume
+        })
+        const effectiveResumeModelId = preparedResumeRouting.effectiveModelId
         resumeErrorModelId = effectiveResumeModelId
 
         const resumeStreamConfig = {
@@ -8791,54 +8216,52 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         // ── Failover loop for resume ──
-        const resumePrimaryTier = resumeRoutingResult?.resolvedTier ?? "premium"
-        const resumeOrderedChain = buildOrderedChain(
-          effectiveResumeModelId,
-          resumeRoutingResult?.fallbackChain,
-          resumePrimaryTier,
-          resumeRoutingResult?.layer !== "pinned"
-        )
+        const resumeOrderedChain = preparedResumeRouting.orderedModelIds
         const resumeFailoverAttempts: FailoverAttempt[] = []
         lastFailoverByChannel.set(channel, resumeFailoverAttempts)
         const resumeCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
+        const resumeRuntimeFactory = prepareStandardThreadRuntimeFactory({
+          source: "desktop",
+          baseOptions: () => ({
+            threadId,
+            currentRunMessageQueueOwnerToken: runToken,
+            workspacePath,
+            coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
+            coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
+            coordinatorExplicitSelectedSkill: resumeCoordinatorExplicitSelectedSkill,
+            coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
+            coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
+            abortSignal: abortController.signal,
+            enableRequestUserInput: true,
+            noSkillEvolutionTool: true,
+            agentMode: resumeAgentMode,
+            retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            onHookResult,
+            onFailureFuseNotice,
+            onContextCompaction,
+            hookTurnId: turnState.turnId,
+            onHookSkippedFactory,
+            hookScope,
+            skillHookKeys,
+            skillUseTracker,
+            onAgentsPromptLoadStatus,
+            onFileMutation: autoCommit.onFileMutation,
+            onCoordinatorWorkerHookResult,
+            onCoordinatorWorkerEvent,
+            onCoordinatorNotificationAction
+          }),
+          harnessContext: harnessAgentContext
+        })
         let resumeUsedModelId = effectiveResumeModelId
         let resumeStream: AsyncIterable<unknown> | null = null
-        let resumeAgentRuntime: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
+        let resumeAgentRuntime: Awaited<ReturnType<typeof resumeRuntimeFactory.create>> | null =
+          null
 
         for (const candidateId of resumeOrderedChain) {
           if (abortController.signal.aborted) break
           try {
-            const resumeAgent = await createAgentRuntime({
-              threadId,
-              currentRunMessageQueueOwnerToken: runToken,
-              workspacePath,
-              modelId: candidateId,
-              coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
-              coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
-              coordinatorExplicitSelectedSkill: resumeCoordinatorExplicitSelectedSkill,
-              coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
-              coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
-              abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
-              agentMode: resumeAgentMode,
-              retryHooks: buildModelRetryHooks(window, channel),
-              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult,
-              onFailureFuseNotice,
-              onContextCompaction,
-              hookTurnId: turnState.turnId,
-              onHookSkippedFactory,
-              hookScope,
-              skillHookKeys,
-              skillUseTracker,
-              ...harnessAgentContext,
-              onAgentsPromptLoadStatus,
-              onFileMutation: autoCommit.onFileMutation,
-              onCoordinatorWorkerHookResult,
-              onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
-            })
+            const resumeAgent = await resumeRuntimeFactory.create(candidateId)
             resumeStream = await resumeAgent.stream(
               new Command({ resume: resumeValue }),
               resumeStreamConfig
@@ -9029,37 +8452,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
             const nextCandidate = resumeRemainingCandidates.shift()!
-            const nextAgent = await createAgentRuntime({
-              threadId,
-              currentRunMessageQueueOwnerToken: runToken,
-              workspacePath,
-              modelId: nextCandidate,
-              coordinatorTurnPrompt: resumeCoordinatorTurnPrompt,
-              coordinatorSelectedSkill: resumeCoordinatorSelectedSkill,
-              coordinatorExplicitSelectedSkill: resumeCoordinatorExplicitSelectedSkill,
-              coordinatorNotificationSelectedSkills: resumeCoordinatorNotificationSelectedSkills,
-              coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
-              abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
-              agentMode: resumeAgentMode,
-              retryHooks: buildModelRetryHooks(window, channel),
-              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult,
-              onFailureFuseNotice,
-              onContextCompaction,
-              hookTurnId: turnState.turnId,
-              onHookSkippedFactory,
-              hookScope,
-              skillHookKeys,
-              skillUseTracker,
-              ...harnessAgentContext,
-              onAgentsPromptLoadStatus,
-              onFileMutation: autoCommit.onFileMutation,
-              onCoordinatorWorkerHookResult,
-              onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
-            })
+            const nextAgent = await resumeRuntimeFactory.create(nextCandidate)
             activeResumeStream = await nextAgent.stream(
               new Command({ resume: resumeValue }),
               resumeStreamConfig
@@ -9306,10 +8699,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     // Get workspace path from thread metadata - REQUIRED
     const thread = getThread(threadId)
-    const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+    const parsedThreadMetadata = parseStandardThreadMetadata(thread?.metadata, {
+      onParseError: () =>
+        console.warn("[Agent] Failed to parse thread metadata, using empty object")
+    })
+    const metadata = parsedThreadMetadata.metadata
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
-    const workspacePath = metadata.workspacePath as string | undefined
-    const modelId = metadata.model as string | undefined
+    const workspacePath = parsedThreadMetadata.workspacePath
+    const modelId = parsedThreadMetadata.modelId
     const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     const onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
@@ -9321,7 +8718,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const interruptAgentMode: AgentMode =
       interruptCoordinatorRequest.source === "environment"
         ? "coordinator"
-        : getAgentModeFromMetadata(metadata)
+        : parsedThreadMetadata.agentMode
 
     if (!workspacePath) {
       safeSendToWindow(window, channel, {
@@ -9620,15 +9017,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     let interruptErrorModelId: string | undefined
     try {
-      const interruptRoutingResult = await resolveModel({
+      const preparedInterruptRouting = await resolveStandardTurnRouting({
         taskSource: "chat",
         threadId,
         continuation: "interrupt",
         requestedModelId: modelId ?? undefined,
         routingMode: getGlobalRoutingMode()
-      }).catch(() => null)
-      const effectiveInterruptModelId =
-        interruptRoutingResult?.resolvedModelId ?? modelId ?? undefined
+      })
+      const effectiveInterruptModelId = preparedInterruptRouting.effectiveModelId
       interruptErrorModelId = effectiveInterruptModelId
 
       const interruptStreamConfig = {
@@ -9640,54 +9036,52 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       if (decision.type === "approve") {
         // ── Failover loop for interrupt-continue ──
-        const intPrimaryTier = interruptRoutingResult?.resolvedTier ?? "premium"
-        const intOrderedChain = buildOrderedChain(
-          effectiveInterruptModelId,
-          interruptRoutingResult?.fallbackChain,
-          intPrimaryTier,
-          interruptRoutingResult?.layer !== "pinned"
-        )
+        const intOrderedChain = preparedInterruptRouting.orderedModelIds
         const intFailoverAttempts: FailoverAttempt[] = []
         lastFailoverByChannel.set(channel, intFailoverAttempts)
         const interruptCoordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
+        const interruptRuntimeFactory = prepareStandardThreadRuntimeFactory({
+          source: "desktop",
+          baseOptions: () => ({
+            threadId,
+            currentRunMessageQueueOwnerToken: runToken,
+            workspacePath,
+            coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
+            coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
+            coordinatorExplicitSelectedSkill: interruptCoordinatorExplicitSelectedSkill,
+            coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
+            coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
+            abortSignal: abortController.signal,
+            enableRequestUserInput: true,
+            noSkillEvolutionTool: true,
+            agentMode: interruptAgentMode,
+            retryHooks: buildModelRetryHooks(window, channel),
+            maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
+            onHookResult,
+            onFailureFuseNotice,
+            onContextCompaction,
+            hookTurnId: turnState.turnId,
+            onHookSkippedFactory,
+            hookScope,
+            skillHookKeys,
+            skillUseTracker,
+            onAgentsPromptLoadStatus,
+            onFileMutation: autoCommit.onFileMutation,
+            onCoordinatorWorkerHookResult,
+            onCoordinatorWorkerEvent,
+            onCoordinatorNotificationAction
+          }),
+          harnessContext: harnessAgentContext
+        })
         let intUsedModelId = effectiveInterruptModelId
         let intStream: AsyncIterable<unknown> | null = null
-        let intAgentRuntime: Awaited<ReturnType<typeof createAgentRuntime>> | null = null
+        let intAgentRuntime: Awaited<ReturnType<typeof interruptRuntimeFactory.create>> | null =
+          null
 
         for (const candidateId of intOrderedChain) {
           if (abortController.signal.aborted) break
           try {
-            const intAgent = await createAgentRuntime({
-              threadId,
-              currentRunMessageQueueOwnerToken: runToken,
-              workspacePath,
-              modelId: candidateId,
-              coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
-              coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
-              coordinatorExplicitSelectedSkill: interruptCoordinatorExplicitSelectedSkill,
-              coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
-              coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
-              abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
-              agentMode: interruptAgentMode,
-              retryHooks: buildModelRetryHooks(window, channel),
-              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult,
-              onFailureFuseNotice,
-              onContextCompaction,
-              hookTurnId: turnState.turnId,
-              onHookSkippedFactory,
-              hookScope,
-              skillHookKeys,
-              skillUseTracker,
-              ...harnessAgentContext,
-              onAgentsPromptLoadStatus,
-              onFileMutation: autoCommit.onFileMutation,
-              onCoordinatorWorkerHookResult,
-              onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
-            })
+            const intAgent = await interruptRuntimeFactory.create(candidateId)
             intStream = await intAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = intAgent
             intUsedModelId = candidateId
@@ -9874,37 +9268,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (!abortController.signal.aborted) await new Promise((r) => setTimeout(r, 500))
 
             const nextCandidate = intRemainingCandidates.shift()!
-            const nextAgent = await createAgentRuntime({
-              threadId,
-              currentRunMessageQueueOwnerToken: runToken,
-              workspacePath,
-              modelId: nextCandidate,
-              coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
-              coordinatorSelectedSkill: interruptCoordinatorSelectedSkill,
-              coordinatorExplicitSelectedSkill: interruptCoordinatorExplicitSelectedSkill,
-              coordinatorNotificationSelectedSkills: interruptCoordinatorNotificationSelectedSkills,
-              coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
-              abortSignal: abortController.signal,
-              enableRequestUserInput: true,
-              noSkillEvolutionTool: true,
-              agentMode: interruptAgentMode,
-              retryHooks: buildModelRetryHooks(window, channel),
-              maxRetryAttempts: getMaxRetryAttemptsForRoutingMode(),
-              onHookResult,
-              onFailureFuseNotice,
-              onContextCompaction,
-              hookTurnId: turnState.turnId,
-              onHookSkippedFactory,
-              hookScope,
-              skillHookKeys,
-              skillUseTracker,
-              ...harnessAgentContext,
-              onAgentsPromptLoadStatus,
-              onFileMutation: autoCommit.onFileMutation,
-              onCoordinatorWorkerHookResult,
-              onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
-            })
+            const nextAgent = await interruptRuntimeFactory.create(nextCandidate)
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
             intAgentRuntime = nextAgent
             intUsedModelId = nextCandidate

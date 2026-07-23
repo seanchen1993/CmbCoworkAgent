@@ -57,6 +57,7 @@ function sliceBetween(source: string, start: string, end: string, label: string)
 
 const agentIpc = read("src/main/ipc/agent.ts")
 const runtime = read("src/main/agent/runtime.ts")
+const standardTurn = read("src/main/agent/standard-thread-turn.ts")
 const sandboxIpc = read("src/main/ipc/sandbox.ts")
 
 const invoke = sliceBetween(
@@ -84,9 +85,15 @@ function testForegroundHandlerInventory(): void {
   assertIncludes(resume, '"agent:resume"', "resume IPC remains registered")
   assertIncludes(interrupt, 'ipcMain.on("agent:interrupt"', "interrupt IPC remains registered")
   assertIncludes(cancel, '"agent:cancel"', "cancel IPC remains registered")
-  assertOccurrences(invoke, "createAgentRuntime({", 3, "invoke Runtime creation paths")
-  assertOccurrences(resume, "createAgentRuntime({", 2, "resume Runtime creation paths")
-  assertOccurrences(interrupt, "createAgentRuntime({", 2, "interrupt Runtime creation paths")
+  assertOccurrences(invoke, "invokeRuntimeFactory.create(", 3, "invoke Runtime creation paths")
+  assertOccurrences(resume, "resumeRuntimeFactory.create(", 2, "resume Runtime creation paths")
+  assertOccurrences(
+    interrupt,
+    "interruptRuntimeFactory.create(",
+    2,
+    "interrupt Runtime creation paths"
+  )
+  assertNotIncludes(agentIpc, "createAgentRuntime(", "desktop IPC uses the controlled factory")
 }
 
 function testInvokeReplacementOwnershipOrder(): void {
@@ -144,9 +151,9 @@ function testFreshTurnGoalAndTranscriptSemantics(): void {
 
 function testPromptSkillHookAndHarnessPreparation(): void {
   const preparation = sliceBetween(
-    agentIpc,
-    "async function prepareUserPromptForRun({",
-    "function registerCurrentRunMessagePreparer({",
+    standardTurn,
+    "export async function prepareStandardUserPrompt({",
+    "export interface StandardTurnRoutingInput",
     "desktop prompt preparation"
   )
   assertSourceOrder(
@@ -171,12 +178,22 @@ function testPromptSkillHookAndHarnessPreparation(): void {
     "explicitSkillActivation.parsed.block",
     "hook rewrites retain the explicit Skill block"
   )
+  const sharedFeatureBinding = sliceBetween(
+    standardTurn,
+    "export function resolveHarnessFeatureBindingContext(",
+    "export function getHarnessAgentContext(",
+    "shared Feature binding preparation"
+  )
+  assertSourceOrder(
+    sharedFeatureBinding,
+    ["readHarnessFeatureMetadata(metadata)", "resolveHarnessFeatureCurrentStage("],
+    "shared Feature Harness preparation"
+  )
   assertSourceOrder(
     invoke,
     [
-      "readHarnessFeatureMetadata(bindingMetadata)",
-      "resolveHarnessFeatureCurrentStage(",
-      "new TraceCollector(threadId, rootUserPrompt",
+      "resolveHarnessFeatureBindingContext(bindingMetadata)",
+      "createStandardTurnTrace({",
       "const harnessAgentContext = getHarnessAgentContext(metadata",
       "await fireSessionStartOnce(",
       "const preparedPrompt = await prepareUserPromptForCurrentRun"
@@ -195,12 +212,13 @@ function testRoutingRuntimeCheckpointAndAutoCommit(): void {
     invoke,
     [
       "const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)",
-      "invokeRoutingResult = await resolveModel({",
+      "const preparedRouting = await resolveStandardTurnRouting({",
       "const userHumanMessage = isCoordinatorNotificationTurn",
       "id: userMessageId",
       "configurable: { thread_id: threadId }",
-      "const orderedChain = buildOrderedChain(",
-      "agent = await createAgentRuntime({",
+      "const orderedChain = preparedRouting.orderedModelIds",
+      "const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({",
+      "agent = await invokeRuntimeFactory.create(candidateId)",
       "stream = await agent.stream(input, streamConfig)"
     ],
     "desktop Runtime preparation and checkpoint identity"
@@ -215,7 +233,7 @@ function testRoutingRuntimeCheckpointAndAutoCommit(): void {
     "hookScope",
     "skillHookKeys",
     "skillUseTracker",
-    "...harnessAgentContext",
+    "harnessContext: harnessAgentContext",
     "onFileMutation: autoCommit.onFileMutation"
   ]) {
     assertIncludes(invoke, expected, `desktop Runtime option ${expected}`)
@@ -256,7 +274,11 @@ function testResumeAndInterruptContinueTheSameLogicalTurn(): void {
     )
     assertNotIncludes(handler, "resetTurnStateForNewInvoke(", `${label} does not start a new turn`)
     assertIncludes(handler, "enableRequestUserInput: true", `${label} retains structured input`)
-    assertIncludes(handler, "...harnessAgentContext", `${label} retains Harness context`)
+    assertIncludes(
+      handler,
+      "harnessContext: harnessAgentContext",
+      `${label} retains Harness context`
+    )
   }
   assertIncludes(
     resume,
@@ -343,15 +365,15 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
   assertOccurrences(
     invoke,
     "enableRequestUserInput: true",
-    3,
-    "all invoke Runtime variants retain request_user_input"
+    1,
+    "the invoke Runtime factory retains request_user_input for every model variant"
   )
 }
 
 function testAdvancedDesktopModesStayInsideTheExistingHandler(): void {
   for (const expected of [
     "parseGoalSlashCommand(message)",
-    "getAgentModeFromMetadata(metadata)",
+    "const metadataAgentMode = parsedThreadMetadata.agentMode",
     'effectiveAgentMode === "coordinator"',
     'metadataAgentMode === "workflow"',
     "coordinatorWorkerManager.restoreWorkersForThread({",

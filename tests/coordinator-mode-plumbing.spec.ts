@@ -667,8 +667,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertIncludes(agentIpc, "coordinatorWorkerManager", "agent IPC imports worker manager")
   assertIncludes(
     agentIpc,
-    "getAgentModeFromMetadata(metadata)",
-    "agent IPC can load persisted mode"
+    "parsedThreadMetadata.agentMode",
+    "agent IPC loads persisted mode through the shared Thread metadata parser"
   )
   assertIncludes(agentIpc, "requestedAgentMode", "agent IPC reads requested mode")
   assertIncludes(
@@ -897,7 +897,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "coordinatorNotificationSelectedSkills,\n              coordinatorWorkerTurnPlanning,\n              abortSignal: abortController.signal",
+    "coordinatorNotificationSelectedSkills,\n            coordinatorWorkerTurnPlanning,\n            abortSignal: abortController.signal",
     "agent invoke passes notification-selected skill context into the first coordinator runtime"
   )
   assertIncludes(
@@ -907,7 +907,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "coordinatorTurnPrompt,\n              coordinatorSelectedSkill,",
+    "coordinatorTurnPrompt,\n            coordinatorSelectedSkill,",
     "agent invoke passes turn-scoped coordinator context into the first coordinator runtime"
   )
   assertIncludes(
@@ -1506,7 +1506,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertSourceOrder(
     agentIpc,
     "coordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(",
-    "invokeRoutingResult = await resolveModel({",
+    "const preparedRouting = await resolveStandardTurnRouting({",
     "agent IPC builds coordinator context before model routing runs"
   )
   assertIncludes(

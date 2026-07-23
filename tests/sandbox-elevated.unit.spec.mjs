@@ -2362,7 +2362,7 @@ test("workflow notification turn is recognized on a FULL prompt match, not just 
   )
   assert.match(
     agentIpcSource,
-    /matchesWorkflowNotificationPrompt &&\s+getAgentModeFromMetadata\(metadata\) === "workflow"/,
+    /matchesWorkflowNotificationPrompt &&\s+parsedThreadMetadata\.agentMode === "workflow"/,
     "the full-match gate is combined with workflow agent mode"
   )
 })
