@@ -3,8 +3,14 @@ import {
   isBrowserNativeMessagingHostLaunch,
   runBrowserNativeMessagingHost
 } from "./browser/browser-native-messaging-host"
+import { configureBrowserCdpEndpoint } from "./browser/browser-cdp"
 
 const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
+
+const browserCdpPort = configureBrowserCdpEndpoint(app.commandLine)
+if (browserCdpPort !== null) {
+  console.info(`[Main] Browser CDP endpoint enabled on http://127.0.0.1:${browserCdpPort}.`)
+}
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -107,6 +113,10 @@ function getConsoleLevelName(level: number): string {
     default:
       return "LOG"
   }
+}
+
+function shouldMirrorRendererBrowserLog(message: string): boolean {
+  return message.startsWith("[BrowserPanel]") || (message.startsWith("[App]") && message.includes("Browser"))
 }
 
 function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): string {
@@ -490,6 +500,10 @@ function createWindow(): void {
 
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
+    if (shouldMirrorRendererBrowserLog(message)) {
+      const location = sourceId ? `${sourceId}:${line}` : `line:${line}`
+      console.log(`[RendererBrowser] ${message} (${location})`)
+    }
   })
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
@@ -503,11 +517,6 @@ function createWindow(): void {
 
   mainWindow.webContents.on("did-start-loading", () => {
     clearCloseToTrayPromptState()
-  })
-
-  mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
-    if (!isMainFrame || isInPlace) return
-    disposeBrowserServiceForMainWindow("the renderer started navigation")
   })
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {

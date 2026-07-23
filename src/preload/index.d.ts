@@ -1591,6 +1591,7 @@ interface CustomAPI {
     openChromeSetup: (
       action: BrowserChromeSetupAction
     ) => Promise<BrowserChromeSetupOpenResult>
+    disposeAllForRendererUnload: () => void
     onState: (sessionId: string, callback: (state: BrowserState) => void) => () => void
     onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
   }

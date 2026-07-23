@@ -60,6 +60,30 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function formatBounds(bounds: BrowserBounds | null | undefined): string {
+  if (!bounds) return "(none)"
+  return `${bounds.x},${bounds.y} ${bounds.width}x${bounds.height}`
+}
+
+function formatRect(rect: DOMRect | null | undefined): string {
+  if (!rect) return "(none)"
+  return `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)}`
+}
+
+function describeBrowserState(state: BrowserState | null | undefined): string {
+  if (!state) return "(none)"
+  return `created=${state.created} visible=${state.visible} loading=${state.isLoading} url=${state.url || "(empty)"} title=${state.title || "(empty)"}`
+}
+
+function detectRendererZoomLevel(): number {
+  const widthRatio = window.innerWidth > 0 ? window.outerWidth / window.innerWidth : 1
+  const heightRatio = window.innerHeight > 0 ? window.outerHeight / window.innerHeight : 1
+  const candidate = [widthRatio, heightRatio].find(
+    (value) => Number.isFinite(value) && value > 0.5 && value < 3
+  )
+  return candidate ? Math.round(candidate * 100) / 100 : 1
+}
+
 function getLastConsoleEntryId(entries: BrowserConsoleEntry[]): string | undefined {
   return entries.length > 0 ? entries[entries.length - 1]?.id : undefined
 }
@@ -232,6 +256,8 @@ export function BrowserPanel({
   const isSessionCreatedRef = useRef(false)
   const isUrlFocusedRef = useRef(false)
   const lastInitialNavigationRef = useRef<string | null>(null)
+  const pendingSyncReasonRef = useRef<string | null>(null)
+  const lastObservedStateRef = useRef<BrowserState | null>(null)
   const consoleScrollerRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<BrowserState>({ ...EMPTY_STATE, sessionId })
   const [urlInput, setUrlInput] = useState("")
@@ -258,36 +284,61 @@ export function BrowserPanel({
     lastBrowserViewVisibleRef.current = null
     hasVisibleBoundsRef.current = false
     lastInitialNavigationRef.current = null
+    pendingSyncReasonRef.current = null
+    lastObservedStateRef.current = null
     setIsImportingBrowserProfile(false)
     setBrowserProfileImportSkippedWebsites([])
     setCopiedConsole(false)
     setConsoleOpen(false)
     setIsFullscreen(false)
+    console.info(`[BrowserPanel] Reset local browser panel state for ${sessionId}.`)
   }, [sessionId])
 
   useEffect(() => {
-    return window.api.browser.onState(sessionId, (nextState) => {
+    console.info(`[BrowserPanel] Subscribing to Browser state channel for ${sessionId}.`)
+    const unsubscribe = window.api.browser.onState(sessionId, (nextState) => {
+      const previousState = lastObservedStateRef.current
+      if (!previousState || !browserStatesEqual(previousState, nextState)) {
+        console.info(
+          `[BrowserPanel] State update for ${sessionId}: prev={${describeBrowserState(previousState)}} next={${describeBrowserState(nextState)}}.`
+        )
+      }
+      lastObservedStateRef.current = nextState
       applyBrowserState(nextState)
       if (!isUrlFocusedRef.current) {
         setUrlInput(nextState.url)
       }
     })
+    return () => {
+      console.info(`[BrowserPanel] Unsubscribing Browser state channel for ${sessionId}.`)
+      unsubscribe()
+    }
   }, [applyBrowserState, sessionId])
 
   const syncBounds = useCallback(
-    () => {
-      if (!isSessionCreatedRef.current) return
+    (reason: string) => {
+      if (!isSessionCreatedRef.current) {
+        console.info(`[BrowserPanel] Skip bounds sync for ${sessionId}; reason=${reason}; session not created.`)
+        return
+      }
       const element = viewportRef.current
-      if (!element) return
+      if (!element) {
+        console.info(`[BrowserPanel] Skip bounds sync for ${sessionId}; reason=${reason}; viewport missing.`)
+        return
+      }
       const rect = element.getBoundingClientRect()
+      const zoomLevel = detectRendererZoomLevel()
       const bounds: BrowserBounds = {
-        x: Math.round(rect.left),
-        y: Math.round(rect.top),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height)
+        x: Math.round(rect.left * zoomLevel),
+        y: Math.round(rect.top * zoomLevel),
+        width: Math.round(rect.width * zoomLevel),
+        height: Math.round(rect.height * zoomLevel)
       }
       const visible = rect.width >= 8 && rect.height >= 8
       if (!visible && hasVisibleBoundsRef.current) {
+        console.info(
+          `[BrowserPanel] Skip bounds sync for ${sessionId}; reason=${reason}; viewport hidden after first visible; rect=${formatRect(rect)} zoom=${zoomLevel} lastBounds=${formatBounds(lastBoundsRef.current)}.`
+        )
         return
       }
       if (
@@ -296,9 +347,14 @@ export function BrowserPanel({
       ) {
         return
       }
+      const previousBounds = lastBoundsRef.current
+      const previousVisible = lastBrowserViewVisibleRef.current
       lastBoundsRef.current = bounds
       lastBrowserViewVisibleRef.current = visible
       if (visible) hasVisibleBoundsRef.current = true
+      console.info(
+        `[BrowserPanel] Syncing bounds for ${sessionId}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
+      )
       void window.api.browser
         .setBounds(sessionId, bounds, visible)
         .then(applyBrowserState)
@@ -317,21 +373,29 @@ export function BrowserPanel({
     let frame: number | null = null
     const timers: number[] = []
 
-    const scheduleSync = (): void => {
+    const scheduleSync = (reason: string): void => {
+      pendingSyncReasonRef.current = pendingSyncReasonRef.current
+        ? `${pendingSyncReasonRef.current},${reason}`
+        : reason
       if (frame !== null) return
       frame = window.requestAnimationFrame(() => {
         frame = null
-        if (!cancelled) syncBounds()
+        const nextReason = pendingSyncReasonRef.current || "raf"
+        pendingSyncReasonRef.current = null
+        if (!cancelled) syncBounds(nextReason)
       })
     }
 
     const scheduleStabilizedSync = (): void => {
-      scheduleSync()
+      scheduleSync("attach:raf")
       for (const delay of [50, 150, 300, 600, 1000]) {
-        timers.push(window.setTimeout(scheduleSync, delay))
+        timers.push(window.setTimeout(() => scheduleSync(`attach:${delay}ms`), delay))
       }
     }
 
+    console.info(
+      `[BrowserPanel] Mounting BrowserPanel for ${sessionId}; workspacePath=${workspacePath || "(none)"} initialUrl=${initialUrl || "(none)"} reloadToken=${reloadToken ?? "(none)"}.`
+    )
     console.info(`[BrowserPanel] Attaching Browser session ${sessionId}.`)
     window.api.browser
       .attach(sessionId, { workspacePath, visible: false })
@@ -340,21 +404,26 @@ export function BrowserPanel({
         applyBrowserState(nextState)
         if (!isUrlFocusedRef.current) setUrlInput(nextState.url)
         scheduleStabilizedSync()
-        console.info(`[BrowserPanel] Browser session ${sessionId} attached.`)
+        console.info(
+          `[BrowserPanel] Browser session ${sessionId} attached with state={${describeBrowserState(nextState)}}.`
+        )
       })
       .catch((error) => {
         console.error(`[BrowserPanel] Browser attach failed: ${formatError(error)}`)
         toast.error("内置浏览器启动失败")
       })
 
-    const observer = new ResizeObserver(() => scheduleSync())
-    const handleResize = (): void => scheduleSync()
-    const handleScroll = (): void => scheduleSync()
+    const observer = new ResizeObserver(() => scheduleSync("resize-observer"))
+    const handleResize = (): void => scheduleSync("window-resize")
+    const handleScroll = (): void => scheduleSync("window-scroll")
     if (viewportRef.current) observer.observe(viewportRef.current)
     window.addEventListener("resize", handleResize)
     window.addEventListener("scroll", handleScroll, true)
 
     return () => {
+      console.info(
+        `[BrowserPanel] Unmounting BrowserPanel for ${sessionId}; lastBounds=${formatBounds(lastBoundsRef.current)} lastVisible=${lastBrowserViewVisibleRef.current ?? "(none)"} localState={${describeBrowserState(lastObservedStateRef.current)}}.`
+      )
       cancelled = true
       for (const timer of timers) window.clearTimeout(timer)
       observer.disconnect()
@@ -363,18 +432,13 @@ export function BrowserPanel({
       if (frame !== null) {
         window.cancelAnimationFrame(frame)
       }
-      void window.api.browser
-        .detach(sessionId)
-        .catch((error) => {
-          console.error(`[BrowserPanel] Browser detach failed: ${formatError(error)}`)
-        })
     }
-  }, [applyBrowserState, sessionId, syncBounds, workspacePath])
+  }, [applyBrowserState, initialUrl, reloadToken, sessionId, syncBounds, workspacePath])
 
   useEffect(() => {
     if (!state.created) return
-    const frame = window.requestAnimationFrame(syncBounds)
-    const timer = window.setTimeout(syncBounds, 120)
+    const frame = window.requestAnimationFrame(() => syncBounds("state-change:raf"))
+    const timer = window.setTimeout(() => syncBounds("state-change:120ms"), 120)
     return () => {
       window.cancelAnimationFrame(frame)
       window.clearTimeout(timer)
@@ -391,7 +455,7 @@ export function BrowserPanel({
   useEffect(() => {
     if (!state.created) return
     // ResizeObserver misses pure position shifts, but BrowserView bounds are window-relative.
-    const interval = window.setInterval(() => syncBounds(), BOUNDS_POSITION_POLL_MS)
+    const interval = window.setInterval(() => syncBounds("position-poll"), BOUNDS_POSITION_POLL_MS)
     return () => {
       window.clearInterval(interval)
     }

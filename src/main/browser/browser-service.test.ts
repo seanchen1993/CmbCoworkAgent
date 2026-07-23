@@ -1,12 +1,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { BrowserConsoleEntry } from "../../shared/browser-types"
 
 import {
   appendBrowserConsoleEntry,
   getUrlPermissionError,
+  initializeBrowserTarget,
   normalizeUrlInput
 } from "./browser-service"
 
@@ -64,5 +65,22 @@ describe("browser file path guards", () => {
     expect(entries).toHaveLength(200)
     expect(entries[0]?.id).toBe("entry-5")
     expect(entries[199]?.id).toBe("entry-204")
+  })
+
+  it("loads about:blank to initialize a newly created WebContents target", async () => {
+    const loadURL = vi.fn().mockResolvedValue(undefined)
+
+    await initializeBrowserTarget({ getURL: () => "", loadURL })
+
+    expect(loadURL).toHaveBeenCalledOnce()
+    expect(loadURL).toHaveBeenCalledWith("about:blank")
+  })
+
+  it("does not replace a target that already has a URL", async () => {
+    const loadURL = vi.fn().mockResolvedValue(undefined)
+
+    await initializeBrowserTarget({ getURL: () => "https://example.com", loadURL })
+
+    expect(loadURL).not.toHaveBeenCalled()
   })
 })

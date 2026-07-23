@@ -51,6 +51,8 @@
     "test:goal:e2e": "RUN_GOAL_E2E_REAL_MODEL=1 npx tsx tests/goal-ipc-e2e.spec.ts",
     "start": "electron-vite preview",
     "dev": "electron-vite dev",
+    "dev:playwright-mcp-poc": "node scripts/dev-playwright-mcp-poc.mjs",
+    "check:playwright-mcp-poc": "node scripts/check-playwright-mcp-poc.mjs",
     "dev:mock-task-cards": "node -e \"const { spawnSync } = require('child_process'); process.env.CMB_TASK_CARDS_MOCK = '1'; const result = spawnSync('electron-vite', ['dev'], { stdio: 'inherit', shell: true, env: process.env }); process.exit(result.status ?? 1)\"",
     "build": "electron-vite build",
     "clean:win-code-exe": "node -e \"require('fs').rmSync('resources/bin/win32/codex.exe', { force: true })\"",

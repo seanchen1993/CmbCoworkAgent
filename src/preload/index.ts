@@ -2048,6 +2048,9 @@ const api = {
       action: BrowserChromeSetupAction
     ): Promise<BrowserChromeSetupOpenResult> =>
       ipcRenderer.invoke("browser:openChromeSetup", action) as Promise<BrowserChromeSetupOpenResult>,
+    disposeAllForRendererUnload: (): void => {
+      ipcRenderer.send("browser:disposeAllForRendererUnload")
+    },
     onState: (sessionId: string, callback: (state: BrowserState) => void): (() => void) => {
       const channel = `browser:state:${sessionId}`
       const handler = (_: unknown, state: BrowserState): void => {

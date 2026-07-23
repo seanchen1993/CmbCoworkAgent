@@ -48,6 +48,7 @@ interface BrowserSession {
   id: string
   isAttached: boolean
   view: WebContentsView
+  targetReady: Promise<void>
   workspacePath: string | null
   consoleEntries: BrowserConsoleEntry[]
   nextConsoleEntryId: number
@@ -73,6 +74,14 @@ function formatBounds(bounds: Rectangle | BrowserBounds): string {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function formatSessionSnapshot(session: BrowserSession | null): string {
+  if (!session) return "(none)"
+  const webContents = session.view.webContents
+  const destroyed = webContents.isDestroyed()
+  const url = destroyed ? "(destroyed)" : webContents.getURL() || "(empty)"
+  return `id=${session.id} attached=${session.isAttached} visible=${session.view.getVisible()} bounds=${formatBounds(session.view.getBounds())} destroyed=${destroyed} url=${url}`
 }
 
 function getHttpOrigin(url: string): string | null {
@@ -387,6 +396,13 @@ export function appendBrowserConsoleEntry(
     : next
 }
 
+export async function initializeBrowserTarget(
+  webContents: Pick<WebContents, "getURL" | "loadURL">
+): Promise<void> {
+  if (webContents.getURL()) return
+  await webContents.loadURL("about:blank")
+}
+
 function getChannel(sessionId: string): string {
   return `browser:state:${sessionId}`
 }
@@ -398,6 +414,9 @@ export class BrowserService {
 
   attach(sessionId: string, options: BrowserAttachOptions = {}): BrowserState {
     const window = this.getUsableWindow()
+    console.info(
+      `[BrowserService] Attach requested for ${sessionId}; active=${formatSessionSnapshot(this.activeSession)} requestedVisible=${options.visible ?? true} workspacePath=${options.workspacePath ?? "(unchanged)"} initialUrl=${options.initialUrl ?? "(none)"}.`
+    )
 
     if (this.activeSession && this.activeSession.id !== sessionId) {
       console.info(`[BrowserService] Disposing Browser session ${this.activeSession.id} before attaching ${sessionId}.`)
@@ -408,12 +427,18 @@ export class BrowserService {
     const existingSession = this.getActiveSession(sessionId)
     const session = this.ensureActiveSession(sessionId, options.workspacePath ?? null)
     if (!session.isAttached) {
+      console.info(
+        `[BrowserService] addChildView for ${sessionId}; snapshot before attach=${formatSessionSnapshot(session)}.`
+      )
       window.contentView.addChildView(session.view)
       session.isAttached = true
     }
     const requestedVisible = options.visible ?? true
     const shouldUpdateVisibility = !existingSession || requestedVisible
     const previousVisible = session.view.getVisible()
+    console.info(
+      `[BrowserService] Attach resolved session for ${sessionId}; existing=${Boolean(existingSession)} shouldUpdateVisibility=${shouldUpdateVisibility} previousVisible=${previousVisible} current=${formatSessionSnapshot(session)}.`
+    )
     if (shouldUpdateVisibility) {
       if (previousVisible !== requestedVisible) session.view.setVisible(requestedVisible)
     }
@@ -432,7 +457,20 @@ export class BrowserService {
     return state
   }
 
+  async prepareTarget(
+    sessionId: string,
+    options: BrowserAttachOptions = {}
+  ): Promise<BrowserState> {
+    this.attach(sessionId, options)
+    const session = this.requireSession(sessionId)
+    await session.targetReady
+    return this.getState(sessionId)
+  }
+
   detach(sessionId: string): BrowserState {
+    console.info(
+      `[BrowserService] Detach requested for ${sessionId}; active=${formatSessionSnapshot(this.activeSession)}.`
+    )
     if (this.activeSession?.id !== sessionId) return this.getState(sessionId)
     this.disposeActiveSession()
     this.emitState(sessionId)
@@ -456,9 +494,15 @@ export class BrowserService {
     const visibilityChanged = currentVisible !== nextVisible
 
     if (!boundsChanged && !visibilityChanged) {
+      console.info(
+        `[BrowserService] Ignored Browser bounds update for ${sessionId}; unchanged current=${formatBounds(currentBounds)} visible=${currentVisible}.`
+      )
       return this.getState(sessionId)
     }
 
+    console.info(
+      `[BrowserService] Applying Browser bounds for ${sessionId}; from=${formatBounds(currentBounds)} visible=${currentVisible} to=${formatBounds(nextBounds)} visible=${nextVisible}.`
+    )
     if (boundsChanged) session.view.setBounds(nextBounds)
     if (visibilityChanged) session.view.setVisible(nextVisible)
     if (nextVisible && (boundsChanged || visibilityChanged)) {
@@ -849,6 +893,9 @@ export class BrowserService {
     const existing = this.getActiveSession(sessionId)
     if (existing) {
       existing.workspacePath = workspacePath ?? existing.workspacePath
+      console.info(
+        `[BrowserService] Reusing active Browser session ${sessionId}; snapshot=${formatSessionSnapshot(existing)} workspacePath=${existing.workspacePath ?? "(none)"}.`
+      )
       return existing
     }
 
@@ -869,6 +916,7 @@ export class BrowserService {
       id: sessionId,
       isAttached: false,
       view,
+      targetReady: Promise.resolve(),
       workspacePath,
       consoleEntries: [],
       nextConsoleEntryId: 1
@@ -877,7 +925,16 @@ export class BrowserService {
     this.activeSession = session
     this.configureSessionGuards(session)
     this.bindWebContentsEvents(session)
-    console.info(`[BrowserService] Created Browser session ${sessionId}.`)
+    session.targetReady = initializeBrowserTarget(view.webContents)
+    void session.targetReady.catch((error) => {
+      if (this.getActiveSession(sessionId) !== session || view.webContents.isDestroyed()) return
+      session.error = `内置浏览器初始化失败: ${formatError(error)}`
+      this.emitState(sessionId)
+      console.error(`[BrowserService] ${session.error}.`)
+    })
+    console.info(
+      `[BrowserService] Created Browser session ${sessionId}; snapshot=${formatSessionSnapshot(session)} workspacePath=${workspacePath ?? "(none)"}.`
+    )
     return session
   }
 
@@ -1009,6 +1066,9 @@ export class BrowserService {
     const session = this.activeSession
     if (!session) return null
 
+    console.info(
+      `[BrowserService] Disposing active Browser session ${session.id}; snapshot before dispose=${formatSessionSnapshot(session)}.`
+    )
     this.activeSession = null
     session.view.setVisible(false)
 
@@ -1017,6 +1077,7 @@ export class BrowserService {
       try {
         window.contentView.removeChildView(session.view)
         session.isAttached = false
+        console.info(`[BrowserService] removeChildView completed for ${session.id}.`)
       } catch (error) {
         console.warn(`[BrowserService] Browser view detach failed for ${session.id}: ${formatError(error)}.`)
       }
@@ -1024,6 +1085,7 @@ export class BrowserService {
 
     try {
       if (!session.view.webContents.isDestroyed()) {
+        console.info(`[BrowserService] Closing Browser webContents for ${session.id}.`)
         session.view.webContents.close({ waitForBeforeUnload: false })
       }
     } catch (error) {

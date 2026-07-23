@@ -136,6 +136,21 @@ export function registerBrowserHandlers(
     return browserService.detach(sessionId)
   })
 
+  ipcMain.on("browser:disposeAllForRendererUnload", (event) => {
+    const window = getMainWindow()
+    if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
+      console.warn(
+        `[BrowserService] Ignored renderer-unload cleanup from unknown sender ${event.sender.id}.`
+      )
+      return
+    }
+
+    const disposedSessionId = browserService.disposeAll()
+    console.info(
+      `[BrowserService] Renderer unload cleanup requested by sender ${event.sender.id}; disposed=${disposedSessionId ?? "(none)"}.`
+    )
+  })
+
   ipcMain.handle(
     "browser:setBounds",
     (_event, sessionId: string, bounds: BrowserBounds, visible?: boolean) => {
