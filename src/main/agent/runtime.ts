@@ -176,7 +176,12 @@ import { classifyCommandConcurrency, isReadOnlyShellCommand } from "./exec-polic
 import type { WindowsShellKind } from "./windows-safe-commands"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
-import type { ApprovalRequest, ApprovalDecision, Message } from "../types"
+import type {
+  ApprovalRequest,
+  ApprovalDecision,
+  Message,
+  ScheduledTaskImDeliveryContext
+} from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import {
   isTraceReasoningTruncated,
@@ -4617,12 +4622,28 @@ The workspace root is: ${workspacePath}`
   }
   if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
     let chatxRobotChatId: string | null = null
+    let imDeliveryContext: ScheduledTaskImDeliveryContext | null = null
     if (options.threadId) {
       try {
         const threadRow = getThread(options.threadId)
         if (threadRow?.metadata) {
           const meta = JSON.parse(threadRow.metadata)
           chatxRobotChatId = (meta.chatxRobotChatId as string) || null
+          const delivery = meta.imDeliveryContext as Record<string, unknown> | undefined
+          if (
+            meta.targetKind === "inbox" &&
+            delivery?.provider === "zhaohu" &&
+            typeof delivery.conversationKey === "string" &&
+            Number.isSafeInteger(delivery.deviceEpoch) &&
+            (delivery.deviceEpoch as number) > 0
+          ) {
+            imDeliveryContext = {
+              provider: "zhaohu",
+              conversationKey: delivery.conversationKey,
+              expectedDeviceEpoch: delivery.deviceEpoch as number,
+              inboxThreadId: options.threadId
+            }
+          }
         }
       } catch {
         /* ignore */
@@ -4633,7 +4654,8 @@ The workspace root is: ${workspacePath}`
         workspacePath,
         modelId: options.modelId,
         threadId: options.threadId,
-        chatxRobotChatId
+        chatxRobotChatId,
+        imDeliveryContext
       })
     )
   }

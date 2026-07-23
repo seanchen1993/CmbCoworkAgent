@@ -12,7 +12,11 @@ import {
   type HarnessAgentContext,
   type RemoteTurnPolicy
 } from "../../agent/standard-thread-turn"
-import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../../agent/thread-run-lease"
+import {
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease,
+  type LocalThreadRunOwner
+} from "../../agent/thread-run-lease"
 import {
   StandardTurnStreamConsumer,
   persistStandardTurnUserMessage
@@ -84,6 +88,21 @@ export interface ImRemoteTurnExecutionInput {
   capability: Extract<ImRemoteCapabilityDecision, { allowed: true }>
 }
 
+export interface PreparedRemoteStandardTurnInput {
+  rawMessage: string
+  userMessageId: string
+  threadId: string
+  targetKind: "inbox" | "feature"
+  metadata: Record<string, unknown>
+  workspacePath: string
+  runId: string
+  runOwner: LocalThreadRunOwner
+  source: "im" | "scheduler"
+  routingTaskSource: "chat" | "scheduler_reminder"
+  signal: AbortSignal
+  remotePolicy?: RemoteTurnPolicy
+}
+
 export interface ImRemoteRunnerDependencies {
   gateway: ImGatewayClientPort
   eventStore: ImEventStore
@@ -153,12 +172,24 @@ export function createImInboxRemotePolicy(): RemoteTurnPolicy {
   }
 }
 
-async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput): Promise<string> {
-  const { event, capability, runId, signal } = input
-  const { target, metadata, workspacePath } = capability
-  const threadId = target.threadId
+export async function executePreparedRemoteStandardTurn(
+  input: PreparedRemoteStandardTurnInput
+): Promise<string> {
+  const {
+    rawMessage,
+    userMessageId,
+    threadId,
+    targetKind,
+    metadata,
+    workspacePath,
+    runId,
+    runOwner,
+    source,
+    routingTaskSource,
+    signal,
+    remotePolicy
+  } = input
   const channel = `scheduler:stream:${threadId}`
-  const userMessageId = `im:${event.eventId}:user`
   const hookScope = createPersistentThreadHookScope(threadId)
   const skillUseTracker = createSkillUseTracker()
   const skillHookKeys = new Set<string>()
@@ -171,10 +202,10 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
   const onHookSkippedFactory = () => () => undefined
   const tracer = createStandardTurnTrace({
     threadId,
-    rawMessage: event.messageText,
+    rawMessage,
     requestedModelId: typeof metadata.model === "string" ? metadata.model : undefined,
     options: {
-      triggerSource: "chat",
+      triggerSource: routingTaskSource,
       includeSkillEval: true,
       ...(harnessFeature ? { harnessFeature } : {})
     }
@@ -184,11 +215,11 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
   persistStandardTurnUserMessage({
     threadId,
     messageId: userMessageId,
-    content: event.messageText
+    content: rawMessage
   })
   const preparedPrompt = await prepareStandardUserPrompt({
-    rawMessage: event.messageText,
-    initialModelInput: event.messageText,
+    rawMessage,
+    initialModelInput: rawMessage,
     threadId,
     workspacePath,
     turnState: { hookScope, skillUseTracker, skillHookKeys, turnId: userMessageId },
@@ -203,7 +234,7 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
   }
 
   const routing = await resolveStandardTurnRouting({
-    taskSource: "chat",
+    taskSource: routingTaskSource,
     message: preparedPrompt.content,
     threadId,
     requestedModelId: typeof metadata.model === "string" ? metadata.model : undefined
@@ -227,8 +258,8 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
 
   try {
     const runtimeFactory = prepareStandardThreadRuntimeFactory({
-      source: "im",
-      runLease: { owner: "im", runId },
+      source,
+      runLease: { owner: runOwner, runId },
       baseOptions: () => ({
         threadId,
         workspacePath,
@@ -240,14 +271,14 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
         skillHookKeys,
         skillUseTracker,
         onHookResult,
-        enableRequestUserInput: target.kind === "feature",
-        memoryEnabled: target.kind === "inbox" ? false : undefined,
+        enableRequestUserInput: targetKind === "feature",
+        memoryEnabled: targetKind === "inbox" ? false : undefined,
         extraSystemPrompt: IM_UNTRUSTED_INPUT_CONTEXT,
-        autoApproveFileEdits: target.kind === "inbox",
+        autoApproveFileEdits: targetKind === "inbox",
         onFileMutation: (filePath) => recordAgentTouchedFile(threadId, workspacePath, filePath)
       }),
       harnessContext,
-      remotePolicy: target.kind === "inbox" ? createImInboxRemotePolicy() : undefined
+      remotePolicy
     })
 
     const candidates = routing.orderedModelIds.length > 0 ? routing.orderedModelIds : [undefined]
@@ -293,7 +324,7 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
       ...getHarnessHookContext(harnessContext),
       abortSignal: signal,
       getStopContext: () => ({
-        userMessage: event.messageText,
+        userMessage: rawMessage,
         assistantResponse: streamConsumer.getFinalAssistantText(),
         toolCalls: streamConsumer.getToolNames(),
         usedSkills: skillUseTracker.getUsedSkillNames()
@@ -306,7 +337,7 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
           {
             messages: [
               new HumanMessage({
-                id: `im:${event.eventId}:revision:${revision}`,
+                id: `${userMessageId}:revision:${revision}`,
                 content: revisionPrompt
               })
             ]
@@ -346,7 +377,7 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
     await maybeAutoCommitAfterAgentRun({
       threadId,
       workspacePath,
-      userPrompt: event.messageText,
+      userPrompt: rawMessage,
       snapshot
     }).catch((error) => console.warn("[IM] Auto-commit finalize failed:", error))
     completionSucceeded = true
@@ -369,6 +400,25 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
     await flushStrict().catch(() => undefined)
     notifyRemoteThreadChanged()
   }
+}
+
+async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput): Promise<string> {
+  const { event, capability, runId, signal } = input
+  const { target, metadata, workspacePath } = capability
+  return executePreparedRemoteStandardTurn({
+    rawMessage: event.messageText,
+    userMessageId: `im:${event.eventId}:user`,
+    threadId: target.threadId,
+    targetKind: target.kind,
+    metadata,
+    workspacePath,
+    runId,
+    runOwner: "im",
+    source: "im",
+    routingTaskSource: "chat",
+    signal,
+    remotePolicy: target.kind === "inbox" ? createImInboxRemotePolicy() : undefined
+  })
 }
 
 export class ImRemoteRunner {

@@ -289,6 +289,39 @@ function normalizeReplies(
   return ordered
 }
 
+function normalizeProactiveReplies(replies: readonly RemoteImReplyV1[]): RemoteImReplyV1[] {
+  if (replies.length === 0) {
+    throw new ImEventStoreError("OUTBOX_INCOMPLETE", "At least one reply segment is required")
+  }
+  for (const reply of replies) assertRemoteImReplyV1(reply)
+  const ordered = [...replies].sort((left, right) => left.segment.index - right.segment.index)
+  const first = ordered[0]
+  const keys = new Set<string>()
+  for (const [index, reply] of ordered.entries()) {
+    if (
+      reply.eventId !== undefined ||
+      reply.segment.index !== index ||
+      reply.segment.count !== ordered.length ||
+      reply.deliveryId !== first.deliveryId ||
+      reply.conversationKey !== first.conversationKey ||
+      reply.expectedDeviceEpoch !== first.expectedDeviceEpoch
+    ) {
+      throw new ImEventStoreError(
+        "OUTBOX_INCOMPLETE",
+        "Proactive reply segments do not form one delivery"
+      )
+    }
+    if (keys.has(reply.idempotencyKey)) {
+      throw new ImEventStoreError(
+        "REPLY_IDEMPOTENCY_CONFLICT",
+        "Reply segment idempotency keys must be unique"
+      )
+    }
+    keys.add(reply.idempotencyKey)
+  }
+  return ordered
+}
+
 export class ImEventStore {
   constructor(private readonly dependencies: ImPersistenceDependencies) {}
 
@@ -702,6 +735,65 @@ export class ImEventStore {
     this.dependencies.markDirty()
     await this.dependencies.flushStrict()
     return this.requireEvent(eventId)
+  }
+
+  async enqueueProactiveReplies(
+    replies: readonly RemoteImReplyV1[]
+  ): Promise<ImReplyOutboxRecord[]> {
+    const normalized = normalizeProactiveReplies(replies)
+    const database = this.dependencies.getDatabase()
+    const deliveryId = normalized[0].deliveryId
+    const persisted = readAll<ImReplyOutboxRow>(
+      database,
+      "SELECT * FROM im_reply_outbox WHERE delivery_id = ? ORDER BY segment_index ASC",
+      [deliveryId]
+    )
+    if (persisted.length > 0) {
+      if (
+        persisted.length !== normalized.length ||
+        persisted.some((row, index) => !samePersistedReply(row, normalized[index]))
+      ) {
+        throw new ImEventStoreError(
+          "REPLY_IDEMPOTENCY_CONFLICT",
+          "Proactive delivery differs from its durable outbox"
+        )
+      }
+      await this.dependencies.flushStrict()
+      return persisted.map(hydrateOutbox)
+    }
+
+    const now = this.dependencies.now()
+    withImTransaction(database, () => {
+      for (const reply of normalized) {
+        database.run(
+          `INSERT INTO im_reply_outbox (
+             outbox_id, delivery_id, event_id, conversation_key, expected_device_epoch,
+             idempotency_key, segment_index, segment_count, content, state,
+             platform_reply_id, attempt_count, next_attempt_at, reason_code, created_at, updated_at
+           ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
+          [
+            `${reply.deliveryId}:${reply.segment.index}`,
+            reply.deliveryId,
+            reply.conversationKey,
+            reply.expectedDeviceEpoch,
+            reply.idempotencyKey,
+            reply.segment.index,
+            reply.segment.count,
+            reply.message.content,
+            now,
+            now,
+            now
+          ]
+        )
+      }
+    })
+    this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
+    return readAll<ImReplyOutboxRow>(
+      database,
+      "SELECT * FROM im_reply_outbox WHERE delivery_id = ? ORDER BY segment_index ASC",
+      [deliveryId]
+    ).map(hydrateOutbox)
   }
 
   async cancelEvent(eventId: string, reasonCode: string): Promise<ImEventRecord> {

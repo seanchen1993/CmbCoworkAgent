@@ -181,6 +181,14 @@ function getDisplayThreadTitle(thread: Thread): string {
   return title
 }
 
+function getRemoteThreadKind(thread: Thread): "inbox" | "feature" | null {
+  const metadata = thread.metadata
+  if (!metadata?.imDeliveryContext || typeof metadata.imDeliveryContext !== "object") return null
+  if (metadata.targetKind === "inbox") return "inbox"
+  if (metadata.targetKind === "feature" || metadata.harnessFeature) return "feature"
+  return null
+}
+
 function getProjectDisplayName(
   path: string | null,
   projectNameOverrides: Record<string, string>
@@ -290,6 +298,7 @@ function ThreadListItemImpl({
   }, [isRunning])
 
   const displayTitle = getDisplayThreadTitle(thread)
+  const remoteThreadKind = getRemoteThreadKind(thread)
   const pendingUserInputBadge = hasPendingUserInput ? (
     <span className="ml-1 shrink-0 rounded-sm border border-status-warning/45 bg-status-warning/10 px-1.5 py-0.5 text-[10px] leading-none text-status-warning">
       等待用户回复
@@ -337,7 +346,16 @@ function ThreadListItemImpl({
                 className="flex min-w-0 items-center text-sm"
                 title={hoverTitle ?? thread.title ?? thread.thread_id}
               >
-                {thread.title?.startsWith("[定时]") ? (
+                {remoteThreadKind ? (
+                  <>
+                    <span className="mr-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-blue-500/15 px-1 py-px text-[10px] font-medium text-blue-700 dark:text-blue-300">
+                      <MessageSquare className="size-2.5" />
+                      {remoteThreadKind === "inbox" ? "远程收件箱" : "远程 Feature"}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
+                    {pendingUserInputBadge}
+                  </>
+                ) : thread.title?.startsWith("[定时]") ? (
                   <>
                     <span className="shrink-0 text-[10px] px-1 py-px rounded bg-primary/15 text-primary font-medium">
                       定时
@@ -536,10 +554,10 @@ export function ThreadSidebar(): React.JSX.Element {
   const [forkingThreadId, setForkingThreadId] = useState<string | null>(null)
   const [forkDialogThread, setForkDialogThread] = useState<Thread | null>(null)
   const [forkCheckpoints, setForkCheckpoints] = useState<ForkableCheckpoint[]>([])
-  const [selectedForkCheckpoint, setSelectedForkCheckpoint] =
-    useState<ForkableCheckpoint | null>(null)
-  const [forkDestinationMode, setForkDestinationMode] =
-    useState<ForkDestinationMode>("local")
+  const [selectedForkCheckpoint, setSelectedForkCheckpoint] = useState<ForkableCheckpoint | null>(
+    null
+  )
+  const [forkDestinationMode, setForkDestinationMode] = useState<ForkDestinationMode>("local")
   const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
   const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
   const [loadingForkCheckpoints, setLoadingForkCheckpoints] = useState(false)
@@ -1012,60 +1030,55 @@ export function ThreadSidebar(): React.JSX.Element {
     setLoadingForkCheckpoints(false)
   }, [])
 
-  const handleForkCheckpoint = useCallback(
-    async (): Promise<void> => {
-      if (
-        !forkDialogThread ||
-        !selectedForkCheckpoint ||
-        forkingThreadIdRef.current ||
-        !selectedForkCheckpoint.isStableTurnBoundary
-      ) {
-        return
-      }
+  const handleForkCheckpoint = useCallback(async (): Promise<void> => {
+    if (
+      !forkDialogThread ||
+      !selectedForkCheckpoint ||
+      forkingThreadIdRef.current ||
+      !selectedForkCheckpoint.isStableTurnBoundary
+    ) {
+      return
+    }
 
-      let selectedWorkspacePath = forkWorkspacePath
-      if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
-        selectedWorkspacePath = await handleSelectForkWorkspace()
-        if (!selectedWorkspacePath) return
-      }
+    let selectedWorkspacePath = forkWorkspacePath
+    if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
+      selectedWorkspacePath = await handleSelectForkWorkspace()
+      if (!selectedWorkspacePath) return
+    }
 
-      const overrides: ThreadForkOverrides | undefined =
-        forkDestinationMode === "workspace"
-          ? { workspacePath: selectedWorkspacePath }
-          : undefined
+    const overrides: ThreadForkOverrides | undefined =
+      forkDestinationMode === "workspace" ? { workspacePath: selectedWorkspacePath } : undefined
 
-      const sourceThreadId = forkDialogThread.thread_id
-      forkingThreadIdRef.current = sourceThreadId
-      setForkingThreadId(sourceThreadId)
-      try {
-        const forked = await forkThread({
-          sourceThreadId,
-          checkpointId: selectedForkCheckpoint.checkpointId,
-          overrides
-        })
-        markRead(forked.thread_id)
-        resetForkCheckpointDialog()
-        toast.success("已从历史 checkpoint 创建新会话")
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Fork 会话失败")
-      } finally {
-        if (forkingThreadIdRef.current === sourceThreadId) {
-          forkingThreadIdRef.current = null
-          setForkingThreadId(null)
-        }
+    const sourceThreadId = forkDialogThread.thread_id
+    forkingThreadIdRef.current = sourceThreadId
+    setForkingThreadId(sourceThreadId)
+    try {
+      const forked = await forkThread({
+        sourceThreadId,
+        checkpointId: selectedForkCheckpoint.checkpointId,
+        overrides
+      })
+      markRead(forked.thread_id)
+      resetForkCheckpointDialog()
+      toast.success("已从历史 checkpoint 创建新会话")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Fork 会话失败")
+    } finally {
+      if (forkingThreadIdRef.current === sourceThreadId) {
+        forkingThreadIdRef.current = null
+        setForkingThreadId(null)
       }
-    },
-    [
-      forkDestinationMode,
-      forkThread,
-      forkWorkspacePath,
-      forkDialogThread,
-      handleSelectForkWorkspace,
-      markRead,
-      resetForkCheckpointDialog,
-      selectedForkCheckpoint
-    ]
-  )
+    }
+  }, [
+    forkDestinationMode,
+    forkThread,
+    forkWorkspacePath,
+    forkDialogThread,
+    handleSelectForkWorkspace,
+    markRead,
+    resetForkCheckpointDialog,
+    selectedForkCheckpoint
+  ])
 
   const confirmDeleteProject = useCallback(async () => {
     if (!projectToDelete) return
@@ -1528,9 +1541,7 @@ export function ThreadSidebar(): React.JSX.Element {
 
                     {!isCollapsed && (
                       <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-                        {project.threads
-                          .slice(0, visibleThreadCount)
-                          .map((thread) => {
+                        {project.threads.slice(0, visibleThreadCount).map((thread) => {
                           const threadState = allThreadStates[thread.thread_id]
                           const hasRunningCoordinatorWorker = Boolean(
                             threadState?.coordinatorWorkers.some(
@@ -1682,8 +1693,7 @@ export function ThreadSidebar(): React.JSX.Element {
               </div>
             ) : (
               forkCheckpoints.map((checkpoint) => {
-                const selected =
-                  selectedForkCheckpoint?.checkpointId === checkpoint.checkpointId
+                const selected = selectedForkCheckpoint?.checkpointId === checkpoint.checkpointId
                 const disabled = !checkpoint.isStableTurnBoundary || forkDialogBusy
                 return (
                   <button
@@ -1764,7 +1774,9 @@ export function ThreadSidebar(): React.JSX.Element {
               >
                 <div className="text-sm font-medium">派生到其他工作区</div>
                 <div className="mt-1 truncate text-xs text-muted-foreground">
-                  {forkWorkspacePath ? getWorkspaceName(forkWorkspacePath) : "选择一个本地工作区路径"}
+                  {forkWorkspacePath
+                    ? getWorkspaceName(forkWorkspacePath)
+                    : "选择一个本地工作区路径"}
                 </div>
               </button>
             </div>

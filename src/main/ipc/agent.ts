@@ -644,6 +644,22 @@ function rejectDesktopRunForForeignOwner(
   return true
 }
 
+function rejectDesktopRunForRemoteReadOnlyInbox(
+  threadId: string,
+  window: BrowserWindow,
+  channel: string
+): boolean {
+  const metadata = parseStandardThreadMetadata(getThread(threadId)?.metadata).metadata
+  if (metadata.targetKind !== "inbox" || metadata.remoteReadOnly !== true) return false
+  safeSendToWindow(window, channel, {
+    type: "error",
+    error: "REMOTE_INBOX_DESKTOP_READ_ONLY",
+    message: "远程收件箱在桌面仅可查看，请从招乎继续发送消息。"
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+  return true
+}
+
 function claimDesktopThreadRunLease(threadId: string, runId: string): LocalThreadRunLeaseClaim {
   const current = getLocalThreadRunLease(threadId)
   return claimLocalThreadRunLease({
@@ -4488,6 +4504,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         ? `${baseChannel}:coordinator-internal`
         : baseChannel
       if (rejectAgentStartDuringShutdown(window, channel)) return
+      if (rejectDesktopRunForRemoteReadOnlyInbox(threadId, window, channel)) return
       if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
       let modelInputMessage = message
       let routingMessage = message

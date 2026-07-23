@@ -29,6 +29,8 @@ import {
   claimLocalThreadRunLease,
   releaseLocalThreadRunLease
 } from "../agent/thread-run-lease"
+import type { ScheduledTask } from "../types"
+import { executeImInboxScheduledTask } from "./im/inbox-scheduler"
 
 const TICK_INTERVAL_MS = 60_000
 const ONCE_EXPIRE_MS = 30 * 60_000 // once tasks older than 30 min are auto-disabled instead of executed
@@ -157,12 +159,68 @@ function broadcastToChannel(channel: string, data: unknown): void {
   }
 }
 
+async function executeManagedInboxTask(task: ScheduledTask): Promise<void> {
+  runningTasks.add(task.id)
+  const abortController = new AbortController()
+  activeAbortControllers.set(task.id, abortController)
+  notifyRenderer("scheduledTasks:changed")
+  const startedAt = new Date()
+  try {
+    const result = await executeImInboxScheduledTask(task, abortController.signal, {
+      occurrence: task.nextRunAt ?? undefined
+    })
+    if (result.status === "deferred") {
+      console.log(`[Scheduler] Deferred managed inbox reminder ${task.id}: ${result.reasonCode}`)
+      return
+    }
+
+    updateScheduledTaskRunResult(task.id, "ok", null)
+    recordRun(task.id, task.name, startedAt, "ok", null)
+    if (task.frequency === "once") setScheduledTaskEnabled(task.id, false)
+    showTaskNotification(task.name, "ok", result.text)
+    showPetCompletedTaskNotice(task.imDeliveryContext!.inboxThreadId, task.name)
+    emitAppAttention({
+      kind: "task-complete",
+      threadId: task.imDeliveryContext!.inboxThreadId,
+      key: `scheduled-task:${task.id}:${result.deliveryId}`
+    })
+  } catch (error) {
+    const cancelled =
+      abortController.signal.aborted ||
+      (error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message)))
+    const message = cancelled
+      ? "Cancelled by user"
+      : error instanceof Error
+        ? error.message
+        : String(error)
+    updateScheduledTaskRunResult(task.id, "error", message)
+    recordRun(task.id, task.name, startedAt, "error", message)
+    if (!cancelled) {
+      showTaskNotification(task.name, "error", message)
+      emitAppAttention({
+        kind: "task-error",
+        threadId: task.imDeliveryContext!.inboxThreadId,
+        key: `scheduled-task:${task.id}:${startedAt.toISOString()}`
+      })
+    }
+  } finally {
+    runningTasks.delete(task.id)
+    activeAbortControllers.delete(task.id)
+    notifyRenderer("scheduledTasks:changed")
+    notifyRenderer("threads:changed")
+  }
+}
+
 async function executeTask(taskId: string): Promise<void> {
   if (shuttingDown) throw new Error("The application is quitting; scheduled tasks cannot start.")
   const tasks = getScheduledTasks()
   const task = tasks.find((t) => t.id === taskId)
   if (!task) throw new Error(`任务不存在: ${taskId}`)
   if (!task.enabled) return
+  if (task.imDeliveryContext) {
+    await executeManagedInboxTask(task)
+    return
+  }
 
   runningTasks.add(taskId)
   const abortController = new AbortController()

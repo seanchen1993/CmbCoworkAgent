@@ -3,6 +3,7 @@ import { ImConversationTurnQueue } from "./conversation-turn-queue"
 import type { ImIngressResult } from "./ingress-sequencer"
 import { ImIngressSequencer } from "./ingress-sequencer"
 import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
+import { registerImInboxSchedulerGateway } from "./inbox-scheduler"
 import { ImRemoteRunner, createImTurnQueueHandler } from "./remote-runner"
 
 /**
@@ -15,8 +16,10 @@ export class ImUnifiedBotService {
   readonly runner: ImRemoteRunner
   readonly ingress: ImIngressSequencer
   readonly turnQueue: ImConversationTurnQueue
+  private readonly unregisterSchedulerGateway: () => void
 
   constructor(readonly gateway: ImGatewayClientPort = unavailableImGatewayClient) {
+    this.unregisterSchedulerGateway = registerImInboxSchedulerGateway(gateway)
     this.runner = new ImRemoteRunner({ gateway })
     this.ingress = new ImIngressSequencer({
       emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack)
@@ -43,6 +46,7 @@ export class ImUnifiedBotService {
   }
 
   stop(): Promise<void> {
+    this.unregisterSchedulerGateway()
     return this.turnQueue.stop()
   }
 }

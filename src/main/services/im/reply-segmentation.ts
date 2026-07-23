@@ -117,3 +117,24 @@ export function buildImEventReplies(input: {
     message: { type: "text", content }
   }))
 }
+
+export function buildImProactiveReplies(input: {
+  deliveryId: string
+  conversationKey: string
+  expectedDeviceEpoch: number
+  text: string
+  prefix?: string
+}): RemoteImReplyV1[] {
+  const deliveryId = input.deliveryId.trim()
+  if (!deliveryId) throw new Error("deliveryId is required")
+  const segments = segmentImReplyText(input.text, { prefix: input.prefix })
+  return segments.map((content, index) => ({
+    schemaVersion: IM_GATEWAY_SCHEMA_VERSION,
+    deliveryId,
+    conversationKey: input.conversationKey,
+    expectedDeviceEpoch: input.expectedDeviceEpoch,
+    idempotencyKey: `${deliveryId}:reply:${index}`,
+    segment: { index, count: segments.length },
+    message: { type: "text", content }
+  }))
+}

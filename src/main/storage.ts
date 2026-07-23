@@ -2075,6 +2075,7 @@ export function upsertScheduledTask(
     modelId: config.modelId,
     workDir: config.workDir,
     chatxRobotChatId: config.chatxRobotChatId ?? existing?.chatxRobotChatId ?? null,
+    imDeliveryContext: config.imDeliveryContext ?? existing?.imDeliveryContext ?? null,
     frequency: config.frequency,
     intervalMinutes: config.intervalMinutes ?? existing?.intervalMinutes ?? null,
     runAt: config.runAt ?? existing?.runAt ?? null,

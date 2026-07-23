@@ -1334,6 +1334,50 @@ interface MessageForkDialogTarget {
   checkpoint: ForkableCheckpoint
 }
 
+interface RemoteThreadDisplayInfo {
+  kind: "inbox" | "feature"
+  conversationKey: string
+  deviceEpoch: number | null
+  projectId?: string
+  featureSlug?: string
+}
+
+function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayInfo | null {
+  const metadata = thread?.metadata
+  if (!metadata || (metadata.targetKind !== "inbox" && metadata.targetKind !== "feature")) {
+    return null
+  }
+  const delivery = metadata.imDeliveryContext
+  if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return null
+  const context = delivery as Record<string, unknown>
+  if (context.provider !== "zhaohu" || typeof context.conversationKey !== "string") return null
+  if (metadata.targetKind === "inbox") {
+    return {
+      kind: "inbox",
+      conversationKey: context.conversationKey,
+      deviceEpoch: typeof context.deviceEpoch === "number" ? context.deviceEpoch : null
+    }
+  }
+  const harnessFeature = metadata.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object" || Array.isArray(harnessFeature)) {
+    return null
+  }
+  const feature = harnessFeature as Record<string, unknown>
+  if (typeof feature.projectId !== "string" || typeof feature.slug !== "string") return null
+  return {
+    kind: "feature",
+    conversationKey: context.conversationKey,
+    deviceEpoch: typeof context.deviceEpoch === "number" ? context.deviceEpoch : null,
+    projectId: feature.projectId,
+    featureSlug: feature.slug
+  }
+}
+
+function compactConversationKey(value: string): string {
+  if (value.length <= 18) return value
+  return `${value.slice(0, 8)}…${value.slice(-6)}`
+}
+
 function getForkWorkspacePath(thread: Thread | null): string | null {
   const workspacePath = thread?.metadata?.workspacePath
   return typeof workspacePath === "string" && workspacePath.trim() ? workspacePath : null
@@ -1986,8 +2030,15 @@ export function ChatContainer({
   onThreadGitStatusChange,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
+  const remoteThread = useAppStore(
+    (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
+  )
+  const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
+  const resolvedReadOnlyReason =
+    readOnlyReason ??
+    (remoteThreadInfo?.kind === "inbox" ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息" : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
-  const readOnly = Boolean(readOnlyReason)
+  const readOnly = Boolean(resolvedReadOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
@@ -2428,18 +2479,16 @@ export function ChatContainer({
   const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
   const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
   const showSystemConstraintsButton = surface === "harness-project"
-  const systemConstraintsTitle =
-    systemConstraintsLoadFailed
-      ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
-      : systemConstraintCounts.total > 0
+  const systemConstraintsTitle = systemConstraintsLoadFailed
+    ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+    : systemConstraintCounts.total > 0
       ? `系统约束已加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
       : "系统约束，点击查看详情"
-  const systemConstraintsLabel =
-    systemConstraintsLoadFailed
-      ? "系统约束未全部加载"
-      : systemConstraintCounts.loaded > 0
-        ? "系统约束已加载"
-        : "系统约束"
+  const systemConstraintsLabel = systemConstraintsLoadFailed
+    ? "系统约束未全部加载"
+    : systemConstraintCounts.loaded > 0
+      ? "系统约束已加载"
+      : "系统约束"
   const handleOpenSystemConstraints = useCallback((): void => {
     requestOpenRightPanelSystemConstraints(threadId)
   }, [requestOpenRightPanelSystemConstraints, threadId])
@@ -3683,7 +3732,7 @@ export function ChatContainer({
   const effectiveComposerControlsDisabled =
     composerControlsDisabled || contextReminderPending || readOnly
   const inputPlaceholder = useMemo(() => {
-    if (readOnlyReason) return readOnlyReason
+    if (resolvedReadOnlyReason) return resolvedReadOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
     if (isLoading) {
@@ -3711,7 +3760,7 @@ export function ChatContainer({
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
-    readOnlyReason,
+    resolvedReadOnlyReason,
     scheduledTaskLoading,
     streamData.isLoading
   ])
@@ -3796,28 +3845,28 @@ export function ChatContainer({
         }
 
         clearError()
-          void (async () => {
-            let contentChars = 0
-            try {
-              const readResult = await window.api.workspace.readFile(
-                threadId,
-                selection.mentionedFile.workspaceFilePath
-              )
-              if (readResult.success && typeof readResult.content === "string") {
-                contentChars = readResult.content.length
-              }
-            } catch {
-              contentChars = 0
+        void (async () => {
+          let contentChars = 0
+          try {
+            const readResult = await window.api.workspace.readFile(
+              threadId,
+              selection.mentionedFile.workspaceFilePath
+            )
+            if (readResult.success && typeof readResult.content === "string") {
+              contentChars = readResult.content.length
             }
+          } catch {
+            contentChars = 0
+          }
 
-            setMentionedFiles((prev) => [
-              ...prev,
-              {
-                ...selection.mentionedFile,
-                contentChars
-              }
-            ])
-          })()
+          setMentionedFiles((prev) => [
+            ...prev,
+            {
+              ...selection.mentionedFile,
+              contentChars
+            }
+          ])
+        })()
 
         const { nextInput, nextCursor } = removeAtFileTokenFromInput(input, {
           startPos: atFileMentions.mode.startPos,
@@ -4050,9 +4099,9 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent, defaultText=''): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = defaultText ||  input.trim()
+    const trimmedInput = defaultText || input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -4078,10 +4127,7 @@ export function ChatContainer({
     })
     const willEnqueueWhileBusy =
       !isGoalSlashInput &&
-      (isLoading ||
-        Boolean(pendingApproval) ||
-        approvalQueue.length > 0 ||
-        shouldQueueBehindSubmit)
+      (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
       (!trimmedInput && !hasPendingFilePayload && !selectedSkill) ||
       historyLoading ||
@@ -6519,9 +6565,54 @@ export function ChatContainer({
     messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
   const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
   const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+  const remoteLifecycleState = remoteThread?.metadata?.remoteState
+  const remoteThreadStatus = pendingApproval
+    ? "等待桌面审批"
+    : pendingUserInput
+      ? "等待桌面补充输入"
+      : remoteLifecycleState === "suspended"
+        ? "绑定已暂停"
+        : remoteLifecycleState === "outcome_unknown"
+          ? "执行结果未知"
+          : isLoading
+            ? "任务执行中"
+            : remoteThread?.status === "error"
+              ? "执行失败"
+              : remoteThread?.status === "interrupted"
+                ? "已中止"
+                : "空闲"
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
+      {remoteThreadInfo ? (
+        <div className="flex shrink-0 items-start gap-2 border-b border-blue-500/20 bg-blue-500/5 px-4 py-2 text-xs">
+          <Info className="mt-0.5 size-3.5 shrink-0 text-blue-500" />
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="rounded bg-blue-500/15 px-1.5 py-0.5 font-medium text-blue-700 dark:text-blue-300">
+                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程 Feature"}
+              </span>
+              {remoteThreadInfo.kind === "feature" ? (
+                <span className="font-medium">
+                  {remoteThreadInfo.projectId} / {remoteThreadInfo.featureSlug}
+                </span>
+              ) : null}
+              <span className="text-muted-foreground">
+                招乎会话 {compactConversationKey(remoteThreadInfo.conversationKey)}
+                {remoteThreadInfo.deviceEpoch ? ` · 设备版本 ${remoteThreadInfo.deviceEpoch}` : ""}
+                {` · ${remoteThreadStatus}`}
+              </span>
+            </div>
+            <p className="text-muted-foreground">
+              {remoteThreadInfo.kind === "inbox"
+                ? "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                : isLoading
+                  ? "当前任务占用远程运行租约，结束后可在桌面继续。"
+                  : "可在桌面继续处理；桌面发出的本轮结果只保留在本机，不会自动发送到招乎。"}
+            </p>
+          </div>
+        </div>
+      ) : null}
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
         open={searchOpen}
@@ -6717,9 +6808,7 @@ export function ChatContainer({
                     userSendTimeLabelById={userSendTimeLabelById}
                   />
 
-                  {contextCompaction && (
-                    <ContextCompactionCard compaction={contextCompaction} />
-                  )}
+                  {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
 
                   {/*测试git diff功能*/}
                   {/*<DisplayDiffTest/>*/}

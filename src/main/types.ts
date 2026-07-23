@@ -366,6 +366,13 @@ export type ScheduledTaskFrequency =
   | "interval"
 export type ScheduledTaskType = "action" | "reminder"
 
+export interface ScheduledTaskImDeliveryContext {
+  provider: "zhaohu"
+  conversationKey: string
+  expectedDeviceEpoch: number
+  inboxThreadId: string
+}
+
 export interface ScheduledTask {
   id: string
   name: string
@@ -375,6 +382,7 @@ export interface ScheduledTask {
   modelId: string | null
   workDir: string | null
   chatxRobotChatId: string | null // 关联的机器人会话ID，执行完后 HTTP 回复
+  imDeliveryContext: ScheduledTaskImDeliveryContext | null
   frequency: ScheduledTaskFrequency
   intervalMinutes: number | null // 仅 interval 类型使用，如 5 表示每5分钟
   runAt: string | null // ISO 时间戳，仅 once 类型使用
@@ -397,6 +405,7 @@ export interface ScheduledTaskUpsert {
   modelId: string | null
   workDir: string | null
   chatxRobotChatId?: string | null
+  imDeliveryContext?: ScheduledTaskImDeliveryContext | null
   frequency: ScheduledTaskFrequency
   intervalMinutes?: number | null
   runAt?: string | null
