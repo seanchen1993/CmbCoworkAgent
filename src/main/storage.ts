@@ -2675,6 +2675,53 @@ export function saveChatXConfig(updates: Partial<import("./types").ChatXConfig>)
   writeFileSync(CHATX_CONFIG_FILE, JSON.stringify(merged, null, 2))
 }
 
+// ── Unified built-in IM robot ─────────────────────────────────────────────────
+
+const BUILTIN_ROBOT_SETTINGS_FILE = join(OPENWORK_DIR, "builtin-robot-settings.json")
+
+const DEFAULT_BUILTIN_ROBOT_SETTINGS: import("./types").BuiltinRobotSettings = {
+  enabled: true,
+  remoteAccess: "inbox-only"
+}
+
+export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSettings {
+  getOpenworkDir()
+  if (!existsSync(BUILTIN_ROBOT_SETTINGS_FILE)) return { ...DEFAULT_BUILTIN_ROBOT_SETTINGS }
+  try {
+    const value = JSON.parse(readFileSync(BUILTIN_ROBOT_SETTINGS_FILE, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    return {
+      enabled: value.enabled !== false,
+      remoteAccess:
+        value.remoteAccess === "inbox-and-features" ? "inbox-and-features" : "inbox-only"
+    }
+  } catch {
+    return { ...DEFAULT_BUILTIN_ROBOT_SETTINGS }
+  }
+}
+
+export function saveBuiltinRobotSettings(
+  updates: Partial<import("./types").BuiltinRobotSettings>
+): import("./types").BuiltinRobotSettings {
+  getOpenworkDir()
+  const current = getBuiltinRobotSettings()
+  const next: import("./types").BuiltinRobotSettings = {
+    enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
+    remoteAccess:
+      updates.remoteAccess === "inbox-and-features" || updates.remoteAccess === "inbox-only"
+        ? updates.remoteAccess
+        : current.remoteAccess
+  }
+  writeFileSync(BUILTIN_ROBOT_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf-8")
+  return next
+}
+
+export function hasLegacyChatXRobotCredentials(): boolean {
+  return getChatXConfig().robots.length > 0
+}
+
 // ── Hook Logging ──────────────────────────────────────────────────────────────
 //
 // Both flags default to false: no chat UI footprint, no IPC overhead, no disk

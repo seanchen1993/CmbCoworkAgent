@@ -3757,6 +3757,14 @@ export interface CreateAgentRuntimeOptions {
   noSkillEvolutionTool?: boolean
   /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
   enableRequestUserInput?: boolean
+  /** Keep request_user_input pending when a renderer is temporarily absent. */
+  allowDeferredUserInputRenderer?: boolean
+  /**
+   * Transport-owned barrier around approvals and structured input. Desktop
+   * callers leave this unset; IM uses it to durably enter waiting_desktop and
+   * revalidate its execution permit before a tool can resume.
+   */
+  interactionWaitHooks?: RuntimeInteractionWaitHooks
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
   /** Project-mode plugin switch for the inline task tool. Undefined keeps legacy env behavior. */
@@ -3867,6 +3875,19 @@ export interface CreateAgentRuntimeOptions {
    * editing many files must not re-prompt per file (official acceptEdits).
    */
   autoApproveFileEdits?: boolean
+}
+
+export type RuntimeInteractionWaitKind = "approval" | "user_input"
+
+export interface RuntimeInteractionWaitEvent {
+  id: string
+  kind: RuntimeInteractionWaitKind
+  threadId: string
+}
+
+export interface RuntimeInteractionWaitHooks {
+  onWaitStart(event: RuntimeInteractionWaitEvent): void | Promise<void>
+  onWaitEnd(event: RuntimeInteractionWaitEvent): void | Promise<void>
 }
 
 // Create agent runtime with configured model and checkpointer
@@ -4160,12 +4181,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // because the user stepped away. They are resolved by an explicit user
   // decision, or by the run abort signal when the user stops/cancels the turn.
   const APPROVAL_TIMEOUT_MS: number | null = null
-  const requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+  const requestApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
     // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
     // Multiple concurrent tool calls each register their own resolver here —
     // the renderer shows them one at a time, but the events are not serialized
     // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
-    return new Promise<ApprovalDecision>((resolve) => {
+    const waitEvent: RuntimeInteractionWaitEvent = {
+      id: req.id,
+      kind: "approval",
+      threadId: approvalThreadId
+    }
+    await options.interactionWaitHooks?.onWaitStart(waitEvent)
+    const decision = await new Promise<ApprovalDecision>((resolve) => {
       let settled = false
       let attentionRaised = false
       let timeoutId: ReturnType<typeof setTimeout> | undefined
@@ -4283,6 +4310,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         win.webContents.send(`approval:request:${approvalThreadId}`, req)
       }
     })
+    if (!options.abortSignal?.aborted) {
+      await options.interactionWaitHooks?.onWaitEnd(waitEvent)
+    }
+    return decision
   }
 
   const approvalStore = getOrCreateApprovalStore(approvalThreadId)
@@ -4616,7 +4647,9 @@ The workspace root is: ${workspacePath}`
     extraTools.push(
       createRequestUserInputTool({
         threadId: options.threadId,
-        abortSignal: options.abortSignal
+        abortSignal: options.abortSignal,
+        allowDeferredRenderer: options.allowDeferredUserInputRenderer,
+        interactionWaitHooks: options.interactionWaitHooks
       })
     )
   }

@@ -425,6 +425,11 @@ export interface TaskRunRecord {
   durationMs: number
 }
 
+export interface BuiltinRobotSettings {
+  enabled: boolean
+  remoteAccess: "inbox-only" | "inbox-and-features"
+}
+
 // Heartbeat types
 export interface HeartbeatConfig {
   enabled: boolean

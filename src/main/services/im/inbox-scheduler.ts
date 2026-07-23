@@ -148,7 +148,7 @@ export async function executeImInboxScheduledTask(
     target,
     now: now()
   })
-  const capability = capabilityGuard.evaluate(event)
+  const capability = await capabilityGuard.evaluate(event)
   if (!capability.allowed) {
     return { status: "deferred", reasonCode: capability.reasonCode }
   }

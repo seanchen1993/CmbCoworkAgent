@@ -41,6 +41,18 @@ const target: ImTargetSnapshot = {
   workspacePath: "/managed/inbox"
 }
 
+const featureTarget: Extract<ImTargetSnapshot, { kind: "feature" }> = {
+  kind: "feature",
+  targetId: "target-feature",
+  threadId: "thread-feature",
+  workspacePath: "/managed/feature",
+  bindingId: "binding-feature",
+  projectId: "project-1",
+  projectName: "统一机器人",
+  featureSlug: "approval-flow",
+  featureTitle: "审批流程"
+}
+
 function eventFixture(index: number): RemoteImEventV1 {
   return {
     schemaVersion: 1,
@@ -81,6 +93,13 @@ async function createContext(): Promise<Context> {
 async function queueEvent(context: Context, index: number) {
   const remote = eventFixture(index)
   await context.events.receiveEvent(remote, target)
+  return context.events.queueEvent(remote.eventId)
+}
+
+async function queueFeatureEvent(context: Context, index: number) {
+  await context.conversations.registerTarget("conversation-1", featureTarget, { activate: true })
+  const remote = eventFixture(index)
+  await context.events.receiveEvent(remote, featureTarget)
   return context.events.queueEvent(remote.eventId)
 }
 
@@ -158,6 +177,57 @@ function capabilityGuard(context: Context): ImRemoteCapabilityGuard {
     workflow: { isBusyForThread: () => false },
     hasPendingApproval: () => false,
     hasPendingUserInput: () => false
+  })
+}
+
+function featureCapabilityGuard(context: Context): ImRemoteCapabilityGuard {
+  const thread: ThreadRow = {
+    thread_id: featureTarget.threadId,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+    status: "idle",
+    title: "远程 Feature",
+    thread_values: null,
+    metadata: JSON.stringify({
+      workspacePath: featureTarget.workspacePath,
+      agentMode: "normal",
+      harnessFeature: {
+        projectId: featureTarget.projectId,
+        slug: featureTarget.featureSlug,
+        source: "harness"
+      },
+      imDeliveryContext: {
+        provider: "zhaohu",
+        conversationKey: "conversation-1",
+        deviceEpoch: 1,
+        targetId: featureTarget.targetId,
+        bindingId: featureTarget.bindingId
+      }
+    })
+  }
+  return new ImRemoteCapabilityGuard({
+    conversationState: context.conversations,
+    getThread: () => thread,
+    getGoal: () => null,
+    coordinator: {
+      hasRunningWorkersForThread: () => false,
+      hasNotifications: () => false,
+      hasTerminalWorkerAwaitingNotificationForThread: () => false
+    },
+    workflow: { isBusyForThread: () => false },
+    hasPendingApproval: () => false,
+    hasPendingUserInput: () => false,
+    validateFeatureTarget: async () => ({
+      valid: true,
+      project: { id: featureTarget.projectId, name: featureTarget.projectName ?? "Project" },
+      feature: {
+        projectId: featureTarget.projectId,
+        slug: featureTarget.featureSlug,
+        title: featureTarget.featureTitle ?? "Feature",
+        status: "in_progress"
+      },
+      workspacePath: featureTarget.workspacePath
+    })
   })
 }
 
@@ -247,6 +317,95 @@ async function testPermitRevocationBecomesOutcomeUnknown(): Promise<void> {
   }
 }
 
+async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    conversationState: context.conversations,
+    capabilityGuard: featureCapabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    createRunId: () => "run-feature-wait",
+    executeTurn: async ({ event, interactionWaitHooks }) => {
+      assert(interactionWaitHooks)
+      await interactionWaitHooks.onWaitStart({
+        id: "approval-1",
+        kind: "approval",
+        threadId: featureTarget.threadId
+      })
+      assert.equal(context.events.getEvent(event.eventId)?.state, "waiting_desktop")
+      assert.equal(gateway.acknowledgements.at(-1)?.type, "waiting_desktop")
+      assert(gateway.replies.at(-1)?.message.content.includes("等待桌面确认"))
+      assert(gateway.replies.at(-1)?.message.content.includes("【统一机器人 / 审批流程】"))
+      await interactionWaitHooks.onWaitEnd({
+        id: "approval-1",
+        kind: "approval",
+        threadId: featureTarget.threadId
+      })
+      assert.equal(context.events.getEvent(event.eventId)?.state, "executing")
+      await context.conversations.setActiveTarget("conversation-1", target.targetId)
+      return "审批后完成"
+    }
+  })
+  try {
+    const queued = await queueFeatureEvent(context, 1)
+    assert.equal(await runner.invoke(queued, new AbortController().signal), "completed")
+    assert.deepEqual(
+      gateway.acknowledgements.map((ack) => ack.type),
+      ["waiting_desktop", "completed"]
+    )
+    assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
+    assert(gateway.replies.at(-1)?.message.content.includes("审批后完成"))
+    assert(gateway.replies.at(-1)?.message.content.includes("切换前任务"))
+  } finally {
+    context.database.close()
+  }
+}
+
+async function testFeatureDesktopWaitTimeoutCancelsOnlyEvent(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    conversationState: context.conversations,
+    capabilityGuard: featureCapabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    createRunId: () => "run-feature-timeout",
+    waitingDesktopTtlMs: 5,
+    executeTurn: async ({ interactionWaitHooks, signal }) => {
+      assert(interactionWaitHooks)
+      await interactionWaitHooks.onWaitStart({
+        id: "input-1",
+        kind: "user_input",
+        threadId: featureTarget.threadId
+      })
+      return new Promise<string>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+      })
+    }
+  })
+  try {
+    const queued = await queueFeatureEvent(context, 1)
+    assert.equal(await runner.invoke(queued, new AbortController().signal), "cancelled")
+    const terminal = context.events.getEvent(queued.eventId)
+    assert.equal(terminal?.state, "cancelled")
+    assert.equal(terminal?.reasonCode, "REMOTE_INTERACTION_TIMEOUT")
+    assert.equal(
+      context.conversations
+        .listTargets("conversation-1")
+        .find(({ snapshot }) => snapshot.targetId === featureTarget.targetId)?.state,
+      "active",
+      "waiting timeout must not revoke the Feature binding"
+    )
+    assert(gateway.replies.at(-1)?.message.content.includes("Feature Binding 保持不变"))
+    assert.equal(gateway.acknowledgements.at(-1)?.type, "cancelled")
+  } finally {
+    context.database.close()
+  }
+}
+
 function testInboxPolicyKeepsSchedulerButCutsRemoteRisks(): void {
   const policy = createImInboxRemotePolicy()
   assert.equal(policy.disableScheduler, undefined)
@@ -261,6 +420,11 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   ["testSuccessfulRunAndDurableOutbox", testSuccessfulRunAndDurableOutbox],
   ["testForeignOwnerDefersWithoutRuntime", testForeignOwnerDefersWithoutRuntime],
   ["testPermitRevocationBecomesOutcomeUnknown", testPermitRevocationBecomesOutcomeUnknown],
+  [
+    "testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume",
+    testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume
+  ],
+  ["testFeatureDesktopWaitTimeoutCancelsOnlyEvent", testFeatureDesktopWaitTimeoutCancelsOnlyEvent],
   [
     "testInboxPolicyKeepsSchedulerButCutsRemoteRisks",
     testInboxPolicyKeepsSchedulerButCutsRemoteRisks

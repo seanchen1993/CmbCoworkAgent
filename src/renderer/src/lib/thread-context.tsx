@@ -101,10 +101,7 @@ import {
   type LiveStreamMessage
 } from "./live-stream-messages"
 import { buildSyntheticCheckpointBaselineIds } from "./stream-message-ids"
-import {
-  loadWorkspaceFilesDeduped,
-  markWorkspaceFilesStale
-} from "./workspace-file-load"
+import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "./workspace-file-load"
 import {
   liveStreamMessageToStoreMessage,
   resolveLiveStreamMessageEndAt,
@@ -272,7 +269,10 @@ const normalizePersistedThreadMessages = (messages: Message[]): Message[] => {
     const endAt = toMessageDate(message.end_at)
     return {
       ...message,
-      content: typeof message.content === "string" || Array.isArray(message.content) ? message.content : "",
+      content:
+        typeof message.content === "string" || Array.isArray(message.content)
+          ? message.content
+          : "",
       created_at: createdAt,
       ...(startAt ? { start_at: startAt } : {}),
       ...(endAt ? { end_at: endAt } : {})
@@ -654,9 +654,7 @@ export interface ThreadActions {
   setActiveTab: (tab: "agent" | string) => void
   setFileContents: (path: string, content: string) => void
   setContextReminder: (
-    update:
-      | ContextReminderState
-      | ((prev: ContextReminderState) => ContextReminderState)
+    update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
   setDraftInput: (input: string) => void
   setHarnessNextActionDialogTips: (tips: string | null) => void
@@ -1796,10 +1794,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   const syncPersistedThreadMessagesAfterStreamStop = useCallback(
-    (
-      threadId: string,
-      orderHintMessages: ReadonlyArray<{ id?: string }> | undefined
-    ): void => {
+    (threadId: string, orderHintMessages: ReadonlyArray<{ id?: string }> | undefined): void => {
       const seq = (durableTranscriptSyncSeqRef.current[threadId] ?? 0) + 1
       durableTranscriptSyncSeqRef.current[threadId] = seq
 
@@ -3048,9 +3043,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             contextCompactionDismissTimersRef.current[threadId] = window.setTimeout(() => {
               delete contextCompactionDismissTimersRef.current[threadId]
               updateThreadState(threadId, (prev) =>
-                prev.contextCompaction?.id === compaction.id
-                  ? { contextCompaction: null }
-                  : {}
+                prev.contextCompaction?.id === compaction.id ? { contextCompaction: null } : {}
               )
             }, dismissMs)
           }
@@ -3181,8 +3174,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             typeof data.count === "number" && typeof data.threshold === "number"
               ? `（${data.count}/${data.threshold}）`
               : ""
-          const prefix =
-            data.action === "strong_warn" ? "工具重复失败强提醒" : "工具重复失败提醒"
+          const prefix = data.action === "strong_warn" ? "工具重复失败强提醒" : "工具重复失败提醒"
           const message =
             typeof data.count === "number"
               ? `同类错误已重复出现 ${data.count} 次，本轮不会停止。`
@@ -3732,9 +3724,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }))
         },
         setContextReminder: (
-          update:
-            | ContextReminderState
-            | ((prev: ContextReminderState) => ContextReminderState)
+          update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
         ) => {
           updateThreadState(threadId, (state) => ({
             contextReminder:
@@ -4072,8 +4062,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               visibleRestoredMessages,
               persistedThreadMessages
             )
-            const persistedVisibleLatestMessageAt =
-              latestPersistedVisibleMessageAt(visiblePersistedThreadMessages)
+            const persistedVisibleLatestMessageAt = latestPersistedVisibleMessageAt(
+              visiblePersistedThreadMessages
+            )
             hasPersistedVisibleTailAfterCheckpoint =
               findMessagesAfterCheckpointVisibleIds(
                 visiblePersistedThreadMessages,
@@ -4202,9 +4193,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // it receives the IPC acknowledgement. The checkpoint is then the durable
       // source of truth: remove any matching local draft so auto-drain cannot
       // submit the same user turn a second time.
-      const restoredMessageIds = new Set(
-        restoredTranscriptMessages.map((message) => message.id)
-      )
+      const restoredMessageIds = new Set(restoredTranscriptMessages.map((message) => message.id))
       updateThreadState(threadId, (state) => {
         const nextQueuedMessages = removeQueuedMessagesById(
           state.queuedMessages,
@@ -4858,6 +4847,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         })
       })
       userInputListenerCleanups.current[threadId] = [cleanupUserInput, cleanupUserInputCancel]
+      void window.api.userInput
+        .getPending(threadId)
+        .then((request) => {
+          if (!request || !initializedThreadsRef.current.has(threadId)) return
+          updateThreadState(threadId, () => ({ pendingUserInput: request }))
+        })
+        .catch((error) => {
+          console.warn(
+            `[ThreadProvider] Failed to restore pending user input for thread ${threadId}:`,
+            error
+          )
+        })
     },
     [
       loadThreadHistory,
@@ -4964,7 +4965,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           subagentTranscriptsRef.current[threadId] ??
           threadStatesRef.current[threadId]?.subagentTranscripts
         if (transcripts && Object.keys(transcripts).length > 0) {
-          saveSubagentTranscripts(threadId, transcripts, subagentTranscriptDirtyIdsRef.current[threadId])
+          saveSubagentTranscripts(
+            threadId,
+            transcripts,
+            subagentTranscriptDirtyIdsRef.current[threadId]
+          )
         }
       }
       delete subagentTranscriptDirtyIdsRef.current[threadId]
@@ -4982,8 +4987,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         window.clearTimeout(coordinatorNotificationSuppressTimer)
       }
       delete coordinatorNotificationSuppressTimersRef.current[threadId]
-      const contextCompactionDismissTimer =
-        contextCompactionDismissTimersRef.current[threadId]
+      const contextCompactionDismissTimer = contextCompactionDismissTimersRef.current[threadId]
       if (contextCompactionDismissTimer !== undefined) {
         window.clearTimeout(contextCompactionDismissTimer)
       }

@@ -18,6 +18,8 @@ export type ImTargetSnapshot =
       bindingId: string
       projectId: string
       featureSlug: string
+      projectName?: string
+      featureTitle?: string
       threadId: string
       workspacePath: string
     }
@@ -52,6 +54,8 @@ interface ImTargetRow {
   binding_id: string | null
   project_id: string | null
   feature_slug: string | null
+  project_name: string | null
+  feature_title: string | null
   workspace_path: string
   state: ImTargetState
   suspend_reason: string | null
@@ -116,6 +120,8 @@ function targetSnapshot(row: ImTargetRow): ImTargetSnapshot {
     bindingId: row.binding_id,
     projectId: row.project_id,
     featureSlug: row.feature_slug,
+    ...(row.project_name ? { projectName: row.project_name } : {}),
+    ...(row.feature_title ? { featureTitle: row.feature_title } : {}),
     threadId: row.thread_id,
     workspacePath: row.workspace_path
   }
@@ -130,7 +136,9 @@ function sameTarget(row: ImTargetRow, candidate: ImTargetSnapshot): boolean {
     (candidate.kind === "inbox" ||
       (row.binding_id === candidate.bindingId &&
         row.project_id === candidate.projectId &&
-        row.feature_slug === candidate.featureSlug))
+        row.feature_slug === candidate.featureSlug &&
+        (row.project_name ?? undefined) === candidate.projectName &&
+        (row.feature_title ?? undefined) === candidate.featureTitle))
   )
 }
 
@@ -286,8 +294,9 @@ export class ImConversationStateStore {
         database.run(
           `INSERT INTO im_targets (
              target_id, conversation_key, kind, thread_id, binding_id, project_id,
-             feature_slug, workspace_path, state, suspend_reason, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+             feature_slug, project_name, feature_title, workspace_path, state,
+             suspend_reason, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
           [
             target.targetId,
             conversationKey,
@@ -296,6 +305,8 @@ export class ImConversationStateStore {
             target.kind === "feature" ? target.bindingId : null,
             target.kind === "feature" ? target.projectId : null,
             target.kind === "feature" ? target.featureSlug : null,
+            target.kind === "feature" ? (target.projectName ?? null) : null,
+            target.kind === "feature" ? (target.featureTitle ?? null) : null,
             target.workspacePath,
             state,
             now,

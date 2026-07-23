@@ -4,7 +4,7 @@ import { SqlGoalStore } from "../../agent/goals/goal-store"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { workflowRunManager } from "../../agent/workflow/run-manager"
-import { getThread, type ThreadRow } from "../../db"
+import { getThread, updateThread, type ThreadRow } from "../../db"
 import { hasPendingUserInputForThread } from "../user-input"
 import {
   imConversationStateStore,
@@ -12,6 +12,7 @@ import {
   type ImTargetSnapshot
 } from "./conversation-state"
 import type { ImEventRecord } from "./event-store"
+import { validateImFeatureTarget } from "./feature-binding-service"
 
 export type ImRemoteCapabilityReason =
   | "REMOTE_TARGET_INVALID"
@@ -23,6 +24,13 @@ export type ImRemoteCapabilityReason =
   | "REMOTE_WORKFLOW_UNSUPPORTED"
   | "REMOTE_INTERNAL_NOTIFICATION_PENDING"
   | "REMOTE_INTERACTION_PENDING"
+  | "REMOTE_FEATURE_ACCESS_DISABLED"
+  | "REMOTE_PROJECT_MODE_DISABLED"
+  | "REMOTE_PROJECT_UNAVAILABLE"
+  | "REMOTE_PROJECT_DIRECTORY_UNAVAILABLE"
+  | "REMOTE_FEATURE_UNAVAILABLE"
+  | "REMOTE_WORKSPACE_UNAVAILABLE"
+  | "REMOTE_HARNESS_CONTEXT_UNAVAILABLE"
 
 export type ImRemoteCapabilityDecision =
   | {
@@ -37,6 +45,7 @@ export type ImRemoteCapabilityDecision =
 export interface ImRemoteCapabilityGuardDependencies {
   conversationState: ImConversationStateStore
   getThread: typeof getThread
+  updateThread?: typeof updateThread
   getGoal: (threadId: string) => { status: string } | null
   coordinator: {
     hasRunningWorkersForThread(threadId: string): boolean
@@ -48,6 +57,7 @@ export interface ImRemoteCapabilityGuardDependencies {
   }
   hasPendingApproval(threadId: string): boolean
   hasPendingUserInput(threadId: string): boolean
+  validateFeatureTarget?: typeof validateImFeatureTarget
 }
 
 function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean {
@@ -106,7 +116,7 @@ export class ImRemoteCapabilityGuard {
     }
   ) {}
 
-  evaluate(event: ImEventRecord): ImRemoteCapabilityDecision {
+  async evaluate(event: ImEventRecord): Promise<ImRemoteCapabilityDecision> {
     const snapshot = event.targetSnapshot
     if (!snapshot) {
       return {
@@ -149,6 +159,28 @@ export class ImRemoteCapabilityGuard {
         allowed: false,
         reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
         message: "远程会话上下文不一致，已阻止执行，请回到桌面检查。"
+      }
+    }
+    if (snapshot.kind === "feature") {
+      const validation = await (this.dependencies.validateFeatureTarget ?? validateImFeatureTarget)(
+        snapshot,
+        parsed.metadata
+      )
+      if (!validation.valid) {
+        await this.dependencies.conversationState.updateTargetState(
+          snapshot.targetId,
+          "suspended",
+          validation.reasonCode
+        )
+        const updateRemoteThread = this.dependencies.updateThread ?? updateThread
+        updateRemoteThread(snapshot.threadId, {
+          metadata: JSON.stringify({ ...parsed.metadata, remoteState: "suspended" })
+        })
+        return {
+          allowed: false,
+          reasonCode: validation.reasonCode as ImRemoteCapabilityReason,
+          message: `${validation.message} Binding 已暂停，请修复后重新发送 /绑定。`
+        }
       }
     }
     if (parsed.agentMode !== "normal") {

@@ -7,6 +7,8 @@ import type { ImTargetSnapshot } from "./conversation-state"
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
 import { imEventStore, type ImEventRecord, type ImEventStore } from "./event-store"
 import { imInboxService, type ImInboxService } from "./inbox-service"
+import { buildImEventReplies, eventShortCode } from "./reply-segmentation"
+import { ImReplyClient } from "./reply-client"
 
 export interface ImIngressResult {
   duplicate: boolean
@@ -20,6 +22,7 @@ export interface ImIngressSequencerOptions {
   inboxService?: ImInboxService
   resolveTarget?: (event: RemoteImEventV1) => Promise<ImTargetSnapshot>
   emitAcknowledgement?: (ack: RemoteImAckV1) => Promise<void>
+  replyClient?: ImReplyClient
 }
 
 function acknowledgementForEvent(event: ImEventRecord): RemoteImAckV1 {
@@ -55,6 +58,7 @@ export class ImIngressSequencer {
   private readonly eventStore: ImEventStore
   private readonly resolveTarget: (event: RemoteImEventV1) => Promise<ImTargetSnapshot>
   private readonly emitAcknowledgement?: (ack: RemoteImAckV1) => Promise<void>
+  private readonly replyClient: ImReplyClient
   private readonly ingressTails = new Map<string, Promise<void>>()
 
   constructor(options: ImIngressSequencerOptions = {}) {
@@ -75,9 +79,13 @@ export class ImIngressSequencer {
         )
       })
     this.emitAcknowledgement = options.emitAcknowledgement
+    this.replyClient = options.replyClient ?? new ImReplyClient()
   }
 
-  receiveOrdinaryEvent(event: RemoteImEventV1): Promise<ImIngressResult> {
+  receiveOrdinaryEvent(
+    event: RemoteImEventV1,
+    options: { targetSnapshot?: ImTargetSnapshot; retryOfEventId?: string } = {}
+  ): Promise<ImIngressResult> {
     assertRemoteImEventV1(event)
     return this.runExclusive(event.conversationKey, async () => {
       await this.conversationState.ensureConversation({
@@ -87,8 +95,11 @@ export class ImIngressSequencer {
       })
 
       const existing = this.eventStore.getEvent(event.eventId)
-      const snapshot = existing?.targetSnapshot ?? (await this.resolveTarget(event))
-      const received = await this.eventStore.receiveEvent(event, snapshot)
+      const snapshot =
+        existing?.targetSnapshot ?? options.targetSnapshot ?? (await this.resolveTarget(event))
+      const received = await this.eventStore.receiveEvent(event, snapshot, {
+        ...(options.retryOfEventId ? { retryOfEventId: options.retryOfEventId } : {})
+      })
       if (received.duplicate && received.event.state !== "received") {
         const ack = acknowledgementForEvent(received.event)
         await this.emit(ack)
@@ -112,6 +123,66 @@ export class ImIngressSequencer {
         duplicate: received.duplicate,
         event: queued,
         acknowledgements: [receivedAck, acceptedAck]
+      }
+    })
+  }
+
+  receiveControlEvent(
+    event: RemoteImEventV1,
+    handle: () => Promise<string>
+  ): Promise<ImIngressResult> {
+    assertRemoteImEventV1(event)
+    return this.runExclusive(event.conversationKey, async () => {
+      await this.conversationState.ensureConversation({
+        conversationKey: event.conversationKey,
+        principalId: event.principalId,
+        deviceEpoch: event.deviceEpoch
+      })
+      const existing = this.eventStore.getEvent(event.eventId)
+      const snapshot = existing?.targetSnapshot ?? (await this.resolveTarget(event))
+      const received = await this.eventStore.receiveEvent(event, snapshot)
+      if (received.duplicate && received.event.state !== "received") {
+        await this.replyClient.sendPending()
+        const ack = acknowledgementForEvent(received.event)
+        await this.emit(ack)
+        return { duplicate: true, event: received.event, acknowledgements: [ack] }
+      }
+
+      const receivedAck: RemoteImAckV1 = {
+        type: "received",
+        eventId: received.event.eventId,
+        leaseId: received.event.leaseId
+      }
+      await this.emit(receivedAck)
+      let terminal: ImEventRecord
+      try {
+        const text = await handle()
+        terminal = await this.eventStore.finalizeEventWithReplies({
+          eventId: received.event.eventId,
+          state: "completed",
+          replies: buildImEventReplies({ event: received.event, text }),
+          resultText: text,
+          retryable: false
+        })
+      } catch (error) {
+        console.error("[IM] Control command failed:", error)
+        const text = `指令处理失败。事件短码：${eventShortCode(received.event.eventId)}。请在桌面查看详情。`
+        terminal = await this.eventStore.finalizeEventWithReplies({
+          eventId: received.event.eventId,
+          state: "failed",
+          replies: buildImEventReplies({ event: received.event, text }),
+          resultText: text,
+          reasonCode: "REMOTE_COMMAND_FAILED",
+          retryable: false
+        })
+      }
+      await this.replyClient.sendPending()
+      const terminalAck = acknowledgementForEvent(terminal)
+      await this.emit(terminalAck)
+      return {
+        duplicate: received.duplicate,
+        event: terminal,
+        acknowledgements: [receivedAck, terminalAck]
       }
     })
   }

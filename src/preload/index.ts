@@ -2458,6 +2458,8 @@ const api = {
     sendResponse: (response: UserInputResponse): void => {
       ipcRenderer.send("userInput:response", response)
     },
+    getPending: (threadId: string): Promise<UserInputRequest | null> =>
+      ipcRenderer.invoke("userInput:getPending", threadId) as Promise<UserInputRequest | null>,
     onRequest: (threadId: string, callback: (request: UserInputRequest) => void): (() => void) => {
       const channel = `userInput:request:${threadId}`
       const handler = (_: unknown, request: UserInputRequest): void => {

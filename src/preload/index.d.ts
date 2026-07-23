@@ -1837,6 +1837,7 @@ interface CustomAPI {
   }
   userInput: {
     sendResponse: (response: UserInputResponse) => void
+    getPending: (threadId: string) => Promise<UserInputRequest | null>
     onRequest: (threadId: string, callback: (request: UserInputRequest) => void) => () => void
     onCancel: (
       threadId: string,

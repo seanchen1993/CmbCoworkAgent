@@ -1,5 +1,18 @@
 import type { Database as SqlJsDatabase } from "sql.js"
 
+function ensureColumn(
+  database: SqlJsDatabase,
+  table: string,
+  column: string,
+  declaration: string
+): void {
+  const result = database.exec(`PRAGMA table_info(${table})`)[0]
+  const nameIndex = result?.columns.indexOf("name") ?? -1
+  const exists =
+    nameIndex >= 0 && result.values.some((row) => String(row[nameIndex] ?? "") === column)
+  if (!exists) database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`)
+}
+
 export function ensureImServiceSchema(database: SqlJsDatabase): void {
   database.run(`
     CREATE TABLE IF NOT EXISTS im_conversations (
@@ -24,6 +37,8 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
       binding_id TEXT,
       project_id TEXT,
       feature_slug TEXT,
+      project_name TEXT,
+      feature_title TEXT,
       workspace_path TEXT NOT NULL,
       state TEXT NOT NULL CHECK(state IN ('pending', 'active', 'suspended', 'revoked')),
       suspend_reason TEXT,
@@ -33,6 +48,9 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
       UNIQUE(binding_id)
     )
   `)
+
+  ensureColumn(database, "im_targets", "project_name", "TEXT")
+  ensureColumn(database, "im_targets", "feature_title", "TEXT")
 
   database.run(`
     CREATE TABLE IF NOT EXISTS im_feature_bindings (

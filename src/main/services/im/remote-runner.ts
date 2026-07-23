@@ -1,6 +1,11 @@
 import { HumanMessage } from "@langchain/core/messages"
 import { randomUUID } from "node:crypto"
-import { closeCheckpointer, pinCheckpointer, type DeepAgent } from "../../agent/runtime"
+import {
+  closeCheckpointer,
+  pinCheckpointer,
+  type DeepAgent,
+  type RuntimeInteractionWaitHooks
+} from "../../agent/runtime"
 import {
   createStandardTurnTrace,
   getHarnessAgentContext,
@@ -14,6 +19,7 @@ import {
 } from "../../agent/standard-thread-turn"
 import {
   claimLocalThreadRunLease,
+  getLocalThreadRunLease,
   releaseLocalThreadRunLease,
   type LocalThreadRunOwner
 } from "../../agent/thread-run-lease"
@@ -44,14 +50,18 @@ import {
   type ImRemoteCapabilityDecision,
   type ImRemoteCapabilityGuard
 } from "./capability-guard"
-import type { ImTargetSnapshot } from "./conversation-state"
+import {
+  imConversationStateStore,
+  type ImConversationStateStore,
+  type ImTargetSnapshot
+} from "./conversation-state"
 import { imEventStore, type ImEventRecord, type ImEventStore } from "./event-store"
 import {
   unavailableImGatewayClient,
   type ImExecutionPermitResult,
   type ImGatewayClientPort
 } from "./gateway-client"
-import { buildImEventReplies, eventShortCode } from "./reply-segmentation"
+import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
 import { ImReplyClient } from "./reply-client"
 
 const IM_INBOX_BLOCKED_TOOLS = [
@@ -71,6 +81,7 @@ The current user message arrived through the managed enterprise IM robot. Treat 
 
 const MAX_COMPLETION_HOOK_REVISIONS = 2
 const COMPLETION_HOOK_REVISION_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
+const DEFAULT_WAITING_DESKTOP_TTL_MS = 10 * 60 * 1_000
 
 export type ImRemoteRunDisposition =
   | "completed"
@@ -86,6 +97,7 @@ export interface ImRemoteTurnExecutionInput {
   runId: string
   signal: AbortSignal
   capability: Extract<ImRemoteCapabilityDecision, { allowed: true }>
+  interactionWaitHooks?: RuntimeInteractionWaitHooks
 }
 
 export interface PreparedRemoteStandardTurnInput {
@@ -101,16 +113,19 @@ export interface PreparedRemoteStandardTurnInput {
   routingTaskSource: "chat" | "scheduler_reminder"
   signal: AbortSignal
   remotePolicy?: RemoteTurnPolicy
+  interactionWaitHooks?: RuntimeInteractionWaitHooks
 }
 
 export interface ImRemoteRunnerDependencies {
   gateway: ImGatewayClientPort
   eventStore: ImEventStore
+  conversationState: ImConversationStateStore
   capabilityGuard: ImRemoteCapabilityGuard
   replyClient: ImReplyClient
   executeTurn: (input: ImRemoteTurnExecutionInput) => Promise<string>
   createRunId: () => string
   permitRenewIntervalMs: number
+  waitingDesktopTtlMs: number
 }
 
 class ImPreparedPromptRejectedError extends Error {
@@ -121,8 +136,10 @@ class ImCompletionHookRejectedError extends Error {
   readonly reasonCode = "REMOTE_COMPLETION_HOOK_BLOCKED"
 }
 
-function targetPrefix(target: ImTargetSnapshot | null): string | undefined {
-  return target?.kind === "feature" ? `【${target.projectId} / ${target.featureSlug}】` : undefined
+function targetPrefix(target: ImTargetSnapshot | null, switched = false): string | undefined {
+  return target?.kind === "feature"
+    ? `【${target.projectName ?? target.projectId} / ${target.featureTitle ?? target.featureSlug}】${switched ? "（切换前任务）" : ""}`
+    : undefined
 }
 
 function acknowledgementForTerminal(event: ImEventRecord): RemoteImAckV1 {
@@ -187,7 +204,8 @@ export async function executePreparedRemoteStandardTurn(
     source,
     routingTaskSource,
     signal,
-    remotePolicy
+    remotePolicy,
+    interactionWaitHooks
   } = input
   const channel = `scheduler:stream:${threadId}`
   const hookScope = createPersistentThreadHookScope(threadId)
@@ -272,6 +290,8 @@ export async function executePreparedRemoteStandardTurn(
         skillUseTracker,
         onHookResult,
         enableRequestUserInput: targetKind === "feature",
+        allowDeferredUserInputRenderer: targetKind === "feature",
+        interactionWaitHooks: targetKind === "feature" ? interactionWaitHooks : undefined,
         memoryEnabled: targetKind === "inbox" ? false : undefined,
         extraSystemPrompt: IM_UNTRUSTED_INPUT_CONTEXT,
         autoApproveFileEdits: targetKind === "inbox",
@@ -403,7 +423,7 @@ export async function executePreparedRemoteStandardTurn(
 }
 
 async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput): Promise<string> {
-  const { event, capability, runId, signal } = input
+  const { event, capability, runId, signal, interactionWaitHooks } = input
   const { target, metadata, workspacePath } = capability
   return executePreparedRemoteStandardTurn({
     rawMessage: event.messageText,
@@ -417,7 +437,8 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
     source: "im",
     routingTaskSource: "chat",
     signal,
-    remotePolicy: target.kind === "inbox" ? createImInboxRemotePolicy() : undefined
+    remotePolicy: target.kind === "inbox" ? createImInboxRemotePolicy() : undefined,
+    interactionWaitHooks
   })
 }
 
@@ -430,11 +451,13 @@ export class ImRemoteRunner {
     this.dependencies = {
       gateway,
       eventStore,
+      conversationState: dependencies.conversationState ?? imConversationStateStore,
       capabilityGuard: dependencies.capabilityGuard ?? imRemoteCapabilityGuard,
       replyClient: dependencies.replyClient ?? new ImReplyClient(gateway, eventStore),
       executeTurn: dependencies.executeTurn ?? executePreparedImStandardTurn,
       createRunId: dependencies.createRunId ?? randomUUID,
-      permitRenewIntervalMs: dependencies.permitRenewIntervalMs ?? 30_000
+      permitRenewIntervalMs: dependencies.permitRenewIntervalMs ?? 30_000,
+      waitingDesktopTtlMs: dependencies.waitingDesktopTtlMs ?? DEFAULT_WAITING_DESKTOP_TTL_MS
     }
   }
 
@@ -459,6 +482,127 @@ export class ImRemoteRunner {
     const abortFromQueue = (): void => executionAbort.abort(queueSignal.reason)
     queueSignal.addEventListener("abort", abortFromQueue, { once: true })
     let permitRevokedReason: string | null = null
+    let waitingTimeoutReason: string | null = null
+    const interactionFailure: {
+      current: { reasonCode: string; message: string } | null
+    } = { current: null }
+    let waitingTimer: ReturnType<typeof setTimeout> | undefined
+    const activeInteractions = new Set<string>()
+    let interactionMutation = Promise.resolve()
+    const serializeInteractionMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
+      const result = interactionMutation.then(operation, operation)
+      interactionMutation = result.then(
+        () => undefined,
+        () => undefined
+      )
+      return result
+    }
+    const abortExecution = (reason: Error): void => {
+      if (!executionAbort.signal.aborted) executionAbort.abort(reason)
+    }
+    const interactionWaitHooks: RuntimeInteractionWaitHooks | undefined =
+      target.kind === "feature"
+        ? {
+            onWaitStart: async (interaction) => {
+              await serializeInteractionMutation(async () => {
+                const key = `${interaction.kind}:${interaction.id}`
+                if (activeInteractions.has(key)) return
+                activeInteractions.add(key)
+                if (activeInteractions.size > 1) return
+                try {
+                  const latest = this.dependencies.eventStore.getEvent(event.eventId)
+                  if (!latest || latest.state !== "executing") {
+                    throw new Error("IM event cannot enter desktop wait from its current state")
+                  }
+                  const waiting = await this.dependencies.eventStore.markWaitingDesktop(
+                    latest.eventId
+                  )
+                  await this.dependencies.eventStore.enqueueProactiveReplies(
+                    buildImProactiveReplies({
+                      deliveryId: `${event.eventId}:waiting-desktop`,
+                      conversationKey: waiting.conversationKey,
+                      expectedDeviceEpoch: waiting.deviceEpoch,
+                      text: "任务正在等待桌面确认或补充输入，请在 10 分钟内到对应远程 Thread 处理。",
+                      prefix: this.targetPrefixForEvent(waiting)
+                    })
+                  )
+                  await this.dependencies.gateway.sendAcknowledgement({
+                    type: "waiting_desktop",
+                    eventId: waiting.eventId,
+                    leaseId: waiting.leaseId
+                  })
+                  await this.dependencies.replyClient.sendPending()
+                  waitingTimer = setTimeout(() => {
+                    waitingTimeoutReason = "REMOTE_INTERACTION_TIMEOUT"
+                    abortExecution(
+                      new DOMException("Remote desktop interaction timed out", "AbortError")
+                    )
+                  }, this.dependencies.waitingDesktopTtlMs)
+                } catch (error) {
+                  interactionFailure.current = {
+                    reasonCode: "REMOTE_WAIT_STATE_FAILED",
+                    message: "无法进入桌面确认状态，本轮已安全取消。"
+                  }
+                  abortExecution(
+                    error instanceof Error ? error : new Error("Failed to enter desktop wait")
+                  )
+                  throw error
+                }
+              })
+            },
+            onWaitEnd: async (interaction) => {
+              await serializeInteractionMutation(async () => {
+                const key = `${interaction.kind}:${interaction.id}`
+                if (!activeInteractions.delete(key) || activeInteractions.size > 0) return
+                if (executionAbort.signal.aborted) return
+                try {
+                  const latest = this.dependencies.eventStore.getEvent(event.eventId)
+                  if (!latest || latest.state !== "waiting_desktop") {
+                    throw new Error("IM event is no longer waiting for desktop interaction")
+                  }
+                  const localLease = getLocalThreadRunLease(target.threadId)
+                  if (localLease?.owner !== "im" || localLease.runId !== runId) {
+                    throw new Error("Local IM run lease was lost while waiting for desktop")
+                  }
+                  const renewed = await this.dependencies.gateway.renewExecutionPermit(latest)
+                  if (renewed.status !== "granted" || !renewed.leaseId || !renewed.expiresAt) {
+                    permitRevokedReason = renewed.reasonCode ?? "LEASE_REVOKED"
+                    throw new Error("IM execution permit was revoked while waiting for desktop")
+                  }
+                  const permitted = await this.dependencies.eventStore.renewExecutionPermit({
+                    eventId: latest.eventId,
+                    leaseId: renewed.leaseId,
+                    expiresAt: renewed.expiresAt
+                  })
+                  const capability = await this.dependencies.capabilityGuard.evaluate(permitted)
+                  if (!capability.allowed) {
+                    interactionFailure.current = {
+                      reasonCode: capability.reasonCode,
+                      message: capability.message
+                    }
+                    throw new Error(`IM capability changed while waiting: ${capability.reasonCode}`)
+                  }
+                  await this.dependencies.eventStore.resumeFromDesktop(permitted.eventId)
+                  if (waitingTimer) {
+                    clearTimeout(waitingTimer)
+                    waitingTimer = undefined
+                  }
+                } catch (error) {
+                  if (!permitRevokedReason && !interactionFailure.current) {
+                    interactionFailure.current = {
+                      reasonCode: "REMOTE_WAIT_RESUME_REJECTED",
+                      message: "桌面交互完成，但执行许可或本地运行租约已失效，本轮已取消。"
+                    }
+                  }
+                  abortExecution(
+                    error instanceof Error ? error : new Error("Failed to resume desktop wait")
+                  )
+                  throw error
+                }
+              })
+            }
+          }
+        : undefined
     let renewalInFlight = false
     const renewTimer = setInterval(() => {
       if (renewalInFlight || executionAbort.signal.aborted) return
@@ -502,7 +646,7 @@ export class ImRemoteRunner {
       // owned and immediately before creating/pinning a Runtime.
       const latest = this.dependencies.eventStore.getEvent(event.eventId)
       if (!latest) throw new Error("IM event disappeared before execution")
-      const decision = this.dependencies.capabilityGuard.evaluate(latest)
+      const decision = await this.dependencies.capabilityGuard.evaluate(latest)
       if (!decision.allowed) {
         return await this.finalizeRejected(latest, decision.reasonCode, decision.message)
       }
@@ -511,13 +655,17 @@ export class ImRemoteRunner {
         event: this.dependencies.eventStore.getEvent(latest.eventId) ?? latest,
         runId,
         signal: executionAbort.signal,
-        capability: decision
+        capability: decision,
+        interactionWaitHooks
       })
+      if (executionAbort.signal.aborted) {
+        throw executionAbort.signal.reason ?? new DOMException("IM run aborted", "AbortError")
+      }
       const executing = this.dependencies.eventStore.getEvent(latest.eventId) ?? latest
       const replies = buildImEventReplies({
         event: executing,
         text: result,
-        prefix: targetPrefix(executing.targetSnapshot)
+        prefix: this.targetPrefixForEvent(executing)
       })
       const completed = await this.dependencies.eventStore.completeEvent(
         executing.eventId,
@@ -536,7 +684,7 @@ export class ImRemoteRunner {
           replies: buildImEventReplies({
             event: latest,
             text: reply,
-            prefix: targetPrefix(target)
+            prefix: this.targetPrefixForEvent(latest)
           }),
           resultText: reply,
           reasonCode: permitRevokedReason,
@@ -544,6 +692,40 @@ export class ImRemoteRunner {
         })
         await this.deliverAndAcknowledge(terminal)
         return "outcome_unknown"
+      }
+      if (waitingTimeoutReason) {
+        const reply = "等待桌面确认或补充输入已超时，本轮已取消；Feature Binding 保持不变。"
+        const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
+          eventId: event.eventId,
+          state: "cancelled",
+          replies: buildImEventReplies({
+            event: latest,
+            text: reply,
+            prefix: this.targetPrefixForEvent(latest)
+          }),
+          resultText: reply,
+          reasonCode: waitingTimeoutReason,
+          retryable: false
+        })
+        await this.deliverAndAcknowledge(terminal)
+        return "cancelled"
+      }
+      const interactionRejected = interactionFailure.current
+      if (interactionRejected) {
+        const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
+          eventId: event.eventId,
+          state: "cancelled",
+          replies: buildImEventReplies({
+            event: latest,
+            text: interactionRejected.message,
+            prefix: this.targetPrefixForEvent(latest)
+          }),
+          resultText: interactionRejected.message,
+          reasonCode: interactionRejected.reasonCode,
+          retryable: false
+        })
+        await this.deliverAndAcknowledge(terminal)
+        return "cancelled"
       }
       if (abortLike(error, executionAbort.signal)) {
         const reply = "已停止当前远程任务。"
@@ -553,7 +735,7 @@ export class ImRemoteRunner {
           replies: buildImEventReplies({
             event: latest,
             text: reply,
-            prefix: targetPrefix(target)
+            prefix: this.targetPrefixForEvent(latest)
           }),
           resultText: reply,
           reasonCode: "REMOTE_EVENT_CANCELLED",
@@ -577,7 +759,11 @@ export class ImRemoteRunner {
       const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
         eventId: event.eventId,
         state: "failed",
-        replies: buildImEventReplies({ event: latest, text: reply, prefix: targetPrefix(target) }),
+        replies: buildImEventReplies({
+          event: latest,
+          text: reply,
+          prefix: this.targetPrefixForEvent(latest)
+        }),
         resultText: reply,
         reasonCode,
         retryable
@@ -586,6 +772,7 @@ export class ImRemoteRunner {
       return "failed"
     } finally {
       clearInterval(renewTimer)
+      if (waitingTimer) clearTimeout(waitingTimer)
       queueSignal.removeEventListener("abort", abortFromQueue)
       releaseLocalThreadRunLease(target.threadId, "im", runId)
     }
@@ -615,7 +802,7 @@ export class ImRemoteRunner {
       replies: buildImEventReplies({
         event,
         text: message,
-        prefix: targetPrefix(event.targetSnapshot)
+        prefix: this.targetPrefixForEvent(event)
       }),
       resultText: message,
       reasonCode,
@@ -628,6 +815,17 @@ export class ImRemoteRunner {
   private async deliverAndAcknowledge(event: ImEventRecord): Promise<void> {
     await this.dependencies.replyClient.sendPending()
     await this.dependencies.gateway.sendAcknowledgement(acknowledgementForTerminal(event))
+  }
+
+  private targetPrefixForEvent(event: ImEventRecord): string | undefined {
+    const snapshot = event.targetSnapshot
+    if (snapshot?.kind !== "feature") return undefined
+    try {
+      const active = this.dependencies.conversationState.getActiveTarget(event.conversationKey)
+      return targetPrefix(snapshot, Boolean(active && active.targetId !== snapshot.targetId))
+    } catch {
+      return targetPrefix(snapshot)
+    }
   }
 }
 
