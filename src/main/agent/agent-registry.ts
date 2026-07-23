@@ -47,8 +47,8 @@ export interface AgentProfile {
   shellAccess: AgentShellAccess
 }
 
-/** The fs/exec tools an allowlist/denylist can govern in this project. Mirrors
- * the set deepagents' filesystem middleware provides plus our task_output. */
+/** The built-in tools an allowlist/denylist can govern in this project. Mirrors
+ * the tools provided by deepagents' filesystem/todo middleware plus task_output. */
 const KNOWN_TOOLS = [
   "read_file",
   "write_file",
@@ -57,7 +57,8 @@ const KNOWN_TOOLS = [
   "ls",
   "glob",
   "grep",
-  "task_output"
+  "task_output",
+  "write_todos"
 ] as const
 
 /** Claude Code tool name → this project's tool name. Names absent here (e.g.
@@ -780,9 +781,9 @@ export function resolveAgentProfile(name: string, workspacePath?: string): Agent
 }
 
 /**
- * Strip a blocked tool's "- <tool>: …" documentation line — and, when
- * shellAccess is "none", the deepagents "## Execute Tool" section — from an
- * injected filesystem/system prompt.
+ * Strip a blocked tool's "- <tool>: …" documentation line, the deepagents
+ * "## Execute Tool" section when shellAccess is "none", and LangChain's
+ * write_todos guidance when that middleware-provided tool is blocked.
  *
  * deepagents' filesystem middleware advertises tool usage in the SYSTEM PROMPT,
  * not only through the model's tool list, so hiding a tool from request.tools is
@@ -812,6 +813,23 @@ export function stripBlockedToolDocs(systemMessage: unknown, blocked: Iterable<s
     // section), since it can still run provably read-only commands.
     if (blockedSet.has("execute")) {
       out = out.replace(/\n## Execute Tool[\s\S]*?(?=\n## |\n### |$)/g, "")
+    }
+    if (blockedSet.has("write_todos")) {
+      // todoListMiddleware appends this guidance before the registry guard runs.
+      // Match its exact start/end markers instead of a broad Markdown-section
+      // regex: the prompt contains another `##` heading internally, and deleting
+      // until the next heading could either leave half the guidance behind or
+      // consume an unrelated prompt appended by a later middleware.
+      const startMarker = "\n## `write_todos`\n"
+      const endMarker =
+        "\n- Don't be afraid to revise the To-Do list as you go. New information may reveal new tasks that need to be done, or old tasks that are irrelevant."
+      let start = out.indexOf(startMarker)
+      while (start !== -1) {
+        const end = out.indexOf(endMarker, start + startMarker.length)
+        if (end === -1) break
+        out = out.slice(0, start) + out.slice(end + endMarker.length)
+        start = out.indexOf(startMarker, start)
+      }
     }
     return out
   }
