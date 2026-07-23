@@ -25,7 +25,7 @@ import {
 import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
-import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
+import { CMBDEVCLAW_INTERNAL_GIT_ENV, markInAppCommitProcessed } from "../services/git-hook-service"
 import { getTracesDir } from "../agent/trace/collector"
 import type { AgentTrace } from "../agent/trace/types"
 import {
@@ -4507,6 +4507,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             )
           }
         }
+        // The `manual` telemetry below is this commit's canonical
+        // git.commit.created. Record the sha as processed so the hook/reconcile
+        // backstop — which treats the durable commit job left by
+        // measureForCommit as "still needs its event" — does not emit a
+        // duplicate under the resolved git root (in monorepos that duplicate
+        // even shows up as a different repository name).
+        await markInAppCommitProcessed(worktreePath, commitSha)
         const postChangedFiles = await getPostCommitChangedFilesForMetadata(
           worktreePath,
           tracked
