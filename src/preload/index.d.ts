@@ -2096,6 +2096,7 @@ interface CustomAPI {
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
     isAwardsAdmin: () => Promise<boolean>
+    isSkillEvalAllowed: () => Promise<boolean>
     awardsSkillContributions: (
       range: { from: string; to: string },
       skillNames: string[]

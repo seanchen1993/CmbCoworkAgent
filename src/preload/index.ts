@@ -2932,6 +2932,7 @@ const api = {
     isUncommittedAnalysisAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
     isAwardsAdmin: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAwardsAdmin"),
+    isSkillEvalAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isSkillEvalAllowed"),
     awardsSkillContributions: (
       range: { from: string; to: string },
       skillNames: string[]
