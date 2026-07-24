@@ -94,11 +94,6 @@ import { getThread } from "../db/index"
 import { createRequestUserInputTool } from "./tools/user-input-tool"
 import { createToolSearchTools } from "./tools/tool-search-tool"
 import { createCodeExecTool } from "./tools/code-exec-tool"
-import { getEnabledBrowserPluginRuntime } from "../browser/browser-plugin"
-import {
-  BROWSER_PLUGIN_NODE_REPL_TOOL_NAME,
-  createBrowserPluginRuntimeTool
-} from "./tools/browser/browser-plugin-runtime-tool"
 import { createTaskMmdMiddleware } from "./task-mmd/middleware"
 import { createToolHookMiddleware } from "./tool-hooks"
 import { listSavedCodeExecTools } from "../code-exec/saved-tool-store"
@@ -165,7 +160,7 @@ import {
   autoSelectPlaywrightInAppBrowserTab,
   preparePlaywrightInAppBrowser,
   shouldPreparePlaywrightInAppBrowser
-} from "./tools/browser/playwright-mcp-bridge"
+} from "../browser/cdp/playwright-mcp-bridge"
 import {
   InterleavedThinkingChatOpenAICompletions,
   ReasoningDisplayChatOpenAICompletions
@@ -351,7 +346,6 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
 const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
   "save_code_exec_tool",
-  BROWSER_PLUGIN_NODE_REPL_TOOL_NAME,
   "manage_scheduler",
   "manage_skill",
   "workflow",
@@ -4401,24 +4395,6 @@ The workspace root is: ${workspacePath}`
   }
   if (!options.noSkillEvolutionTool) {
     extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
-  }
-
-  try {
-    const browserPluginRuntime = getEnabledBrowserPluginRuntime()
-    if (browserPluginRuntime) {
-      extraTools.push(
-        createBrowserPluginRuntimeTool({
-          plugin: browserPluginRuntime,
-          requestApproval,
-          workspacePath,
-          threadId: options.threadId
-        })
-      )
-      console.log(`[Runtime] Browser plugin runtime injected: ${browserPluginRuntime.pluginRoot}.`)
-    }
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e)
-    console.warn(`[Runtime] Failed to check Browser plugin runtime: ${message}.`)
   }
 
   // Conditionally inject Java LSP tool

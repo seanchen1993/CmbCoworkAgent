@@ -2,8 +2,8 @@ import {
   MAX_EXTENSION_COOKIE_VALUE_CHARS,
   MAX_EXTENSION_IMPORT_COOKIES,
   type CmbChromeCookie
-} from "../../shared/browser-cookie-bridge"
-import type { BrowserSessionCookie, BrowserSessionData } from "./browser-session-data"
+} from "../../../shared/browser-cookie-bridge"
+import type { BrowserSessionCookie, BrowserSessionData } from "../core/browser-session-data"
 
 const MAX_COOKIE_NAME_CHARS = 4_096
 const MAX_COOKIE_DOMAIN_CHARS = 4_096

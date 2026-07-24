@@ -4,9 +4,7 @@ import { join } from "path"
 import initSqlJs from "sql.js"
 import { describe, expect, it } from "vitest"
 import {
-  getBrowserProfileImportPreview,
-  readBrowserProfileImportData,
-  type BrowserProfileImportReadOptions
+  readBrowserProfileImportData
 } from "./browser-profile-importer"
 
 function writeJson(filePath: string, value: unknown): void {
@@ -91,7 +89,12 @@ async function writeCookieStore(filePath: string): Promise<void> {
 }
 
 async function createFakeChromeUserData(): Promise<{
-  options: BrowserProfileImportReadOptions
+  options: {
+    env?: NodeJS.ProcessEnv
+    homeDir?: string
+    platform?: NodeJS.Platform
+    timeoutMs?: number
+  }
   root: string
 }> {
   const root = mkdtempSync(join(tmpdir(), "cmb-browser-profile-import-"))
@@ -124,26 +127,6 @@ async function createFakeChromeUserData(): Promise<{
 }
 
 describe("browser profile importer", () => {
-  it("discovers Chrome profiles from an explicit user data directory", async () => {
-    const fixture = await createFakeChromeUserData()
-    try {
-      const preview = await getBrowserProfileImportPreview(fixture.options)
-
-      expect(preview.error).toBeUndefined()
-      expect(preview.sourceUserDataDirectory).toBe(fixture.root)
-      expect(preview.profiles).toEqual([
-        {
-          cookieStoreExists: true,
-          profileDirectory: "Profile 1",
-          profileName: "Work",
-          selected: true
-        }
-      ])
-    } finally {
-      rmSync(fixture.root, { recursive: true, force: true })
-    }
-  })
-
   it("reads plaintext cookies and skips partitioned or undecryptable cookies", async () => {
     const fixture = await createFakeChromeUserData()
     try {

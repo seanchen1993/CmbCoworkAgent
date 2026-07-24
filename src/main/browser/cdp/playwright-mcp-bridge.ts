@@ -2,10 +2,10 @@ import type {
   McpCapabilityService,
   McpCapabilityTool,
   McpInvocationResult
-} from "../../../mcp/capability-types"
-import { resolveBrowserCdpPort } from "../../../browser/browser-cdp"
-import { getGlobalBrowserService } from "../../../browser/browser-service-registry"
-import type { BrowserAttachOptions, BrowserState } from "../../../../shared/browser-types"
+} from "../../mcp/capability-types"
+import { resolveBrowserCdpPort } from "./browser-cdp"
+import { getGlobalBrowserService } from "../core/browser-service-registry"
+import type { BrowserAttachOptions, BrowserState } from "../../../shared/browser-types"
 
 interface PlaywrightBrowserTargetService {
   getState(sessionId: string): BrowserState
@@ -123,7 +123,7 @@ export function shouldPreparePlaywrightInAppBrowser(
   )
 }
 
-export function shouldAutoSelectPlaywrightInAppBrowserTab(
+function shouldAutoSelectPlaywrightInAppBrowserTab(
   tool: McpCapabilityTool,
   env: NodeJS.ProcessEnv = process.env
 ): boolean {

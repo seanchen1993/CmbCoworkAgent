@@ -3,8 +3,8 @@ import type {
   McpCapabilityService,
   McpCapabilityTool,
   McpInvocationResult
-} from "../../../mcp/capability-types"
-import type { BrowserState } from "../../../../shared/browser-types"
+} from "../../mcp/capability-types"
+import type { BrowserState } from "../../../shared/browser-types"
 import {
   autoSelectPlaywrightInAppBrowserTab,
   preparePlaywrightInAppBrowser,

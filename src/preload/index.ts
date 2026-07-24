@@ -99,21 +99,14 @@ import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-ty
 import { BROWSER_PANEL_REQUEST_CHANNEL } from "../shared/browser-types"
 import type {
   BrowserAttachOptions,
-  BrowserChromeSetupAction,
-  BrowserChromeSetupOpenResult,
-  BrowserChromeSessionImportResult,
   BrowserBounds,
-  BrowserClickTarget,
-  BrowserDomResult,
   BrowserNavigateOptions,
   BrowserPanelRequest,
   BrowserProfileImportOptions,
-  BrowserProfileImportPreview,
   BrowserProfileImportResult,
   BrowserScreenshotResult,
   BrowserState
 } from "../shared/browser-types"
-import type { BrowserCookieBridgeStatus } from "../shared/browser-cookie-bridge"
 import {
   APP_ATTENTION_CHANNEL,
   getAgentStreamAttentionKind,
@@ -2023,31 +2016,10 @@ const api = {
       ipcRenderer.invoke("browser:getState", sessionId) as Promise<BrowserState>,
     captureScreenshot: (sessionId: string): Promise<BrowserScreenshotResult> =>
       ipcRenderer.invoke("browser:captureScreenshot", sessionId) as Promise<BrowserScreenshotResult>,
-    readRenderedState: (sessionId: string, includeHtml?: boolean): Promise<BrowserDomResult> =>
-      ipcRenderer.invoke("browser:readRenderedState", sessionId, includeHtml) as Promise<BrowserDomResult>,
-    click: (sessionId: string, target: BrowserClickTarget): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:click", sessionId, target) as Promise<BrowserState>,
-    typeText: (sessionId: string, text: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:typeText", sessionId, text) as Promise<BrowserState>,
-    press: (sessionId: string, keyCode: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:press", sessionId, keyCode) as Promise<BrowserState>,
-    getProfileImportPreview: (): Promise<BrowserProfileImportPreview> =>
-      ipcRenderer.invoke("browser:getProfileImportPreview") as Promise<BrowserProfileImportPreview>,
     importProfileData: (
       options: BrowserProfileImportOptions
     ): Promise<BrowserProfileImportResult> =>
       ipcRenderer.invoke("browser:importProfileData", options) as Promise<BrowserProfileImportResult>,
-    getCookieBridgeStatus: (): Promise<BrowserCookieBridgeStatus> =>
-      ipcRenderer.invoke("browser:getCookieBridgeStatus") as Promise<BrowserCookieBridgeStatus>,
-    importChromeSession: (
-      sessionId: string,
-      options?: { threadId?: string; workspacePath?: string | null }
-    ): Promise<BrowserChromeSessionImportResult> =>
-      ipcRenderer.invoke("browser:importChromeSession", sessionId, options) as Promise<BrowserChromeSessionImportResult>,
-    openChromeSetup: (
-      action: BrowserChromeSetupAction
-    ): Promise<BrowserChromeSetupOpenResult> =>
-      ipcRenderer.invoke("browser:openChromeSetup", action) as Promise<BrowserChromeSetupOpenResult>,
     disposeAllForRendererUnload: (): void => {
       ipcRenderer.send("browser:disposeAllForRendererUnload")
     },

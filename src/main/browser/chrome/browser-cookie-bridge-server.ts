@@ -12,7 +12,7 @@ import {
   type CmbChromeExtensionReadyMessage,
   type CmbExportCookiesRequestMessage,
   type CmbNativeHostHelloMessage
-} from "../../shared/browser-cookie-bridge"
+} from "../../../shared/browser-cookie-bridge"
 import {
   getBrowserCookieBridgePipePath,
   getBrowserCookieBridgeSecret

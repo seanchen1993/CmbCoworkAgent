@@ -45,84 +45,9 @@ export interface BrowserAttachOptions extends BrowserNavigateOptions {
   visible?: boolean
 }
 
-export interface BrowserClickTarget {
-  x?: number
-  y?: number
-  selector?: string
-}
-
-export type BrowserMouseButton = "left" | "middle" | "right"
-
-export interface BrowserMousePoint {
-  x: number
-  y: number
-}
-
-export interface BrowserScrollTarget extends BrowserMousePoint {
-  deltaX?: number
-  deltaY?: number
-}
-
-export interface BrowserRenderedState {
-  sessionId: string
-  url: string
-  title: string
-  text: string
-  html?: string
-  truncated: boolean
-}
-
 export interface BrowserScreenshotResult {
   success: boolean
   dataUrl?: string
-  error?: string
-}
-
-export interface BrowserDomResult {
-  success: boolean
-  state?: BrowserRenderedState
-  error?: string
-}
-
-export type BrowserChromeSetupAction =
-  | "open-chrome"
-  | "install-extension"
-  | "enable-extension"
-  | "reinstall-plugin"
-
-export interface BrowserChromeBackendDiagnostics {
-  chromeInstalled: boolean
-  chromeRunning: boolean
-  extensionBackendReady: boolean
-  extensionEnabled: boolean
-  extensionId?: string
-  extensionInstalled: boolean
-  extensionInstallUrl?: string
-  extensionManagerUrl: string
-  nativeHostManifestCorrect: boolean
-  recommendedAction?: BrowserChromeSetupAction
-  recommendedActionLabel?: string
-  selectedProfileDirectory?: string
-}
-
-export interface BrowserChromeSetupOpenResult {
-  action: BrowserChromeSetupAction
-  error?: string
-  success: boolean
-  targetUrl?: string
-}
-
-export interface BrowserChromeSessionImportResult {
-  success: boolean
-  cancelled?: boolean
-  chromeDiagnostics?: BrowserChromeBackendDiagnostics
-  sourceOrigin?: string
-  targetOrigin?: string
-  importedCookies?: number
-  importedLocalStorage?: number
-  skippedCookies?: number
-  skippedLocalStorage?: number
-  warning?: string
   error?: string
 }
 

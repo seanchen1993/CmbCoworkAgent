@@ -1,52 +1,27 @@
-import { dialog, type BrowserWindow, type IpcMain, type MessageBoxOptions } from "electron"
-import { BrowserService } from "../browser/browser-service"
+import { dialog, type BrowserWindow, type IpcMain } from "electron"
+import { BrowserService } from "../browser/core/browser-service"
 import {
-  importChromeSessionIntoBrowser
-} from "../browser/browser-chrome-session-importer"
-import {
-  openBrowserChromeSetupTarget
-} from "../browser/browser-chrome-discovery"
-import {
-  getBrowserProfileImportPreview,
   readBrowserProfileImportData
-} from "../browser/browser-profile-importer"
-import { sanitizeExtensionCookieExport } from "../browser/browser-extension-cookie-importer"
+} from "../browser/chrome/browser-profile-importer"
+import { sanitizeExtensionCookieExport } from "../browser/chrome/browser-extension-cookie-importer"
 import {
   BrowserCookieBridgeError,
   BrowserCookieBridgeServer
-} from "../browser/browser-cookie-bridge-server"
+} from "../browser/chrome/browser-cookie-bridge-server"
 import {
-  ensureCmbChromeNativeHostRegistration,
-  getCmbChromeNativeHostRegistrationStatus
-} from "../browser/browser-native-host-installer"
-import { getEnabledBrowserPluginRuntime } from "../browser/browser-plugin"
-import { setGlobalBrowserService } from "../browser/browser-service-registry"
+  ensureCmbChromeNativeHostRegistration
+} from "../browser/chrome/browser-native-host-installer"
+import { setGlobalBrowserService } from "../browser/core/browser-service-registry"
 import type {
   BrowserAttachOptions,
-  BrowserChromeSetupAction,
-  BrowserChromeSetupOpenResult,
-  BrowserChromeSessionImportResult,
   BrowserBounds,
-  BrowserClickTarget,
   BrowserNavigateOptions,
   BrowserProfileImportOptions,
-  BrowserProfileImportPreview,
   BrowserProfileImportResult,
   BrowserProfileImportSkippedWebsite
 } from "../../shared/browser-types"
-import type { BrowserCookieBridgeStatus } from "../../shared/browser-cookie-bridge"
 
 const cookieBridgeServer = new BrowserCookieBridgeServer()
-
-function getHttpOrigin(url: string): string {
-  try {
-    const parsed = new URL(url)
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return ""
-    return parsed.origin
-  } catch {
-    return ""
-  }
-}
 
 function profileImportFailure(
   error: string,
@@ -158,25 +133,6 @@ export function registerBrowserHandlers(
     }
   )
 
-  ipcMain.handle("browser:getCookieBridgeStatus", async (event): Promise<BrowserCookieBridgeStatus> => {
-    const window = getMainWindow()
-    if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
-      return {
-        connected: false,
-        error: "拒绝来自未知窗口的浏览器扩展状态请求",
-        extensionId: "",
-        nativeHostRegistered: false,
-        platformSupported: false
-      }
-    }
-    const status = await getCmbChromeNativeHostRegistrationStatus()
-    return {
-      ...status,
-      connected: cookieBridgeServer.connected,
-      profileInstanceId: cookieBridgeServer.profileInstanceId
-    }
-  })
-
   ipcMain.handle(
     "browser:navigate",
     async (_event, sessionId: string, url: string, options?: BrowserNavigateOptions) => {
@@ -204,37 +160,6 @@ export function registerBrowserHandlers(
 
   ipcMain.handle("browser:captureScreenshot", (_event, sessionId: string) =>
     browserService.captureScreenshot(sessionId)
-  )
-
-  ipcMain.handle("browser:readRenderedState", (_event, sessionId: string, includeHtml?: boolean) =>
-    browserService.readRenderedState(sessionId, includeHtml)
-  )
-
-  ipcMain.handle("browser:click", (_event, sessionId: string, target: BrowserClickTarget) =>
-    browserService.click(sessionId, target)
-  )
-
-  ipcMain.handle("browser:typeText", (_event, sessionId: string, text: string) =>
-    browserService.typeText(sessionId, text)
-  )
-
-  ipcMain.handle("browser:press", (_event, sessionId: string, keyCode: string) =>
-    browserService.press(sessionId, keyCode)
-  )
-
-  ipcMain.handle(
-    "browser:getProfileImportPreview",
-    async (event): Promise<BrowserProfileImportPreview> => {
-      const window = getMainWindow()
-      if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
-        return {
-          sourceBrowser: "chrome",
-          profiles: [],
-          error: "拒绝来自未知窗口的浏览器数据导入预览请求"
-        }
-      }
-      return getBrowserProfileImportPreview()
-    }
   )
 
   ipcMain.handle(
@@ -284,74 +209,6 @@ export function registerBrowserHandlers(
       } catch (error) {
         return profileImportFailure(sanitizeProfileImportError(error), options)
       }
-    }
-  )
-
-  ipcMain.handle(
-    "browser:importChromeSession",
-    async (
-      event,
-      sessionId: string,
-      options?: { threadId?: string; workspacePath?: string | null }
-    ): Promise<BrowserChromeSessionImportResult> => {
-      const window = getMainWindow()
-      if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
-        return { success: false, error: "拒绝来自未知窗口的 Chrome 登录态导入请求" }
-      }
-      const state = browserService.getState(sessionId)
-      if (!state.created) {
-        return { success: false, error: "内置浏览器还没有打开页面" }
-      }
-      const targetOrigin = state.url ? getHttpOrigin(state.url) : ""
-      if (!targetOrigin) {
-        return { success: false, error: "当前内置浏览器页面不是可导入登录态的 HTTP(S) 页面" }
-      }
-      const messageBoxOptions: MessageBoxOptions = {
-        type: "question",
-        title: "导入 Chrome 登录态",
-        message: "从已打开的 Chrome 导入当前页面的 Cookie 和 localStorage？",
-        detail:
-          targetOrigin.length > 0
-            ? `目标页面：${targetOrigin}\n\n只会导入同源 tab 的 Cookie 和 localStorage，不会导入密码。`
-            : "只会导入同源 tab 的 Cookie 和 localStorage，不会导入密码。",
-        buttons: ["取消", "导入"],
-        defaultId: 1,
-        cancelId: 0
-      }
-      const result = await dialog.showMessageBox(window, messageBoxOptions)
-      if (result.response !== 1) {
-        return { success: false, cancelled: true, targetOrigin: targetOrigin || undefined }
-      }
-
-      return importChromeSessionIntoBrowser({
-        service: browserService,
-        sessionId,
-        threadId: options?.threadId,
-        workspacePath: options?.workspacePath ?? null
-      })
-    }
-  )
-
-  ipcMain.handle(
-    "browser:openChromeSetup",
-    async (event, action: BrowserChromeSetupAction): Promise<BrowserChromeSetupOpenResult> => {
-      const window = getMainWindow()
-      if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
-        return { action, success: false, error: "拒绝来自未知窗口的 Chrome setup 请求" }
-      }
-      if (
-        action !== "open-chrome" &&
-        action !== "install-extension" &&
-        action !== "enable-extension" &&
-        action !== "reinstall-plugin"
-      ) {
-        return { action, success: false, error: "不支持的 Chrome setup action" }
-      }
-      const plugin = getEnabledBrowserPluginRuntime()
-      if (!plugin) {
-        return { action, success: false, error: "Browser 插件 runtime 未启用" }
-      }
-      return openBrowserChromeSetupTarget(plugin, action)
     }
   )
 

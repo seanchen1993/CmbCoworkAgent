@@ -1,15 +1,15 @@
-import { parseMcpImportConfig, buildMcpImportOperations } from "../mcp/config-import"
-import { getMcpConnectors, upsertMcpConnector } from "../storage"
+import { parseMcpImportConfig, buildMcpImportOperations } from "../../mcp/config-import"
+import { getMcpConnectors, upsertMcpConnector } from "../../storage"
 
 const REMOTE_DEBUGGING_PORT_SWITCH = "remote-debugging-port"
 const DEFAULT_CDP_PORT = 7777
 const PLAYWRIGHT_MCP_NAME = "In-app-browser"
 
-export interface BrowserCdpCommandLine {
+interface BrowserCdpCommandLine {
   appendSwitch(name: string, value: string): void
 }
 
-export function parseBrowserCdpPort(value: string | undefined): number | null {
+function parseBrowserCdpPort(value: string | undefined): number | null {
   const normalized = value?.trim()
   if (!normalized) return null
   if (!/^\d+$/.test(normalized)) {

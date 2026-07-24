@@ -15,7 +15,6 @@ import {
   buildToolMessageFallbackId
 } from "./stream-message-ids"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
-import { isToolResultError } from "./tool-result-error"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -2812,12 +2811,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private isToolMessageError(kwargs: SerializedMessageChunk["kwargs"]): boolean {
     if (!kwargs) return false
-    return isToolResultError({
-      toolName: kwargs.name,
-      content: kwargs.content,
-      is_error: kwargs.is_error === true || kwargs.additional_kwargs?.is_error === true,
-      status: kwargs.status
-    })
+    return (
+      kwargs.status === "error" ||
+      kwargs.is_error === true ||
+      kwargs.additional_kwargs?.is_error === true
+    )
   }
 
   /**

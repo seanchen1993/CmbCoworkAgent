@@ -1,7 +1,6 @@
 import type {
-  BrowserProfileImportSkipReason,
   BrowserProfileImportSkippedWebsite
-} from "../../shared/browser-types"
+} from "../../../shared/browser-types"
 
 export interface BrowserSessionCookie {
   domain?: string
@@ -31,11 +30,4 @@ export interface BrowserSessionImportCounts {
   skippedCookies: number
   skippedLocalStorage: number
   skippedWebsites?: BrowserProfileImportSkippedWebsite[]
-}
-
-export interface BrowserSessionImportSkippedWebsite {
-  domain: string
-  reasons: BrowserProfileImportSkipReason[]
-  skippedCookies: number
-  url: string
 }

@@ -74,7 +74,6 @@ import {
   subscribePendingHarnessNextActions
 } from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
-import { isToolResultError } from "@/lib/tool-result-error"
 import { useShallow } from "zustand/react/shallow"
 import {
   useCurrentThread,
@@ -3315,12 +3314,7 @@ export function ChatContainer({
       if (msg.role === "tool" && msg.tool_call_id) {
         results.set(msg.tool_call_id, {
           content: msg.content,
-          is_error: isToolResultError({
-            toolName: msg.name,
-            content: msg.content,
-            is_error: msg.is_error,
-            status: msg.status
-          })
+          is_error: msg.is_error === true || msg.status === "error"
         })
       }
     }

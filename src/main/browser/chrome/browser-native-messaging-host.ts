@@ -5,7 +5,7 @@ import {
   type CmbChromeExtensionReadyMessage,
   type CmbHostStatusMessage,
   type CmbNativeHostHelloMessage
-} from "../../shared/browser-cookie-bridge"
+} from "../../../shared/browser-cookie-bridge"
 import {
   getBrowserCookieBridgePipePath,
   getBrowserCookieBridgeSecret
@@ -21,7 +21,7 @@ function recordValue(value: unknown): Record<string, unknown> {
     : {}
 }
 
-export function getNativeMessagingOrigin(args: string[] = process.argv): string | null {
+function getNativeMessagingOrigin(args: string[] = process.argv): string | null {
   const origin = args.find((value) => value.startsWith("chrome-extension://"))
   return origin === CMB_CHROME_EXTENSION_ORIGIN ? origin : null
 }

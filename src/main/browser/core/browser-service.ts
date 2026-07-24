@@ -3,45 +3,32 @@ import {
   WebContentsView,
   session as electronSession,
   type CookiesSetDetails,
-  type MouseInputEvent,
-  type MouseWheelInputEvent,
   type Rectangle,
   type WebContents
 } from "electron"
 import { existsSync } from "fs"
 import { posix, resolve, win32 } from "path"
 import { pathToFileURL } from "url"
-import { BROWSER_PANEL_REQUEST_CHANNEL } from "../../shared/browser-types"
+import { BROWSER_PANEL_REQUEST_CHANNEL } from "../../../shared/browser-types"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
-  BrowserClickTarget,
   BrowserConsoleEntry,
   BrowserConsoleLevel,
-  BrowserDomResult,
-  BrowserMouseButton,
-  BrowserMousePoint,
   BrowserNavigateOptions,
   BrowserProfileImportSkipReason,
   BrowserProfileImportSkippedWebsite,
-  BrowserRenderedState,
-  BrowserScrollTarget,
   BrowserScreenshotResult,
   BrowserState
-} from "../../shared/browser-types"
+} from "../../../shared/browser-types"
 import type {
   BrowserSessionCookie,
   BrowserSessionData,
-  BrowserSessionImportCounts,
-  BrowserSessionStorageEntry
+  BrowserSessionImportCounts
 } from "./browser-session-data"
 
-const MAX_TEXT_CHARS = 80_000
-const MAX_HTML_CHARS = 200_000
 const MAX_BROWSER_CONSOLE_ENTRIES = 200
 const MAX_BROWSER_CONSOLE_MESSAGE_CHARS = 4_000
-const MAX_IMPORTED_STORAGE_KEY_CHARS = 2_000
-const MAX_IMPORTED_STORAGE_VALUE_CHARS = 200_000
 const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 
 interface BrowserSession {
@@ -84,16 +71,6 @@ function formatSessionSnapshot(session: BrowserSession | null): string {
   return `id=${session.id} attached=${session.isAttached} visible=${session.view.getVisible()} bounds=${formatBounds(session.view.getBounds())} destroyed=${destroyed} url=${url}`
 }
 
-function getHttpOrigin(url: string): string | null {
-  try {
-    const parsed = new URL(url)
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null
-    return parsed.origin
-  } catch {
-    return null
-  }
-}
-
 function sameSiteForElectron(value: BrowserSessionCookie["sameSite"]): CookiesSetDetails["sameSite"] {
   switch ((value ?? "").toLowerCase()) {
     case "strict":
@@ -107,55 +84,6 @@ function sameSiteForElectron(value: BrowserSessionCookie["sameSite"]): CookiesSe
     default:
       return "lax"
   }
-}
-
-function browserCookieDetails(
-  cookie: BrowserSessionCookie,
-  targetUrl: string
-): CookiesSetDetails | null {
-  if (!cookie.name || typeof cookie.value !== "string") return null
-
-  let parsedTarget: URL
-  try {
-    parsedTarget = new URL(targetUrl)
-  } catch {
-    return null
-  }
-  if (parsedTarget.protocol !== "http:" && parsedTarget.protocol !== "https:") return null
-  if (cookie.secure && parsedTarget.protocol !== "https:") return null
-
-  const details: CookiesSetDetails = {
-    url: targetUrl,
-    name: cookie.name,
-    value: cookie.value
-  }
-
-  const normalizedPath = typeof cookie.path === "string" && cookie.path.trim() ? cookie.path : "/"
-  details.path = normalizedPath.startsWith("/") ? normalizedPath : `/${normalizedPath}`
-
-  if (typeof cookie.domain === "string" && cookie.domain.trim()) {
-    const domain = cookie.domain.trim()
-    const normalizedDomain = domain.startsWith(".") ? domain.slice(1) : domain
-    if (
-      normalizedDomain.length === 0 ||
-      (parsedTarget.hostname !== normalizedDomain &&
-        !parsedTarget.hostname.endsWith(`.${normalizedDomain}`))
-    ) {
-      return null
-    }
-    if (domain.startsWith(".") || domain !== parsedTarget.hostname) {
-      details.domain = domain
-    }
-  }
-
-  if (typeof cookie.expires === "number" && Number.isFinite(cookie.expires) && cookie.expires > 0) {
-    details.expirationDate = cookie.expires
-  }
-  if (cookie.httpOnly === true) details.httpOnly = true
-  if (cookie.secure === true) details.secure = true
-  if (cookie.sameSite) details.sameSite = sameSiteForElectron(cookie.sameSite)
-
-  return details
 }
 
 function browserProfileCookieDetails(cookie: BrowserSessionCookie): CookiesSetDetails | null {
@@ -232,61 +160,6 @@ function sortedSkippedWebsites(
   )
 }
 
-function localStorageImportScript(entries: BrowserSessionStorageEntry[]): string {
-  const sanitizedEntries = entries
-    .filter(
-      (entry) =>
-        typeof entry.key === "string" &&
-        typeof entry.value === "string" &&
-        entry.key.length > 0 &&
-        entry.key.length <= MAX_IMPORTED_STORAGE_KEY_CHARS &&
-        entry.value.length <= MAX_IMPORTED_STORAGE_VALUE_CHARS
-    )
-    .slice(0, 200)
-
-  return `
-    (() => {
-      const entries = ${JSON.stringify(sanitizedEntries)};
-      let imported = 0;
-      let skipped = 0;
-      try {
-        for (const entry of entries) {
-          if (!entry || typeof entry.key !== "string" || typeof entry.value !== "string") {
-            skipped += 1;
-            continue;
-          }
-          try {
-            window.localStorage.setItem(entry.key, entry.value);
-            imported += 1;
-          } catch {
-            skipped += 1;
-          }
-        }
-      } catch {
-        skipped += entries.length;
-      }
-      return { imported, skipped };
-    })()
-  `
-}
-
-function normalizeMousePoint(point: BrowserMousePoint): BrowserMousePoint {
-  return {
-    x: Math.max(0, Math.round(point.x)),
-    y: Math.max(0, Math.round(point.y))
-  }
-}
-
-function normalizeClickCount(clickCount: number | undefined): number {
-  return typeof clickCount === "number" && Number.isFinite(clickCount) && clickCount > 0
-    ? Math.round(clickCount)
-    : 1
-}
-
-function finiteDelta(value: number | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0
-}
-
 type PathApi = typeof posix
 
 function usesWindowsPaths(...paths: Array<string | null | undefined>): boolean {
@@ -310,7 +183,7 @@ function isAbsoluteFilesystemPath(value: string): boolean {
   return /^(?:[a-zA-Z]:[\\/]|\/)/.test(value)
 }
 
-export function normalizeUrlInput(input: string, workspacePath: string | null): string {
+function normalizeUrlInput(input: string, workspacePath: string | null): string {
   const value = input.trim()
   if (!value) return "about:blank"
   if (value === "about:blank") return value
@@ -351,7 +224,7 @@ export function normalizeUrlInput(input: string, workspacePath: string | null): 
   return `https://${value}`
 }
 
-export function getUrlPermissionError(url: string, _workspacePath: string | null): string | null {
+function getUrlPermissionError(url: string, _workspacePath: string | null): string | null {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -386,7 +259,7 @@ function truncateBrowserConsoleMessage(message: string): string {
   return `${message.slice(0, MAX_BROWSER_CONSOLE_MESSAGE_CHARS)}\n[message truncated]`
 }
 
-export function appendBrowserConsoleEntry(
+function appendBrowserConsoleEntry(
   entries: BrowserConsoleEntry[],
   entry: BrowserConsoleEntry
 ): BrowserConsoleEntry[] {
@@ -396,7 +269,7 @@ export function appendBrowserConsoleEntry(
     : next
 }
 
-export async function initializeBrowserTarget(
+async function initializeBrowserTarget(
   webContents: Pick<WebContents, "getURL" | "loadURL">
 ): Promise<void> {
   if (webContents.getURL()) return
@@ -606,90 +479,6 @@ export class BrowserService {
     }
   }
 
-  async readRenderedState(sessionId: string, includeHtml = false): Promise<BrowserDomResult> {
-    const session = this.getActiveSession(sessionId)
-    if (!session) return { success: false, error: "Browser session has not been created" }
-
-    try {
-      const state = await this.readStateFromWebContents(session, includeHtml)
-      return { success: true, state }
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  async evaluateInPage<T = unknown>(sessionId: string, script: string): Promise<T> {
-    const session = this.requireSession(sessionId)
-    return (await session.view.webContents.executeJavaScript(script, false)) as T
-  }
-
-  async importSessionData(
-    sessionId: string,
-    data: BrowserSessionData
-  ): Promise<BrowserSessionImportCounts> {
-    const session = this.requireSession(sessionId)
-    const webContents = session.view.webContents
-    const targetUrl = webContents.getURL()
-    const targetOrigin = getHttpOrigin(targetUrl)
-    if (!targetOrigin) {
-      throw new Error("当前内置浏览器页面不是可导入登录态的 HTTP(S) 页面")
-    }
-
-    let importedCookies = 0
-    let skippedCookies = 0
-    for (const cookie of data.cookies) {
-      if (cookie.partitionKey !== undefined && cookie.partitionKey !== null) {
-        skippedCookies += 1
-        continue
-      }
-
-      const details = browserCookieDetails(cookie, targetUrl)
-      if (!details) {
-        skippedCookies += 1
-        continue
-      }
-
-      try {
-        await webContents.session.cookies.set(details)
-        importedCookies += 1
-      } catch {
-        skippedCookies += 1
-      }
-    }
-
-    let importedLocalStorage = 0
-    let skippedLocalStorage = 0
-    if (data.localStorage.length > 0) {
-      try {
-        const result = (await webContents.executeJavaScript(
-          localStorageImportScript(data.localStorage),
-          false
-        )) as { imported?: number; skipped?: number } | null
-        importedLocalStorage =
-          typeof result?.imported === "number" && Number.isFinite(result.imported)
-            ? Math.max(0, Math.round(result.imported))
-            : 0
-        skippedLocalStorage =
-          typeof result?.skipped === "number" && Number.isFinite(result.skipped)
-            ? Math.max(0, Math.round(result.skipped))
-            : data.localStorage.length
-      } catch {
-        skippedLocalStorage = data.localStorage.length
-      }
-    }
-
-    webContents.reload()
-    console.info(
-      `[BrowserService] Imported Chrome session data for ${sessionId} cookies=${importedCookies} localStorage=${importedLocalStorage} skipped=${skippedCookies + skippedLocalStorage}.`
-    )
-    return {
-      importedCookies,
-      importedLocalStorage,
-      skippedCookies,
-      skippedLocalStorage
-    }
-  }
-
   async importProfileData(data: BrowserSessionData): Promise<BrowserSessionImportCounts> {
     const browserSession = electronSession.fromPartition(BROWSER_PROFILE_PARTITION)
     const skippedWebsites = new Map<string, BrowserProfileImportSkippedWebsite>()
@@ -739,116 +528,6 @@ export class BrowserService {
   requestPanel(sessionId: string, threadId?: string): void {
     const window = this.getUsableWindow()
     window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, { sessionId, threadId })
-  }
-
-  async click(sessionId: string, target: BrowserClickTarget): Promise<BrowserState> {
-    const session = this.requireSession(sessionId)
-    const point = await this.resolveClickPoint(session.view.webContents, target)
-    session.view.webContents.focus()
-    session.view.webContents.sendInputEvent({ type: "mouseMove", x: point.x, y: point.y })
-    session.view.webContents.sendInputEvent({
-      type: "mouseDown",
-      x: point.x,
-      y: point.y,
-      button: "left",
-      clickCount: 1
-    })
-    session.view.webContents.sendInputEvent({
-      type: "mouseUp",
-      x: point.x,
-      y: point.y,
-      button: "left",
-      clickCount: 1
-    })
-    return this.getState(sessionId)
-  }
-
-  async moveMouse(sessionId: string, point: BrowserMousePoint): Promise<BrowserState> {
-    const session = this.requireSession(sessionId)
-    const normalized = normalizeMousePoint(point)
-    session.view.webContents.focus()
-    this.sendMouseInput(session.view.webContents, {
-      type: "mouseMove",
-      x: normalized.x,
-      y: normalized.y
-    })
-    return this.getState(sessionId)
-  }
-
-  async mouseDown(
-    sessionId: string,
-    point: BrowserMousePoint,
-    button: BrowserMouseButton = "left",
-    clickCount?: number
-  ): Promise<BrowserState> {
-    const session = this.requireSession(sessionId)
-    const normalized = normalizeMousePoint(point)
-    session.view.webContents.focus()
-    this.sendMouseInput(session.view.webContents, {
-      type: "mouseDown",
-      x: normalized.x,
-      y: normalized.y,
-      button,
-      clickCount: normalizeClickCount(clickCount)
-    })
-    return this.getState(sessionId)
-  }
-
-  async mouseUp(
-    sessionId: string,
-    point: BrowserMousePoint,
-    button: BrowserMouseButton = "left",
-    clickCount?: number
-  ): Promise<BrowserState> {
-    const session = this.requireSession(sessionId)
-    const normalized = normalizeMousePoint(point)
-    session.view.webContents.focus()
-    this.sendMouseInput(session.view.webContents, {
-      type: "mouseUp",
-      x: normalized.x,
-      y: normalized.y,
-      button,
-      clickCount: normalizeClickCount(clickCount)
-    })
-    return this.getState(sessionId)
-  }
-
-  async scroll(sessionId: string, target: BrowserScrollTarget): Promise<BrowserState> {
-    const session = this.requireSession(sessionId)
-    const point = normalizeMousePoint(target)
-    const deltaX = finiteDelta(target.deltaX)
-    const deltaY = finiteDelta(target.deltaY)
-    session.view.webContents.focus()
-    this.sendMouseInput(session.view.webContents, {
-      type: "mouseMove",
-      x: point.x,
-      y: point.y
-    })
-    this.sendMouseWheelInput(session.view.webContents, {
-      type: "mouseWheel",
-      x: point.x,
-      y: point.y,
-      deltaX,
-      deltaY,
-      hasPreciseScrollingDeltas: true,
-      canScroll: true
-    })
-    return this.getState(sessionId)
-  }
-
-  async typeText(sessionId: string, text: string): Promise<BrowserState> {
-    const session = this.requireSession(sessionId)
-    session.view.webContents.focus()
-    await session.view.webContents.insertText(text)
-    return this.getState(sessionId)
-  }
-
-  press(sessionId: string, keyCode: string): BrowserState {
-    const session = this.requireSession(sessionId)
-    session.view.webContents.focus()
-    session.view.webContents.sendInputEvent({ type: "keyDown", keyCode })
-    session.view.webContents.sendInputEvent({ type: "keyUp", keyCode })
-    return this.getState(sessionId)
   }
 
   getState(sessionId: string): BrowserState {
@@ -1094,84 +773,5 @@ export class BrowserService {
 
     console.info(`[BrowserService] Disposed Browser session ${session.id}.`)
     return session.id
-  }
-
-  private async readStateFromWebContents(
-    session: BrowserSession,
-    includeHtml: boolean
-  ): Promise<BrowserRenderedState> {
-    const script = `
-      (() => {
-        const maxText = ${MAX_TEXT_CHARS};
-        const maxHtml = ${MAX_HTML_CHARS};
-        const text = (document.body?.innerText || "").slice(0, maxText + 1);
-        const html = ${includeHtml ? "(document.documentElement?.outerHTML || '').slice(0, maxHtml + 1)" : "undefined"};
-        return {
-          url: location.href,
-          title: document.title,
-          text: text.slice(0, maxText),
-          html: typeof html === "string" ? html.slice(0, maxHtml) : undefined,
-          truncated: text.length > maxText || (typeof html === "string" && html.length > maxHtml)
-        };
-      })()
-    `
-    const result = (await session.view.webContents.executeJavaScript(script, false)) as {
-      url?: string
-      title?: string
-      text?: string
-      html?: string
-      truncated?: boolean
-    }
-    return {
-      sessionId: session.id,
-      url: result.url || session.view.webContents.getURL(),
-      title: result.title || session.view.webContents.getTitle(),
-      text: result.text || "",
-      html: result.html,
-      truncated: Boolean(result.truncated)
-    }
-  }
-
-  private async resolveClickPoint(
-    webContents: WebContents,
-    target: BrowserClickTarget
-  ): Promise<{ x: number; y: number }> {
-    if (typeof target.x === "number" && typeof target.y === "number") {
-      return { x: Math.round(target.x), y: Math.round(target.y) }
-    }
-
-    const selector = target.selector?.trim()
-    if (!selector) {
-      throw new Error("Click target must include x/y or selector")
-    }
-
-    const script = `
-      (() => {
-        const element = document.querySelector(${JSON.stringify(selector)});
-        if (!element) return null;
-        const rect = element.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return null;
-        return {
-          x: Math.round(rect.left + rect.width / 2),
-          y: Math.round(rect.top + rect.height / 2)
-        };
-      })()
-    `
-    const point = (await webContents.executeJavaScript(script, false)) as {
-      x?: number
-      y?: number
-    } | null
-    if (!point || typeof point.x !== "number" || typeof point.y !== "number") {
-      throw new Error(`Element not found or not clickable: ${selector}`)
-    }
-    return { x: point.x, y: point.y }
-  }
-
-  private sendMouseInput(webContents: WebContents, event: MouseInputEvent): void {
-    webContents.sendInputEvent(event)
-  }
-
-  private sendMouseWheelInput(webContents: WebContents, event: MouseWheelInputEvent): void {
-    webContents.sendInputEvent(event)
   }
 }

@@ -94,21 +94,14 @@ import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type {
   BrowserAttachOptions,
-  BrowserChromeSetupAction,
-  BrowserChromeSetupOpenResult,
-  BrowserChromeSessionImportResult,
   BrowserBounds,
-  BrowserClickTarget,
-  BrowserDomResult,
   BrowserNavigateOptions,
   BrowserPanelRequest,
   BrowserProfileImportOptions,
-  BrowserProfileImportPreview,
   BrowserProfileImportResult,
   BrowserScreenshotResult,
   BrowserState
 } from "../shared/browser-types"
-import type { BrowserCookieBridgeStatus } from "../shared/browser-cookie-bridge"
 import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent
@@ -1575,22 +1568,9 @@ interface CustomAPI {
     clearConsole: (sessionId: string) => Promise<BrowserState>
     getState: (sessionId: string) => Promise<BrowserState>
     captureScreenshot: (sessionId: string) => Promise<BrowserScreenshotResult>
-    readRenderedState: (sessionId: string, includeHtml?: boolean) => Promise<BrowserDomResult>
-    click: (sessionId: string, target: BrowserClickTarget) => Promise<BrowserState>
-    typeText: (sessionId: string, text: string) => Promise<BrowserState>
-    press: (sessionId: string, keyCode: string) => Promise<BrowserState>
-    getProfileImportPreview: () => Promise<BrowserProfileImportPreview>
     importProfileData: (
       options: BrowserProfileImportOptions
     ) => Promise<BrowserProfileImportResult>
-    getCookieBridgeStatus: () => Promise<BrowserCookieBridgeStatus>
-    importChromeSession: (
-      sessionId: string,
-      options?: { threadId?: string; workspacePath?: string | null }
-    ) => Promise<BrowserChromeSessionImportResult>
-    openChromeSetup: (
-      action: BrowserChromeSetupAction
-    ) => Promise<BrowserChromeSetupOpenResult>
     disposeAllForRendererUnload: () => void
     onState: (sessionId: string, callback: (state: BrowserState) => void) => () => void
     onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void

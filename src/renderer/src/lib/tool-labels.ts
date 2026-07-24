@@ -1,8 +1,3 @@
-import {
-  BROWSER_TOOL_LABELS,
-  getNodeReplChineseLabel
-} from "./tool-labels-browser"
-
 const TOOL_LABELS: Record<string, string> = {
   read_file: "读取文件",
   write_file: "写入文件",
@@ -22,8 +17,7 @@ const TOOL_LABELS: Record<string, string> = {
   request_user_input: "请求用户输入",
   invoke_deferred_tool: "调用延迟加载的工具",
   inspect_tool: "查看工具定义",
-  search_tool: "搜索工具",
-  ...BROWSER_TOOL_LABELS
+  search_tool: "搜索工具"
 }
 
 interface ToolLabelOptions {
@@ -44,10 +38,6 @@ export function getChineseLabel(
   toolName: string,
   options?: ToolLabelOptions
 ): string | null {
-  if (toolName === "mcp__node_repl__js") {
-    return getNodeReplChineseLabel(options?.args)
-  }
-
   return TOOL_LABELS[toolName] ?? null
 }
 

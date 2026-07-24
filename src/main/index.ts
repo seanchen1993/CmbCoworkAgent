@@ -2,8 +2,8 @@ import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } fro
 import {
   isBrowserNativeMessagingHostLaunch,
   runBrowserNativeMessagingHost
-} from "./browser/browser-native-messaging-host"
-import { configureBrowserCdpEndpoint, autoRegisterPlaywrightMcpConnector } from "./browser/browser-cdp"
+} from "./browser/chrome/browser-native-messaging-host"
+import { configureBrowserCdpEndpoint, autoRegisterPlaywrightMcpConnector } from "./browser/cdp/browser-cdp"
 
 const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
 
@@ -261,7 +261,7 @@ import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { registerBrowserHandlers } from "./ipc/browser"
-import { setGlobalBrowserService } from "./browser/browser-service-registry"
+import { setGlobalBrowserService } from "./browser/core/browser-service-registry"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"

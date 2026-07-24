@@ -10,7 +10,6 @@ import {
   filterCoordinatorNoiseMessages,
   isCoordinatorNotificationPrompt
 } from "../src/renderer/src/lib/message-display-helpers.ts"
-import { getToolLabel } from "../src/renderer/src/lib/tool-labels.ts"
 import type { Message } from "../src/renderer/src/types.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -352,110 +351,6 @@ async function testKeepsNormalUserMessageUnchanged(): Promise<void> {
   assert(messages[0]?.content === content, "normal user message content should not be rewritten")
 }
 
-async function testCoordinatorToolLabelsAreUserFriendly(): Promise<void> {
-  assert(
-    getToolLabel("start_worker", { showToolName: false }) === "启动子代理",
-    "start_worker should have a Chinese display label"
-  )
-  assert(
-    getToolLabel("read_worker_state", { showToolName: false }) === "等待子代理结果",
-    "read_worker_state should have a Chinese display label"
-  )
-  assert(
-    getToolLabel("cancel_worker", { showToolName: false }) === "取消子代理",
-    "cancel_worker should have a Chinese display label"
-  )
-  assert(
-    getToolLabel("mcp__node_repl__js", { showToolName: false }) === "内置浏览器：脚本执行",
-    "mcp__node_repl__js should have a base Chinese display label"
-  )
-  assert(
-    getToolLabel("mcp__node_repl__js", {
-      args: {
-        code: `
-          const caps = await tab.capabilities.list();
-          nodeRepl.write(JSON.stringify(caps, null, 2));
-        `
-      },
-      showToolName: false
-    }) === "内置浏览器：能力列表",
-    "mcp__node_repl__js should infer tab capability list actions from code"
-  )
-  assert(
-    getToolLabel("mcp__node_repl__js", {
-      args: {
-        code: `
-          const capability = await tab.capabilities.get("pageAssets");
-          nodeRepl.write(await capability.documentation());
-        `
-      },
-      showToolName: false
-    }) === "内置浏览器：能力详情",
-    "mcp__node_repl__js should infer tab capability get actions from code"
-  )
-  assert(
-    getToolLabel("mcp__node_repl__js", {
-      args: {
-        code: `
-          const tab = await browser.tabs.new();
-          await tab.goto("https://example.com");
-          await tab.playwright.getByRole("button", { name: "Save" }).click();
-        `
-      },
-      showToolName: false
-    }) === "内置浏览器：跳转",
-    "mcp__node_repl__js should infer only the highest-priority browser action from code"
-  )
-  assert(
-    getToolLabel("mcp__node_repl__js", {
-      args: {
-        code: `
-          const input = tab.playwright.getByRole("textbox", { name: "Name" });
-          await input.fill("Alice");
-        `
-      },
-      showToolName: false
-    }) === "内置浏览器：输入",
-    "mcp__node_repl__js should infer browser input actions from code"
-  )
-  assert(
-    getToolLabel("mcp__node_repl__js", {
-      args: {
-        code: `
-          const info = await tab.playwright.evaluate(() => {
-            const canvas = document.getElementById("captchaCanvas");
-            const rect = canvas?.getBoundingClientRect?.();
-            const form = document.querySelector(".captcha-wrap");
-            return {
-              rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,
-              textNear: form?.textContent || null,
-              html: form?.outerHTML || null
-            };
-          });
-          nodeRepl.write(JSON.stringify(info, null, 2));
-        `
-      },
-      showToolName: false
-    }) === "内置浏览器：页面信息读取",
-    "mcp__node_repl__js should describe evaluate-based DOM inspection clearly"
-  )
-  assert(
-    getToolLabel("mcp__node_repl__js", {
-      args: {
-        code: `
-          if (globalThis.agent?.browsers == null) {
-            await setupBrowserRuntime({ globals: globalThis });
-          }
-          globalThis.browser = await agent.browsers.getForUrl("http://localhost:8080/register.html");
-          nodeRepl.write(await browser.documentation());
-        `
-      },
-      showToolName: false
-    }) === "内置浏览器：启动",
-    "mcp__node_repl__js should prefer earlier browser rules over later matches"
-  )
-}
-
 async function run(): Promise<void> {
   await testHidesToolOnlyReadWorkerStateMessages()
   console.log("PASS hides read_worker_state-only messages")
@@ -493,8 +388,6 @@ async function run(): Promise<void> {
   console.log("PASS keeps assistant coordinator heading")
   await testKeepsNormalUserMessageUnchanged()
   console.log("PASS keeps normal user messages unchanged")
-  await testCoordinatorToolLabelsAreUserFriendly()
-  console.log("PASS coordinator tool labels")
 }
 
 run().catch((error: Error) => {

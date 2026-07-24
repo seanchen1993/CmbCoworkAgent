@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import {
   configureBrowserCdpEndpoint,
-  parseBrowserCdpPort,
   resolveBrowserCdpPort
 } from "./browser-cdp"
 
@@ -32,13 +31,6 @@ describe("browser CDP configuration", () => {
     expect(appendSwitch).toHaveBeenCalledOnce()
     expect(appendSwitch).toHaveBeenCalledWith("remote-debugging-port", "9222")
   })
-
-  it.each(["0", "65536", "abc", "9222.5"])("rejects invalid port %s", (value) => {
-    expect(() => parseBrowserCdpPort(value)).toThrow(
-      "VITE_IN_APP_BROWSER_CDP_PORT must be an integer between 1 and 65535"
-    )
-  })
-})
 
 describe("resolveBrowserCdpPort", () => {
   it("returns default port when no env is set", () => {

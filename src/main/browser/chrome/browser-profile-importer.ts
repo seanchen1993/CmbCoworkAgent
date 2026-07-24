@@ -11,8 +11,8 @@ import type {
   BrowserProfileImportProfile,
   BrowserProfileImportSkipReason,
   BrowserProfileImportSkippedWebsite
-} from "../../shared/browser-types"
-import type { BrowserSessionCookie, BrowserSessionData } from "./browser-session-data"
+} from "../../../shared/browser-types"
+import type { BrowserSessionCookie, BrowserSessionData } from "../core/browser-session-data"
 
 const execFileAsync = promisify(execFile)
 
@@ -55,7 +55,7 @@ interface ChromeCookieReadResult {
   skippedWebsites: BrowserProfileImportSkippedWebsite[]
 }
 
-export interface BrowserProfileImportReadOptions {
+interface BrowserProfileImportReadOptions {
   env?: NodeJS.ProcessEnv
   homeDir?: string
   platform?: NodeJS.Platform
@@ -300,7 +300,7 @@ async function discoverChromeProfiles(
   }))
 }
 
-export async function getBrowserProfileImportPreview(
+async function getBrowserProfileImportPreview(
   options: BrowserProfileImportReadOptions = {}
 ): Promise<BrowserProfileImportPreview> {
   try {

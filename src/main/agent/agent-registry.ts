@@ -99,7 +99,6 @@ const NON_FS_TOOL_NAMES = new Set([
   "memory_get",
   "code_exec",
   "save_code_exec_tool",
-  "mcp__node_repl__js",
   "invoke_deferred_tool",
   "search_tool",
   "inspect_tool",
@@ -115,7 +114,6 @@ const NON_FS_TOOL_NAMES = new Set([
 const NON_FS_SIDE_EFFECT_TOOLS = [
   "code_exec",
   "save_code_exec_tool",
-  "mcp__node_repl__js",
   "invoke_deferred_tool",
   "search_tool",
   "inspect_tool",

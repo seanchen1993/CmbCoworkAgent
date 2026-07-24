@@ -8,7 +8,7 @@ import {
   CMB_CHROME_EXTENSION_ORIGIN,
   CMB_CHROME_NATIVE_HOST_NAME,
   type BrowserCookieBridgeStatus
-} from "../../shared/browser-cookie-bridge"
+} from "../../../shared/browser-cookie-bridge"
 import {
   getBrowserCookieBridgeDirectory,
   getBrowserCookieBridgeSecret
@@ -27,11 +27,11 @@ interface NativeHostManifest {
   type: "stdio"
 }
 
-export function getCmbChromeNativeHostManifestPath(): string {
+function getCmbChromeNativeHostManifestPath(): string {
   return join(getBrowserCookieBridgeDirectory(), `${CMB_CHROME_NATIVE_HOST_NAME}.json`)
 }
 
-export function getCmbChromeNativeHostWrapperPath(): string {
+function getCmbChromeNativeHostWrapperPath(): string {
   return join(getBrowserCookieBridgeDirectory(), WINDOWS_NATIVE_HOST_WRAPPER_NAME)
 }
 
@@ -44,7 +44,7 @@ function batchQuotedPath(value: string): string {
   return `"${value.replace(/%/g, "%%")}"`
 }
 
-export function createWindowsNativeHostWrapper(execPath: string, entryPath: string): string {
+function createWindowsNativeHostWrapper(execPath: string, entryPath: string): string {
   return [
     "@echo off",
     "setlocal",
@@ -174,29 +174,5 @@ export async function ensureCmbChromeNativeHostRegistration(): Promise<BrowserCo
       nativeHostRegistered: false,
       platformSupported: true
     }
-  }
-}
-
-export async function getCmbChromeNativeHostRegistrationStatus(): Promise<BrowserCookieBridgeStatus> {
-  if (process.platform !== "win32") {
-    return {
-      connected: false,
-      extensionId: CMB_CHROME_EXTENSION_ID,
-      nativeHostRegistered: false,
-      platformSupported: false
-    }
-  }
-  const manifestPath = getCmbChromeNativeHostManifestPath()
-  const wrapperPath = getCmbChromeNativeHostWrapperPath()
-  const registered =
-    app.isPackaged &&
-    (await manifestMatches(manifestPath)) &&
-    (await nativeHostFilesMatch(wrapperPath)) &&
-    (await registryMatches(manifestPath))
-  return {
-    connected: false,
-    extensionId: CMB_CHROME_EXTENSION_ID,
-    nativeHostRegistered: registered,
-    platformSupported: true
   }
 }
