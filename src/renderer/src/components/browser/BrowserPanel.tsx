@@ -268,9 +268,8 @@ function BrowserWelcomePanel(): React.JSX.Element {
           <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
             从一个链接开始
           </h2>
-          <p className="mt-2 max-w-md text-xs leading-5 text-stone-600">
-            在上方地址栏输入网站链接、本地服务地址或工作区中的 HTML 文件路径，按 Enter
-            即可打开页面。
+          <p className="mt-2  text-xs leading-5 text-stone-600">
+            在上方地址栏输入：Web Url、本地服务地址、工作区中的 HTML 文件路径，按 Enter。
           </p>
         </div>
 
@@ -289,7 +288,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
               </span>
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">本地开发即时预览</p>
-                <p className="mt-0.5 text-[11px] leading-4 text-stone-500">
+                <p className="mt-1 text-[11px] leading-4 text-stone-500">
                   修改代码后运行{" "}
                   <code className="font-mono text-[10px] text-stone-700">npm run dev</code>
                   ，即可直接访问{" "}
@@ -305,7 +304,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
               </span>
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">让大模型协助操作页面</p>
-                <p className="mt-0.5 text-[11px] leading-4 text-stone-500">
+                <p className="mt-1 text-[11px] leading-4 text-stone-500">
                   在配置页面开启内置浏览器后，大模型即可在任务中浏览、输入、点击并验证页面结果。
                 </p>
               </div>
@@ -317,7 +316,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
               </span>
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">导入Chrome 数据，复用登录态</p>
-                <p className="mt-0.5 text-[11px] leading-4 text-stone-500">
+                <p className="mt-1 text-[11px] leading-4 text-stone-500">
                   点击右上角钥匙图标即可导入 Chrome 登录数据。首次使用需要安装浏览器插件，
                   插件请联系开发人员获取。
                 </p>
@@ -330,7 +329,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
               </span>
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">沉淀可复用的测试案例</p>
-                <p className="mt-0.5 text-[11px] leading-4 text-stone-500">
+                <p className="mt-1 text-[11px] leading-4 text-stone-500">
                   支持 [ AI 自动录制 + 人工录制 ]
                   测试案例，方便将高频操作沉淀为后续可复用的验证流程。
                 </p>
