@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Check,
   Copy,
+  EyeOff,
   Globe2,
   KeyRound,
   Loader2,
@@ -20,6 +21,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import {
   BROWSER_SESSION_ID,
   type BrowserBounds,
@@ -264,6 +266,7 @@ export function BrowserPanel({
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [isHiddenByModalDialog, setIsHiddenByModalDialog] = useState(false)
 
   const applyBrowserState = useCallback((nextState: BrowserState) => {
     isSessionCreatedRef.current = nextState.created
@@ -314,8 +317,10 @@ export function BrowserPanel({
         width: Math.round(rect.width * zoomLevel),
         height: Math.round(rect.height * zoomLevel)
       }
-      const visible = rect.width >= 8 && rect.height >= 8
-      if (!visible && hasVisibleBoundsRef.current) {
+      const layoutVisible = rect.width >= 8 && rect.height >= 8
+      const modalDialogOpen = hasOpenModalDialog()
+      const visible = layoutVisible && !modalDialogOpen
+      if (!layoutVisible && hasVisibleBoundsRef.current) {
         console.info(
           `[BrowserPanel] Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport hidden after first visible; rect=${formatRect(rect)} zoom=${zoomLevel} lastBounds=${formatBounds(lastBoundsRef.current)}.`
         )
@@ -331,9 +336,9 @@ export function BrowserPanel({
       const previousVisible = lastBrowserViewVisibleRef.current
       lastBoundsRef.current = bounds
       lastBrowserViewVisibleRef.current = visible
-      if (visible) hasVisibleBoundsRef.current = true
+      if (layoutVisible) hasVisibleBoundsRef.current = true
       console.info(
-        `[BrowserPanel] Syncing bounds for ${BROWSER_SESSION_ID}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
+        `[BrowserPanel] Syncing bounds for ${BROWSER_SESSION_ID}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} modalDialogOpen=${modalDialogOpen} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
       )
       void window.api.browser
         .setBounds(bounds, visible)
@@ -430,6 +435,18 @@ export function BrowserPanel({
       window.clearInterval(interval)
     }
   }, [state.created, syncBounds])
+
+  useEffect(() => {
+    const handleModalDialogChange = (): void => {
+      setIsHiddenByModalDialog(hasOpenModalDialog())
+      syncBounds("modal-dialog-change")
+    }
+    handleModalDialogChange()
+    window.addEventListener(MODAL_DIALOG_CHANGE_EVENT, handleModalDialogChange)
+    return () => {
+      window.removeEventListener(MODAL_DIALOG_CHANGE_EVENT, handleModalDialogChange)
+    }
+  }, [syncBounds])
 
   useEffect(() => {
     if (!isUrlFocused) {
@@ -811,6 +828,19 @@ export function BrowserPanel({
       )}
 
       <div className="relative min-h-0 flex-1 bg-white">
+        {isHiddenByModalDialog && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[radial-gradient(circle_at_top,#f5f5f4,transparent_58%),linear-gradient(135deg,#fafaf9,#f5f5f4)] p-6">
+            <div className="max-w-xs text-center">
+              <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 shadow-sm">
+                <EyeOff className="size-4" strokeWidth={1.8} />
+              </div>
+              <p className="text-sm font-medium text-stone-800">浏览器已暂时隐藏</p>
+              <p className="mt-1.5 text-xs leading-5 text-stone-500">
+                为确保当前弹窗完整显示，内置浏览器会在关闭弹窗后自动恢复。
+              </p>
+            </div>
+          </div>
+        )}
         {state.isLoading && (
           <div className="pointer-events-none absolute right-3 top-3 z-10 inline-flex items-center rounded-md border border-border bg-background/90 px-2 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
             <Loader2 className="mr-1.5 size-3 animate-spin" />

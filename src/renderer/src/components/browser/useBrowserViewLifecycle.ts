@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react"
 import { BROWSER_SESSION_ID } from "../../../../shared/browser-types"
+import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 
 const HIDDEN_BROWSER_BOUNDS = { x: 0, y: 0, width: 0, height: 0 }
 
@@ -30,6 +31,7 @@ export function useBrowserViewLifecycle({
 }: UseBrowserViewLifecycleOptions): void {
   const wasBrowserPanelVisibleRef = useRef(false)
   const rendererUnloadBrowserCleanupSentRef = useRef(false)
+  const modalDialogOpenRef = useRef(false)
 
   const isBrowserPanelVisible =
     rightModule === "browser" &&
@@ -96,6 +98,45 @@ export function useBrowserViewLifecycle({
     wasBrowserPanelVisibleRef.current = false
     hideBrowserSession("the Browser panel is hidden")
   }, [hideBrowserSession, isBrowserPanelVisible])
+
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined" || !document.body) return
+
+    let frame: number | null = null
+    const syncModalDialogState = (): void => {
+      frame = null
+      const modalDialogOpen = hasOpenModalDialog()
+      if (modalDialogOpen === modalDialogOpenRef.current) return
+
+      modalDialogOpenRef.current = modalDialogOpen
+      window.dispatchEvent(new Event(MODAL_DIALOG_CHANGE_EVENT))
+      console.info(
+        `[App] Modal dialog visibility changed: open=${modalDialogOpen}; session=${BROWSER_SESSION_ID}.`
+      )
+      if (modalDialogOpen && wasBrowserPanelVisibleRef.current) {
+        hideBrowserSession("a modal dialog is open")
+      }
+    }
+
+    const scheduleModalDialogStateSync = (): void => {
+      if (frame !== null) return
+      frame = window.requestAnimationFrame(syncModalDialogState)
+    }
+
+    const observer = new MutationObserver(scheduleModalDialogStateSync)
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-hidden", "data-state", "role"]
+    })
+    scheduleModalDialogStateSync()
+
+    return () => {
+      observer.disconnect()
+      if (frame !== null) window.cancelAnimationFrame(frame)
+    }
+  }, [hideBrowserSession])
 
   useEffect(() => {
     return window.api.browser.onPanelRequest((request) => {
