@@ -1,11 +1,11 @@
 export const MODAL_DIALOG_CHANGE_EVENT = "cmb:modal-dialog-change"
 
-const MODAL_DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"]'
+const MODAL_DIALOG_SELECTOR = '[data-cmb-modal-dialog="true"]'
 
 /**
  * Native WebContentsView instances sit above renderer DOM. Keep them hidden
- * whenever a dialog is mounted in the renderer. Radix Dialog marks open
- * content with data-state rather than aria-modal.
+ * whenever an app Dialog is mounted in the renderer. The shared DialogContent
+ * marker intentionally excludes Popover and other ARIA overlays.
  */
 export function hasOpenModalDialog(): boolean {
   if (typeof document === "undefined") return false
