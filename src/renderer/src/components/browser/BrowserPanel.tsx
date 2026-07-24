@@ -23,6 +23,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import {
   BROWSER_SESSION_ID,
@@ -51,6 +52,10 @@ const EMPTY_STATE: BrowserState = {
   consoleEntries: []
 }
 const BOUNDS_POSITION_POLL_MS = 1000
+const BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME =
+  "size-8 shrink-0 rounded-md transition-colors hover:bg-muted"
+const BROWSER_INPUT_ICON_BUTTON_CLASSNAME = "absolute right-1 size-6 rounded"
+const BROWSER_CONSOLE_ICON_BUTTON_CLASSNAME = "size-7 rounded transition-colors hover:bg-muted"
 
 function isInitialBrowserPage(url: string): boolean {
   return !url || url === "about:blank"
@@ -776,30 +781,32 @@ export function BrowserPanel({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
       <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
-        <button
-          type="button"
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-          title="后退"
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={<ArrowLeft className="size-4" strokeWidth={1.8} />}
+          popoverContent="后退"
           aria-label="后退"
           disabled={!state.canGoBack}
           onClick={() => void window.api.browser.goBack().then(applyBrowserState)}
-        >
-          <ArrowLeft className="size-4" strokeWidth={1.8} />
-        </button>
-        <button
-          type="button"
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-          title="前进"
+        />
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={<ArrowRight className="size-4" strokeWidth={1.8} />}
+          popoverContent="前进"
           aria-label="前进"
           disabled={!state.canGoForward}
           onClick={() => void window.api.browser.goForward().then(applyBrowserState)}
-        >
-          <ArrowRight className="size-4" strokeWidth={1.8} />
-        </button>
-        <button
-          type="button"
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          title={state.isLoading ? "停止" : "刷新"}
+        />
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={
+            state.isLoading ? (
+              <Square className="size-3.5" strokeWidth={2} />
+            ) : (
+              <RotateCcw className="size-4" strokeWidth={1.8} />
+            )
+          }
+          popoverContent={state.isLoading ? "停止" : "刷新"}
           aria-label={state.isLoading ? "停止" : "刷新"}
           onClick={() =>
             void (
@@ -808,13 +815,7 @@ export function BrowserPanel({
                 : window.api.browser.reload()
             ).then(applyBrowserState)
           }
-        >
-          {state.isLoading ? (
-            <Square className="size-3.5" strokeWidth={2} />
-          ) : (
-            <RotateCcw className="size-4" strokeWidth={1.8} />
-          )}
-        </button>
+        />
         <form onSubmit={navigate} className="flex min-w-0 flex-1 items-center">
           <div className="relative flex min-w-0 flex-1 items-center">
             <Globe2 className="pointer-events-none absolute left-2 size-4 text-muted-foreground/70" />
@@ -833,33 +834,33 @@ export function BrowserPanel({
               className="h-8 w-full rounded-md border border-border bg-background px-8 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-status-warning/70"
             />
             {urlInput && (
-              <button
-                type="button"
-                className="absolute right-1 inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-                title="清空"
+              <IconPopoverButton
+                className={BROWSER_INPUT_ICON_BUTTON_CLASSNAME}
+                icon={<X className="size-3.5" strokeWidth={2} />}
+                popoverContent="清空"
                 aria-label="清空"
                 onClick={() => setUrlInput("")}
-              >
-                <X className="size-3.5" strokeWidth={2} />
-              </button>
+              />
             )}
           </div>
         </form>
-        <button
-          type="button"
-          className="relative inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          title={consoleToggleTitle}
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={
+            <div className="relative">
+              <Terminal className="size-4" strokeWidth={1.8} />
+              {consoleCount > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
+                  {consoleCount > 99 ? "99+" : consoleCount}
+                </span>
+              )}
+            </div>
+          }
+          popoverContent={consoleToggleTitle}
           aria-label={consoleToggleTitle}
           aria-pressed={consoleOpen}
           onClick={() => setConsoleOpen((open) => !open)}
-        >
-          <Terminal className="size-4" strokeWidth={1.8} />
-          {consoleCount > 0 && (
-            <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
-              {consoleCount > 99 ? "99+" : consoleCount}
-            </span>
-          )}
-        </button>
+        />
         {/* 暂时隐藏“读取页面状态”动作，后续可能恢复。
         <button
           type="button"
@@ -872,48 +873,48 @@ export function BrowserPanel({
           <Code2 className="size-4" strokeWidth={1.8} />
         </button>
         */}
-        <button
-          type="button"
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-          title="截图"
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={
+            isCapturing ? (
+              <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+            ) : (
+              <Camera className="size-4" strokeWidth={1.8} />
+            )
+          }
+          popoverContent="截图"
           aria-label="截图"
           disabled={isCapturing || !state.created}
           onClick={captureScreenshot}
-        >
-          {isCapturing ? (
-            <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-          ) : (
-            <Camera className="size-4" strokeWidth={1.8} />
-          )}
-        </button>
-        <button
-          type="button"
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-          title="导入浏览器数据"
+        />
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={
+            isImportingBrowserProfile ? (
+              <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+            ) : (
+              <KeyRound className="size-4" strokeWidth={1.8} />
+            )
+          }
+          popoverContent="导入浏览器数据"
           aria-label="导入浏览器数据"
           disabled={browserProfileImportDisabled}
           onClick={() => void importBrowserProfileData()}
-        >
-          {isImportingBrowserProfile ? (
-            <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-          ) : (
-            <KeyRound className="size-4" strokeWidth={1.8} />
-          )}
-        </button>
-        <button
-          type="button"
-          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          title={isFullscreen ? "缩小全屏" : "全屏预览"}
+        />
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={
+            isFullscreen ? (
+              <Minimize2 className="size-4" strokeWidth={1.8} />
+            ) : (
+              <Maximize2 className="size-4" strokeWidth={1.8} />
+            )
+          }
+          popoverContent={isFullscreen ? "缩小全屏" : "全屏预览"}
           aria-label={isFullscreen ? "缩小全屏" : "全屏预览"}
           aria-pressed={isFullscreen}
           onClick={toggleFullscreen}
-        >
-          {isFullscreen ? (
-            <Minimize2 className="size-4" strokeWidth={1.8} />
-          ) : (
-            <Maximize2 className="size-4" strokeWidth={1.8} />
-          )}
-        </button>
+        />
       </div>
 
       {state.error && (
@@ -968,34 +969,33 @@ export function BrowserPanel({
               <span className="tabular-nums">{consoleCount}</span>
             </div>
             <div className="flex items-center gap-1">
-              <button
-                type="button"
-                className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-                title="复制 Console 内容"
+              <IconPopoverButton
+                className={BROWSER_CONSOLE_ICON_BUTTON_CLASSNAME}
+                side="bottom"
+                icon={
+                  copiedConsole ? (
+                    <Check className="size-3.5" strokeWidth={1.8} />
+                  ) : (
+                    <Copy className="size-3.5" strokeWidth={1.8} />
+                  )
+                }
+                popoverContent="复制 Console 内容"
                 aria-label="复制 Console 内容"
                 disabled={consoleCount === 0}
                 onClick={() => void copyConsole()}
-              >
-                {copiedConsole ? (
-                  <Check className="size-3.5" strokeWidth={1.8} />
-                ) : (
-                  <Copy className="size-3.5" strokeWidth={1.8} />
-                )}
-              </button>
-              <button
-                type="button"
-                className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-                title="清空控制台"
+              />
+              <IconPopoverButton
+                className={BROWSER_CONSOLE_ICON_BUTTON_CLASSNAME}
+                side="bottom"
+                icon={<Trash2 className="size-3.5" strokeWidth={1.8} />}
+                popoverContent="清空控制台"
                 aria-label="清空控制台"
                 disabled={consoleCount === 0}
                 onClick={clearConsole}
-              >
-                <Trash2 className="size-3.5" strokeWidth={1.8} />
-              </button>
+              />
               <button
                 type="button"
                 className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                title="收起控制台"
                 aria-label="收起控制台"
                 onClick={() => setConsoleOpen(false)}
               >
