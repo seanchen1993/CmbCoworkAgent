@@ -118,8 +118,8 @@ export function shouldPreparePlaywrightInAppBrowser(
 
   const providerNames = [tool.providerAlias, tool.providerDisplayName].map(normalizeProviderName)
   return (
-    providerNames.some((name) => name === "playwright" || name === "playwrightmcp") ||
-    tool.toolId.startsWith("mcp__playwright__")
+    providerNames.some((name) => name === "inappbrowser") ||
+    tool.toolId.startsWith("mcp__inAppBrowser__")
   )
 }
 

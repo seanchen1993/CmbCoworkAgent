@@ -3,7 +3,7 @@ import {
   isBrowserNativeMessagingHostLaunch,
   runBrowserNativeMessagingHost
 } from "./browser/browser-native-messaging-host"
-import { configureBrowserCdpEndpoint } from "./browser/browser-cdp"
+import { configureBrowserCdpEndpoint, autoRegisterPlaywrightMcpConnector } from "./browser/browser-cdp"
 
 const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
 
@@ -706,6 +706,9 @@ if (browserNativeMessagingHostLaunch) {
     registerModelHandlers(ipcMain)
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
+    autoRegisterPlaywrightMcpConnector(browserCdpPort).catch((err) =>
+      console.error("[Main] Failed to auto-register Playwright MCP connector:", err)
+    )
     registerScheduledTaskHandlers(ipcMain)
     registerHeartbeatHandlers(ipcMain)
     registerMemoryHandlers(ipcMain)
