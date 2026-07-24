@@ -93,6 +93,14 @@ import {
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
 import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
+import {
+  buildToolResultAssociations,
+  getWorkerToolUiKey
+} from "@/lib/worker-tool-result-key"
+import {
+  buildVisibleMessageLayout,
+  messageHasVisibleRow
+} from "@/lib/message-display-visibility"
 import { isCoordinatorModeMetadata, isWorkflowModeMetadata } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
@@ -178,6 +186,7 @@ import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import {
   liveStreamMessageRole,
+  normalizeLiveStreamMessageIds,
   normalizeLiveStreamMessageContent,
   stringifyMessageContentForReport,
   type LiveStreamMessage as StreamMessage
@@ -1367,47 +1376,6 @@ function getMessageForkCheckpointHint(errorMessage?: string): string {
   return `${message} ${MESSAGE_FORK_CHECKPOINT_HINT}`
 }
 
-const getMessageBubbleText = (content: Message["content"]): string => {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-
-  return content
-    .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-    .filter(Boolean)
-    .join("\n")
-}
-
-// MessageBubble renders `null` for messages with no visible content: tool-result
-// messages, empty system notices, and assistant/user messages whose text is empty
-// and that carry no tool calls or reasoning. Such empty wrappers must NOT get content-visibility
-// containment — when scrolled off-screen the intrinsic-size fallback would reserve
-// phantom height (stacking across many empty tool results into a large blank gap
-// between tools and text). Detection is intentionally generous: a false positive
-// only skips a cheap optimization on an already-short message (harmless), while a
-// false negative reintroduces the gap.
-//
-// Match each role to its actual render path: assistant/user bubbles render only
-// `text` blocks (getMessageBubbleText), while the system branch renders via
-// extractMessagePlainText, which also reads string `block.content` — so system
-// must use getMessageText (same text+content logic) or a notice carried in a
-// content block would be misclassified as empty.
-const messageRendersNothing = (message: Message): boolean => {
-  if (message.role === "tool") return true
-  const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
-  if (hasToolCalls) return false
-  if (message.role === "assistant" && typeof message.reasoning === "string") {
-    return (
-      message.reasoning.trim().length === 0 &&
-      getMessageBubbleText(message.content).trim().length === 0
-    )
-  }
-  const visibleText =
-    message.role === "system"
-      ? getMessageText(message.content)
-      : getMessageBubbleText(message.content)
-  return visibleText.trim().length === 0
-}
-
 function RotatingHeadline() {
   const [wordIndex, setWordIndex] = useState(0)
   const [displayed, setDisplayed] = useState("")
@@ -1752,6 +1720,7 @@ interface ChatMessageListProps {
   isLoading: boolean
   toolResults: Map<string, ChatToolResultInfo>
   toolCallStates: Map<string, ToolCallState>
+  pendingApprovalToolCallKeys: Set<string>
   pendingApproval: HITLRequest | null
   autoApproveGitPush: boolean
   onApprovalDecision: (decision: ChatApprovalDecision) => void
@@ -1776,6 +1745,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
   isLoading,
   toolResults,
   toolCallStates,
+  pendingApprovalToolCallKeys,
   pendingApproval,
   autoApproveGitPush,
   onApprovalDecision,
@@ -1788,11 +1758,23 @@ const ChatMessageList = React.memo(function ChatMessageList({
   assistantDurationMsById,
   userSendTimeLabelById
 }: ChatMessageListProps): React.JSX.Element {
+  const visibleMessageLayout = useMemo(
+    () =>
+      buildVisibleMessageLayout(messages, (message) => {
+        const hasHookLogChip =
+          hookLoggingEnabled &&
+          message.role === "user" &&
+          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+        return messageHasVisibleRow(message, hasHookLogChip)
+      }),
+    [hookLogBucketByTurnId, hookLoggingEnabled, messages]
+  )
+
   return (
     <>
       {messages.map((message, index) => {
-        const previousMessage = index > 0 ? messages[index - 1] : null
-        const isLastMessage = index === messages.length - 1
+        const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
+        const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
         const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
         const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
 
@@ -1800,9 +1782,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
           hookLoggingEnabled && message.role === "user"
             ? hookLogBucketByTurnId.get(message.id)
             : undefined
-        const rendersNothing = messageRendersNothing(message)
         const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
-        if (rendersNothing && !hasHookLogChip) return null
+        if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
         const navigatorRef = setMessageRef(message.id, message.role)
         const combinedRef = (node: HTMLDivElement | null): void => {
@@ -1815,7 +1796,11 @@ const ChatMessageList = React.memo(function ChatMessageList({
         }
 
         return (
-          <div key={message.id} ref={combinedRef} data-message-role={message.role}>
+          <div
+            key={`${message.role}:${message.id}`}
+            ref={combinedRef}
+            data-message-role={message.role}
+          >
             <MessageBubble
               message={message}
               previousMessage={previousMessage}
@@ -1823,6 +1808,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
               showAssistantMeta={showAssistantMeta}
               toolResults={toolResults}
               toolCallStates={toolCallStates}
+              pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
               pendingApproval={pendingApproval}
               autoApproveGitPush={autoApproveGitPush}
               onApprovalDecision={onApprovalDecision}
@@ -2402,6 +2388,7 @@ export function ChatContainer({
     setActiveTurnStartTime,
     clearFinishedWorkflowRun,
     appendMessage,
+    syncDurableTranscript,
     removeLocalMessage,
     addQueuedMessage,
     prependQueuedMessage,
@@ -3273,9 +3260,21 @@ export function ChatContainer({
   }, [isLoading])
 
   const displayMessages = useMemo(() => {
+    const normalizedLiveMessages = normalizeLiveStreamMessageIds(
+      threadMessages.map((message) => ({
+        id: message.id,
+        type:
+          message.role === "user"
+            ? "human"
+            : message.role === "assistant"
+              ? "ai"
+              : message.role
+      })),
+      streamData.liveMessages || []
+    )
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
     const liveReasoningById = new Map<string, string>()
-    for (const liveMessage of streamData.liveMessages || []) {
+    for (const liveMessage of normalizedLiveMessages) {
       if (
         liveMessage.id &&
         liveStreamMessageRole(liveMessage.type) === "assistant" &&
@@ -3290,7 +3289,7 @@ export function ChatContainer({
       const liveReasoning = liveReasoningById.get(message.id)
       return liveReasoning ? { ...message, reasoning: liveReasoning } : message
     })
-    const streamingMsgs: Message[] = (streamData.liveMessages || [])
+    const streamingMsgs: Message[] = normalizedLiveMessages
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
       .map((streamMsg) => {
@@ -3372,70 +3371,79 @@ export function ChatContainer({
   }, [displayMessages, hookLogBuckets])
 
   const lastContentMessageId = useMemo(() => {
-    // Match what actually renders: empty messages are skipped from the DOM
-    // (see messageRendersNothing), so they own no contentMessageRefs entry and
-    // must not be returned here, or precise scroll alignment would silently fall
-    // back to scroll-to-bottom.
+    // Match what actually renders: ordinary empty messages are skipped, while
+    // an empty user row with Hook entries still owns a visible chip and scroll
+    // anchor. Returning a skipped row would make precise alignment fall back to
+    // scroll-to-bottom; omitting the Hook-only row would anchor one turn early.
     for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
       const message = displayMessages[index]
-      if (!messageRendersNothing(message)) return message.id
+      const hasHookLogChip = Boolean(
+        hookLogConfig.enabled &&
+        message.role === "user" &&
+        hookLogBucketByTurnId.get(message.id)?.entries.length
+      )
+      if (messageHasVisibleRow(message, hasHookLogChip)) return message.id
     }
     return null
-  }, [displayMessages])
+  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
 
-  // Per-message derived flags precomputed in a single O(n) reverse pass. The
-  // render loop previously recomputed these with `slice().find/some` for every
-  // message, which is O(n^2) on every render (and renders fire on every
-  // streaming token). Here we walk right-to-left once, tracking the nearest
-  // non-tool message role and whether a later user message exists.
+  // Per-message derived flags precomputed in a single O(n) reverse pass. Use
+  // the same visibility rule as ChatMessageList so invisible tool/empty rows do
+  // not affect assistant actions or turn boundaries.
   const perMessageFlags = useMemo(() => {
     const n = displayMessages.length
     const showAssistantMeta: boolean[] = new Array(n)
     const hasUserAfterHead: boolean[] = new Array(n)
-    let nextNonToolRole: string | null = null
+    let nextVisibleRole: string | null = null
     let userAfter = false
     for (let index = n - 1; index >= 0; index -= 1) {
       const message = displayMessages[index]
       hasUserAfterHead[index] = userAfter
+      const hasHookLogChip =
+        hookLogConfig.enabled &&
+        message.role === "user" &&
+        Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+      if (!messageHasVisibleRow(message, hasHookLogChip)) {
+        showAssistantMeta[index] = false
+        continue
+      }
       showAssistantMeta[index] =
-        message.role !== "assistant" || nextNonToolRole === null || nextNonToolRole !== "assistant"
+        message.role !== "assistant" || nextVisibleRole === null || nextVisibleRole !== "assistant"
       if (message.role === "user") userAfter = true
-      if (message.role !== "tool") nextNonToolRole = message.role
+      nextVisibleRole = message.role
     }
     return { showAssistantMeta, hasUserAfterHead }
-  }, [displayMessages])
+  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
 
-  // Build tool results map from tool messages
-  const toolResults = useMemo(() => {
-    const results = new Map<string, { content: string | unknown; is_error?: boolean }>()
-    for (const msg of displayMessages) {
-      if (msg.role === "tool" && msg.tool_call_id) {
-        results.set(msg.tool_call_id, {
-          content: msg.content,
-          is_error: msg.is_error
-        })
-      }
-    }
-    return results
-  }, [displayMessages])
+  const toolResults = useMemo(
+    () => buildToolResultAssociations(displayMessages),
+    [displayMessages]
+  )
 
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
     () => buildMessageBubbleTimingMeta(displayMessages),
     [displayMessages]
   )
 
-  const toolCallDisplayStates = useMemo(() => {
-    const orderedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
-    const seenToolCallIds = new Set<string>()
+  const { toolCallDisplayStates, pendingApprovalToolCallKeys } = useMemo(() => {
+    const orderedToolCalls: Array<{
+      key: string
+      call: { id: string; name: string; args: Record<string, unknown> }
+    }> = []
 
     for (const message of displayMessages) {
       if (!Array.isArray(message.tool_calls)) continue
-      for (const toolCall of message.tool_calls) {
-        if (!toolCall?.id || seenToolCallIds.has(toolCall.id)) continue
-        seenToolCallIds.add(toolCall.id)
-        orderedToolCalls.push(toolCall)
-      }
+      message.tool_calls.forEach((toolCall, index) => {
+        if (!toolCall?.id) return
+        orderedToolCalls.push({
+          key: getWorkerToolUiKey(message.id, toolCall.id, index),
+          call: toolCall
+        })
+      })
     }
+
+    const lastOccurrenceKeyByCallId = new Map<string, string>()
+    for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
 
     const currentApprovalIds = new Set<string>()
     if (pendingApproval?.pendingToolCallIds?.length) {
@@ -3445,21 +3453,29 @@ export function ChatContainer({
     } else if (pendingApproval?.tool_call?.id) {
       currentApprovalIds.add(pendingApproval.tool_call.id)
     }
+    const approvalKeys = new Set<string>()
+    for (const id of currentApprovalIds) {
+      const key = lastOccurrenceKeyByCallId.get(id)
+      if (key) approvalKeys.add(key)
+    }
 
     let activeAssigned = false
     const nextStates = new Map<string, ToolCallState>()
 
-    for (const toolCall of orderedToolCalls) {
-      const baseState = toolCallStates[toolCall.id]
+    for (const { key, call: toolCall } of orderedToolCalls) {
+      const baseState =
+        lastOccurrenceKeyByCallId.get(toolCall.id) === key
+          ? toolCallStates[toolCall.id]
+          : undefined
       const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
-      const result = toolResults.get(toolCall.id)
+      const result = toolResults.get(key)
       let status: ToolCallStatus
 
       if (result !== undefined) {
         status = result.is_error ? "failed" : "completed"
       } else if (isTerminalToolCallStatus(baseState?.status)) {
-        status = baseState.status
-      } else if (currentApprovalIds.has(toolCall.id)) {
+        status = baseState!.status
+      } else if (approvalKeys.has(key)) {
         status = "awaiting_approval"
         activeAssigned = true
       } else if (!isLoading) {
@@ -3471,7 +3487,7 @@ export function ChatContainer({
         status = "queued"
       }
 
-      nextStates.set(toolCall.id, {
+      nextStates.set(key, {
         id: toolCall.id,
         status,
         name: toolCall.name || baseState?.name,
@@ -3486,7 +3502,10 @@ export function ChatContainer({
       })
     }
 
-    return nextStates
+    return {
+      toolCallDisplayStates: nextStates,
+      pendingApprovalToolCallKeys: approvalKeys
+    }
   }, [displayMessages, isLoading, pendingApproval, toolCallStates, toolResults])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
@@ -4957,23 +4976,30 @@ export function ChatContainer({
         threadId,
         handedOff.map((queued) => queued.id)
       )
-      .then(({ pendingIds, injectedIds, durableIds }) => {
+      .then(async ({ pendingIds, injectedIds, durableIds }) => {
         if (cancelled) return
         const pending = new Set([...pendingIds, ...injectedIds])
         const durable = new Set(durableIds)
         const visibleIds = new Set(threadMessages.map((message) => message.id))
+        const missingDurableIds = handedOff
+          .filter((queued) => durable.has(queued.id) && !visibleIds.has(queued.id))
+          .map((queued) => queued.id)
+        const missingDurableIdSet = new Set(missingDurableIds)
+        if (missingDurableIds.length > 0) {
+          const synced = await syncDurableTranscript(missingDurableIds)
+          if (cancelled) return
+          if (!synced) {
+            scheduleRetry()
+            return
+          }
+        }
         let shouldRetry = false
         for (const queued of handedOff) {
           if (durable.has(queued.id)) {
-            if (!visibleIds.has(queued.id)) {
-              appendMessage({
-                id: queued.id,
-                role: "user",
-                content: guardCoordinatorPlainText(getQueuedDisplayContent(queued)),
-                created_at: new Date()
-              })
-            }
-            deleteQueuedMessage(queued.id)
+            // Missing durable messages and their handed-off drafts are committed
+            // atomically by syncDurableTranscript. A separately queued delete
+            // could otherwise run after its lifecycle fence became stale.
+            if (!missingDurableIdSet.has(queued.id)) deleteQueuedMessage(queued.id)
           } else if (pending.has(queued.id)) {
             shouldRetry = true
           } else {
@@ -4998,13 +5024,13 @@ export function ChatContainer({
       if (retryTimer) clearTimeout(retryTimer)
     }
   }, [
-    appendMessage,
     deleteQueuedMessage,
     historyLoading,
     isLoading,
     pendingApproval,
     queuePumpTick,
     queuedMessages,
+    syncDurableTranscript,
     threadId,
     threadMessages,
     updateQueuedMessage
@@ -6704,6 +6730,7 @@ export function ChatContainer({
                     isLoading={isLoading}
                     toolResults={toolResults}
                     toolCallStates={toolCallDisplayStates}
+                    pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
                     pendingApproval={pendingApproval}
                     autoApproveGitPush={!yoloModeLoaded || yoloMode}
                     onApprovalDecision={handleApprovalDecision}

@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
+import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import {
   isWindowCloseBehavior,
@@ -52,6 +53,10 @@ import type {
   ThreadForkParams,
   ThreadForkResponse
 } from "../main/types"
+import {
+  classifyAgentStreamDelivery,
+  resolveAgentStreamRequestChannel
+} from "../shared/agent-stream-channel"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -246,6 +251,44 @@ const electronAPI = {
   }
 }
 
+function listenForAgentStreamRequest(
+  ambientChannel: string,
+  requestChannel: string,
+  threadId: string,
+  onEvent: (event: StreamEvent) => void,
+  notifyUser: boolean
+): () => void {
+  let listening = true
+  const cleanup = (): void => {
+    if (!listening) return
+    listening = false
+    ipcRenderer.removeListener(requestChannel, requestHandler)
+    if (requestChannel !== ambientChannel) {
+      ipcRenderer.removeListener(ambientChannel, ambientHandler)
+    }
+  }
+  const deliver = (data: StreamEvent): void => {
+    onEvent(data)
+    if (notifyUser) notifyForAgentStreamEvent(data, threadId)
+  }
+  const requestHandler = (_: unknown, data: StreamEvent): void => {
+    const decision = classifyAgentStreamDelivery("request", data.type)
+    deliver(data)
+    if (decision === "deliver-and-close") cleanup()
+  }
+  const ambientHandler = (_: unknown, data: StreamEvent): void => {
+    // Thread-scoped broadcasts carry asynchronous worker, hook, and message-id
+    // events. A terminal event always belongs to a concrete request and must not
+    // detach another request that is queued behind the replacement lock.
+    if (classifyAgentStreamDelivery("ambient", data.type) === "ignore") return
+    deliver(data)
+  }
+
+  ipcRenderer.on(requestChannel, requestHandler)
+  if (requestChannel !== ambientChannel) ipcRenderer.on(ambientChannel, ambientHandler)
+  return cleanup
+}
+
 // Custom APIs for renderer
 const api = {
   agent: {
@@ -259,23 +302,21 @@ const api = {
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
-      const channel = coordinatorInternalNotification
+      const ambientChannel = coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
         : `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent(data)
-        if (!coordinatorInternalNotification) {
-          notifyForAgentStreamEvent(data, threadId)
-        }
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        onEvent,
+        !coordinatorInternalNotification
+      )
       ipcRenderer.send("agent:invoke", {
         threadId,
+        streamRequestId,
         message,
         modelId,
         agentMode,
@@ -283,9 +324,7 @@ const api = {
         userMessageId
       })
 
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      return cleanup
     },
     streamAgent: (
       threadId: string,
@@ -297,27 +336,33 @@ const api = {
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
-      const channel = coordinatorInternalNotification
+      const ambientChannel = command
+        ? `agent:stream:${threadId}`
+        : coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
         : `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent(data)
-        if (!coordinatorInternalNotification) {
-          notifyForAgentStreamEvent(data, threadId)
-        }
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        onEvent,
+        !coordinatorInternalNotification
+      )
 
       if (command) {
-        ipcRenderer.send("agent:resume", { threadId, command, modelId, agentMode })
+        ipcRenderer.send("agent:resume", {
+          threadId,
+          streamRequestId,
+          command,
+          modelId,
+          agentMode
+        })
       } else {
         ipcRenderer.send("agent:invoke", {
           threadId,
+          streamRequestId,
           message,
           modelId,
           agentMode,
@@ -326,32 +371,25 @@ const api = {
         })
       }
 
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      return cleanup
     },
     interrupt: (
       threadId: string,
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
     ): (() => void) => {
-      const channel = `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent?.(data)
-        notifyForAgentStreamEvent(data, threadId)
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:interrupt", { threadId, decision })
-
-      // Return cleanup function
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      const ambientChannel = `agent:stream:${threadId}`
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        (data) => onEvent?.(data),
+        true
+      )
+      ipcRenderer.send("agent:interrupt", { threadId, streamRequestId, decision })
+      return cleanup
     },
     goalControl: (
       threadId: string,

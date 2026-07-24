@@ -1,4 +1,12 @@
 import type { Message } from "../types"
+import {
+  getMessageProviderOccurrence,
+  getMessageProviderSourceId,
+  normalizeAppendedMessageIds,
+  normalizeCompleteMessageIds,
+  normalizeCompleteSnapshotMessageIds,
+  orderMessagesByProviderOccurrence
+} from "../../../shared/message-role-collision"
 
 export const SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY = "subagentTranscripts"
 
@@ -259,17 +267,112 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
   }
 }
 
-export function upsertTranscriptMessages(messages: Message[], incoming: Message[]): Message[] {
+export interface UpsertTranscriptMessagesOptions {
+  completeSnapshot?: boolean
+}
+
+function orderCompleteTranscriptSnapshot(
+  baselineIds: readonly string[],
+  mergedMessages: readonly Message[],
+  incomingMessages: readonly Message[]
+): Message[] {
+  const mergedById = new Map(mergedMessages.map((message) => [message.id, message]))
+  const incomingIds = new Set(incomingMessages.map((message) => message.id))
+  const incomingCoversBaseline = baselineIds.every((id) => incomingIds.has(id))
+  const emitted = new Set<string>()
+  const ordered: Message[] = []
+  const emit = (id: string): void => {
+    if (emitted.has(id)) return
+    const message = mergedById.get(id)
+    if (!message) return
+    emitted.add(id)
+    ordered.push(message)
+  }
+
+  if (incomingCoversBaseline) {
+    incomingMessages.forEach((message) => emit(message.id))
+    mergedMessages.forEach((message) => emit(message.id))
+    return orderMessagesByProviderOccurrence(ordered)
+  }
+
+  baselineIds.forEach(emit)
+  const baselineIdSet = new Set(baselineIds)
+  let incomingSegmentStartsNewTurn = false
+  let previousIncomingPlacementId: string | undefined
+  incomingMessages.forEach((message, incomingIndex) => {
+    if (message.role === "user") incomingSegmentStartsNewTurn = !baselineIdSet.has(message.id)
+    if (emitted.has(message.id)) {
+      previousIncomingPlacementId = message.id
+      return
+    }
+    const snapshotAnchorId = incomingMessages
+      .slice(incomingIndex + 1)
+      .find((candidate) => baselineIdSet.has(candidate.id))?.id
+    const occurrence = getMessageProviderOccurrence(message)
+    const providerOccurrenceAnchorId =
+      snapshotAnchorId ||
+      previousIncomingPlacementId ||
+      incomingSegmentStartsNewTurn ||
+      occurrence === undefined
+        ? undefined
+        : ordered.find(
+            (candidate) =>
+              candidate.role === message.role &&
+              getMessageProviderSourceId(candidate) === getMessageProviderSourceId(message) &&
+              (getMessageProviderOccurrence(candidate) ?? 0) > occurrence
+          )?.id
+    const nextAnchorId = snapshotAnchorId ?? providerOccurrenceAnchorId
+    if (!nextAnchorId) {
+      emit(message.id)
+      previousIncomingPlacementId = message.id
+      return
+    }
+    const nextAnchorIndex = ordered.findIndex((candidate) => candidate.id === nextAnchorId)
+    const mergedMessage = mergedById.get(message.id)
+    if (nextAnchorIndex < 0 || !mergedMessage) {
+      emit(message.id)
+      previousIncomingPlacementId = message.id
+      return
+    }
+    emitted.add(message.id)
+    ordered.splice(nextAnchorIndex, 0, mergedMessage)
+    previousIncomingPlacementId = message.id
+  })
+  mergedMessages.forEach((message) => emit(message.id))
+  return orderMessagesByProviderOccurrence(ordered)
+}
+
+export function upsertTranscriptMessages(
+  messages: Message[],
+  incoming: Message[],
+  options: UpsertTranscriptMessagesOptions = {}
+): Message[] {
   if (incoming.length === 0) return messages
-  const next = [...messages]
+  const next: Message[] = []
+  const baselineIndexById = new Map<string, number>()
+  for (const message of normalizeCompleteMessageIds(messages)) {
+    const existingIndex = baselineIndexById.get(message.id)
+    if (existingIndex === undefined) {
+      baselineIndexById.set(message.id, next.length)
+      next.push(message)
+    } else {
+      next[existingIndex] = mergeTranscriptMessage(next[existingIndex], message)
+    }
+  }
+  const baselineIds = next.map((message) => message.id)
   const indexById = new Map(next.map((message, index) => [message.id, index]))
-  for (const rawMessage of incoming) {
+  const normalizedIncoming = options.completeSnapshot
+    ? normalizeCompleteSnapshotMessageIds(next, incoming)
+    : normalizeAppendedMessageIds(next, incoming)
+  const resolvedIncoming: Message[] = []
+  for (const rawMessage of normalizedIncoming) {
     // Clamp oversized content (e.g. large tool results) before storing so a
     // single message can't bloat memory or the persisted thread values.
     const message =
       typeof rawMessage.content === "string"
         ? { ...rawMessage, content: clampTranscriptContent(rawMessage.content) }
         : rawMessage
+    resolvedIncoming.push(message)
     const existingIndex = indexById.get(message.id)
     if (existingIndex === undefined) {
       indexById.set(message.id, next.length)
@@ -278,21 +381,25 @@ export function upsertTranscriptMessages(messages: Message[], incoming: Message[
     }
     next[existingIndex] = mergeTranscriptMessage(next[existingIndex], message)
   }
+  const ordered = options.completeSnapshot
+    ? orderCompleteTranscriptSnapshot(baselineIds, next, resolvedIncoming)
+    : next
   const countCapped =
-    next.length > MAX_SUBAGENT_TRANSCRIPT_MESSAGES
-      ? next.slice(-MAX_SUBAGENT_TRANSCRIPT_MESSAGES)
-      : next
+    ordered.length > MAX_SUBAGENT_TRANSCRIPT_MESSAGES
+      ? ordered.slice(-MAX_SUBAGENT_TRANSCRIPT_MESSAGES)
+      : ordered
   return enforceTranscriptByteBudget(countCapped)
 }
 
 export function mergeSubagentTranscripts(
   current: Record<string, Message[]>,
   subagentId: string,
-  messages: Message[]
+  messages: Message[],
+  options: UpsertTranscriptMessagesOptions = {}
 ): Record<string, Message[]> {
   return {
     ...current,
-    [subagentId]: upsertTranscriptMessages(current[subagentId] ?? [], messages)
+    [subagentId]: upsertTranscriptMessages(current[subagentId] ?? [], messages, options)
   }
 }
 
@@ -313,10 +420,20 @@ function revivePersistedSubagentMessage(value: unknown): Message | null {
   const rawContent = value.content
   const content: Message["content"] =
     typeof rawContent === "string" || Array.isArray(rawContent) ? rawContent : ""
+  const providerSourceId =
+    typeof value.provider_source_id === "string" ? value.provider_source_id.trim() : ""
+  const providerOccurrence =
+    typeof value.provider_occurrence === "number" &&
+    Number.isInteger(value.provider_occurrence) &&
+    value.provider_occurrence > 0
+      ? value.provider_occurrence
+      : undefined
   return {
     id,
     role: role as Message["role"],
     content,
+    ...(providerSourceId && { provider_source_id: providerSourceId }),
+    ...(providerOccurrence !== undefined && { provider_occurrence: providerOccurrence }),
     ...(Array.isArray(value.tool_calls) && {
       tool_calls: value.tool_calls as Message["tool_calls"]
     }),
@@ -347,7 +464,8 @@ export function getSubagentTranscriptsFromThreadValues(
               [],
               messages
                 .map(revivePersistedSubagentMessage)
-                .filter((message): message is Message => message !== null)
+                .filter((message): message is Message => message !== null),
+              { completeSnapshot: true }
             )
           : []
       ])

@@ -33,10 +33,11 @@ import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
 } from "@/lib/coordinator-worker-tool-args"
-import { getWorkerToolResultKey, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
+import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
 import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
+import { normalizeVisibleReasoningText } from "@/lib/message-display-visibility"
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -148,13 +149,6 @@ function normalizeToolCallForDisplay<T extends { name: string; args?: Record<str
     ...toolCall,
     args: normalizeCoordinatorWorkerToolArgsForDisplay(toolCall.name, toolCall.args)
   }
-}
-
-function cleanReasoningText(text: string): string {
-  return text
-    .replace(/^\s*<think>\s*/i, "")
-    .replace(/\s*<\/think>\s*$/i, "")
-    .trim()
 }
 
 function stripThinkBlocksForDisplay(text: string): string {
@@ -559,6 +553,7 @@ interface MessageBubbleProps {
   showAssistantMeta?: boolean
   toolResults?: Map<string, ToolResultInfo>
   toolCallStates?: Map<string, ToolCallState>
+  pendingApprovalToolCallKeys?: Set<string>
   pendingApproval?: HITLRequest | null
   autoApproveGitPush?: boolean
   onApprovalDecision?: (
@@ -585,6 +580,7 @@ function MessageBubbleImpl({
   showAssistantMeta = true,
   toolResults,
   toolCallStates,
+  pendingApprovalToolCallKeys,
   pendingApproval,
   autoApproveGitPush = false,
   onApprovalDecision,
@@ -618,8 +614,7 @@ function MessageBubbleImpl({
   const isForkingThisMessage = forkingMessageId === message.id
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
-  const reasoningText =
-    !isUser && typeof message.reasoning === "string" ? cleanReasoningText(message.reasoning) : ""
+  const reasoningText = !isUser ? normalizeVisibleReasoningText(message.reasoning) : ""
   const visibleAssistantContentText = useMemo(() => {
     if (isUser) return ""
     if (typeof message.content === "string") {
@@ -1097,16 +1092,18 @@ function MessageBubbleImpl({
           <div className="space-y-2 overflow-hidden">
             {displayToolCalls!.map((toolCall, index) => {
               const toolId = getWorkerToolUiKey(message.id, toolCall.id, index)
-              const toolState = toolCallStates?.get(toolCall.id)
+              const toolState = toolCallStates?.get(toolId)
               const resolvedToolCall = hydrateToolCall(toolCall, toolState)
-              const resultKey = getWorkerToolResultKey(message.id, toolCall.id) ?? toolCall.id
-              const result = resultKey ? toolResults?.get(resultKey) : undefined
+              const result = toolResults?.get(toolId)
               const pendingIds = pendingApproval?.pendingToolCallIds
-              const needsApproval = Boolean(
-                pendingIds?.length
-                  ? pendingIds.includes(toolCall.id)
-                  : pendingApproval?.tool_call?.id && pendingApproval.tool_call.id === toolCall.id
-              )
+              const needsApproval = pendingApprovalToolCallKeys
+                ? pendingApprovalToolCallKeys.has(toolId)
+                : Boolean(
+                    pendingIds?.length
+                      ? pendingIds.includes(toolCall.id)
+                      : pendingApproval?.tool_call?.id &&
+                          pendingApproval.tool_call.id === toolCall.id
+                  )
               const inferredStatus: ToolCallStatus =
                 toolState?.status ||
                 (needsApproval
