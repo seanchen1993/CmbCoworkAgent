@@ -88,12 +88,19 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(switcher, 'value: "normal"', "AgentModeSwitcher exposes normal mode")
   assertIncludes(switcher, 'value: "coordinator"', "AgentModeSwitcher exposes coordinator mode")
   assertIncludes(switcher, 'value: "workflow"', "AgentModeSwitcher exposes workflow mode")
+  assertIncludes(switcher, 'shortLabel: "Solo"', "AgentModeSwitcher labels the Solo stop")
+  assertIncludes(switcher, 'shortLabel: "Team"', "AgentModeSwitcher labels the Team stop")
+  assertIncludes(switcher, 'shortLabel: "Workflow"', "AgentModeSwitcher labels the Workflow stop")
   assertIncludes(
     switcher,
-    "Solo 快速直达；Team 多代理编排；Workflow 大规模并行。",
-    "AgentModeSwitcher explains the three execution modes"
+    "const handleSliderChange = (index: number): void =>",
+    "AgentModeSwitcher selects modes through its discrete slider"
   )
-  assertIncludes(switcher, "setOpen(false)", "AgentModeSwitcher closes after selection")
+  assertNotIncludes(
+    switcher,
+    "nextMode === mode",
+    "a rapid drag back to the persisted mode still becomes the latest mode request"
+  )
   assertMatches(
     switcher,
     /<Button\b[\s\S]*?\btype="button"/,
@@ -109,6 +116,16 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "适合复杂开发、深度排查、文档产出和高可信交付",
     "AgentModeSwitcher explains coordinator mode"
   )
+  assertIncludes(
+    switcher,
+    "onMouseEnter={() => setInfoOpen(true)}",
+    "mode help opens only when the pointer hovers the help control"
+  )
+  assertIncludes(
+    switcher,
+    "onMouseLeave={() => setInfoOpen(false)}",
+    "mode help closes when the pointer leaves the help control"
+  )
 
   const chat = await readProjectFile("src/renderer/src/components/chat/ChatContainer.tsx")
   assertIncludes(chat, "AgentModeSwitcher", "ChatContainer imports mode switcher")
@@ -119,7 +136,17 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "const metadataDerivedMode: ChatAgentMode = disableCoordinatorModeOption",
+    "const agentModeChangeChainRef = useRef<Promise<void>>(Promise.resolve())",
+    "mode metadata writes are serialized"
+  )
+  assertIncludes(
+    chat,
+    "requestId !== agentModeChangeRequestRef.current",
+    "stale mode validations cannot overwrite the latest selection"
+  )
+  assertMatches(
+    chat,
+    /const metadataDerivedMode: ChatAgentMode\s*=\s*disableCoordinatorModeOption/,
     "ChatContainer re-derives mode synchronously when switching threads"
   )
   assertIncludes(
@@ -168,11 +195,15 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。",
     "ChatContainer explains why mode switching is locked after conversation starts"
   )
-  // Formatting-insensitive: prettier may wrap the JSX attribute across lines.
   assertIncludes(
     chat,
-    "disableCoordinatorModeOption || isLoading || !canChangeAgentMode",
+    "locked={isLoading || !canChangeAgentMode}",
     "ChatContainer locks mode switching while running or after the thread has messages"
+  )
+  assertIncludes(
+    chat,
+    "coordinator: disableCoordinatorModeOption",
+    "ChatContainer disables only the unavailable coordinator stop instead of locking the whole slider"
   )
 
   const threadContextSource = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
@@ -617,7 +648,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "用户输入的普通文本",
+    "guardCoordinatorPlainText(getQueuedDisplayContent(composedDraft))",
     "ChatContainer keeps user-typed coordinator internal markers visible as ordinary text"
   )
   // The `keepPrepareApprovalForSaveMetadata` assertions were removed: that
@@ -1044,15 +1075,19 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "isTrustedCoordinatorNotificationInvoke",
     "agent IPC identifies trusted internal notification requests before aborting active runs"
   )
-  assertSourceOrder(
-    agentIpc,
-    "if (existingController) {",
-    "if (isTrustedCoordinatorNotificationInvoke)",
-    "agent IPC checks trusted internal notification requests inside the active-run guard"
+  const activeRunReplacement = agentIpc.slice(
+    agentIpc.indexOf("const replacement = await withThreadRunMutationLock"),
+    agentIpc.indexOf('if ("ignoredInternalNotification" in replacement)')
   )
   assertSourceOrder(
-    agentIpc,
-    "if (isTrustedCoordinatorNotificationInvoke)",
+    activeRunReplacement,
+    "if (initialController && isTrustedCoordinatorNotificationInvoke)",
+    "invalidateCurrentRunMessagePreparer(threadId)",
+    "agent IPC no-ops trusted internal notifications before invalidating user steer preparation"
+  )
+  assertSourceOrder(
+    activeRunReplacement,
+    "if (initialController && isTrustedCoordinatorNotificationInvoke)",
     "existingController.abort()",
     "agent IPC no-ops internal notification turns instead of aborting active user runs"
   )
@@ -1061,10 +1096,14 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "isTrustedCoordinatorNotificationRequest && !isCoordinatorNotificationTurn",
     "agent IPC treats stale trusted coordinator notification turns as no-op instead of user text"
   )
+  const coordinatorPromptPreparation = agentIpc.slice(
+    agentIpc.indexOf("const hasCoordinatorNotificationPrefix"),
+    agentIpc.indexOf("const persistedCoordinatorSelectedSkill")
+  )
   assertSourceOrder(
-    agentIpc,
+    coordinatorPromptPreparation,
     "if (isTrustedCoordinatorNotificationRequest && !isCoordinatorNotificationTurn)",
-    "const promptSubmitResult = await runHooksEnriched",
+    "const preparedPrompt = await prepareUserPromptForCurrentRun",
     "agent IPC drops stale internal notification turns before user prompt hooks"
   )
   assertIncludes(
@@ -1391,8 +1430,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: message",
-    "agent IPC persists hook-augmented prompts with the original visible user message"
+    "[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage",
+    "agent IPC persists hook-augmented prompts with the safe visible user message"
   )
   assertIncludes(
     agentIpc,

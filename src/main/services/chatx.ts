@@ -23,6 +23,7 @@ import { showPetCompletedTaskNotice } from "../pet"
 import type { ChatXRobotConfig } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import { getChatXUserMessageId, namespaceChatXStreamEventIds } from "./chatx-stream-ids"
+import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -338,10 +339,21 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
 
     broadcastToChannel(channel, { type: "started" })
 
+    const selectedModel = getAvailableModelConfigOrDefault(robot.modelId)
+    if (!selectedModel) {
+      throw new Error("没有可用的模型配置，无法处理 ChatX 消息")
+    }
+    const effectiveModelId = toModelRef(selectedModel)
+    if (robot.modelId && effectiveModelId !== robot.modelId) {
+      console.warn(
+        `[ChatX] Configured model ${robot.modelId} is unavailable; falling back to ${effectiveModelId}`
+      )
+    }
+
     const agent = await createAgentRuntime({
       threadId,
       workspacePath,
-      modelId: robot.modelId || undefined,
+      modelId: effectiveModelId,
       enableAgentsPrompt: false,
       abortSignal: abortController.signal
     })

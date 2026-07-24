@@ -1,4 +1,4 @@
-import { getCustomModelConfigs } from "../storage"
+import { getModelConfigByRef, getModelConfigs, toModelRef } from "../models/registry"
 
 // ─── PR-12 / PR-17 — minimal API error classifier ─────────────────────────────
 // Reuses the status-code + message-pattern primitives already powering
@@ -33,11 +33,19 @@ interface StatusInfo {
 const STATUS_CODE_INFO: Record<number, StatusInfo> = {
   400: { category: "invalid_request", label: "请求错误", hint: "请检查请求内容" },
   401: { category: "authentication_failed", label: "认证失败", hint: "请检查设置中的 API Key" },
-  403: { category: "authentication_failed", label: "认证失败 / 无权限", hint: "请检查 API Key 与权限" },
+  403: {
+    category: "authentication_failed",
+    label: "认证失败 / 无权限",
+    hint: "请检查 API Key 与权限"
+  },
   404: { category: "invalid_request", label: "路径错误", hint: "请检查接口地址 / 模型配置" },
   405: { category: "invalid_request", label: "请求方式错误", hint: "请求方法不正确，请联系支持" },
   429: { category: "rate_limit", label: "请求速率限制", hint: "请稍后重试" },
-  432: { category: "rate_limit", label: "输入 Token 数限流", hint: "输入过长，请减少输入或稍后重试" },
+  432: {
+    category: "rate_limit",
+    label: "输入 Token 数限流",
+    hint: "输入过长，请减少输入或稍后重试"
+  },
   433: { category: "rate_limit", label: "输出 Token 数限流", hint: "请稍后重试" },
   480: { category: "invalid_request", label: "请求参数异常", hint: "请检查请求参数" },
   481: { category: "invalid_request", label: "目标模型不存在", hint: "请检查模型名称是否正确" },
@@ -71,12 +79,7 @@ const NETWORK_CODES = new Set([
   "EPIPE",
   "EAI_AGAIN"
 ])
-const NETWORK_MESSAGE_TOKENS = [
-  "fetch failed",
-  "socket hang up",
-  "network error",
-  "timeout"
-]
+const NETWORK_MESSAGE_TOKENS = ["fetch failed", "socket hang up", "network error", "timeout"]
 
 const STREAM_DISCONNECT_CODES = new Set([
   "ECONNRESET",
@@ -405,8 +408,7 @@ function getRequestId(error: unknown): string | undefined {
 }
 
 function cleanProviderMessage(error: unknown): string | undefined {
-  const raw =
-    error instanceof Error ? error.message : typeof error === "string" ? error : undefined
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : undefined
   if (!raw) return undefined
   const cleaned = raw
     .replace(/\n\nTroubleshooting URL: https:\/\/docs\.langchain\.com\S*/g, "")
@@ -426,7 +428,8 @@ export function extractErrorDetail(
   const status = fetchDetail?.status ?? getStatusCode(error) ?? statusFromMessage(error)
   const info = getStatusInfo(status)
   const code =
-    info?.category ?? (typeof status === "number" ? classifyApiError({ status }) : classifyApiError(error))
+    info?.category ??
+    (typeof status === "number" ? classifyApiError({ status }) : classifyApiError(error))
   const requestId = fetchDetail?.requestId ?? getRequestId(error)
   const providerMessage = cleanProviderMessage(error)
   // Prefer the fetch-layer raw body (schema-independent), then the SDK's parsed
@@ -472,7 +475,7 @@ export function buildOrderedChain(
   primaryTier: "premium" | "economy",
   allowFailover = true
 ): string[] {
-  const configs = getCustomModelConfigs()
+  const configs = getModelConfigs()
   const chain: string[] = []
   const seen = new Set<string>()
 
@@ -494,14 +497,14 @@ export function buildOrderedChain(
     // Premium fails → only other premium models
     for (const c of configs) {
       if ((c.tier ?? "premium") === "premium" && c.apiKey) {
-        add(`custom:${c.id}`)
+        add(toModelRef(c))
       }
     }
   } else {
     // Economy fails → skip other economy, go straight to premium
     for (const c of configs) {
       if ((c.tier ?? "premium") === "premium" && c.apiKey) {
-        add(`custom:${c.id}`)
+        add(toModelRef(c))
       }
     }
   }
@@ -509,8 +512,7 @@ export function buildOrderedChain(
   // If fallbackChain provided, append any remaining eligible models
   if (fallbackChain) {
     for (const id of fallbackChain) {
-      const cfgId = id.startsWith("custom:") ? id.slice("custom:".length) : id
-      const cfg = configs.find((c) => c.id === cfgId)
+      const cfg = getModelConfigByRef(id)
       if (!cfg) continue
       const tier = cfg.tier ?? "premium"
       // Only add if not downgrading

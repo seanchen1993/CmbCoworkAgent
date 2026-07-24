@@ -25,6 +25,8 @@ export type StreamFallbackIndexBaselines = {
   human: number
 }
 
+type TransportAgentMode = "normal" | "coordinator" | "workflow"
+
 /**
  * Usage metadata from LangChain model responses.
  * Contains token counts for tracking context window usage.
@@ -446,10 +448,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.observedMainToolCallIdsByMessageId.clear()
     const threadId = payload.config?.configurable?.thread_id
     const modelId = payload.config?.configurable?.model_id as string | undefined
-    const agentMode = payload.config?.configurable?.agent_mode as
-      | "normal"
-      | "coordinator"
-      | undefined
+    const agentMode = payload.config?.configurable?.agent_mode as TransportAgentMode | undefined
     const coordinatorInternalNotification =
       payload.config?.configurable?.coordinator_internal_notification === true
     const userMessageId = payload.config?.configurable?.hook_turn_id as string | undefined
@@ -573,7 +572,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     command: unknown,
     signal: AbortSignal,
     modelId?: string,
-    agentMode?: "normal" | "coordinator",
+    agentMode?: TransportAgentMode,
     coordinatorInternalNotification = false,
     userMessageId?: string
   ): AsyncGenerator<StreamEvent> {
@@ -596,7 +595,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     yield this.createSubagentLogResetEvent()
     yield this.createSubagentToolCountEvent()
-    let currentAgentMode: "normal" | "coordinator" = agentMode ?? "normal"
+    let currentAgentMode: TransportAgentMode = agentMode ?? "normal"
 
     const cleanup = window.api.agent.streamAgent(
       threadId,
@@ -707,7 +706,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private convertToSDKEvents(
     event: IPCEvent,
     threadId: string,
-    agentMode: "normal" | "coordinator" = "normal"
+    agentMode: TransportAgentMode = "normal"
   ): StreamEvent[] {
     const events: StreamEvent[] = []
 
@@ -841,6 +840,34 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // Custom events (e.g. routing_result) sent directly from main process
       case "custom": {
         const data = event.data
+        if (data?.type === "current_run_user_injected") {
+          this.resetCurrentAssistantMessage()
+          const injectedMessages = Array.isArray(data.messages) ? data.messages : []
+          for (const injectedMessage of injectedMessages) {
+            if (
+              !injectedMessage ||
+              typeof injectedMessage !== "object" ||
+              typeof injectedMessage.id !== "string" ||
+              !injectedMessage.id ||
+              typeof injectedMessage.content !== "string"
+            ) {
+              continue
+            }
+            events.push({
+              event: "messages",
+              data: [
+                {
+                  id: injectedMessage.id,
+                  type: "human",
+                  content: injectedMessage.content
+                },
+                { langgraph_node: "agent" }
+              ]
+            })
+          }
+          events.push({ event: "custom", data })
+          break
+        }
         if (data?.type === "stream_retry_reset") {
           const discardedMessageIds = Array.isArray(data.discardedMessageIds)
             ? data.discardedMessageIds.filter((id): id is string => typeof id === "string")
@@ -1099,7 +1126,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
    */
   private processStreamEvent(
     event: IPCStreamEvent,
-    agentMode: "normal" | "coordinator"
+    agentMode: TransportAgentMode
   ): StreamEvent[] {
     const events: StreamEvent[] = []
     const { mode, data } = event

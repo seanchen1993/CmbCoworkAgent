@@ -819,6 +819,22 @@ interface CustomAPI {
       }
     }>
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
+    queueCurrentRunMessage: (
+      threadId: string,
+      message: { id: string; content: string; displayContent?: string }
+    ) => Promise<{ queued: boolean; reason?: string; message?: string }>
+    deleteCurrentRunQueuedMessage: (threadId: string, messageId: string) => Promise<void>
+    reconcileCurrentRunQueuedMessages: (
+      threadId: string,
+      messageIds: string[]
+    ) => Promise<{ pendingIds: string[]; injectedIds: string[]; durableIds: string[] }>
+    onQueuedMessagesInjected: (
+      threadId: string,
+      callback: (payload: {
+        messages: Array<{ id: string; content: string }>
+        assistantIdAlias?: { sourceId: string; id: string }
+      }) => void
+    ) => () => void
     getCoordinatorWorkers: (
       threadId: string,
       options?: { subscribeUpdates?: boolean }
@@ -1013,6 +1029,47 @@ interface CustomAPI {
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null>
+    getBuiltinConfigs: () => Promise<
+      Array<{
+        id: string
+        ref: `builtin:${string}`
+        source: "builtin"
+        origin: "remote" | "fallback"
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+      }>
+    >
+    updateBuiltinConfig: (
+      id: string,
+      config: {
+        name?: string
+        maxTokens?: number
+        maxOutputTokens?: number
+        temperature?: number
+        topP?: number
+        topK?: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+      }
+    ) => Promise<void>
+    resetBuiltinConfig: (id: string) => Promise<void>
+    onChanged: (callback: () => void) => () => void
     setCustomConfig: (config: {
       id: string
       name: string

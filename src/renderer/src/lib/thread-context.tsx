@@ -56,7 +56,8 @@ import type {
   AgentAutoCommitResult,
   UserInputRequest,
   GoalUiState,
-  GoalEvent
+  GoalEvent,
+  QueuedMessage
 } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
@@ -118,6 +119,7 @@ import {
 } from "./subagent-transcripts"
 import { resolveIncomingSubagentStatus } from "./subagent-state"
 import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
+import { queueStorageKey } from "./queued-message-content"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -498,6 +500,23 @@ function createDefaultContextReminderState(): ContextReminderState {
 // Per-thread state (persisted/restored from checkpoints)
 export interface ThreadState {
   messages: Message[]
+  /**
+   * Draft messages parked while a run is active or an approval is pending. They
+   * auto-drain (send in order) once the thread is idle again, or can be steered
+   * into the running turn. Persisted per-thread to localStorage so a reload or
+   * view switch doesn't lose queued input.
+   */
+  queuedMessages: QueuedMessage[]
+  /**
+   * Set when the user hits Stop; makes the queue auto-drain effect skip firing
+   * the next queued draft so Stop actually stops. Not persisted to localStorage
+   * (a fresh app launch should never start suppressed) — but it DOES need to
+   * live here rather than as a ChatContainer-local ref: TabbedPanel unmounts
+   * ChatContainer entirely when switching to a file tab (`isAgentTab ? <ChatContainer>
+   * : <FileViewer>`), which would silently reset a local ref back to false and
+   * undo the suppression the moment the user glances at an open file and back.
+   */
+  queueAutoDrainSuppressed: boolean
   goalUi: GoalUiState
   activeTurnStartTime: number | null
   todos: Todo[]
@@ -598,7 +617,16 @@ interface StreamData {
 // Actions available on a thread
 export interface ThreadActions {
   appendMessage: (message: Message) => void
+  removeLocalMessage: (messageId: string) => void
   setMessages: (messages: Message[]) => void
+  addQueuedMessage: (message: QueuedMessage) => void
+  prependQueuedMessage: (message: QueuedMessage) => void
+  getQueuedMessage: (messageId: string) => QueuedMessage | undefined
+  updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>) => void
+  deleteQueuedMessage: (messageId: string) => void
+  reorderQueuedMessages: (orderedIds: string[]) => void
+  promoteQueuedMessage: (messageId: string) => void
+  setQueueAutoDrainSuppressed: (suppressed: boolean) => void
   setGoalUi: (goalUi: GoalUiState) => void
   refreshGoalUi: (options?: { includeEvents?: boolean }) => Promise<void>
   setActiveTurnStartTime: (startTime: number | null) => void
@@ -662,8 +690,73 @@ interface ThreadContextValue {
 }
 
 // Default thread state
+// ── Draft-queue persistence (per-thread, localStorage) ────────────────────────
+// Best-effort: the in-memory ThreadState.queuedMessages is authoritative; this
+// only survives reloads/view-switches. Keyed by threadId.
+
+function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
+  if (!raw || typeof raw !== "object") return null
+  const item = raw as Partial<QueuedMessage>
+  if (typeof item.id !== "string" || !item.id) return null
+  if (typeof item.text !== "string") return null
+  const createdAt = item.created_at ? new Date(item.created_at) : new Date()
+  const updatedAt = item.updated_at ? new Date(item.updated_at) : createdAt
+  const handoffRequestedAt = item.handoffRequestedAt ? new Date(item.handoffRequestedAt) : null
+  return {
+    id: item.id,
+    text: item.text,
+    attachmentModelBlocks:
+      typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
+    attachmentDisplayPrefix:
+      typeof item.attachmentDisplayPrefix === "string" ? item.attachmentDisplayPrefix : undefined,
+    skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
+    modelId: typeof item.modelId === "string" ? item.modelId : undefined,
+    handoffRequestedAt:
+      handoffRequestedAt && !Number.isNaN(handoffRequestedAt.getTime())
+        ? handoffRequestedAt
+        : undefined,
+    created_at: Number.isNaN(createdAt.getTime()) ? new Date() : createdAt,
+    updated_at: Number.isNaN(updatedAt.getTime()) ? new Date() : updatedAt
+  }
+}
+
+function loadQueuedMessages(threadId: string): QueuedMessage[] {
+  try {
+    const raw = window.localStorage.getItem(queueStorageKey(threadId))
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.map(normalizeQueuedMessage).filter((item): item is QueuedMessage => Boolean(item))
+  } catch {
+    return []
+  }
+}
+
+function persistQueuedMessages(threadId: string, messages: QueuedMessage[]): void {
+  try {
+    if (messages.length === 0) {
+      window.localStorage.removeItem(queueStorageKey(threadId))
+      return
+    }
+    window.localStorage.setItem(queueStorageKey(threadId), JSON.stringify(messages))
+  } catch {
+    // Queue persistence is best-effort; the in-memory queue remains authoritative.
+  }
+}
+
+function removeQueuedMessagesById(
+  queuedMessages: QueuedMessage[],
+  messageIds: ReadonlySet<string>
+): QueuedMessage[] {
+  if (messageIds.size === 0) return queuedMessages
+  const next = queuedMessages.filter((message) => !messageIds.has(message.id))
+  return next.length === queuedMessages.length ? queuedMessages : next
+}
+
 const createDefaultThreadState = (): ThreadState => ({
   messages: [],
+  queuedMessages: [],
+  queueAutoDrainSuppressed: false,
   goalUi: { goal: null, events: [], lastUpdated: null },
   activeTurnStartTime: null,
   todos: [],
@@ -3394,6 +3487,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             }
           })
         },
+        removeLocalMessage: (messageId: string) => {
+          updateThreadState(threadId, (state) => {
+            if (!state.messages.some((message) => message.id === messageId)) return {}
+            return { messages: state.messages.filter((message) => message.id !== messageId) }
+          })
+        },
         setMessages: (messages: Message[]) => {
           updateThreadState(threadId, (state) => {
             const existingReasoningById = new Map(
@@ -3430,6 +3529,75 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
             return { messages: messagesWithPreservedReasoning, toolCallStates: nextToolCallStates }
           })
+        },
+        addQueuedMessage: (message: QueuedMessage) => {
+          updateThreadState(threadId, (state) => {
+            const next = [...state.queuedMessages, message]
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        prependQueuedMessage: (message: QueuedMessage) => {
+          updateThreadState(threadId, (state) => {
+            const next = [
+              message,
+              ...state.queuedMessages.filter((queued) => queued.id !== message.id)
+            ]
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        getQueuedMessage: (messageId: string) => {
+          return threadStatesRef.current[threadId]?.queuedMessages.find(
+            (message) => message.id === messageId
+          )
+        },
+        updateQueuedMessage: (messageId: string, updates: Partial<QueuedMessage>) => {
+          updateThreadState(threadId, (state) => {
+            const next = state.queuedMessages.map((message) =>
+              message.id === messageId
+                ? { ...message, ...updates, id: message.id, updated_at: new Date() }
+                : message
+            )
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        deleteQueuedMessage: (messageId: string) => {
+          updateThreadState(threadId, (state) => {
+            const next = state.queuedMessages.filter((message) => message.id !== messageId)
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        reorderQueuedMessages: (orderedIds: string[]) => {
+          updateThreadState(threadId, (state) => {
+            const byId = new Map(state.queuedMessages.map((message) => [message.id, message]))
+            const ordered = orderedIds
+              .map((id) => byId.get(id))
+              .filter((message): message is QueuedMessage => Boolean(message))
+            const missing = state.queuedMessages.filter(
+              (message) => !orderedIds.includes(message.id)
+            )
+            const next = [...ordered, ...missing]
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        promoteQueuedMessage: (messageId: string) => {
+          updateThreadState(threadId, (state) => {
+            const target = state.queuedMessages.find((message) => message.id === messageId)
+            if (!target) return {}
+            const next = [
+              target,
+              ...state.queuedMessages.filter((message) => message.id !== messageId)
+            ]
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
+          })
+        },
+        setQueueAutoDrainSuppressed: (suppressed: boolean) => {
+          updateThreadState(threadId, () => ({ queueAutoDrainSuppressed: suppressed }))
         },
         setGoalUi: (goalUi: GoalUiState) => {
           updateThreadState(threadId, () => ({ goalUi }))
@@ -4024,13 +4192,28 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         checkpointTranscript,
         visiblePersistedThreadMessages
       )
-      actions.setMessages(
-        restoreVisibleCheckpointMessageTimes(
-          restoredTranscript,
-          persistedMessageTimes,
-          persistedMessageTimeOrder
-        )
+      const restoredTranscriptMessages = restoreVisibleCheckpointMessageTimes(
+        restoredTranscript,
+        persistedMessageTimes,
+        persistedMessageTimeOrder
       )
+      actions.setMessages(restoredTranscriptMessages)
+      // A renderer can reload after main has injected a steered draft but before
+      // it receives the IPC acknowledgement. The checkpoint is then the durable
+      // source of truth: remove any matching local draft so auto-drain cannot
+      // submit the same user turn a second time.
+      const restoredMessageIds = new Set(
+        restoredTranscriptMessages.map((message) => message.id)
+      )
+      updateThreadState(threadId, (state) => {
+        const nextQueuedMessages = removeQueuedMessagesById(
+          state.queuedMessages,
+          restoredMessageIds
+        )
+        if (nextQueuedMessages === state.queuedMessages) return {}
+        persistQueuedMessages(threadId, nextQueuedMessages)
+        return { queuedMessages: nextQueuedMessages }
+      })
       if (Object.keys(persistedSubagentTranscripts).length > 0) {
         updateThreadState(threadId, (prev) => {
           const merged = { ...persistedSubagentTranscripts }
@@ -4117,6 +4300,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const workflowNotificationRetryOnIdleRef = useRef<Record<string, boolean>>({})
   // Track approval listeners per thread (registered globally, not per-component)
   const approvalListenerCleanups = useRef<Record<string, Array<() => void>>>({})
+  // Track queued-message-injection listeners per thread.
+  const queueListenerCleanups = useRef<Record<string, () => void>>({})
   // Track request_user_input listeners per thread.
   const userInputListenerCleanups = useRef<Record<string, Array<() => void>>>({})
 
@@ -4394,6 +4579,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     (threadId: string) => {
       if (initializedThreadsRef.current.has(threadId)) return
       initializedThreadsRef.current.add(threadId)
+      const threadActions = getThreadActions(threadId)
 
       // Add to active threads (this will render a ThreadStreamHolder)
       setActiveThreadIds((prev) => new Set([...prev, threadId]))
@@ -4402,7 +4588,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (prev[threadId]) return prev
         const next = {
           ...prev,
-          [threadId]: { ...createDefaultThreadState(), historyLoading: true }
+          [threadId]: {
+            ...createDefaultThreadState(),
+            queuedMessages: loadQueuedMessages(threadId),
+            historyLoading: true
+          }
         }
         threadStatesRef.current = next
         return next
@@ -4566,6 +4756,58 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         })
       })
       approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout, cleanupCancel]
+
+      // When the main process injects steered messages into the running turn,
+      // drop them from the draft queue and surface them as committed user turns
+      // (the model already received them; the transcript should match).
+      queueListenerCleanups.current[threadId] = window.api.agent.onQueuedMessagesInjected(
+        threadId,
+        ({ messages, assistantIdAlias }) => {
+          if (!Array.isArray(messages) || messages.length === 0) return
+          const injectedIds = new Set(messages.map((message) => message.id))
+          const existingMessageIds = new Set(
+            threadStatesRef.current[threadId]?.messages.map((message) => message.id) ?? []
+          )
+          updateThreadState(threadId, (state) => {
+            const next = removeQueuedMessagesById(state.queuedMessages, injectedIds)
+            const sourceId = assistantIdAlias?.sourceId
+            const canonicalId = assistantIdAlias?.id
+            const sourceIndex =
+              sourceId && canonicalId
+                ? state.messages.findIndex((message) => message.id === sourceId)
+                : -1
+            const canonicalAlreadyPresent =
+              !!canonicalId && state.messages.some((message) => message.id === canonicalId)
+            const nextMessages =
+              sourceIndex < 0 || !canonicalId
+                ? state.messages
+                : canonicalAlreadyPresent
+                  ? state.messages.filter((message) => message.id !== sourceId)
+                  : state.messages.map((message, index) =>
+                      index === sourceIndex ? { ...message, id: canonicalId } : message
+                    )
+            if (next === state.queuedMessages && nextMessages === state.messages) return {}
+            if (next !== state.queuedMessages) persistQueuedMessages(threadId, next)
+            return {
+              ...(next !== state.queuedMessages ? { queuedMessages: next } : {}),
+              ...(nextMessages !== state.messages ? { messages: nextMessages } : {})
+            }
+          })
+          for (const message of messages) {
+            if (!message.id || existingMessageIds.has(message.id)) continue
+            // Reuse appendMessage so an injected turn has the same hook-log,
+            // coordinator-notification, and interruption-reset effects as a
+            // normal user submission.
+            threadActions.appendMessage({
+              id: message.id,
+              role: "user",
+              content: message.content,
+              created_at: new Date()
+            })
+          }
+        }
+      )
+
       window.api.sandbox
         .getPendingApprovals(threadId)
         .then((requests) => {
@@ -4622,7 +4864,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       processSchedulerEvent,
       updateThreadState,
       handleCustomEvent,
-      scheduleWorkflowNotificationTurn
+      scheduleWorkflowNotificationTurn,
+      getThreadActions
     ]
   )
 
@@ -4708,6 +4951,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       workflowProgressBufferRef.current.delete(threadId)
       approvalListenerCleanups.current[threadId]?.forEach((c) => c())
       delete approvalListenerCleanups.current[threadId]
+      queueListenerCleanups.current[threadId]?.()
+      delete queueListenerCleanups.current[threadId]
       userInputListenerCleanups.current[threadId]?.forEach((c) => c())
       delete userInputListenerCleanups.current[threadId]
       clearSchedulerStreamingForThread(threadId)

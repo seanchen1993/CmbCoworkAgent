@@ -155,7 +155,8 @@ async function prepareWorkspaceSelectionSandbox(
       ? {
           type: "warning",
           title: "Elevated 工作区受限",
-          message: "Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区。",
+          message:
+            "Elevated 模式可以读取系统目录，也可能执行不涉及写入的命令；但当前模式需要为工作区准备写入权限，不支持将系统敏感目录作为工作区。",
           detail: result.error,
           buttons: ["知道了"],
           defaultId: 0
@@ -227,7 +228,9 @@ async function collectThreadSkillStatsAsync(threadId: string): Promise<string[]>
           if (Array.isArray(trace.usedSkills)) {
             for (const skill of trace.usedSkills) skillSet.add(skill)
           }
-        } catch { /* skip malformed lines */ }
+        } catch {
+          /* skip malformed lines */
+        }
       }
     }
     return Array.from(skillSet)
@@ -274,8 +277,7 @@ async function assertWorkspaceSwitchAllowed(
 ): Promise<void> {
   const normalizedCurrentPath =
     typeof currentPath === "string" ? normalizeTrackedPath(currentPath) : ""
-  const normalizedNextPath =
-    typeof nextPath === "string" ? normalizeTrackedPath(nextPath) : ""
+  const normalizedNextPath = typeof nextPath === "string" ? normalizeTrackedPath(nextPath) : ""
   if (normalizedCurrentPath && normalizedCurrentPath === normalizedNextPath) return
   if (currentPath === nextPath) return
   // Block a workspace switch while a dynamic workflow is running or its result is
@@ -483,7 +485,7 @@ function getGitPanelFileStatus(status: string): GitPanelFileStatus {
 }
 
 function decodeGitQuotedPath(rawPath: string): string {
-  const quoted = rawPath.startsWith("\"") && rawPath.endsWith("\"")
+  const quoted = rawPath.startsWith('"') && rawPath.endsWith('"')
   if (!quoted) return rawPath
   const source = quoted ? rawPath.slice(1, -1) : rawPath
   const bytes: number[] = []
@@ -502,7 +504,7 @@ function decodeGitQuotedPath(rawPath: string): string {
     }
 
     const next = source[++i]
-    if (next === "\\" || next === "\"") {
+    if (next === "\\" || next === '"') {
       bytes.push(next.charCodeAt(0))
       continue
     }
@@ -584,7 +586,10 @@ function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
   }
 
   // Fallback for newline-delimited porcelain output.
-  const lines = output.split("\n").map((line) => line.trimEnd()).filter(Boolean)
+  const lines = output
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
   const files: GitPanelChangedFile[] = []
   for (const line of lines) {
     if (line.length < 4) continue
@@ -718,11 +723,17 @@ async function runStatusPorcelainExcludingNoiseDirs(
   let trackedOut: string
   let untrackedOut: string
   try {
-    ;[trackedOut, untrackedOut] = await Promise.all([run(trackedArgs(true)), run(untrackedArgs(true))])
+    ;[trackedOut, untrackedOut] = await Promise.all([
+      run(trackedArgs(true)),
+      run(untrackedArgs(true))
+    ])
   } catch {
     // 旧版 Git 不支持某些 -z 组合时回退到换行分隔。
     useZ = false
-    ;[trackedOut, untrackedOut] = await Promise.all([run(trackedArgs(false)), run(untrackedArgs(false))])
+    ;[trackedOut, untrackedOut] = await Promise.all([
+      run(trackedArgs(false)),
+      run(untrackedArgs(false))
+    ])
   }
 
   const sep = useZ ? "\0" : "\n"
@@ -734,7 +745,8 @@ async function runStatusPorcelainExcludingNoiseDirs(
   if (untrackedEntries.length === 0) {
     return trackedOut
   }
-  const trackedNormalized = trackedOut && !trackedOut.endsWith(sep) ? `${trackedOut}${sep}` : trackedOut
+  const trackedNormalized =
+    trackedOut && !trackedOut.endsWith(sep) ? `${trackedOut}${sep}` : trackedOut
   return `${trackedNormalized}${untrackedEntries.join(sep)}${sep}`
 }
 
@@ -829,17 +841,17 @@ const GIT_PANEL_EXCLUDED_UNTRACKED_DIRS = [
   ".turbo",
   ".parcel-cache",
   "coverage",
-  '.playwright-cli',
-  '.playwright',
-  '.agent-browser',
-  '.idea',
-  '.cmbdevclaw',
-  '.devagent',
-  '.devagentrules',
-  '.github',
-  '.vscode',
-  '.codex',
-  '.claude'
+  ".playwright-cli",
+  ".playwright",
+  ".agent-browser",
+  ".idea",
+  ".cmbdevclaw",
+  ".devagent",
+  ".devagentrules",
+  ".github",
+  ".vscode",
+  ".codex",
+  ".claude"
 ] as const
 
 // 把排除目录名转成 git pathspec：`:(exclude)<dir>` 命中顶层目录及其内容，
@@ -889,7 +901,12 @@ function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
  */
 function writeThreadGitContextCache(
   metadata: Record<string, unknown>,
-  payload: { workspacePath: string; isGitRepo: boolean; isWorktreePath: boolean; gitRoot: string | null }
+  payload: {
+    workspacePath: string
+    isGitRepo: boolean
+    isWorktreePath: boolean
+    gitRoot: string | null
+  }
 ): void {
   // 写入前先清掉新旧缓存字段，避免 metadata 同时存在两套 Git context 表达。
   clearThreadGitContextCache(metadata)
@@ -919,7 +936,9 @@ function readThreadGitContextCache(
   if (!workspacePath) return null
   // 优先读取新版结构：所有 Git 探测结果都收敛在 metadata.gitContext 中。
   const gitContext =
-    metadata.gitContext && typeof metadata.gitContext === "object" && !Array.isArray(metadata.gitContext)
+    metadata.gitContext &&
+    typeof metadata.gitContext === "object" &&
+    !Array.isArray(metadata.gitContext)
       ? (metadata.gitContext as Record<string, unknown>)
       : null
   if (gitContext) {
@@ -981,13 +1000,9 @@ function readThreadGitContextCache(
   }
 
   const cachedIsGitRepo =
-    typeof metadata.cachedIsGitRepo === "boolean"
-      ? metadata.cachedIsGitRepo
-      : null
+    typeof metadata.cachedIsGitRepo === "boolean" ? metadata.cachedIsGitRepo : null
   const cachedIsWorktreePath =
-    typeof metadata.cachedIsWorktreePath === "boolean"
-      ? metadata.cachedIsWorktreePath
-      : null
+    typeof metadata.cachedIsWorktreePath === "boolean" ? metadata.cachedIsWorktreePath : null
   const cachedGitRoot =
     typeof metadata.cachedGitRoot === "string" && metadata.cachedGitRoot.trim()
       ? metadata.cachedGitRoot
@@ -1035,11 +1050,13 @@ function collectChangedFileEntriesFromStatus(
     const previousPathCandidates = entry.previousPath
       ? toWorktreeRelativePath(worktreePath, entry.previousPath)
       : []
-    const mappedPreviousPath = pickBestWorktreeRelativePath(worktreePath, previousPathCandidates) ?? undefined
+    const mappedPreviousPath =
+      pickBestWorktreeRelativePath(worktreePath, previousPathCandidates) ?? undefined
 
     if (filterByTracked) {
       const matched = pathCandidates.find((candidate) => trackedSet.has(candidate))
-      if (matched) changedMap.set(matched, { ...entry, path: matched, previousPath: mappedPreviousPath })
+      if (matched)
+        changedMap.set(matched, { ...entry, path: matched, previousPath: mappedPreviousPath })
       continue
     }
 
@@ -1052,15 +1069,16 @@ function collectChangedFileEntriesFromStatus(
   return Array.from(changedMap.values())
 }
 
-
-async function getHeadBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
+async function getHeadBlobHash(
+  worktreePath: string,
+  relPath: string,
+  options?: { silent?: boolean }
+): Promise<string | null> {
   try {
-    const out = await runGitWithLiteralPathspecs(
-      worktreePath,
-      ["ls-files", "-s"],
-      [relPath],
-      { silent: Boolean(options?.silent), timeoutMs: 10_000 }
-    )
+    const out = await runGitWithLiteralPathspecs(worktreePath, ["ls-files", "-s"], [relPath], {
+      silent: Boolean(options?.silent),
+      timeoutMs: 10_000
+    })
     const match = out.match(/^\d+\s+([0-9a-f]{40,64})\s+\d+\t/)
     return match?.[1] ?? null
   } catch {
@@ -1068,14 +1086,16 @@ async function getHeadBlobHash(worktreePath: string, relPath: string, options?: 
   }
 }
 
-async function getWorktreeBlobHash(worktreePath: string, relPath: string, options?: { silent?: boolean }): Promise<string | null> {
+async function getWorktreeBlobHash(
+  worktreePath: string,
+  relPath: string,
+  options?: { silent?: boolean }
+): Promise<string | null> {
   try {
-    const out = await runGitWithLiteralPathspecs(
-      worktreePath,
-      ["hash-object"],
-      [relPath],
-      { silent: Boolean(options?.silent), timeoutMs: 10_000 }
-    )
+    const out = await runGitWithLiteralPathspecs(worktreePath, ["hash-object"], [relPath], {
+      silent: Boolean(options?.silent),
+      timeoutMs: 10_000
+    })
     const hash = out.trim()
     return /^[0-9a-f]{40,64}$/i.test(hash) ? hash : null
   } catch {
@@ -1088,7 +1108,9 @@ async function combineFilesystemMovesForDisplay(
   entries: GitPanelChangedFile[],
   options?: { silent?: boolean }
 ): Promise<GitPanelChangedFile[]> {
-  const deletedEntries = entries.filter((entry) => entry.status === "deleted" && !entry.previousPath)
+  const deletedEntries = entries.filter(
+    (entry) => entry.status === "deleted" && !entry.previousPath
+  )
   const newEntries = entries.filter(
     (entry) => (entry.status === "untracked" || entry.status === "added") && !entry.previousPath
   )
@@ -1321,7 +1343,11 @@ async function runGitPushWithLfsCompat(
       throw error
     }
 
-    logGitStep(threadId, "push", "检测到 Git LFS pre-push 版本误报，跳过 LFS pre-push hook 后重试一次")
+    logGitStep(
+      threadId,
+      "push",
+      "检测到 Git LFS pre-push 版本误报，跳过 LFS pre-push hook 后重试一次"
+    )
     return runGit(worktreePath, args, {
       env: {
         // Enterprise Windows Git setups can occasionally make the Git LFS hook
@@ -1388,7 +1414,9 @@ async function stageFilesForCommit(
   worktreePath: string,
   pathspecs: string[]
 ): Promise<{ existingPathspecs: string[]; removedPathspecs: string[] }> {
-  const normalizedPathspecs = Array.from(new Set(pathspecs.map(normalizeGitRelativePath).filter(Boolean)))
+  const normalizedPathspecs = Array.from(
+    new Set(pathspecs.map(normalizeGitRelativePath).filter(Boolean))
+  )
   const existingPathspecs: string[] = []
   const removedPathspecs: string[] = []
 
@@ -1490,10 +1518,7 @@ async function resolvePushBaseRef(
 ): Promise<string | null> {
   const silent = Boolean(options?.silent)
 
-  const candidates = [
-    "@{upstream}",
-    `refs/remotes/origin/${branch}`
-  ]
+  const candidates = ["@{upstream}", `refs/remotes/origin/${branch}`]
 
   for (const candidate of candidates) {
     try {
@@ -1541,12 +1566,19 @@ async function getPushabilityForRevisions(
   worktreePath: string,
   revisionArgs: string[],
   options?: { silent?: boolean }
-): Promise<{ hasPushableCommit: boolean; pendingCommits: Array<{ hash: string; message: string; date: string }> }> {
+): Promise<{
+  hasPushableCommit: boolean
+  pendingCommits: Array<{ hash: string; message: string; date: string }>
+}> {
   const silent = Boolean(options?.silent)
   const logFormat = "%H\x1f%s\x1f%ci"
   const [countRaw, logRaw] = await Promise.all([
     runGit(worktreePath, ["rev-list", "--count", ...revisionArgs], { silent }),
-    runGit(worktreePath, ["log", `-${GIT_PANEL_MAX_PENDING_COMMITS}`, ...revisionArgs, `--format=${logFormat}`], { silent })
+    runGit(
+      worktreePath,
+      ["log", `-${GIT_PANEL_MAX_PENDING_COMMITS}`, ...revisionArgs, `--format=${logFormat}`],
+      { silent }
+    )
   ])
   const count = Number.parseInt(countRaw.trim(), 10)
   return {
@@ -1560,7 +1592,10 @@ async function getPushabilitySnapshot(
   branch: string,
   baseCommit: string | null,
   options?: { silent?: boolean }
-): Promise<{ hasPushableCommit: boolean; pendingCommits: Array<{ hash: string; message: string; date: string }> }> {
+): Promise<{
+  hasPushableCommit: boolean
+  pendingCommits: Array<{ hash: string; message: string; date: string }>
+}> {
   const silent = Boolean(options?.silent)
   const pushBaseRef = await resolvePushBaseRef(worktreePath, branch, { silent })
 
@@ -1611,7 +1646,9 @@ async function getPushabilitySnapshot(
 
   try {
     const logFormat = "%H\x1f%s\x1f%ci"
-    const raw = (await runGit(worktreePath, ["log", "-1", `--format=${logFormat}`], { silent })).trim()
+    const raw = (
+      await runGit(worktreePath, ["log", "-1", `--format=${logFormat}`], { silent })
+    ).trim()
     return { hasPushableCommit: true, pendingCommits: parseCommitLog(raw) }
   } catch {
     return { hasPushableCommit: true, pendingCommits: [] }
@@ -1663,7 +1700,9 @@ async function collectPublishedCommitShas(
     // fall through to the upstream-based snapshot
   }
   try {
-    const snapshot = await getPushabilitySnapshot(worktreePath, branch, baseCommit, { silent: true })
+    const snapshot = await getPushabilitySnapshot(worktreePath, branch, baseCommit, {
+      silent: true
+    })
     for (const commit of snapshot.pendingCommits) {
       if (/^[0-9a-f]{40}$/i.test(commit.hash)) shas.add(commit.hash)
     }
@@ -1693,9 +1732,11 @@ async function runWithConcurrency<T>(
 
 function isMissingRemoteBranchError(error: unknown): boolean {
   const text = getExecErrorText(error).toLowerCase()
-  return text.includes("couldn't find remote ref") ||
+  return (
+    text.includes("couldn't find remote ref") ||
     text.includes("no such ref was fetched") ||
     text.includes("couldn't find remote branch")
+  )
 }
 
 const GIT_REBASE_CONFLICT_MESSAGE =
@@ -1706,22 +1747,26 @@ const GIT_PUSH_REJECTED_NEEDS_PULL_MESSAGE =
 
 function isGitRebaseConflictError(error: unknown): boolean {
   const text = getExecErrorText(error).toLowerCase()
-  return text.includes("conflict (") ||
+  return (
+    text.includes("conflict (") ||
     text.includes("merge conflict") ||
     text.includes("failed to merge in the changes") ||
     text.includes("patch failed at") ||
     text.includes("resolve all conflicts manually") ||
     text.includes("could not apply")
+  )
 }
 
 function isGitPushRejectedNeedsPullError(error: unknown): boolean {
   const text = getExecErrorText(error).toLowerCase()
-  return text.includes("non-fast-forward") ||
+  return (
+    text.includes("non-fast-forward") ||
     text.includes("fetch first") ||
     text.includes("failed to push some refs") ||
     text.includes("updates were rejected") ||
     text.includes("tip of your current branch is behind") ||
     text.includes("remote contains work that you do not have locally")
+  )
 }
 
 async function resolveThreadWorkspaceContext(threadId: string): Promise<{
@@ -1778,7 +1823,15 @@ async function resolveThreadWorkspaceContext(threadId: string): Promise<{
     typeof metadata.worktreeBaseCommit === "string" ? metadata.worktreeBaseCommit : null
   const worktreeBranch =
     typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
-  return { metadata, workspacePath, isWorktree, isGitRepo, worktreeBaseCommit, worktreeBranch, repositories }
+  return {
+    metadata,
+    workspacePath,
+    isWorktree,
+    isGitRepo,
+    worktreeBaseCommit,
+    worktreeBranch,
+    repositories
+  }
 }
 
 async function resolveGitOperationTarget(
@@ -1809,9 +1862,15 @@ function prefixRepositoryPath(repo: DiscoveredGitRepository, filePath: string): 
 function resolveRepositoryFilePath(
   repos: DiscoveredGitRepository[],
   filePath: string
-): { repo: DiscoveredGitRepository; repoRelativePath: string; workspaceRelativePath: string } | null {
+): {
+  repo: DiscoveredGitRepository
+  repoRelativePath: string
+  workspaceRelativePath: string
+} | null {
   const normalized = normalizeGitRelativePath(filePath)
-  const sorted = [...repos].sort((a, b) => b.workspaceRelativePath.length - a.workspaceRelativePath.length)
+  const sorted = [...repos].sort(
+    (a, b) => b.workspaceRelativePath.length - a.workspaceRelativePath.length
+  )
   for (const repo of sorted) {
     if (repo.workspaceRelativePath === ".") {
       return { repo, repoRelativePath: normalized, workspaceRelativePath: normalized }
@@ -1826,7 +1885,9 @@ function resolveRepositoryFilePath(
   return null
 }
 
-function getFileHistoryMap(metadata: Record<string, unknown>): Record<string, FileHistorySnapshot[]> {
+function getFileHistoryMap(
+  metadata: Record<string, unknown>
+): Record<string, FileHistorySnapshot[]> {
   const raw = metadata.llmFileHistory
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
   const map: Record<string, FileHistorySnapshot[]> = {}
@@ -1839,16 +1900,22 @@ function getFileHistoryMap(metadata: Record<string, unknown>): Record<string, Fi
           typeof v === "object" &&
           typeof (v as FileHistorySnapshot).exists === "boolean" &&
           typeof (v as FileHistorySnapshot).ts === "string" &&
-          (((v as FileHistorySnapshot).content === null) || typeof (v as FileHistorySnapshot).content === "string") &&
-          (((v as FileHistorySnapshot).omitted === undefined) || typeof (v as FileHistorySnapshot).omitted === "boolean") &&
-          (((v as FileHistorySnapshot).sizeBytes === undefined) || typeof (v as FileHistorySnapshot).sizeBytes === "number")
+          ((v as FileHistorySnapshot).content === null ||
+            typeof (v as FileHistorySnapshot).content === "string") &&
+          ((v as FileHistorySnapshot).omitted === undefined ||
+            typeof (v as FileHistorySnapshot).omitted === "boolean") &&
+          ((v as FileHistorySnapshot).sizeBytes === undefined ||
+            typeof (v as FileHistorySnapshot).sizeBytes === "number")
       )
       .slice(-LLM_FILE_HISTORY_MAX_SNAPSHOTS_PER_FILE)
   }
   return map
 }
 
-async function readFileSnapshot(worktreePath: string, relPath: string): Promise<FileHistorySnapshot> {
+async function readFileSnapshot(
+  worktreePath: string,
+  relPath: string
+): Promise<FileHistorySnapshot> {
   const absPath = path.join(worktreePath, relPath)
   try {
     const stat = await fs.stat(absPath)
@@ -1979,7 +2046,9 @@ function replaceWorktreeLlmMetadata(
   for (const filePath of payload.changedFiles) {
     const normalized = normalizeGitRelativePath(filePath)
     if (normalized) {
-      nextChanged.add(getWorkspaceRelativePathForWorktreeFile(workspacePath, worktreePath, normalized))
+      nextChanged.add(
+        getWorkspaceRelativePathForWorktreeFile(workspacePath, worktreePath, normalized)
+      )
     }
   }
   metadata.llmModifiedFiles = Array.from(nextChanged)
@@ -1995,7 +2064,9 @@ function replaceWorktreeLlmMetadata(
     const normalized = normalizeGitRelativePath(relPath)
     const trimmed = trimFileHistory(history)
     if (normalized && trimmed.length > 0) {
-      nextHistory[getWorkspaceRelativePathForWorktreeFile(workspacePath, worktreePath, normalized)] = trimmed
+      nextHistory[
+        getWorkspaceRelativePathForWorktreeFile(workspacePath, worktreePath, normalized)
+      ] = trimmed
     }
   }
   metadata.llmFileHistory = nextHistory
@@ -2008,7 +2079,9 @@ function replaceWorktreeLlmMetadata(
   for (const filePath of payload.recentlyRevertedFiles) {
     const normalized = normalizeGitRelativePath(filePath)
     if (normalized) {
-      nextReverted.add(getWorkspaceRelativePathForWorktreeFile(workspacePath, worktreePath, normalized))
+      nextReverted.add(
+        getWorkspaceRelativePathForWorktreeFile(workspacePath, worktreePath, normalized)
+      )
     }
   }
   metadata.llmRecentlyRevertedFiles = Array.from(nextReverted)
@@ -2142,7 +2215,7 @@ export async function buildGitPanelFileDiff(
     // New untracked file: synthesize a minimal unified diff and stats.
     // To avoid loading huge files into memory, cap synthesized preview size.
     try {
-      const statForPreview = currentStat ?? await fs.stat(absPath)
+      const statForPreview = currentStat ?? (await fs.stat(absPath))
       if (statForPreview.size > MAX_SYNTHETIC_DIFF_BYTES) {
         const sizeKb = Math.max(1, Math.ceil(statForPreview.size / 1024))
         additions = 1
@@ -2248,7 +2321,8 @@ export async function buildGitPanelState(
   const statusMaxBufferBytes =
     // 懒加载列表如今用 --untracked-files=all 展开未跟踪目录（已排除 node_modules 等噪音），
     // 路径文本量比 normal 模式更大，放宽到 summary 档，避免正常仓库触顶报错。
-    options?.statusMaxBufferBytes ?? (includeDiffs ? GIT_EXEC_MAX_BUFFER_BYTES : GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES)
+    options?.statusMaxBufferBytes ??
+    (includeDiffs ? GIT_EXEC_MAX_BUFFER_BYTES : GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES)
   const trackedSet = new Set<string>()
   for (const tracked of trackedFiles) {
     for (const rel of toWorktreeRelativePath(worktreePath, tracked)) {
@@ -2312,7 +2386,9 @@ export async function buildGitPanelState(
   // 保留文件数量上限，避免超大仓库一次返回过多数据导致渲染阻塞。
   const visibleChangedFiles = displayChangedFiles.slice(0, visibleFileLimit)
   const statusByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.status]))
-  const previousPathByPath = new Map(changedFileEntries.map((entry) => [entry.path, entry.previousPath]))
+  const previousPathByPath = new Map(
+    changedFileEntries.map((entry) => [entry.path, entry.previousPath])
+  )
   const omittedFileCount = Math.max(0, displayChangedFiles.length - visibleChangedFiles.length)
   const numstatPathspecs = Array.from(
     new Set(
@@ -2490,7 +2566,9 @@ function normalizeSelectedChangedFileEntries(
 ): string[] {
   const changedFiles = Array.from(
     new Set(
-      changedEntries.flatMap((entry) => entry.previousPath ? [entry.previousPath, entry.path] : [entry.path])
+      changedEntries.flatMap((entry) =>
+        entry.previousPath ? [entry.previousPath, entry.path] : [entry.path]
+      )
     )
   )
   if (!Array.isArray(selectedFilePaths)) {
@@ -2535,7 +2613,9 @@ function normalizeSelectedChangedFileEntries(
 function getChangedFilesFromEntries(changedEntries: GitPanelChangedFile[]): string[] {
   return Array.from(
     new Set(
-      changedEntries.flatMap((entry) => entry.previousPath ? [entry.previousPath, entry.path] : [entry.path])
+      changedEntries.flatMap((entry) =>
+        entry.previousPath ? [entry.previousPath, entry.path] : [entry.path]
+      )
     )
   )
 }
@@ -2686,13 +2766,17 @@ export async function buildGitPanelMetaState(
 
   const repos = await getContextGitRepositories(context)
   if (!options?.worktreePath && repos.length > 1) {
-    const summaries: Array<{ hasPendingDiff: boolean; changedFiles: number }> = new Array(repos.length)
+    const summaries: Array<{ hasPendingDiff: boolean; changedFiles: number }> = new Array(
+      repos.length
+    )
     await runWithConcurrency(
       repos.map((repo, index) => ({ repo, index })),
       GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
       async ({ repo, index }) => {
-        summaries[index] = await getGitPanelSummaryQuick(repo.repoPath)
-          .catch(() => ({ hasPendingDiff: false, changedFiles: 0 }))
+        summaries[index] = await getGitPanelSummaryQuick(repo.repoPath).catch(() => ({
+          hasPendingDiff: false,
+          changedFiles: 0
+        }))
       }
     )
     const changedFilesTotal = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
@@ -2721,11 +2805,8 @@ export async function buildGitPanelMetaState(
   const workspacePath = target.worktreePath
   const tracked = getTrackedLlmFiles(context.metadata)
   const cacheKey = getCacheKeyForPath(workspacePath)
-  const summaryPromise = getCachedPromise(
-    summaryCache,
-    cacheKey,
-    GIT_CONTEXT_CACHE_TTL_MS,
-    () => getGitPanelSummaryQuick(workspacePath)
+  const summaryPromise = getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
+    getGitPanelSummaryQuick(workspacePath)
   )
   const branchPromise = options?.worktreePath
     ? getCurrentBranchCached(workspacePath, { silent: true })
@@ -2786,7 +2867,9 @@ async function buildGitChangedFilesSummary(
       entries.map((entry) => ({
         ...entry,
         path: prefixRepositoryPath(repo, entry.path),
-        previousPath: entry.previousPath ? prefixRepositoryPath(repo, entry.previousPath) : undefined
+        previousPath: entry.previousPath
+          ? prefixRepositoryPath(repo, entry.previousPath)
+          : undefined
       }))
     )
     const files = changedFileEntries.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
@@ -3129,8 +3212,17 @@ async function listWorktrees(gitRoot: string): Promise<WorktreeInfo[]> {
     const block = blocks[i]
     if (!block.trim()) continue
     const lines = block.trim().split("\n")
-    const worktreePath = lines.find((l) => l.startsWith("worktree "))?.slice(9).trim() ?? ""
-    const branch = lines.find((l) => l.startsWith("branch "))?.slice(7).trim().replace("refs/heads/", "") ?? "(detached)"
+    const worktreePath =
+      lines
+        .find((l) => l.startsWith("worktree "))
+        ?.slice(9)
+        .trim() ?? ""
+    const branch =
+      lines
+        .find((l) => l.startsWith("branch "))
+        ?.slice(7)
+        .trim()
+        .replace("refs/heads/", "") ?? "(detached)"
     const isMain = lines.some((l) => l === "bare") || i === 0
 
     let createdAt: Date | undefined
@@ -3153,7 +3245,6 @@ import {
   getOpenworkDir,
   getCustomModelPublicConfigById,
   getCustomModelPublicConfigs,
-  getCustomModelConfigById,
   getGoalSettings,
   setCustomModelConfig,
   setGoalSettings,
@@ -3161,6 +3252,7 @@ import {
   deleteCustomModelConfig,
   upsertUserInfoConfig,
   getUserInfo,
+  getStoredDefaultModelId,
   DEFAULT_MAX_TOKENS,
   MIN_MAX_TOKENS,
   MAX_MAX_TOKENS,
@@ -3176,7 +3268,19 @@ import {
   MAX_TOP_K,
   DEFAULT_THINKING_EFFORT
 } from "../storage"
-import type { CustomModelConfig, ThinkingEffort } from "../storage"
+import type { BuiltinModelOverride, CustomModelConfig, ThinkingEffort } from "../storage"
+import {
+  getBuiltinModelPublicConfigs,
+  getDefaultModelConfig,
+  getModelConfigByRef,
+  getModelConfigs,
+  normalizeModelRef,
+  refreshBuiltinModelCatalog,
+  resetBuiltinModelOverride,
+  setDefaultModelRef,
+  toModelRef,
+  updateBuiltinModelOverride
+} from "../models/registry"
 
 // Store for non-sensitive settings only (no encryption needed)
 const store = new Store({
@@ -3185,49 +3289,40 @@ const store = new Store({
 })
 
 const PROVIDERS: Omit<Provider, "hasAnyModelApiKey">[] = [
+  { id: "builtin", name: "系统内置" },
   { id: "custom", name: "Custom" }
 ]
 
 function resolveDefaultModelId(): string {
-  const customConfigs = getCustomModelPublicConfigs()
-  return customConfigs.length > 0 ? `custom:${customConfigs[0].id}` : ""
+  const config = getDefaultModelConfig()
+  return config ? toModelRef(config) : ""
 }
 
 function normalizeConfiguredModelId(modelId: string): string {
-  const trimmed = modelId.trim()
-  if (!trimmed) return ""
-
-  const customConfigs = getCustomModelPublicConfigs()
-  const normalizedId = trimmed.startsWith("custom:") ? trimmed.slice("custom:".length) : trimmed
-
-  const matchedById = customConfigs.find((config) => config.id === normalizedId)
-  if (matchedById) return `custom:${matchedById.id}`
-
-  const matchedByModel = customConfigs.find(
-    (config) => config.model === trimmed || config.model === normalizedId
-  )
-  if (matchedByModel) return `custom:${matchedByModel.id}`
-
-  return ""
+  return normalizeModelRef(modelId)
 }
 
 function getResolvedStoredDefaultModelId(): string {
-  const stored = store.get("defaultModel", "") as string
+  const stored = getStoredDefaultModelId()
   return normalizeConfiguredModelId(stored) || resolveDefaultModelId()
 }
 
 export function registerModelHandlers(ipcMain: IpcMain): void {
-  // List available models (custom only)
+  // List all effective models. The first call waits for the remote manifest so
+  // the renderer does not briefly show fallback entries and then replace them.
   ipcMain.handle("models:list", async () => {
-    const customConfigs = getCustomModelPublicConfigs()
-    const models: ModelConfig[] = customConfigs.map((customConfig) => ({
-      id: `custom:${customConfig.id}`,
-      name: customConfig.name,
-      provider: "custom",
-      model: customConfig.model,
-      description: customConfig.baseUrl,
-      available: customConfig.hasApiKey,
-      ...(customConfig.tier !== undefined && { tier: customConfig.tier })
+    await refreshBuiltinModelCatalog()
+    const models: ModelConfig[] = getModelConfigs().map((config) => ({
+      id: toModelRef(config),
+      name: config.name,
+      provider: config.source,
+      source: config.source,
+      model: config.model,
+      description: config.baseUrl,
+      available: Boolean(config.apiKey),
+      maxTokens: config.maxTokens,
+      ...(config.origin !== undefined && { origin: config.origin }),
+      ...(config.tier !== undefined && { tier: config.tier })
     }))
 
     return models
@@ -3243,6 +3338,22 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
     const all = getCustomModelPublicConfigs()
     return all[0] || null
+  })
+
+  ipcMain.handle("models:getBuiltinConfigs", async () => {
+    await refreshBuiltinModelCatalog()
+    return getBuiltinModelPublicConfigs()
+  })
+
+  ipcMain.handle(
+    "models:updateBuiltinConfig",
+    async (_event, id: string, config: BuiltinModelOverride) => {
+      updateBuiltinModelOverride(id, config)
+    }
+  )
+
+  ipcMain.handle("models:resetBuiltinConfig", async (_event, id: string) => {
+    resetBuiltinModelOverride(id)
   })
 
   ipcMain.handle("models:setCustomConfig", async (_event, config: CustomModelConfig) => {
@@ -3280,20 +3391,24 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Get default model
   ipcMain.handle("models:getDefault", async () => {
+    await refreshBuiltinModelCatalog()
     return getResolvedStoredDefaultModelId()
   })
 
   // Set default model
   ipcMain.handle("models:setDefault", async (_event, modelId: string) => {
-    store.set("defaultModel", normalizeConfiguredModelId(modelId))
+    setDefaultModelRef(modelId)
   })
 
   // List providers with whether any model has a key configured.
   ipcMain.handle("models:listProviders", async () => {
-    const hasAnyModelApiKey = getCustomModelPublicConfigs().some((config) => config.hasApiKey)
+    await refreshBuiltinModelCatalog()
     return PROVIDERS.map((provider) => ({
       ...provider,
-      hasAnyModelApiKey
+      hasAnyModelApiKey:
+        provider.id === "builtin"
+          ? getBuiltinModelPublicConfigs().some((config) => config.hasApiKey)
+          : getCustomModelPublicConfigs().some((config) => config.hasApiKey)
     }))
   })
 
@@ -3335,6 +3450,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         apiKey?: string
         maxOutputTokens?: number
         temperature?: number
+        topP?: number
+        topK?: number
         enableThinking?: boolean
         enableThinkingEffort?: boolean
         thinkingEffort?: ThinkingEffort
@@ -3345,22 +3462,28 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       let apiKey: string
       let maxOutputTokens: number
       let temperature: number
+      let topP: number
+      let topK: number
       let enableThinking: boolean
       let enableThinkingEffort: boolean
       let thinkingEffort: ThinkingEffort
 
       if (params.id) {
-        // Test an existing saved config — read API key from storage
-        const saved = getCustomModelConfigById(params.id)
+        // Built-in connection fields are resolved entirely in the main process;
+        // renderer-supplied URL/model/key cannot override managed credentials.
+        const saved = getModelConfigByRef(params.id)
         if (!saved) return { success: false, error: "未找到该模型配置" }
-        baseUrl = params.baseUrl || saved.baseUrl
-        model = params.model || saved.model
-        apiKey = params.apiKey || saved.apiKey || ""
-        maxOutputTokens = params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+        const builtin = saved.source === "builtin"
+        baseUrl = builtin ? saved.baseUrl : params.baseUrl || saved.baseUrl
+        model = builtin ? saved.model : params.model || saved.model
+        apiKey = builtin ? saved.apiKey || "" : params.apiKey || saved.apiKey || ""
+        maxOutputTokens =
+          params.maxOutputTokens ?? saved.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
         temperature = params.temperature ?? saved.temperature ?? DEFAULT_TEMPERATURE
-        enableThinking = params.enableThinking ?? (saved.enableThinking === true)
-        enableThinkingEffort =
-          params.enableThinkingEffort ?? (saved.enableThinkingEffort === true)
+        topP = params.topP ?? saved.topP ?? DEFAULT_TOP_P
+        topK = params.topK ?? saved.topK ?? DEFAULT_TOP_K
+        enableThinking = params.enableThinking ?? saved.enableThinking === true
+        enableThinkingEffort = params.enableThinkingEffort ?? saved.enableThinkingEffort === true
         thinkingEffort = params.thinkingEffort ?? saved.thinkingEffort ?? DEFAULT_THINKING_EFFORT
       } else {
         baseUrl = params.baseUrl || ""
@@ -3368,6 +3491,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         apiKey = params.apiKey || ""
         maxOutputTokens = params.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
         temperature = params.temperature ?? DEFAULT_TEMPERATURE
+        topP = params.topP ?? DEFAULT_TOP_P
+        topK = params.topK ?? DEFAULT_TOP_K
         enableThinking = params.enableThinking === true
         enableThinkingEffort = params.enableThinkingEffort === true
         thinkingEffort = params.thinkingEffort ?? DEFAULT_THINKING_EFFORT
@@ -3388,9 +3513,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (!["http:", "https:"].includes(urlObj.protocol)) {
         return { success: false, error: "仅支持 http/https 协议" }
       }
-      urlObj.pathname = urlObj.pathname
-        .replace(/\/chat\/completions\/?$/, "")
-        .replace(/\/+$/, "") + "/chat/completions"
+      urlObj.pathname =
+        urlObj.pathname.replace(/\/chat\/completions\/?$/, "").replace(/\/+$/, "") +
+        "/chat/completions"
       const url = urlObj.toString()
 
       const start = Date.now()
@@ -3408,13 +3533,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
             messages: [{ role: "user", content: "Hi" }],
             max_tokens: maxOutputTokens,
             temperature,
+            top_p: topP,
+            ...(topK > 0 ? { top_k: topK } : {}),
             chat_template_kwargs: {
               enable_thinking: enableThinking,
               ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
             },
-            ...(enableThinking
-              ? { thinking: { type: "enabled" } }
-              : {}),
+            ...(enableThinking ? { thinking: { type: "enabled" } } : {}),
             stream: false
           }),
           signal: controller.signal
@@ -3537,8 +3662,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (thread?.metadata) {
         try {
           const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
-          preferredPath =
-            typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+          preferredPath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
         } catch {
           preferredPath = null
         }
@@ -3551,8 +3675,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
 
     // 仅当目录真实存在时才作为 defaultPath，避免对话框落到不存在路径。
-    const defaultPath =
-      preferredPath && existsSync(preferredPath) ? preferredPath : undefined
+    const defaultPath = preferredPath && existsSync(preferredPath) ? preferredPath : undefined
 
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
@@ -3819,8 +3942,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       payload: string | { folderPath: string; includeWorktrees?: boolean; threadId?: string }
     ) => {
       const folderPath = typeof payload === "string" ? payload : payload.folderPath
-      const includeWorktrees = typeof payload === "string" ? true : Boolean(payload.includeWorktrees)
-      const threadId = typeof payload === "string" ? null : (payload.threadId || null)
+      const includeWorktrees =
+        typeof payload === "string" ? true : Boolean(payload.includeWorktrees)
+      const threadId = typeof payload === "string" ? null : payload.threadId || null
 
       const gitRoot = await getGitRoot(folderPath)
       const repositories = gitRoot ? [] : await discoverWorkspaceGitRepositories(folderPath)
@@ -3853,7 +3977,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
             const threadWorkspacePath =
               typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
-            if (threadWorkspacePath && path.resolve(threadWorkspacePath) === path.resolve(folderPath)) {
+            if (
+              threadWorkspacePath &&
+              path.resolve(threadWorkspacePath) === path.resolve(folderPath)
+            ) {
               writeThreadGitContextCache(metadata, {
                 workspacePath: threadWorkspacePath,
                 isGitRepo: result.isGit,
@@ -3947,13 +4074,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           runGit(gitRoot, ["rev-parse", "HEAD"])
         ])
         const baseBranch =
-          baseBranchResult.status === "fulfilled"
-            ? baseBranchResult.value.trim() || "main"
-            : "main"
+          baseBranchResult.status === "fulfilled" ? baseBranchResult.value.trim() || "main" : "main"
         const baseCommit =
-          baseCommitResult.status === "fulfilled"
-            ? baseCommitResult.value.trim()
-            : ""
+          baseCommitResult.status === "fulfilled" ? baseCommitResult.value.trim() : ""
 
         await runGit(gitRoot, ["worktree", "add", "-b", safeBranch, worktreePath])
         return { success: true, path: worktreePath, branch: safeBranch, baseBranch, baseCommit }
@@ -3989,13 +4112,18 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const thread = getThread(threadId)
       if (!thread) return
       let metadata: Record<string, unknown> = {}
-      try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { /* corrupted, reset */ }
+      try {
+        metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+      } catch {
+        /* corrupted, reset */
+      }
       metadata.gitRoot = gitRoot
       metadata.isWorktree = true
       metadata.worktreeBranch = branch
       if (baseBranch) metadata.worktreeBaseBranch = baseBranch
       if (baseCommit) metadata.worktreeBaseCommit = baseCommit
-      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+      const workspacePath =
+        typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
       if (workspacePath) {
         writeThreadGitContextCache(metadata, {
           workspacePath,
@@ -4017,7 +4145,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const thread = getThread(threadId)
     if (!thread) return
     let metadata: Record<string, unknown> = {}
-    try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { /* corrupted, reset */ }
+    try {
+      metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+    } catch {
+      /* corrupted, reset */
+    }
     delete metadata.isWorktree
     delete metadata.gitRoot
     delete metadata.worktreeBranch
@@ -4037,8 +4169,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       const thread = getThread(threadId)
       if (!thread) return { success: false, error: "Thread not found" }
       let metadata: Record<string, unknown> = {}
-      try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
-      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+      try {
+        metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+      } catch {
+        metadata = {}
+      }
+      const workspacePath =
+        typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
       const existing = new Set(getTrackedLlmFiles(metadata))
       const revertedSet = new Set(getRecentlyRevertedFiles(metadata))
       const fileHistory = getFileHistoryMap(metadata)
@@ -4125,7 +4262,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "workspace:getGitPanelFileDiff",
     async (
       _event,
-      { threadId, filePath, options }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
+      {
+        threadId,
+        filePath,
+        options
+      }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
     ) => {
       let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
       try {
@@ -4269,7 +4410,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         message,
         filePaths,
         options
-      }: { threadId: string; message: string; filePaths?: string[]; options?: { worktreePath?: string } }
+      }: {
+        threadId: string
+        message: string
+        filePaths?: string[]
+        options?: { worktreePath?: string }
+      }
     ) => {
       try {
         logGitStep(threadId, "commit", "开始提交")
@@ -4308,11 +4454,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           "commit",
           `前端选择路径：${Array.isArray(filePaths) ? filePaths.join(", ") || "(空)" : "(未指定，提交全部)"}`
         )
-        logGitStep(
-          threadId,
-          "commit",
-          `后端展开路径：${filesToCommit.join(", ") || "(空)"}`
-        )
+        logGitStep(threadId, "commit", `后端展开路径：${filesToCommit.join(", ") || "(空)"}`)
         if (filesToCommit.length === 0) {
           logGitStep(threadId, "commit", "失败：没有需要提交的改动")
           return { success: false, error: "没有需要提交的改动" }
@@ -4342,12 +4484,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
         let commitSha: string | undefined
         try {
-          commitSha = (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() || undefined
+          commitSha =
+            (await runGit(worktreePath, ["rev-parse", "HEAD"], { silent: true })).trim() ||
+            undefined
         } catch {
           // best-effort: adoption can still be measured without the SHA
         }
         // 提交后主动刷新 HEAD 短缓存，保证后续 push/telemetry 读取到最新提交。
-        void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(() => null)
+        void getHeadCommitCached(worktreePath, { silent: true, forceRefresh: true }).catch(
+          () => null
+        )
         if (adoptionSnapshots.length > 0) {
           const durable = await measureForCommit(
             adoptionSnapshots,
@@ -4368,13 +4514,19 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         // duplicate under the resolved git root (in monorepos that duplicate
         // even shows up as a different repository name).
         await markInAppCommitProcessed(worktreePath, commitSha)
-        const postChangedFiles = await getPostCommitChangedFilesForMetadata(worktreePath, tracked)
-          .catch(() => [])
+        const postChangedFiles = await getPostCommitChangedFilesForMetadata(
+          worktreePath,
+          tracked
+        ).catch(() => [])
         const { getThread, updateThread } = await import("../db")
         const thread = getThread(threadId)
         if (thread) {
           let metadata: Record<string, unknown> = {}
-          try { metadata = thread.metadata ? JSON.parse(thread.metadata) : {} } catch { metadata = {} }
+          try {
+            metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
+          } catch {
+            metadata = {}
+          }
           replaceWorktreeLlmMetadata(metadata, context.workspacePath, worktreePath, {
             changedFiles: postChangedFiles,
             fileHistory: {},
@@ -4383,7 +4535,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           updateThread(threadId, { metadata: JSON.stringify(metadata) })
         }
         notifyWorkspaceFilesChanged(threadId, worktreePath)
-        if (context.workspacePath && path.resolve(context.workspacePath) !== path.resolve(worktreePath)) {
+        if (
+          context.workspacePath &&
+          path.resolve(context.workspacePath) !== path.resolve(worktreePath)
+        ) {
           notifyWorkspaceFilesChanged(threadId, context.workspacePath)
         }
         logGitStep(threadId, "commit", "提交成功")
@@ -4410,7 +4565,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         return { success: true }
       } catch (e) {
-        logGitStep(threadId, "commit", `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "提交失败")}`)
+        logGitStep(
+          threadId,
+          "commit",
+          `异常：${getExecErrorText(e) || (e instanceof Error ? e.message : "提交失败")}`
+        )
         return { success: false, error: e instanceof Error ? e.message : "提交失败" }
       }
     }
@@ -4441,9 +4600,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         const branch = options?.worktreePath
           ? (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
-          : context.worktreeBranch || (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
+          : context.worktreeBranch ||
+            (await getCurrentBranchCached(worktreePath, { silent: true })) ||
+            "HEAD"
 
-        steps.push({ step: "commit", status: "skipped", detail: "Push 不执行提交，仅推送已有 commit" })
+        steps.push({
+          step: "commit",
+          status: "skipped",
+          detail: "Push 不执行提交，仅推送已有 commit"
+        })
 
         // 快速路径：push 流程跳过 pull --rebase，减少端到端等待。
         // 若后续 push 失败，会把错误精确返回给用户处理（例如非 fast-forward）。
@@ -4508,7 +4673,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
         steps.push({ step: "final", status: "ok", detail: "推送成功" })
         notifyWorkspaceFilesChanged(threadId, worktreePath)
-        if (context.workspacePath && path.resolve(context.workspacePath) !== path.resolve(worktreePath)) {
+        if (
+          context.workspacePath &&
+          path.resolve(context.workspacePath) !== path.resolve(worktreePath)
+        ) {
           notifyWorkspaceFilesChanged(threadId, context.workspacePath)
         }
         logGitStep(threadId, "push", "推送流程成功")
@@ -4521,8 +4689,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           const pushedAt = nowIsoLocal()
           let remoteUrl = ""
           try {
-            remoteUrl = (await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })).trim()
-          } catch { /* best-effort */ }
+            remoteUrl = (
+              await runGit(worktreePath, ["remote", "get-url", "origin"], { silent: true })
+            ).trim()
+          } catch {
+            /* best-effort */
+          }
           const remoteInfo = parseGitRemoteInfo(remoteUrl)
           console.log(
             `[GitPush] scheduling code adoption push marking: commitCount=${pushedCommitShas.length} shas=${pushedCommitShas.join(",")} branch=${branch}`
@@ -4560,7 +4732,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         return { success: true, autoCommitted: false, steps }
       } catch (e) {
         const detail = getExecErrorText(e)
-        logGitStep(threadId, "push", `异常：${detail || (e instanceof Error ? e.message : "推送失败")}`)
+        logGitStep(
+          threadId,
+          "push",
+          `异常：${detail || (e instanceof Error ? e.message : "推送失败")}`
+        )
         steps.push({ step: "final", status: "failed", detail: detail || "流程异常中断" })
         return {
           success: false,
@@ -4755,7 +4931,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // Parse a file and extract text content for chat attachments
   ipcMain.handle(
     "file:parse",
-    async (_event, filePath: string, maxLength?: number): Promise<{
+    async (
+      _event,
+      filePath: string,
+      maxLength?: number
+    ): Promise<{
       success: boolean
       attachment?: import("../file-parser").ParsedAttachment
       error?: string
@@ -4786,9 +4966,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const result = await dialog.showOpenDialog(win, {
       properties: ["openFile", "multiSelections"],
       title: "选择附件",
-      filters: [
-        { name: "支持的文件", extensions: ["txt", "md", "csv", "docx", "xlsx", "xls"] }
-      ]
+      filters: [{ name: "支持的文件", extensions: ["txt", "md", "csv", "docx", "xlsx", "xls"] }]
     })
     if (result.canceled || result.filePaths.length === 0) {
       return { canceled: true, filePaths: [] }

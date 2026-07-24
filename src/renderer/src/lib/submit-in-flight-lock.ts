@@ -8,6 +8,13 @@ export function shouldUseSubmitInFlightLock(params: {
   return !params.isSideChannelGoalControl
 }
 
+export function shouldQueueBehindInFlightSubmit(params: {
+  hasInFlightSubmit: boolean
+  isLiveSubmitPreparing: boolean
+}): boolean {
+  return params.hasInFlightSubmit && !params.isLiveSubmitPreparing
+}
+
 export function tryAcquireSubmitInFlightLock(
   lockRef: SubmitInFlightLockRef,
   shouldUseLock: boolean,

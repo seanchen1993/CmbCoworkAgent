@@ -1,13 +1,15 @@
-import Store from "electron-store"
 import { tool } from "langchain"
 import { ChatOpenAI } from "@langchain/openai"
-import { AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages"
-import { z } from "zod"
 import {
-  getCustomModelConfigs,
-  getOpenworkDir,
-  type CustomModelConfig
-} from "../storage"
+  AIMessage,
+  BaseMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage
+} from "@langchain/core/messages"
+import { z } from "zod"
+import type { CustomModelConfig } from "../storage"
+import { getDefaultModelConfig, toModelRef, type ResolvedModelConfig } from "../models/registry"
 import type {
   DashboardEsIndexAlias,
   DashboardEsQueryInput,
@@ -62,11 +64,6 @@ export interface DashboardAnalysisAgentOptions {
   executeQuery: DashboardAnalysisQueryExecutor
 }
 
-const settingsStore = new Store({
-  name: "settings",
-  cwd: getOpenworkDir()
-})
-
 const dashboardEsQuerySchema = z.object({
   indexAlias: z.enum(["event", "trace"]).describe(
     "Allowed dashboard ES index alias. Use event for devclaw_event telemetry, trace for devclaw_trace agent traces."
@@ -85,7 +82,9 @@ const dashboardEsQuerySchema = z.object({
       featureSlug: z.string().nullable().optional()
     })
     .optional()
-    .describe("Optional extra dashboard context. The current panel context is enforced by the backend.")
+    .describe(
+      "Optional extra dashboard context. The current panel context is enforced by the backend."
+    )
 })
 
 type DashboardEsQueryToolArgs = z.infer<typeof dashboardEsQuerySchema>
@@ -94,30 +93,8 @@ const MAX_HISTORY_MESSAGES = 8
 const MAX_TOOL_ROUNDS = 5
 const MAX_TOOL_OUTPUT_CHARS = 80_000
 
-function normalizeConfiguredModelId(modelId: string, configs: CustomModelConfig[]): string {
-  const trimmed = modelId.trim()
-  if (!trimmed) return ""
-  const normalizedId = trimmed.startsWith("custom:") ? trimmed.slice("custom:".length) : trimmed
-
-  const matchedById = configs.find((config) => config.id === normalizedId)
-  if (matchedById) return matchedById.id
-
-  const matchedByModel = configs.find(
-    (config) => config.model === trimmed || config.model === normalizedId
-  )
-  return matchedByModel?.id ?? ""
-}
-
-export function resolveDashboardAnalysisModelConfig(): CustomModelConfig | null {
-  const configs = getCustomModelConfigs()
-  if (configs.length === 0) return null
-
-  const stored = String(settingsStore.get("defaultModel", "") || "")
-  const normalizedId = normalizeConfiguredModelId(stored, configs)
-  if (normalizedId) {
-    return configs.find((config) => config.id === normalizedId) ?? configs[0] ?? null
-  }
-  return configs[0] ?? null
+export function resolveDashboardAnalysisModelConfig(): ResolvedModelConfig | null {
+  return getDefaultModelConfig()
 }
 
 function createDashboardAnalysisModel(config: CustomModelConfig): ChatOpenAI {
@@ -198,8 +175,8 @@ export function buildDashboardToolRetryMessage(error: unknown): string {
     "Please retry with corrected tool arguments.",
     "Requirements:",
     "- The tool arguments must be a strict JSON object.",
-    "- indexAlias must be \"event\" or \"trace\".",
-    "- operation must be one of \"search\", \"msearch\", \"count\", \"mapping\", \"field_caps\".",
+    '- indexAlias must be "event" or "trace".',
+    '- operation must be one of "search", "msearch", "count", "mapping", "field_caps".',
     "- body must be a JSON object, not a string, Markdown code block, JavaScript object literal, or JSON with comments/trailing commas.",
     "- Do not include URL, HTTP method, credentials, or index names."
   ].join("\n")
@@ -343,7 +320,8 @@ export async function runDashboardAnalysisAgent(
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const response = (await model.invoke(messages)) as AIMessage
     const calls = Array.isArray(response.tool_calls) ? response.tool_calls : []
-    const invalidToolCallRetryMessage = calls.length === 0 ? getInvalidToolCallRetryMessage(response) : null
+    const invalidToolCallRetryMessage =
+      calls.length === 0 ? getInvalidToolCallRetryMessage(response) : null
     if (invalidToolCallRetryMessage) {
       messages.push(
         new HumanMessage(
@@ -359,7 +337,7 @@ export async function runDashboardAnalysisAgent(
       const content = contentToText(response.content).trim()
       return {
         content: content || "没有生成有效分析结果，请换个问题重试。",
-        modelId: `custom:${config.id}`,
+        modelId: toModelRef(config),
         modelName: config.model,
         toolCallCount: toolCalls.length,
         toolCalls
@@ -397,7 +375,7 @@ export async function runDashboardAnalysisAgent(
 
   return {
     content: "分析过程超过工具调用上限。请缩小问题范围，或指定要看的指标、人员、组织或时间段。",
-    modelId: `custom:${config.id}`,
+    modelId: toModelRef(config),
     modelName: config.model,
     toolCallCount: toolCalls.length,
     toolCalls

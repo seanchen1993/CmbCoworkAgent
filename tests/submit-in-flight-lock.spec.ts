@@ -7,6 +7,7 @@
 
 import {
   releaseSubmitInFlightLock,
+  shouldQueueBehindInFlightSubmit,
   shouldUseSubmitInFlightLock,
   tryAcquireSubmitInFlightLock
 } from "../src/renderer/src/lib/submit-in-flight-lock.ts"
@@ -30,6 +31,36 @@ function testSideChannelGoalControlsSkipLock(): void {
     shouldUseSubmitInFlightLock({ isSideChannelGoalControl: true }),
     false,
     "loading side-channel goal controls should remain available while a submit is in flight"
+  )
+}
+
+function testLiveSubmitPreparationDoesNotBecomeQueueableBusy(): void {
+  assertEqual(
+    shouldQueueBehindInFlightSubmit({
+      hasInFlightSubmit: true,
+      isLiveSubmitPreparing: true
+    }),
+    false,
+    "a rapid duplicate gesture must remain blocked by the live submit lock"
+  )
+}
+
+function testNonLiveSubmitLockRemainsQueueableBusy(): void {
+  assertEqual(
+    shouldQueueBehindInFlightSubmit({
+      hasInFlightSubmit: true,
+      isLiveSubmitPreparing: false
+    }),
+    true,
+    "a new user message racing the queue pump should be parked instead of dropped"
+  )
+  assertEqual(
+    shouldQueueBehindInFlightSubmit({
+      hasInFlightSubmit: false,
+      isLiveSubmitPreparing: false
+    }),
+    false,
+    "an idle thread should not be treated as queueable busy"
   )
 }
 
@@ -111,6 +142,8 @@ function testSideChannelDoesNotMutateLock(): void {
 
 testRealSubmitPathsUseLock()
 testSideChannelGoalControlsSkipLock()
+testLiveSubmitPreparationDoesNotBecomeQueueableBusy()
+testNonLiveSubmitLockRemainsQueueableBusy()
 testLockBlocksSecondSubmitUntilReleased()
 testLockAllowsDifferentThreadsIndependently()
 testSideChannelDoesNotMutateLock()
