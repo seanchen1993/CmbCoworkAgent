@@ -1,17 +1,13 @@
 import { useCallback, useEffect, useRef } from "react"
+import { BROWSER_SESSION_ID } from "../../../../shared/browser-types"
 
 const HIDDEN_BROWSER_BOUNDS = { x: 0, y: 0, width: 0, height: 0 }
-
-function getBrowserSessionId(threadId: string): string {
-  return `thread-${threadId}`
-}
 
 function formatBrowserViewLifecycleError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
 interface UseBrowserViewLifecycleOptions {
-  activeRightPanelThreadId: string | null
   currentThreadId: string | null
   harnessSessionThreadId: string | null
   mainView: string
@@ -23,7 +19,6 @@ interface UseBrowserViewLifecycleOptions {
 }
 
 export function useBrowserViewLifecycle({
-  activeRightPanelThreadId,
   currentThreadId,
   harnessSessionThreadId,
   mainView,
@@ -33,12 +28,9 @@ export function useBrowserViewLifecycle({
   selectBrowserModule,
   setRightPanelCollapsed
 }: UseBrowserViewLifecycleOptions): void {
-  const lastVisibleBrowserSessionIdRef = useRef<string | null>(null)
+  const wasBrowserPanelVisibleRef = useRef(false)
   const rendererUnloadBrowserCleanupSentRef = useRef(false)
 
-  const activeBrowserSessionId = activeRightPanelThreadId
-    ? getBrowserSessionId(activeRightPanelThreadId)
-    : null
   const isBrowserPanelVisible =
     rightModule === "browser" &&
     !rightPanelCollapsed &&
@@ -46,30 +38,20 @@ export function useBrowserViewLifecycle({
     ((mainView === "thread" && Boolean(currentThreadId)) ||
       (mainView === "harness" && Boolean(harnessSessionThreadId)))
 
-  const detachBrowserSession = useCallback((sessionId: string, reason: string) => {
-    console.info(`[App] Detaching Browser session ${sessionId} because ${reason}.`)
-    void window.api.browser.detach(sessionId).catch((error) => {
+  const hideBrowserSession = useCallback((reason: string) => {
+    console.info(`[App] Hiding Browser session ${BROWSER_SESSION_ID} because ${reason}.`)
+    void window.api.browser.setBounds(HIDDEN_BROWSER_BOUNDS, false).catch((error) => {
       console.error(
-        `[App] Browser session ${sessionId} detach failed: ${formatBrowserViewLifecycleError(error)}.`
-      )
-    })
-  }, [])
-
-  const hideBrowserSession = useCallback((sessionId: string, reason: string) => {
-    console.info(`[App] Hiding Browser session ${sessionId} because ${reason}.`)
-    void window.api.browser.setBounds(sessionId, HIDDEN_BROWSER_BOUNDS, false).catch((error) => {
-      console.error(
-        `[App] Browser session ${sessionId} hide failed: ${formatBrowserViewLifecycleError(error)}.`
+        `[App] Browser session ${BROWSER_SESSION_ID} hide failed: ${formatBrowserViewLifecycleError(error)}.`
       )
     })
   }, [])
 
   useEffect(() => {
     console.info(
-      `[App] Browser panel visibility snapshot: visible=${isBrowserPanelVisible} module=${rightModule} collapsed=${rightPanelCollapsed} agentFocus=${isAgentFocusActive} mainView=${mainView} currentThreadId=${currentThreadId ?? "(none)"} harnessThreadId=${harnessSessionThreadId ?? "(none)"} activeSession=${activeBrowserSessionId ?? "(none)"} lastVisibleSession=${lastVisibleBrowserSessionIdRef.current ?? "(none)"}.`
+      `[App] Browser panel visibility snapshot: visible=${isBrowserPanelVisible} module=${rightModule} collapsed=${rightPanelCollapsed} agentFocus=${isAgentFocusActive} mainView=${mainView} currentThreadId=${currentThreadId ?? "(none)"} harnessThreadId=${harnessSessionThreadId ?? "(none)"} session=${BROWSER_SESSION_ID}.`
     )
   }, [
-    activeBrowserSessionId,
     currentThreadId,
     harnessSessionThreadId,
     isAgentFocusActive,
@@ -86,7 +68,7 @@ export function useBrowserViewLifecycle({
       if (rendererUnloadBrowserCleanupSentRef.current) return
       rendererUnloadBrowserCleanupSentRef.current = true
       console.info(
-        `[App] Renderer unload requested BrowserView cleanup; activeSession=${activeBrowserSessionId ?? "(none)"} browserPanelVisible=${isBrowserPanelVisible}.`
+        `[App] Renderer unload requested BrowserView cleanup; session=${BROWSER_SESSION_ID} browserPanelVisible=${isBrowserPanelVisible}.`
       )
       window.api.browser.disposeAllForRendererUnload()
     }
@@ -98,30 +80,22 @@ export function useBrowserViewLifecycle({
       window.removeEventListener("beforeunload", handleRendererUnloadBrowserCleanup)
       window.removeEventListener("pagehide", handleRendererUnloadBrowserCleanup)
     }
-  }, [activeBrowserSessionId, isBrowserPanelVisible])
+  }, [isBrowserPanelVisible])
 
   useEffect(() => {
-    if (isBrowserPanelVisible && activeBrowserSessionId) {
-      const previousSessionId = lastVisibleBrowserSessionIdRef.current
-      console.info(
-        `[App] Browser panel became visible; activeSession=${activeBrowserSessionId} previousVisibleSession=${previousSessionId ?? "(none)"}.`
-      )
-      if (previousSessionId && previousSessionId !== activeBrowserSessionId) {
-        detachBrowserSession(previousSessionId, "the active thread changed")
-      }
-      lastVisibleBrowserSessionIdRef.current = activeBrowserSessionId
+    if (isBrowserPanelVisible) {
+      wasBrowserPanelVisibleRef.current = true
+      console.info(`[App] Browser panel became visible; session=${BROWSER_SESSION_ID}.`)
       return
     }
 
-    const sessionId = lastVisibleBrowserSessionIdRef.current
-    if (!sessionId) {
-      console.info("[App] Browser panel hidden with no retained visible Browser session.")
+    if (!wasBrowserPanelVisibleRef.current) {
+      console.info("[App] Browser panel hidden with no visible Browser session to hide.")
       return
     }
-    console.info(`[App] Browser panel no longer visible; last session=${sessionId}.`)
-    lastVisibleBrowserSessionIdRef.current = null
-    hideBrowserSession(sessionId, "the Browser panel is hidden")
-  }, [activeBrowserSessionId, detachBrowserSession, hideBrowserSession, isBrowserPanelVisible])
+    wasBrowserPanelVisibleRef.current = false
+    hideBrowserSession("the Browser panel is hidden")
+  }, [hideBrowserSession, isBrowserPanelVisible])
 
   useEffect(() => {
     return window.api.browser.onPanelRequest((request) => {

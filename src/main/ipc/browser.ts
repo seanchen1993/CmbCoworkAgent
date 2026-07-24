@@ -1,16 +1,12 @@
 import { dialog, type BrowserWindow, type IpcMain } from "electron"
 import { BrowserService } from "../browser/core/browser-service"
-import {
-  readBrowserProfileImportData
-} from "../browser/chrome/browser-profile-importer"
+import { readBrowserProfileImportData } from "../browser/chrome/browser-profile-importer"
 import { sanitizeExtensionCookieExport } from "../browser/chrome/browser-extension-cookie-importer"
 import {
   BrowserCookieBridgeError,
   BrowserCookieBridgeServer
 } from "../browser/chrome/browser-cookie-bridge-server"
-import {
-  ensureCmbChromeNativeHostRegistration
-} from "../browser/chrome/browser-native-host-installer"
+import { ensureCmbChromeNativeHostRegistration } from "../browser/chrome/browser-native-host-installer"
 import { setGlobalBrowserService } from "../browser/core/browser-service-registry"
 import type {
   BrowserAttachOptions,
@@ -58,7 +54,10 @@ function extensionImportFailure(
 
 function sanitizeProfileImportError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  return message.replace(/(cookie|token|session|authorization|password)=([^;\s]+)/gi, "$1=[redacted]")
+  return message.replace(
+    /(cookie|token|session|authorization|password)=([^;\s]+)/gi,
+    "$1=[redacted]"
+  )
 }
 
 function mergeSkippedWebsites(
@@ -68,14 +67,12 @@ function mergeSkippedWebsites(
   for (const list of lists) {
     for (const item of list ?? []) {
       const key = item.domain || item.url || "(unknown)"
-      const current =
-        merged.get(key) ??
-        {
-          domain: item.domain || "(unknown)",
-          reasons: [],
-          skippedCookies: 0,
-          url: item.url
-        }
+      const current = merged.get(key) ?? {
+        domain: item.domain || "(unknown)",
+        reasons: [],
+        skippedCookies: 0,
+        url: item.url
+      }
       current.skippedCookies += item.skippedCookies
       current.url = current.url || item.url
       for (const reason of item.reasons) {
@@ -97,18 +94,22 @@ export function registerBrowserHandlers(
   const browserService = new BrowserService(getMainWindow)
   setGlobalBrowserService(browserService)
   void cookieBridgeServer.start().catch((error) => {
-    console.warn(`[BrowserCookieBridge] failed to start: ${error instanceof Error ? error.message : String(error)}`)
+    console.warn(
+      `[BrowserCookieBridge] failed to start: ${error instanceof Error ? error.message : String(error)}`
+    )
   })
   void ensureCmbChromeNativeHostRegistration().catch((error) => {
-    console.warn(`[BrowserCookieBridge] registration failed: ${error instanceof Error ? error.message : String(error)}`)
+    console.warn(
+      `[BrowserCookieBridge] registration failed: ${error instanceof Error ? error.message : String(error)}`
+    )
   })
 
-  ipcMain.handle("browser:attach", (_event, sessionId: string, options?: BrowserAttachOptions) => {
-    return browserService.attach(sessionId, options)
+  ipcMain.handle("browser:attach", (_event, options?: BrowserAttachOptions) => {
+    return browserService.attach(options)
   })
 
-  ipcMain.handle("browser:detach", (_event, sessionId: string) => {
-    return browserService.detach(sessionId)
+  ipcMain.handle("browser:detach", () => {
+    return browserService.detach()
   })
 
   ipcMain.on("browser:disposeAllForRendererUnload", (event) => {
@@ -126,48 +127,34 @@ export function registerBrowserHandlers(
     )
   })
 
-  ipcMain.handle(
-    "browser:setBounds",
-    (_event, sessionId: string, bounds: BrowserBounds, visible?: boolean) => {
-      return browserService.setBounds(sessionId, bounds, visible)
-    }
-  )
+  ipcMain.handle("browser:setBounds", (_event, bounds: BrowserBounds, visible?: boolean) => {
+    return browserService.setBounds(bounds, visible)
+  })
 
   ipcMain.handle(
     "browser:navigate",
-    async (_event, sessionId: string, url: string, options?: BrowserNavigateOptions) => {
-      return browserService.navigate(sessionId, url, options)
+    async (_event, url: string, options?: BrowserNavigateOptions) => {
+      return browserService.navigate(url, options)
     }
   )
 
-  ipcMain.handle("browser:goBack", (_event, sessionId: string) => browserService.goBack(sessionId))
+  ipcMain.handle("browser:goBack", () => browserService.goBack())
 
-  ipcMain.handle("browser:goForward", (_event, sessionId: string) =>
-    browserService.goForward(sessionId)
-  )
+  ipcMain.handle("browser:goForward", () => browserService.goForward())
 
-  ipcMain.handle("browser:reload", (_event, sessionId: string) => browserService.reload(sessionId))
+  ipcMain.handle("browser:reload", () => browserService.reload())
 
-  ipcMain.handle("browser:stop", (_event, sessionId: string) => browserService.stop(sessionId))
+  ipcMain.handle("browser:stop", () => browserService.stop())
 
-  ipcMain.handle("browser:clearConsole", (_event, sessionId: string) =>
-    browserService.clearConsole(sessionId)
-  )
+  ipcMain.handle("browser:clearConsole", () => browserService.clearConsole())
 
-  ipcMain.handle("browser:getState", (_event, sessionId: string) =>
-    browserService.getState(sessionId)
-  )
+  ipcMain.handle("browser:getState", () => browserService.getState())
 
-  ipcMain.handle("browser:captureScreenshot", (_event, sessionId: string) =>
-    browserService.captureScreenshot(sessionId)
-  )
+  ipcMain.handle("browser:captureScreenshot", () => browserService.captureScreenshot())
 
   ipcMain.handle(
     "browser:importProfileData",
-    async (
-      event,
-      options?: BrowserProfileImportOptions
-    ): Promise<BrowserProfileImportResult> => {
+    async (event, options?: BrowserProfileImportOptions): Promise<BrowserProfileImportResult> => {
       const window = getMainWindow()
       if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
         return profileImportFailure("拒绝来自未知窗口的浏览器数据导入请求", options)
@@ -188,7 +175,10 @@ export function registerBrowserHandlers(
         })
         const counts = await browserService.importProfileData(imported.data)
         const skippedCookies = counts.skippedCookies + imported.skippedCookies
-        const skippedWebsites = mergeSkippedWebsites(imported.skippedWebsites, counts.skippedWebsites)
+        const skippedWebsites = mergeSkippedWebsites(
+          imported.skippedWebsites,
+          counts.skippedWebsites
+        )
         return {
           success: true,
           sourceBrowser: "chrome",
@@ -248,8 +238,7 @@ async function importWindowsCookieData(
     const exported = await cookieBridgeServer.exportCookies()
     const imported = sanitizeExtensionCookieExport(exported.cookies)
     const counts = await browserService.importProfileData(imported.data)
-    const skippedCookies =
-      exported.skippedCookies + imported.skippedCookies + counts.skippedCookies
+    const skippedCookies = exported.skippedCookies + imported.skippedCookies + counts.skippedCookies
     return {
       success: true,
       sourceBrowser: "chrome",

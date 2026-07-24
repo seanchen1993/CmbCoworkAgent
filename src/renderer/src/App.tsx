@@ -521,7 +521,6 @@ function App(): React.JSX.Element {
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
 
   useBrowserViewLifecycle({
-    activeRightPanelThreadId,
     currentThreadId,
     harnessSessionThreadId,
     mainView,

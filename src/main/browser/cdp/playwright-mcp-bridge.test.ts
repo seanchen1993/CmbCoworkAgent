@@ -4,7 +4,7 @@ import type {
   McpCapabilityTool,
   McpInvocationResult
 } from "../../mcp/capability-types"
-import type { BrowserState } from "../../../shared/browser-types"
+import { BROWSER_SESSION_ID, type BrowserState } from "../../../shared/browser-types"
 import {
   autoSelectPlaywrightInAppBrowserTab,
   preparePlaywrightInAppBrowser,
@@ -47,7 +47,7 @@ const inAppBrowserTabsTool: McpCapabilityTool = {
 
 function browserState(visible: boolean, created = true): BrowserState {
   return {
-    sessionId: "thread-thread-1",
+    sessionId: BROWSER_SESSION_ID,
     url: "about:blank",
     title: "",
     isLoading: false,
@@ -139,7 +139,7 @@ describe("Playwright MCP in-app browser bridge", () => {
       vi.useRealTimers()
     }
 
-    expect(getState).toHaveBeenCalledWith("thread-thread-1")
+    expect(getState).toHaveBeenCalled()
     expect(prepareTarget).not.toHaveBeenCalled()
   })
 
@@ -190,7 +190,7 @@ describe("Playwright MCP in-app browser bridge", () => {
       vi.useRealTimers()
     }
 
-    expect(prepareTarget).toHaveBeenCalledWith("thread-thread-1", {
+    expect(prepareTarget).toHaveBeenCalledWith({
       workspacePath: "/workspace",
       visible: false
     })
@@ -206,9 +206,36 @@ describe("Playwright MCP in-app browser bridge", () => {
       service: { getState, prepareTarget }
     })
 
-    expect(getState).toHaveBeenCalledWith("thread-thread-1")
-    expect(prepareTarget).toHaveBeenCalledWith("thread-thread-1", {
+    expect(getState).toHaveBeenCalled()
+    expect(prepareTarget).toHaveBeenCalledWith({
       workspacePath: "/workspace",
+      visible: false
+    })
+  })
+
+  it("reuses the shared BrowserView across thread IDs", async () => {
+    const getState = vi.fn().mockReturnValue(browserState(true))
+    const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
+    const service = { getState, prepareTarget }
+
+    await preparePlaywrightInAppBrowser({
+      workspacePath: "/workspace-a",
+      threadId: "thread-a",
+      service
+    })
+    await preparePlaywrightInAppBrowser({
+      workspacePath: "/workspace-b",
+      threadId: "thread-b",
+      service
+    })
+
+    expect(getState).toHaveBeenCalledTimes(2)
+    expect(prepareTarget).toHaveBeenNthCalledWith(1, {
+      workspacePath: "/workspace-a",
+      visible: false
+    })
+    expect(prepareTarget).toHaveBeenNthCalledWith(2, {
+      workspacePath: "/workspace-b",
       visible: false
     })
   })
@@ -237,7 +264,7 @@ describe("Playwright MCP in-app browser bridge", () => {
         browserService: { getState, prepareTarget }
       })
 
-      expect(prepareTarget).toHaveBeenCalledWith("thread-thread-1", {
+      expect(prepareTarget).toHaveBeenCalledWith({
         workspacePath: "/workspace",
         visible: false
       })
@@ -257,14 +284,12 @@ describe("Playwright MCP in-app browser bridge", () => {
     vi.stubEnv("VITE_IN_APP_BROWSER_CDP_PORT", "9222")
     const getState = vi.fn().mockReturnValue(browserState(true))
     const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
-    const invoke = vi
-      .fn<McpCapabilityService["invoke"]>()
-      .mockResolvedValueOnce(
-        mcpResult(`### Open tabs
+    const invoke = vi.fn<McpCapabilityService["invoke"]>().mockResolvedValueOnce(
+      mcpResult(`### Open tabs
 - 0: [Build Electron App](https://github.com/example/repo/actions)
 - 1: [pet-ready](file:///tmp/pet.html)
 - 2: (current) [](about:blank)`)
-      )
+    )
 
     try {
       await autoSelectPlaywrightInAppBrowserTab({

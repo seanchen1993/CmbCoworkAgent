@@ -29,10 +29,11 @@ export interface BrowserState {
   error?: string
 }
 
+/** The app owns one BrowserView shared by every thread. */
+export const BROWSER_SESSION_ID = "app-browser"
 export const BROWSER_PANEL_REQUEST_CHANNEL = "browser:panel-request"
 
 export interface BrowserPanelRequest {
-  sessionId: string
   threadId?: string
 }
 

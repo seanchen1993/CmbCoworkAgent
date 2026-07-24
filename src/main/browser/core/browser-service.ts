@@ -9,7 +9,10 @@ import {
 import { existsSync } from "fs"
 import { posix, resolve, win32 } from "path"
 import { pathToFileURL } from "url"
-import { BROWSER_PANEL_REQUEST_CHANNEL } from "../../../shared/browser-types"
+import {
+  BROWSER_PANEL_REQUEST_CHANNEL,
+  BROWSER_SESSION_ID
+} from "../../../shared/browser-types"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
@@ -224,7 +227,8 @@ function normalizeUrlInput(input: string, workspacePath: string | null): string 
   return `https://${value}`
 }
 
-function getUrlPermissionError(url: string, _workspacePath: string | null): string | null {
+function getUrlPermissionError(url: string, workspacePath: string | null): string | null {
+  void workspacePath
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -285,20 +289,15 @@ export class BrowserService {
 
   constructor(private readonly getMainWindow: () => BrowserWindow | null) {}
 
-  attach(sessionId: string, options: BrowserAttachOptions = {}): BrowserState {
+  attach(options: BrowserAttachOptions = {}): BrowserState {
+    const sessionId = BROWSER_SESSION_ID
     const window = this.getUsableWindow()
     console.info(
       `[BrowserService] Attach requested for ${sessionId}; active=${formatSessionSnapshot(this.activeSession)} requestedVisible=${options.visible ?? true} workspacePath=${options.workspacePath ?? "(unchanged)"} initialUrl=${options.initialUrl ?? "(none)"}.`
     )
 
-    if (this.activeSession && this.activeSession.id !== sessionId) {
-      console.info(`[BrowserService] Disposing Browser session ${this.activeSession.id} before attaching ${sessionId}.`)
-      const disposedSessionId = this.disposeActiveSession()
-      if (disposedSessionId) this.emitState(disposedSessionId)
-    }
-
-    const existingSession = this.getActiveSession(sessionId)
-    const session = this.ensureActiveSession(sessionId, options.workspacePath ?? null)
+    const existingSession = this.activeSession
+    const session = this.ensureActiveSession(sessionId, options.workspacePath)
     if (!session.isAttached) {
       console.info(
         `[BrowserService] addChildView for ${sessionId}; snapshot before attach=${formatSessionSnapshot(session)}.`
@@ -320,43 +319,42 @@ export class BrowserService {
     }
 
     if (options.initialUrl && !session.view.webContents.getURL()) {
-      void this.navigate(sessionId, options.initialUrl, options)
+      void this.navigate(options.initialUrl, options)
     } else {
       this.emitState(sessionId)
     }
 
-    const state = this.getState(sessionId)
+    const state = this.getState()
     console.info(`[BrowserService] Attached Browser session ${sessionId} visible=${state.visible}.`)
     return state
   }
 
-  async prepareTarget(
-    sessionId: string,
-    options: BrowserAttachOptions = {}
-  ): Promise<BrowserState> {
-    this.attach(sessionId, options)
-    const session = this.requireSession(sessionId)
+  async prepareTarget(options: BrowserAttachOptions = {}): Promise<BrowserState> {
+    this.attach(options)
+    const session = this.requireSession()
     await session.targetReady
-    return this.getState(sessionId)
+    return this.getState()
   }
 
-  detach(sessionId: string): BrowserState {
+  detach(): BrowserState {
+    const sessionId = BROWSER_SESSION_ID
     console.info(
       `[BrowserService] Detach requested for ${sessionId}; active=${formatSessionSnapshot(this.activeSession)}.`
     )
-    if (this.activeSession?.id !== sessionId) return this.getState(sessionId)
+    if (!this.activeSession) return this.getState()
     this.disposeActiveSession()
     this.emitState(sessionId)
-    const state = this.getState(sessionId)
+    const state = this.getState()
     console.info(`[BrowserService] Detached Browser session ${sessionId}.`)
     return state
   }
 
-  setBounds(sessionId: string, bounds: BrowserBounds, visible = true): BrowserState {
-    const session = this.getActiveSession(sessionId)
+  setBounds(bounds: BrowserBounds, visible = true): BrowserState {
+    const sessionId = BROWSER_SESSION_ID
+    const session = this.getActiveSession()
     if (!session) {
       console.warn(`[BrowserService] Ignored bounds for inactive Browser session ${sessionId}.`)
-      return this.getState(sessionId)
+      return this.getState()
     }
 
     const nextBounds = normalizeBounds(bounds)
@@ -370,7 +368,7 @@ export class BrowserService {
       console.info(
         `[BrowserService] Ignored Browser bounds update for ${sessionId}; unchanged current=${formatBounds(currentBounds)} visible=${currentVisible}.`
       )
-      return this.getState(sessionId)
+      return this.getState()
     }
 
     console.info(
@@ -382,20 +380,17 @@ export class BrowserService {
       this.invalidateSession(session)
     }
     this.emitState(sessionId)
-    const state = this.getState(sessionId)
+    const state = this.getState()
     console.info(`[BrowserService] Updated Browser bounds for ${sessionId} to ${formatBounds(nextBounds)} visible=${nextVisible}.`)
     return state
   }
 
-  async navigate(
-    sessionId: string,
-    inputUrl: string,
-    options: BrowserNavigateOptions = {}
-  ): Promise<BrowserState> {
-    const session = this.getActiveSession(sessionId)
+  async navigate(inputUrl: string, options: BrowserNavigateOptions = {}): Promise<BrowserState> {
+    const sessionId = BROWSER_SESSION_ID
+    const session = this.getActiveSession()
     if (!session) {
       console.warn(`[BrowserService] Ignored navigation for inactive Browser session ${sessionId}.`)
-      return this.getState(sessionId)
+      return this.getState()
     }
 
     if (options.workspacePath !== undefined) {
@@ -408,7 +403,7 @@ export class BrowserService {
       session.error = permissionError
       console.warn(`[BrowserService] Navigation blocked for ${sessionId}: ${permissionError}.`)
       this.emitState(sessionId)
-      return this.getState(sessionId)
+      return this.getState()
     }
 
     try {
@@ -421,54 +416,54 @@ export class BrowserService {
     }
 
     this.emitState(sessionId)
-    const state = this.getState(sessionId)
+    const state = this.getState()
     console.info(`[BrowserService] Navigated ${sessionId} to ${state.url || url}.`)
     return state
   }
 
-  goBack(sessionId: string): BrowserState {
-    const session = this.getActiveSession(sessionId)
+  goBack(): BrowserState {
+    const session = this.getActiveSession()
     if (session?.view.webContents.canGoBack()) {
       session.view.webContents.goBack()
     }
-    return this.getState(sessionId)
+    return this.getState()
   }
 
-  goForward(sessionId: string): BrowserState {
-    const session = this.getActiveSession(sessionId)
+  goForward(): BrowserState {
+    const session = this.getActiveSession()
     if (session?.view.webContents.canGoForward()) {
       session.view.webContents.goForward()
     }
-    return this.getState(sessionId)
+    return this.getState()
   }
 
-  reload(sessionId: string): BrowserState {
-    const session = this.getActiveSession(sessionId)
+  reload(): BrowserState {
+    const session = this.getActiveSession()
     if (session) {
       session.view.webContents.reload()
     }
-    return this.getState(sessionId)
+    return this.getState()
   }
 
-  stop(sessionId: string): BrowserState {
-    const session = this.getActiveSession(sessionId)
+  stop(): BrowserState {
+    const session = this.getActiveSession()
     if (session) {
       session.view.webContents.stop()
     }
-    return this.getState(sessionId)
+    return this.getState()
   }
 
-  clearConsole(sessionId: string): BrowserState {
-    const session = this.getActiveSession(sessionId)
+  clearConsole(): BrowserState {
+    const session = this.getActiveSession()
     if (session) {
       session.consoleEntries = []
-      this.emitState(sessionId)
+      this.emitState(BROWSER_SESSION_ID)
     }
-    return this.getState(sessionId)
+    return this.getState()
   }
 
-  async captureScreenshot(sessionId: string): Promise<BrowserScreenshotResult> {
-    const session = this.getActiveSession(sessionId)
+  async captureScreenshot(): Promise<BrowserScreenshotResult> {
+    const session = this.getActiveSession()
     if (!session) return { success: false, error: "Browser session has not been created" }
 
     try {
@@ -525,13 +520,14 @@ export class BrowserService {
     }
   }
 
-  requestPanel(sessionId: string, threadId?: string): void {
+  requestPanel(threadId?: string): void {
     const window = this.getUsableWindow()
-    window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, { sessionId, threadId })
+    window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, { threadId })
   }
 
-  getState(sessionId: string): BrowserState {
-    const session = this.getActiveSession(sessionId)
+  getState(): BrowserState {
+    const sessionId = BROWSER_SESSION_ID
+    const session = this.getActiveSession()
     if (!session) {
       return {
         sessionId,
@@ -568,10 +564,13 @@ export class BrowserService {
     return disposedSessionId
   }
 
-  private ensureActiveSession(sessionId: string, workspacePath: string | null): BrowserSession {
-    const existing = this.getActiveSession(sessionId)
+  private ensureActiveSession(
+    sessionId: string,
+    workspacePath: string | null | undefined
+  ): BrowserSession {
+    const existing = this.activeSession
     if (existing) {
-      existing.workspacePath = workspacePath ?? existing.workspacePath
+      if (workspacePath !== undefined) existing.workspacePath = workspacePath
       console.info(
         `[BrowserService] Reusing active Browser session ${sessionId}; snapshot=${formatSessionSnapshot(existing)} workspacePath=${existing.workspacePath ?? "(none)"}.`
       )
@@ -596,7 +595,7 @@ export class BrowserService {
       isAttached: false,
       view,
       targetReady: Promise.resolve(),
-      workspacePath,
+      workspacePath: workspacePath ?? null,
       consoleEntries: [],
       nextConsoleEntryId: 1
     }
@@ -606,7 +605,7 @@ export class BrowserService {
     this.bindWebContentsEvents(session)
     session.targetReady = initializeBrowserTarget(view.webContents)
     void session.targetReady.catch((error) => {
-      if (this.getActiveSession(sessionId) !== session || view.webContents.isDestroyed()) return
+      if (this.getActiveSession() !== session || view.webContents.isDestroyed()) return
       session.error = `内置浏览器初始化失败: ${formatError(error)}`
       this.emitState(sessionId)
       console.error(`[BrowserService] ${session.error}.`)
@@ -617,8 +616,8 @@ export class BrowserService {
     return session
   }
 
-  private requireSession(sessionId: string): BrowserSession {
-    const session = this.getActiveSession(sessionId)
+  private requireSession(): BrowserSession {
+    const session = this.getActiveSession()
     if (!session) {
       throw new Error("Browser session has not been created")
     }
@@ -639,7 +638,7 @@ export class BrowserService {
       emit()
       console.info(`[BrowserService] Loaded Browser session ${session.id}.`)
     })
-    webContents.on("page-title-updated", (_event, _title) => {
+    webContents.on("page-title-updated", () => {
       emit()
     })
     webContents.on("console-message", (_event, level, message, line, sourceId) => {
@@ -691,7 +690,7 @@ export class BrowserService {
     webContents.setWindowOpenHandler((details) => {
       const permissionError = getUrlPermissionError(details.url, session.workspacePath)
       if (!permissionError) {
-        void this.navigate(session.id, details.url, { workspacePath: session.workspacePath })
+        void this.navigate(details.url, { workspacePath: session.workspacePath })
       } else {
         session.error = permissionError
         emit()
@@ -711,8 +710,8 @@ export class BrowserService {
     })
   }
 
-  private emitState(sessionId: string): void {
-    const payload = this.getState(sessionId)
+  private emitState(sessionId = BROWSER_SESSION_ID): void {
+    const payload = this.getState()
     for (const window of BrowserWindow.getAllWindows()) {
       if (window.isDestroyed() || window.webContents.isDestroyed()) continue
       window.webContents.send(getChannel(sessionId), payload)
@@ -727,8 +726,8 @@ export class BrowserService {
     return window
   }
 
-  private getActiveSession(sessionId: string): BrowserSession | null {
-    return this.activeSession?.id === sessionId ? this.activeSession : null
+  private getActiveSession(): BrowserSession | null {
+    return this.activeSession
   }
 
   private invalidateSession(session: BrowserSession): void {

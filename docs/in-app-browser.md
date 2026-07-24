@@ -28,7 +28,7 @@
 
 ### 1.3 BrowserService 核心能力
 
-- **attach / detach**: 以 `thread-{threadId}` 为 session key 管理 WebContentsView
+- **attach / detach**: 全应用共用 `app-browser` 单一 WebContentsView；切换线程时复用页面，仅在关闭或应用重载时销毁
 - **navigate**: URL 自动规范化（localhost、file://、相对路径 → 绝对路径）
 - **goBack / goForward / reload / stop**: 标准浏览器导航
 - **captureScreenshot**: 通过 `webContents.capturePage()` 截图，返回 base64 data URL
@@ -90,7 +90,7 @@ const PLAYWRIGHT_MCP_NAME = "In-app-browser"
 - **preparePlaywrightInAppBrowser()**: 等待面板就绪（最多 1500ms，100ms 轮询），调用 `service.prepareTarget()`
 - **autoSelectPlaywrightInAppBrowserTab()**: 解析 Playwright `browser_tabs` 输出，根据 URL/Title 自动匹配并 `select` 对应 tab
 
-Session ID 规则：`thread-{threadId || "unbound"}`。
+Session ID 固定为：`app-browser`。任意线程调用 Playwright MCP 工具都会复用这一浏览器目标。
 
 ### 2.4 使用方式
 

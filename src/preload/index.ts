@@ -96,7 +96,10 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
-import { BROWSER_PANEL_REQUEST_CHANNEL } from "../shared/browser-types"
+import {
+  BROWSER_PANEL_REQUEST_CHANNEL,
+  BROWSER_SESSION_ID
+} from "../shared/browser-types"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
@@ -1982,40 +1985,32 @@ const api = {
       ipcRenderer.invoke("taskCards:list", query) as Promise<TaskCardsListResult>
   },
   browser: {
-    attach: (sessionId: string, options?: BrowserAttachOptions): Promise<BrowserState> => {
-      return ipcRenderer.invoke("browser:attach", sessionId, options) as Promise<BrowserState>
+    attach: (options?: BrowserAttachOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:attach", options) as Promise<BrowserState>
     },
-    detach: (sessionId: string): Promise<BrowserState> => {
-      return ipcRenderer.invoke("browser:detach", sessionId) as Promise<BrowserState>
+    detach: (): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:detach") as Promise<BrowserState>
     },
-    setBounds: (
-      sessionId: string,
-      bounds: BrowserBounds,
-      visible?: boolean
-    ): Promise<BrowserState> => {
-      return ipcRenderer.invoke("browser:setBounds", sessionId, bounds, visible) as Promise<BrowserState>
+    setBounds: (bounds: BrowserBounds, visible?: boolean): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>
     },
-    navigate: (
-      sessionId: string,
-      url: string,
-      options?: BrowserNavigateOptions
-    ): Promise<BrowserState> => {
-      return ipcRenderer.invoke("browser:navigate", sessionId, url, options) as Promise<BrowserState>
+    navigate: (url: string, options?: BrowserNavigateOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:navigate", url, options) as Promise<BrowserState>
     },
-    goBack: (sessionId: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:goBack", sessionId) as Promise<BrowserState>,
-    goForward: (sessionId: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:goForward", sessionId) as Promise<BrowserState>,
-    reload: (sessionId: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:reload", sessionId) as Promise<BrowserState>,
-    stop: (sessionId: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:stop", sessionId) as Promise<BrowserState>,
-    clearConsole: (sessionId: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:clearConsole", sessionId) as Promise<BrowserState>,
-    getState: (sessionId: string): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:getState", sessionId) as Promise<BrowserState>,
-    captureScreenshot: (sessionId: string): Promise<BrowserScreenshotResult> =>
-      ipcRenderer.invoke("browser:captureScreenshot", sessionId) as Promise<BrowserScreenshotResult>,
+    goBack: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goBack") as Promise<BrowserState>,
+    goForward: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goForward") as Promise<BrowserState>,
+    reload: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:reload") as Promise<BrowserState>,
+    stop: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:stop") as Promise<BrowserState>,
+    clearConsole: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
+    getState: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
+    captureScreenshot: (): Promise<BrowserScreenshotResult> =>
+      ipcRenderer.invoke("browser:captureScreenshot") as Promise<BrowserScreenshotResult>,
     importProfileData: (
       options: BrowserProfileImportOptions
     ): Promise<BrowserProfileImportResult> =>
@@ -2023,8 +2018,8 @@ const api = {
     disposeAllForRendererUnload: (): void => {
       ipcRenderer.send("browser:disposeAllForRendererUnload")
     },
-    onState: (sessionId: string, callback: (state: BrowserState) => void): (() => void) => {
-      const channel = `browser:state:${sessionId}`
+    onState: (callback: (state: BrowserState) => void): (() => void) => {
+      const channel = `browser:state:${BROWSER_SESSION_ID}`
       const handler = (_: unknown, state: BrowserState): void => {
         callback(state)
       }

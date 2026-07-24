@@ -1549,30 +1549,22 @@ interface CustomAPI {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
   }
   browser: {
-    attach: (sessionId: string, options?: BrowserAttachOptions) => Promise<BrowserState>
-    detach: (sessionId: string) => Promise<BrowserState>
-    setBounds: (
-      sessionId: string,
-      bounds: BrowserBounds,
-      visible?: boolean
-    ) => Promise<BrowserState>
-    navigate: (
-      sessionId: string,
-      url: string,
-      options?: BrowserNavigateOptions
-    ) => Promise<BrowserState>
-    goBack: (sessionId: string) => Promise<BrowserState>
-    goForward: (sessionId: string) => Promise<BrowserState>
-    reload: (sessionId: string) => Promise<BrowserState>
-    stop: (sessionId: string) => Promise<BrowserState>
-    clearConsole: (sessionId: string) => Promise<BrowserState>
-    getState: (sessionId: string) => Promise<BrowserState>
-    captureScreenshot: (sessionId: string) => Promise<BrowserScreenshotResult>
+    attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
+    detach: () => Promise<BrowserState>
+    setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
+    navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
+    goBack: () => Promise<BrowserState>
+    goForward: () => Promise<BrowserState>
+    reload: () => Promise<BrowserState>
+    stop: () => Promise<BrowserState>
+    clearConsole: () => Promise<BrowserState>
+    getState: () => Promise<BrowserState>
+    captureScreenshot: () => Promise<BrowserScreenshotResult>
     importProfileData: (
       options: BrowserProfileImportOptions
     ) => Promise<BrowserProfileImportResult>
     disposeAllForRendererUnload: () => void
-    onState: (sessionId: string, callback: (state: BrowserState) => void) => () => void
+    onState: (callback: (state: BrowserState) => void) => () => void
     onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
   }
   lsp: {

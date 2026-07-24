@@ -5,11 +5,15 @@ import type {
 } from "../../mcp/capability-types"
 import { resolveBrowserCdpPort } from "./browser-cdp"
 import { getGlobalBrowserService } from "../core/browser-service-registry"
-import type { BrowserAttachOptions, BrowserState } from "../../../shared/browser-types"
+import {
+  BROWSER_SESSION_ID,
+  type BrowserAttachOptions,
+  type BrowserState
+} from "../../../shared/browser-types"
 
 interface PlaywrightBrowserTargetService {
-  getState(sessionId: string): BrowserState
-  prepareTarget(sessionId: string, options?: BrowserAttachOptions): Promise<BrowserState>
+  getState(): BrowserState
+  prepareTarget(options?: BrowserAttachOptions): Promise<BrowserState>
 }
 
 const BROWSER_PANEL_READY_TIMEOUT_MS = 1_500
@@ -29,10 +33,6 @@ function normalizeProviderName(value: string): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function buildSessionId(threadId?: string): string {
-  return `thread-${threadId || "unbound"}`
 }
 
 function formatUrlForLog(value: string): string {
@@ -57,7 +57,10 @@ function parsePlaywrightTabs(result: McpInvocationResult): PlaywrightTabEntry[] 
 function formatPlaywrightTabsForLog(tabs: PlaywrightTabEntry[]): string {
   if (tabs.length === 0) return "(none)"
   return tabs
-    .map((tab) => `${tab.index}${tab.current ? "*" : ""}:${tab.title || "(untitled)"}@${tab.url || "(empty)"}`)
+    .map(
+      (tab) =>
+        `${tab.index}${tab.current ? "*" : ""}:${tab.title || "(untitled)"}@${tab.url || "(empty)"}`
+    )
     .join(" | ")
 }
 
@@ -96,12 +99,11 @@ function pickPlaywrightTabForBrowserState(
 }
 
 async function waitForBrowserPanelReady(
-  service: PlaywrightBrowserTargetService,
-  sessionId: string
+  service: PlaywrightBrowserTargetService
 ): Promise<BrowserState | null> {
   const deadline = Date.now() + BROWSER_PANEL_READY_TIMEOUT_MS
   while (true) {
-    const state = service.getState(sessionId)
+    const state = service.getState()
     if (state.created && state.visible) return state
     const remaining = deadline - Date.now()
     if (remaining <= 0) return null
@@ -138,13 +140,14 @@ export async function preparePlaywrightInAppBrowser(options: {
   const service = options.service === undefined ? getGlobalBrowserService() : options.service
   if (!service) throw new Error("In-app browser service is unavailable")
 
-  const sessionId = buildSessionId(options.threadId)
-  const state = await waitForBrowserPanelReady(service, sessionId)
+  const state = await waitForBrowserPanelReady(service)
   if (!state) {
-    throw new Error("请先打开右侧“浏览器”Tab，等待内置浏览器显示后，再重新执行 Playwright MCP 工具。")
+    throw new Error(
+      "请先打开右侧“浏览器”Tab，等待内置浏览器显示后，再重新执行 Playwright MCP 工具。"
+    )
   }
 
-  await service.prepareTarget(sessionId, {
+  await service.prepareTarget({
     workspacePath: options.workspacePath,
     visible: false
   })
@@ -163,7 +166,9 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
   const browserService =
     options.browserService === undefined ? getGlobalBrowserService() : options.browserService
   if (!browserService) {
-    console.warn("[PlaywrightMcpBridge] Skipped tab auto-select because Browser service is unavailable.")
+    console.warn(
+      "[PlaywrightMcpBridge] Skipped tab auto-select because Browser service is unavailable."
+    )
     return
   }
   if (!options.tabsTool) {
@@ -173,20 +178,19 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
     return
   }
 
-  const sessionId = buildSessionId(options.threadId)
   await preparePlaywrightInAppBrowser({
     workspacePath: options.workspacePath,
     threadId: options.threadId,
     service: browserService
   })
 
-  const state = browserService.getState(sessionId)
+  const state = browserService.getState()
   const listResult = await options.capabilityService.invoke(options.tabsTool.capabilityId, {
     action: "list"
   })
   if (listResult.isError) {
     console.warn(
-      `[PlaywrightMcpBridge] Failed to list Playwright tabs for ${sessionId}; result=${listResult.text || "(empty)"}.`
+      `[PlaywrightMcpBridge] Failed to list Playwright tabs for ${BROWSER_SESSION_ID}; result=${listResult.text || "(empty)"}.`
     )
     return
   }
@@ -196,19 +200,19 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
   const matchingTab = pickPlaywrightTabForBrowserState(tabs, state)
 
   console.info(
-    `[PlaywrightMcpBridge] Tab sync for ${sessionId}; tool=${options.tool.toolId} stateUrl=${formatUrlForLog(state.url)} stateTitle=${state.title || "(empty)"} current=${currentTab ? `${currentTab.index}@${formatUrlForLog(currentTab.url)}` : "(none)"} match=${matchingTab ? `${matchingTab.index}@${formatUrlForLog(matchingTab.url)}` : "(none)"} tabs=${formatPlaywrightTabsForLog(tabs)}.`
+    `[PlaywrightMcpBridge] Tab sync for ${BROWSER_SESSION_ID}; tool=${options.tool.toolId} stateUrl=${formatUrlForLog(state.url)} stateTitle=${state.title || "(empty)"} current=${currentTab ? `${currentTab.index}@${formatUrlForLog(currentTab.url)}` : "(none)"} match=${matchingTab ? `${matchingTab.index}@${formatUrlForLog(matchingTab.url)}` : "(none)"} tabs=${formatPlaywrightTabsForLog(tabs)}.`
   )
 
   if (!matchingTab) {
     console.warn(
-      `[PlaywrightMcpBridge] No matching Playwright tab found for ${sessionId}; BrowserView url=${formatUrlForLog(state.url)} title=${state.title || "(empty)"}.`
+      `[PlaywrightMcpBridge] No matching Playwright tab found for ${BROWSER_SESSION_ID}; BrowserView url=${formatUrlForLog(state.url)} title=${state.title || "(empty)"}.`
     )
     return
   }
 
   if (currentTab?.index === matchingTab.index) {
     console.info(
-      `[PlaywrightMcpBridge] Playwright tab already aligned for ${sessionId}; index=${matchingTab.index}.`
+      `[PlaywrightMcpBridge] Playwright tab already aligned for ${BROWSER_SESSION_ID}; index=${matchingTab.index}.`
     )
     return
   }
@@ -219,12 +223,12 @@ export async function autoSelectPlaywrightInAppBrowserTab(options: {
   })
   if (selectResult.isError) {
     console.warn(
-      `[PlaywrightMcpBridge] Failed to select Playwright tab ${matchingTab.index} for ${sessionId}; result=${selectResult.text || "(empty)"}.`
+      `[PlaywrightMcpBridge] Failed to select Playwright tab ${matchingTab.index} for ${BROWSER_SESSION_ID}; result=${selectResult.text || "(empty)"}.`
     )
     return
   }
 
   console.info(
-    `[PlaywrightMcpBridge] Selected Playwright tab ${matchingTab.index} for ${sessionId}; url=${formatUrlForLog(matchingTab.url)} title=${matchingTab.title || "(empty)"}.`
+    `[PlaywrightMcpBridge] Selected Playwright tab ${matchingTab.index} for ${BROWSER_SESSION_ID}; url=${formatUrlForLog(matchingTab.url)} title=${matchingTab.title || "(empty)"}.`
   )
 }
