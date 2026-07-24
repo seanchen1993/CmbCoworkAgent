@@ -264,6 +264,8 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  provider_source_id?: string
+  provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number

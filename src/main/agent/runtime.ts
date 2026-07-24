@@ -94,6 +94,8 @@ import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import {
   flushStrict,
   getThread,
+  getThreadMessages,
+  moveThreadMessagesAfterAnchor,
   moveThreadMessagesAfterLastNonAssistant,
   replaceThreadMessageId,
   upsertThreadMessages
@@ -148,6 +150,10 @@ import { ApprovalStore } from "./approval-store"
 import {
   assertCurrentRunMessagesDurablyPersisted,
   createCurrentRunMessageQueueMiddleware,
+  isCurrentRunMessageQueueOwner,
+  registerCurrentRunCompletedAssistantRoute,
+  resolveCurrentRunCompletedAssistantIdentity,
+  resolveCurrentRunInjectionAnchorId,
   setCurrentRunInjectionNotifier
 } from "./current-run-message-queue"
 // Re-exported so existing importers (ipc/agent.ts) keep resolving these from
@@ -160,14 +166,17 @@ export {
   isCurrentRunMessageWithdrawn,
   peekCurrentRunMessageQueue,
   queueCurrentRunMessage,
+  routeCurrentRunCompletedAssistantMessage,
   setCurrentRunMessageQueueOwner
 } from "./current-run-message-queue"
 export type { CurrentRunQueuedMessage } from "./current-run-message-queue"
 
-let flushTranscriptBeforeCurrentRunInjection: ((threadId: string) => void) | null = null
+let flushTranscriptBeforeCurrentRunInjection:
+  | ((threadId: string, runToken: string) => void)
+  | null = null
 
 export function setCurrentRunTranscriptFlushBeforeInjection(
-  flush: (threadId: string) => void
+  flush: (threadId: string, runToken: string) => void
 ): void {
   flushTranscriptBeforeCurrentRunInjection = flush
 }
@@ -765,17 +774,61 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
   // Streamed assistant/tool chunks use a deferred transcript buffer. Flush that
   // buffer first so the steered user turn receives an ordinal after every model
   // message that preceded it in the active run.
-  flushTranscriptBeforeCurrentRunInjection(threadId)
+  if (!context?.runToken) {
+    throw new Error("Current-run transcript flush is missing its physical run token")
+  }
+  flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)
   // afterModel runs before the outer stream consumer receives the final AI
-  // message. Write that completed reply first so the steer cannot replace it
-  // in the durable transcript. Its priority wins over delayed stream chunks
-  // with the same message id.
+  // message. Resolve and migrate the exact provider occurrence before writing
+  // the completed reply so a reused raw provider id cannot overwrite history.
+  // The completed reply's priority then wins over delayed chunks for that tuple.
   const completedAssistantMessage = context?.completedAssistantMessage
+  const durableMessagesBeforeCompletedAssistant = getThreadMessages(threadId)
+  const durableAnchorMessageId = context.anchorMessage
+    ? resolveCurrentRunInjectionAnchorId(
+        durableMessagesBeforeCompletedAssistant,
+        context.anchorMessage
+      )
+    : undefined
+  if (context.anchorMessage && !durableAnchorMessageId) {
+    throw new Error("Cannot resolve current-run injection predecessor in durable transcript")
+  }
+  const completedAssistantIdentity = completedAssistantMessage
+    ? resolveCurrentRunCompletedAssistantIdentity(
+        durableMessagesBeforeCompletedAssistant,
+        completedAssistantMessage
+      )
+    : undefined
+  const completedAssistantObservedContent = completedAssistantIdentity?.sourceId
+    ? durableMessagesBeforeCompletedAssistant.find(
+        (message) =>
+          message.id === completedAssistantIdentity.sourceId && message.role === "assistant"
+      )?.content
+    : undefined
+  if (
+    completedAssistantMessage &&
+    completedAssistantIdentity?.sourceId &&
+    completedAssistantIdentity.sourceId !== completedAssistantMessage.id &&
+    !replaceThreadMessageId(
+      threadId,
+      completedAssistantIdentity.sourceId,
+      completedAssistantMessage.id,
+      "assistant"
+    )
+  ) {
+    throw new Error("Failed to migrate the completed assistant provider occurrence")
+  }
   const transcriptMessages: Message[] = [
     ...(completedAssistantMessage
       ? [
           {
             id: completedAssistantMessage.id,
+            ...(completedAssistantIdentity?.providerSourceId
+              ? { provider_source_id: completedAssistantIdentity.providerSourceId }
+              : {}),
+            ...(completedAssistantIdentity?.providerOccurrence
+              ? { provider_occurrence: completedAssistantIdentity.providerOccurrence }
+              : {}),
             role: "assistant" as const,
             content: completedAssistantMessage.content,
             content_priority: 1,
@@ -795,31 +848,47 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
   ]
   const persistedCount = upsertThreadMessages(threadId, transcriptMessages)
   assertCurrentRunMessagesDurablyPersisted(transcriptMessages.length, persistedCount)
-  // Coordinator streams can emit the provider's final assistant event after
-  // afterModel has already persisted the stable current-run id above. Record an
-  // alias now so that delayed event updates merge into this row instead of
-  // becoming a second, identical assistant transcript entry.
+  const transcriptMessageIds = transcriptMessages.map((message) => message.id)
+  if (durableAnchorMessageId) {
+    moveThreadMessagesAfterAnchor(threadId, durableAnchorMessageId, transcriptMessageIds)
+  } else {
+    moveThreadMessagesAfterLastNonAssistant(threadId, transcriptMessageIds)
+  }
+  await flushStrict()
+  // Persistence above is still valid if a replacement run took ownership while
+  // fsync was in flight, but old-run stream events are not: they would append the
+  // injected user turn after the replacement's optimistic bubble and reset its
+  // assistant accumulator. The renderer's durable-draft reconciliation will pick
+  // up the already persisted message once the replacement becomes idle.
+  if (!isCurrentRunMessageQueueOwner(threadId, context.runToken)) {
+    const ownershipError = new Error("Current-run injection owner changed during persistence")
+    ownershipError.name = "AbortError"
+    throw ownershipError
+  }
   if (
     completedAssistantMessage?.sourceId &&
-    completedAssistantMessage.sourceId !== completedAssistantMessage.id
+    completedAssistantMessage.sourceId !== completedAssistantMessage.id &&
+    context?.runToken &&
+    completedAssistantIdentity?.providerSourceId &&
+    completedAssistantIdentity.providerOccurrence
   ) {
-    replaceThreadMessageId(
-      threadId,
-      completedAssistantMessage.sourceId,
-      completedAssistantMessage.id,
-      "assistant"
-    )
+    registerCurrentRunCompletedAssistantRoute(threadId, context.runToken, {
+      rawSourceId: completedAssistantMessage.sourceId,
+      stableId: completedAssistantMessage.id,
+      providerSourceId: completedAssistantIdentity.providerSourceId,
+      providerOccurrence: completedAssistantIdentity.providerOccurrence,
+      content: completedAssistantMessage.content,
+      ...(completedAssistantObservedContent !== undefined
+        ? { observedContent: completedAssistantObservedContent }
+        : {})
+    })
   }
-  moveThreadMessagesAfterLastNonAssistant(
-    threadId,
-    transcriptMessages.map((message) => message.id)
-  )
-  await flushStrict()
   const assistantIdAlias =
-    completedAssistantMessage?.sourceId &&
-    completedAssistantMessage.sourceId !== completedAssistantMessage.id
+    completedAssistantMessage &&
+    completedAssistantIdentity?.sourceId &&
+    completedAssistantIdentity.sourceId !== completedAssistantMessage.id
       ? {
-          sourceId: completedAssistantMessage.sourceId,
+          sourceId: completedAssistantIdentity.sourceId,
           id: completedAssistantMessage.id
         }
       : undefined
@@ -848,7 +917,10 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
             type: "message_id_alias",
             fromId: assistantIdAlias.sourceId,
             toId: assistantIdAlias.id,
-            role: "assistant"
+            role: "assistant",
+            currentRunCompleted: true,
+            providerSourceId: completedAssistantIdentity?.providerSourceId,
+            providerOccurrence: completedAssistantIdentity?.providerOccurrence
           }
         })
       }
@@ -859,6 +931,13 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         type: "custom",
         data: {
           type: "current_run_user_injected",
+          ...(completedAssistantMessage
+            ? {
+                completedAssistantId: completedAssistantMessage.id,
+                completedAssistantContent: completedAssistantMessage.content,
+                completedAssistantProviderIdless: !completedAssistantMessage.sourceId
+              }
+            : {}),
           messages: payload.messages
         }
       })
@@ -870,6 +949,9 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
       console.warn("[Runtime] Failed to notify renderer about injected messages:", error)
     }
   }
+  return completedAssistantIdentity
+    ? { completedAssistantIdentity }
+    : undefined
 })
 
 const BASE_PROMPT =

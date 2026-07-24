@@ -7,7 +7,12 @@ import { useThreadState } from "@/lib/thread-context"
 import { useAppStore } from "@/lib/store"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
-import { getWorkerToolResultKey } from "@/lib/worker-tool-result-key"
+import {
+  buildVisibleMessageLayout,
+  messageRendersNothing,
+  messageVisibleReasoningLength
+} from "@/lib/message-display-visibility"
+import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 
@@ -34,22 +39,6 @@ function messageContentLength(content: Message["content"] | undefined): number {
     if (typeof block.content === "string") return total + block.content.length
     return total
   }, 0)
-}
-
-function buildToolResults(
-  messages: Message[]
-): Map<string, { content: string | unknown; is_error?: boolean }> {
-  const results = new Map<string, { content: string | unknown; is_error?: boolean }>()
-  for (const message of messages) {
-    if (message.role !== "tool" || !message.tool_call_id) continue
-    const resultKey = getWorkerToolResultKey(message.id, message.tool_call_id)
-    if (!resultKey) continue
-    results.set(resultKey, {
-      content: message.content,
-      is_error: message.is_error === true || message.status === "error"
-    })
-  }
-  return results
 }
 
 function statusBadge(status: string | undefined): { label: string; className: string } {
@@ -244,21 +233,25 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
         : [],
     [transport, focusSnapshot, workflowAgentFocusView]
   )
-  const toolResults = useMemo(() => buildToolResults(messages), [messages])
+  const toolResults = useMemo(() => buildToolResultAssociations(messages), [messages])
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
     () => buildMessageBubbleTimingMeta(messages),
     [messages]
   )
   const showAssistantMetaByIndex = useMemo(() => {
     const result = new Array<boolean>(messages.length)
-    let nextNonToolMessage: Message | null = null
+    let nextVisibleMessage: Message | null = null
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index]
+      if (messageRendersNothing(message)) {
+        result[index] = false
+        continue
+      }
       result[index] =
         message.role !== "assistant" ||
-        !nextNonToolMessage ||
-        nextNonToolMessage.role !== "assistant"
-      if (message.role !== "tool") nextNonToolMessage = message
+        !nextVisibleMessage ||
+        nextVisibleMessage.role !== "assistant"
+      nextVisibleMessage = message
     }
     return result
   }, [messages])
@@ -267,16 +260,16 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
     let hasUserAfterHead = false
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       result[index] = hasUserAfterHead
-      if (messages[index].role === "user") hasUserAfterHead = true
+      if (!messageRendersNothing(messages[index]) && messages[index].role === "user") {
+        hasUserAfterHead = true
+      }
     }
     return result
   }, [messages])
-  const lastNonToolMessageIndex = useMemo(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role !== "tool") return index
-    }
-    return -1
-  }, [messages])
+  const visibleMessageLayout = useMemo(
+    () => buildVisibleMessageLayout(messages, (message) => !messageRendersNothing(message)),
+    [messages]
+  )
 
   const getScrollViewport = useCallback((): HTMLDivElement | null => {
     const root = scrollRef.current
@@ -314,17 +307,18 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
   }, [getScrollViewport])
 
   const scrollSignature = useMemo(() => {
-    const lastMessage = messages[messages.length - 1]
+    const lastMessage = messages[visibleMessageLayout.lastVisibleMessageIndex]
     return [
       messages.length,
       lastMessage?.id ?? "",
       lastMessage?.role ?? "",
       messageContentLength(lastMessage?.content),
+      messageVisibleReasoningLength(lastMessage),
       lastMessage?.tool_calls?.length ?? 0,
       toolResults.size,
       isRunning ? "running" : "idle"
     ].join(":")
-  }, [isRunning, messages, toolResults.size])
+  }, [isRunning, messages, toolResults.size, visibleMessageLayout.lastVisibleMessageIndex])
 
   useEffect(() => {
     isAtBottomRef.current = true
@@ -417,9 +411,9 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
               </div>
             )}
             {messages.map((message, index) => {
-              if (message.role === "tool") return null
-              const previousMessage = index > 0 ? messages[index - 1] : null
-              const isLastMessage = index >= lastNonToolMessageIndex
+              if (messageRendersNothing(message)) return null
+              const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
+              const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
               return (
                 <MessageBubble
                   key={message.id}

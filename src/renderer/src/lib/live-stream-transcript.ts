@@ -1,6 +1,8 @@
 import type { Message } from "@/types"
+import { mergeCheckpointAuthorityTranscriptMessages } from "../../../shared/checkpoint-transcript"
+import { preserveAssistantReasoningByRoleCollisionIdentity } from "../../../shared/message-role-collision"
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
-import { isVisibleCheckpointTranscriptMessage } from "./goal-transcript"
+import { isVisibleCheckpointTranscriptMessage, sameGoalCommandMessage } from "./goal-transcript"
 import {
   liveStreamMessageRole,
   normalizeLiveStreamMessageContent,
@@ -14,6 +16,12 @@ export function liveStreamMessageToStoreMessage(
   const role = liveStreamMessageRole(streamMessage.type)
   return {
     id: streamMessage.id,
+    ...(streamMessage.provider_source_id
+      ? { provider_source_id: streamMessage.provider_source_id }
+      : {}),
+    ...(streamMessage.provider_occurrence
+      ? { provider_occurrence: streamMessage.provider_occurrence }
+      : {}),
     role,
     content: normalizeLiveStreamMessageContent(streamMessage.content),
     ...(typeof streamMessage.content_priority === "number"
@@ -54,4 +62,19 @@ export function shouldSkipLiveStreamAccumulatorMessage(
   const storeMessage = liveStreamMessageToStoreMessage(streamMessage)
   if (isInternalGoalPromptMessage(storeMessage)) return false
   return !isVisibleCheckpointTranscriptMessage(storeMessage)
+}
+
+/** Merge a full DB-ordinal snapshot with local-only/live records without letting
+ * optimistic renderer arrival order displace durable user-turn boundaries. */
+export function mergeDurableTranscriptSnapshot(
+  durableMessages: Message[],
+  localMessages: Message[]
+): Message[] {
+  const merged = mergeCheckpointAuthorityTranscriptMessages(durableMessages, localMessages, {
+    isSameMessage: sameGoalCommandMessage
+  })
+  // thread_messages is authoritative for ordinal/content but does not persist
+  // renderer-only reasoning. Reattach it by provider occurrence so the first
+  // durable sync after a stream stops cannot make visible thinking disappear.
+  return preserveAssistantReasoningByRoleCollisionIdentity(localMessages, merged)
 }

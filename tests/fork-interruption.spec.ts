@@ -205,13 +205,23 @@ async function testDurableSyncThreadLifecycleBoundaries(): Promise<void> {
   )
   assert.match(
     source,
-    /for \(const delayMs of \[50, 350\]\)[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\] !== seq[\s\S]*window\.api\.threads\.getMessages\(threadId\)[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\] !== seq/,
+    /const applyDurableTranscriptSnapshot[\s\S]*const isCurrentIdleSync[\s\S]*if \(!isCurrentIdleSync\(\)\) return false[\s\S]*window\.api\.threads\.getMessages\(threadId\)[\s\S]*if \(!isCurrentIdleSync\(\)\) return false/,
     "durable transcript sync should fence both before and after async DB reads"
   )
   assert.match(
     source,
     /setThreadStates\(\(prev\) => \{[\s\S]*initializedThreadsRef\.current\.has\(threadId\)[\s\S]*streamDataRef\.current\[threadId\]\?\.isLoading[\s\S]*return prev/,
     "durable transcript sync should re-check lifecycle and loading state inside the state update"
+  )
+  assert.match(
+    source,
+    /setThreadStates\(\(prev\) => \{[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\] !== seq[\s\S]*mergeState\(state\)/,
+    "a deferred durable transcript updater should reject superseded sync generations"
+  )
+  assert.match(
+    source,
+    /const mergeState[\s\S]*removeQueuedMessagesById\([\s\S]*requiredMessageIdSet[\s\S]*messages: ordered,[\s\S]*queuedMessages/,
+    "durable message recovery and handed-off draft removal should share one guarded commit"
   )
   assert.match(
     source,
@@ -230,23 +240,26 @@ async function testTerminalAndCancelledRunsFlushDurableTranscript(): Promise<voi
 
   assert.match(
     source,
-    /function isTerminalStreamPayload[\s\S]*type === "done"[\s\S]*type === "error"/,
-    "terminal stream payload detection must include errors, not only normal done events"
+    /function flushPendingStreamTranscriptMessages\([\s\S]*threadId: string,[\s\S]*runToken: string/,
+    "durable transcript buffers should be scoped to a physical run"
+  )
+  const successfulStreamFlushes =
+    source.match(
+      /await commitPending(?:Resume|Interrupt)?MessageSideEffects\(\)[\s\S]{0,240}flushPendingStreamTranscriptMessages\(threadId, runToken\)/g
+    )?.length ?? 0
+  assert(
+    successfulStreamFlushes >= 3,
+    "invoke, resume, and interrupt success paths should flush their run-scoped transcript"
   )
   assert.match(
     source,
-    /function safeSendToWindow[\s\S]*isTerminalStreamPayload\(payload\)[\s\S]*flushPendingStreamTranscriptMessages\(threadId\)/,
-    "terminal stream events should flush pending durable transcript before renderer sync can read it"
-  )
-  assert.match(
-    source,
-    /controller\.abort\(\)[\s\S]{0,240}flushPendingStreamTranscriptMessages\(threadId\)/,
-    "user cancellation should flush already queued transcript chunks immediately after aborting"
+    /if \(activeRunToken\) flushPendingStreamTranscriptMessages\(threadId, activeRunToken\)[\s\S]{0,120}controller\.abort\(\)/,
+    "user cancellation should flush already queued transcript chunks before aborting"
   )
 
   const cleanupFlushes =
     source.match(
-      /flushPendingStreamTranscriptMessages\(threadId\)[\s\S]{0,900}resolve(?:Active|Resume|Interrupt)RunSettled\(\)/g
+      /flushPendingStreamTranscriptMessages\(threadId, runToken\)[\s\S]{0,1200}resolve(?:Active|Resume|Interrupt)RunSettled\(\)/g
     )?.length ?? 0
   assert(
     cleanupFlushes >= 3,

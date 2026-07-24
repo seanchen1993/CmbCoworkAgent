@@ -8,8 +8,6 @@ import {
   getAllThreads,
   getThread,
   getThreadMessages,
-  getThreadMessagesAfterAnyId,
-  getThreadMessagesByIds,
   getThreadGoalEvents,
   getThreadGoalEventsForRestore,
   addThreadGoalEvent,
@@ -28,6 +26,9 @@ import {
   pendingApprovals
 } from "../agent/runtime"
 import {
+  cancelAndWaitForAgentThreadRun,
+  disposeAgentThreadState,
+  disposeDeletedAgentThreadRuntime,
   forgetCoordinatorThreadState,
   hasActiveAgentRun,
   isActiveAgentRunAborting,
@@ -59,7 +60,6 @@ import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
-import { disposeAgentThreadState } from "./agent"
 import { getDefaultModel } from "./models"
 import type {
   ForkableCheckpoint,
@@ -83,6 +83,10 @@ import {
   mergeCheckpointAuthorityTranscriptMessages,
   truncateCheckpointMessagesAfter
 } from "../../shared/checkpoint-transcript"
+import {
+  getMessageProviderOccurrenceIdentity,
+  getMessageProviderTupleFromMetadata
+} from "../../shared/message-role-collision"
 import {
   buildVisibleForkableCheckpointList,
   describeCheckpointForkability,
@@ -370,19 +374,23 @@ function normalizeIpcMessageRole(role: unknown): Message["role"] | undefined {
 function copyForkedThreadMessages(input: {
   sourceThreadId: string
   targetThreadId: string
-  visibleMessageIds: readonly string[]
+  visibleMessages: readonly { id: string; role: string; renderId?: string; rawIndex?: number }[]
   checkpointMessages?: CheckpointMessage[]
 }): void {
-  const allowedIds = new Set(input.visibleMessageIds)
-  if (allowedIds.size === 0) return
+  if (input.visibleMessages.length === 0) return
+  const visibleRawIndices = input.visibleMessages.flatMap((message) =>
+    typeof message.rawIndex === "number" ? [message.rawIndex] : []
+  )
+  const allowedIdentities = new Set(
+    input.visibleMessages.map((message) =>
+      getMessageProviderOccurrenceIdentity({ ...message, id: message.renderId || message.id })
+    )
+  )
   const checkpointMessages = checkpointMessagesToThreadMessages(input.checkpointMessages, {
-    visibleMessageIds: input.visibleMessageIds
+    visibleRawIndices
   })
-  const persistedMessages = getThreadMessagesByIds(
-    input.sourceThreadId,
-    input.visibleMessageIds
-  ).filter((message) =>
-    allowedIds.has(message.id)
+  const persistedMessages = getThreadMessages(input.sourceThreadId).filter((message) =>
+    allowedIdentities.has(getMessageProviderOccurrenceIdentity(message))
   )
   const messages = mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
   if (messages.length === 0) return
@@ -453,13 +461,11 @@ function isForkVisiblePersistedMessage(message: Message): boolean {
 
 function findDurableForkTailMessages(
   sourceThreadId: string,
-  visibleMessageIds: readonly string[]
+  visibleMessages: readonly { id: string; role: string; renderId?: string }[]
 ): Message[] {
   return findMessagesAfterCheckpointVisibleIds(
-    getThreadMessagesAfterAnyId(sourceThreadId, visibleMessageIds).filter(
-      isForkVisiblePersistedMessage
-    ),
-    visibleMessageIds
+    getThreadMessages(sourceThreadId).filter(isForkVisiblePersistedMessage),
+    visibleMessages
   )
 }
 
@@ -546,7 +552,7 @@ function materializeLatestForkTuple(
   const initialTranscript = deriveCheckpointTranscriptIndex(latestTuple.checkpoint)
   const durableTail = findDurableForkTailMessages(
     sourceThreadId,
-    initialTranscript.visibleMessageIds
+    initialTranscript.visibleMessages
   )
   if (durableTail.length === 0) return [...tuples]
 
@@ -901,8 +907,13 @@ function getTupleParentCheckpointId(tuple: CheckpointTuple): string | undefined 
 
 function checkpointTranscriptDedupeKey(checkpoint: CheckpointTuple["checkpoint"]): string {
   const transcript = deriveCheckpointTranscriptIndex(checkpoint)
-  return transcript.visibleMessageIds.length > 0
-    ? JSON.stringify(transcript.visibleMessageIds)
+  return transcript.visibleMessages.length > 0
+    ? JSON.stringify(
+        transcript.visibleMessages.map((message) => [
+          message.role,
+          message.renderId ?? message.id
+        ])
+      )
     : `checkpoint:${checkpoint.id}`
 }
 
@@ -1215,7 +1226,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       copyForkedThreadMessages({
         sourceThreadId,
         targetThreadId,
-        visibleMessageIds: transcriptIndex.visibleMessageIds,
+        visibleMessages: transcriptIndex.visibleMessages,
         checkpointMessages: getCheckpointChannelMessages(forkCheckpoint)
       })
       copyForkedGoalStateForCheckpoint({
@@ -1372,10 +1383,28 @@ function comparableMessageTextsMatch(left: string, right: string): boolean {
   return shorterLength >= 24 && (left.startsWith(right) || right.startsWith(left))
 }
 
-function findCheckpointMessageById(checkpoint: unknown, messageId: string): CheckpointMessage | null {
+function findCheckpointMessageById(
+  checkpoint: unknown,
+  messageId: string,
+  role?: Message["role"],
+  rawIndex?: number
+): CheckpointMessage | null {
   const messages = getCheckpointChannelMessages(checkpoint) ?? []
+  if (rawIndex !== undefined) {
+    const indexedMessage = messages[rawIndex]
+    if (
+      indexedMessage &&
+      getCheckpointMessageId(indexedMessage, rawIndex) === messageId &&
+      (!role || getMessageRole(indexedMessage) === role)
+    ) {
+      return indexedMessage
+    }
+  }
   const index = messages.findIndex((message, messageIndex) => {
-    return getCheckpointMessageId(message, messageIndex) === messageId
+    return (
+      getCheckpointMessageId(message, messageIndex) === messageId &&
+      (!role || getMessageRole(message) === role)
+    )
   })
   return index >= 0 ? messages[index] : null
 }
@@ -1414,7 +1443,8 @@ function snapshotMatchesCheckpointAssistantBoundary(
   tuple: CheckpointTuple,
   snapshot: ForkMessageSnapshot | undefined,
   targetMessageId: string,
-  targetText: string
+  targetText: string,
+  targetRawIndex?: number
 ): boolean {
   if (!snapshot) return false
   if (snapshot.role && snapshot.role !== "assistant") return false
@@ -1424,7 +1454,12 @@ function snapshotMatchesCheckpointAssistantBoundary(
   )
   const checkpointText = normalizeComparableMessageText(targetText)
 
-  const rawMessage = findCheckpointMessageById(tuple.checkpoint, targetMessageId)
+  const rawMessage = findCheckpointMessageById(
+    tuple.checkpoint,
+    targetMessageId,
+    "assistant",
+    targetRawIndex
+  )
   if (!rawMessage) return false
   const snapshotId = typeof snapshot.id === "string" ? snapshot.id.trim() : ""
   if (snapshotId && snapshotId === targetMessageId) return true
@@ -1442,13 +1477,21 @@ function findSnapshotAssistantMessageInTranscript(
   tuple: CheckpointTuple,
   snapshot: ForkMessageSnapshot | undefined,
   transcript: ReturnType<typeof deriveCheckpointTranscriptIndex>
-): { id: string; text: string; index: number } | null {
+): { id: string; text: string; index: number; rawIndex?: number } | null {
   if (!snapshot) return null
   for (let index = transcript.visibleMessages.length - 1; index >= 0; index -= 1) {
     const message = transcript.visibleMessages[index]
     if (message.role !== "assistant") continue
-    if (snapshotMatchesCheckpointAssistantBoundary(tuple, snapshot, message.id, message.text)) {
-      return { id: message.id, text: message.text, index }
+    if (
+      snapshotMatchesCheckpointAssistantBoundary(
+        tuple,
+        snapshot,
+        message.id,
+        message.text,
+        message.rawIndex
+      )
+    ) {
+      return { id: message.id, text: message.text, index, rawIndex: message.rawIndex }
     }
   }
   return null
@@ -1466,13 +1509,15 @@ function snapshotAllowsSparseAssistantFallback(
 
 function findLastAssistantBeforeToolTail(
   transcript: ReturnType<typeof deriveCheckpointTranscriptIndex>
-): { id: string; text: string; index: number } | null {
+): { id: string; text: string; index: number; rawIndex?: number } | null {
   let index = transcript.visibleMessages.length - 1
   while (index >= 0 && transcript.visibleMessages[index].role === "tool") {
     index -= 1
   }
   const message = index >= 0 ? transcript.visibleMessages[index] : undefined
-  return message?.role === "assistant" ? { id: message.id, text: message.text, index } : null
+  return message?.role === "assistant"
+    ? { id: message.id, text: message.text, index, rawIndex: message.rawIndex }
+    : null
 }
 
 function resolveInterruptedToolClusterForkTarget(
@@ -1486,13 +1531,16 @@ function resolveInterruptedToolClusterForkTarget(
 
   const exactMessage = exactTarget.message
   let candidateSource: "exact" | "snapshot" | "fallback" | null = null
-  let candidate: { id: string; text: string; index: number } | null = null
+  let candidate: { id: string; text: string; index: number; rawIndex?: number } | null = null
   if (exactMessage?.role === "assistant") {
     candidateSource = "exact"
     candidate = {
       id: exactMessage.id,
       text: exactMessage.text,
-      index: transcript.visibleMessages.findIndex((message) => message.id === exactMessage.id)
+      index: transcript.visibleMessages.findIndex(
+        (message) => (message.renderId ?? message.id) === (exactMessage.renderId ?? exactMessage.id)
+      ),
+      rawIndex: exactMessage.rawIndex
     }
   } else {
     candidate = findSnapshotAssistantMessageInTranscript(tuple, snapshot, transcript)
@@ -1507,7 +1555,13 @@ function resolveInterruptedToolClusterForkTarget(
 
   if (
     candidateSource === "snapshot" &&
-    !snapshotMatchesCheckpointAssistantBoundary(tuple, snapshot, candidate.id, candidate.text)
+    !snapshotMatchesCheckpointAssistantBoundary(
+      tuple,
+      snapshot,
+      candidate.id,
+      candidate.text,
+      candidate.rawIndex
+    )
   ) {
     return null
   }
@@ -1517,14 +1571,24 @@ function resolveInterruptedToolClusterForkTarget(
     return null
   }
 
-  const assistantMessage = findCheckpointMessageById(tuple.checkpoint, candidate.id)
+  const assistantMessage = findCheckpointMessageById(
+    tuple.checkpoint,
+    candidate.id,
+    "assistant",
+    candidate.rawIndex
+  )
   const assistantToolCallIds = getCheckpointMessageToolCallIds(assistantMessage)
   if (assistantToolCallIds.size === 0) return null
 
   const rawMessages = getCheckpointChannelMessages(tuple.checkpoint) ?? []
-  const candidateRawIndex = rawMessages.findIndex((message, index) => {
-    return getCheckpointMessageId(message, index) === candidate.id
-  })
+  const candidateRawIndex =
+    candidate.rawIndex ??
+    rawMessages.findIndex((message, index) => {
+      return (
+        getCheckpointMessageId(message, index) === candidate.id &&
+        getMessageRole(message) === "assistant"
+      )
+    })
   if (candidateRawIndex < 0) return null
 
   for (let index = candidateRawIndex + 1; index < rawMessages.length; index += 1) {
@@ -1557,13 +1621,15 @@ function resolveForkableCheckpointMessageTarget(
   // 场景：用户选择了一条 tool_call 消息（不可直接 fork），需要回退到同轮次的 assistant 消息。
   const lastVisibleMessage = exactTarget.transcript.visibleMessages.at(-1)
   if (lastVisibleMessage?.role === "assistant") {
-    if (!isForkableCheckpointForMessage(tuple, lastVisibleMessage.id)) return null
+    const lastVisibleMessageId = lastVisibleMessage.renderId ?? lastVisibleMessage.id
+    if (!isForkableCheckpointForMessage(tuple, lastVisibleMessageId)) return null
     if (
       !snapshotMatchesCheckpointAssistantBoundary(
         tuple,
         snapshot,
         lastVisibleMessage.id,
-        lastVisibleMessage.text
+        lastVisibleMessage.text,
+        lastVisibleMessage.rawIndex
       )
     ) {
       return null
@@ -1571,7 +1637,7 @@ function resolveForkableCheckpointMessageTarget(
 
     return {
       mode: "message",
-      messageId: lastVisibleMessage.id,
+      messageId: lastVisibleMessageId,
       transcript: exactTarget.transcript
     }
   }
@@ -1954,23 +2020,29 @@ function roleToCheckpointType(role: Message["role"]): CheckpointMessage["type"] 
 
 function checkpointMessagesToThreadMessages(
   messages: CheckpointMessage[] | undefined,
-  options: { visibleMessageIds?: readonly string[] } = {}
+  options: { visibleRawIndices?: readonly number[] } = {}
 ): Message[] {
   if (!Array.isArray(messages)) return []
-  const visibleMessageIds = options.visibleMessageIds
-    ? new Set(options.visibleMessageIds)
+  const visibleRawIndices = options.visibleRawIndices
+    ? new Set(options.visibleRawIndices)
     : undefined
   const now = new Date()
   return messages.flatMap((msg, index): Message | [] => {
     const role = getMessageRole(msg)
     if (!role) return []
     const id = getCheckpointMessageId(msg, index)
-    if (visibleMessageIds && !visibleMessageIds.has(id)) return []
+    if (visibleRawIndices && !visibleRawIndices.has(index)) return []
     const content = getCheckpointMessageTranscriptContent(msg, role)
     const rawText = stringifyContent(content)
     if (isWorkflowPlumbingTranscriptContent(rawText)) return []
+    const additionalKwargs = getCheckpointMessageAdditionalKwargs(msg)
+    const providerTuple =
+      role === "assistant"
+        ? getMessageProviderTupleFromMetadata(additionalKwargs)
+        : undefined
     return {
       id,
+      ...providerTuple,
       role,
       content:
         typeof content === "string"
@@ -2023,7 +2095,11 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
   const checkpointMessages = checkpointMessagesToThreadMessages(
     getCheckpointChannelMessages(checkpoint),
     checkpointTranscriptIndex
-      ? { visibleMessageIds: checkpointTranscriptIndex.visibleMessageIds }
+      ? {
+          visibleRawIndices: checkpointTranscriptIndex.visibleMessages.flatMap((message) =>
+            typeof message.rawIndex === "number" ? [message.rawIndex] : []
+          )
+        }
       : {}
   )
   return mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
@@ -2266,6 +2342,15 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       } catch (error) {
         console.warn("[Threads] Workflow cancel on delete failed:", error)
       }
+      const window = BrowserWindow.fromWebContents(event.sender)
+      try {
+        const foregroundOutcome = await cancelAndWaitForAgentThreadRun(threadId, window)
+        if (foregroundOutcome === "timed_out") {
+          console.warn("[Threads] Timed out waiting for foreground run cleanup during delete")
+        }
+      } catch (error) {
+        console.warn("[Threads] Foreground run cancel on delete failed:", error)
+      }
       // Drop the thread's tool-concurrency locks so the module-level map
       // doesn't keep one idle lock per deleted thread for the process lifetime.
       clearToolConcurrencyLocksForThread(threadId)
@@ -2282,7 +2367,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         }
       }
       workspacePath = workspacePath ?? activeWorkspaceFallback
-      const window = BrowserWindow.fromWebContents(event.sender)
       const hookChannel = `agent:stream:${threadId}`
       await fireSessionEnd(
         threadId,
@@ -2309,6 +2393,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
       // Delete from our metadata store — the point of no return.
       dbDeleteThread(threadId)
+      // Revoke foreground ownership and synchronously drop every buffered
+      // transcript before the event loop can deliver a late chunk from a run
+      // that exceeded the bounded cancellation wait.
+      disposeDeletedAgentThreadRuntime(threadId)
       // Incarnation boundary crossed: permanently silence every store/snapshot
       // born before this deletion (revive-immune epoch bump).
       commitWorkflowThreadDisposal(threadId)

@@ -16,6 +16,12 @@ import {
   FORK_BOUNDARY_MARKER_VERSION,
   FORK_BOUNDARY_THREAD_METADATA_KEY
 } from "../src/shared/checkpoint-forkability.ts"
+import {
+  buildMessageRoleCollisionId,
+  buildMessageSameRoleDuplicateId,
+  MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
+  MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
+} from "../src/shared/message-role-collision.ts"
 
 type IpcHandler = (_event: unknown, ...args: unknown[]) => unknown
 
@@ -288,6 +294,161 @@ async function testResolveMessageForkReturnsNewestStableCheckpoint(): Promise<vo
       "message resolver should return the newest stable checkpoint from SqlJsSaver.list()"
     )
   } finally {
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testResolveAndForkRoleCollisionAssistantBoundary(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, resolveForkCheckpointForMessage } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-role-collision-source"
+  const checkpointId = "fork-role-collision-cp"
+  const sharedId = "fork-shared-provider-id"
+  const assistantRenderId = buildMessageRoleCollisionId(sharedId, "assistant")
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Role collision fork source",
+      agentMode: "normal"
+    })
+
+    const checkpoint = makeCheckpoint(checkpointId)
+    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+      {
+        id: sharedId,
+        type: "human",
+        content: "hidden coordinator state",
+        additional_kwargs: { cmb_internal_coordinator_notification: true }
+      },
+      { id: sharedId, type: "human", content: "collision question" },
+      { id: sharedId, type: "ai", content: "collision answer" }
+    ]
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      checkpoint,
+      makeForkBoundaryMetadata(checkpointId, sharedId)
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: assistantRenderId,
+      message: {
+        id: assistantRenderId,
+        role: "assistant",
+        content: "collision answer"
+      }
+    })
+    assert.equal(resolved?.checkpointId, checkpointId)
+    assert.equal(
+      resolved?.resolvedMessageId,
+      assistantRenderId,
+      "message resolver should retain the render id needed to select the exact duplicate occurrence"
+    )
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId: resolved!.checkpointId,
+      messageId: resolved!.resolvedMessageId,
+      title: "Fork from role collision assistant"
+    })
+    targetThreadId = forked.thread.thread_id
+    const targetMessages = db.getThreadMessages(targetThreadId)
+    assert.deepEqual(
+      targetMessages.map((message) => [message.role, message.content]),
+      [
+        ["user", "collision question"],
+        ["assistant", "collision answer"]
+      ],
+      "forking the synthetic assistant id must not truncate at the earlier user with the same raw id"
+    )
+    assert.equal(new Set(targetMessages.map((message) => message.id)).size, 2)
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testResolveAndForkSameRoleDuplicateAssistantBoundary(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread, resolveForkCheckpointForMessage } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-same-role-duplicate-source"
+  const checkpointId = "fork-same-role-duplicate-cp"
+  const sharedId = "fork-same-role-provider-id"
+  const duplicateRenderId = buildMessageSameRoleDuplicateId(sharedId, "assistant")
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      title: "Same-role duplicate fork source",
+      agentMode: "normal"
+    })
+
+    const checkpoint = makeCheckpoint(checkpointId)
+    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+      { id: sharedId, type: "ai", content: "first assistant chunk" },
+      { id: sharedId, type: "ai", content: "second assistant chunk" }
+    ]
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      checkpoint,
+      makeForkBoundaryMetadata(checkpointId, sharedId)
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const resolved = await resolveForkCheckpointForMessage({
+      threadId: sourceThreadId,
+      messageId: duplicateRenderId,
+      message: {
+        id: duplicateRenderId,
+        role: "assistant",
+        content: "second assistant chunk"
+      }
+    })
+    assert.equal(resolved?.checkpointId, checkpointId)
+    assert.equal(resolved?.resolvedMessageId, duplicateRenderId)
+
+    const forked = await forkThread({
+      sourceThreadId,
+      checkpointId: resolved!.checkpointId,
+      messageId: resolved!.resolvedMessageId,
+      title: "Fork from same-role duplicate assistant"
+    })
+    targetThreadId = forked.thread.thread_id
+    const targetMessages = db.getThreadMessages(targetThreadId)
+    assert.deepEqual(
+      targetMessages.map((message) => [message.id, message.content]),
+      [
+        [sharedId, "first assistant chunk"],
+        [duplicateRenderId, "second assistant chunk"]
+      ],
+      "forking a same-role duplicate boundary must preserve both durable rows"
+    )
+  } finally {
+    if (targetThreadId) {
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
     db.deleteThread(sourceThreadId)
     deleteThreadCheckpoint(sourceThreadId)
     await db.closeDatabase()
@@ -1325,6 +1486,8 @@ async function testInterruptedDurableTailForkIsConsistentAndComplete(): Promise<
       },
       {
         id: "assistant-tail",
+        provider_source_id: "reused-tail-provider",
+        provider_occurrence: 2,
         role: "assistant",
         content: "I will inspect the durable tail.",
         tool_calls: [{ id: "tail-tool-1", name: "inspect", args: { target: "tail" } }],
@@ -1405,12 +1568,32 @@ async function testInterruptedDurableTailForkIsConsistentAndComplete(): Promise<
     })
     await targetSaver.close()
     const targetMessages = (
-      targetTuple?.checkpoint.channel_values as { messages?: Array<{ id?: string }> } | undefined
+      targetTuple?.checkpoint.channel_values as
+        | {
+            messages?: Array<{
+              id?: string
+              additional_kwargs?: Record<string, unknown>
+            }>
+          }
+        | undefined
     )?.messages
     assert.deepEqual(
       targetMessages?.map((message) => message.id),
       ["user-1", "assistant-tail", "tool-tail"],
       "fork runtime checkpoint must contain the complete transcript"
+    )
+    const targetAssistantTail = targetMessages?.find(
+      (message) => message.id === "assistant-tail"
+    )
+    assert.equal(
+      targetAssistantTail?.additional_kwargs?.[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY],
+      "reused-tail-provider",
+      "fork runtime checkpoint must preserve durable-tail provider source identity"
+    )
+    assert.equal(
+      targetAssistantTail?.additional_kwargs?.[MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY],
+      2,
+      "fork runtime checkpoint must preserve durable-tail provider occurrence"
     )
     const targetRuntimeTail = await getDurableRuntimeTail(targetThreadId)
     assert.equal(
@@ -2024,6 +2207,96 @@ async function testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint(): Pro
   assert.equal(merged[1].goal_id, "goal-1", "durable metadata should enrich checkpoint messages")
 }
 
+async function testSessionTranscriptMergeExcludesHiddenCoordinatorIdCollision(): Promise<void> {
+  const { mergeCheckpointAndPersistedThreadMessagesForSession } = await import(
+    "../src/main/ipc/threads.ts"
+  )
+  const sharedId = "hidden-coordinator-shared-id"
+  const checkpoint = makeCheckpoint("cp-hidden-coordinator-collision")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    {
+      id: sharedId,
+      type: "human",
+      content: "hidden coordinator state",
+      additional_kwargs: { cmb_internal_coordinator_notification: true }
+    },
+    { id: sharedId, type: "ai", content: "visible assistant answer" }
+  ]
+
+  const merged = mergeCheckpointAndPersistedThreadMessagesForSession(checkpoint, [])
+
+  assert.deepEqual(
+    merged.map((message) => [message.role, message.content]),
+    [["assistant", "visible assistant answer"]],
+    "session export must filter checkpoint records by their exact raw occurrence"
+  )
+}
+
+async function testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence(): Promise<void> {
+  const { mergeCheckpointAndPersistedThreadMessagesForSession } = await import(
+    "../src/main/ipc/threads.ts"
+  )
+  const providerId = "session-reused-provider"
+  const stableId = "current-run-assistant:session-stable"
+  const guidedId = buildMessageSameRoleDuplicateId(providerId, "assistant", 3)
+  const checkpoint = makeCheckpoint("cp-current-run-provider-occurrence")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: "session-user-1", type: "human", content: "first" },
+    { id: providerId, type: "ai", content: "old answer" },
+    { id: "session-user-2", type: "human", content: "second" },
+    {
+      id: stableId,
+      type: "ai",
+      content: "first final",
+      additional_kwargs: {
+        cmb_internal_provider_source_id: providerId,
+        cmb_internal_provider_occurrence: 2
+      }
+    },
+    { id: "session-user-3", type: "human", content: "guide" },
+    { id: providerId, type: "ai", content: "guided answer" }
+  ]
+  const persisted = [
+    { id: "session-user-1", role: "user", content: "first" },
+    { id: providerId, role: "assistant", content: "old answer" },
+    { id: "session-user-2", role: "user", content: "second" },
+    {
+      id: stableId,
+      provider_source_id: providerId,
+      provider_occurrence: 2,
+      role: "assistant",
+      content: "first final"
+    },
+    { id: "session-user-3", role: "user", content: "guide" },
+    {
+      id: guidedId,
+      provider_source_id: providerId,
+      provider_occurrence: 3,
+      role: "assistant",
+      content: "guided answer"
+    }
+  ].map((message, index) => ({
+    ...message,
+    created_at: new Date(`2026-07-22T02:00:0${index}.000Z`)
+  })) as Message[]
+
+  const merged = mergeCheckpointAndPersistedThreadMessagesForSession(checkpoint, persisted)
+
+  assert.equal(merged.length, 6, "session hydrate must not duplicate the guided provider reply")
+  assert.deepEqual(
+    merged.map((message) => [message.id, message.provider_occurrence ?? 1]),
+    [
+      ["session-user-1", 1],
+      [providerId, 1],
+      ["session-user-2", 1],
+      [stableId, 2],
+      ["session-user-3", 1],
+      [guidedId, 3]
+    ],
+    "checkpoint and DB transcripts must agree on completed and guided occurrences"
+  )
+}
+
 async function main(): Promise<void> {
   await withTempHome(async () => {
     await testForkThreadCopiesCheckpointThreadRowAndTranscript()
@@ -2036,7 +2309,11 @@ async function main(): Promise<void> {
     await testForkCopiesGoalStateAndEvents()
     await testHistoricalForkDoesNotCopyFutureGoalStateAndEvents()
     await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
+    await testSessionTranscriptMergeExcludesHiddenCoordinatorIdCollision()
+    await testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence()
     await testResolveMessageForkReturnsNewestStableCheckpoint()
+    await testResolveAndForkRoleCollisionAssistantBoundary()
+    await testResolveAndForkSameRoleDuplicateAssistantBoundary()
     await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
     await testResolveMessageForkMatchesSparseToolAssistantSnapshot()
     await testResolveMessageForkUsesCheckpointModeForInterruptedToolTail()
