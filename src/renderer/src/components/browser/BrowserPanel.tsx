@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import {
   ArrowLeft,
   ArrowRight,
+  Bot,
   Camera,
   ChevronDown,
   Check,
@@ -13,6 +14,7 @@ import {
   Maximize2,
   Minimize2,
   RotateCcw,
+  Settings2,
   ShieldAlert,
   Square,
   Terminal,
@@ -49,6 +51,14 @@ const EMPTY_STATE: BrowserState = {
   consoleEntries: []
 }
 const BOUNDS_POSITION_POLL_MS = 1000
+
+function isInitialBrowserPage(url: string): boolean {
+  return !url || url === "about:blank"
+}
+
+function getBrowserAddressValue(url: string): string {
+  return isInitialBrowserPage(url) ? "" : url
+}
 
 function isSameBounds(a: BrowserBounds | null, b: BrowserBounds): boolean {
   return Boolean(a && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height)
@@ -239,6 +249,100 @@ function BrowserProfileImportResultPanel({
   )
 }
 
+function BrowserWelcomePanel(): React.JSX.Element {
+  return (
+    <div className="absolute inset-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
+      <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-6 py-8">
+        <div className="mb-6">
+          <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
+            <Globe2 className="size-8 animate-[spin_12s_linear_infinite]" strokeWidth={1.7} />
+          </div>
+          <p className="text-[10px] font-semibold tracking-[0.18em] text-stone-500">
+            IN-APP BROWSER
+          </p>
+          <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
+            从一个链接开始
+          </h2>
+          <p className="mt-2 max-w-md text-xs leading-5 text-stone-600">
+            在上方地址栏输入网站链接、本地服务地址或工作区中的 HTML 文件路径，按 Enter
+            即可打开页面。
+          </p>
+        </div>
+
+        <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]">
+          <div className="border-b border-stone-100 px-4 py-3">
+            <p className="text-xs font-semibold text-stone-800">浏览器使用提示</p>
+            <p className="mt-0.5 text-[11px] text-stone-500">
+              把页面、登录态和测试流程集中到同一处。
+            </p>
+          </div>
+
+          <div className="divide-y divide-stone-100">
+            <div className="flex gap-3 px-4 py-3">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-700">
+                <Terminal className="size-3.5" strokeWidth={1.8} />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-stone-800">本地开发即时预览</p>
+                <p className="mt-0.5 text-[11px] leading-4 text-stone-500">
+                  修改代码后运行{" "}
+                  <code className="font-mono text-[10px] text-stone-700">npm run dev</code>
+                  ，即可直接访问{" "}
+                  <code className="font-mono text-[10px] text-stone-700">比如 localhost:8080</code>
+                  ，AI 边写，你边看 UI 效果，无需切换到 Chrome。
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 px-4 py-3">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
+                <Settings2 className="size-3.5" strokeWidth={1.8} />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-stone-800">让大模型协助操作页面</p>
+                <p className="mt-0.5 text-[11px] leading-4 text-stone-500">
+                  在配置页面开启内置浏览器后，大模型即可在任务中浏览、输入、点击并验证页面结果。
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 px-4 py-3">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700">
+                <KeyRound className="size-3.5" strokeWidth={1.8} />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-stone-800">导入Chrome 数据，复用登录态</p>
+                <p className="mt-0.5 text-[11px] leading-4 text-stone-500">
+                  点击右上角钥匙图标即可导入 Chrome 登录数据。首次使用需要安装浏览器插件，
+                  插件请联系开发人员获取。
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 px-4 py-3">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+                <Bot className="size-3.5" strokeWidth={1.8} />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-stone-800">沉淀可复用的测试案例</p>
+                <p className="mt-0.5 text-[11px] leading-4 text-stone-500">
+                  支持 [ AI 自动录制 + 人工录制 ]
+                  测试案例，方便将高频操作沉淀为后续可复用的验证流程。
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-center gap-2 text-[11px] text-stone-500">
+          <span>让我们开始吧～</span>
+          <span>🤪</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function BrowserPanel({
   workspacePath,
   initialUrl,
@@ -250,6 +354,7 @@ export function BrowserPanel({
   const lastBrowserViewVisibleRef = useRef<boolean | null>(null)
   const hasVisibleBoundsRef = useRef(false)
   const isSessionCreatedRef = useRef(false)
+  const isInitialBrowserPageRef = useRef(true)
   const isUrlFocusedRef = useRef(false)
   const lastInitialNavigationRef = useRef<string | null>(null)
   const pendingSyncReasonRef = useRef<string | null>(null)
@@ -267,9 +372,11 @@ export function BrowserPanel({
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isHiddenByModalDialog, setIsHiddenByModalDialog] = useState(false)
+  const showBrowserWelcome = isInitialBrowserPage(state.url)
 
   const applyBrowserState = useCallback((nextState: BrowserState) => {
     isSessionCreatedRef.current = nextState.created
+    isInitialBrowserPageRef.current = isInitialBrowserPage(nextState.url)
     setState((current) => (browserStatesEqual(current, nextState) ? current : nextState))
   }, [])
 
@@ -285,7 +392,7 @@ export function BrowserPanel({
       lastObservedStateRef.current = nextState
       applyBrowserState(nextState)
       if (!isUrlFocusedRef.current) {
-        setUrlInput(nextState.url)
+        setUrlInput(getBrowserAddressValue(nextState.url))
       }
     })
     return () => {
@@ -319,7 +426,8 @@ export function BrowserPanel({
       }
       const layoutVisible = rect.width >= 8 && rect.height >= 8
       const modalDialogOpen = hasOpenModalDialog()
-      const visible = layoutVisible && !modalDialogOpen
+      const initialBrowserPage = isInitialBrowserPageRef.current
+      const visible = layoutVisible && !modalDialogOpen && !initialBrowserPage
       if (!layoutVisible && hasVisibleBoundsRef.current) {
         console.info(
           `[BrowserPanel] Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport hidden after first visible; rect=${formatRect(rect)} zoom=${zoomLevel} lastBounds=${formatBounds(lastBoundsRef.current)}.`
@@ -338,7 +446,7 @@ export function BrowserPanel({
       lastBrowserViewVisibleRef.current = visible
       if (layoutVisible) hasVisibleBoundsRef.current = true
       console.info(
-        `[BrowserPanel] Syncing bounds for ${BROWSER_SESSION_ID}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} modalDialogOpen=${modalDialogOpen} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
+        `[BrowserPanel] Syncing bounds for ${BROWSER_SESSION_ID}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} modalDialogOpen=${modalDialogOpen} initialBrowserPage=${initialBrowserPage} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
       )
       void window.api.browser
         .setBounds(bounds, visible)
@@ -384,7 +492,7 @@ export function BrowserPanel({
       .then((nextState) => {
         if (cancelled) return
         applyBrowserState(nextState)
-        if (!isUrlFocusedRef.current) setUrlInput(nextState.url)
+        if (!isUrlFocusedRef.current) setUrlInput(getBrowserAddressValue(nextState.url))
         scheduleStabilizedSync()
         console.info(
           `[BrowserPanel] Browser session ${BROWSER_SESSION_ID} attached with state={${describeBrowserState(nextState)}}.`
@@ -450,7 +558,7 @@ export function BrowserPanel({
 
   useEffect(() => {
     if (!isUrlFocused) {
-      setUrlInput(state.url)
+      setUrlInput(getBrowserAddressValue(state.url))
     }
   }, [isUrlFocused, state.url])
 
@@ -828,6 +936,7 @@ export function BrowserPanel({
       )}
 
       <div className="relative min-h-0 flex-1 bg-white">
+        {showBrowserWelcome && !isHiddenByModalDialog && <BrowserWelcomePanel />}
         {isHiddenByModalDialog && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-[radial-gradient(circle_at_top,#f5f5f4,transparent_58%),linear-gradient(135deg,#fafaf9,#f5f5f4)] p-6">
             <div className="max-w-xs text-center">
