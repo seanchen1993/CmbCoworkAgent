@@ -58,14 +58,25 @@ function createCapabilityInvoker(
 }
 
 describe("Playwright MCP in-app browser bridge", () => {
-  it("matches eager Playwright browser tools when the CDP PoC is enabled", () => {
+  it("matches eager Playwright browser tools by default (CDP enabled)", () => {
     expect(
-      shouldPreparePlaywrightInAppBrowser(playwrightTool, { CMB_BROWSER_CDP_PORT: "9222" })
+      shouldPreparePlaywrightInAppBrowser(playwrightTool, {})
     ).toBe(true)
   })
 
-  it("ignores Playwright without CDP and other browser providers", () => {
-    expect(shouldPreparePlaywrightInAppBrowser(playwrightTool, {})).toBe(false)
+  it("matches eager Playwright browser tools with custom CDP port", () => {
+    expect(
+      shouldPreparePlaywrightInAppBrowser(playwrightTool, { VITE_IN_APP_BROWSER_CDP_PORT: "9222" })
+    ).toBe(true)
+  })
+
+  it("ignores Playwright when CDP is disabled via VITE_IN_APP_BROWSER_CDP_ENABLED=0", () => {
+    expect(
+      shouldPreparePlaywrightInAppBrowser(playwrightTool, { VITE_IN_APP_BROWSER_CDP_ENABLED: "0" })
+    ).toBe(false)
+  })
+
+  it("ignores other browser providers", () => {
     expect(
       shouldPreparePlaywrightInAppBrowser(
         {
@@ -75,7 +86,7 @@ describe("Playwright MCP in-app browser bridge", () => {
           providerDisplayName: "Browser Use",
           toolName: "go_to_url"
         },
-        { CMB_BROWSER_CDP_PORT: "9222" }
+        { VITE_IN_APP_BROWSER_CDP_PORT: "9222" }
       )
     ).toBe(false)
   })
@@ -176,7 +187,7 @@ describe("Playwright MCP in-app browser bridge", () => {
   })
 
   it("selects the BrowserView tab before invoking another Playwright browser tool", async () => {
-    vi.stubEnv("CMB_BROWSER_CDP_PORT", "9222")
+    vi.stubEnv("VITE_IN_APP_BROWSER_CDP_PORT", "9222")
     const getState = vi.fn().mockReturnValue(browserState(true))
     const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
     const invoke = vi
@@ -216,7 +227,7 @@ describe("Playwright MCP in-app browser bridge", () => {
   })
 
   it("does not re-select when Playwright is already on the BrowserView tab", async () => {
-    vi.stubEnv("CMB_BROWSER_CDP_PORT", "9222")
+    vi.stubEnv("VITE_IN_APP_BROWSER_CDP_PORT", "9222")
     const getState = vi.fn().mockReturnValue(browserState(true))
     const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
     const invoke = vi

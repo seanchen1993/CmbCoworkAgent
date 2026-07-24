@@ -3,7 +3,7 @@ import type {
   McpCapabilityTool,
   McpInvocationResult
 } from "../../../mcp/capability-types"
-import { BROWSER_CDP_PORT_ENV, parseBrowserCdpPort } from "../../../browser/browser-cdp"
+import { resolveBrowserCdpPort } from "../../../browser/browser-cdp"
 import { getGlobalBrowserService } from "../../../browser/browser-service-registry"
 import type { BrowserAttachOptions, BrowserState } from "../../../../shared/browser-types"
 
@@ -113,7 +113,7 @@ export function shouldPreparePlaywrightInAppBrowser(
   tool: McpCapabilityTool,
   env: NodeJS.ProcessEnv = process.env
 ): boolean {
-  if (parseBrowserCdpPort(env[BROWSER_CDP_PORT_ENV]) === null) return false
+  if (resolveBrowserCdpPort(env) === null) return false
   if (!tool.toolName.startsWith("browser_")) return false
 
   const providerNames = [tool.providerAlias, tool.providerDisplayName].map(normalizeProviderName)
