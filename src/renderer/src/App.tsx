@@ -84,6 +84,7 @@ async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
 const LEFT_MIN = 200
 const LEFT_MAX = 400
 const LEFT_DEFAULT = 280
+const LEFT_RESIZE_HANDLE_WIDTH = 6
 
 const RIGHT_MIN = 250
 const RIGHT_MAX = 1600
@@ -156,6 +157,31 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
   )
 }
 
+function AnimatedThreadSidebar({
+  hidden,
+  width,
+  onResize
+}: {
+  hidden: boolean
+  width: number
+  onResize: (totalDelta: number) => void
+}): React.JSX.Element {
+  return (
+    <div
+      aria-hidden={hidden}
+      className={`flex shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out ${
+        hidden ? "pointer-events-none opacity-0" : "opacity-100"
+      }`}
+      style={{ width: hidden ? 0 : width + LEFT_RESIZE_HANDLE_WIDTH }}
+    >
+      <div style={{ width }} className="shrink-0">
+        <ThreadSidebar />
+      </div>
+      <ResizeHandle onDrag={onResize} />
+    </div>
+  )
+}
+
 function App(): React.JSX.Element {
   const {
     currentThreadId,
@@ -207,6 +233,7 @@ function App(): React.JSX.Element {
   const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
   const [rightModule, setRightModule] = useState<"work" | "preview" | "git" | "browser">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
+  const [browserFullscreen, setBrowserFullscreen] = useState(false)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
@@ -223,6 +250,7 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+  const isRightPanelFullscreen = previewFullscreen || browserFullscreen
   const isThreadWorkerFocusActive =
     mainView === "thread" &&
     Boolean(currentThreadId && workerFocusView?.threadId === currentThreadId)
@@ -975,12 +1003,11 @@ function App(): React.JSX.Element {
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
             {!sidebarCollapsed && !isAgentFocusActive && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
+              <AnimatedThreadSidebar
+                hidden={browserFullscreen}
+                width={leftWidth}
+                onResize={handleLeftResize}
+              />
             )}
 
             {mainView === "kanban" ? (
@@ -1027,7 +1054,7 @@ function App(): React.JSX.Element {
                       )}
                     </section>
                   </main>
-                ) : !previewFullscreen && (
+                ) : (
                   <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
                     {currentThreadId ? (
                       <TabbedPanel
@@ -1050,11 +1077,11 @@ function App(): React.JSX.Element {
 
             {mainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
-                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                {!isRightPanelFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 {/* Right Panel - floating style */}
                 <div
-                  style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 pl-0"}
+                  style={isRightPanelFullscreen ? undefined : { width: rightWidth }}
+                  className={isRightPanelFullscreen ? "flex-1 min-w-0" : "shrink-0 pl-0"}
                 >
                   <RightPanel
                     moduleMode={rightModule}
@@ -1062,6 +1089,7 @@ function App(): React.JSX.Element {
                     onRequestBrowserMode={selectBrowserModule}
                     onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
+                    onBrowserFullscreenChange={setBrowserFullscreen}
                   />
                 </div>
               </>
@@ -1095,12 +1123,11 @@ function App(): React.JSX.Element {
             className="relative flex flex-1 overflow-hidden bg-grid-subtle"
           >
             {!sidebarCollapsed && !isHarnessAgentFocusActive && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
+              <AnimatedThreadSidebar
+                hidden={browserFullscreen}
+                width={leftWidth}
+                onResize={handleLeftResize}
+              />
             )}
             <main
               key="harness-main"
@@ -1139,10 +1166,10 @@ function App(): React.JSX.Element {
             )}
             {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
               <>
-                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                {!isRightPanelFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 <div
-                  style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0  pl-0"}
+                  style={isRightPanelFullscreen ? undefined : { width: rightWidth }}
+                  className={isRightPanelFullscreen ? "flex-1 min-w-0" : "shrink-0  pl-0"}
                 >
                   <RightPanel
                     threadId={harnessSessionThreadId}
@@ -1152,6 +1179,7 @@ function App(): React.JSX.Element {
                     onRequestBrowserMode={selectBrowserModule}
                     onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
+                    onBrowserFullscreenChange={setBrowserFullscreen}
                   />
                 </div>
               </>

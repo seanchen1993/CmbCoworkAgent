@@ -216,6 +216,7 @@ interface RightPanelProps {
   onRequestBrowserMode?: () => void
   onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
+  onBrowserFullscreenChange?: (isFullscreen: boolean) => void
 }
 
 function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
@@ -234,7 +235,8 @@ export function RightPanel({
   onRequestPreviewMode,
   onRequestBrowserMode,
   onRequestWorkMode,
-  onPreviewFullscreenChange
+  onPreviewFullscreenChange,
+  onBrowserFullscreenChange
 }: RightPanelProps): React.JSX.Element {
   const {
     currentThreadId: storeCurrentThreadId,
@@ -723,16 +725,12 @@ export function RightPanel({
   }, [currentThreadId, onRequestBrowserMode, onRequestPreviewMode])
 
   useEffect(() => {
-    if (moduleMode === "preview") {
-      if (!previewPath) {
-        onPreviewFullscreenChange?.(false)
-      }
-      return
-    }
-    if (moduleMode !== "browser") {
-      onPreviewFullscreenChange?.(false)
-    }
+    if (moduleMode !== "preview" || !previewPath) onPreviewFullscreenChange?.(false)
   }, [moduleMode, previewPath, onPreviewFullscreenChange])
+
+  useEffect(() => {
+    if (moduleMode !== "browser") onBrowserFullscreenChange?.(false)
+  }, [moduleMode, onBrowserFullscreenChange])
 
   useEffect(() => {
     if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0)
@@ -1268,7 +1266,7 @@ export function RightPanel({
               workspacePath={threadState?.workspacePath ?? null}
               initialUrl={browserPreviewUrl}
               reloadToken={previewReloadToken}
-              onFullscreenChange={onPreviewFullscreenChange}
+              onFullscreenChange={onBrowserFullscreenChange}
             />
           </Suspense>
         </div>
