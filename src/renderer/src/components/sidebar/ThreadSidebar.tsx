@@ -498,6 +498,46 @@ export function ThreadSidebar(): React.JSX.Element {
   const allThreadStates = useAllThreadStates()
   const allStreamLoadingStates = useAllStreamLoadingStates()
 
+  // FIX: 发送消息后侧边栏线程时间不更新。
+  // 当线程开始或结束流式加载时，更新本地 updated_at，确保侧边栏时间立即刷新
+  const streamChangeRef = useRef<Record<string, boolean>>({})
+  useEffect(() => {
+    const prev = streamChangeRef.current
+    const now = new Date()
+    let changed = false
+    // 检查当前所有线程的加载状态变化
+    for (const threadId of Object.keys(allStreamLoadingStates)) {
+      const wasLoading = prev[threadId] === true
+      const isLoading = allStreamLoadingStates[threadId] === true
+      if (isLoading !== wasLoading) {
+        changed = true
+        break
+      }
+    }
+    // 检查是否有线程从加载状态中移除（流式结束）
+    if (!changed) {
+      for (const threadId of Object.keys(prev)) {
+        if (!(threadId in allStreamLoadingStates)) {
+          changed = true
+          break
+        }
+      }
+    }
+    if (changed) {
+      // 收集所有受影响的 thread ID（当前 + 之前但已移除的）
+      const affectedIds = new Set([
+        ...Object.keys(allStreamLoadingStates),
+        ...Object.keys(prev)
+      ])
+      useAppStore.setState((state) => ({
+        threads: state.threads.map((t) =>
+          affectedIds.has(t.thread_id) ? { ...t, updated_at: now } : t
+        )
+      }))
+    }
+    streamChangeRef.current = { ...allStreamLoadingStates }
+  }, [allStreamLoadingStates])
+
   const [robots, setRobots] = useState<ChatXRobotConfig[]>([])
   const [showRobotPicker, setShowRobotPicker] = useState(false)
   const robotPickerRef = useRef<HTMLDivElement>(null)
