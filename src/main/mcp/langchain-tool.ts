@@ -144,10 +144,7 @@ class NonValidatingMcpTool extends DynamicStructuredTool {
 
 export function createEagerMcpTool(
   capabilityService: McpCapabilityService,
-  tool: McpCapabilityTool,
-  options: {
-    beforeInvoke?: () => Promise<void> | void
-  } = {}
+  tool: McpCapabilityTool
 ): DynamicStructuredTool {
   return new NonValidatingMcpTool({
     name: tool.toolId,
@@ -156,7 +153,6 @@ export function createEagerMcpTool(
     responseFormat: "content_and_artifact",
     func: async (args) => {
       try {
-        await options.beforeInvoke?.()
         const result = await capabilityService.invoke(tool.capabilityId, args ?? {})
         return toEagerToolResponse(result)
       } catch (error) {

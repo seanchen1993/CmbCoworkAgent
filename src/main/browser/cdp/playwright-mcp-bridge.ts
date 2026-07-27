@@ -14,9 +14,12 @@ import {
 interface PlaywrightBrowserTargetService {
   getState(): BrowserState
   prepareTarget(options?: BrowserAttachOptions): Promise<BrowserState>
+  requestPanel(threadId?: string): void
 }
 
-const BROWSER_PANEL_READY_TIMEOUT_MS = 1_500
+// Auto-opening the Browser tab now includes renderer tab switching, BrowserPanel mount,
+// and BrowserView attach/target bootstrap. Give that path a more realistic startup budget.
+const BROWSER_PANEL_READY_TIMEOUT_MS = 5_000
 const BROWSER_PANEL_READY_POLL_MS = 100
 const PLAYWRIGHT_TAB_LINE_PATTERN = /^\s*-\s*(\d+):\s*(\(current\)\s*)?\[(.*?)\]\((.*?)\)\s*$/
 
@@ -104,7 +107,10 @@ async function waitForBrowserPanelReady(
   const deadline = Date.now() + BROWSER_PANEL_READY_TIMEOUT_MS
   while (true) {
     const state = service.getState()
-    if (state.created && state.visible) return state
+    // 只检查 BrowserView 是否已创建即可。当 BrowserWelcomePanel 显示时，
+    // BrowserView 会被暂时隐藏（让位于欢迎面板覆盖层），但 WebContents 仍然存活、
+    // CDP 连接仍然可用，MCP 可以正常操作。导航后 URL 变化会自动使 view 重新可见。
+    if (state.created) return state
     const remaining = deadline - Date.now()
     if (remaining <= 0) return null
     await delay(Math.min(BROWSER_PANEL_READY_POLL_MS, remaining))
@@ -140,10 +146,13 @@ export async function preparePlaywrightInAppBrowser(options: {
   const service = options.service === undefined ? getGlobalBrowserService() : options.service
   if (!service) throw new Error("In-app browser service is unavailable")
 
+  // 主动请求切到右侧浏览器面板，让 renderer 端挂载 BrowserPanel 并触发 attach。
+  service.requestPanel(options.threadId)
+
   const state = await waitForBrowserPanelReady(service)
   if (!state) {
     throw new Error(
-      "请先打开右侧“浏览器”Tab，等待内置浏览器显示后，再重新执行 Playwright MCP 工具。"
+      '已尝试自动打开右侧"浏览器"Tab，但内置浏览器未及时就绪，请稍后重试。'
     )
   }
 
@@ -151,6 +160,51 @@ export async function preparePlaywrightInAppBrowser(options: {
     workspacePath: options.workspacePath,
     visible: false
   })
+}
+
+export function requestPlaywrightInAppBrowserPanelAfterInvoke(options: {
+  tool: McpCapabilityTool
+  result: McpInvocationResult
+  threadId?: string
+  browserService?: PlaywrightBrowserTargetService | null
+}): void {
+  if (!shouldAutoSelectPlaywrightInAppBrowserTab(options.tool)) return
+  if (options.result.isError || options.result.fallbackCapabilityId) return
+
+  const browserService =
+    options.browserService === undefined ? getGlobalBrowserService() : options.browserService
+  if (!browserService) return
+
+  const state = browserService.getState()
+  if (!state.created) return
+
+  browserService.requestPanel(options.threadId)
+}
+
+export async function invokeMcpToolWithPlaywrightInAppBrowserSupport(options: {
+  tool: McpCapabilityTool
+  workspacePath: string
+  threadId?: string
+  invoke: () => Promise<McpInvocationResult>
+  browserService?: PlaywrightBrowserTargetService | null
+  prepareBeforeInvoke?: boolean
+}): Promise<McpInvocationResult> {
+  if (options.prepareBeforeInvoke !== false && shouldPreparePlaywrightInAppBrowser(options.tool)) {
+    await preparePlaywrightInAppBrowser({
+      workspacePath: options.workspacePath,
+      threadId: options.threadId,
+      service: options.browserService
+    })
+  }
+
+  const result = await options.invoke()
+  requestPlaywrightInAppBrowserPanelAfterInvoke({
+    tool: options.tool,
+    result,
+    threadId: options.threadId,
+    browserService: options.browserService
+  })
+  return result
 }
 
 export async function autoSelectPlaywrightInAppBrowserTab(options: {

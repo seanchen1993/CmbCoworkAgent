@@ -13,33 +13,43 @@ const eagerTool: McpCapabilityTool = {
 }
 
 describe("eager MCP tool", () => {
-  it("awaits beforeInvoke before invoking the MCP capability", async () => {
-    const callOrder: string[] = []
+  it("invokes the MCP capability with the provided args", async () => {
+    const capabilityService: McpCapabilityService = {
+      listTools: async () => [eagerTool],
+      getTool: async () => eagerTool,
+      invoke: vi.fn(async () => ({
+        capabilityId: eagerTool.capabilityId,
+        raw: { content: [] },
+        text: "ok",
+        isError: false
+      })),
+      invalidate: async () => undefined,
+      close: async () => undefined
+    }
+
+    const tool = createEagerMcpTool(capabilityService, eagerTool)
+
+    const result = await tool.invoke({ value: "demo" })
+
+    expect(capabilityService.invoke).toHaveBeenCalledWith(eagerTool.capabilityId, { value: "demo" })
+    expect(result).toBe("ok")
+  })
+
+  it("converts regular invocation failures into non-fatal tool output", async () => {
     const capabilityService: McpCapabilityService = {
       listTools: async () => [eagerTool],
       getTool: async () => eagerTool,
       invoke: vi.fn(async () => {
-        callOrder.push("invoke")
-        return {
-          capabilityId: eagerTool.capabilityId,
-          raw: { content: [] },
-          text: "ok",
-          isError: false
-        }
+        throw new Error("boom")
       }),
       invalidate: async () => undefined,
       close: async () => undefined
     }
 
-    const tool = createEagerMcpTool(capabilityService, eagerTool, {
-      beforeInvoke: async () => {
-        await Promise.resolve()
-        callOrder.push("prepare")
-      }
-    })
+    const tool = createEagerMcpTool(capabilityService, eagerTool)
 
-    await tool.invoke({})
+    const result = await tool.invoke({})
 
-    expect(callOrder).toEqual(["prepare", "invoke"])
+    expect(result).toBe("MCP tool error: boom")
   })
 })

@@ -158,8 +158,7 @@ import {
 import { createEagerMcpTool } from "../mcp/langchain-tool"
 import {
   autoSelectPlaywrightInAppBrowserTab,
-  preparePlaywrightInAppBrowser,
-  shouldPreparePlaywrightInAppBrowser
+  invokeMcpToolWithPlaywrightInAppBrowserSupport
 } from "../browser/cdp/playwright-mcp-bridge"
 import {
   InterleavedThinkingChatOpenAICompletions,
@@ -790,11 +789,23 @@ function createEagerMcpTools(
   context: { workspacePath: string; threadId?: string }
 ): DynamicStructuredTool[] {
   return tools.map((tool) =>
-    createEagerMcpTool(capabilityService, tool, {
-      beforeInvoke: shouldPreparePlaywrightInAppBrowser(tool)
-        ? () => preparePlaywrightInAppBrowser(context)
-        : undefined
-    })
+    createEagerMcpTool(
+      {
+        listTools: capabilityService.listTools.bind(capabilityService),
+        getSnapshot: capabilityService.getSnapshot?.bind(capabilityService),
+        getTool: capabilityService.getTool.bind(capabilityService),
+        invoke: async (_idOrAlias, args) =>
+          invokeMcpToolWithPlaywrightInAppBrowserSupport({
+            tool,
+            workspacePath: context.workspacePath,
+            threadId: context.threadId,
+            invoke: () => capabilityService.invoke(tool.capabilityId, args)
+          }),
+        invalidate: capabilityService.invalidate.bind(capabilityService),
+        close: capabilityService.close.bind(capabilityService)
+      },
+      tool
+    )
   )
 }
 
@@ -1136,20 +1147,27 @@ export function createScopedMcpCapabilityService(
       })
 
       if (pluginId) hookScope.activatePlugin(pluginId)
-      let result: McpInvocationResult
-      try {
-        result = await service.invoke(tool.capabilityId, effectiveArgs)
-      } catch (error) {
-        const fallbackTool = shouldFallbackMcpError(error)
-          ? findFallbackTool(tool, snapshot.tools)
-          : null
-        if (!fallbackTool) throw error
-        result = appendFallbackNotice(
-          await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-          tool,
-          fallbackTool
-        )
-      }
+      const result = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+        tool,
+        workspacePath: baseContext.workspacePath,
+        threadId: baseContext.threadId,
+        prepareBeforeInvoke: false,
+        invoke: async () => {
+          try {
+            return await service.invoke(tool.capabilityId, effectiveArgs)
+          } catch (error) {
+            const fallbackTool = shouldFallbackMcpError(error)
+              ? findFallbackTool(tool, snapshot.tools)
+              : null
+            if (!fallbackTool) throw error
+            return appendFallbackNotice(
+              await service.invoke(fallbackTool.capabilityId, effectiveArgs),
+              tool,
+              fallbackTool
+            )
+          }
+        }
+      })
       const postContext: HookContext = {
         ...hookContext,
         toolArgs: effectiveArgs,

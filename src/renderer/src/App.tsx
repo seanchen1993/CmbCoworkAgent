@@ -572,11 +572,31 @@ function App(): React.JSX.Element {
     setThreadPendingGitDiff(activeRightPanelThreadId, false)
   }, [activeRightPanelThreadId, setThreadPendingGitDiff])
 
+  const rightModuleRef = useRef(rightModule)
+  const previousActiveRightPanelThreadIdRef = useRef<string | null>(activeRightPanelThreadId)
+  const previousMainViewRef = useRef(mainView)
+  rightModuleRef.current = rightModule
+
   useEffect(() => {
-    // Keep right panel behavior predictable: when switching thread or entering thread view,
-    // always fall back to workspace mode.
-    setRightModule("work")
-    handlePreviewCollapse()
+    const previousActiveRightPanelThreadId = previousActiveRightPanelThreadIdRef.current
+    const previousMainView = previousMainViewRef.current
+    previousActiveRightPanelThreadIdRef.current = activeRightPanelThreadId
+    previousMainViewRef.current = mainView
+
+    const shouldPreserveCurrentModule =
+      rightModuleRef.current === "browser" &&
+      (mainView === "thread" || mainView === "harness") &&
+      previousMainView === mainView &&
+      Boolean(previousActiveRightPanelThreadId) &&
+      Boolean(activeRightPanelThreadId) &&
+      previousActiveRightPanelThreadId !== activeRightPanelThreadId
+
+    if (!shouldPreserveCurrentModule) {
+      // Keep right panel behavior predictable when entering thread-like views and for
+      // non-browser module switches between threads.
+      setRightModule("work")
+      handlePreviewCollapse()
+    }
 
     try {
       // 主应用已经处于打开/查看状态，清空宠物完成任务提醒队列。
