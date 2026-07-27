@@ -260,7 +260,7 @@ import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
-import { registerBrowserHandlers } from "./ipc/browser"
+import { registerBrowserHandlers, stopCookieBridgeServer } from "./ipc/browser"
 import { setGlobalBrowserService } from "./browser/core/browser-service-registry"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
@@ -950,6 +950,7 @@ if (browserNativeMessagingHostLaunch) {
     browserService?.disposeAll()
     browserService = null
     setGlobalBrowserService(null)
+    stopCookieBridgeServer()
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()

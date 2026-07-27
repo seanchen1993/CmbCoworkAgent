@@ -91,6 +91,10 @@ function mergeSkippedWebsites(
   )
 }
 
+export function stopCookieBridgeServer(): void {
+  cookieBridgeServer.stop()
+}
+
 export function registerBrowserHandlers(
   ipcMain: IpcMain,
   getMainWindow: () => BrowserWindow | null

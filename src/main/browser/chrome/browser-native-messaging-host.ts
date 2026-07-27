@@ -12,8 +12,13 @@ import {
 } from "./browser-cookie-bridge-paths"
 import { encodeNativeMessage, NativeMessageDecoder } from "./native-messaging-framing"
 
-const RECONNECT_DELAY_MS = 2_000
 export const CMB_BROWSER_NATIVE_HOST_FLAG = "--cmb-browser-native-host"
+
+const TAG = "[CmbBrowserNativeHost]"
+
+function log(message: string): void {
+  process.stderr.write(`${TAG} ${message}\n`)
+}
 
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -46,7 +51,10 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
   const origin = getNativeMessagingOrigin()
   if (!origin) throw new Error("Native messaging host was launched by an unknown extension")
 
+  log(`started, origin=${origin}`)
+
   process.stdout.once("error", (error: NodeJS.ErrnoException) => {
+    log(`stdout error: code=${error.code}, message=${error.message}`)
     process.exit(error.code === "EPIPE" ? 0 : 1)
   })
 
@@ -55,7 +63,6 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
   let mainConnected = false
   let mainDecoder = new NativeMessageDecoder()
   let lastReadyMessage: CmbChromeExtensionReadyMessage | null = null
-  let reconnectTimer: NodeJS.Timeout | null = null
   let closed = false
 
   const statusMessage = (connected: boolean, error?: unknown): CmbHostStatusMessage => ({
@@ -65,22 +72,20 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
     type: "host-status"
   })
 
-  const scheduleReconnect = (): void => {
-    if (closed || reconnectTimer) return
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null
-      connectToMain()
-    }, RECONNECT_DELAY_MS)
-  }
-
   const connectToMain = (): void => {
-    if (closed || mainSocket) return
+    if (closed) return
+    if (mainSocket) {
+      log("connectToMain skipped, already connecting")
+      return
+    }
+    log(`connecting to ${getBrowserCookieBridgePipePath()}`)
     const socket = connect(getBrowserCookieBridgePipePath())
     mainSocket = socket
     mainDecoder = new NativeMessageDecoder()
 
     socket.once("connect", () => {
       mainConnected = true
+      log("socket connected, sending hello")
       const hello: CmbNativeHostHelloMessage = {
         origin,
         protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
@@ -88,7 +93,10 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
         type: "native-host-hello"
       }
       socket.write(encodeNativeMessage(hello))
-      if (lastReadyMessage) socket.write(encodeNativeMessage(lastReadyMessage))
+      if (lastReadyMessage) {
+        log("replaying cached extension-ready message")
+        socket.write(encodeNativeMessage(lastReadyMessage))
+      }
       writeChromeMessage(statusMessage(true))
     })
 
@@ -96,9 +104,7 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
       try {
         for (const message of mainDecoder.push(chunk)) writeChromeMessage(message)
       } catch (error) {
-        process.stderr.write(
-          `[CmbBrowserNativeHost] Invalid message from app: ${error instanceof Error ? error.message : String(error)}\n`
-        )
+        log(`invalid message from app: ${error instanceof Error ? error.message : String(error)}`)
         socket.destroy()
       }
     })
@@ -107,8 +113,10 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
       if (mainSocket !== socket) return
       mainConnected = false
       mainSocket = null
+      const reason = error ? `${error.message}` : "socket closed"
+      log(`disconnected: ${reason}, exiting`)
       writeChromeMessage(statusMessage(false, error))
-      scheduleReconnect()
+      process.exit(0)
     }
     socket.once("error", (error: Error) => disconnect(error))
     socket.once("close", () => disconnect())
@@ -119,18 +127,18 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
       for (const message of chromeDecoder.push(chunk)) {
         const record = recordValue(message)
         if (record.type === "extension-ready") {
+          log(`extension-ready received, version=${record.extensionVersion}`)
           lastReadyMessage = message as CmbChromeExtensionReadyMessage
         }
         if (mainSocket && mainConnected && !mainSocket.destroyed) {
           mainSocket.write(encodeNativeMessage(message))
-        } else if (!mainSocket || mainSocket.destroyed) {
-          connectToMain()
+        } else {
+          log("Chrome message received but socket not connected, exiting")
+          process.exit(0)
         }
       }
     } catch (error) {
-      process.stderr.write(
-        `[CmbBrowserNativeHost] Invalid extension message: ${error instanceof Error ? error.message : String(error)}\n`
-      )
+      log(`invalid extension message: ${error instanceof Error ? error.message : String(error)}`)
       process.exitCode = 1
       process.stdin.destroy()
     }
@@ -138,18 +146,20 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
 
   await new Promise<void>((resolve) => {
     process.stdin.once("end", () => {
+      log("stdin ended (Chrome disconnected), cleaning up")
       closed = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
       mainSocket?.destroy()
       resolve()
     })
-    process.stdin.once("error", () => {
+    process.stdin.once("error", (error) => {
+      log(`stdin error: ${error instanceof Error ? error.message : String(error)}, cleaning up`)
       closed = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
       mainSocket?.destroy()
       resolve()
     })
     process.stdin.resume()
+    log("attempting initial connection to main app")
     connectToMain()
   })
+  log("exited")
 }

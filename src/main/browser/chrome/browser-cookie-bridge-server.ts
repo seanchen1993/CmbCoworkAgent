@@ -94,6 +94,7 @@ export class BrowserCookieBridgeServer {
         reject(error)
       })
       server.listen(this.pipePath, () => {
+        console.log(`[BrowserCookieBridge] Server listening on ${this.pipePath}`)
         server.removeAllListeners("error")
         server.on("error", (error) => {
           console.warn(`[BrowserCookieBridge] Server error: ${error.message}`)
@@ -107,6 +108,7 @@ export class BrowserCookieBridgeServer {
   }
 
   stop(): void {
+    console.log(`[BrowserCookieBridge] Stopping server, ${this.clients.size} client(s) connected`)
     this.failPending(
       new BrowserCookieBridgeError("extension_not_connected", "Chrome 扩展连接已关闭")
     )
@@ -117,6 +119,7 @@ export class BrowserCookieBridgeServer {
     if (process.platform !== "win32" && existsSync(this.pipePath)) {
       rmSync(this.pipePath, { force: true })
     }
+    console.log("[BrowserCookieBridge] Server stopped")
   }
 
   get connected(): boolean {
@@ -148,6 +151,7 @@ export class BrowserCookieBridgeServer {
     }
 
     const requestId = randomUUID()
+    console.log(`[BrowserCookieBridge] Cookie export started, requestId=${requestId}`)
     return new Promise<{ cookies: CmbChromeCookie[]; skippedCookies: number }>(
       (resolve, reject) => {
         const timer = setTimeout(() => {
@@ -185,16 +189,18 @@ export class BrowserCookieBridgeServer {
       socket
     }
     this.clients.add(client)
+    console.log(`[BrowserCookieBridge] Client connected, total=${this.clients.size}`)
     socket.on("data", (chunk: Buffer) => {
       try {
         for (const message of client.decoder.push(chunk)) this.handleMessage(client, message)
       } catch (error) {
+        const errorMsg = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500)
+        console.warn(`[BrowserCookieBridge] Message error from client: ${errorMsg}`)
         try {
           socket.end(
             encodeNativeMessage({
               connected: false,
-              error:
-                error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+              error: errorMsg,
               protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
               type: "host-status"
             })
@@ -213,6 +219,7 @@ export class BrowserCookieBridgeServer {
       }
     })
     socket.once("close", () => {
+      console.log(`[BrowserCookieBridge] Client disconnected, remaining=${this.clients.size - 1}`)
       this.clients.delete(client)
       if (this.pending?.client === client) {
         this.failPending(
@@ -220,7 +227,9 @@ export class BrowserCookieBridgeServer {
         )
       }
     })
-    socket.once("error", () => {})
+    socket.once("error", (error) => {
+      console.warn(`[BrowserCookieBridge] Client socket error: ${error.message}`)
+    })
   }
 
   private handleMessage(client: BridgeClient, value: unknown): void {
@@ -260,9 +269,11 @@ export class BrowserCookieBridgeServer {
       typeof hello.secret !== "string" ||
       !stringsEqualSecurely(hello.secret, this.secret)
     ) {
+      console.warn("[BrowserCookieBridge] Client authentication failed")
       throw new Error("Native host authentication failed")
     }
     client.authenticated = true
+    console.log("[BrowserCookieBridge] Client authenticated")
   }
 
   private handleReady(client: BridgeClient, message: Record<string, unknown>): void {
@@ -276,6 +287,7 @@ export class BrowserCookieBridgeServer {
       throw new Error("Extension ready message is invalid")
     }
     client.ready = message as unknown as CmbChromeExtensionReadyMessage
+    console.log(`[BrowserCookieBridge] Extension ready, version=${client.ready.extensionVersion}`)
   }
 
   private handleBegin(client: BridgeClient, message: Record<string, unknown>): void {
@@ -332,6 +344,7 @@ export class BrowserCookieBridgeServer {
     }
     clearTimeout(pending.timer)
     this.pending = null
+    console.log(`[BrowserCookieBridge] Cookie export complete, total=${pending.expectedTotal}, skipped=${pending.skipped}`)
     pending.resolve({ cookies: pending.cookies, skippedCookies: pending.skipped ?? 0 })
   }
 
@@ -346,6 +359,7 @@ export class BrowserCookieBridgeServer {
       typeof message.message === "string" && message.message.length <= 1_000
         ? message.message
         : "Chrome Cookie 导出失败"
+    console.warn(`[BrowserCookieBridge] Extension reported export error: code=${rawCode}, message=${errorMessage}`)
     this.failPending(new BrowserCookieBridgeError(code, errorMessage))
   }
 
@@ -360,6 +374,7 @@ export class BrowserCookieBridgeServer {
   private failPending(error: Error): void {
     const pending = this.pending
     if (!pending) return
+    console.warn(`[BrowserCookieBridge] Cookie export failed: ${error.message}`)
     clearTimeout(pending.timer)
     this.pending = null
     pending.reject(error)
