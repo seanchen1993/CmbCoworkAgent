@@ -2296,7 +2296,7 @@ const BROWSER_CDP_CONFIG_FILE = join(OPENWORK_DIR, "browser-cdp-config.json")
 
 function defaultBrowserCdpConfig(): BrowserCdpConfig {
   return {
-    enabled: true,
+    enabled: false,
     port: DEFAULT_BROWSER_CDP_PORT
   }
 }

@@ -800,6 +800,14 @@ if (browserNativeMessagingHostLaunch) {
       return app.getVersion()
     })
 
+    ipcMain.handle("app:restart", async () => {
+      // Mark the app as quitting first so the main window doesn't collapse into
+      // the tray when we intentionally relaunch from the renderer.
+      setAppQuitting(true)
+      app.relaunch()
+      app.quit()
+    })
+
     ipcMain.handle("open-login-window", async () => {
       if (!loginWindow) {
         loginWindow = new BrowserWindow({

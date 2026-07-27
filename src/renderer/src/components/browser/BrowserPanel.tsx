@@ -929,7 +929,9 @@ export function BrowserPanel({
       )}
 
       <div className="relative min-h-0 flex-1 bg-white">
-        {showBrowserWelcome && !isHiddenByModalDialog && <BrowserWelcomePanel />}
+        {/* Keep the welcome panel mounted so any dialogs launched from it are not
+            immediately unmounted by the BrowserView modal-hide guard. */}
+        {showBrowserWelcome && <BrowserWelcomePanel />}
         {isHiddenByModalDialog && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-[radial-gradient(circle_at_top,#f5f5f4,transparent_58%),linear-gradient(135deg,#fafaf9,#f5f5f4)] p-6">
             <div className="max-w-xs text-center">

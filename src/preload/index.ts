@@ -3366,6 +3366,9 @@ const api = {
       return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
     }
   },
+  app: {
+    restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>
+  },
   update: {
     check: (): Promise<
       | { hasUpdate: false }

@@ -2364,6 +2364,9 @@ interface CustomAPI {
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
   }
+  app: {
+    restart: () => Promise<void>
+  }
   update: {
     check: () => Promise<
       | { hasUpdate: false }
