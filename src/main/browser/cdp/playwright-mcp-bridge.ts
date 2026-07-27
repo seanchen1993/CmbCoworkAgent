@@ -3,7 +3,7 @@ import type {
   McpCapabilityTool,
   McpInvocationResult
 } from "../../mcp/capability-types"
-import { resolveBrowserCdpPort } from "./browser-cdp"
+import { getCurrentBrowserCdpPort } from "./browser-cdp"
 import { getGlobalBrowserService } from "../core/browser-service-registry"
 import {
   BROWSER_SESSION_ID,
@@ -119,9 +119,9 @@ async function waitForBrowserPanelReady(
 
 export function shouldPreparePlaywrightInAppBrowser(
   tool: McpCapabilityTool,
-  env: NodeJS.ProcessEnv = process.env
+  cdpPort: number | null = getCurrentBrowserCdpPort()
 ): boolean {
-  if (resolveBrowserCdpPort(env) === null) return false
+  if (cdpPort === null) return false
   if (!tool.toolName.startsWith("browser_")) return false
 
   const providerNames = [tool.providerAlias, tool.providerDisplayName].map(normalizeProviderName)
@@ -133,9 +133,9 @@ export function shouldPreparePlaywrightInAppBrowser(
 
 function shouldAutoSelectPlaywrightInAppBrowserTab(
   tool: McpCapabilityTool,
-  env: NodeJS.ProcessEnv = process.env
+  cdpPort: number | null = getCurrentBrowserCdpPort()
 ): boolean {
-  return shouldPreparePlaywrightInAppBrowser(tool, env) && tool.toolName !== "browser_tabs"
+  return shouldPreparePlaywrightInAppBrowser(tool, cdpPort) && tool.toolName !== "browser_tabs"
 }
 
 export async function preparePlaywrightInAppBrowser(options: {

@@ -1,90 +1,148 @@
-import { parseMcpImportConfig, buildMcpImportOperations } from "../../mcp/config-import"
-import { getMcpConnectors, upsertMcpConnector } from "../../storage"
+import { getBrowserCdpConfig, getMcpConnectors, upsertMcpConnector } from "../../storage"
+import { DEFAULT_BROWSER_CDP_PORT, type BrowserCdpConfig } from "../../../shared/browser-types"
 
 const REMOTE_DEBUGGING_PORT_SWITCH = "remote-debugging-port"
-const DEFAULT_CDP_PORT = 7777
 const PLAYWRIGHT_MCP_NAME = "In-app-browser"
+let activeBrowserCdpPort: number | null | undefined
 
 interface BrowserCdpCommandLine {
   appendSwitch(name: string, value: string): void
 }
 
-function parseBrowserCdpPort(value: string | undefined): number | null {
-  const normalized = value?.trim()
-  if (!normalized) return null
-  if (!/^\d+$/.test(normalized)) {
-    throw new Error("VITE_IN_APP_BROWSER_CDP_PORT must be an integer between 1 and 65535")
+function parseBrowserCdpPort(value: number | undefined): number | null {
+  if (value === undefined) return null
+  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
+    throw new Error("Browser CDP port must be an integer between 1 and 65535")
   }
-
-  const port = Number(normalized)
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("VITE_IN_APP_BROWSER_CDP_PORT must be an integer between 1 and 65535")
-  }
-  return port
+  return value
 }
 
-export function resolveBrowserCdpPort(env: NodeJS.ProcessEnv = process.env): number | null {
-  // VITE_IN_APP_BROWSER_CDP_ENABLED=0 in .env disables CDP.
-  const enabled = readCdpEnv("VITE_IN_APP_BROWSER_CDP_ENABLED", env)
-  if (enabled === "0") return null
-  return parseBrowserCdpPort(readCdpEnv("VITE_IN_APP_BROWSER_CDP_PORT", env)) ?? DEFAULT_CDP_PORT
+export function resolveBrowserCdpPort(
+  config: Partial<BrowserCdpConfig> | null | undefined = getBrowserCdpConfig()
+): number | null {
+  if (config?.enabled === false) return null
+  return parseBrowserCdpPort(config?.port) ?? DEFAULT_BROWSER_CDP_PORT
 }
 
-// Read a VITE_ config key from the explicit env object, falling back to
-// import.meta.env only when the caller uses the default process.env (i.e. at
-// runtime). Tests pass their own env objects and must not be affected by .env.
-function readCdpEnv(key: string, env: NodeJS.ProcessEnv): string | undefined {
-  const explicit = env[key]?.trim()
-  if (explicit) return explicit
-  if (env !== process.env) return undefined
-  return metaEnv(key)
-}
-
-function metaEnv(key: string): string | undefined {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (import.meta as any).env?.[key]?.trim() || undefined
-  } catch {
-    return undefined
-  }
+export function getCurrentBrowserCdpPort(): number | null {
+  if (activeBrowserCdpPort !== undefined) return activeBrowserCdpPort
+  return DEFAULT_BROWSER_CDP_PORT
 }
 
 export function configureBrowserCdpEndpoint(
   commandLine: BrowserCdpCommandLine,
-  env: NodeJS.ProcessEnv = process.env
+  config: Partial<BrowserCdpConfig> | null | undefined = getBrowserCdpConfig()
 ): number | null {
-  const port = resolveBrowserCdpPort(env)
+  const port = resolveBrowserCdpPort(config)
+  activeBrowserCdpPort = port
   if (port === null) return null
 
   commandLine.appendSwitch(REMOTE_DEBUGGING_PORT_SWITCH, String(port))
   return port
 }
 
+function findManagedPlaywrightMcpConnector() {
+  return getMcpConnectors().find(
+    (connector) => connector.name.trim().toLowerCase() === PLAYWRIGHT_MCP_NAME.toLowerCase()
+  )
+}
+
+function buildPlaywrightMcpArgs(cdpPort: number): string[] {
+  return ["-y", "@playwright/mcp@latest", `--cdp-endpoint=http://127.0.0.1:${cdpPort}`]
+}
+
 export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null): Promise<void> {
-  if (cdpPort === null) return
+  const existing = findManagedPlaywrightMcpConnector()
 
-  const existing = getMcpConnectors()
-  if (existing.some((c) => c.name.trim().toLowerCase() === PLAYWRIGHT_MCP_NAME.toLowerCase())) return
-
-  const rawJson = JSON.stringify({
-    mcpServers: {
-      [PLAYWRIGHT_MCP_NAME]: {
-        command: "npx",
-        args: ["-y", "@playwright/mcp@latest", `--cdp-endpoint=http://127.0.0.1:${cdpPort}`]
-      }
-    }
-  })
-
-  const parsed = parseMcpImportConfig({ rawJson, autoEnable: true })
-  for (const op of buildMcpImportOperations({
-    parsed: parsed.connectors,
-    existingConnectors: existing,
-    conflictStrategy: "skip"
-  })) {
-    if (op.action === "create" || op.action === "update") {
-      upsertMcpConnector(op.connector)
-      console.info(`[Main] Auto-registered Playwright MCP connector on port ${cdpPort}.`)
-      return
-    }
+  if (cdpPort === null) {
+    if (!existing || existing.enabled === false) return
+    upsertMcpConnector({
+      id: existing.id,
+      name: PLAYWRIGHT_MCP_NAME,
+      kind: "stdio",
+      command: existing.command?.trim() || "npx",
+      args: existing.args ?? [],
+      env: existing.env,
+      enabled: false,
+      lazyLoad: existing.lazyLoad ?? false
+    })
+    console.info("[Main] Disabled Playwright MCP connector because Browser CDP is turned off.")
+    return
   }
+
+  const nextArgs = buildPlaywrightMcpArgs(cdpPort)
+  const isAlreadySynced =
+    existing?.enabled === true &&
+    existing.command?.trim() === "npx" &&
+    JSON.stringify(existing.args ?? []) === JSON.stringify(nextArgs)
+
+  if (isAlreadySynced) return
+
+  upsertMcpConnector({
+    id: existing?.id,
+    name: PLAYWRIGHT_MCP_NAME,
+    kind: "stdio",
+    command: "npx",
+    args: nextArgs,
+    env: existing?.env,
+    enabled: true,
+    lazyLoad: existing?.lazyLoad ?? false
+  })
+  console.info(
+    `[Main] ${existing ? "Synced" : "Auto-registered"} Playwright MCP connector on port ${cdpPort}.`
+  )
+}
+
+export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
+  config: BrowserCdpConfig
+): Promise<{ invalidateCapabilities: boolean }> {
+  const existing = findManagedPlaywrightMcpConnector()
+  const desiredPort = resolveBrowserCdpPort(config)
+  const runtimePort = getCurrentBrowserCdpPort()
+
+  if (desiredPort === null) {
+    if (!existing || existing.enabled === false) {
+      return { invalidateCapabilities: false }
+    }
+
+    upsertMcpConnector({
+      id: existing.id,
+      name: PLAYWRIGHT_MCP_NAME,
+      kind: "stdio",
+      command: existing.command?.trim() || "npx",
+      args: existing.args ?? [],
+      env: existing.env,
+      enabled: false,
+      lazyLoad: existing.lazyLoad ?? false
+    })
+    console.info(
+      "[Main] Synced Playwright MCP connector disabled state from Browser CDP config."
+    )
+    return { invalidateCapabilities: true }
+  }
+
+  const connectorPort = runtimePort ?? desiredPort
+  const nextArgs = buildPlaywrightMcpArgs(connectorPort)
+  const isAlreadySynced =
+    existing?.enabled === true &&
+    existing.command?.trim() === "npx" &&
+    JSON.stringify(existing.args ?? []) === JSON.stringify(nextArgs)
+
+  if (!isAlreadySynced) {
+    upsertMcpConnector({
+      id: existing?.id,
+      name: PLAYWRIGHT_MCP_NAME,
+      kind: "stdio",
+      command: "npx",
+      args: nextArgs,
+      env: existing?.env,
+      enabled: true,
+      lazyLoad: existing?.lazyLoad ?? false
+    })
+    console.info(
+      `[Main] Synced Playwright MCP connector enabled state from Browser CDP config; runtimePort=${connectorPort}, desiredPort=${desiredPort}.`
+    )
+  }
+
+  return { invalidateCapabilities: runtimePort !== null }
 }

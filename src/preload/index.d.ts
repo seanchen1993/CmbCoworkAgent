@@ -95,6 +95,7 @@ import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-ty
 import type {
   BrowserAttachOptions,
   BrowserBounds,
+  BrowserCdpConfig,
   BrowserNavigateOptions,
   BrowserPanelRequest,
   BrowserProfileImportOptions,
@@ -1559,6 +1560,8 @@ interface CustomAPI {
     stop: () => Promise<BrowserState>
     clearConsole: () => Promise<BrowserState>
     getState: () => Promise<BrowserState>
+    getCdpConfig: () => Promise<BrowserCdpConfig>
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
     captureScreenshot: () => Promise<BrowserScreenshotResult>
     importProfileData: (
       options: BrowserProfileImportOptions

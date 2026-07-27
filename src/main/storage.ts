@@ -59,6 +59,8 @@ import {
   getPluginSkillSearchSources,
   readPluginManifest
 } from "./plugins/manifest"
+import type { BrowserCdpConfig } from "../shared/browser-types"
+import { DEFAULT_BROWSER_CDP_PORT } from "../shared/browser-types"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
@@ -2286,6 +2288,58 @@ export function resetLspConfig(): import("./types").LspConfig {
   const defaults = defaultLspConfig()
   writeFileSync(LSP_CONFIG_FILE, JSON.stringify(defaults, null, 2))
   return defaults
+}
+
+// ── Browser CDP Config ───────────────────────────────────────────────────────
+
+const BROWSER_CDP_CONFIG_FILE = join(OPENWORK_DIR, "browser-cdp-config.json")
+
+function defaultBrowserCdpConfig(): BrowserCdpConfig {
+  return {
+    enabled: true,
+    port: DEFAULT_BROWSER_CDP_PORT
+  }
+}
+
+function parseBrowserCdpConfigPort(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return null
+  if (value < 1 || value > 65_535) return null
+  return value
+}
+
+function assertBrowserCdpConfigPort(value: number): number {
+  const port = parseBrowserCdpConfigPort(value)
+  if (port === null) {
+    throw new Error("CDP 端口必须是 1 到 65535 之间的整数")
+  }
+  return port
+}
+
+export function getBrowserCdpConfig(): BrowserCdpConfig {
+  getOpenworkDir()
+  if (!existsSync(BROWSER_CDP_CONFIG_FILE)) return defaultBrowserCdpConfig()
+  try {
+    const content = readFileSync(BROWSER_CDP_CONFIG_FILE, "utf-8")
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    const defaults = defaultBrowserCdpConfig()
+    return {
+      enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
+      port: parseBrowserCdpConfigPort(parsed.port) ?? defaults.port
+    }
+  } catch {
+    return defaultBrowserCdpConfig()
+  }
+}
+
+export function saveBrowserCdpConfig(updates: Partial<BrowserCdpConfig>): BrowserCdpConfig {
+  getOpenworkDir()
+  const current = getBrowserCdpConfig()
+  const next: BrowserCdpConfig = {
+    enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
+    port: updates.port === undefined ? current.port : assertBrowserCdpConfigPort(updates.port)
+  }
+  writeFileSync(BROWSER_CDP_CONFIG_FILE, JSON.stringify(next, null, 2))
+  return next
 }
 
 // ── Plugins ──

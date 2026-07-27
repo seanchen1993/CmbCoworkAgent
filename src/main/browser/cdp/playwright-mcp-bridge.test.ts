@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import type {
   McpCapabilityService,
   McpCapabilityTool,
   McpInvocationResult
 } from "../../mcp/capability-types"
 import { BROWSER_SESSION_ID, type BrowserState } from "../../../shared/browser-types"
+import { DEFAULT_BROWSER_CDP_PORT } from "../../../shared/browser-types"
+import { configureBrowserCdpEndpoint } from "./browser-cdp"
 import {
   autoSelectPlaywrightInAppBrowserTab,
   invokeMcpToolWithPlaywrightInAppBrowserSupport,
@@ -77,32 +79,27 @@ function createCapabilityInvoker(
 }
 
 describe("Playwright MCP in-app browser bridge", () => {
+  beforeEach(() => {
+    configureBrowserCdpEndpoint(
+      { appendSwitch: vi.fn() },
+      { enabled: true, port: DEFAULT_BROWSER_CDP_PORT }
+    )
+  })
+
   it("matches in-app browser tools by default (CDP enabled)", () => {
-    expect(shouldPreparePlaywrightInAppBrowser(inAppBrowserTool, {})).toBe(true)
+    expect(shouldPreparePlaywrightInAppBrowser(inAppBrowserTool)).toBe(true)
   })
 
   it("matches in-app browser tools with custom CDP port", () => {
-    expect(
-      shouldPreparePlaywrightInAppBrowser(inAppBrowserTool, {
-        VITE_IN_APP_BROWSER_CDP_PORT: "9222"
-      })
-    ).toBe(true)
+    expect(shouldPreparePlaywrightInAppBrowser(inAppBrowserTool, 9222)).toBe(true)
   })
 
-  it("ignores in-app browser tools when CDP is disabled via VITE_IN_APP_BROWSER_CDP_ENABLED=0", () => {
-    expect(
-      shouldPreparePlaywrightInAppBrowser(inAppBrowserTool, {
-        VITE_IN_APP_BROWSER_CDP_ENABLED: "0"
-      })
-    ).toBe(false)
+  it("ignores in-app browser tools when CDP is disabled", () => {
+    expect(shouldPreparePlaywrightInAppBrowser(inAppBrowserTool, null)).toBe(false)
   })
 
   it("ignores external Playwright connectors", () => {
-    expect(
-      shouldPreparePlaywrightInAppBrowser(playwrightTool, {
-        VITE_IN_APP_BROWSER_CDP_PORT: "9222"
-      })
-    ).toBe(false)
+    expect(shouldPreparePlaywrightInAppBrowser(playwrightTool, 9222)).toBe(false)
   })
 
   it("ignores other browser providers", () => {
@@ -115,7 +112,7 @@ describe("Playwright MCP in-app browser bridge", () => {
           providerDisplayName: "Browser Use",
           toolName: "go_to_url"
         },
-        { VITE_IN_APP_BROWSER_CDP_PORT: "9222" }
+        9222
       )
     ).toBe(false)
   })
@@ -340,7 +337,6 @@ describe("Playwright MCP in-app browser bridge", () => {
   })
 
   it("selects the BrowserView tab before invoking an in-app browser tool", async () => {
-    vi.stubEnv("VITE_IN_APP_BROWSER_CDP_PORT", "9222")
     const getState = vi.fn().mockReturnValue(browserState(true))
     const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
     const requestPanel = vi.fn()
@@ -354,35 +350,30 @@ describe("Playwright MCP in-app browser bridge", () => {
       )
       .mockResolvedValueOnce(mcpResult("selected"))
 
-    try {
-      await autoSelectPlaywrightInAppBrowserTab({
-        tool: inAppBrowserTool,
-        tabsTool: inAppBrowserTabsTool,
-        capabilityService: createCapabilityInvoker(invoke),
-        workspacePath: "/workspace",
-        threadId: "thread-1",
-        browserService: { getState, prepareTarget, requestPanel }
-      })
+    await autoSelectPlaywrightInAppBrowserTab({
+      tool: inAppBrowserTool,
+      tabsTool: inAppBrowserTabsTool,
+      capabilityService: createCapabilityInvoker(invoke),
+      workspacePath: "/workspace",
+      threadId: "thread-1",
+      browserService: { getState, prepareTarget, requestPanel }
+    })
 
-      expect(prepareTarget).toHaveBeenCalledWith({
-        workspacePath: "/workspace",
-        visible: false
-      })
-      expect(invoke).toHaveBeenNthCalledWith(1, inAppBrowserTabsTool.capabilityId, {
-        action: "list"
-      })
-      expect(invoke).toHaveBeenNthCalledWith(2, inAppBrowserTabsTool.capabilityId, {
-        action: "select",
-        index: 2
-      })
-      expect(requestPanel).toHaveBeenCalledWith("thread-1")
-    } finally {
-      vi.unstubAllEnvs()
-    }
+    expect(prepareTarget).toHaveBeenCalledWith({
+      workspacePath: "/workspace",
+      visible: false
+    })
+    expect(invoke).toHaveBeenNthCalledWith(1, inAppBrowserTabsTool.capabilityId, {
+      action: "list"
+    })
+    expect(invoke).toHaveBeenNthCalledWith(2, inAppBrowserTabsTool.capabilityId, {
+      action: "select",
+      index: 2
+    })
+    expect(requestPanel).toHaveBeenCalledWith("thread-1")
   })
 
   it("does not re-select when already on the BrowserView tab", async () => {
-    vi.stubEnv("VITE_IN_APP_BROWSER_CDP_PORT", "9222")
     const getState = vi.fn().mockReturnValue(browserState(true))
     const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
     const requestPanel = vi.fn()
@@ -393,47 +384,38 @@ describe("Playwright MCP in-app browser bridge", () => {
 - 2: (current) [](about:blank)`)
     )
 
-    try {
-      await autoSelectPlaywrightInAppBrowserTab({
-        tool: inAppBrowserTool,
-        tabsTool: inAppBrowserTabsTool,
-        capabilityService: createCapabilityInvoker(invoke),
-        workspacePath: "/workspace",
-        threadId: "thread-1",
-        browserService: { getState, prepareTarget, requestPanel }
-      })
+    await autoSelectPlaywrightInAppBrowserTab({
+      tool: inAppBrowserTool,
+      tabsTool: inAppBrowserTabsTool,
+      capabilityService: createCapabilityInvoker(invoke),
+      workspacePath: "/workspace",
+      threadId: "thread-1",
+      browserService: { getState, prepareTarget, requestPanel }
+    })
 
-      expect(invoke).toHaveBeenCalledTimes(1)
-      expect(invoke).toHaveBeenCalledWith(inAppBrowserTabsTool.capabilityId, { action: "list" })
-      expect(requestPanel).toHaveBeenCalledWith("thread-1")
-    } finally {
-      vi.unstubAllEnvs()
-    }
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(invoke).toHaveBeenCalledWith(inAppBrowserTabsTool.capabilityId, { action: "list" })
+    expect(requestPanel).toHaveBeenCalledWith("thread-1")
   })
 
   it("skips tab selection for external Playwright connectors", async () => {
-    vi.stubEnv("VITE_IN_APP_BROWSER_CDP_PORT", "9222")
     const getState = vi.fn()
     const prepareTarget = vi.fn()
     const requestPanel = vi.fn()
     const invoke = vi.fn()
 
-    try {
-      await autoSelectPlaywrightInAppBrowserTab({
-        tool: playwrightTool,
-        tabsTool: playwrightTabsTool,
-        capabilityService: createCapabilityInvoker(invoke),
-        workspacePath: "/workspace",
-        threadId: "thread-1",
-        browserService: { getState, prepareTarget, requestPanel }
-      })
+    await autoSelectPlaywrightInAppBrowserTab({
+      tool: playwrightTool,
+      tabsTool: playwrightTabsTool,
+      capabilityService: createCapabilityInvoker(invoke),
+      workspacePath: "/workspace",
+      threadId: "thread-1",
+      browserService: { getState, prepareTarget, requestPanel }
+    })
 
-      expect(getState).not.toHaveBeenCalled()
-      expect(prepareTarget).not.toHaveBeenCalled()
-      expect(invoke).not.toHaveBeenCalled()
-      expect(requestPanel).not.toHaveBeenCalled()
-    } finally {
-      vi.unstubAllEnvs()
-    }
+    expect(getState).not.toHaveBeenCalled()
+    expect(prepareTarget).not.toHaveBeenCalled()
+    expect(invoke).not.toHaveBeenCalled()
+    expect(requestPanel).not.toHaveBeenCalled()
   })
 })

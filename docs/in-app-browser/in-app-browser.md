@@ -62,12 +62,12 @@ webPreferences: {
 
 ### 2.2 CDP 端口配置
 
-通过环境变量控制：
+通过 `BrowserWelcomePanel` 中的手动配置卡片控制：
 
-| 环境变量 | 说明 | 默认值 |
-|----------|------|--------|
-| `VITE_IN_APP_BROWSER_CDP_ENABLED` | 设为 `"0"` 禁用 CDP | 启用 |
-| `VITE_IN_APP_BROWSER_CDP_PORT` | CDP 端口号 | `7777` |
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `enabled` | 关闭后不再暴露 CDP endpoint，也不会自动接管内置浏览器 | `true` |
+| `port` | CDP 端口号 | `7777` |
 
 启动时调用 `app.commandLine.appendSwitch("remote-debugging-port", port)` 开放 CDP endpoint。CDP 开启时，自动注册名为 `"In-app-browser"` 的 MCP 连接器：
 
@@ -77,10 +77,7 @@ npx -y @playwright/mcp@latest --cdp-endpoint=http://127.0.0.1:7777
 
 CDP 连接器名和默认端口定义在 `browser-cdp.ts` 中：
 
-```ts
-const DEFAULT_CDP_PORT = 7777
-const PLAYWRIGHT_MCP_NAME = "In-app-browser"
-```
+该配置会持久化保存；由于 Electron 启动参数限制，保存后需要重启应用生效。
 
 ### 2.3 Playwright MCP 桥接
 
@@ -161,7 +158,7 @@ CDP 默认启用，无需额外配置。触发流程：
 ## 五、配置说明
 
 - **内置浏览器面板**: 始终可用，通过右侧面板 "浏览器" Tab 打开
-- **CDP 端口**: 由 `VITE_IN_APP_BROWSER_CDP_ENABLED` / `VITE_IN_APP_BROWSER_CDP_PORT` 控制，默认启用，端口 7777
+- **CDP 端口**: 由 `BrowserWelcomePanel` 手动配置，默认启用，端口 7777；保存后重启应用生效
 
 ---
 

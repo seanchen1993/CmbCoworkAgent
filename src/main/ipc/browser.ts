@@ -1,5 +1,6 @@
 import { dialog, type BrowserWindow, type IpcMain } from "electron"
 import { BrowserService } from "../browser/core/browser-service"
+import { syncPlaywrightMcpConnectorForBrowserCdpConfig } from "../browser/cdp/browser-cdp"
 import { readBrowserProfileImportData } from "../browser/chrome/browser-profile-importer"
 import { sanitizeExtensionCookieExport } from "../browser/chrome/browser-extension-cookie-importer"
 import {
@@ -8,9 +9,12 @@ import {
 } from "../browser/chrome/browser-cookie-bridge-server"
 import { ensureCmbChromeNativeHostRegistration } from "../browser/chrome/browser-native-host-installer"
 import { setGlobalBrowserService } from "../browser/core/browser-service-registry"
+import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { getBrowserCdpConfig, saveBrowserCdpConfig } from "../storage"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
+  BrowserCdpConfig,
   BrowserNavigateOptions,
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
@@ -149,6 +153,31 @@ export function registerBrowserHandlers(
   ipcMain.handle("browser:clearConsole", () => browserService.clearConsole())
 
   ipcMain.handle("browser:getState", () => browserService.getState())
+
+  ipcMain.handle("browser:getCdpConfig", () => getBrowserCdpConfig())
+
+  ipcMain.handle(
+    "browser:saveCdpConfig",
+    async (_event, updates?: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> => {
+      const sanitized: Partial<BrowserCdpConfig> = {}
+      if (updates && typeof updates.enabled === "boolean") {
+        sanitized.enabled = updates.enabled
+      }
+      if (updates && updates.port !== undefined) {
+        if (typeof updates.port !== "number" || !Number.isSafeInteger(updates.port)) {
+          throw new Error("CDP 端口必须是 1 到 65535 之间的整数")
+        }
+        sanitized.port = updates.port
+      }
+      const saved = saveBrowserCdpConfig(sanitized)
+      const { invalidateCapabilities } =
+        await syncPlaywrightMcpConnectorForBrowserCdpConfig(saved)
+      if (invalidateCapabilities) {
+        await invalidateGlobalMcpCapabilityService("browser:saveCdpConfig")
+      }
+      return saved
+    }
+  )
 
   ipcMain.handle("browser:captureScreenshot", () => browserService.captureScreenshot())
 

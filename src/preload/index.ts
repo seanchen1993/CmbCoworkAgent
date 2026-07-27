@@ -103,6 +103,7 @@ import {
 import type {
   BrowserAttachOptions,
   BrowserBounds,
+  BrowserCdpConfig,
   BrowserNavigateOptions,
   BrowserPanelRequest,
   BrowserProfileImportOptions,
@@ -2009,6 +2010,10 @@ const api = {
       ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
     getState: (): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
+    getCdpConfig: (): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:saveCdpConfig", updates) as Promise<BrowserCdpConfig>,
     captureScreenshot: (): Promise<BrowserScreenshotResult> =>
       ipcRenderer.invoke("browser:captureScreenshot") as Promise<BrowserScreenshotResult>,
     importProfileData: (

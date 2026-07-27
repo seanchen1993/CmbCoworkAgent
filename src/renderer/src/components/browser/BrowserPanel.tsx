@@ -25,6 +25,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
+import { BrowserCdpConfigCard } from "./BrowserCdpConfigCard"
 import {
   BROWSER_SESSION_ID,
   type BrowserBounds,
@@ -256,9 +257,9 @@ function BrowserProfileImportResultPanel({
 
 function BrowserWelcomePanel(): React.JSX.Element {
   return (
-    <div className="absolute inset-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
+    <div className="absolute inset-0 z-20 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
       <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-6 py-8">
-        <div className="mb-6">
+        <div className="mb-2">
           <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
             <Globe2 className="size-8 animate-[spin_12s_linear_infinite]" strokeWidth={1.7} />
           </div>
@@ -337,6 +338,12 @@ function BrowserWelcomePanel(): React.JSX.Element {
             </div>
           </div>
         </div>
+
+        <BrowserCdpConfigCard
+          className="mt-4"
+          title="内置浏览器配置"
+          description="在这里手动开启内置浏览器。"
+        />
 
         <div className="mt-4 flex items-center gap-2 text-[11px] text-stone-500">
           <span>让我们开始吧～</span>
@@ -956,7 +963,7 @@ export function BrowserPanel({
             加载中
           </div>
         )}
-        <div ref={viewportRef} className="absolute inset-0" />
+        <div ref={viewportRef} className="pointer-events-none absolute inset-0" />
       </div>
 
       {consoleOpen && (

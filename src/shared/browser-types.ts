@@ -52,6 +52,13 @@ export interface BrowserScreenshotResult {
   error?: string
 }
 
+export const DEFAULT_BROWSER_CDP_PORT = 7777
+
+export interface BrowserCdpConfig {
+  enabled: boolean
+  port: number
+}
+
 export type BrowserProfileImportSource = "chrome"
 
 export interface BrowserProfileImportProfile {
