@@ -9,6 +9,7 @@ import {
   Copy,
   EyeOff,
   Globe2,
+  House,
   KeyRound,
   Loader2,
   Maximize2,
@@ -16,7 +17,6 @@ import {
   RotateCcw,
   Settings2,
   ShieldAlert,
-  Square,
   Terminal,
   Trash2,
   X
@@ -375,6 +375,7 @@ export function BrowserPanel({
   const [urlInput, setUrlInput] = useState("")
   const [isUrlFocused, setIsUrlFocused] = useState(false)
   const [isCapturing, setIsCapturing] = useState(false)
+  const [isResettingHome, setIsResettingHome] = useState(false)
   const [isImportingBrowserProfile, setIsImportingBrowserProfile] = useState(false)
   const [browserProfileImportSkippedWebsites, setBrowserProfileImportSkippedWebsites] = useState<
     BrowserProfileImportSkippedWebsite[]
@@ -654,6 +655,24 @@ export function BrowserPanel({
     [applyBrowserState, urlInput, workspacePath]
   )
 
+  const resetToHome = useCallback(async () => {
+    setIsResettingHome(true)
+    try {
+      await window.api.browser.detach()
+      const nextState = await window.api.browser.attach({ workspacePath, visible: false })
+      applyBrowserState(nextState)
+      setUrlInput("")
+      setBrowserProfileImportSkippedWebsites([])
+      setCopiedConsole(false)
+      setConsoleOpen(false)
+    } catch (error) {
+      console.error(`[BrowserPanel] Return home failed: ${formatError(error)}`)
+      toast.error("返回欢迎页失败")
+    } finally {
+      setIsResettingHome(false)
+    }
+  }, [applyBrowserState, workspacePath])
+
   const captureScreenshot = useCallback(async () => {
     setIsCapturing(true)
     try {
@@ -807,7 +826,7 @@ export function BrowserPanel({
           className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
           icon={
             state.isLoading ? (
-              <Square className="size-3.5" strokeWidth={2} />
+              <RotateCcw className="size-3.5 animate-spin" strokeWidth={2} />
             ) : (
               <RotateCcw className="size-4" strokeWidth={1.8} />
             )
@@ -815,11 +834,9 @@ export function BrowserPanel({
           popoverContent={state.isLoading ? "停止" : "刷新"}
           aria-label={state.isLoading ? "停止" : "刷新"}
           onClick={() =>
-            void (
-              state.isLoading
-                ? window.api.browser.stop()
-                : window.api.browser.reload()
-            ).then(applyBrowserState)
+            void (state.isLoading ? window.api.browser.stop() : window.api.browser.reload()).then(
+              applyBrowserState
+            )
           }
         />
         <form onSubmit={navigate} className="flex min-w-0 flex-1 items-center">
@@ -850,23 +867,6 @@ export function BrowserPanel({
             )}
           </div>
         </form>
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          icon={
-            <div className="relative">
-              <Terminal className="size-4" strokeWidth={1.8} />
-              {consoleCount > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
-                  {consoleCount > 99 ? "99+" : consoleCount}
-                </span>
-              )}
-            </div>
-          }
-          popoverContent={consoleToggleTitle}
-          aria-label={consoleToggleTitle}
-          aria-pressed={consoleOpen}
-          onClick={() => setConsoleOpen((open) => !open)}
-        />
         {/* 暂时隐藏“读取页面状态”动作，后续可能恢复。
         <button
           type="button"
@@ -879,20 +879,6 @@ export function BrowserPanel({
           <Code2 className="size-4" strokeWidth={1.8} />
         </button>
         */}
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          icon={
-            isCapturing ? (
-              <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-            ) : (
-              <Camera className="size-4" strokeWidth={1.8} />
-            )
-          }
-          popoverContent="截图"
-          aria-label="截图"
-          disabled={isCapturing || !state.created}
-          onClick={captureScreenshot}
-        />
         <IconPopoverButton
           className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
           icon={
@@ -964,6 +950,57 @@ export function BrowserPanel({
           </div>
         )}
         <div ref={viewportRef} className="pointer-events-none absolute inset-0" />
+      </div>
+
+      <div className="flex shrink-0 items-center justify-start gap-2 border-t border-border bg-background-elevated px-2 py-2">
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          side="left"
+          icon={
+            isResettingHome ? (
+              <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+            ) : (
+              <House className="size-4" strokeWidth={1.8} />
+            )
+          }
+          popoverContent="回到首页"
+          aria-label="Home"
+          disabled={isResettingHome}
+          onClick={() => void resetToHome()}
+        />
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          side="left"
+          icon={
+            <div className="relative">
+              <Terminal className="size-4" strokeWidth={1.8} />
+              {consoleCount > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
+                  {consoleCount > 99 ? "99+" : consoleCount}
+                </span>
+              )}
+            </div>
+          }
+          popoverContent={consoleToggleTitle}
+          aria-label={consoleToggleTitle}
+          aria-pressed={consoleOpen}
+          onClick={() => setConsoleOpen((open) => !open)}
+        />
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          side="left"
+          icon={
+            isCapturing ? (
+              <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+            ) : (
+              <Camera className="size-4" strokeWidth={1.8} />
+            )
+          }
+          popoverContent="截图"
+          aria-label="截图"
+          disabled={isCapturing || !state.created}
+          onClick={captureScreenshot}
+        />
       </div>
 
       {consoleOpen && (
