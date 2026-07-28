@@ -25,6 +25,9 @@ const questionSchema = z.object({
 })
 
 const requestUserInputSchema = z.object({
+  autoResolutionMs: z.number().int().min(30_000).max(240_000).optional().describe(
+    "Automatically resolve after 30,000-240,000 milliseconds when the question is useful but non-blocking. Omit this when explicit user input is required."
+  ),
   questions: z.array(questionSchema).min(1).max(10).describe(
     "Questions to show the user. Prefer 1 and do not exceed 10."
   )
@@ -54,8 +57,18 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
         const response = await requestUserInput({
           threadId: context.threadId,
           questions: input.questions,
+          autoResolutionMs: input.autoResolutionMs,
           abortSignal: context.abortSignal
         })
+        if ("autoResolved" in response) {
+          return JSON.stringify({
+            status: "auto_resolved",
+            requestId: response.requestId,
+            answers: {},
+            message:
+              "The user did not answer within the configured time. Do not infer or assume any option selections; continue with your best judgment."
+          }, null, 2)
+        }
         if (response.ignored) {
           return JSON.stringify({
             status: "ignored",
@@ -89,7 +102,7 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
     {
       name: "request_user_input",
       description:
-        "Request user input for one to ten short questions and wait for the response.",
+        "Request user input for one to ten short questions and wait for the response, with optional automatic resolution for non-blocking questions.",
       schema: requestUserInputSchema
     }
   )

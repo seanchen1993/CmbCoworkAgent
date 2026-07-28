@@ -771,6 +771,7 @@ export interface UserInputRequest {
   requestId: string
   threadId: string
   questions: UserInputQuestion[]
+  autoResolutionMs?: number
   createdAt: string
 }
 

@@ -28,6 +28,11 @@ export interface UserInputRequestDialogLayout {
   bottom: number
 }
 
+function formatRemainingTime(totalSeconds: number): string {
+  if (totalSeconds < 60) return `${totalSeconds} 秒`
+  return `${Math.floor(totalSeconds / 60)} 分 ${totalSeconds % 60} 秒`
+}
+
 export function UserInputRequestDialog({
   request,
   onSubmit,
@@ -37,12 +42,29 @@ export function UserInputRequestDialog({
   const [draftAnswers, setDraftAnswers] = useState<Record<string, DraftAnswer>>({})
   const [activeIndex, setActiveIndex] = useState(0)
   const [collapsed, setCollapsed] = useState(false)
+  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null)
 
   useEffect(() => {
     setDraftAnswers({})
     setActiveIndex(0)
     setCollapsed(false)
   }, [request?.requestId])
+
+  useEffect(() => {
+    if (!request?.autoResolutionMs) {
+      setRemainingSeconds(null)
+      return
+    }
+
+    const deadline = new Date(request.createdAt).getTime() + request.autoResolutionMs
+    const updateRemainingSeconds = (): void => {
+      setRemainingSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1_000)))
+    }
+
+    updateRemainingSeconds()
+    const interval = window.setInterval(updateRemainingSeconds, 1_000)
+    return () => window.clearInterval(interval)
+  }, [request?.autoResolutionMs, request?.createdAt, request?.requestId])
 
   const handleIgnore = useCallback((): void => {
     if (!request) return
@@ -206,6 +228,9 @@ export function UserInputRequestDialog({
             </h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {answeredCount}/{request.questions.length} 已选择
+              {remainingSeconds !== null && (
+                <> · 将在 {formatRemainingTime(remainingSeconds)}后自动继续</>
+              )}
             </p>
           </div>
           {request.questions.length > 1 && (

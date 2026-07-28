@@ -3,18 +3,27 @@ import { BrowserWindow } from "electron"
 import type { UserInputQuestion, UserInputRequest, UserInputResponse } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 
+interface AutoResolvedUserInputResponse {
+  requestId: string
+  autoResolved: true
+}
+
+type UserInputResult = UserInputResponse | AutoResolvedUserInputResponse
+
 interface PendingUserInput {
   request: UserInputRequest
-  resolve: (response: UserInputResponse) => void
+  resolve: (response: UserInputResult) => void
   reject: (error: Error) => void
   abortSignal?: AbortSignal
   abortHandler?: () => void
   ackTimeout?: ReturnType<typeof setTimeout>
+  autoResolutionTimeout?: ReturnType<typeof setTimeout>
 }
 
 interface RequestUserInputParams {
   threadId: string
   questions: UserInputQuestion[]
+  autoResolutionMs?: number
   abortSignal?: AbortSignal
 }
 
@@ -58,6 +67,9 @@ function cleanupPending(requestId: string): PendingUserInput | undefined {
   if (pending.ackTimeout) {
     clearTimeout(pending.ackTimeout)
   }
+  if (pending.autoResolutionTimeout) {
+    clearTimeout(pending.autoResolutionTimeout)
+  }
   emitAppAttention({
     action: "resolve",
     kind: "user-input",
@@ -67,8 +79,8 @@ function cleanupPending(requestId: string): PendingUserInput | undefined {
   return pending
 }
 
-export function requestUserInput(params: RequestUserInputParams): Promise<UserInputResponse> {
-  const { threadId, questions, abortSignal } = params
+export function requestUserInput(params: RequestUserInputParams): Promise<UserInputResult> {
+  const { threadId, questions, autoResolutionMs, abortSignal } = params
   if (abortSignal?.aborted) {
     return Promise.reject(new Error("User input request was cancelled before it was shown."))
   }
@@ -97,10 +109,11 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
     requestId: randomUUID(),
     threadId,
     questions,
+    autoResolutionMs,
     createdAt: new Date().toISOString()
   }
 
-  return new Promise<UserInputResponse>((resolve, reject) => {
+  return new Promise<UserInputResult>((resolve, reject) => {
     const abortHandler = (): void => {
       const pending = cleanupPending(request.requestId)
       if (!pending) return
@@ -126,13 +139,29 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       )
     }, USER_INPUT_ACK_TIMEOUT_MS)
 
+    const autoResolutionTimeout = autoResolutionMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          const pending = cleanupPending(request.requestId)
+          if (!pending) return
+          sendToThread(threadId, "cancel", {
+            requestId: request.requestId,
+            reason: "The user input request was automatically resolved."
+          })
+          pending.resolve({
+            requestId: request.requestId,
+            autoResolved: true
+          })
+        }, autoResolutionMs)
+
     pendingUserInputs.set(request.requestId, {
       request,
       resolve,
       reject,
       abortSignal,
       abortHandler,
-      ackTimeout
+      ackTimeout,
+      autoResolutionTimeout
     })
     pendingUserInputThreads.set(threadId, request.requestId)
 
