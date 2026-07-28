@@ -107,7 +107,10 @@ import {
   type CheckpointTuple
 } from "@langchain/langgraph-checkpoint"
 import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
-import { buildHarnessFeatureAgentContext } from "../harness-board/service"
+import {
+  buildHarnessFeatureAgentContext,
+  resolveHarnessProjectTaskToolEnabled
+} from "../harness-board/service"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 
@@ -281,7 +284,7 @@ async function assertCanPersistExplicitNormalMode(
     if (unresolvedWorkers.length === 0 && !hasPendingNotifications) {
       return
     }
-    throw new Error("该线程缺少工作区路径，无法安全切回 Solo Agent。请先重新选择工作区后再切换。")
+    throw new Error("该线程缺少工作区路径，无法安全切换到 Solo 或 Multi。请先重新选择工作区后再切换。")
   }
 
   await coordinatorWorkerManager.restoreWorkersForThread({
@@ -301,7 +304,7 @@ async function assertCanPersistExplicitNormalMode(
     .map((worker) => `${worker.worker_id}: ${worker.description}`)
     .join("; ")
   throw new Error(
-    "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent。" +
+    "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切换到 Solo 或 Multi。" +
       (workerList ? `相关 worker：${workerList}` : "请先切回 Agent Team 处理这些结果。")
   )
 }
@@ -310,7 +313,6 @@ const TOOL_CALL_ARGS_LIMIT = 1200
 const TOOL_RESULT_CONTENT_LIMIT = 4000
 const MAX_FORK_DURABLE_TAIL_MESSAGES = 1_000
 const MAX_FORK_DURABLE_TAIL_BYTES = 8 * 1024 * 1024
-
 function parseJsonObject(raw: string | null | undefined): Record<string, unknown> | undefined {
   if (!raw) return undefined
   try {
@@ -325,6 +327,31 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
 
 function parseThreadValues(raw: string | null | undefined): Record<string, unknown> {
   return parseJsonObject(raw) ?? {}
+}
+
+function resolveProjectSubagentsAvailable(metadata: Record<string, unknown> | undefined): boolean {
+  if (!metadata) return true
+  const hasHarnessFeature =
+    metadata.harnessFeature !== null &&
+    typeof metadata.harnessFeature === "object" &&
+    !Array.isArray(metadata.harnessFeature)
+  const hasHarnessProjectSession =
+    metadata.harnessProjectSession !== null &&
+    typeof metadata.harnessProjectSession === "object" &&
+    !Array.isArray(metadata.harnessProjectSession)
+  if (!hasHarnessFeature && !hasHarnessProjectSession) return true
+
+  const projectBinding = (
+    hasHarnessFeature ? metadata.harnessFeature : metadata.harnessProjectSession
+  ) as Record<string, unknown>
+  const projectId =
+    typeof projectBinding.projectId === "string" ? projectBinding.projectId : undefined
+  try {
+    return (projectId ? resolveHarnessProjectTaskToolEnabled(projectId) : undefined) ?? true
+  } catch (error) {
+    console.warn("[Threads] Failed to resolve project subagent policy:", error)
+    return false
+  }
 }
 
 function serializeThreadRow(row: NonNullable<ReturnType<typeof getThread>>): Thread {
@@ -871,6 +898,9 @@ function buildForkMetadata(input: {
     ? overrides.agentMode
     : getAgentModeFromMetadata(sourceMetadata)
   if (isAgentMode(agentMode)) next.agentMode = agentMode
+  if (agentMode === "normal") {
+    next.subagentsEnabled = sourceMetadata.subagentsEnabled !== false
+  }
 
   const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
   if (typeof memoryEnabled === "boolean") next.memoryEnabled = memoryEnabled
@@ -2149,6 +2179,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
+  ipcMain.handle("threads:getProjectSubagentsAvailable", async (_event, threadId: string) => {
+    const row = getThread(threadId)
+    if (!row) throw new Error("Thread not found")
+    return resolveProjectSubagentsAvailable(parseJsonObject(row.metadata))
+  })
+
   ipcMain.handle("threads:messages", async (_event, threadId: string) => {
     return getThreadMessages(threadId)
   })
@@ -2216,11 +2252,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
         const harnessContext = buildHarnessFeatureAgentContext(nextMetadata, { workspacePath })
         const initialAgentMode = harnessContext?.agentConfig?.agentMode
-        if (initialAgentMode === "solo") nextMetadata.agentMode = "normal"
+        if (initialAgentMode === "solo") {
+          nextMetadata.agentMode = "normal"
+          nextMetadata.subagentsEnabled = false
+        }
+        if (initialAgentMode === "multi") {
+          nextMetadata.agentMode = "normal"
+          nextMetadata.subagentsEnabled = true
+        }
         if (initialAgentMode === "agent_team") nextMetadata.agentMode = "coordinator"
       } catch (error) {
         console.warn("[Threads] Failed to apply Harness initial agent mode:", error)
       }
+    }
+    if (
+      getAgentModeFromMetadata(nextMetadata) === "normal" &&
+      typeof nextMetadata.subagentsEnabled !== "boolean"
+    ) {
+      nextMetadata.subagentsEnabled = true
     }
 
     const hasModel = Object.prototype.hasOwnProperty.call(nextMetadata, "model")

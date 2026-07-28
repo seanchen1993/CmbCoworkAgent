@@ -4352,7 +4352,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     options.filesystemAccess?.workload === "read_only"
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, {
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-    includeSubagents: runtimePolicy.includeSubagents,
+    includeSubagents: runtimePolicy.includeSubagents && !disableSubagents,
     includeMemory: runtimePolicy.includeMemory,
     includeCurrentTime: runtimePolicy.includeCurrentTime
   })

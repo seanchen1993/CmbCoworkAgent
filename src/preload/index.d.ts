@@ -903,6 +903,7 @@ interface CustomAPI {
   threads: {
     list: () => Promise<Thread[]>
     get: (threadId: string) => Promise<Thread | null>
+    getProjectSubagentsAvailable: (threadId: string) => Promise<boolean>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
     listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>

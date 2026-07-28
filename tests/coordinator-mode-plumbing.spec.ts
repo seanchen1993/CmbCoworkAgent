@@ -9,7 +9,8 @@
  *   npx -y tsx tests/coordinator-mode-plumbing.spec.ts
  */
 
-import { readFile } from "fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
+import { tmpdir } from "os"
 import { join, resolve } from "path"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
@@ -86,9 +87,11 @@ async function testIpcTypesExposeAgentMode(): Promise<void> {
 async function testRendererSendsAgentMode(): Promise<void> {
   const switcher = await readProjectFile("src/renderer/src/components/chat/AgentModeSwitcher.tsx")
   assertIncludes(switcher, 'value: "normal"', "AgentModeSwitcher exposes normal mode")
+  assertIncludes(switcher, 'value: "multi"', "AgentModeSwitcher exposes multi mode")
   assertIncludes(switcher, 'value: "coordinator"', "AgentModeSwitcher exposes coordinator mode")
   assertIncludes(switcher, 'value: "workflow"', "AgentModeSwitcher exposes workflow mode")
   assertIncludes(switcher, 'shortLabel: "Solo"', "AgentModeSwitcher labels the Solo stop")
+  assertIncludes(switcher, 'shortLabel: "Multi"', "AgentModeSwitcher labels the Multi stop")
   assertIncludes(switcher, 'shortLabel: "Team"', "AgentModeSwitcher labels the Team stop")
   assertIncludes(switcher, 'shortLabel: "Workflow"', "AgentModeSwitcher labels the Workflow stop")
   assertIncludes(
@@ -108,12 +111,22 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     switcher,
-    "适合日常问答、明确小改动、快速排查与独立子任务",
+    "适合治理类任务、小改动、低风险和上下文集中的任务",
     "AgentModeSwitcher explains normal mode"
   )
   assertIncludes(
     switcher,
-    "适合复杂开发、深度排查、文档产出和高可信交付",
+    'label: "Multi Agent"',
+    "AgentModeSwitcher uses the full Multi Agent label"
+  )
+  assertIncludes(
+    switcher,
+    "适合以主任务为中心的并行分析、局部实现和专家辅助",
+    "AgentModeSwitcher explains multi mode"
+  )
+  assertIncludes(
+    switcher,
+    "适合跨模块长任务、持续并行开发和分阶段汇总交付",
     "AgentModeSwitcher explains coordinator mode"
   )
   assertIncludes(
@@ -131,6 +144,54 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(chat, "AgentModeSwitcher", "ChatContainer imports mode switcher")
   assertIncludes(
     chat,
+    "showWorkflow={!isProjectModeAgentContext}",
+    "project mode hides Workflow while normal chat keeps it"
+  )
+  assertIncludes(
+    chat,
+    'agentMode: nextMode === "multi" ? "normal" : nextMode',
+    "Multi reuses the existing normal runtime mode"
+  )
+  assertIncludes(
+    chat,
+    'nextMetadata.subagentsEnabled = nextMode === "multi"',
+    "Solo/Multi persists only the synchronous-subagent capability flag"
+  )
+  assertIncludes(
+    chat,
+    'agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode',
+    "renderer does not widen the IPC agent-mode contract for Multi"
+  )
+  assertIncludes(
+    chat,
+    'agent_mode: agentMode === "multi" ? "normal" : agentMode',
+    "legacy approval resume keeps Multi inside the existing IPC mode contract"
+  )
+  assertIncludes(
+    chat,
+    "isProjectModeAgentContext && projectSubagentsAvailable !== true",
+    "project mode conservatively disables Multi until its local policy query completes"
+  )
+  assertIncludes(
+    chat,
+    "multi: disableMultiModeOption",
+    "mode switcher explains when project policy disables Multi"
+  )
+  assertIncludes(
+    chat,
+    "getProjectSubagentsAvailable(threadId)",
+    "only the active project chat queries whether subagents are available"
+  )
+  const modeHelpers = await readProjectFile(
+    "src/renderer/src/lib/coordinator-mode-helpers.ts"
+  )
+  assertIncludes(
+    modeHelpers,
+    "record.subagentsEnabled !== false",
+    "Solo/Multi display uses only the persisted user selection"
+  )
+  assertIncludes(
+    chat,
     "const initialAgentMode: ChatAgentMode = isWorkflowModeMetadata(initialThreadMetadata)",
     "ChatContainer derives its initial mode (workflow/coordinator/normal) from stored thread metadata"
   )
@@ -141,8 +202,62 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
+    "const agentModeSaveRef = useRef<Promise<void>>(Promise.resolve())",
+    "the current mode save is tracked without a persistent error state"
+  )
+  const liveSubmitModeGate = chat.slice(
+    chat.indexOf("// Solo/Multi differ only in thread metadata."),
+    chat.indexOf("const composedDraft: QueuedMessage")
+  )
+  assertSourceOrder(
+    liveSubmitModeGate,
+    "await pendingModeSave",
+    'setInput("")',
+    "live submit waits for mode persistence before claiming the composer"
+  )
+  assertIncludes(
+    liveSubmitModeGate,
+    'toast.error("Agent 模式保存失败，消息未发送；再次发送将使用原模式")',
+    "live submit stops when the selected mode failed to persist"
+  )
+  const queuedSubmit = chat.slice(
+    chat.indexOf("const submitQueuedMessage = useCallback"),
+    chat.indexOf("// Queue validation errors are recoverable")
+  )
+  const queuedModeGate = queuedSubmit.slice(
+    queuedSubmit.indexOf("// Skipping this hydration would route that turn through the wrong mode.")
+  )
+  assertSourceOrder(
+    queuedModeGate,
+    "await pendingModeSave",
+    "deleteQueuedMessage(queued.id)",
+    "queued submit remains queued when the selected mode failed to persist"
+  )
+  assertIncludes(
+    queuedSubmit,
+    "persistedAgentModeRef.current",
+    "queued submit uses the persisted mode after waiting for the metadata write"
+  )
+  assertOccurrenceCount(
+    chat,
+    "persistedAgentModeRef.current = resolvedMode",
+    2,
+    "live and queued submit hydration both retain the successfully resolved mode"
+  )
+  assertIncludes(
+    chat,
     "requestId !== agentModeChangeRequestRef.current",
     "stale mode validations cannot overwrite the latest selection"
+  )
+  const modeChangeHandler = chat.slice(
+    chat.indexOf("const handleAgentModeChange"),
+    chat.indexOf("const userInputScrollPadding")
+  )
+  assertSourceOrder(
+    modeChangeHandler,
+    "submitInFlightRef.current.has(threadId)",
+    "const requestId = ++agentModeChangeRequestRef.current",
+    "mode switching is rejected once a live or queued submit owns the thread"
   )
   assertMatches(
     chat,
@@ -178,6 +293,22 @@ async function testRendererSendsAgentMode(): Promise<void> {
     chat,
     "!agentModeHydratedRef.current",
     "ChatContainer re-resolves coordinator mode before first submit when hydration has not finished"
+  )
+  assertMatches(
+    chat,
+    /agentModeHydratedRef = useRef\(\s*initialAgentMode === "coordinator" \|\| initialAgentMode === "workflow"/,
+    "initial Solo/Multi modes remain unresolved until environment-forced coordinator is checked"
+  )
+  assertMatches(
+    chat,
+    /agentModeHydratedRef\.current =\s*metadataDerivedMode === "coordinator" \|\|\s*metadataDerivedMode === "workflow"/,
+    "thread changes do not mark Solo/Multi hydrated before forced-mode resolution"
+  )
+  assertOccurrenceCount(
+    chat,
+    "isProjectModeAgentContext && projectSubagentsAvailable === null",
+    3,
+    "live send, queued send, and queue pump wait for the current project subagent policy"
   )
   assertIncludes(chat, "agent_mode: submitAgentMode", "ChatContainer stream config")
   assertIncludes(
@@ -368,6 +499,11 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
 
   const preload = await readProjectFile("src/preload/index.ts")
+  assertIncludes(
+    preload,
+    'ipcRenderer.invoke("threads:getProjectSubagentsAvailable", threadId)',
+    "preload exposes the dedicated project subagent policy query"
+  )
   assertIncludes(
     preload,
     "coordinatorInternalNotification",
@@ -663,6 +799,37 @@ async function testRendererSendsAgentMode(): Promise<void> {
 
 async function testMainResolvesAndPersistsMode(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
+  assertIncludes(
+    agentIpc,
+    'return agentMode === "normal" && metadata.subagentsEnabled === false',
+    "main process disables task subagents only for explicitly persisted Solo threads"
+  )
+  assertIncludes(
+    agentIpc,
+    "resolveHarnessProjectTaskToolEnabled(harnessProjectSession.projectId)",
+    "project-level sessions load the static adapter task-tool policy"
+  )
+  assertIncludes(
+    agentIpc,
+    "{ enableTaskTool: projectSessionTaskToolEnabled }",
+    "project-level session policy is forwarded to runtime construction"
+  )
+  assertIncludes(
+    agentIpc,
+    '...(isHarnessProjectContext ? { enableTaskTool: false } : {})',
+    "Harness project context failures disable task subagents"
+  )
+  assertIncludes(
+    agentIpc,
+    "{ featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }",
+    "Harness feature failures preserve project-mode identity for runtime policy"
+  )
+  assertOccurrenceCount(
+    agentIpc,
+    "disableSubagents: shouldDisableNormalModeSubagents(",
+    7,
+    "invoke, resume, interrupt, and failover runtime construction all preserve the Solo/Multi policy"
+  )
   const replacementLock = await readProjectFile("src/main/ipc/async-keyed-lock.ts")
   assertIncludes(
     agentIpc,
@@ -1685,6 +1852,55 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
 
   const threadsIpc = await readProjectFile("src/main/ipc/threads.ts")
+  const harnessBoardService = await readProjectFile("src/main/harness-board/service.ts")
+  const threadsListHandler = threadsIpc.slice(
+    threadsIpc.indexOf('ipcMain.handle("threads:list"'),
+    threadsIpc.indexOf("// Get a single thread")
+  )
+  assertNotIncludes(
+    threadsListHandler,
+    "resolveThreadMetadataForRenderer",
+    "listing threads never runs full Harness context resolution or plugin session injection"
+  )
+  assertIncludes(
+    harnessBoardService,
+    'HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"',
+    "Harness agent configuration can select the normal-mode Multi variant"
+  )
+  assertIncludes(
+    threadsIpc,
+    'if (initialAgentMode === "multi")',
+    "Harness Multi initializes the normal runtime with subagents enabled"
+  )
+  assertIncludes(
+    threadsIpc,
+    "next.subagentsEnabled = sourceMetadata.subagentsEnabled !== false",
+    "thread fork preserves the Solo/Multi capability variant"
+  )
+  assertMatches(
+    threadsIpc,
+    /getAgentModeFromMetadata\(nextMetadata\) === "normal"[\s\S]*?nextMetadata\.subagentsEnabled = true/,
+    "new normal threads explicitly default to Multi"
+  )
+  assertIncludes(
+    threadsIpc,
+    'ipcMain.handle("threads:getProjectSubagentsAvailable"',
+    "project policy is exposed through one dedicated boolean query"
+  )
+  assertIncludes(
+    threadsIpc,
+    "resolveHarnessProjectTaskToolEnabled(projectId)",
+    "project subagent availability uses the static board policy"
+  )
+  const projectPolicyResolver = threadsIpc.slice(
+    threadsIpc.indexOf("function resolveProjectSubagentsAvailable"),
+    threadsIpc.indexOf("function serializeThreadRow")
+  )
+  assertNotIncludes(
+    projectPolicyResolver,
+    "buildHarnessFeatureAgentContext",
+    "project page policy queries never execute session-context injection"
+  )
   assertIncludes(
     threadsIpc,
     "retireThreadCheckpointers(threadId)",
@@ -2678,9 +2894,9 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "mainFilesystemEnabled: !isCoordinatorMode",
     "runtime disables coordinator filesystem"
   )
-  assertIncludes(
+  assertMatches(
     runtime,
-    "includeGeneralPurposeSubagent: !isCoordinatorMode",
+    /includeGeneralPurposeSubagent:\s*!isCoordinatorMode &&/,
     "runtime hides general worker in coordinator"
   )
   assertIncludes(
@@ -2702,6 +2918,11 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     runtime,
     "mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents",
     "runtime combines coordinator mode and leaf-worker subagent disabling"
+  )
+  assertIncludes(
+    runtime,
+    "includeSubagents: runtimePolicy.includeSubagents && !disableSubagents",
+    "Solo and leaf runtimes omit task-tool guidance when task subagents are disabled"
   )
   assertIncludes(
     coordinatorMode,
@@ -2778,6 +2999,121 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
 }
 
+async function testProjectSubagentPolicyQuery(): Promise<void> {
+  const previousHome = process.env.HOME
+  const previousUserProfile = process.env.USERPROFILE
+  const home = await mkdtemp(join(tmpdir(), "cmb-project-subagent-policy-"))
+  const openworkDir = join(home, ".cmbcoworkagent")
+  const pluginDir = join(home, "fixture-adapter")
+  const workspacePath = join(home, "workspace")
+  const projectId = "project-task-disabled"
+  const threadId = "thread-task-disabled"
+  const projectSessionThreadId = "project-session-task-disabled"
+  let closeDatabase: (() => Promise<void>) | undefined
+
+  process.env.HOME = home
+  process.env.USERPROFILE = home
+  try {
+    await mkdir(join(pluginDir, "board_core"), { recursive: true })
+    await mkdir(workspacePath, { recursive: true })
+    await mkdir(openworkDir, { recursive: true })
+    await writeFile(
+      join(pluginDir, "board_core", "board_config.json"),
+      JSON.stringify({ apiVersion: 1, enable_task_tool: false })
+    )
+    await writeFile(
+      join(openworkDir, "plugins.json"),
+      JSON.stringify([
+        {
+          id: "fixture-adapter",
+          name: "Fixture Adapter",
+          version: "1.0.0",
+          description: "",
+          author: "test",
+          path: pluginDir,
+          enabled: true,
+          skillCount: 0,
+          mcpServerCount: 0
+        }
+      ])
+    )
+    await writeFile(
+      join(openworkDir, "harness-board-projects.json"),
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            projectId,
+            name: "Task disabled",
+            description: "",
+            projectCode: "P1",
+            projectFromLean: false,
+            projectDir: "P1",
+            systemId: "S1",
+            systemName: "S1",
+            workspacePath,
+            "harness-adapter": {
+              id: "fixture-adapter",
+              name: "Fixture Adapter",
+              version: "1.0.0",
+              type: "plugin"
+            },
+            lifecycle: {
+              status: "active",
+              createAt: "2026-07-27T00:00:00.000Z"
+            }
+          }
+        ]
+      })
+    )
+
+    const db = await import("../src/main/db/index.ts")
+    const { registerThreadHandlers } = await import("../src/main/ipc/threads.ts")
+    closeDatabase = db.closeDatabase
+    await db.initializeDatabase()
+    db.createThread(threadId, {
+      agentMode: "normal",
+      subagentsEnabled: true,
+      workspacePath,
+      harnessFeature: { projectId, slug: "feature-1" }
+    })
+    db.createThread(projectSessionThreadId, {
+      agentMode: "normal",
+      subagentsEnabled: true,
+      workspacePath,
+      harnessProjectSession: { projectId, kind: "system-constraints-update" }
+    })
+
+    type IpcHandler = (_event: unknown, ...args: unknown[]) => unknown
+    const handlers = new Map<string, IpcHandler>()
+    registerThreadHandlers({
+      handle: (channel: string, handler: IpcHandler) => {
+        handlers.set(channel, handler)
+      }
+    } as never)
+    const invoke = async (channel: string, ...args: unknown[]): Promise<unknown> => {
+      const handler = handlers.get(channel)
+      assert(handler, `missing ${channel} handler`)
+      return handler(undefined, ...args)
+    }
+    assert(
+      (await invoke("threads:getProjectSubagentsAvailable", threadId)) === false,
+      "feature sessions honor enable_task_tool=false"
+    )
+    assert(
+      (await invoke("threads:getProjectSubagentsAvailable", projectSessionThreadId)) === false,
+      "project-level sessions honor enable_task_tool=false"
+    )
+  } finally {
+    await closeDatabase?.()
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousUserProfile
+    await rm(home, { recursive: true, force: true })
+  }
+}
+
 async function run(): Promise<void> {
   await testIpcTypesExposeAgentMode()
   console.log("PASS coordinator IPC types")
@@ -2789,6 +3125,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator workspace switch guard")
   await testRuntimeKeepsNormalAndCoordinatorSeparate()
   console.log("PASS coordinator runtime isolation")
+  await testProjectSubagentPolicyQuery()
+  console.log("PASS project subagent policy query")
 }
 
 run().catch((error: Error) => {
