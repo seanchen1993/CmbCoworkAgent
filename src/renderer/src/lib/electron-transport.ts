@@ -16,6 +16,7 @@ import {
 import { isInternalGoalPromptMessage } from "./goal-notice-messages"
 import { isSerializedSummarizationMessage } from "../../../shared/context-compaction-messages"
 import { isContextCompactionStreamPayload } from "../../../shared/context-compaction-events"
+import { buildSubagentTaskInvocationIdentity } from "../../../shared/subagent-invocation-identity"
 import { extractVisibleReasoning } from "../../../shared/model-reasoning"
 import {
   advanceCompletedMessageContentRoute,
@@ -33,6 +34,12 @@ import {
   type RoleCollisionMessage
 } from "../../../shared/message-role-collision"
 import { mergeStreamToolCallArgs } from "../../../shared/stream-tool-call-chunks"
+import {
+  buildSubagentFinalSignature,
+  fingerprintSubagentTranscriptContent as fingerprintTranscriptContent,
+  projectSubagentDescription
+} from "../../../shared/subagent-transcript-storage"
+import { projectSubagentTranscriptBoundaries } from "./subagent-transcripts"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -134,6 +141,8 @@ export type TransformedValuesMessage = {
   tool_calls?: ToolCall[]
   tool_call_id?: string
   name?: string
+  status?: string
+  is_error?: boolean
   content_priority?: number
   provider_source_id?: string
   provider_occurrence?: number
@@ -292,6 +301,11 @@ export function transformSerializedValuesMessages(
           : "ai"
     const content = extractSerializedContent(kwargs.content)
     const reasoning = type === "ai" ? extractVisibleReasoning(kwargs) : ""
+    const isToolError =
+      type === "tool" &&
+      (kwargs.status === "error" ||
+        kwargs.is_error === true ||
+        kwargs.additional_kwargs?.is_error === true)
     const providerTuple =
       type === "ai"
         ? getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
@@ -319,7 +333,9 @@ export function transformSerializedValuesMessages(
       ...(reasoning && { reasoning }),
       ...(type === "ai" && kwargs.tool_calls && { tool_calls: kwargs.tool_calls }),
       ...(type === "tool" && kwargs.tool_call_id && { tool_call_id: kwargs.tool_call_id }),
-      ...(type === "tool" && kwargs.name && { name: kwargs.name })
+      ...(type === "tool" && kwargs.name && { name: kwargs.name }),
+      ...(type === "tool" && kwargs.status && { status: kwargs.status }),
+      ...(isToolError && { is_error: true })
     })
   }
 
@@ -331,6 +347,58 @@ interface AccumulatedToolCall {
   id: string
   name: string
   args: string // Accumulated JSON string
+  parsedArgs?: Record<string, unknown>
+  jsonDepth: number
+  jsonInString: boolean
+  jsonEscaped: boolean
+  jsonStarted: boolean
+  jsonComplete: boolean
+  jsonInvalid: boolean
+}
+
+function scanAccumulatedToolCallJson(call: AccumulatedToolCall, fragment: string): void {
+  for (const character of fragment) {
+    if (call.jsonInvalid) return
+    if (call.jsonComplete) {
+      if (!/\s/.test(character)) call.jsonInvalid = true
+      continue
+    }
+    if (!call.jsonStarted) {
+      if (/\s/.test(character)) continue
+      if (character !== "{" && character !== "[") {
+        call.jsonInvalid = true
+        continue
+      }
+      call.jsonStarted = true
+      call.jsonDepth = 1
+      continue
+    }
+    if (call.jsonInString) {
+      if (call.jsonEscaped) call.jsonEscaped = false
+      else if (character === "\\") call.jsonEscaped = true
+      else if (character === '"') call.jsonInString = false
+      continue
+    }
+    if (character === '"') call.jsonInString = true
+    else if (character === "{" || character === "[") call.jsonDepth += 1
+    else if (character === "}" || character === "]") {
+      call.jsonDepth -= 1
+      if (call.jsonDepth < 0) call.jsonInvalid = true
+      else if (call.jsonDepth === 0) call.jsonComplete = true
+    }
+  }
+}
+
+function parseCompletedAccumulatedToolCall(call: AccumulatedToolCall): void {
+  if (call.parsedArgs || !call.jsonComplete || call.jsonInvalid) return
+  try {
+    const parsed = JSON.parse(call.args)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      call.parsedArgs = parsed as Record<string, unknown>
+    }
+  } catch {
+    // Structural completion is a cheap parse gate, not a full JSON validator.
+  }
 }
 
 // Completed tool call with parsed args
@@ -340,6 +408,39 @@ interface CompletedToolCall {
   args: Record<string, unknown>
 }
 
+interface ActiveSubagentAssistant {
+  providerMessageId?: string
+  transcriptMessageId: string
+  contentChunks: string[]
+  contentLength: number
+  previewHeadChunks: string[]
+  previewHeadLength: number
+  previewTailChunks: string[]
+  previewTailLength: number
+  projectedContent: string
+  hasVisibleContent: boolean
+  reasoningChunks: string[]
+  reasoningLength: number
+  reasoningPreviewHeadChunks: string[]
+  reasoningPreviewHeadLength: number
+  reasoningPreviewTailChunks: string[]
+  reasoningPreviewTailLength: number
+  projectedReasoning: string
+  hasVisibleReasoning: boolean
+  lastSnapshotLength: number
+  lastSnapshotAt: number
+}
+
+interface SubagentTerminalAssistantCandidate {
+  transcriptMessageId: string
+  assistant: ActiveSubagentAssistant
+}
+
+interface QueuedStreamEvent {
+  event: StreamEvent
+  coalesceKey?: string
+}
+
 const QUIET_COORDINATOR_TOOL_NAMES = new Set(["read_worker_state"])
 const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
 const MAX_TRACKED_EMITTED_MESSAGES = 2_000
@@ -347,6 +448,10 @@ const MAX_TRACKED_TOOL_CALLS = 2_000
 const MAX_TRACKED_TOOL_CALL_NAMES = 300
 const MAX_TRACKED_TOOL_CALLS_PER_NAME = 50
 const MAX_TRACKED_MESSAGE_TOOL_CALLS = 1_000
+const MAX_TRACKED_TRANSCRIPT_SIGNATURE_THREADS = 64
+const SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS = 24_000
+const SUBAGENT_ASSISTANT_SNAPSHOT_MIN_CHARS = 1_024
+const SUBAGENT_ASSISTANT_SNAPSHOT_MAX_INTERVAL_MS = 50
 
 /**
  * Extract the LangGraph task UUID from a checkpoint_ns.
@@ -467,18 +572,45 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // Track subagent-internal tool calls as a single aggregate activity count.
   private subagentToolCallIds: Set<string> = new Set()
 
+  // Provider inner-tool IDs are only unique inside one task execution. Keep
+  // ownership by raw ID for discovery, but key mutable log rows by both owner
+  // execution and raw ID so a later execution cannot overwrite an earlier one.
   private subagentToolLogEntryIds: Map<string, string> = new Map()
 
-  private subagentToolOwnerIds: Map<string, string> = new Map()
+  private subagentToolOwnerIds: Map<string, Set<string>> = new Map()
 
   private subagentToolCallCount = 0
   private subagentSpawnCounter = 0
   private taskUuidToSubagentToolCallId = new Map<string, string>()
+  // Provider tool_call_id values may be reused in later parent turns. Scope each
+  // logical task invocation to its parent assistant identity so transcripts and
+  // stable rows from separate executions never merge.
+  // Canonical values/checkpoint identities survive stream boundaries. Live
+  // identities are intentionally separate and reset for every foreground run.
+  private subagentExecutionIdByInvocation = new Map<string, string>()
+  private liveSubagentExecutionIdByInvocation = new Map<string, string>()
+  private liveSubagentExecutionIdsByToolCallId = new Map<string, string[]>()
+  private liveSubagentInvocationByParentTask = new Map<
+    string,
+    { occurrence: number; invocationScope: string; executionId?: string }
+  >()
+  private subagentStreamGeneration = 0
+  private subagentExecutionIdsByToolCallId = new Map<string, string[]>()
+  private currentSubagentExecutionIdByToolCallId = new Map<string, string>()
+  private subagentTaskResultExecutionIdByIdentity = new Map<string, string>()
+  // Older persisted transcripts used the raw task tool_call_id (and then
+  // `::execution-N`) as bucket IDs. Reserve those IDs during hydration so a
+  // newly observed live invocation cannot claim them before full values arrive.
+  private seededSubagentExecutionIdsByToolCallId = new Map<string, string[]>()
+  private claimedSeededSubagentExecutionIds = new Set<string>()
+  private seededSubagentPromptFingerprintByExecutionId = new Map<string, string>()
+  private subagentPromptInvocationIdentityByExecutionId = new Map<string, string>()
 
   // Owning task tool_call_id for the subagent-interior chunk currently being
   // processed, read from the backend-stamped metadata. Set per chunk; when
   // present it makes subagent attribution deterministic (no ns/order heuristic).
   private currentSubagentOwnerHint?: string
+  private currentSubagentRawOwnerHint?: string
 
   // Per subagent-transcript-message accumulation of its tool calls, keyed by
   // tool id. Unlike completedToolCallsByMessageId (which only keeps args-bearing
@@ -492,10 +624,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private subagentLogSequence = 0
 
-  // Accumulates a subagent's streamed assistant (thinking) text per message id so
-  // successive AIMessageChunk deltas coalesce into one growing log entry instead
-  // of flooding the subagent log with per-token fragments.
-  private subagentAssistantAccum: Map<string, string> = new Map()
+  // Keep only the currently streaming assistant turn for each subagent. The raw
+  // text is retained until a tool/completion boundary, while queued live events
+  // carry a bounded projection. Completion messages remain lossless.
+  private activeSubagentAssistants = new Map<string, ActiveSubagentAssistant>()
+  private subagentTerminalAssistantCandidates = new Map<
+    string,
+    SubagentTerminalAssistantCandidate
+  >()
+  private subagentStableTranscriptSignaturesByThread = new Map<
+    string,
+    Map<string, string>
+  >()
+  private subagentAssistantSnapshotTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private deferredStreamEventSink?: (event: StreamEvent) => void
 
   // Coordinator worker status checks are analogous to Claude Code TaskOutput:
   // useful as a fallback, but too noisy for the main chat transcript.
@@ -559,6 +701,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   async stream(payload: StreamPayload): Promise<AsyncGenerator<StreamEvent>> {
     // Reset state for new stream
+    this.subagentStreamGeneration += 1
+    this.liveSubagentExecutionIdByInvocation.clear()
+    this.liveSubagentExecutionIdsByToolCallId.clear()
+    this.liveSubagentInvocationByParentTask.clear()
     this.currentMessageId = null
     this.currentMessageIndex = null
     this.applyFallbackIndexBaselines()
@@ -594,9 +740,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.subagentToolCallCount = 0
     this.subagentSpawnCounter = 0
     this.taskUuidToSubagentToolCallId.clear()
+    this.currentSubagentExecutionIdByToolCallId.clear()
     this.subagentTranscriptToolCallsByMessage.clear()
     this.subagentLogSequence = 0
-    this.subagentAssistantAccum.clear()
+    this.activeSubagentAssistants.clear()
+    this.subagentTerminalAssistantCandidates.clear()
     this.quietCoordinatorToolCallIds.clear()
     this.emittedMessageIds.clear()
     this.inFlightMainMessageIds.clear()
@@ -739,7 +887,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       )
     }
 
-    return this.processStreamEvent(event, "coordinator")
+    return this.processStreamEvent(event, "coordinator", focused.workerThreadId)
       .filter((sdkEvent) => sdkEvent.event === "custom")
       .map((sdkEvent) => sdkEvent.data as { type?: unknown; workerMessage?: unknown })
       .filter((data) => data.type === "coordinator_worker_stream_message")
@@ -1022,10 +1170,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
     userMessageId?: string
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
-    const eventQueue: StreamEvent[] = []
+    const eventQueue: QueuedStreamEvent[] = []
+    const coalescedQueuedEvents = new Map<string, QueuedStreamEvent>()
     let resolveNext: ((value: StreamEvent | null) => void) | null = null
     let isDone = false
-    let hasError = false
+    let terminalReceived = false
+    let reachedDoneBoundary = false
 
     // Generate a run ID for this stream
     const runId = crypto.randomUUID()
@@ -1040,13 +1190,37 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     yield this.createSubagentLogResetEvent()
     yield this.createSubagentToolCountEvent()
+    // Async generators do not start until the first next(). An already-aborted
+    // signal will not replay its event, so never start IPC work in that state.
+    if (signal.aborted) return
     let currentAgentMode: TransportAgentMode = agentMode ?? "normal"
+
+    const enqueueStreamEvent = (sdkEvent: StreamEvent): void => {
+      if (resolveNext) {
+        const resolve = resolveNext
+        resolveNext = null
+        resolve(sdkEvent)
+        return
+      }
+
+      const coalesceKey = this.getStreamEventCoalesceKey(sdkEvent)
+      const queued = coalesceKey ? coalescedQueuedEvents.get(coalesceKey) : undefined
+      if (queued) {
+        queued.event = sdkEvent
+        return
+      }
+      const nextQueued = { event: sdkEvent, ...(coalesceKey && { coalesceKey }) }
+      eventQueue.push(nextQueued)
+      if (coalesceKey) coalescedQueuedEvents.set(coalesceKey, nextQueued)
+    }
+    this.deferredStreamEventSink = enqueueStreamEvent
 
     const cleanup = window.api.agent.streamAgent(
       threadId,
       message,
       command,
       (ipcEvent) => {
+        if (terminalReceived) return
         if (
           ipcEvent.type === "custom" &&
           (ipcEvent.data as { type?: unknown; mode?: unknown } | undefined)?.type === "agent_mode"
@@ -1061,19 +1235,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
         for (const sdkEvent of sdkEvents) {
           if (sdkEvent.event === "done" || sdkEvent.event === "error") {
+            for (const recoveryEvent of this.createActiveSubagentAssistantLosslessEvents()) {
+              enqueueStreamEvent(recoveryEvent)
+            }
             isDone = true
-            hasError = sdkEvent.event === "error"
+            terminalReceived = true
           }
-
-          // If someone is waiting for the next event, resolve immediately
-          if (resolveNext) {
-            const resolve = resolveNext
-            resolveNext = null
-            resolve(sdkEvent)
-          } else {
-            // Otherwise queue the event
-            eventQueue.push(sdkEvent)
-          }
+          enqueueStreamEvent(sdkEvent)
+          if (terminalReceived) break
         }
       },
       modelId,
@@ -1086,6 +1255,23 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const abortListener = (): void => {
       cleanupOnce()
       isDone = true
+      terminalReceived = true
+      const durableTranscriptEvents = eventQueue.filter((queued) => {
+        if (queued.event.event !== "custom") return true
+        const data = queued.event.data
+        if (!data || typeof data !== "object") return true
+        const type = (data as { type?: unknown }).type
+        return !["subagent_log_entry", "subagent_tool_count", "subagent_log_reset"].includes(
+          String(type ?? "")
+        )
+      })
+      eventQueue.splice(0, eventQueue.length, ...durableTranscriptEvents)
+      coalescedQueuedEvents.clear()
+      for (const queued of durableTranscriptEvents) {
+        if (queued.coalesceKey) coalescedQueuedEvents.set(queued.coalesceKey, queued)
+      }
+      const recoveryEvents = this.createActiveSubagentAssistantLosslessEvents()
+      for (const recoveryEvent of recoveryEvents) enqueueStreamEvent(recoveryEvent)
       if (resolveNext) {
         const resolve = resolveNext
         resolveNext = null
@@ -1107,16 +1293,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
       while (!isDone || eventQueue.length > 0) {
         // Check for queued events first
         if (eventQueue.length > 0) {
-          const event = eventQueue.shift()!
+          const queued = eventQueue.shift()!
+          if (
+            queued.coalesceKey &&
+            coalescedQueuedEvents.get(queued.coalesceKey) === queued
+          ) {
+            coalescedQueuedEvents.delete(queued.coalesceKey)
+          }
+          const event = queued.event
           if (event.event === "done") {
+            reachedDoneBoundary = true
             break
           }
-          if (event.event !== "error" || hasError) {
-            yield event
-          }
-          if (hasError) {
-            break
-          }
+          yield event
+          if (event.event === "error") break
           continue
         }
 
@@ -1130,6 +1320,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
 
         if (event.event === "done") {
+          reachedDoneBoundary = true
           break
         }
 
@@ -1141,7 +1332,146 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
     } finally {
       cleanupOnce()
+      this.clearActiveSubagentAssistantState()
+      if (this.deferredStreamEventSink === enqueueStreamEvent) {
+        this.deferredStreamEventSink = undefined
+      }
+      // Stable signatures are retained only after the generator drains through
+      // the normal done boundary. Abort, error, or early consumer cancellation
+      // may leave queued transcript rows undelivered, so allow the next stream to
+      // hydrate them again.
+      if (!reachedDoneBoundary) {
+        this.subagentStableTranscriptSignaturesByThread.delete(threadId)
+      }
     }
+  }
+
+  seedSubagentTranscriptBaseline(
+    threadId: string,
+    transcripts: Readonly<Record<string, readonly Message[]>>
+  ): void {
+    const signatures = this.getSubagentStableTranscriptSignatures(threadId)
+    for (const [subagentId, messages] of Object.entries(transcripts)) {
+      const scopedMatch = /^(.*)::(?:execution-\d+|invocation-[a-z0-9-]+)$/.exec(subagentId)
+      const rawToolCallId = scopedMatch?.[1] ?? subagentId
+      const legacyExecutionIds = this.seededSubagentExecutionIdsByToolCallId.get(rawToolCallId) ?? []
+      if (!legacyExecutionIds.includes(subagentId)) {
+        legacyExecutionIds.push(subagentId)
+        legacyExecutionIds.sort((left, right) => {
+          const legacyOrdinal = (value: string): number => {
+            if (value === rawToolCallId) return 1
+            const match = /::execution-(\d+)$/.exec(value)
+            return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER
+          }
+          return legacyOrdinal(left) - legacyOrdinal(right)
+        })
+        this.seededSubagentExecutionIdsByToolCallId.set(rawToolCallId, legacyExecutionIds)
+      }
+      for (const message of messages) {
+        if (typeof message.content !== "string") continue
+        if (message.id === `subagent-prompt-${subagentId}`) {
+          const promptFingerprint =
+            message.subagent_prompt_fingerprint ||
+            this.fingerprintSubagentTranscriptContent(message.content)
+          this.seededSubagentPromptFingerprintByExecutionId.set(
+            subagentId,
+            promptFingerprint
+          )
+          if (message.subagent_tool_call_id && message.subagent_invocation_scope) {
+            this.subagentPromptInvocationIdentityByExecutionId.set(
+              subagentId,
+              JSON.stringify([
+                message.subagent_tool_call_id,
+                message.subagent_invocation_scope
+              ])
+            )
+          }
+          signatures.set(
+            `prompt:${subagentId}`,
+            message.subagent_name || message.subagent_description || message.subagent_type
+              ? JSON.stringify([
+                  promptFingerprint,
+                  message.subagent_name ?? "",
+                  message.subagent_description ?? "",
+                  message.subagent_type ?? ""
+                ])
+              : promptFingerprint
+          )
+          continue
+        }
+        if (message.id !== `subagent-final-${subagentId}`) continue
+        const signature = buildSubagentFinalSignature({
+          isError: message.is_error === true,
+          status: message.status,
+          contentFingerprint:
+            message.subagent_content_fingerprint ||
+            this.fingerprintSubagentTranscriptContent(message.content),
+          reasoningFingerprint:
+            message.subagent_reasoning_fingerprint ||
+            this.fingerprintSubagentTranscriptContent(message.reasoning ?? "")
+        })
+        signatures.set(`final:${subagentId}`, signature)
+        signatures.set(
+          `final-content:${subagentId}`,
+          buildSubagentFinalSignature({
+            isError: message.is_error === true,
+            status: message.status,
+            contentFingerprint:
+              message.subagent_content_fingerprint ||
+              this.fingerprintSubagentTranscriptContent(message.content),
+            reasoningFingerprint: this.fingerprintSubagentTranscriptContent("")
+          })
+        )
+        for (const replacedId of message.replaced_message_ids ?? []) {
+          signatures.set(`final-replacement:${subagentId}:${replacedId}`, signature)
+        }
+      }
+    }
+  }
+
+  private getStreamEventCoalesceKey(event: StreamEvent): string | undefined {
+    if (event.event !== "custom" || !event.data || typeof event.data !== "object") {
+      return undefined
+    }
+    const data = event.data as Record<string, unknown>
+    if (data.type === "subagent_transcript_message") {
+      const subagentId = typeof data.subagentId === "string" ? data.subagentId : ""
+      const message = data.subagentMessage
+      if (!subagentId || !message || typeof message !== "object") return undefined
+      const transcriptMessage = message as {
+        id?: unknown
+        role?: unknown
+        content_priority?: unknown
+      }
+      const messageId = transcriptMessage.id
+      // Only provisional live assistants are replaceable state snapshots. Final
+      // repairs, prompts and tool results carry order-sensitive metadata and
+      // must remain separate events so backlog and real-time reduction agree.
+      return typeof messageId === "string" &&
+        transcriptMessage.role === "assistant" &&
+        (transcriptMessage.content_priority ?? 0) === 0 &&
+        messageId.startsWith("subagent-assistant-")
+        ? JSON.stringify(["subagent-transcript", subagentId, messageId])
+        : undefined
+    }
+    if (data.type === "subagent_log_entry") {
+      const entry = data.entry
+      const logEntry =
+        entry && typeof entry === "object"
+          ? (entry as { id?: unknown; kind?: unknown; subagentToolCallId?: unknown })
+          : undefined
+      // Tool call/result log events are reducer patches: the result intentionally
+      // omits the earlier argument summary. Only assistant logs are complete
+      // snapshots that can safely replace an older queued version.
+      if (logEntry?.kind !== "assistant") return undefined
+      const entryId = logEntry.id
+      const ownerId =
+        logEntry.subagentToolCallId
+      return typeof entryId === "string"
+        ? JSON.stringify(["subagent-log", ownerId ?? "", entryId])
+        : undefined
+    }
+    return undefined
   }
 
   /**
@@ -1158,7 +1488,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     switch (event.type) {
       // Raw stream events from LangGraph - parse and convert
       case "stream": {
-        const streamEvents = this.processStreamEvent(event, agentMode)
+        const streamEvents = this.processStreamEvent(event, agentMode, threadId)
         events.push(...streamEvents)
         break
       }
@@ -1729,17 +2059,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     )
     if (this.currentChunkMessageId === previousActiveMessageId) {
       for (const pendingToolCall of this.accumulatedToolCalls.values()) {
-        let args: Record<string, unknown> = {}
-        if (pendingToolCall.args) {
-          try {
-            const parsed = JSON.parse(pendingToolCall.args)
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-              args = parsed as Record<string, unknown>
-            }
-          } catch {
-            // Partial args still provide stable call-id/name evidence.
-          }
-        }
+        const args = pendingToolCall.parsedArgs ?? {}
         const existing = previousToolCallsById.get(pendingToolCall.id)
         previousToolCallsById.set(pendingToolCall.id, {
           id: pendingToolCall.id,
@@ -2484,7 +2804,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
    */
   private processStreamEvent(
     event: IPCStreamEvent,
-    agentMode: TransportAgentMode
+    agentMode: TransportAgentMode,
+    threadId: string
   ): StreamEvent[] {
     const events: StreamEvent[] = []
     const { mode, data } = event
@@ -2492,6 +2813,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     // Owner hint is scoped to a single messages chunk; clear stale values so it
     // never leaks into values-mode or a subsequent non-subagent chunk.
     this.currentSubagentOwnerHint = undefined
+    this.currentSubagentRawOwnerHint = undefined
     this.currentChunkMessageId = undefined
 
     if (isContextCompactionStreamPayload(mode, data)) return events
@@ -2515,8 +2837,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // referenced subagent is active, this attributes the chunk exactly,
       // bypassing the ns/spawn-order heuristic entirely. Set per chunk.
       const ownerHint = metadata?.[SUBAGENT_OWNER_METADATA_KEY]
+      this.currentSubagentRawOwnerHint = ownerHint
+      const hintedExecutionId = ownerHint
+        ? (this.currentSubagentExecutionIdByToolCallId.get(ownerHint) ?? ownerHint)
+        : undefined
       this.currentSubagentOwnerHint =
-        ownerHint && this.activeSubagents.has(ownerHint) ? ownerHint : undefined
+        hintedExecutionId && this.activeSubagents.has(hintedExecutionId)
+          ? hintedExecutionId
+          : undefined
       if (isCoordinatorMode && this.isCoordinatorWorkerNamespace(checkpointNs)) {
         // Async coordinator workers must not become main coordinator messages.
         // The focused worker panel receives these through the dedicated
@@ -2531,12 +2859,58 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // Check if this is an AI message (class name contains 'AI')
       const isAIMessage = className.includes("AI") || className.includes("AIMessageChunk")
 
+      const checkpointTaskUuid = checkpointNs ? extractTaskUuid(checkpointNs) : undefined
+      const checkpointExecutionId = checkpointTaskUuid
+        ? this.taskUuidToSubagentToolCallId.get(checkpointTaskUuid)
+        : undefined
+      const knownInnerOwners = kwargs.tool_call_id
+        ? this.subagentToolOwnerIds.get(kwargs.tool_call_id)
+        : undefined
+      const hasExplicitInnerRoutingEvidence =
+        !!this.currentSubagentOwnerHint ||
+        !!checkpointExecutionId ||
+        (this.isSubagentNamespace(checkpointNs) && (knownInnerOwners?.size ?? 0) > 0)
+      const isKnownParentTaskResult =
+        isToolMessage &&
+        typeof kwargs.tool_call_id === "string" &&
+        !ownerHint &&
+        this.currentSubagentExecutionIdByToolCallId.has(kwargs.tool_call_id) &&
+        (kwargs.name === "task" ||
+          (typeof kwargs.name !== "string" && !hasExplicitInnerRoutingEvidence))
+      const hasExplicitSubagentToolContext =
+        isToolMessage &&
+        !isKnownParentTaskResult &&
+        hasExplicitInnerRoutingEvidence
+      const taskResultMessageId =
+        isToolMessage && typeof kwargs.id === "string" ? kwargs.id : undefined
+      const taskResultContent = isToolMessage ? this.extractContent(kwargs.content) : ""
+      const taskResultIsError = isToolMessage ? this.isToolMessageError(kwargs) : false
+      const mappedTaskResultExecutionId =
+        taskResultMessageId && kwargs.tool_call_id
+          ? this.subagentTaskResultExecutionIdByIdentity.get(
+              this.buildSubagentTaskResultIdentity(
+                kwargs.tool_call_id,
+                taskResultMessageId,
+                taskResultContent,
+                kwargs.status,
+                taskResultIsError
+              )
+            )
+          : undefined
+      const taskResultExecutionId = hasExplicitSubagentToolContext
+        ? undefined
+        : ((mappedTaskResultExecutionId && this.activeSubagents.has(mappedTaskResultExecutionId)
+            ? mappedTaskResultExecutionId
+            : undefined) ??
+          (kwargs.tool_call_id
+            ? this.currentSubagentExecutionIdByToolCallId.get(kwargs.tool_call_id)
+            : undefined))
       const isTaskResultMessage =
-        isToolMessage && !!kwargs.tool_call_id && this.activeSubagents.has(kwargs.tool_call_id)
+        isToolMessage && !!taskResultExecutionId && this.activeSubagents.has(taskResultExecutionId)
       const isKnownSubagentToolCall =
         isToolMessage &&
         !!kwargs.tool_call_id &&
-        this.subagentToolLogEntryIds.has(kwargs.tool_call_id)
+        this.subagentToolOwnerIds.has(kwargs.tool_call_id)
       const isFromSubagent =
         !isTaskResultMessage &&
         (!!this.currentSubagentOwnerHint ||
@@ -2548,7 +2922,31 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // Subagent internals stay out of the main conversation, but we surface
           // them in the subagent activity log: aggregate tool count, tool-call
           // titles, and (Phase 2, A1') the subagent's streamed thinking text.
-          events.push(...this.processSubagentToolCalls(kwargs.tool_calls, kwargs.tool_call_chunks))
+          const subagentToolCallId = this.resolveSubagentToolCallId(checkpointNs)
+          const providerMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
+          const assistantOwnerKey =
+            subagentToolCallId ||
+            `unowned:${providerMessageId || checkpointNs || "subagent-thinking"}`
+          const previousAssistant = this.activeSubagentAssistants.get(assistantOwnerKey)
+          if (
+            previousAssistant &&
+            providerMessageId &&
+            previousAssistant.providerMessageId &&
+            previousAssistant.providerMessageId !== providerMessageId
+          ) {
+            if (subagentToolCallId) {
+              events.push(...this.createSubagentAssistantLosslessEvents(assistantOwnerKey))
+            }
+            this.sealSubagentAssistant(assistantOwnerKey)
+          }
+          const assistantState = this.getOrCreateSubagentAssistant(assistantOwnerKey, providerMessageId)
+          events.push(
+            ...this.processSubagentToolCalls(
+              subagentToolCallId,
+              kwargs.tool_calls,
+              kwargs.tool_call_chunks
+            )
+          )
           events.push(
             ...this.createSubagentAssistantLogEvents(
               checkpointNs,
@@ -2560,42 +2958,70 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // Surface the subagent's streamed assistant (thinking) text. Accumulate
           // the RAW content (do not trim per chunk, or inter-chunk spaces/newlines
           // would be lost and words/paragraphs would run together); coalesce
-          // delta/cumulative chunks per message id into one growing log entry.
+          // delta/cumulative chunks per logical assistant turn into one growing
+          // entry. Only the active turn is retained here; persisted transcript
+          // limits are applied downstream without discarding the live tail.
           const thinkingChunk = this.extractContent(kwargs.content)
-          const thinkingAccumKey = (kwargs.id as string) || checkpointNs || "subagent-thinking"
-          const prevThinking = this.subagentAssistantAccum.get(thinkingAccumKey) ?? ""
-          let fullThinking = prevThinking
-          // Skip only LEADING whitespace-only chunks (before any content exists).
-          // Once content exists, whitespace deltas separate words/paragraphs and
-          // must be accumulated, otherwise "hello"+" "+"world" → "helloworld".
-          if (thinkingChunk.length > 0 && (prevThinking !== "" || thinkingChunk.trim())) {
-            fullThinking =
-              thinkingChunk.startsWith(prevThinking) && thinkingChunk.length >= prevThinking.length
-                ? thinkingChunk
-                : prevThinking + thinkingChunk
-            // Bound stored thinking to keep memory in check; the displayed content
-            // is truncated to the log limit anyway, so the head is what matters.
-            if (fullThinking.length > 16000) fullThinking = fullThinking.slice(0, 16000)
-            this.subagentAssistantAccum.set(thinkingAccumKey, fullThinking)
-            // Only emit a UI event when there is visible (non-whitespace) content,
-            // so pure-whitespace deltas accumulate without flooding the stream.
-            if (fullThinking.trim()) {
-              events.push(
-                this.createSubagentLogEntryEvent({
-                  kind: "assistant",
-                  entryId: `subagent-assistant-${thinkingAccumKey}`,
-                  title: "子代理思考",
-                  content: this.truncateSubagentLogContent(fullThinking),
-                  status: "completed",
-                  checkpointNs,
-                  subagentToolCallId: this.resolveSubagentToolCallId(checkpointNs)
-                })
-              )
-            }
+          const reasoningChunk = extractVisibleReasoning(kwargs)
+          let projectedThinking = assistantState.projectedContent
+          let projectedReasoning = assistantState.projectedReasoning
+          const chunkHasVisibleContent = /\S/.test(thinkingChunk)
+          const chunkHasVisibleReasoning = /\S/.test(reasoningChunk)
+          const isCompleteAssistantSnapshot = !className.includes("AIMessageChunk")
+          if (thinkingChunk.length > 0) {
+            // Every non-empty delta is part of the raw record, including leading
+            // whitespace. Visibility only controls whether a UI snapshot is sent.
+            this.updateSubagentAssistantContent(
+              assistantState,
+              thinkingChunk,
+              isCompleteAssistantSnapshot ? "snapshot" : "delta"
+            )
+            assistantState.hasVisibleContent ||= chunkHasVisibleContent
           }
-          const subagentToolCallId = this.resolveSubagentToolCallId(checkpointNs)
+          if (reasoningChunk.length > 0) {
+            this.updateSubagentAssistantReasoning(
+              assistantState,
+              reasoningChunk,
+              isCompleteAssistantSnapshot ? "snapshot" : "delta"
+            )
+            assistantState.hasVisibleReasoning ||= chunkHasVisibleReasoning
+          }
+          const hasToolCallUpdate = Boolean(
+            kwargs.tool_calls?.length || kwargs.tool_call_chunks?.length
+          )
+          const shouldEmitAssistantSnapshot = this.shouldEmitSubagentAssistantSnapshot(
+            assistantState,
+            hasToolCallUpdate || isCompleteAssistantSnapshot
+          )
+          if (shouldEmitAssistantSnapshot) {
+            this.cancelSubagentAssistantSnapshotTimer(assistantOwnerKey)
+            projectedThinking = isCompleteAssistantSnapshot
+              ? this.materializeSubagentAssistantContent(assistantState)
+              : this.projectSubagentAssistantContent(assistantState)
+            projectedReasoning = isCompleteAssistantSnapshot
+              ? this.materializeSubagentAssistantReasoning(assistantState)
+              : this.projectSubagentAssistantReasoning(assistantState)
+            assistantState.projectedContent = projectedThinking
+            assistantState.projectedReasoning = projectedReasoning
+            events.push(
+              this.createSubagentLogEntryEvent({
+                kind: "assistant",
+                entryId: assistantState.transcriptMessageId,
+                title: "子代理思考",
+                content: this.truncateSubagentLogContent(
+                  projectedThinking || projectedReasoning
+                ),
+                status: "completed",
+                checkpointNs,
+                subagentToolCallId
+              })
+            )
+          } else if ((thinkingChunk.length > 0 || reasoningChunk.length > 0) && subagentToolCallId) {
+            this.scheduleSubagentAssistantSnapshot(assistantOwnerKey)
+          }
+          const toolCallAccumulationScope = assistantState.transcriptMessageId
           if (kwargs.tool_call_chunks?.length) {
-            this.accumulateToolCallChunks(kwargs.tool_call_chunks)
+            this.accumulateToolCallChunks(kwargs.tool_call_chunks, toolCallAccumulationScope)
           }
           // A subagent's tool-call args arrive in two parts across chunks: an
           // early `tool_calls` entry with empty args ({}), then the real args
@@ -2604,14 +3030,16 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // the tool shows immediately (by name) and its args fill in place once
           // they finish streaming, without ever dropping back to {}.
           const hydratedTranscriptCalls = this.hydrateToolCallsWithAccumulatedArgs(
-            kwargs.tool_calls ?? []
+            kwargs.tool_calls ?? [],
+            true,
+            toolCallAccumulationScope
           )
           const completedChunkCalls = this.completedToolCallsFromAccumulatedChunks(
-            kwargs.tool_call_chunks ?? []
+            kwargs.tool_call_chunks ?? [],
+            toolCallAccumulationScope
           )
-          const transcriptAccumKey = `subagent-transcript-${thinkingAccumKey}`
           const transcriptToolCalls = this.accumulateSubagentTranscriptToolCalls(
-            transcriptAccumKey,
+            assistantState.transcriptMessageId,
             [...hydratedTranscriptCalls, ...completedChunkCalls]
           )
           // Update currentTool from the latest tool name (known before args
@@ -2628,17 +3056,42 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 events.push(this.createSubagentEvent())
               }
             }
+
+            if (transcriptToolCalls.length > 0) {
+              this.subagentTerminalAssistantCandidates.delete(subagentToolCallId)
+            } else if (
+              assistantState.hasVisibleContent ||
+              assistantState.hasVisibleReasoning
+            ) {
+              this.subagentTerminalAssistantCandidates.set(subagentToolCallId, {
+                transcriptMessageId: assistantState.transcriptMessageId,
+                assistant: assistantState
+              })
+            }
           }
-          if (subagentToolCallId && (fullThinking.trim() || transcriptToolCalls.length > 0)) {
+          if (
+            subagentToolCallId &&
+            (shouldEmitAssistantSnapshot || transcriptToolCalls.length > 0)
+          ) {
             events.push({
               event: "custom",
               data: {
                 type: "subagent_transcript_message",
                 subagentId: subagentToolCallId,
                 subagentMessage: {
-                  id: `subagent-assistant-${thinkingAccumKey}`,
+                  id: assistantState.transcriptMessageId,
                   role: "assistant",
-                  content: fullThinking,
+                  content: projectedThinking,
+                  ...(isCompleteAssistantSnapshot && { content_priority: 0.5 }),
+                  content_is_projection:
+                    projectedThinking.length < assistantState.contentLength,
+                  content_full_length: assistantState.contentLength,
+                  ...(projectedReasoning && {
+                    reasoning: projectedReasoning,
+                    reasoning_is_projection:
+                      projectedReasoning.length < assistantState.reasoningLength,
+                    reasoning_full_length: assistantState.reasoningLength
+                  }),
                   ...(transcriptToolCalls.length > 0 && { tool_calls: transcriptToolCalls }),
                   created_at: new Date()
                 }
@@ -2807,7 +3260,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
           // Handle tool call chunks (streaming) - these have args as strings
           if (visibleToolCallChunks.length) {
-            const subagentDetectEvents = this.processToolCallChunks(visibleToolCallChunks)
+            const subagentDetectEvents = this.processToolCallChunks(
+              visibleToolCallChunks,
+              threadId,
+              msgId
+            )
             events.push(...subagentDetectEvents)
 
             const completedChunkToolCalls =
@@ -2848,7 +3305,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
           // Handle complete tool calls (non-streaming) - these have args as objects
           if (visibleToolCalls.length) {
-            const subagentDetectEvents = this.processCompletedToolCalls(visibleToolCalls)
+            const subagentDetectEvents = this.processCompletedToolCalls(
+              visibleToolCalls,
+              threadId,
+              msgId
+            )
             events.push(...subagentDetectEvents)
 
             // Track tool calls for HITL matching
@@ -2942,6 +3403,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             })
           )
           if (subagentToolCallId) {
+            events.push(...this.createSubagentAssistantLosslessEvents(subagentToolCallId))
             const isError = this.isToolMessageError(kwargs)
             events.push({
               event: "custom",
@@ -2967,11 +3429,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 }
               }
             })
+            this.sealSubagentAssistant(subagentToolCallId)
+            this.subagentTerminalAssistantCandidates.delete(subagentToolCallId)
           }
         } else {
           // Main agent tool message
           this.resetCurrentAssistantMessage()
           const content = this.extractContent(kwargs.content)
+          const isError = this.isToolMessageError(kwargs)
           const msgId =
             kwargs.id ||
             this.createStableFallbackMessageId({
@@ -2991,7 +3456,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 type: "tool",
                 content,
                 tool_call_id: kwargs.tool_call_id,
-                name: kwargs.name
+                name: kwargs.name,
+                ...(kwargs.status && { status: kwargs.status }),
+                ...(isError && { is_error: true })
               },
               {
                 langgraph_node: metadata?.langgraph_node || "tools",
@@ -3002,11 +3469,26 @@ export class ElectronIPCTransport implements UseStreamTransport {
           })
 
           // Handle subagent task completion (ToolMessage whose tool_call_id is a registered subagent)
-          if (kwargs.tool_call_id && this.activeSubagents.has(kwargs.tool_call_id)) {
-            const completionEvents = this.processToolMessage(
-              kwargs.tool_call_id,
-              this.isToolMessageError(kwargs)
-            )
+          if (kwargs.tool_call_id && taskResultExecutionId) {
+            if (taskResultMessageId) {
+              this.subagentTaskResultExecutionIdByIdentity.set(
+                this.buildSubagentTaskResultIdentity(
+                  kwargs.tool_call_id,
+                  taskResultMessageId,
+                  content,
+                  kwargs.status,
+                  isError
+                ),
+                taskResultExecutionId
+              )
+            }
+            const completionEvents = this.processToolMessage({
+              threadId,
+              toolCallId: taskResultExecutionId,
+              content,
+              status: kwargs.status,
+              isError
+            })
             events.push(...completionEvents)
           }
         }
@@ -3028,9 +3510,109 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }>
       }
 
+      // Reconcile the snapshot's parent assistant IDs before deriving task
+      // invocation scopes. This makes an id-less live task and the later
+      // provider-ID values snapshot resolve to the same execution bucket.
+      let transformedMessages = normalizeCompleteMessageIds(
+        this.applyMainAssistantProviderIdentitiesToSnapshot(
+          transformSerializedValuesMessages(state.messages)
+        )
+      )
+      const normalValuesReconciliation =
+        !isCoordinatorMode && transformedMessages.length > 0
+          ? this.reconcileNormalValuesMessageIds(transformedMessages)
+          : undefined
+      if (normalValuesReconciliation) {
+        transformedMessages = normalValuesReconciliation.messages
+      }
+      const taskInvocationScopesByToolCallId = new Map<string, string[]>()
+      for (const message of transformedMessages) {
+        if (message.type !== "ai" || !message.tool_calls?.length) continue
+        for (const toolCall of message.tool_calls) {
+          if (toolCall.name !== "task" || !toolCall.id) continue
+          const scopes = taskInvocationScopesByToolCallId.get(toolCall.id) ?? []
+          scopes.push(message.id)
+          taskInvocationScopesByToolCallId.set(toolCall.id, scopes)
+        }
+      }
+      const persistedTaskScopesByToolCallId = new Map<string, string[]>()
+      const parentOccurrenceCounts = new Map<string, number>()
+      let idlessParentOccurrence = 0
+      for (const rawMessage of state.messages ?? []) {
+        const className = getSerializedMessageClassName(rawMessage)
+        if (!className.includes("AI")) continue
+        const kwargs = rawMessage.kwargs ?? {}
+        const parentMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
+        const providerOccurrence = getMessageProviderTupleFromMetadata(
+          kwargs.additional_kwargs
+        )?.provider_occurrence
+        let parentOccurrence: number
+        if (providerOccurrence) {
+          parentOccurrence = providerOccurrence
+        } else if (parentMessageId) {
+          parentOccurrence = (parentOccurrenceCounts.get(parentMessageId) ?? 0) + 1
+          parentOccurrenceCounts.set(parentMessageId, parentOccurrence)
+        } else {
+          idlessParentOccurrence += 1
+          parentOccurrence = idlessParentOccurrence
+        }
+        for (let toolIndex = 0; toolIndex < (kwargs.tool_calls?.length ?? 0); toolIndex += 1) {
+          const toolCall = kwargs.tool_calls![toolIndex]
+          if (toolCall.name !== "task" || !toolCall.id) continue
+          const scopes = persistedTaskScopesByToolCallId.get(toolCall.id) ?? []
+          scopes.push(
+            buildSubagentTaskInvocationIdentity({
+              parentMessageId,
+              parentOccurrence,
+              parentContent: kwargs.content,
+              parentToolCalls: kwargs.tool_calls,
+              taskToolCallId: toolCall.id,
+              taskToolCallIndex: toolIndex,
+              taskArgs: toolCall.args
+            })
+          )
+          persistedTaskScopesByToolCallId.set(toolCall.id, scopes)
+        }
+      }
+
+      // Bind message-stream executions to the canonical checkpoint identities
+      // before replaying the full snapshot. A snapshot may include older turns
+      // that reused the same parent/task IDs, so unmatched live executions align
+      // with the unmatched tail occurrences rather than the first raw-ID match.
+      for (const [toolCallId, persistedScopes] of persistedTaskScopesByToolCallId) {
+        const mappedExecutionIds = new Set(this.subagentExecutionIdByInvocation.values())
+        const liveExecutionIds = (
+          this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
+        ).filter((executionId) => !mappedExecutionIds.has(executionId))
+        if (liveExecutionIds.length === 0) continue
+        const adoptionCount = Math.min(liveExecutionIds.length, persistedScopes.length)
+        const executionsToAdopt = liveExecutionIds.slice(-adoptionCount)
+        const scopesToAdopt = persistedScopes.slice(-adoptionCount)
+        for (let index = 0; index < adoptionCount; index += 1) {
+          this.subagentExecutionIdByInvocation.set(
+            JSON.stringify([toolCallId, scopesToAdopt[index]]),
+            executionsToAdopt[index]
+          )
+        }
+      }
+
       // Process messages in values mode to extract subagents
       if (state.messages) {
-        for (const msg of state.messages) {
+        const currentTurnStart =
+          state.messages.findLastIndex((message) =>
+            getSerializedMessageClassName(message).includes("Human")
+          ) + 1
+        const effectiveTerminalByExecutionId = new Map<
+          string,
+          { index: number; content: string; status?: string; isError: boolean }
+        >()
+        // A values snapshot can contain several invocations that reuse the same
+        // provider task ID. Track the nearest invocation seen in this snapshot;
+        // it is stronger evidence than a result-message mapping retained from an
+        // older snapshot or stream.
+        const snapshotExecutionIdByToolCallId = new Map<string, string>()
+        for (let messageIndex = 0; messageIndex < state.messages.length; messageIndex += 1) {
+          const msg = state.messages[messageIndex]
           const kwargs = msg.kwargs || {}
           const classId = Array.isArray(msg.id) ? msg.id : []
           const className = classId[classId.length - 1] || ""
@@ -3042,15 +3624,41 @@ export class ElectronIPCTransport implements UseStreamTransport {
               isCoordinatorMode
             )
             for (const toolCall of visibleToolCalls) {
-              if (
-                toolCall.name === "task" &&
-                toolCall.id &&
-                !this.activeSubagents.has(toolCall.id)
-              ) {
+              if (toolCall.name === "task" && toolCall.id) {
                 const args = toolCall.args || {}
                 if (args.subagent_type || args.description) {
-                  this.registerSubagent(toolCall.id, args)
-                  const seed = this.createSubagentPromptSeedEvent(toolCall.id, args)
+                  const invocationScope =
+                    taskInvocationScopesByToolCallId.get(toolCall.id)?.shift() ??
+                    ((typeof kwargs.id === "string" && kwargs.id) ||
+                      buildStableValuesMessageId({
+                        index: messageIndex,
+                        type: "ai",
+                        className,
+                        content: this.extractContent(kwargs.content),
+                        toolCalls: kwargs.tool_calls
+                      }))
+                  const persistedInvocationScope =
+                    persistedTaskScopesByToolCallId.get(toolCall.id)?.shift() ??
+                    invocationScope
+                  const registration = this.registerSubagent(
+                    toolCall.id,
+                    args,
+                    invocationScope,
+                    true,
+                    persistedInvocationScope,
+                    currentTurnStart > 0 && messageIndex >= currentTurnStart
+                  )
+                  snapshotExecutionIdByToolCallId.set(
+                    toolCall.id,
+                    registration.executionId
+                  )
+                  const seed = this.createSubagentPromptSeedEvent(
+                    threadId,
+                    registration.executionId,
+                    args,
+                    toolCall.id,
+                    persistedInvocationScope
+                  )
                   if (seed) events.push(seed)
                 }
               }
@@ -3061,12 +3669,48 @@ export class ElectronIPCTransport implements UseStreamTransport {
           if (
             className.includes("ToolMessage") &&
             kwargs.tool_call_id &&
-            this.activeSubagents.has(kwargs.tool_call_id)
+            this.currentSubagentExecutionIdByToolCallId.has(kwargs.tool_call_id)
           ) {
-            const subagent = this.activeSubagents.get(kwargs.tool_call_id)
-            if (subagent && subagent.status === "running") {
-              subagent.status = this.isToolMessageError(kwargs) ? "failed" : "completed"
-              subagent.completedAt = new Date()
+            const resultMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
+            const content = this.extractContent(kwargs.content)
+            const isError = this.isToolMessageError(kwargs)
+            const mappedExecutionId = resultMessageId
+              ? this.subagentTaskResultExecutionIdByIdentity.get(
+                  this.buildSubagentTaskResultIdentity(
+                    kwargs.tool_call_id,
+                    resultMessageId,
+                    content,
+                    kwargs.status,
+                    isError
+                  )
+                )
+              : undefined
+            const executionId =
+              snapshotExecutionIdByToolCallId.get(kwargs.tool_call_id) ??
+              (mappedExecutionId && this.activeSubagents.has(mappedExecutionId)
+                ? mappedExecutionId
+                : undefined) ??
+              this.currentSubagentExecutionIdByToolCallId.get(kwargs.tool_call_id)!
+            if (resultMessageId) {
+              this.subagentTaskResultExecutionIdByIdentity.set(
+                this.buildSubagentTaskResultIdentity(
+                  kwargs.tool_call_id,
+                  resultMessageId,
+                  content,
+                  kwargs.status,
+                  isError
+                ),
+                executionId
+              )
+            }
+            const existing = effectiveTerminalByExecutionId.get(executionId)
+            if (!existing || isError || !existing.isError) {
+              effectiveTerminalByExecutionId.set(executionId, {
+                index: messageIndex,
+                content,
+                status: kwargs.status,
+                isError
+              })
             }
           }
 
@@ -3085,29 +3729,37 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
         }
 
+        for (const [executionId, terminal] of Array.from(
+          effectiveTerminalByExecutionId.entries()
+        ).sort((left, right) => left[1].index - right[1].index)) {
+          events.push(
+            ...this.processToolMessage({
+              threadId,
+              toolCallId: executionId,
+              content: terminal.content,
+              status: terminal.status,
+              isError: terminal.isError,
+              emitSubagentEvent: false
+            })
+          )
+        }
+
         // Emit subagent update if we have any
         if (this.activeSubagents.size > 0) {
           events.push(this.createSubagentEvent())
         }
 
         if (isCoordinatorMode) {
-          events.push(...this.createCurrentTurnMessageEventsFromValues(state.messages))
+          events.push(...this.createCurrentTurnMessageEventsFromValues(state.messages, threadId))
         }
       }
-
-        let transformedMessages = normalizeCompleteMessageIds(
-          this.applyMainAssistantProviderIdentitiesToSnapshot(
-            transformSerializedValuesMessages(state.messages)
-          )
-        )
 
       // Only emit values event if we have actual data to update
       // Don't emit messages: undefined as it would clear the UI
       const valuesData: Record<string, unknown> = {}
       if (!isCoordinatorMode) {
         if (transformedMessages.length > 0) {
-          const reconciled = this.reconcileNormalValuesMessageIds(transformedMessages)
-          for (const alias of reconciled.aliases) {
+          for (const alias of normalValuesReconciliation?.aliases ?? []) {
             events.push({
               event: "custom",
               data: {
@@ -3118,7 +3770,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
               }
             })
           }
-          transformedMessages = reconciled.messages.map((message) => {
+          transformedMessages = transformedMessages.map((message) => {
             // Sparse empty snapshots stay non-authoritative; an empty assistant tool-call
             // message is complete state and must be able to clear speculative live text.
             const hasAuthoritativeContent =
@@ -5061,6 +5713,24 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     this.mainAssistantMessageIdAliases.set(canonicalFromId, canonicalToId)
     pruneMapToLimit(this.mainAssistantMessageIdAliases, MAX_TRACKED_EMITTED_MESSAGES)
+    // A task may already have been registered while its parent assistant still
+    // used a renderer fallback ID. Carry that invocation mapping across provider
+    // ID adoption before the values snapshot scans the same task call.
+    for (const [invocationKey, executionId] of [
+      ...this.subagentExecutionIdByInvocation.entries()
+    ]) {
+      try {
+        const [toolCallId, invocationScope] = JSON.parse(invocationKey) as [string, string]
+        if (invocationScope !== canonicalFromId) continue
+        this.subagentExecutionIdByInvocation.set(
+          JSON.stringify([toolCallId, canonicalToId]),
+          executionId
+        )
+      } catch {
+        // Invocation keys are created locally as JSON tuples. Ignore a corrupt
+        // legacy entry rather than making main-message identity adoption fail.
+      }
+    }
     this.moveMainAssistantMessageState(canonicalFromId, canonicalToId)
     this.rememberEmittedMessage(canonicalToId)
   }
@@ -5122,7 +5792,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private createCurrentTurnMessageEventsFromValues(
-    messages: SerializedMessageChunk[]
+    messages: SerializedMessageChunk[],
+    threadId: string
   ): StreamEvent[] {
     const events: StreamEvent[] = []
     let currentTurnStart = 0
@@ -5302,7 +5973,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
 
         if (visibleToolCalls.length) {
-          events.push(...this.processCompletedToolCalls(visibleToolCalls))
+          events.push(...this.processCompletedToolCalls(visibleToolCalls, threadId, msgId))
           for (const toolCall of visibleToolCalls) {
             if (!toolCall.id || !toolCall.name) continue
             const existing = this.completedToolCallsByName.get(toolCall.name) || []
@@ -5385,12 +6056,54 @@ export class ElectronIPCTransport implements UseStreamTransport {
    *       for all subsequent chunks sharing the same task UUID.
    */
   private resolveSubagentToolCallId(ns?: string, toolCallId?: string): string | undefined {
-    // tier (0): deterministic backend-stamped owner for the current chunk —
-    // exact, concurrency-safe, no ordering assumptions.
-    if (this.currentSubagentOwnerHint) return this.currentSubagentOwnerHint
-    if (toolCallId) {
-      const owner = this.subagentToolOwnerIds.get(toolCallId)
-      if (owner) return owner
+    const taskUuid = ns ? extractTaskUuid(ns) : undefined
+    const cached = taskUuid ? this.taskUuidToSubagentToolCallId.get(taskUuid) : undefined
+    // A checkpoint task UUID identifies one concrete invocation and remains
+    // correct after both parent and inner provider tool IDs are reused.
+    if (cached) {
+      const cachedRawToolCallId = this.activeSubagents.get(cached)?.toolCallId
+      // Some providers reuse a checkpoint UUID across concurrently distinct raw
+      // task calls. In that case the explicit raw owner metadata is stronger.
+      // When the raw task ID itself was reused, keep the UUID pin: the metadata
+      // can only name the raw ID and would otherwise redirect a late old chunk.
+      if (
+        this.currentSubagentOwnerHint &&
+        this.currentSubagentRawOwnerHint &&
+        cachedRawToolCallId &&
+        cachedRawToolCallId !== this.currentSubagentRawOwnerHint
+      ) {
+        this.taskUuidToSubagentToolCallId.set(taskUuid!, this.currentSubagentOwnerHint)
+        return this.currentSubagentOwnerHint
+      }
+      return cached
+    }
+
+    const knownOwners = toolCallId ? this.subagentToolOwnerIds.get(toolCallId) : undefined
+    if (knownOwners?.size === 1) {
+      const owner = knownOwners.values().next().value as string
+      if (taskUuid) this.taskUuidToSubagentToolCallId.set(taskUuid, owner)
+      return owner
+    }
+    if (knownOwners?.size && this.currentSubagentOwnerHint) {
+      if (knownOwners.has(this.currentSubagentOwnerHint)) {
+        // Once the same raw inner ID belongs to multiple executions, an unseen
+        // checkpoint UUID is ambiguous. Do not corrupt either transcript by
+        // guessing from a raw parent hint that may itself have been reused.
+        if (knownOwners.size > 1 && taskUuid) return undefined
+        if (taskUuid) {
+          this.taskUuidToSubagentToolCallId.set(taskUuid, this.currentSubagentOwnerHint)
+        }
+        return this.currentSubagentOwnerHint
+      }
+    }
+    // The backend hint is deterministic for the first chunk. Pin its checkpoint
+    // UUID before returning so late chunks keep their original execution even
+    // after the same raw parent task ID starts another invocation.
+    if (this.currentSubagentOwnerHint) {
+      if (taskUuid) {
+        this.taskUuidToSubagentToolCallId.set(taskUuid, this.currentSubagentOwnerHint)
+      }
+      return this.currentSubagentOwnerHint
     }
     const running = Array.from(this.activeSubagents.values()).filter(
       (subagent) => subagent.status === "running"
@@ -5400,24 +6113,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const matched = running.find(
         (subagent) => subagent.toolCallId && ns.includes(subagent.toolCallId)
       )
-      if (matched?.toolCallId) return matched.toolCallId
+      if (matched?.id) return matched.id
     }
     // tier (b): sole running subagent — unambiguous
-    if (running.length === 1) return running[0].toolCallId
+    if (running.length === 1) return running[0].id
     // tier (c): map stable LangGraph task UUID to earliest unattributed subagent
     if (ns) {
-      const taskUuid = extractTaskUuid(ns)
       if (taskUuid) {
-        const cached = this.taskUuidToSubagentToolCallId.get(taskUuid)
-        if (cached) return cached
-
         const attributed = new Set(this.taskUuidToSubagentToolCallId.values())
         const unattributed = running
-          .filter((sa) => sa.toolCallId && !attributed.has(sa.toolCallId))
+          .filter((sa) => sa.id && !attributed.has(sa.id))
           .sort((a, b) => (a.spawnIndex ?? 0) - (b.spawnIndex ?? 0))
-        if (unattributed.length > 0 && unattributed[0].toolCallId) {
-          this.taskUuidToSubagentToolCallId.set(taskUuid, unattributed[0].toolCallId)
-          return unattributed[0].toolCallId
+        if (unattributed.length > 0 && unattributed[0].id) {
+          this.taskUuidToSubagentToolCallId.set(taskUuid, unattributed[0].id)
+          return unattributed[0].id
         }
       }
     }
@@ -5465,6 +6174,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private processSubagentToolCalls(
+    ownerExecutionId: string | undefined,
     ...toolCallGroups: Array<Array<{ id?: string; name?: string }> | undefined>
   ): StreamEvent[] {
     let changed = false
@@ -5474,9 +6184,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       for (const toolCall of toolCalls) {
         if (!toolCall.id) continue
-        if (this.subagentToolCallIds.has(toolCall.id)) continue
+        const scopedToolCallId = this.buildSubagentInnerToolKey(
+          ownerExecutionId,
+          toolCall.id
+        )
+        if (this.subagentToolCallIds.has(scopedToolCallId)) continue
 
-        this.subagentToolCallIds.add(toolCall.id)
+        this.subagentToolCallIds.add(scopedToolCallId)
         changed = true
       }
     }
@@ -5543,9 +6257,158 @@ export class ElectronIPCTransport implements UseStreamTransport {
   /**
    * Register a subagent from a task tool call.
    */
-  private registerSubagent(toolCallId: string, args: Record<string, unknown>): void {
-    const subagent = this.createSubagentFromTask(toolCallId, args)
-    this.activeSubagents.set(toolCallId, subagent)
+  private resolveLiveSubagentInvocationScope(
+    toolCallId: string,
+    parentMessageId: string
+  ): { key: string; invocationScope: string } {
+    const parentTaskKey = JSON.stringify([parentMessageId, toolCallId])
+    const previous = this.liveSubagentInvocationByParentTask.get(parentTaskKey)
+    const previousSubagent = previous?.executionId
+      ? this.activeSubagents.get(previous.executionId)
+      : undefined
+    const startsNewOccurrence =
+      !previous ||
+      (previousSubagent !== undefined &&
+        previousSubagent.status !== "pending" &&
+        previousSubagent.status !== "running")
+    if (startsNewOccurrence) {
+      const occurrence = (previous?.occurrence ?? 0) + 1
+      const invocationScope = buildSubagentTaskInvocationIdentity({
+        parentMessageId: `live:${this.subagentStreamGeneration}:${parentMessageId}`,
+        parentOccurrence: occurrence,
+        parentContent: null,
+        parentToolCalls: [],
+        taskToolCallId: toolCallId,
+        taskToolCallIndex: 0,
+        taskArgs: null
+      })
+      this.liveSubagentInvocationByParentTask.set(parentTaskKey, {
+        occurrence,
+        invocationScope
+      })
+    }
+    const current = this.liveSubagentInvocationByParentTask.get(parentTaskKey)!
+    return {
+      key: JSON.stringify([toolCallId, current.invocationScope]),
+      invocationScope: current.invocationScope
+    }
+  }
+
+  private registerSubagent(
+    toolCallId: string,
+    args: Record<string, unknown>,
+    invocationScope: string,
+    preferSeededLegacyExecution: boolean = false,
+    persistedInvocationScope?: string,
+    observedLiveFromSnapshot: boolean = false
+  ): { executionId: string; created: boolean; updated: boolean } {
+    const canonicalInvocationScope = persistedInvocationScope ?? invocationScope
+    const liveInvocation = preferSeededLegacyExecution
+      ? undefined
+      : this.resolveLiveSubagentInvocationScope(toolCallId, invocationScope)
+    const effectiveInvocationScope = liveInvocation?.invocationScope ?? canonicalInvocationScope
+    const invocationKey =
+      liveInvocation?.key ?? JSON.stringify([toolCallId, canonicalInvocationScope])
+    const invocationMap = preferSeededLegacyExecution
+      ? this.subagentExecutionIdByInvocation
+      : this.liveSubagentExecutionIdByInvocation
+    let executionId = invocationMap.get(invocationKey)
+    if (!executionId) {
+      const executions = this.subagentExecutionIdsByToolCallId.get(toolCallId) ?? []
+      const deterministicExecutionId = this.buildSubagentExecutionId(
+        toolCallId,
+        effectiveInvocationScope
+      )
+      const seededExecutionIds =
+        this.seededSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
+      const persistedInvocationIdentity = preferSeededLegacyExecution
+        ? JSON.stringify([toolCallId, canonicalInvocationScope])
+        : undefined
+      const matchingPersistedExecutionIds = persistedInvocationIdentity
+        ? seededExecutionIds.filter(
+            (candidate) =>
+              !this.claimedSeededSubagentExecutionIds.has(candidate) &&
+              this.subagentPromptInvocationIdentityByExecutionId.get(candidate) ===
+                persistedInvocationIdentity
+          )
+        : []
+      const matchingPersistedExecutionId =
+        matchingPersistedExecutionIds.length === 1
+          ? matchingPersistedExecutionIds[0]
+          : undefined
+      const matchingSeededExecutionId =
+        preferSeededLegacyExecution && seededExecutionIds.includes(deterministicExecutionId)
+        ? deterministicExecutionId
+        : undefined
+      const prompt =
+        (typeof args.prompt === "string" && args.prompt.trim() && args.prompt) ||
+        (typeof args.description === "string" && args.description.trim() && args.description) ||
+        ""
+      const promptFingerprint = prompt
+        ? this.fingerprintSubagentTranscriptContent(prompt)
+        : undefined
+      const matchingLegacyExecutionIds = preferSeededLegacyExecution
+        ? seededExecutionIds.filter(
+            (candidate) =>
+              (candidate === toolCallId || /::execution-\d+$/.test(candidate)) &&
+              !this.claimedSeededSubagentExecutionIds.has(candidate) &&
+              !!promptFingerprint &&
+              this.seededSubagentPromptFingerprintByExecutionId.get(candidate) ===
+                promptFingerprint
+          )
+        : []
+      // Snapshot history can be pruned, so positional matching is unsafe. Only
+      // migrate a legacy bucket when its task prompt uniquely identifies it.
+      const unclaimedLegacyExecutionId =
+        matchingLegacyExecutionIds.length === 1 ? matchingLegacyExecutionIds[0] : undefined
+      executionId =
+        matchingPersistedExecutionId ??
+        matchingSeededExecutionId ??
+        unclaimedLegacyExecutionId ??
+        (executions.length === 0 && seededExecutionIds.length === 0
+          ? toolCallId
+          : deterministicExecutionId)
+      if (seededExecutionIds.includes(executionId)) {
+        this.claimedSeededSubagentExecutionIds.add(executionId)
+      }
+      if (!executions.includes(executionId)) executions.push(executionId)
+      this.subagentExecutionIdsByToolCallId.set(toolCallId, executions)
+      invocationMap.set(invocationKey, executionId)
+      if (liveInvocation) {
+        const parentTaskKey = JSON.stringify([invocationScope, toolCallId])
+        const liveState = this.liveSubagentInvocationByParentTask.get(parentTaskKey)
+        if (liveState) liveState.executionId = executionId
+        const liveExecutions =
+          this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
+        if (!liveExecutions.includes(executionId)) liveExecutions.push(executionId)
+        this.liveSubagentExecutionIdsByToolCallId.set(toolCallId, liveExecutions)
+      }
+    }
+    this.currentSubagentExecutionIdByToolCallId.set(toolCallId, executionId)
+    const observedLive = !preferSeededLegacyExecution || observedLiveFromSnapshot
+    const existing = this.activeSubagents.get(executionId)
+    if (existing) {
+      const updated = observedLive && existing.observedLive !== true
+      if (updated) existing.observedLive = true
+      return { executionId, created: false, updated }
+    }
+    const subagent = this.createSubagentFromTask(executionId, toolCallId, args)
+    if (observedLive) subagent.observedLive = true
+    this.activeSubagents.set(executionId, subagent)
+    return { executionId, created: true, updated: false }
+  }
+
+  private buildSubagentExecutionId(toolCallId: string, invocationScope: string): string {
+    let first = 0x811c9dc5
+    let second = 0x9e3779b9
+    for (let index = 0; index < invocationScope.length; index += 1) {
+      const code = invocationScope.charCodeAt(index)
+      first = Math.imul(first ^ code, 0x01000193)
+      second = Math.imul(second ^ code, 0x85ebca6b)
+    }
+    return `${toolCallId}::invocation-${invocationScope.length.toString(36)}-${(
+      first >>> 0
+    ).toString(36)}-${(second >>> 0).toString(36)}`
   }
 
   /**
@@ -5555,23 +6418,66 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * exact instructions a subagent was given. Emitted once at registration.
    */
   private createSubagentPromptSeedEvent(
-    toolCallId: string,
-    args: Record<string, unknown>
+    threadId: string,
+    executionId: string,
+    args: Record<string, unknown>,
+    rawToolCallId: string,
+    invocationScope: string
   ): StreamEvent | null {
     const prompt =
       (typeof args.prompt === "string" && args.prompt.trim() && args.prompt) ||
       (typeof args.description === "string" && args.description.trim() && args.description) ||
       ""
     if (!prompt) return null
+    const registeredSubagent = this.activeSubagents.get(executionId)
+    const signatures = this.getSubagentStableTranscriptSignatures(threadId)
+    const signatureKey = `prompt:${executionId}`
+    const signature = JSON.stringify([
+      this.fingerprintSubagentTranscriptContent(prompt),
+      registeredSubagent?.name ?? "",
+      registeredSubagent?.description ?? "",
+      registeredSubagent?.subagentType ?? ""
+    ])
+    const promptFingerprint = this.fingerprintSubagentTranscriptContent(prompt)
+    const invocationIdentity = JSON.stringify([rawToolCallId, invocationScope])
+    const exactPersistedPrompt =
+      this.seededSubagentPromptFingerprintByExecutionId.get(executionId) ===
+        promptFingerprint &&
+      this.subagentPromptInvocationIdentityByExecutionId.get(executionId) ===
+        invocationIdentity
+    if (
+      exactPersistedPrompt ||
+      (signatures.get(signatureKey) === signature &&
+        this.subagentPromptInvocationIdentityByExecutionId.get(executionId) ===
+          invocationIdentity)
+    ) {
+      return null
+    }
+    signatures.set(signatureKey, signature)
+    this.subagentPromptInvocationIdentityByExecutionId.set(
+      executionId,
+      invocationIdentity
+    )
     return {
       event: "custom",
       data: {
         type: "subagent_transcript_message",
-        subagentId: toolCallId,
+        subagentId: executionId,
         subagentMessage: {
-          id: `subagent-prompt-${toolCallId}`,
+          id: `subagent-prompt-${executionId}`,
           role: "user",
           content: prompt,
+          subagent_tool_call_id: rawToolCallId,
+          subagent_invocation_scope: invocationScope,
+          subagent_prompt_fingerprint: promptFingerprint,
+          ...(registeredSubagent?.name && { subagent_name: registeredSubagent.name }),
+          ...(registeredSubagent?.description && {
+            subagent_description: registeredSubagent.description
+          }),
+          ...(registeredSubagent?.subagentType && {
+            subagent_type: registeredSubagent.subagentType
+          }),
+          content_priority: 1,
           created_at: new Date()
         }
       }
@@ -5600,30 +6506,30 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return Boolean(args && typeof args === "object" && Object.keys(args).length > 0)
   }
 
-  private parseAccumulatedToolCall(id?: string): CompletedToolCall | null {
-    if (!id) return null
-    const accumulated = this.accumulatedToolCalls.get(id)
-    if (!accumulated?.name || !accumulated.args) return null
+  private getAccumulatedToolCallKey(id: string, accumulationScope?: string): string {
+    return accumulationScope ? `\u0000subagent:${accumulationScope.length}:${accumulationScope}:${id}` : id
+  }
 
-    try {
-      const args = JSON.parse(accumulated.args)
-      if (!args || typeof args !== "object" || Array.isArray(args)) return null
-      return {
-        id: accumulated.id,
-        name: accumulated.name,
-        args: this.normalizeToolCallArgsForDisplay(
-          accumulated.name,
-          args as Record<string, unknown>
-        )
-      }
-    } catch {
-      return null
+  private parseAccumulatedToolCall(
+    id?: string,
+    accumulationScope?: string
+  ): CompletedToolCall | null {
+    if (!id) return null
+    const accumulated = this.accumulatedToolCalls.get(
+      this.getAccumulatedToolCallKey(id, accumulationScope)
+    )
+    if (!accumulated?.name || !accumulated.parsedArgs) return null
+    return {
+      id: accumulated.id,
+      name: accumulated.name,
+      args: this.normalizeToolCallArgsForDisplay(accumulated.name, accumulated.parsedArgs)
     }
   }
 
   private hydrateToolCallsWithAccumulatedArgs(
     toolCalls: unknown,
-    allowAccumulatedArgs: boolean = true
+    allowAccumulatedArgs: boolean = true,
+    accumulationScope?: string
   ): Array<{ id?: string; name?: string; args?: Record<string, unknown> }> {
     // A corrupted / half-broken sidecar can deserialize `tool_calls` as a NON-array (string/object) OR
     // as an array with bad ELEMENTS (null / string / array). `?? []` at call sites only catches
@@ -5644,7 +6550,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
 
       const completed = allowAccumulatedArgs
-        ? this.parseAccumulatedToolCall(toolCall.id)
+        ? this.parseAccumulatedToolCall(toolCall.id, accumulationScope)
         : null
       if (!completed) return toolCall
 
@@ -5665,7 +6571,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private completedToolCallsFromAccumulatedChunks(
-    chunks: Array<{ id?: string; index?: number }>
+    chunks: Array<{ id?: string; index?: number }>,
+    accumulationScope?: string
   ): CompletedToolCall[] {
     const completed: CompletedToolCall[] = []
     const seen = new Set<string>()
@@ -5673,11 +6580,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
     for (const chunk of chunks) {
       // Resolve id-less continuation chunks by their index, mirroring
       // accumulateToolCallChunks, so streamed-only tool calls are still read.
-      const id = this.resolveToolCallChunkId(chunk)
+      const id = this.resolveToolCallChunkId(chunk, accumulationScope)
       if (!id || seen.has(id)) continue
       seen.add(id)
 
-      const parsed = this.parseAccumulatedToolCall(id)
+      const parsed = this.parseAccumulatedToolCall(id, accumulationScope)
       if (parsed) completed.push(parsed)
     }
 
@@ -5763,27 +6670,59 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private accumulateToolCallChunks(
-    chunks: Array<{ id?: string; name?: string; args?: string; index?: number }>
+    chunks: Array<{ id?: string; name?: string; args?: string; index?: number }>,
+    accumulationScope?: string
   ): void {
     for (const chunk of chunks) {
       // Resolve the stable tool-call id. The first chunk of each tool call
       // carries id+name+index; continuation chunks carry only index + an args
       // fragment. Record index→id on the first chunk and resolve id-less
       // continuations by their index so streamed args are not dropped.
-      const id = this.resolveToolCallChunkId(chunk)
+      const id = this.resolveToolCallChunkId(chunk, accumulationScope)
       if (!id) continue
 
-      let accumulated = this.accumulatedToolCalls.get(id)
+      const accumulationKey = this.getAccumulatedToolCallKey(id, accumulationScope)
+      let accumulated = this.accumulatedToolCalls.get(accumulationKey)
       if (!accumulated) {
-        accumulated = { id, name: chunk.name || "", args: "" }
-        this.accumulatedToolCalls.set(id, accumulated)
+        accumulated = {
+          id,
+          name: chunk.name || "",
+          args: "",
+          jsonDepth: 0,
+          jsonInString: false,
+          jsonEscaped: false,
+          jsonStarted: false,
+          jsonComplete: false,
+          jsonInvalid: false
+        }
+        this.accumulatedToolCalls.set(accumulationKey, accumulated)
       }
 
       if (chunk.name) {
         accumulated.name = chunk.name
       }
       if (chunk.args) {
-        accumulated.args = this.mergeToolCallChunkArgs(accumulated.args, chunk.args)
+        const previousArgs = accumulated.args
+        if (chunk.args === previousArgs && accumulated.parsedArgs) {
+          continue
+        }
+        const isCumulativeGrowth =
+          previousArgs.length > 0 &&
+          chunk.args.length > previousArgs.length &&
+          chunk.args.startsWith(previousArgs)
+        const mergedArgs = this.mergeToolCallChunkArgs(previousArgs, chunk.args)
+        if (mergedArgs !== previousArgs) {
+          // In auto mode the merger either accepts an explicit cumulative
+          // prefix or appends this fragment. Scan only newly arrived bytes;
+          // checking the merged string's full prefix here would itself turn
+          // ordinary delta streams back into quadratic work.
+          scanAccumulatedToolCallJson(
+            accumulated,
+            isCumulativeGrowth ? chunk.args.slice(previousArgs.length) : chunk.args
+          )
+          accumulated.args = mergedArgs
+          parseCompletedAccumulatedToolCall(accumulated)
+        }
       }
       pruneMapToLimit(this.accumulatedToolCalls, MAX_TRACKED_TOOL_CALLS)
     }
@@ -5810,10 +6749,17 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * message id because concurrent subagents all stream with index 0 — keying by
    * index alone would let one subagent's continuations resolve to another's id.
    */
-  private resolveToolCallChunkId(chunk: { id?: string; index?: number }): string | undefined {
-    const msgId = this.currentChunkMessageId
+  private resolveToolCallChunkId(
+    chunk: { id?: string; index?: number },
+    accumulationScope?: string
+  ): string | undefined {
+    const msgId = accumulationScope ?? this.currentChunkMessageId
     const key =
-      msgId !== undefined && typeof chunk.index === "number" ? `${msgId}:${chunk.index}` : undefined
+      msgId !== undefined && typeof chunk.index === "number"
+        ? accumulationScope
+          ? `subagent:${msgId}:${chunk.index}`
+          : `${msgId}:${chunk.index}`
+        : undefined
     if (chunk.id) {
       if (key) {
         this.toolCallChunkIndexToId.set(key, chunk.id)
@@ -5832,29 +6778,34 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * Tool calls are streamed incrementally, so we accumulate args until we have enough
    */
   private processToolCallChunks(
-    chunks: Array<{ id?: string; name?: string; args?: string }>
+    chunks: Array<{ id?: string; name?: string; args?: string; index?: number }>,
+    threadId: string,
+    parentMessageId: string
   ): StreamEvent[] {
     const events: StreamEvent[] = []
     this.accumulateToolCallChunks(chunks)
 
     for (const chunk of chunks) {
-      if (!chunk.id) continue
-      const accumulated = this.accumulatedToolCalls.get(chunk.id)
+      const id = this.resolveToolCallChunkId(chunk)
+      if (!id) continue
+      const accumulated = this.accumulatedToolCalls.get(this.getAccumulatedToolCallKey(id))
       if (!accumulated) continue
 
       // Check if this is a "task" tool call and try to parse args
-      if (accumulated.name === "task") {
-        try {
-          const args = JSON.parse(accumulated.args)
-          // Only process if we haven't already created a subagent for this tool call
-          if (!this.activeSubagents.has(chunk.id) && args.subagent_type) {
-            this.registerSubagent(chunk.id, args)
-            events.push(this.createSubagentEvent())
-            const seed = this.createSubagentPromptSeedEvent(chunk.id, args)
-            if (seed) events.push(seed)
-          }
-        } catch {
-          // Args not complete yet, continue accumulating
+      if (accumulated.name === "task" && accumulated.parsedArgs) {
+        const args = accumulated.parsedArgs
+        if (args.subagent_type) {
+          const registration = this.registerSubagent(id, args, parentMessageId)
+          if (!registration.created && !registration.updated) continue
+          events.push(this.createSubagentEvent())
+          const seed = this.createSubagentPromptSeedEvent(
+            threadId,
+            registration.executionId,
+            args,
+            id,
+            parentMessageId
+          )
+          if (seed) events.push(seed)
         }
       }
     }
@@ -5866,7 +6817,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * Process completed tool calls (non-streaming) and detect task subagent invocations
    */
   private processCompletedToolCalls(
-    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>,
+    threadId: string,
+    parentMessageId: string
   ): StreamEvent[] {
     const events: StreamEvent[] = []
 
@@ -5874,12 +6827,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
       if (!toolCall.id || !toolCall.name) continue
 
       // Check if this is a "task" tool call
-      if (toolCall.name === "task" && !this.activeSubagents.has(toolCall.id)) {
+      if (toolCall.name === "task") {
         const args = toolCall.args || {}
         if (args.subagent_type || args.description) {
-          this.registerSubagent(toolCall.id, args)
+          const registration = this.registerSubagent(toolCall.id, args, parentMessageId)
+          if (!registration.created && !registration.updated) continue
           events.push(this.createSubagentEvent())
-          const seed = this.createSubagentPromptSeedEvent(toolCall.id, args)
+          const seed = this.createSubagentPromptSeedEvent(
+            threadId,
+            registration.executionId,
+            args,
+            toolCall.id,
+            parentMessageId
+          )
           if (seed) events.push(seed)
         }
       }
@@ -5888,18 +6848,570 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return events
   }
 
+  private getOrCreateSubagentAssistant(
+    ownerKey: string,
+    providerMessageId?: string
+  ): ActiveSubagentAssistant {
+    let active = this.activeSubagentAssistants.get(ownerKey)
+    if (
+      active &&
+      providerMessageId &&
+      active.providerMessageId &&
+      active.providerMessageId !== providerMessageId
+    ) {
+      this.sealSubagentAssistant(ownerKey)
+      active = undefined
+    }
+
+    if (active) {
+      if (providerMessageId && !active.providerMessageId) {
+        active.providerMessageId = providerMessageId
+      }
+      return active
+    }
+
+    this.subagentTerminalAssistantCandidates.delete(ownerKey)
+
+    const next: ActiveSubagentAssistant = {
+      ...(providerMessageId && { providerMessageId }),
+      transcriptMessageId: `subagent-assistant-${ownerKey}-${crypto.randomUUID()}`,
+      contentChunks: [],
+      contentLength: 0,
+      previewHeadChunks: [],
+      previewHeadLength: 0,
+      previewTailChunks: [],
+      previewTailLength: 0,
+      projectedContent: "",
+      hasVisibleContent: false,
+      reasoningChunks: [],
+      reasoningLength: 0,
+      reasoningPreviewHeadChunks: [],
+      reasoningPreviewHeadLength: 0,
+      reasoningPreviewTailChunks: [],
+      reasoningPreviewTailLength: 0,
+      projectedReasoning: "",
+      hasVisibleReasoning: false,
+      lastSnapshotLength: 0,
+      lastSnapshotAt: 0
+    }
+    this.activeSubagentAssistants.set(ownerKey, next)
+    return next
+  }
+
+  private replaceSubagentAssistantContent(
+    assistant: ActiveSubagentAssistant,
+    content: string
+  ): void {
+    assistant.contentChunks = content ? [content] : []
+    assistant.contentLength = content.length
+    assistant.previewHeadChunks = content
+      ? [content.slice(0, SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS)]
+      : []
+    assistant.previewHeadLength = Math.min(
+      content.length,
+      SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS
+    )
+    assistant.previewTailChunks = content
+      ? [content.slice(-SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS)]
+      : []
+    assistant.previewTailLength = Math.min(
+      content.length,
+      SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS
+    )
+  }
+
+  private appendSubagentAssistantContent(
+    assistant: ActiveSubagentAssistant,
+    content: string
+  ): void {
+    if (!content) return
+    assistant.contentChunks.push(content)
+    assistant.contentLength += content.length
+
+    const headRemaining =
+      SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS - assistant.previewHeadLength
+    if (headRemaining > 0) {
+      const headChunk = content.slice(0, headRemaining)
+      if (headChunk) {
+        assistant.previewHeadChunks.push(headChunk)
+        assistant.previewHeadLength += headChunk.length
+      }
+    }
+
+    assistant.previewTailChunks.push(content)
+    assistant.previewTailLength += content.length
+    if (assistant.previewTailLength > SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS * 2) {
+      const compacted = assistant.previewTailChunks
+        .join("")
+        .slice(-SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS)
+      assistant.previewTailChunks = compacted ? [compacted] : []
+      assistant.previewTailLength = compacted.length
+    }
+  }
+
+  private updateSubagentAssistantContent(
+    assistant: ActiveSubagentAssistant,
+    content: string,
+    mode: "delta" | "snapshot"
+  ): void {
+    if (mode === "snapshot") {
+      this.replaceSubagentAssistantContent(assistant, content)
+      return
+    }
+    this.appendSubagentAssistantContent(assistant, content)
+  }
+
+  private replaceSubagentAssistantReasoning(
+    assistant: ActiveSubagentAssistant,
+    reasoning: string
+  ): void {
+    assistant.reasoningChunks = reasoning ? [reasoning] : []
+    assistant.reasoningLength = reasoning.length
+    assistant.reasoningPreviewHeadChunks = reasoning
+      ? [reasoning.slice(0, SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS)]
+      : []
+    assistant.reasoningPreviewHeadLength = Math.min(
+      reasoning.length,
+      SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS
+    )
+    assistant.reasoningPreviewTailChunks = reasoning
+      ? [reasoning.slice(-SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS)]
+      : []
+    assistant.reasoningPreviewTailLength = Math.min(
+      reasoning.length,
+      SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS
+    )
+  }
+
+  private appendSubagentAssistantReasoning(
+    assistant: ActiveSubagentAssistant,
+    reasoning: string
+  ): void {
+    if (!reasoning) return
+    assistant.reasoningChunks.push(reasoning)
+    assistant.reasoningLength += reasoning.length
+
+    const headRemaining =
+      SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS - assistant.reasoningPreviewHeadLength
+    if (headRemaining > 0) {
+      const headChunk = reasoning.slice(0, headRemaining)
+      if (headChunk) {
+        assistant.reasoningPreviewHeadChunks.push(headChunk)
+        assistant.reasoningPreviewHeadLength += headChunk.length
+      }
+    }
+
+    assistant.reasoningPreviewTailChunks.push(reasoning)
+    assistant.reasoningPreviewTailLength += reasoning.length
+    if (assistant.reasoningPreviewTailLength > SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS * 2) {
+      const compacted = assistant.reasoningPreviewTailChunks
+        .join("")
+        .slice(-SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS)
+      assistant.reasoningPreviewTailChunks = compacted ? [compacted] : []
+      assistant.reasoningPreviewTailLength = compacted.length
+    }
+  }
+
+  private updateSubagentAssistantReasoning(
+    assistant: ActiveSubagentAssistant,
+    reasoning: string,
+    mode: "delta" | "snapshot"
+  ): void {
+    if (mode === "snapshot") {
+      this.replaceSubagentAssistantReasoning(assistant, reasoning)
+      return
+    }
+    // Some providers label cumulative reasoning snapshots as chunks. Only
+    // materialize the existing buffer when the incoming value is large enough
+    // to be cumulative; ordinary token deltas remain O(total bytes).
+    if (reasoning.length >= assistant.reasoningLength && assistant.reasoningLength > 0) {
+      const existing = this.materializeSubagentAssistantReasoning(assistant)
+      if (reasoning === existing || reasoning.startsWith(existing)) {
+        this.replaceSubagentAssistantReasoning(assistant, reasoning)
+        return
+      }
+    }
+    this.appendSubagentAssistantReasoning(assistant, reasoning)
+  }
+
+  private materializeSubagentAssistantContent(assistant: ActiveSubagentAssistant): string {
+    return assistant.contentChunks.join("")
+  }
+
+  private materializeSubagentAssistantReasoning(assistant: ActiveSubagentAssistant): string {
+    return assistant.reasoningChunks.join("")
+  }
+
+  private projectSubagentAssistantContent(assistant: ActiveSubagentAssistant): string {
+    const head = assistant.previewHeadChunks.join("")
+    const tail = assistant.previewTailChunks.join("")
+    return projectSubagentTranscriptBoundaries(assistant.contentLength, head, tail)
+  }
+
+  private projectSubagentAssistantReasoning(assistant: ActiveSubagentAssistant): string {
+    const head = assistant.reasoningPreviewHeadChunks.join("")
+    const tail = assistant.reasoningPreviewTailChunks.join("")
+    return projectSubagentTranscriptBoundaries(assistant.reasoningLength, head, tail)
+  }
+
+  private shouldEmitSubagentAssistantSnapshot(
+    assistant: ActiveSubagentAssistant,
+    force: boolean
+  ): boolean {
+    if (!assistant.hasVisibleContent && !assistant.hasVisibleReasoning) return false
+    const totalLength = assistant.contentLength + assistant.reasoningLength
+    const now = Date.now()
+    if (
+      force ||
+      assistant.lastSnapshotLength === 0 ||
+      totalLength - assistant.lastSnapshotLength >=
+        SUBAGENT_ASSISTANT_SNAPSHOT_MIN_CHARS ||
+      now - assistant.lastSnapshotAt >= SUBAGENT_ASSISTANT_SNAPSHOT_MAX_INTERVAL_MS
+    ) {
+      assistant.lastSnapshotLength = totalLength
+      assistant.lastSnapshotAt = now
+      return true
+    }
+    return false
+  }
+
+  private createProjectedSubagentAssistantEvents(ownerKey: string): StreamEvent[] {
+    const assistant = this.activeSubagentAssistants.get(ownerKey)
+    if (!assistant || (!assistant.hasVisibleContent && !assistant.hasVisibleReasoning)) return []
+    const content = this.projectSubagentAssistantContent(assistant)
+    const reasoning = this.projectSubagentAssistantReasoning(assistant)
+    assistant.projectedContent = content
+    assistant.projectedReasoning = reasoning
+    assistant.lastSnapshotLength = assistant.contentLength + assistant.reasoningLength
+    assistant.lastSnapshotAt = Date.now()
+    const toolCalls = Array.from(
+      this.subagentTranscriptToolCallsByMessage.get(assistant.transcriptMessageId)?.values() ?? []
+    )
+    return [
+      this.createSubagentLogEntryEvent({
+        kind: "assistant",
+        entryId: assistant.transcriptMessageId,
+        title: "子代理思考",
+        content: this.truncateSubagentLogContent(content || reasoning),
+        status: "completed",
+        subagentToolCallId: ownerKey
+      }),
+      {
+        event: "custom",
+        data: {
+          type: "subagent_transcript_message",
+          subagentId: ownerKey,
+          subagentMessage: {
+            id: assistant.transcriptMessageId,
+            role: "assistant",
+            content,
+            content_is_projection: content.length < assistant.contentLength,
+            content_full_length: assistant.contentLength,
+            ...(reasoning && {
+              reasoning,
+              reasoning_is_projection: reasoning.length < assistant.reasoningLength,
+              reasoning_full_length: assistant.reasoningLength
+            }),
+            ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+            created_at: new Date()
+          }
+        }
+      }
+    ]
+  }
+
+  private cancelSubagentAssistantSnapshotTimer(ownerKey: string): void {
+    const timer = this.subagentAssistantSnapshotTimers.get(ownerKey)
+    if (timer !== undefined) clearTimeout(timer)
+    this.subagentAssistantSnapshotTimers.delete(ownerKey)
+  }
+
+  private scheduleSubagentAssistantSnapshot(ownerKey: string): void {
+    this.cancelSubagentAssistantSnapshotTimer(ownerKey)
+    const assistant = this.activeSubagentAssistants.get(ownerKey)
+    if (
+      !assistant ||
+      (!assistant.hasVisibleContent && !assistant.hasVisibleReasoning) ||
+      !this.deferredStreamEventSink
+    ) {
+      return
+    }
+    const elapsed = Math.max(0, Date.now() - assistant.lastSnapshotAt)
+    const delay = Math.max(0, SUBAGENT_ASSISTANT_SNAPSHOT_MAX_INTERVAL_MS - elapsed)
+    const timer = setTimeout(() => {
+      this.subagentAssistantSnapshotTimers.delete(ownerKey)
+      for (const event of this.createProjectedSubagentAssistantEvents(ownerKey)) {
+        this.deferredStreamEventSink?.(event)
+      }
+    }, delay)
+    this.subagentAssistantSnapshotTimers.set(ownerKey, timer)
+  }
+
+  private createSubagentAssistantLosslessEvents(ownerKey: string): StreamEvent[] {
+    const assistant = this.activeSubagentAssistants.get(ownerKey)
+    if (!assistant || (!assistant.hasVisibleContent && !assistant.hasVisibleReasoning)) return []
+    const content = this.materializeSubagentAssistantContent(assistant)
+    const reasoning = this.materializeSubagentAssistantReasoning(assistant)
+    if (content === assistant.projectedContent && reasoning === assistant.projectedReasoning) {
+      return []
+    }
+    const toolCalls = Array.from(
+      this.subagentTranscriptToolCallsByMessage.get(assistant.transcriptMessageId)?.values() ?? []
+    )
+    return [
+      this.createSubagentLogEntryEvent({
+        kind: "assistant",
+        entryId: assistant.transcriptMessageId,
+        title: "子代理思考",
+        content: this.truncateSubagentLogContent(content || reasoning),
+        status: "completed",
+        subagentToolCallId: ownerKey
+      }),
+      {
+        event: "custom",
+        data: {
+          type: "subagent_transcript_message",
+          subagentId: ownerKey,
+          subagentMessage: {
+            id: assistant.transcriptMessageId,
+            role: "assistant",
+            content,
+            // Authoritative for this assistant turn but still replaceable by the
+            // task-level final (priority 1). It must never be coalesced back down
+            // to a provisional priority-0 projection.
+            content_priority: 0.5,
+            content_is_projection: false,
+            content_full_length: content.length,
+            ...(reasoning && {
+              reasoning,
+              reasoning_is_projection: false,
+              reasoning_full_length: reasoning.length
+            }),
+            ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+            created_at: new Date()
+          }
+        }
+      }
+    ]
+  }
+
+  private createActiveSubagentAssistantLosslessEvents(): StreamEvent[] {
+    const events: StreamEvent[] = []
+    for (const ownerKey of this.activeSubagentAssistants.keys()) {
+      this.cancelSubagentAssistantSnapshotTimer(ownerKey)
+      if (ownerKey.startsWith("unowned:")) continue
+      events.push(...this.createSubagentAssistantLosslessEvents(ownerKey))
+    }
+    return events
+  }
+
+  private sealSubagentAssistant(ownerKey: string): void {
+    this.cancelSubagentAssistantSnapshotTimer(ownerKey)
+    const active = this.activeSubagentAssistants.get(ownerKey)
+    if (!active) return
+    this.activeSubagentAssistants.delete(ownerKey)
+    this.subagentTranscriptToolCallsByMessage.delete(active.transcriptMessageId)
+  }
+
+  private clearActiveSubagentAssistantState(): void {
+    for (const timer of this.subagentAssistantSnapshotTimers.values()) clearTimeout(timer)
+    this.subagentAssistantSnapshotTimers.clear()
+    this.activeSubagentAssistants.clear()
+    this.subagentTerminalAssistantCandidates.clear()
+    this.subagentTranscriptToolCallsByMessage.clear()
+  }
+
+  private isCompatibleSubagentFinalContent(candidate: string, finalContent: string): boolean {
+    const candidateText = candidate.trim()
+    const finalText = finalContent.trim()
+    if (!candidateText || !finalText) return false
+    return (
+      candidateText === finalText ||
+      finalText.startsWith(candidateText) ||
+      candidateText.startsWith(finalText)
+    )
+  }
+
+  private getSubagentStableTranscriptSignatures(threadId: string): Map<string, string> {
+    const existing = this.subagentStableTranscriptSignaturesByThread.get(threadId)
+    if (existing) {
+      // Refresh the thread-level LRU without imposing a per-thread entry cap.
+      // A per-entry FIFO cap creates a replay cliff when a full snapshot contains
+      // one more historical task than the cap.
+      this.subagentStableTranscriptSignaturesByThread.delete(threadId)
+      this.subagentStableTranscriptSignaturesByThread.set(threadId, existing)
+      return existing
+    }
+    const signatures = new Map<string, string>()
+    this.subagentStableTranscriptSignaturesByThread.set(threadId, signatures)
+    pruneMapToLimit(
+      this.subagentStableTranscriptSignaturesByThread,
+      MAX_TRACKED_TRANSCRIPT_SIGNATURE_THREADS
+    )
+    return signatures
+  }
+
+  private fingerprintSubagentTranscriptContent(content: string): string {
+    return fingerprintTranscriptContent(content)
+  }
+
+  private createSubagentFinalTranscriptEvent(input: {
+    threadId: string
+    toolCallId: string
+    content: string
+    status?: string
+    isError: boolean
+  }): StreamEvent | null {
+    const candidate = this.subagentTerminalAssistantCandidates.get(input.toolCallId)
+    const inputHasVisibleContent = /\S/.test(input.content)
+    const candidateContent =
+      candidate && (!inputHasVisibleContent || input.isError)
+        ? this.materializeSubagentAssistantContent(candidate.assistant)
+        : undefined
+    const candidateReasoning = candidate
+      ? this.materializeSubagentAssistantReasoning(candidate.assistant)
+      : ""
+    const rawFinalContent = inputHasVisibleContent
+      ? input.content
+      : input.isError
+        ? ""
+        : (candidateContent ?? "")
+    const finalContent = rawFinalContent
+    const candidateIsCompatible =
+      !!candidateContent && this.isCompatibleSubagentFinalContent(candidateContent, finalContent)
+    const replacedMessageId =
+      candidate && (!input.isError || candidateIsCompatible)
+        ? candidate.transcriptMessageId
+        : undefined
+    const contentFingerprint = this.fingerprintSubagentTranscriptContent(finalContent)
+    const reasoningFingerprint = this.fingerprintSubagentTranscriptContent(candidateReasoning)
+    const contentSignature = buildSubagentFinalSignature({
+      isError: input.isError,
+      status: input.status,
+      contentFingerprint,
+      reasoningFingerprint
+    })
+    const signatures = this.getSubagentStableTranscriptSignatures(input.threadId)
+    const contentSignatureKey = `final:${input.toolCallId}`
+    const replacementSignatureKey = replacedMessageId
+      ? `final-replacement:${input.toolCallId}:${replacedMessageId}`
+      : undefined
+    const contentOnlySignature = buildSubagentFinalSignature({
+      isError: input.isError,
+      status: input.status,
+      contentFingerprint,
+      reasoningFingerprint: this.fingerprintSubagentTranscriptContent("")
+    })
+    const contentIsKnown = candidate
+      ? signatures.get(contentSignatureKey) === contentSignature
+      : signatures.get(`final-content:${input.toolCallId}`) === contentOnlySignature
+    const replacementIsKnown =
+      !replacementSignatureKey ||
+      signatures.get(replacementSignatureKey) === contentSignature
+    if (contentIsKnown && replacementIsKnown) return null
+    signatures.set(contentSignatureKey, contentSignature)
+    signatures.set(`final-content:${input.toolCallId}`, contentOnlySignature)
+    if (replacementSignatureKey) {
+      signatures.set(replacementSignatureKey, contentSignature)
+    }
+    return {
+      event: "custom",
+      data: {
+        type: "subagent_transcript_message",
+        subagentId: input.toolCallId,
+        subagentMessage: {
+          id: `subagent-final-${input.toolCallId}`,
+          role: "assistant",
+          content: finalContent,
+          subagent_content_fingerprint: contentFingerprint,
+          subagent_reasoning_fingerprint: reasoningFingerprint,
+          content_priority: 1,
+          content_is_projection: false,
+          content_full_length: finalContent.length,
+          ...(candidateReasoning && {
+            reasoning: candidateReasoning,
+            reasoning_is_projection: false,
+            reasoning_full_length: candidateReasoning.length
+          }),
+          ...(replacedMessageId && { replaces_message_id: replacedMessageId }),
+          ...(!input.isError && {
+            replaces_message_id_prefix: `subagent-assistant-${input.toolCallId}-`
+          }),
+          ...(input.isError && {
+            replaces_message_id_prefix: `subagent-assistant-${input.toolCallId}-`,
+            replacement_mode: "compatible"
+          }),
+          ...(input.status && { status: input.status }),
+          ...(input.isError && { is_error: true }),
+          created_at: new Date()
+        }
+      }
+    }
+  }
+
+  private buildSubagentTaskResultIdentity(
+    taskToolCallId: string,
+    resultMessageId: string,
+    content: string,
+    status: string | undefined,
+    isError: boolean
+  ): string {
+    return JSON.stringify([
+      taskToolCallId,
+      resultMessageId,
+      isError ? "error" : "success",
+      status ?? "",
+      this.fingerprintSubagentTranscriptContent(content)
+    ])
+  }
+
   /**
    * Process a ToolMessage which signals subagent completion
    */
-  private processToolMessage(toolCallId: string, isError = false): StreamEvent[] {
+  private processToolMessage(input: {
+    threadId: string
+    toolCallId: string
+    content: string
+    status?: string
+    isError: boolean
+    emitSubagentEvent?: boolean
+  }): StreamEvent[] {
     const events: StreamEvent[] = []
+    const subagent = this.activeSubagents.get(input.toolCallId)
+    const ignoresStaleSuccess = subagent?.status === "failed" && !input.isError
+
+    const finalTranscriptEvent = ignoresStaleSuccess
+      ? null
+      : this.createSubagentFinalTranscriptEvent(input)
+    const finalTranscriptData = finalTranscriptEvent?.data as
+      | { subagentMessage?: { replaces_message_id?: unknown } }
+      | undefined
+    const replacedMessageId = finalTranscriptData?.subagentMessage?.replaces_message_id
+    const activeAssistant = this.activeSubagentAssistants.get(input.toolCallId)
+    if (!activeAssistant || replacedMessageId !== activeAssistant.transcriptMessageId) {
+      events.push(...this.createSubagentAssistantLosslessEvents(input.toolCallId))
+    }
+    if (finalTranscriptEvent) events.push(finalTranscriptEvent)
+    this.sealSubagentAssistant(input.toolCallId)
+    this.subagentTerminalAssistantCandidates.delete(input.toolCallId)
 
     // Check if this tool_call_id corresponds to an active subagent
-    const subagent = this.activeSubagents.get(toolCallId)
     if (subagent) {
-      subagent.status = isError ? "failed" : "completed"
-      subagent.completedAt = new Date()
-      events.push(this.createSubagentEvent())
+      const previousStatus = subagent.status
+      const nextStatus = input.isError
+        ? "failed"
+        : previousStatus === "failed" || previousStatus === "completed"
+          ? previousStatus
+          : "completed"
+      const completedAtWasMissing = !subagent.completedAt
+      subagent.status = nextStatus
+      if (completedAtWasMissing) {
+        subagent.completedAt = new Date()
+      }
+      const stateChanged = previousStatus !== nextStatus || completedAtWasMissing
+      if (input.emitSubagentEvent !== false && stateChanged) {
+        events.push(this.createSubagentEvent())
+      }
     }
 
     return events
@@ -5908,9 +7420,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
   /**
    * Create a Subagent object from task tool call args
    */
-  private createSubagentFromTask(toolCallId: string, args: Record<string, unknown>): Subagent {
+  private createSubagentFromTask(
+    executionId: string,
+    toolCallId: string,
+    args: Record<string, unknown>
+  ): Subagent {
     const subagentType = (args.subagent_type as string) || "general-purpose"
-    const description = (args.description as string) || "Executing task..."
+    const description = projectSubagentDescription(
+      (args.description as string) || (args.prompt as string) || "Executing task..."
+    )
 
     // Generate a friendly name from the subagent type
     const nameMap: Record<string, string> = {
@@ -5922,7 +7440,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
 
     return {
-      id: toolCallId,
+      id: executionId,
       toolCallId,
       name: nameMap[subagentType] || this.formatSubagentName(subagentType),
       description,
@@ -5988,17 +7506,22 @@ export class ElectronIPCTransport implements UseStreamTransport {
     subagentToolCallId?: string
   }): StreamEvent {
     this.subagentLogSequence += 1
+    const scopedToolCallId = input.toolCallId
+      ? this.buildSubagentInnerToolKey(input.subagentToolCallId, input.toolCallId)
+      : undefined
     const entryId =
       input.entryId ??
-      (input.toolCallId && this.subagentToolLogEntryIds.has(input.toolCallId)
-        ? this.subagentToolLogEntryIds.get(input.toolCallId)!
+      (scopedToolCallId && this.subagentToolLogEntryIds.has(scopedToolCallId)
+        ? this.subagentToolLogEntryIds.get(scopedToolCallId)!
         : `subagent-log-${Date.now()}-${this.subagentLogSequence}`)
 
-    if (input.toolCallId) {
-      this.subagentToolLogEntryIds.set(input.toolCallId, entryId)
+    if (scopedToolCallId) {
+      this.subagentToolLogEntryIds.set(scopedToolCallId, entryId)
     }
     if (input.toolCallId && input.subagentToolCallId) {
-      this.subagentToolOwnerIds.set(input.toolCallId, input.subagentToolCallId)
+      const owners = this.subagentToolOwnerIds.get(input.toolCallId) ?? new Set<string>()
+      owners.add(input.subagentToolCallId)
+      this.subagentToolOwnerIds.set(input.toolCallId, owners)
     }
 
     return {
@@ -6020,5 +7543,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       }
     }
+  }
+
+  private buildSubagentInnerToolKey(
+    ownerExecutionId: string | undefined,
+    toolCallId: string
+  ): string {
+    return JSON.stringify([ownerExecutionId ?? "unowned", toolCallId])
   }
 }

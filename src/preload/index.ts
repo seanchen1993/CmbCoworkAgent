@@ -51,7 +51,10 @@ import type {
   ForkableCheckpoint,
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
-  ThreadForkResponse
+  ThreadForkResponse,
+  SubagentTranscriptPage,
+  SubagentTranscriptBlobExportResult,
+  SubagentTranscriptBlobField
 } from "../main/types"
 import {
   classifyAgentStreamDelivery,
@@ -678,6 +681,40 @@ const api = {
     },
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:mergeThreadValues", { threadId, patch })
+    },
+    getSubagentTranscripts: (threadId: string): Promise<Record<string, unknown>> => {
+      return ipcRenderer.invoke("threads:getSubagentTranscripts", threadId)
+    },
+    getSubagentTranscript: (
+      threadId: string,
+      subagentId: string,
+      before?: number
+    ): Promise<SubagentTranscriptPage> => {
+      return ipcRenderer.invoke("threads:getSubagentTranscript", { threadId, subagentId, before })
+    },
+    exportSubagentTranscriptBlob: (
+      threadId: string,
+      subagentId: string,
+      messageIndex: number,
+      expectedMessageId: string,
+      field: SubagentTranscriptBlobField
+    ): Promise<SubagentTranscriptBlobExportResult> => {
+      return ipcRenderer.invoke("threads:exportSubagentTranscriptBlob", {
+        threadId,
+        subagentId,
+        messageIndex,
+        expectedMessageId,
+        field
+      })
+    },
+    persistSubagentTranscripts: (
+      threadId: string,
+      transcripts: Record<string, unknown>
+    ): Promise<Record<string, unknown>> => {
+      return ipcRenderer.invoke("threads:persistSubagentTranscripts", {
+        threadId,
+        transcripts
+      })
     },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)

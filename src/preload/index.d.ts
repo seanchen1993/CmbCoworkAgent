@@ -43,7 +43,10 @@ import type {
   ForkableCheckpoint,
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
-  ThreadForkResponse
+  ThreadForkResponse,
+  SubagentTranscriptPage,
+  SubagentTranscriptBlobExportResult,
+  SubagentTranscriptBlobField
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -912,6 +915,23 @@ interface CustomAPI {
     ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
+    getSubagentTranscripts: (threadId: string) => Promise<Record<string, unknown>>
+    getSubagentTranscript: (
+      threadId: string,
+      subagentId: string,
+      before?: number
+    ) => Promise<SubagentTranscriptPage>
+    exportSubagentTranscriptBlob: (
+      threadId: string,
+      subagentId: string,
+      messageIndex: number,
+      expectedMessageId: string,
+      field: SubagentTranscriptBlobField
+    ) => Promise<SubagentTranscriptBlobExportResult>
+    persistSubagentTranscripts: (
+      threadId: string,
+      transcripts: Record<string, unknown>
+    ) => Promise<Record<string, unknown>>
     delete: (threadId: string) => Promise<void>
     getMessages: (threadId: string) => Promise<Message[]>
     appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
