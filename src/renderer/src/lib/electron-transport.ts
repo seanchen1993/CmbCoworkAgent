@@ -347,6 +347,58 @@ interface AccumulatedToolCall {
   id: string
   name: string
   args: string // Accumulated JSON string
+  parsedArgs?: Record<string, unknown>
+  jsonDepth: number
+  jsonInString: boolean
+  jsonEscaped: boolean
+  jsonStarted: boolean
+  jsonComplete: boolean
+  jsonInvalid: boolean
+}
+
+function scanAccumulatedToolCallJson(call: AccumulatedToolCall, fragment: string): void {
+  for (const character of fragment) {
+    if (call.jsonInvalid) return
+    if (call.jsonComplete) {
+      if (!/\s/.test(character)) call.jsonInvalid = true
+      continue
+    }
+    if (!call.jsonStarted) {
+      if (/\s/.test(character)) continue
+      if (character !== "{" && character !== "[") {
+        call.jsonInvalid = true
+        continue
+      }
+      call.jsonStarted = true
+      call.jsonDepth = 1
+      continue
+    }
+    if (call.jsonInString) {
+      if (call.jsonEscaped) call.jsonEscaped = false
+      else if (character === "\\") call.jsonEscaped = true
+      else if (character === '"') call.jsonInString = false
+      continue
+    }
+    if (character === '"') call.jsonInString = true
+    else if (character === "{" || character === "[") call.jsonDepth += 1
+    else if (character === "}" || character === "]") {
+      call.jsonDepth -= 1
+      if (call.jsonDepth < 0) call.jsonInvalid = true
+      else if (call.jsonDepth === 0) call.jsonComplete = true
+    }
+  }
+}
+
+function parseCompletedAccumulatedToolCall(call: AccumulatedToolCall): void {
+  if (call.parsedArgs || !call.jsonComplete || call.jsonInvalid) return
+  try {
+    const parsed = JSON.parse(call.args)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      call.parsedArgs = parsed as Record<string, unknown>
+    }
+  } catch {
+    // Structural completion is a cheap parse gate, not a full JSON validator.
+  }
 }
 
 // Completed tool call with parsed args
@@ -2007,17 +2059,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     )
     if (this.currentChunkMessageId === previousActiveMessageId) {
       for (const pendingToolCall of this.accumulatedToolCalls.values()) {
-        let args: Record<string, unknown> = {}
-        if (pendingToolCall.args) {
-          try {
-            const parsed = JSON.parse(pendingToolCall.args)
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-              args = parsed as Record<string, unknown>
-            }
-          } catch {
-            // Partial args still provide stable call-id/name evidence.
-          }
-        }
+        const args = pendingToolCall.parsedArgs ?? {}
         const existing = previousToolCallsById.get(pendingToolCall.id)
         previousToolCallsById.set(pendingToolCall.id, {
           id: pendingToolCall.id,
@@ -6476,21 +6518,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const accumulated = this.accumulatedToolCalls.get(
       this.getAccumulatedToolCallKey(id, accumulationScope)
     )
-    if (!accumulated?.name || !accumulated.args) return null
-
-    try {
-      const args = JSON.parse(accumulated.args)
-      if (!args || typeof args !== "object" || Array.isArray(args)) return null
-      return {
-        id: accumulated.id,
-        name: accumulated.name,
-        args: this.normalizeToolCallArgsForDisplay(
-          accumulated.name,
-          args as Record<string, unknown>
-        )
-      }
-    } catch {
-      return null
+    if (!accumulated?.name || !accumulated.parsedArgs) return null
+    return {
+      id: accumulated.id,
+      name: accumulated.name,
+      args: this.normalizeToolCallArgsForDisplay(accumulated.name, accumulated.parsedArgs)
     }
   }
 
@@ -6652,7 +6684,17 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const accumulationKey = this.getAccumulatedToolCallKey(id, accumulationScope)
       let accumulated = this.accumulatedToolCalls.get(accumulationKey)
       if (!accumulated) {
-        accumulated = { id, name: chunk.name || "", args: "" }
+        accumulated = {
+          id,
+          name: chunk.name || "",
+          args: "",
+          jsonDepth: 0,
+          jsonInString: false,
+          jsonEscaped: false,
+          jsonStarted: false,
+          jsonComplete: false,
+          jsonInvalid: false
+        }
         this.accumulatedToolCalls.set(accumulationKey, accumulated)
       }
 
@@ -6660,7 +6702,27 @@ export class ElectronIPCTransport implements UseStreamTransport {
         accumulated.name = chunk.name
       }
       if (chunk.args) {
-        accumulated.args = this.mergeToolCallChunkArgs(accumulated.args, chunk.args)
+        const previousArgs = accumulated.args
+        if (chunk.args === previousArgs && accumulated.parsedArgs) {
+          continue
+        }
+        const isCumulativeGrowth =
+          previousArgs.length > 0 &&
+          chunk.args.length > previousArgs.length &&
+          chunk.args.startsWith(previousArgs)
+        const mergedArgs = this.mergeToolCallChunkArgs(previousArgs, chunk.args)
+        if (mergedArgs !== previousArgs) {
+          // In auto mode the merger either accepts an explicit cumulative
+          // prefix or appends this fragment. Scan only newly arrived bytes;
+          // checking the merged string's full prefix here would itself turn
+          // ordinary delta streams back into quadratic work.
+          scanAccumulatedToolCallJson(
+            accumulated,
+            isCumulativeGrowth ? chunk.args.slice(previousArgs.length) : chunk.args
+          )
+          accumulated.args = mergedArgs
+          parseCompletedAccumulatedToolCall(accumulated)
+        }
       }
       pruneMapToLimit(this.accumulatedToolCalls, MAX_TRACKED_TOOL_CALLS)
     }
@@ -6716,7 +6778,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * Tool calls are streamed incrementally, so we accumulate args until we have enough
    */
   private processToolCallChunks(
-    chunks: Array<{ id?: string; name?: string; args?: string }>,
+    chunks: Array<{ id?: string; name?: string; args?: string; index?: number }>,
     threadId: string,
     parentMessageId: string
   ): StreamEvent[] {
@@ -6724,29 +6786,26 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.accumulateToolCallChunks(chunks)
 
     for (const chunk of chunks) {
-      if (!chunk.id) continue
-      const accumulated = this.accumulatedToolCalls.get(chunk.id)
+      const id = this.resolveToolCallChunkId(chunk)
+      if (!id) continue
+      const accumulated = this.accumulatedToolCalls.get(this.getAccumulatedToolCallKey(id))
       if (!accumulated) continue
 
       // Check if this is a "task" tool call and try to parse args
-      if (accumulated.name === "task") {
-        try {
-          const args = JSON.parse(accumulated.args)
-          if (args.subagent_type) {
-            const registration = this.registerSubagent(chunk.id, args, parentMessageId)
-            if (!registration.created && !registration.updated) continue
-            events.push(this.createSubagentEvent())
-            const seed = this.createSubagentPromptSeedEvent(
-              threadId,
-              registration.executionId,
-              args,
-              chunk.id,
-              parentMessageId
-            )
-            if (seed) events.push(seed)
-          }
-        } catch {
-          // Args not complete yet, continue accumulating
+      if (accumulated.name === "task" && accumulated.parsedArgs) {
+        const args = accumulated.parsedArgs
+        if (args.subagent_type) {
+          const registration = this.registerSubagent(id, args, parentMessageId)
+          if (!registration.created && !registration.updated) continue
+          events.push(this.createSubagentEvent())
+          const seed = this.createSubagentPromptSeedEvent(
+            threadId,
+            registration.executionId,
+            args,
+            id,
+            parentMessageId
+          )
+          if (seed) events.push(seed)
         }
       }
     }

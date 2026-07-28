@@ -117,7 +117,7 @@ function aiMessageChunk(input: {
   id?: string
   content?: unknown
   reasoning?: string
-  toolCallChunks?: Array<{ id?: string; name?: string; args?: string }>
+  toolCallChunks?: Array<{ id?: string; name?: string; args?: string; index?: number }>
 }): unknown {
   return {
     id: ["langchain_core", "messages", "AIMessageChunk"],
@@ -4270,6 +4270,92 @@ async function testCoordinatorToolCallChunksHydrateDisplayedArgs(): Promise<void
   assert(
     toolCalls[0]?.args?.prompt === "Find Elasticsearch usages",
     "completed chunk should preserve full prompt args for raw argument display"
+  )
+}
+
+async function testLargeCoordinatorToolArgsParseOnlyAfterCompletion(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const largeContent = `${"function value() { return \\\"ok\\\" }\n".repeat(4096)}tail`
+  const argsText = JSON.stringify({ path: "large.ts", content: largeContent })
+  const chunkSize = 257
+  let completedEvents: ReturnType<typeof convertCoordinator> = []
+
+  for (let offset = 0; offset < argsText.length; offset += chunkSize) {
+    completedEvents = convertCoordinator(
+      transport,
+      streamMessageEvent(
+        aiMessageChunk({
+          id: "coordinator-ai-large-args",
+          toolCallChunks: [
+            {
+              id: "write-large-file",
+              name: "write_file",
+              args: argsText.slice(offset, offset + chunkSize)
+            }
+          ]
+        }),
+        { langgraph_node: "agent" }
+      )
+    )
+  }
+
+  const message = firstMessage(completedEvents)
+  const toolCalls = message.tool_calls as Array<{
+    id?: string
+    name?: string
+    args?: Record<string, unknown>
+  }>
+  assert(
+    toolCalls[0]?.args?.content === largeContent,
+    "large streamed file arguments should parse once complete without losing escaped content"
+  )
+}
+
+async function testCoordinatorTaskIdlessContinuationRegistersSubagent(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const firstEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-idless-task",
+        toolCallChunks: [
+          {
+            id: "task-idless-chunks",
+            name: "task",
+            args: '{"subagent_type":"verifier",',
+            index: 0
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  assert(
+    customEvents(firstEvents, "subagents").length === 0,
+    "incomplete task args should not register a subagent"
+  )
+
+  const completedEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "coordinator-ai-idless-task",
+        toolCallChunks: [
+          {
+            args: '"description":"Inspect streamed task"}',
+            index: 0
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const subagents = customEvents(completedEvents, "subagents").at(-1)?.subagents as
+    | Array<Record<string, unknown>>
+    | undefined
+  assert(
+    subagents?.some((subagent) => subagent.toolCallId === "task-idless-chunks"),
+    "an id-less final task chunk should register the accumulated task by index"
   )
 }
 
@@ -11671,6 +11757,10 @@ async function run(): Promise<void> {
   console.log("PASS worker focus drops live buffer across close/reopen")
   await testCoordinatorToolCallChunksHydrateDisplayedArgs()
   console.log("PASS electron transport hydrates coordinator tool-call chunk args")
+  await testLargeCoordinatorToolArgsParseOnlyAfterCompletion()
+  console.log("PASS electron transport handles large streamed file arguments")
+  await testCoordinatorTaskIdlessContinuationRegistersSubagent()
+  console.log("PASS electron transport registers task calls completed by id-less chunks")
   await testCoordinatorToolCallChunksHandleCumulativeProviderArgs()
   console.log("PASS electron transport handles cumulative tool-call chunk args")
   await testReadWorkerStateIsQuietLikeTaskOutput()

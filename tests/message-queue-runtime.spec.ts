@@ -248,6 +248,41 @@ function testStreamToolCallChunksPersistCompleteArguments(): void {
     JSON.stringify({ text: "bananana" }),
     "explicit deltas preserve legitimate repeated boundary bytes"
   )
+
+  const largeContent = "x".repeat(256 * 1024)
+  const largeArgs = JSON.stringify({ path: "large.txt", content: largeContent })
+  const largeAccumulator = { snapshots: [], chunks: [] }
+  let largeToolCalls: ReturnType<typeof accumulateStreamToolCallChunks> = []
+  const chunkSize = 257
+  for (let offset = 0; offset < largeArgs.length; offset += chunkSize) {
+    largeToolCalls = accumulateStreamToolCallChunks(
+      largeAccumulator,
+      offset === 0 ? [{ id: "call-large", name: "write_file", args: {} }] : [],
+      [
+        {
+          ...(offset === 0 ? { id: "call-large", name: "write_file" } : {}),
+          args: largeArgs.slice(offset, offset + chunkSize),
+          index: 0,
+          contentMode: "delta"
+        }
+      ]
+    )
+  }
+  assertEqual(
+    (largeToolCalls[0]?.args.content as string | undefined)?.length,
+    largeContent.length,
+    "large streamed file content is reconstructed without losing bytes"
+  )
+  assertEqual(
+    largeAccumulator.snapshots.length,
+    0,
+    "incremental accumulation does not retain repeated snapshot history"
+  )
+  assertEqual(
+    largeAccumulator.chunks.length,
+    0,
+    "incremental accumulation does not retain raw chunk history"
+  )
 }
 
 function testCompletedAssistantIdentityUsesCurrentProviderOccurrence(): void {
