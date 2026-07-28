@@ -4197,14 +4197,15 @@ function ProjectCard({
     : detail?.projectState
 
   return (
-    <article
-      ref={cardRef}
-      role="button"
-      tabIndex={0}
-      className={cn(
-        "mt-2 group relative w-[360px] flex-none cursor-pointer overflow-hidden rounded-xl border border-border/80 bg-background-elevated/90 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:border-primary/40 hover:shadow-[0_18px_45px_rgb(41_37_36/0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        archived && "bg-muted/45 opacity-85"
-      )}
+    <div className="group mt-2 pt-1 pb-1">
+      <article
+        ref={cardRef}
+        role="button"
+        tabIndex={0}
+        className={cn(
+          "relative w-[360px] flex-none cursor-pointer overflow-hidden rounded-xl border border-border/80 bg-background-elevated/90 shadow-sm transition-all duration-200 group-hover:-translate-y-1 group-hover:border-primary/40 group-hover:shadow-[0_18px_45px_rgb(41_37_36/0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          archived && "bg-muted/45 opacity-85"
+        )}
       onClick={() => onOpenProject(project.projectId)}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -4327,7 +4328,8 @@ function ProjectCard({
           ) : null}
         </div>
       </div>
-    </article>
+      </article>
+    </div>
   )
 }
 
@@ -6083,82 +6085,83 @@ function FeatureDetailPage({
       const skippable = canSkipNode(node)
       const skipping = skippingNodeId === node.id
       return (
-        <div
-          key={node.id}
-          title={node.label}
-          className={cn(
-            "group/node flex h-[104px] min-w-0  flex-col rounded-xl border bg-background/75  transition-all duration-200",
-            selected
-              ? "border-status-info/35 shadow-md ring-1 ring-status-info/10"
-              : "border-border/80 hover:-translate-y-0.5 hover:border-primary/35 hover:bg-background/85 hover:shadow-md"
-          )}
-        >
-          <button
-            type="button"
-            onClick={() => {
-              setSelectedNodeId(node.id)
-            }}
-            aria-pressed={selected}
+        <div key={node.id} className="group/node pt-0.5 pb-0.5">
+          <div
+            title={node.label}
             className={cn(
-              "flex min-h-0 w-full flex-1 cursor-pointer flex-col justify-between gap-2 rounded-t-xl px-2.5 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              "flex h-[104px] min-w-0 flex-col rounded-xl border bg-background/75 transition-all duration-200",
+              selected
+                ? "border-status-info/35 shadow-md ring-1 ring-status-info/10"
+                : "border-border/80 group-hover/node:-translate-y-0.5 group-hover/node:border-primary/35 group-hover/node:bg-background/85 group-hover/node:shadow-md"
             )}
           >
-            <span className="flex min-w-0 items-start gap-2">
-              <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
-              <span className="min-w-0 flex-1">
-                <span className="block line-clamp-2 text-[12px] font-semibold leading-[1.35]">
-                  {node.label}
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedNodeId(node.id)
+              }}
+              aria-pressed={selected}
+              className={cn(
+                "flex min-h-0 w-full flex-1 cursor-pointer flex-col justify-between gap-2 rounded-t-xl px-2.5 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              )}
+            >
+              <span className="flex min-w-0 items-start gap-2">
+                <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block line-clamp-2 text-[12px] font-semibold leading-[1.35]">
+                    {node.label}
+                  </span>
+                  <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                    {node.status.label}
+                  </span>
                 </span>
-                <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                  {node.status.label}
+              </span>
+              <div className="flex items-center justify-between">
+                <span className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                  <span className="rounded-full border border-border/70 bg-muted/40 px-1.5 py-0.5">
+                    {node.artifacts.length} 产物
+                  </span>
+                  <span className="rounded-full border border-border/70 bg-muted/40 px-1.5 py-0.5">
+                    {node.hooks.length} 事件
+                  </span>
                 </span>
-              </span>
-            </span>
-            <div className="flex items-center justify-between">
-               <span className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
-              <span className="rounded-full border border-border/70 bg-muted/40 px-1.5 py-0.5">
-                {node.artifacts.length} 产物
-              </span>
-              <span className="rounded-full border border-border/70 bg-muted/40 px-1.5 py-0.5">
-                {node.hooks.length} 事件
-              </span>
-            </span>
-              <div
-                className={cn(
-                  "mt-auto flex  items-end ",
-                  skippable ? "border-t border-border/60" : "border-t border-transparent"
-                )}
-              >
-                {skippable && (
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-6 w-full gap-1 rounded-md border-status-info/30 bg-background/95 px-2 text-[10px] shadow-sm"
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            void handleSkipNode(node)
-                          }}
-                          disabled={skippingNodeId !== null}
-                        >
-                          {skipping ? <Loader2 className="size-3 animate-spin" /> : <SkipForward className="size-3" />}
-                          跳过当前节点
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="z-[70] max-w-72">
-                        跳过当前节点，不再产生对应阶段产物
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                )}
+                <div
+                  className={cn(
+                    "mt-auto flex items-end",
+                    skippable ? "border-t border-border/60" : "border-t border-transparent"
+                  )}
+                >
+                  {skippable && (
+                    <TooltipProvider delayDuration={150}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-6 w-full gap-1 rounded-md border-status-info/30 bg-background/95 px-2 text-[10px] shadow-sm"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              void handleSkipNode(node)
+                            }}
+                            disabled={skippingNodeId !== null}
+                          >
+                            {skipping ? <Loader2 className="size-3 animate-spin" /> : <SkipForward className="size-3" />}
+                            跳过当前节点
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="z-[70] max-w-72">
+                          跳过当前节点，不再产生对应阶段产物
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
+                </div>
               </div>
-            </div>
 
-          </button>
+            </button>
 
+          </div>
         </div>
       )
     }
@@ -6180,41 +6183,42 @@ function FeatureDetailPage({
                 )
 
                 return (
-                  <button
-                    key={group.key}
-                    ref={(element) => {
-                      groupButtonRefs.current[group.key] = element
-                    }}
-                    type="button"
-                    onClick={() => {
-                      if (currentNode) setSelectedNodeId(currentNode.id)
-                    }}
-                    aria-pressed={selected}
-                    title={group.label}
-                    className={cn(
-                      "group/stage flex min-w-0 min-h-[96px] cursor-pointer flex-col gap-2 rounded-xl border px-3 py-3 text-left  transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      selected
-                        ? "border-status-info/60 bg-status-info/10 shadow-md"
-                        : "border-border/80 bg-background/70 hover:-translate-y-0.5 hover:border-primary/45 hover:shadow-md"
-                    )}
-                  >
-                    <div className="flex min-w-0 items-start gap-2">
-                      {currentNode ? statusIcon(currentNode.status) : <Circle className="size-4 text-muted-foreground" />}
-                      <div className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] font-semibold">{group.label}</span>
-                        <span className="mt-1 block truncate text-[11px] text-muted-foreground">
-                          {currentNode?.label ?? "暂无节点"}
+                  <div key={group.key} className="group/stage pt-0.5 pb-0.5">
+                    <button
+                      ref={(element) => {
+                        groupButtonRefs.current[group.key] = element
+                      }}
+                      type="button"
+                      onClick={() => {
+                        if (currentNode) setSelectedNodeId(currentNode.id)
+                      }}
+                      aria-pressed={selected}
+                      title={group.label}
+                      className={cn(
+                        "flex min-w-0 min-h-[96px] cursor-pointer flex-col gap-2 rounded-xl border px-3 py-3 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        selected
+                          ? "border-status-info/60 bg-status-info/10 shadow-md"
+                          : "border-border/80 bg-background/70 group-hover/stage:-translate-y-0.5 group-hover/stage:border-primary/45 group-hover/stage:shadow-md"
+                      )}
+                    >
+                      <div className="flex min-w-0 items-start gap-2">
+                        {currentNode ? statusIcon(currentNode.status) : <Circle className="size-4 text-muted-foreground" />}
+                        <div className="min-w-0 flex-1">
+                          <span className="block truncate text-[13px] font-semibold">{group.label}</span>
+                          <span className="mt-1 block truncate text-[11px] text-muted-foreground">
+                            {currentNode?.label ?? "暂无节点"}
+                          </span>
+                        </div>
+                      </div>
+                      <ProgressBar progressIndex={groupProgress} totalNodes={group.nodes.length} />
+                      <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
+                        <span className="truncate">{group.nodes.length} 个节点</span>
+                        <span className="shrink-0">
+                          {groupProgress}/{group.nodes.length}
                         </span>
                       </div>
-                    </div>
-                    <ProgressBar progressIndex={groupProgress} totalNodes={group.nodes.length} />
-                    <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
-                      <span className="truncate">{group.nodes.length} 个节点</span>
-                      <span className="shrink-0">
-                        {groupProgress}/{group.nodes.length}
-                      </span>
-                    </div>
-                  </button>
+                    </button>
+                  </div>
                 )
               })}
           </div>
