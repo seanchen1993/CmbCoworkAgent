@@ -2752,7 +2752,7 @@ export function resolveHookLogDir(): string {
 export function getHookLogDir(): string {
   getOpenworkDir()
   const dir = resolveHookLogDir()
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
   return dir
 }
 

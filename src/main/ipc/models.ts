@@ -26,8 +26,7 @@ import { trackEvent } from "../services/event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "../services/adoption-tracker"
 import { scheduleMarkCodeAdoptionCommitsPushed } from "../services/code-adoption-push-updater"
 import { CMBDEVCLAW_INTERNAL_GIT_ENV, markInAppCommitProcessed } from "../services/git-hook-service"
-import { getTracesDir } from "../agent/trace/collector"
-import type { AgentTrace } from "../agent/trace/types"
+import { getTracesDir, parseStoredTraceLine } from "../agent/trace/collector"
 import {
   coordinatorWorkerManager,
   deleteCoordinatorWorkerArtifacts
@@ -224,7 +223,7 @@ async function collectThreadSkillStatsAsync(threadId: string): Promise<string[]>
       for (const line of raw.trim().split("\n")) {
         if (!line.trim()) continue
         try {
-          const trace = JSON.parse(line) as AgentTrace
+          const trace = parseStoredTraceLine(line)
           if (Array.isArray(trace.usedSkills)) {
             for (const skill of trace.usedSkills) skillSet.add(skill)
           }

@@ -1,4 +1,5 @@
 import { getHookLoggingConfig } from "../storage"
+import { redactLogValue } from "../log-redaction"
 import { persistHookExecutionRecord } from "./persistence"
 import type { ScopeSkipReason } from "./scope"
 import type { HookConfig, HookEvent, HookResult } from "./types"
@@ -215,10 +216,12 @@ export function buildHookResultRecord(
 ): HookExecutedEnvelope | null {
   const cfg = getHookLoggingConfig()
   if (!cfg.enabled) return null
-  return buildExecutedEnvelope(event, hook as ScopedHook, result, cfg.diagnostic, {
-    preview: true,
-    turnId
-  })
+  return redactLogValue(
+    buildExecutedEnvelope(event, hook as ScopedHook, result, cfg.diagnostic, {
+      preview: true,
+      turnId
+    })
+  ) as HookExecutedEnvelope
 }
 
 function buildPersistedHookResultRecord(
@@ -229,10 +232,12 @@ function buildPersistedHookResultRecord(
 ): HookExecutedEnvelope | null {
   const cfg = getHookLoggingConfig()
   if (!cfg.enabled) return null
-  return buildExecutedEnvelope(event, hook as ScopedHook, result, cfg.diagnostic, {
-    preview: false,
-    turnId
-  })
+  return redactLogValue(
+    buildExecutedEnvelope(event, hook as ScopedHook, result, cfg.diagnostic, {
+      preview: false,
+      turnId
+    })
+  ) as HookExecutedEnvelope
 }
 
 export function buildHookSkippedRecord(
@@ -244,7 +249,7 @@ export function buildHookSkippedRecord(
   const cfg = getHookLoggingConfig()
   // Skipped rows are diagnostic-only — too noisy to show by default.
   if (!cfg.enabled || !cfg.diagnostic) return null
-  return buildSkippedEnvelope(event, hook, reason, turnId)
+  return redactLogValue(buildSkippedEnvelope(event, hook, reason, turnId)) as HookExecutedEnvelope
 }
 
 export function persistHookRecordOnce(envelope: HookExecutedEnvelope): void {
