@@ -57,6 +57,8 @@ const BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME =
   "size-8 shrink-0 rounded-md transition-colors hover:bg-muted"
 const BROWSER_INPUT_ICON_BUTTON_CLASSNAME = "absolute right-1 size-6 rounded"
 const BROWSER_CONSOLE_ICON_BUTTON_CLASSNAME = "size-7 rounded transition-colors hover:bg-muted"
+const BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME =
+  "h-8 min-w-8 shrink-0 rounded-md px-1 transition-colors hover:bg-muted"
 
 function isInitialBrowserPage(url: string): boolean {
   return !url || url === "about:blank"
@@ -971,17 +973,17 @@ export function BrowserPanel({
           onClick={() => void resetToHome()}
         />
         <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          className={BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME}
           side="left"
           icon={
-            <div className="relative">
+            <span className="inline-flex items-center gap-1">
               <Terminal className="size-4" strokeWidth={1.8} />
               {consoleCount > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
+                <span className="min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
                   {consoleCount > 99 ? "99+" : consoleCount}
                 </span>
               )}
-            </div>
+            </span>
           }
           popoverContent={consoleToggleTitle}
           aria-label={consoleToggleTitle}

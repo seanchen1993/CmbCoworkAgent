@@ -12,10 +12,7 @@ import {
 } from "@/components/ui/dialog"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
-import {
-  DEFAULT_BROWSER_CDP_PORT,
-  type BrowserCdpConfig
-} from "../../../../shared/browser-types"
+import { DEFAULT_BROWSER_CDP_PORT, type BrowserCdpConfig } from "../../../../shared/browser-types"
 
 interface BrowserCdpConfigCardProps {
   className?: string
@@ -49,7 +46,6 @@ export function BrowserCdpConfigCard({
 }: BrowserCdpConfigCardProps): React.JSX.Element {
   const [cdpConfig, setCdpConfig] = useState<BrowserCdpConfig | null>(null)
   const [cdpPortInput, setCdpPortInput] = useState(String(DEFAULT_BROWSER_CDP_PORT))
-  const [cdpPortError, setCdpPortError] = useState<string | null>(null)
   const [isSavingCdpConfig, setIsSavingCdpConfig] = useState(false)
   const [restartDialogOpen, setRestartDialogOpen] = useState(false)
   const [isRestartingApp, setIsRestartingApp] = useState(false)
@@ -62,10 +58,11 @@ export function BrowserCdpConfigCard({
         if (cancelled) return
         setCdpConfig(nextConfig)
         setCdpPortInput(String(nextConfig.port))
-        setCdpPortError(null)
       })
       .catch((error) => {
-        console.error(`[BrowserCdpConfigCard] Failed to load Browser CDP config: ${formatError(error)}`)
+        console.error(
+          `[BrowserCdpConfigCard] Failed to load Browser CDP config: ${formatError(error)}`
+        )
         if (cancelled) return
         const fallbackConfig: BrowserCdpConfig = {
           enabled: true,
@@ -73,7 +70,6 @@ export function BrowserCdpConfigCard({
         }
         setCdpConfig(fallbackConfig)
         setCdpPortInput(String(fallbackConfig.port))
-        setCdpPortError(null)
         toast.error("读取浏览器 配置失败，已回退默认值")
       })
 
@@ -86,21 +82,14 @@ export function BrowserCdpConfigCard({
     setCdpConfig((current) => (current ? { ...current, enabled } : current))
   }, [])
 
-  const handleCdpPortChange = useCallback((value: string) => {
-    setCdpPortInput(value)
-    setCdpPortError((current) => (current ? null : current))
-  }, [])
-
   const handleSaveCdpConfig = useCallback(async () => {
     if (!cdpConfig) return
 
     let port: number
     try {
       port = parseBrowserCdpPortInput(cdpPortInput)
-      setCdpPortError(null)
     } catch (error) {
       const message = formatError(error)
-      setCdpPortError(message)
       toast.error(message)
       return
     }
@@ -113,22 +102,26 @@ export function BrowserCdpConfigCard({
       })
       setCdpConfig(saved)
       setCdpPortInput(String(saved.port))
-      setCdpPortError(null)
       onSaved?.(saved)
       setIsRestartingApp(false)
       setRestartDialogOpen(true)
     } catch (error) {
-      console.error(`[BrowserCdpConfigCard] Failed to save Browser CDP config: ${formatError(error)}`)
+      console.error(
+        `[BrowserCdpConfigCard] Failed to save Browser CDP config: ${formatError(error)}`
+      )
       toast.error("保存内置浏览器配置失败")
     } finally {
       setIsSavingCdpConfig(false)
     }
   }, [cdpConfig, cdpPortInput, onSaved])
 
-  const handleRestartDialogOpenChange = useCallback((open: boolean) => {
-    if (isRestartingApp) return
-    setRestartDialogOpen(open)
-  }, [isRestartingApp])
+  const handleRestartDialogOpenChange = useCallback(
+    (open: boolean) => {
+      if (isRestartingApp) return
+      setRestartDialogOpen(open)
+    },
+    [isRestartingApp]
+  )
 
   const handleRestartAppNow = useCallback(async () => {
     setIsRestartingApp(true)
@@ -197,9 +190,7 @@ export function BrowserCdpConfigCard({
           {/*</div>*/}
 
           <div className="flex items-center justify-between gap-3">
-            <p className="text-[11px] leading-4 text-stone-500">
-              保存后需重启应用生效。
-            </p>
+            <p className="text-[11px] leading-4 text-stone-500">保存后需重启应用生效。</p>
             <Button
               type="button"
               size="sm"
@@ -235,9 +226,7 @@ export function BrowserCdpConfigCard({
             <>
               <DialogHeader>
                 <DialogTitle>内置浏览器配置已保存</DialogTitle>
-                <DialogDescription>
-                  新配置将在应用重启后生效。是否现在立刻重启？
-                </DialogDescription>
+                <DialogDescription>新配置将在应用重启后生效。是否现在立刻重启？</DialogDescription>
               </DialogHeader>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setRestartDialogOpen(false)}>
