@@ -155,7 +155,7 @@ export function BrowserCdpConfigCard({
           <p className="mt-0.5 text-[11px] text-stone-500">{description}</p>
         </div>
 
-        <div className="space-y-4 px-4 py-4">
+        <div className="space-y-2 p-2">
           <div className="flex items-center justify-between gap-4 rounded-lg border border-stone-200/80 bg-stone-50/80 px-3 py-2.5">
             <div className="min-w-0">
               <p className="text-xs font-medium text-stone-800">

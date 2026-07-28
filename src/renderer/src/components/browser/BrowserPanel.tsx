@@ -258,7 +258,7 @@ function BrowserProfileImportResultPanel({
 function BrowserWelcomePanel(): React.JSX.Element {
   return (
     <div className="absolute inset-0 z-20 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
-      <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-6 py-8">
+      <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-4 py-2">
         <div className="mb-2">
           <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
             <Globe2 className="size-8 animate-[spin_12s_linear_infinite]" strokeWidth={1.7} />
@@ -340,7 +340,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
         </div>
 
         <BrowserCdpConfigCard
-          className="mt-4"
+          className="mt-2"
           title="内置浏览器配置"
           description="在这里手动开启内置浏览器。"
         />
