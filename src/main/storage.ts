@@ -82,6 +82,14 @@ export function getCheckpointDbPath(): string {
   return join(getOpenworkDir(), "langgraph.sqlite")
 }
 
+export function getSubagentTranscriptContentDir(): string {
+  const dir = join(getOpenworkDir(), "subagent-transcript-content")
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
+}
+
 export function getLogsDir(): string {
   const dir = join(getOpenworkDir(), "logs")
   if (!existsSync(dir)) {

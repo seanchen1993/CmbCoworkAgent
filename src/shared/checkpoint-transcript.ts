@@ -11,11 +11,16 @@ import {
   orderMessagesByProviderOccurrence
 } from "./message-role-collision"
 import type { RoleCollisionMessage } from "./message-role-collision"
+import { buildSubagentTaskInvocationIdentity } from "./subagent-invocation-identity"
 
 export interface CheckpointTranscriptIndex {
   visibleMessageIds: string[]
   internalGoalMessageIds: string[]
   subagentTranscriptIds: string[]
+  subagentTranscriptInvocations: Array<{
+    toolCallId: string
+    invocationScope: string
+  }>
   visibleMessages: CheckpointTranscriptMessage[]
 }
 
@@ -555,6 +560,15 @@ function getReferencedToolCallIds(message: Record<string, unknown>): string[] {
   return [...ids]
 }
 
+function getMessageToolCalls(message: Record<string, unknown>): unknown[] {
+  const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+  const additionalKwargs = getAdditionalKwargs(message)
+  if (Array.isArray(kwargs?.tool_calls)) return kwargs.tool_calls
+  if (Array.isArray(message.tool_calls)) return message.tool_calls
+  if (Array.isArray(additionalKwargs?.tool_calls)) return additionalKwargs.tool_calls
+  return []
+}
+
 function isInternalGoalPrompt(role: string, content: unknown): boolean {
   if (role !== "user" || typeof content !== "string") return false
   const text = content.trimStart()
@@ -643,6 +657,13 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
   const subagentTranscriptIds: string[] = []
   const seenSubagentTranscriptIds = new Set<string>()
   const visibleMessages: CheckpointTranscriptMessage[] = []
+  const subagentTranscriptInvocations: Array<{
+    toolCallId: string
+    invocationScope: string
+  }> = []
+  const seenInvocations = new Set<string>()
+  const parentOccurrenceCounts = new Map<string, number>()
+  let idlessParentOccurrence = 0
 
   getCheckpointMessages(checkpoint).forEach((raw, index) => {
     if (!isRecord(raw)) return
@@ -658,6 +679,43 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
     const role = getMessageRole(raw)
     const checkpointContent = getMessageContent(raw)
     const messageId = getMessageId(raw, index)
+    if (role === "assistant") {
+      const kwargs = isRecord(raw.kwargs) ? raw.kwargs : undefined
+      const parentMessageId = readString(kwargs?.id) ?? readString(raw.id)
+      const providerOccurrence = getMessageProviderTupleFromMetadata(
+        additionalKwargs
+      )?.provider_occurrence
+      let parentOccurrence: number
+      if (providerOccurrence) {
+        parentOccurrence = providerOccurrence
+      } else if (parentMessageId) {
+        parentOccurrence = (parentOccurrenceCounts.get(parentMessageId) ?? 0) + 1
+        parentOccurrenceCounts.set(parentMessageId, parentOccurrence)
+      } else {
+        idlessParentOccurrence += 1
+        parentOccurrence = idlessParentOccurrence
+      }
+      const toolCalls = getMessageToolCalls(raw)
+      for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
+        const toolCall = toolCalls[toolIndex]
+        if (!isRecord(toolCall) || readString(toolCall.name) !== "task") continue
+        const toolCallId = readString(toolCall.id)
+        if (!toolCallId) continue
+        const invocationScope = buildSubagentTaskInvocationIdentity({
+          parentMessageId,
+          parentOccurrence,
+          parentContent: kwargs?.content ?? raw.content,
+          parentToolCalls: toolCalls,
+          taskToolCallId: toolCallId,
+          taskToolCallIndex: toolIndex,
+          taskArgs: toolCall.args
+        })
+        const invocationKey = JSON.stringify([toolCallId, invocationScope])
+        if (seenInvocations.has(invocationKey)) continue
+        seenInvocations.add(invocationKey)
+        subagentTranscriptInvocations.push({ toolCallId, invocationScope })
+      }
+    }
     const rawInternalGoalPrompt = isInternalGoalPrompt(role, checkpointContent)
     if (rawInternalGoalPrompt) {
       internalGoalMessageIds.push(messageId)
@@ -690,11 +748,11 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
     ...message,
     renderId: normalizedVisibleMessages[index]?.id ?? message.id
   }))
-
   return {
     visibleMessageIds,
     internalGoalMessageIds,
     subagentTranscriptIds,
+    subagentTranscriptInvocations,
     visibleMessages: indexedVisibleMessages
   }
 }
@@ -896,13 +954,54 @@ function buildOrder(
 
 function filterSubagentTranscripts(
   value: unknown,
-  ids: readonly string[]
+  ids: readonly string[],
+  invocations: readonly { toolCallId: string; invocationScope: string }[]
 ): Record<string, unknown> | undefined {
   if (!isRecord(value) || ids.length === 0) return undefined
   const next: Record<string, unknown> = {}
-  for (const id of ids) {
-    const transcript = value[id]
-    if (Array.isArray(transcript)) next[id] = cloneJsonValue(transcript)
+  const rawIds = new Set(ids)
+  const invocationKeys = new Set(
+    invocations.map((invocation) =>
+      JSON.stringify([invocation.toolCallId, invocation.invocationScope])
+    )
+  )
+  for (const [executionId, transcript] of Object.entries(value)) {
+    if (!Array.isArray(transcript)) continue
+    const prompt = transcript.find(
+      (message) =>
+        isRecord(message) &&
+        typeof message.subagent_tool_call_id === "string" &&
+        typeof message.subagent_invocation_scope === "string"
+    )
+    if (isRecord(prompt)) {
+      const key = JSON.stringify([
+        prompt.subagent_tool_call_id,
+        prompt.subagent_invocation_scope
+      ])
+      if (invocationKeys.has(key)) {
+        next[executionId] = cloneJsonValue(transcript)
+        continue
+      }
+      // Pre-v1 metadata stored a mutable UI render ID. It cannot be compared to
+      // the shared checkpoint identity, so retain its raw family conservatively.
+      if (
+        typeof prompt.subagent_invocation_scope === "string" &&
+        prompt.subagent_invocation_scope.startsWith("task-v1-")
+      ) {
+        continue
+      }
+    }
+
+    // Legacy buckets have no parent identity. Preserve the matching raw-ID
+    // family rather than silently dropping scoped historical records; new
+    // records use the exact invocation path above and do not leak past a fork.
+    const scopedMatch = /^(.*)::(?:execution-\d+|invocation-[a-z0-9-]+)$/.exec(executionId)
+    const promptToolCallId =
+      isRecord(prompt) && typeof prompt.subagent_tool_call_id === "string"
+        ? prompt.subagent_tool_call_id
+        : undefined
+    const rawToolCallId = promptToolCallId ?? scopedMatch?.[1] ?? executionId
+    if (rawIds.has(rawToolCallId)) next[executionId] = cloneJsonValue(transcript)
   }
   return Object.keys(next).length > 0 ? next : undefined
 }
@@ -934,7 +1033,8 @@ export function buildFilteredThreadValues(
   )
   const subagentTranscripts = filterSubagentTranscripts(
     sourceThreadValues[SUBAGENT_TRANSCRIPTS_KEY],
-    transcriptIndex.subagentTranscriptIds
+    transcriptIndex.subagentTranscriptIds,
+    transcriptIndex.subagentTranscriptInvocations
   )
 
   if (messageTimes) next[MESSAGE_TIMES_KEY] = messageTimes

@@ -68,6 +68,7 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  SubagentTranscriptBlobField,
   ThreadUpdateParams,
   ThreadValuesMergeParams
 } from "../types"
@@ -108,9 +109,27 @@ import {
 } from "@langchain/langgraph-checkpoint"
 import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
 import { buildHarnessFeatureAgentContext } from "../harness-board/service"
+import {
+  acquireSubagentTranscriptBlobReadPin,
+  advanceSubagentTranscriptReferenceEpoch,
+  buildSubagentTranscriptStartupManifests,
+  compactSubagentTranscriptManifests,
+  exportSubagentTranscriptBlobValue,
+  getSubagentTranscriptReferenceEpoch,
+  hydrateSubagentTranscriptManifestPage,
+  mergeSubagentTranscriptManifestMessages,
+  quarantineSubagentTranscriptBlobGcCandidates,
+  removeQuarantinedSubagentTranscriptBlobs,
+  scanSubagentTranscriptBlobGcCandidates,
+  sliceSubagentTranscriptManifestPage,
+  withSubagentTranscriptContentMutationLock
+} from "../services/subagent-transcript-content-store"
+import {
+  SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY,
+  isSubagentTranscriptBlobRef
+} from "../../shared/subagent-transcript-storage"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
-
 interface ExportAttachment {
   filename: string
 }
@@ -334,9 +353,22 @@ function serializeThreadRow(row: NonNullable<ReturnType<typeof getThread>>): Thr
     updated_at: new Date(row.updated_at),
     metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     status: row.status as Thread["status"],
-    thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+    // Subagent transcripts can contain thousands of manifest entries. They
+    // travel only through the dedicated transcript IPC; returning them from
+    // every unrelated update/merge/fork response repeatedly structured-clones
+    // the entire history and defeats the sidecar storage boundary.
+    thread_values: threadValuesWithoutSubagentTranscripts(row.thread_values),
     title: row.title ?? undefined
   }
+}
+
+function threadValuesWithoutSubagentTranscripts(
+  raw: string | null | undefined
+): Record<string, unknown> | undefined {
+  if (!raw) return undefined
+  const values = parseThreadValues(raw)
+  delete values[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+  return values
 }
 
 function mergeThreadMessageTranscripts(
@@ -1217,13 +1249,16 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       targetSaver = null
       await verifyForkCheckpointPersisted(targetThreadId, forkCheckpoint.id)
 
-      dbCreateThread(targetThreadId, targetMetadata)
-      rowCreated = true
-
-      const row = dbUpdateThread(targetThreadId, {
-        thread_values: JSON.stringify(filteredThreadValues)
+      const row = await withSubagentTranscriptContentMutationLock(async () => {
+        dbCreateThread(targetThreadId, targetMetadata)
+        rowCreated = true
+        const updated = dbUpdateThread(targetThreadId, {
+          thread_values: JSON.stringify(filteredThreadValues)
+        })
+        if (!updated) throw new Error("Forked thread row was not created.")
+        advanceSubagentTranscriptReferenceEpoch()
+        return updated
       })
-      if (!row) throw new Error("Forked thread row was not created.")
       copyForkedThreadMessages({
         sourceThreadId,
         targetThreadId,
@@ -1840,6 +1875,25 @@ function safeFileName(value: string): string {
   return cleaned || "chat-session"
 }
 
+async function collectReferencedTranscriptHashesBounded(): Promise<Set<string>> {
+  const hashes = new Set<string>()
+  const chunkChars = 1024 * 1024
+  const overlapChars = 160
+  for (const row of getAllThreads()) {
+    const raw = typeof row.thread_values === "string" ? row.thread_values : ""
+    for (let offset = 0; offset < raw.length; offset += chunkChars) {
+      const start = Math.max(0, offset - overlapChars)
+      const chunk = raw.slice(start, Math.min(raw.length, offset + chunkChars))
+      const pattern = /"sha256"\s*:\s*"([a-f0-9]{64})"/g
+      for (let match = pattern.exec(chunk); match; match = pattern.exec(chunk)) {
+        hashes.add(match[1])
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+  }
+  return hashes
+}
+
 function escapeMarkdown(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/`/g, "\\`")
 }
@@ -2144,7 +2198,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       updated_at: new Date(row.updated_at),
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
       status: row.status as Thread["status"],
-      thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+      // Large subagent fields are loaded through the dedicated hydrating API;
+      // never duplicate legacy inline payloads through this general response.
+      thread_values: threadValuesWithoutSubagentTranscripts(row.thread_values),
       title: row.title
     }
   })
@@ -2283,8 +2339,18 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       if (updates.title !== undefined) updateData.title = updates.title
       if (updates.status !== undefined) updateData.status = updates.status
       if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
-      if (updates.thread_values !== undefined)
-        updateData.thread_values = JSON.stringify(updates.thread_values)
+      if (updates.thread_values !== undefined) {
+        const currentThread = getThread(threadId)
+        const currentValues = parseThreadValues(currentThread?.thread_values)
+        const safeValues = { ...updates.thread_values }
+        if (Object.prototype.hasOwnProperty.call(currentValues, SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY)) {
+          safeValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY] =
+            currentValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        } else {
+          delete safeValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        }
+        updateData.thread_values = JSON.stringify(safeValues)
+      }
 
       const row = dbUpdateThread(threadId, updateData)
       if (!row) throw new Error("Thread not found")
@@ -2297,10 +2363,272 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     "threads:mergeThreadValues",
     async (_event, { threadId, patch }: ThreadValuesMergeParams) => {
       return withThreadRunMutationLock(threadId, async () => {
-        const row = dbMergeThreadValues(threadId, patch)
+        const safePatch = { ...patch }
+        delete safePatch[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        const row = dbMergeThreadValues(threadId, safePatch)
         if (!row) throw new Error("Thread not found")
 
         return serializeThreadRow(row)
+      })
+    }
+  )
+
+  ipcMain.handle("threads:getSubagentTranscripts", async (_event, threadId: string) => {
+    return withThreadRunMutationLock(threadId, async () => {
+      const row = getThread(threadId)
+      if (!row) return {}
+      const threadValues = parseThreadValues(row.thread_values)
+      const rawTranscripts = threadValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+      // Startup is a read-only index path. Never migrate or hydrate the full
+      // unbounded history here: a legacy thread may contain thousands of large
+      // inline rows, and sidecar I/O failure must not block the main chat.
+      return buildSubagentTranscriptStartupManifests(rawTranscripts)
+    })
+  })
+
+  ipcMain.handle(
+    "threads:getSubagentTranscript",
+    async (
+      _event,
+      {
+        threadId,
+        subagentId,
+        before
+      }: { threadId: string; subagentId: string; before?: number }
+    ) => {
+      const page = await withThreadRunMutationLock(threadId, async () => {
+        const row = getThread(threadId)
+        if (!row || !subagentId) return sliceSubagentTranscriptManifestPage([], before)
+        const threadValues = parseThreadValues(row.thread_values)
+        const rawTranscripts = threadValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        const transcriptRecord =
+          rawTranscripts && typeof rawTranscripts === "object" && !Array.isArray(rawTranscripts)
+            ? (rawTranscripts as Record<string, unknown>)
+            : {}
+        const bucket = transcriptRecord[subagentId]
+        let selectedPage = sliceSubagentTranscriptManifestPage(bucket, before)
+        if (
+          !selectedPage.deferredHydration ||
+          !Array.isArray(bucket) ||
+          selectedPage.start >= selectedPage.end
+        ) {
+          return selectedPage
+        }
+
+        const deferredMessage = bucket[selectedPage.start]
+        const hasSidecar =
+          deferredMessage &&
+          typeof deferredMessage === "object" &&
+          !Array.isArray(deferredMessage) &&
+          (["content", "reasoning", "tool_calls"] as const).some((field) =>
+            isSubagentTranscriptBlobRef(
+              (deferredMessage as Record<string, unknown>)[`${field}_ref`],
+              field
+            )
+          )
+        if (hasSidecar) return selectedPage
+
+        // A legacy inline value can itself exceed the hydration budget. Compact
+        // just that selected row on demand so the bounded page gains a sidecar
+        // that the user can stream-export; never migrate the whole history here.
+        selectedPage = await withSubagentTranscriptContentMutationLock(async () => {
+          const compacted = await compactSubagentTranscriptManifests({
+            [subagentId]: [deferredMessage]
+          })
+          const compactedBucket = compacted.manifests[subagentId]
+          if (!compacted.changed || !Array.isArray(compactedBucket) || !compactedBucket[0]) {
+            return selectedPage
+          }
+          const updatedBucket = [...bucket]
+          updatedBucket[selectedPage.start] = compactedBucket[0]
+          const updatedRow = dbMergeThreadValues(threadId, {
+            [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: {
+              ...transcriptRecord,
+              [subagentId]: updatedBucket
+            }
+          })
+          if (!updatedRow) throw new Error("Thread not found")
+          advanceSubagentTranscriptReferenceEpoch()
+          return sliceSubagentTranscriptManifestPage(updatedBucket, before)
+        })
+        return selectedPage
+      })
+      // Blobs are immutable. Release both mutation locks before unbounded disk
+      // reads so opening a large record cannot delay cancel/delete or another
+      // focused request. Concurrent GC may make a blob unavailable; hydration
+      // deliberately degrades to the compact projection in that case.
+      const hydrated = await hydrateSubagentTranscriptManifestPage(page)
+      const deferredMessage = page.deferredHydration ? page.messages[0] : undefined
+      const deferredExport =
+        deferredMessage &&
+        typeof deferredMessage === "object" &&
+        !Array.isArray(deferredMessage) &&
+        typeof (deferredMessage as Record<string, unknown>).id === "string"
+          ? {
+              messageIndex: page.start,
+              expectedMessageId: (deferredMessage as Record<string, unknown>).id as string,
+              fields: (["content", "reasoning", "tool_calls"] as const).filter((field) =>
+                isSubagentTranscriptBlobRef(
+                  (deferredMessage as Record<string, unknown>)[`${field}_ref`],
+                  field
+                )
+              )
+            }
+          : undefined
+      return {
+        messages: hydrated,
+        deferredHydration: page.deferredHydration,
+        ...(deferredExport?.fields.length && { deferredExport }),
+        end: page.end,
+        start: page.start,
+        ...(page.nextBefore !== undefined && { nextBefore: page.nextBefore }),
+        total: page.total
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "threads:exportSubagentTranscriptBlob",
+    async (
+      event,
+      {
+        threadId,
+        subagentId,
+        messageIndex,
+        expectedMessageId,
+        field
+      }: {
+        threadId: string
+        subagentId: string
+        messageIndex: number
+        expectedMessageId: string
+        field: SubagentTranscriptBlobField
+      }
+    ) => {
+      let releasePin: (() => void) | undefined
+      try {
+        if (!(["content", "reasoning", "tool_calls"] as const).includes(field)) {
+          return { success: false, error: "Invalid transcript field" }
+        }
+        const ref = await withThreadRunMutationLock(threadId, async () => {
+          const row = getThread(threadId)
+          if (
+            !row ||
+            !subagentId ||
+            !expectedMessageId ||
+            !Number.isSafeInteger(messageIndex) ||
+            messageIndex < 0
+          ) {
+            return undefined
+          }
+          const rawTranscripts = parseThreadValues(row.thread_values)[
+            SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY
+          ]
+          const bucket =
+            rawTranscripts && typeof rawTranscripts === "object" && !Array.isArray(rawTranscripts)
+              ? (rawTranscripts as Record<string, unknown>)[subagentId]
+              : undefined
+          if (!Array.isArray(bucket)) return undefined
+          const message = bucket[messageIndex]
+          if (!message || typeof message !== "object" || Array.isArray(message)) return undefined
+          if ((message as Record<string, unknown>).id !== expectedMessageId) return undefined
+          const candidate = (message as Record<string, unknown>)[`${field}_ref`]
+          if (!isSubagentTranscriptBlobRef(candidate, field)) return undefined
+          await withSubagentTranscriptContentMutationLock(async () => {
+            releasePin = acquireSubagentTranscriptBlobReadPin(candidate)
+          })
+          return candidate
+        })
+        if (!ref) return { success: false, error: "完整内容引用不存在或已失效" }
+
+        const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+          title: "导出子代理完整记录字段",
+          defaultPath: `${safeFileName(`${subagentId}-${expectedMessageId}-${field}`)}.json`,
+          filters: [{ name: "JSON", extensions: ["json"] }]
+        })
+        if (result.canceled || !result.filePath) return { success: false, canceled: true }
+        await exportSubagentTranscriptBlobValue(ref, result.filePath)
+        return { success: true, filePath: result.filePath }
+      } catch (error) {
+        console.warn("[Threads] Failed to export subagent transcript blob:", error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      } finally {
+        releasePin?.()
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "threads:persistSubagentTranscripts",
+    async (
+      _event,
+      { threadId, transcripts }: { threadId: string; transcripts: Record<string, unknown> }
+    ) => {
+      return withThreadRunMutationLock(threadId, async () => {
+        return withSubagentTranscriptContentMutationLock(async () => {
+          const currentRow = getThread(threadId)
+          if (!currentRow) throw new Error("Thread not found")
+          const currentTranscripts = parseThreadValues(currentRow.thread_values)[
+            SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY
+          ]
+          const currentRecord =
+            currentTranscripts &&
+            typeof currentTranscripts === "object" &&
+            !Array.isArray(currentTranscripts)
+              ? (currentTranscripts as Record<string, unknown>)
+              : {}
+          const compacted = await compactSubagentTranscriptManifests(transcripts)
+          const mergedManifests = Object.fromEntries(
+            Object.entries(compacted.manifests).map(([subagentId, incomingMessages]) => [
+              subagentId,
+              mergeSubagentTranscriptManifestMessages(
+                currentRecord[subagentId],
+                incomingMessages
+              )
+            ])
+          )
+          const row = dbMergeThreadValues(threadId, {
+            [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: mergedManifests
+          })
+          if (!row) throw new Error("Thread not found")
+          advanceSubagentTranscriptReferenceEpoch()
+          // The database needs each full merged bucket, but the renderer only
+          // needs refs/metadata for rows in this delta. Returning a 20k-row
+          // bucket for one changed message recreates the structured-clone stall
+          // the sidecar channel is intended to avoid.
+          return Object.fromEntries(
+            Object.entries(compacted.manifests).map(([subagentId, incomingMessages]) => {
+              const mergedMessages = Array.isArray(mergedManifests[subagentId])
+                ? (mergedManifests[subagentId] as unknown[])
+                : []
+              const mergedById = new Map(
+                mergedMessages.flatMap((message) =>
+                  message &&
+                  typeof message === "object" &&
+                  !Array.isArray(message) &&
+                  typeof (message as Record<string, unknown>).id === "string"
+                    ? [[(message as Record<string, unknown>).id as string, message] as const]
+                    : []
+                )
+              )
+              const responseRows = Array.isArray(incomingMessages)
+                ? incomingMessages.flatMap((message) =>
+                    message &&
+                    typeof message === "object" &&
+                    !Array.isArray(message) &&
+                    typeof (message as Record<string, unknown>).id === "string"
+                      ? [mergedById.get((message as Record<string, unknown>).id as string) ?? message]
+                      : [message]
+                  )
+                : []
+              return [subagentId, responseRows] as const
+            })
+          )
+        })
       })
     }
   )
@@ -2311,6 +2639,64 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // rolls back the mark attempt B still depends on; if B then succeeds without
   // a workspacePath, the no-sweep late-writer window the tombstone closes
   // would silently reopen. ThreadIds are uuids, so the map stays tiny.
+  let transcriptBlobGcRun: Promise<void> | null = null
+  let transcriptBlobGcRerunRequested = false
+  let transcriptBlobGcRetryTimer: NodeJS.Timeout | undefined
+  const runTranscriptBlobGcSweep = async (): Promise<boolean> => {
+    const epoch = await withSubagentTranscriptContentMutationLock(async () =>
+      getSubagentTranscriptReferenceEpoch()
+    )
+    const referencedHashes = await collectReferencedTranscriptHashesBounded()
+    const candidates = await scanSubagentTranscriptBlobGcCandidates(referencedHashes, 0)
+    const batchSize = 8
+    for (let offset = 0; offset < candidates.length; offset += batchSize) {
+      let stale = false
+      const quarantined = await withSubagentTranscriptContentMutationLock(async () => {
+        if (getSubagentTranscriptReferenceEpoch() !== epoch) {
+          stale = true
+          return []
+        }
+        return quarantineSubagentTranscriptBlobGcCandidates(
+          candidates.slice(offset, offset + batchSize),
+          referencedHashes
+        )
+      })
+      if (stale) return false
+      await removeQuarantinedSubagentTranscriptBlobs(quarantined)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    return true
+  }
+  const scheduleTranscriptBlobGc = (): void => {
+    if (transcriptBlobGcRun) {
+      transcriptBlobGcRerunRequested = true
+      return
+    }
+    if (transcriptBlobGcRetryTimer) return
+    transcriptBlobGcRun = (async () => {
+      let completed = false
+      for (let attempt = 0; attempt < 2 && !completed; attempt += 1) {
+        completed = await runTranscriptBlobGcSweep()
+      }
+      if (!completed) {
+        transcriptBlobGcRetryTimer = setTimeout(() => {
+          transcriptBlobGcRetryTimer = undefined
+          scheduleTranscriptBlobGc()
+        }, 1_000)
+      }
+    })()
+      .catch((error) => {
+        console.warn("[Threads] Failed to prune transcript content blobs:", error)
+      })
+      .finally(() => {
+        transcriptBlobGcRun = null
+        if (transcriptBlobGcRerunRequested) {
+          transcriptBlobGcRerunRequested = false
+          scheduleTranscriptBlobGc()
+        }
+      })
+  }
+
   const deletingThreads = new Map<string, Promise<void>>()
 
   const performThreadDeletion = async (
@@ -2500,6 +2886,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     } catch (e) {
       console.warn("[Threads] Failed to delete task-mmd files:", e)
     }
+
+    // Shared, content-addressed blobs are swept in the background. Directory
+    // walking/stat/removal stay outside the global write lock; only an
+    // epoch-checked batch of canonical->quarantine renames holds it.
+    scheduleTranscriptBlobGc()
   }
 
   ipcMain.handle("threads:delete", async (event, threadId: string) => {

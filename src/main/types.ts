@@ -158,6 +158,33 @@ export interface Subagent {
   lastActivityAt?: string
   /** Registration order (0-based). Used to match LangGraph checkpoint_ns index (e.g. "tools:0"). */
   spawnIndex?: number
+  /** True only after this execution was observed in the current live stream. */
+  observedLive?: boolean
+  /** Renderer-only provenance for a prompt row restored without a stable final. */
+  restoredFromPromptOnly?: boolean
+}
+
+export interface SubagentTranscriptPage {
+  messages: unknown[]
+  deferredHydration: boolean
+  deferredExport?: {
+    messageIndex: number
+    expectedMessageId: string
+    fields: SubagentTranscriptBlobField[]
+  }
+  end: number
+  start: number
+  nextBefore?: number
+  total: number
+}
+
+export type SubagentTranscriptBlobField = "content" | "reasoning" | "tool_calls"
+
+export interface SubagentTranscriptBlobExportResult {
+  success: boolean
+  canceled?: boolean
+  filePath?: string
+  error?: string
 }
 
 // Stream events from agent

@@ -11,7 +11,18 @@
 
 import { ElectronIPCTransport } from "../src/renderer/src/lib/electron-transport.ts"
 import { useAppStore, type WorkerFocusView } from "../src/renderer/src/lib/store.ts"
+import {
+  getSubagentTranscriptsFromThreadValues,
+  mergeSubagentTranscripts,
+  serializeSubagentTranscripts
+} from "../src/renderer/src/lib/subagent-transcripts.ts"
+import type { Message } from "../src/renderer/src/types.ts"
+import {
+  upsertSubagentLogEntry,
+  type SubagentInternalLogEntry
+} from "../src/renderer/src/lib/thread-state-helpers.ts"
 import { CONTEXT_COMPACTION_MODEL_TAG } from "../src/shared/context-compaction-events.ts"
+import { buildSubagentTaskInvocationIdentity } from "../src/shared/subagent-invocation-identity.ts"
 import {
   buildWorkerCheckpointHistory,
   isExplicitWorkerOccurrenceAfter,
@@ -105,6 +116,7 @@ function aiMessage(input: {
 function aiMessageChunk(input: {
   id?: string
   content?: unknown
+  reasoning?: string
   toolCallChunks?: Array<{ id?: string; name?: string; args?: string }>
 }): unknown {
   return {
@@ -112,6 +124,7 @@ function aiMessageChunk(input: {
     kwargs: {
       id: input.id,
       content: input.content ?? "",
+      ...(input.reasoning !== undefined && { reasoning_content: input.reasoning }),
       tool_call_chunks: input.toolCallChunks
     }
   }
@@ -373,6 +386,50 @@ async function testSubagentInternalsAreHiddenButObservable(): Promise<void> {
   assert(
     messageEvents(taskDoneEvents).length > 0,
     "parent task result should remain visible to the main agent thread"
+  )
+  assert(
+    firstMessage(taskDoneEvents).content === "subagent final answer",
+    "parent task result should keep the complete final content"
+  )
+  const finalTranscriptEvent = customEvents(
+    taskDoneEvents,
+    "subagent_transcript_message"
+  )[0]
+  assert(finalTranscriptEvent, "task result should backfill the subagent transcript")
+  const finalTranscriptMessage = asRecord(finalTranscriptEvent.subagentMessage)
+  assert(
+    finalTranscriptEvent.subagentId === "task-1" &&
+      finalTranscriptMessage.role === "assistant" &&
+      finalTranscriptMessage.content === "subagent final answer",
+    "task result backfill should be a visible assistant message for the owning subagent"
+  )
+  assert(
+    String(finalTranscriptMessage.id).startsWith("subagent-final-task-1"),
+    "a task without a streamed terminal assistant should use a stable final id"
+  )
+
+  const replayedTaskDoneEvents = convert(
+    transport,
+    streamValuesEvent([
+      toolMessage({
+        id: "task-result-replayed-with-another-provider-id",
+        name: "task",
+        toolCallId: "task-1",
+        content: "subagent final answer"
+      })
+    ])
+  )
+  assert(
+    customEvents(replayedTaskDoneEvents, "subagent_transcript_message").length === 0,
+    "messages-to-values task result replay should not resend an unchanged final transcript"
+  )
+  const mergedFinalTranscript = mergeSubagentTranscripts({}, "task-1", [
+    finalTranscriptMessage as unknown as Message
+  ])["task-1"]
+  assert(
+    mergedFinalTranscript?.length === 1 &&
+      mergedFinalTranscript[0]?.content === "subagent final answer",
+    "replayed task results should remain one complete subagent transcript entry"
   )
 
   const lateResultEvents = convert(
@@ -5681,6 +5738,405 @@ async function testValuesModeRegistersAndCompletesSubagents(): Promise<void> {
     completedSubagents?.[0]?.status === "completed",
     "values mode should complete subagent from task ToolMessage"
   )
+  const completedTranscript = customEvents(
+    completedEvents,
+    "subagent_transcript_message"
+  )[0]
+  const completedTranscriptMessage = asRecord(completedTranscript?.subagentMessage)
+  assert(
+    completedTranscript?.subagentId === "task-values-1" &&
+      completedTranscriptMessage.role === "assistant" &&
+      completedTranscriptMessage.content === "verified",
+    "values-only completion should backfill the final subagent assistant content"
+  )
+}
+
+async function testStableTranscriptHistoryDoesNotReplayAcrossStreams(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    const snapshot = streamValuesEvent([
+      aiMessage({
+        id: "history-main-ai",
+        toolCalls: [
+          {
+            id: "task-history-stable",
+            name: "task",
+            args: { subagent_type: "verifier", description: "stable history" }
+          }
+        ]
+      }),
+      toolMessage({
+        id: "task-history-result",
+        name: "task",
+        toolCallId: "task-history-stable",
+        content: "stable final"
+      })
+    ])
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            callback(snapshot)
+            callback({ type: "done" })
+            return () => undefined
+          }
+        }
+      }
+    }
+    const transport = new ElectronIPCTransport()
+    const payload = {
+      input: { messages: [{ type: "human", content: "continue" }] },
+      config: {
+        configurable: {
+          thread_id: "thread-stable-history",
+          model_id: "test-model",
+          agent_mode: "normal"
+        }
+      },
+      signal: new AbortController().signal
+    }
+    const first = await collectStreamEvents(transport, payload)
+    const second = await collectStreamEvents(transport, payload)
+    const transcriptIds = (events: SdkEvent[]): string[] =>
+      customEvents(events, "subagent_transcript_message").map((event) =>
+        String(asRecord(event.subagentMessage).id)
+      )
+    const firstIds = transcriptIds(first)
+    const secondIds = transcriptIds(second)
+    assert(
+      firstIds.filter((id) => id === "subagent-prompt-task-history-stable").length === 1 &&
+        firstIds.filter((id) => id === "subagent-final-task-history-stable").length === 1,
+      "the first stream should hydrate stable prompt and final transcript rows"
+    )
+    assert(
+      !secondIds.includes("subagent-prompt-task-history-stable") &&
+        !secondIds.includes("subagent-final-task-history-stable"),
+      "an unchanged full-history snapshot must not replay stable rows in a later stream"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
+async function testInterruptedStreamDoesNotSuppressStableTranscriptRecovery(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    let failStream = true
+    const snapshot = streamValuesEvent([
+      aiMessage({
+        id: "recovery-main-ai",
+        toolCalls: [
+          {
+            id: "task-stable-recovery",
+            name: "task",
+            args: { subagent_type: "verifier", description: "recover stable history" }
+          }
+        ]
+      }),
+      toolMessage({
+        id: "task-stable-recovery-result",
+        name: "task",
+        toolCallId: "task-stable-recovery",
+        content: "recoverable final"
+      })
+    ])
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            callback(snapshot)
+            callback(
+              failStream
+                ? { type: "error", error: "INTERRUPTED", message: "interrupted" }
+                : { type: "done" }
+            )
+            return () => undefined
+          }
+        }
+      }
+    }
+    const transport = new ElectronIPCTransport()
+    const payload = {
+      input: { messages: [{ type: "human", content: "recover" }] },
+      config: {
+        configurable: {
+          thread_id: "thread-stable-recovery",
+          model_id: "test-model",
+          agent_mode: "normal"
+        }
+      },
+      signal: new AbortController().signal
+    }
+    await collectStreamEvents(transport, payload)
+    failStream = false
+    const recovered = await collectStreamEvents(transport, payload)
+    const recoveredIds = customEvents(recovered, "subagent_transcript_message").map((event) =>
+      String(asRecord(event.subagentMessage).id)
+    )
+    assert(
+      recoveredIds.includes("subagent-prompt-task-stable-recovery") &&
+        recoveredIds.includes("subagent-final-task-stable-recovery"),
+      "an interrupted stream must allow its potentially undelivered stable rows to rehydrate"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
+async function testStableTranscriptSignaturesDoNotThrashPastOneThousand(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const count = 1_001
+  const taskCalls = Array.from({ length: count }, (_, index) => ({
+    id: `task-signature-boundary-${index}`,
+    name: "task",
+    args: { subagent_type: "verifier", description: `boundary ${index}` }
+  }))
+  const snapshot = streamValuesEvent([
+    aiMessage({ id: "signature-boundary-main", toolCalls: taskCalls }),
+    ...taskCalls.map((toolCall, index) =>
+      toolMessage({
+        id: `signature-boundary-result-${index}`,
+        name: "task",
+        toolCallId: toolCall.id,
+        content: `done ${index}`
+      })
+    )
+  ])
+  const first = convert(transport, snapshot)
+  const second = convert(transport, snapshot)
+  const countFinals = (events: SdkEvent[]): number =>
+    customEvents(events, "subagent_transcript_message")
+      .map((event) => String(asRecord(event.subagentMessage).id))
+      .filter((id) => id.startsWith("subagent-final-task-signature-boundary-")).length
+  assert(countFinals(first) === count, "the first large snapshot should hydrate every final row")
+  assert(
+    countFinals(second) === 0,
+    "an identical snapshot above 1000 tasks must not trigger FIFO signature-cache replay"
+  )
+}
+
+async function testQueuedSubagentSnapshotsCoalesceAndStayBounded(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            callback(
+              streamMessageEvent(
+                aiMessage({
+                  id: "main-ai-queued-subagent",
+                  toolCalls: [
+                    {
+                      id: "task-queued-subagent",
+                      name: "task",
+                      args: { subagent_type: "implementer", description: "large queued output" }
+                    }
+                  ]
+                }),
+                { langgraph_node: "agent" }
+              )
+            )
+            const repeatedDelta = ".".repeat(100)
+            for (let index = 0; index < 300; index += 1) {
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "subagent-queued-live", content: repeatedDelta }),
+                  { langgraph_checkpoint_ns: "agent:tools:task-queued-subagent" }
+                )
+              )
+            }
+            callback({ type: "done" })
+            return () => undefined
+          }
+        }
+      }
+    }
+
+    const events = await collectStreamEvents(new ElectronIPCTransport(), {
+      input: { messages: [{ type: "human", content: "run queued subagent" }] },
+      config: {
+        configurable: {
+          thread_id: "thread-queued-subagent",
+          model_id: "test-model",
+          agent_mode: "normal"
+        }
+      },
+      signal: new AbortController().signal
+    })
+    const assistantSnapshots = customEvents(events, "subagent_transcript_message")
+      .map((event) => asRecord(event.subagentMessage))
+      .filter((message) => message.role === "assistant")
+    const assistantLogs = customEvents(events, "subagent_log_entry")
+      .map((event) => asRecord(event.entry))
+      .filter((entry) => entry.kind === "assistant")
+    assert(
+      assistantSnapshots.length === 2 && assistantLogs.length === 1,
+      "a synchronous burst should keep one bounded preview plus one lossless terminal repair"
+    )
+    const previewContent = assistantSnapshots[0]?.content
+    assert(
+      typeof previewContent === "string" &&
+        previewContent.length <= 24_000 &&
+        previewContent.includes("省略"),
+      "the coalesced live transcript payload should remain a bounded head-tail projection"
+    )
+    assert(
+      assistantSnapshots[1]?.content === ".".repeat(30_000) &&
+        assistantSnapshots[1]?.content_priority === 0.5,
+      "the done boundary should repair the bounded preview with exact full content"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
+async function testQueuedFinalCorrectionsPreserveRepairMetadata(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            callback(
+              streamMessageEvent(
+                aiMessage({
+                  id: "main-ai-queued-final",
+                  toolCalls: [
+                    {
+                      id: "task-queued-final",
+                      name: "task",
+                      args: { subagent_type: "verifier", description: "queued final" }
+                    }
+                  ]
+                }),
+                { langgraph_node: "agent" }
+              )
+            )
+            callback(
+              streamMessageEvent(
+                aiMessage({
+                  id: "subagent-queued-final-tool-call",
+                  toolCalls: [
+                    {
+                      id: "queued-final-inner-tool",
+                      name: "read_file",
+                      args: { path: "secret.ts" }
+                    }
+                  ]
+                }),
+                { langgraph_checkpoint_ns: "agent:tools:task-queued-final" }
+              )
+            )
+            callback(
+              streamMessageEvent(
+                toolMessage({
+                  id: "subagent-queued-final-tool-result",
+                  name: "read_file",
+                  toolCallId: "queued-final-inner-tool",
+                  content: "file body"
+                }),
+                { langgraph_checkpoint_ns: "agent:tools:task-queued-final" }
+              )
+            )
+            callback(
+              streamMessageEvent(
+                aiMessageChunk({ id: "subagent-queued-final-live", content: "candidate" }),
+                { langgraph_checkpoint_ns: "agent:tools:task-queued-final" }
+              )
+            )
+            callback(
+              streamMessageEvent(
+                toolMessage({
+                  id: "task-queued-final-success",
+                  name: "task",
+                  toolCallId: "task-queued-final",
+                  content: "candidate"
+                }),
+                { langgraph_node: "tools" }
+              )
+            )
+            callback(
+              streamValuesEvent([
+                toolMessage({
+                  id: "task-queued-final-error",
+                  name: "task",
+                  toolCallId: "task-queued-final",
+                  content: "actual failure",
+                  status: "error"
+                })
+              ])
+            )
+            callback({ type: "done" })
+            return () => undefined
+          }
+        }
+      }
+    }
+
+    const events = await collectStreamEvents(new ElectronIPCTransport(), {
+      input: { messages: [{ type: "human", content: "run queued final" }] },
+      config: {
+        configurable: {
+          thread_id: "thread-queued-final",
+          model_id: "test-model",
+          agent_mode: "normal"
+        }
+      },
+      signal: new AbortController().signal
+    })
+    const transcriptEvents = customEvents(events, "subagent_transcript_message")
+    let merged: Record<string, Message[]> = {}
+    for (const event of transcriptEvents) {
+      merged = mergeSubagentTranscripts(merged, String(event.subagentId), [
+        event.subagentMessage as Message
+      ])
+    }
+    const assistants = (merged["task-queued-final"] ?? []).filter(
+      (message) => message.role === "assistant" && !message.tool_calls?.length
+    )
+    const stableEvents = transcriptEvents
+      .map((event) => asRecord(event.subagentMessage))
+      .filter((message) => message.id === "subagent-final-task-queued-final")
+    assert(
+      stableEvents.length === 2 &&
+        assistants.length === 1 &&
+        assistants[0]?.content === "actual failure" &&
+        assistants[0]?.is_error === true,
+      "queued final corrections must retain the earlier repair before applying the error update"
+    )
+    let logs: SubagentInternalLogEntry[] = []
+    for (const event of customEvents(events, "subagent_log_entry")) {
+      logs = upsertSubagentLogEntry(logs, event.entry as SubagentInternalLogEntry)
+    }
+    const toolLog = logs.find((entry) => entry.toolCallId === "queued-final-inner-tool")
+    assert(
+      toolLog?.content.includes("secret.ts") && toolLog.result?.includes("file body"),
+      "queued tool-call/result patches should retain both the arguments and result"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
 }
 
 async function testSubagentThinkingStreamingAccumulation(): Promise<void> {
@@ -5712,7 +6168,9 @@ async function testSubagentThinkingStreamingAccumulation(): Promise<void> {
   // must not be dropped (otherwise the text glues into "helloworld").
   feed("hello")
   feed(" ")
-  const lastEvents = feed("world")
+  feed("world")
+  const flushSuffix = "!".repeat(1_018)
+  const lastEvents = feed(flushSuffix)
 
   const assistantLogs = customEvents(lastEvents, "subagent_log_entry").filter(
     (data) => asRecord(data.entry).kind === "assistant"
@@ -5720,7 +6178,7 @@ async function testSubagentThinkingStreamingAccumulation(): Promise<void> {
   assert(assistantLogs.length > 0, "subagent thinking should emit an assistant log entry")
   const entry = asRecord(assistantLogs[assistantLogs.length - 1].entry)
   assert(
-    entry.content === "hello world",
+    entry.content === `hello world${flushSuffix}`,
     `streamed thinking should accumulate with spaces, got ${JSON.stringify(entry.content)}`
   )
   assert(
@@ -5730,6 +6188,833 @@ async function testSubagentThinkingStreamingAccumulation(): Promise<void> {
   assert(
     messageEvents(lastEvents).length === 0,
     "subagent thinking must not leak into the main chat stream"
+  )
+
+  const oversizedEvents = feed("A".repeat(25_000))
+  const liveTail = "TAIL-SHOULD-KEEP-UPDATING"
+  const tailDelta = `${"T".repeat(1_024 - liveTail.length)}${liveTail}`
+  const tailEvents = feed(tailDelta)
+  const tailTranscriptEvent = customEvents(tailEvents, "subagent_transcript_message")[0]
+  const tailTranscriptMessage = asRecord(tailTranscriptEvent?.subagentMessage)
+  assert(
+    typeof tailTranscriptMessage.content === "string" &&
+      tailTranscriptMessage.content.length > 16_000 &&
+      tailTranscriptMessage.content.endsWith(liveTail),
+    "subagent transcript should continue growing after the former 16k cutoff"
+  )
+
+  let merged: Record<string, Message[]> = {}
+  for (const event of [...oversizedEvents, ...tailEvents]) {
+    const data = event.event === "custom" ? asRecord(event.data) : undefined
+    if (data?.type !== "subagent_transcript_message") continue
+    merged = mergeSubagentTranscripts(merged, String(data.subagentId), [
+      data.subagentMessage as Message
+    ])
+  }
+  const storedTail = merged["task-1"]?.[0]?.content
+  assert(
+    typeof storedTail === "string" &&
+      storedTail.includes("省略") &&
+      storedTail.endsWith(liveTail),
+    "the bounded in-flight preview should preserve the moving tail"
+  )
+
+  const completeContent = `hello world${flushSuffix}${"A".repeat(25_000)}${tailDelta}`
+  const completionEvents = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "task-long-thinking-result",
+        name: "task",
+        toolCallId: "task-1",
+        content: completeContent
+      }),
+      { langgraph_node: "tools", langgraph_checkpoint_ns: ns }
+    )
+  )
+  const finalMessage = asRecord(
+    customEvents(completionEvents, "subagent_transcript_message")
+      .map((event) => asRecord(event.subagentMessage))
+      .find((message) => message.id === "subagent-final-task-1")
+  )
+  assert(
+    finalMessage.content === completeContent,
+    "task completion must replace the bounded live preview with lossless final content"
+  )
+}
+
+async function testSubagentCumulativeThinkingContinuesPast16k(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-cumulative",
+        toolCalls: [
+          {
+            id: "task-cumulative",
+            name: "task",
+            args: { subagent_type: "implementer", description: "stream cumulative text" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const prefix = `CUMULATIVE-HEAD-${"C".repeat(17_000)}`
+  const ns = "agent:tools:task-cumulative"
+  convert(
+    transport,
+    streamMessageEvent(aiMessage({ id: "subagent-cumulative", content: prefix }), {
+      langgraph_checkpoint_ns: ns
+    })
+  )
+  const cumulativeTail = "-CUMULATIVE-TAIL"
+  const cumulativeEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({ id: "subagent-cumulative", content: `${prefix}${cumulativeTail}` }),
+      { langgraph_checkpoint_ns: ns }
+    )
+  )
+  const transcript = asRecord(
+    customEvents(cumulativeEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(
+    transcript.content === `${prefix}${cumulativeTail}`,
+    "cumulative subagent snapshots should keep growing beyond 16k without duplicating the prefix"
+  )
+}
+
+async function testSubagentReasoningOnlyStreamingIsLosslessAndSeparate(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-reasoning-only",
+        toolCalls: [
+          {
+            id: "task-reasoning-only",
+            name: "task",
+            args: { subagent_type: "implementer", description: "reason without content" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const namespace = "agent:tools:task-reasoning-only"
+  const reasoningPrefix = `REASONING-HEAD-${"R".repeat(31_000)}`
+  const firstEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "subagent-reasoning-only",
+        content: "",
+        reasoning: reasoningPrefix
+      }),
+      { langgraph_checkpoint_ns: namespace }
+    )
+  )
+  const firstTranscript = asRecord(
+    customEvents(firstEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(firstTranscript.content === "", "reasoning-only chunks must not leak into final content")
+  assert(
+    typeof firstTranscript.reasoning === "string" && firstTranscript.reasoning.includes("省略"),
+    "oversized live reasoning should emit a bounded head/tail projection"
+  )
+  assert(
+    firstTranscript.reasoning_full_length === reasoningPrefix.length &&
+      firstTranscript.reasoning_is_projection === true,
+    "live reasoning projection should advertise its authoritative full length"
+  )
+
+  // Exceed the live snapshot delta threshold so this direct converter test
+  // observes the update synchronously (the real stream also has a timer sink).
+  const reasoningTail = `${"T".repeat(1_024)}-REASONING-TAIL`
+  const cumulativeEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({
+        id: "subagent-reasoning-only",
+        content: "",
+        reasoning: `${reasoningPrefix}${reasoningTail}`
+      }),
+      { langgraph_checkpoint_ns: namespace }
+    )
+  )
+  const cumulativeTranscript = asRecord(
+    customEvents(cumulativeEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(
+    typeof cumulativeTranscript.reasoning === "string" &&
+      cumulativeTranscript.reasoning.endsWith(reasoningTail) &&
+      cumulativeTranscript.reasoning_full_length === reasoningPrefix.length + reasoningTail.length,
+    "cumulative reasoning chunks should replace their prefix instead of duplicating it"
+  )
+
+  const completionEvents = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "task-reasoning-only-result",
+        name: "task",
+        toolCallId: "task-reasoning-only",
+        content: "final answer"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const finalMessage = asRecord(
+    customEvents(completionEvents, "subagent_transcript_message")
+      .map((event) => asRecord(event.subagentMessage))
+      .find((message) => message.id === "subagent-final-task-reasoning-only")
+  )
+  assert(finalMessage.content === "final answer", "task result should remain the final content")
+  assert(
+    finalMessage.reasoning === `${reasoningPrefix}${reasoningTail}` &&
+      finalMessage.reasoning_is_projection === false,
+    "task completion should persist the complete reasoning separately from content"
+  )
+}
+
+async function testSubagentPrefixRelatedTextDeltasAreNotDropped(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-prefix-related-deltas",
+        toolCalls: [
+          {
+            id: "task-prefix-related-deltas",
+            name: "task",
+            args: { subagent_type: "implementer", description: "prefix-related deltas" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const feed = (content: string): SdkEvent[] =>
+    convert(
+      transport,
+      streamMessageEvent(aiMessageChunk({ id: "subagent-prefix-related", content }), {
+        langgraph_checkpoint_ns: "agent:tools:task-prefix-related-deltas"
+      })
+    )
+  feed("ha")
+  const flushSuffix = "x".repeat(1_020)
+  const events = feed(`haha${flushSuffix}`)
+  const message = asRecord(
+    customEvents(events, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(
+    message.content === `hahaha${flushSuffix}`,
+    "a longer delta that starts with prior text must append byte-for-byte"
+  )
+}
+
+async function testSubagentRepeatedTextDeltasAreNotDropped(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-repeated-text",
+        toolCalls: [
+          {
+            id: "task-repeated-text",
+            name: "task",
+            args: { subagent_type: "implementer", description: "repeat text" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const feed = (content: string): SdkEvent[] =>
+    convert(
+      transport,
+      streamMessageEvent(aiMessageChunk({ id: "subagent-repeated-text", content }), {
+        langgraph_checkpoint_ns: "agent:tools:task-repeated-text"
+      })
+    )
+  feed("ha")
+  feed("ha")
+  const flushSuffix = "x".repeat(1_021)
+  const events = feed(`.${flushSuffix}`)
+  const message = asRecord(
+    customEvents(events, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(
+    message.content === `haha.${flushSuffix}`,
+    "identical legal text deltas must append instead of being mistaken for replays"
+  )
+}
+
+async function testTaskResultRebasesStreamedTerminalAssistant(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-terminal",
+        toolCalls: [
+          {
+            id: "task-terminal",
+            name: "task",
+            args: { subagent_type: "verifier", description: "produce a final answer" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const finalContent = "streamed terminal answer"
+  const streamedContent = `${finalContent} with speculative suffix`
+  const streamedEvents = convert(
+    transport,
+    streamMessageEvent(
+      aiMessageChunk({ id: "subagent-terminal-ai", content: streamedContent }),
+      { langgraph_checkpoint_ns: "agent:tools:task-terminal" }
+    )
+  )
+  const streamedMessage = asRecord(
+    customEvents(streamedEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  const completionEvents = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "task-terminal-result",
+        name: "task",
+        toolCallId: "task-terminal",
+        content: finalContent
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const completedMessage = asRecord(
+    customEvents(completionEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(
+    completedMessage.id === "subagent-final-task-terminal" &&
+      completedMessage.replaces_message_id === streamedMessage.id,
+    "task completion should rebase the matching streamed assistant onto a stable final id"
+  )
+  const finalEventIndex = completionEvents.findIndex(
+    (event) =>
+      event.event === "custom" &&
+      asRecord(event.data).type === "subagent_transcript_message"
+  )
+  const statusEventIndex = completionEvents.findIndex(
+    (event) => event.event === "custom" && asRecord(event.data).type === "subagents"
+  )
+  assert(
+    finalEventIndex >= 0 && statusEventIndex > finalEventIndex,
+    "the final transcript repair should arrive before the completed status"
+  )
+
+  const merged = mergeSubagentTranscripts({}, "task-terminal", [
+    streamedMessage as unknown as Message,
+    completedMessage as unknown as Message
+  ])["task-terminal"]
+  assert(
+    merged?.length === 1 &&
+      merged[0]?.id === "subagent-final-task-terminal" &&
+      merged[0]?.content === finalContent,
+    `a streamed terminal answer and its task result should render as one assistant entry: ${JSON.stringify(merged)}`
+  )
+
+  const sameTransportReplay = convert(
+    transport,
+    streamValuesEvent([
+      toolMessage({
+        id: "task-terminal-result-values-replay",
+        name: "task",
+        toolCallId: "task-terminal",
+        content: finalContent
+      })
+    ])
+  )
+  assert(
+    customEvents(sameTransportReplay, "subagent_transcript_message").length === 0,
+    "an unchanged final must stay deduped after its live replacement candidate is sealed"
+  )
+
+  const restoredTransport = new ElectronIPCTransport()
+  const restoredEvents = convert(
+    restoredTransport,
+    streamValuesEvent([
+      aiMessage({
+        id: "restored-main-ai-terminal",
+        toolCalls: [
+          {
+            id: "task-terminal",
+            name: "task",
+            args: { subagent_type: "verifier", description: "produce a final answer" }
+          }
+        ]
+      }),
+      toolMessage({
+        id: "restored-task-terminal-result",
+        name: "task",
+        toolCallId: "task-terminal",
+        content: finalContent
+      })
+    ])
+  )
+  const restoredFinalMessage = asRecord(
+    customEvents(restoredEvents, "subagent_transcript_message")
+      .map((event) => asRecord(event.subagentMessage))
+      .find((message) => message.id === "subagent-final-task-terminal")
+  )
+  const afterRestoreReplay = mergeSubagentTranscripts(
+    { "task-terminal": merged ?? [] },
+    "task-terminal",
+    [restoredFinalMessage as unknown as Message]
+  )["task-terminal"]
+  assert(
+    restoredFinalMessage.id === "subagent-final-task-terminal" &&
+      afterRestoreReplay?.length === 1,
+    "a fresh transport values replay should keep the canonical final entry idempotent"
+  )
+}
+
+async function testConcurrentSubagentsDoNotShareProviderAccumulator(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-shared-provider",
+        toolCalls: [
+          {
+            id: "task-shared-provider-a",
+            name: "task",
+            args: { subagent_type: "implementer", description: "first" }
+          },
+          {
+            id: "task-shared-provider-b",
+            name: "task",
+            args: { subagent_type: "verifier", description: "second" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const firstEvents = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ id: "shared-provider-ai", content: "alpha" }), {
+      langgraph_checkpoint_ns: "tools:shared-runtime|model:1",
+      [ownerKey]: "task-shared-provider-a"
+    })
+  )
+  const secondEvents = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ id: "shared-provider-ai", content: "beta" }), {
+      langgraph_checkpoint_ns: "tools:shared-runtime|model:1",
+      [ownerKey]: "task-shared-provider-b"
+    })
+  )
+  const first = asRecord(
+    customEvents(firstEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  const second = asRecord(
+    customEvents(secondEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(
+    first.content === "alpha" && second.content === "beta",
+    "concurrent subagents reusing a provider message id must keep independent text"
+  )
+}
+
+async function testTaskFinalRepairsPersistedLiveMessageAcrossTransportReset(): Promise<void> {
+  const firstTransport = new ElectronIPCTransport()
+  convert(
+    firstTransport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-reset",
+        toolCalls: [
+          {
+            id: "task-reset",
+            name: "task",
+            args: { subagent_type: "verifier", description: "survive reset" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const liveEvents = convert(
+    firstTransport,
+    streamMessageEvent(
+      aiMessageChunk({ id: "subagent-reset-live", content: "speculative suffix" }),
+      { langgraph_checkpoint_ns: "agent:tools:task-reset" }
+    )
+  )
+  const liveMessage = asRecord(
+    customEvents(liveEvents, "subagent_transcript_message")[0]?.subagentMessage
+  ) as unknown as Message
+  const persisted = serializeSubagentTranscripts(
+    mergeSubagentTranscripts({}, "task-reset", [liveMessage])
+  )
+  const restored = getSubagentTranscriptsFromThreadValues({
+    subagentTranscripts: persisted
+  })
+
+  const secondTransport = new ElectronIPCTransport()
+  const completionEvents = convert(
+    secondTransport,
+    streamValuesEvent([
+      aiMessage({
+        id: "main-ai-reset-restored",
+        toolCalls: [
+          {
+            id: "task-reset",
+            name: "task",
+            args: { subagent_type: "verifier", description: "survive reset" }
+          }
+        ]
+      }),
+      toolMessage({
+        id: "task-reset-result",
+        name: "task",
+        toolCallId: "task-reset",
+        content: "authoritative result"
+      })
+    ])
+  )
+  const finalMessage = asRecord(
+    customEvents(completionEvents, "subagent_transcript_message")
+      .map((event) => asRecord(event.subagentMessage))
+      .find((message) => message.id === "subagent-final-task-reset")
+  ) as unknown as Message
+  const repaired = mergeSubagentTranscripts(restored, "task-reset", [finalMessage])
+  assert(
+    repaired["task-reset"]?.length === 1 &&
+      repaired["task-reset"]?.[0]?.id === "subagent-final-task-reset" &&
+      repaired["task-reset"]?.[0]?.content === "authoritative result",
+    "a values completion after transport reset should replace the persisted live terminal row"
+  )
+
+  const emptyCompletionEvents = convert(
+    new ElectronIPCTransport(),
+    streamValuesEvent([
+      aiMessage({
+        id: "main-ai-reset-empty",
+        toolCalls: [
+          {
+            id: "task-reset",
+            name: "task",
+            args: { subagent_type: "verifier", description: "survive empty completion" }
+          }
+        ]
+      }),
+      toolMessage({
+        id: "task-reset-empty-result",
+        name: "task",
+        toolCallId: "task-reset",
+        content: ""
+      })
+    ])
+  )
+  const emptyFinal = asRecord(
+    customEvents(emptyCompletionEvents, "subagent_transcript_message")
+      .map((event) => asRecord(event.subagentMessage))
+      .find((message) => message.id === "subagent-final-task-reset")
+  ) as unknown as Message
+  const repairedEmpty = mergeSubagentTranscripts(restored, "task-reset", [emptyFinal])
+  assert(
+    repairedEmpty["task-reset"]?.length === 1 &&
+      repairedEmpty["task-reset"]?.[0]?.id === "subagent-final-task-reset" &&
+      repairedEmpty["task-reset"]?.[0]?.content === "speculative suffix",
+    "an empty successful completion should still canonicalize a persisted live terminal row"
+  )
+}
+
+async function testIdlessSubagentAssistantTurnsSplitAtToolResult(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ns = "agent:tools:task-idless-turns"
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-idless-turns",
+        toolCalls: [
+          {
+            id: "task-idless-turns",
+            name: "task",
+            args: { subagent_type: "implementer", description: "use a tool" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const beforeEvents = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ content: "before tool" }), {
+      langgraph_checkpoint_ns: ns
+    })
+  )
+  const before = asRecord(
+    customEvents(beforeEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        toolCalls: [{ id: "idless-inner-tool", name: "read_file", args: { path: "a.ts" } }]
+      }),
+      { langgraph_checkpoint_ns: ns }
+    )
+  )
+  convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "idless-inner-result",
+        name: "read_file",
+        toolCallId: "idless-inner-tool",
+        content: "file body"
+      }),
+      { langgraph_checkpoint_ns: ns }
+    )
+  )
+  const afterEvents = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ content: "after tool" }), {
+      langgraph_checkpoint_ns: ns
+    })
+  )
+  const after = asRecord(
+    customEvents(afterEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(
+    after.id !== before.id && after.content === "after tool",
+    "id-less assistant output after a tool result should start a new transcript turn"
+  )
+}
+
+async function testFailedTaskResultBackfillsVisibleDiagnostic(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-failed-task",
+        toolCalls: [
+          {
+            id: "task-failed",
+            name: "task",
+            args: { subagent_type: "verifier", description: "fail with diagnostics" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const failedEvents = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "task-failed-result",
+        name: "task",
+        toolCallId: "task-failed",
+        content: "diagnostic details",
+        status: "error"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const failedSubagents = customEvents(failedEvents, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const diagnostic = asRecord(
+    customEvents(failedEvents, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(failedSubagents?.[0]?.status === "failed", "error task result should fail the subagent")
+  assert(
+    diagnostic.role === "assistant" &&
+      diagnostic.content === "diagnostic details" &&
+      diagnostic.status === "error" &&
+      diagnostic.is_error === true,
+    "failed task result should remain visible in the subagent transcript with error metadata"
+  )
+  assert(
+    firstMessage(failedEvents).content === "diagnostic details" &&
+      firstMessage(failedEvents).status === "error" &&
+      firstMessage(failedEvents).is_error === true,
+    "failed task result should retain content and error metadata in the parent thread"
+  )
+}
+
+async function testLaterValuesErrorUpgradesCompletedSubagentMonotonically(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-status-upgrade",
+        toolCalls: [
+          {
+            id: "task-status-upgrade",
+            name: "task",
+            args: { subagent_type: "verifier", description: "status upgrade" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const initial = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "task-status-initial",
+        name: "task",
+        toolCallId: "task-status-upgrade",
+        content: "initial result"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const initiallyCompleted = customEvents(initial, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const initialFinal = asRecord(
+    customEvents(initial, "subagent_transcript_message")[0]?.subagentMessage
+  ) as unknown as Message
+  const completedAt = String(initiallyCompleted?.[0]?.completedAt)
+  assert(initiallyCompleted?.[0]?.status === "completed", "initial result should complete task")
+
+  const corrected = convert(
+    transport,
+    streamValuesEvent([
+      toolMessage({
+        id: "task-status-corrected",
+        name: "task",
+        toolCallId: "task-status-upgrade",
+        content: "actual failure",
+        status: "error"
+      })
+    ])
+  )
+  const failed = customEvents(corrected, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const correctedFinal = asRecord(
+    customEvents(corrected, "subagent_transcript_message")[0]?.subagentMessage
+  ) as unknown as Message
+  assert(
+    failed?.[0]?.status === "failed" && String(failed[0]?.completedAt) === completedAt,
+    "later error evidence should upgrade completed to failed without refreshing completion time"
+  )
+  const correctedValuesEvent = corrected.find((event) => event.event === "values")
+  const correctedValues = asRecord(correctedValuesEvent?.data)
+  const correctedParentTool = (correctedValues.messages as Array<Record<string, unknown>>)?.[0]
+  assert(
+    correctedParentTool?.status === "error" && correctedParentTool?.is_error === true,
+    "a values-only parent ToolMessage should retain its error metadata"
+  )
+
+  const staleSuccess = convert(
+    transport,
+    streamValuesEvent([
+      toolMessage({
+        id: "task-status-stale-success",
+        name: "task",
+        toolCallId: "task-status-upgrade",
+        content: "initial result"
+      })
+    ])
+  )
+  const stillFailed = customEvents(staleSuccess, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const staleFinals = customEvents(staleSuccess, "subagent_transcript_message")
+  assert(
+    stillFailed?.[0]?.status === "failed",
+    "a stale successful replay must not downgrade a failed subagent"
+  )
+  assert(
+    staleFinals.length === 0,
+    "a stale successful replay after failure must not emit or perturb final signatures"
+  )
+  const mergedFinal = mergeSubagentTranscripts({}, "task-status-upgrade", [
+    initialFinal,
+    correctedFinal
+  ])["task-status-upgrade"]?.[0]
+  assert(
+    mergedFinal?.content === "actual failure" && mergedFinal.is_error === true,
+    "a stale success must not replace the sticky failed final content"
+  )
+}
+
+async function testFinalReplayFingerprintIncludesCompleteMiddleContent(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-final-fingerprint",
+        toolCalls: [
+          {
+            id: "task-final-fingerprint",
+            name: "task",
+            args: { subagent_type: "verifier", description: "fingerprint final" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const head = "H".repeat(300)
+  const tail = "T".repeat(300)
+  const firstContent = `${head}${"A".repeat(400)}${tail}`
+  const correctedContent = `${head}${"B".repeat(400)}${tail}`
+  convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "task-final-fingerprint-first",
+        name: "task",
+        toolCallId: "task-final-fingerprint",
+        content: firstContent
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const corrected = convert(
+    transport,
+    streamValuesEvent([
+      toolMessage({
+        id: "task-final-fingerprint-corrected",
+        name: "task",
+        toolCallId: "task-final-fingerprint",
+        content: correctedContent
+      })
+    ])
+  )
+  const correctedFinal = asRecord(
+    customEvents(corrected, "subagent_transcript_message")[0]?.subagentMessage
+  )
+  assert(
+    correctedFinal.content === correctedContent,
+    "same-length final corrections that differ only in the middle must not be suppressed"
   )
 }
 
@@ -5930,6 +7215,93 @@ async function testConcurrentSubagentsStreamingIndexZeroDoNotCrossContaminate():
   assert(
     bCalls?.[0]?.name === "glob" && bCalls?.[0]?.args?.pattern === "*.ts",
     "subagent B args must stitch independently of interleaved subagent A (index 0 collision)"
+  )
+}
+
+async function testConcurrentSubagentsReusingInnerToolIdDoNotCrossContaminate(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "main-ai-reused-inner-id",
+        toolCalls: [
+          { id: "task-a", name: "task", args: { subagent_type: "implementer", description: "A" } },
+          { id: "task-b", name: "task", args: { subagent_type: "verifier", description: "B" } }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+
+  const chunkMsg = (
+    msgId: string,
+    chunks: Array<{ id?: string; name?: string; args?: string; index?: number }>
+  ): unknown => ({
+    id: ["langchain_core", "messages", "AIMessageChunk"],
+    kwargs: { id: msgId, content: "", tool_call_chunks: chunks }
+  })
+  const send = (
+    taskId: string,
+    namespace: string,
+    msgId: string,
+    chunks: Parameters<typeof chunkMsg>[1]
+  ): SdkEvent[] =>
+    convert(transport, streamMessageEvent(chunkMsg(msgId, chunks), {
+      langgraph_checkpoint_ns: namespace,
+      [ownerKey]: taskId
+    }))
+
+  send("task-a", "tools:uuid-reused-a|model_request:1", "msg-reused-a", [
+    { id: "inner-shared", name: "read_file", args: "", index: 0 }
+  ])
+  send("task-b", "tools:uuid-reused-b|model_request:1", "msg-reused-b", [
+    { id: "inner-shared", name: "glob", args: "", index: 0 }
+  ])
+  send("task-a", "tools:uuid-reused-a|model_request:1", "msg-reused-a", [
+    { args: '{"file_path":', index: 0 }
+  ])
+  send("task-b", "tools:uuid-reused-b|model_request:1", "msg-reused-b", [
+    { args: '{"pattern":', index: 0 }
+  ])
+  const lastA = send("task-a", "tools:uuid-reused-a|model_request:1", "msg-reused-a", [
+    { args: '"a.ts"}', index: 0 }
+  ])
+  const lastB = send("task-b", "tools:uuid-reused-b|model_request:1", "msg-reused-b", [
+    { args: '"*.ts"}', index: 0 }
+  ])
+
+  const readCalls = (
+    events: SdkEvent[],
+    taskId: string
+  ): Array<{ id?: string; name?: string; args?: Record<string, unknown> }> => {
+    const message = asRecord(
+      customEvents(events, "subagent_transcript_message").find(
+        (event) => event.subagentId === taskId
+      )?.subagentMessage as Record<string, unknown>
+    )
+    return message.tool_calls as Array<{
+      id?: string
+      name?: string
+      args?: Record<string, unknown>
+    }>
+  }
+  const aCalls = readCalls(lastA, "task-a")
+  const bCalls = readCalls(lastB, "task-b")
+
+  assert(
+    aCalls?.[0]?.id === "inner-shared" &&
+      aCalls[0].name === "read_file" &&
+      aCalls[0].args?.file_path === "a.ts",
+    "subagent A must retain its own args when another execution reuses the raw inner tool id"
+  )
+  assert(
+    bCalls?.[0]?.id === "inner-shared" &&
+      bCalls[0].name === "glob" &&
+      bCalls[0].args?.pattern === "*.ts",
+    "subagent B must retain its own args when another execution reuses the raw inner tool id"
   )
 }
 
@@ -10259,10 +11631,30 @@ async function run(): Promise<void> {
   console.log("PASS electron transport hides subagent internals")
   await testConcurrentSubagentsStreamingIndexZeroDoNotCrossContaminate()
   console.log("PASS electron transport keeps interleaved index-0 subagent args separate")
+  await testConcurrentSubagentsReusingInnerToolIdDoNotCrossContaminate()
+  console.log("PASS electron transport scopes reused inner tool-call ids by subagent execution")
   await testSubagentDeltaArgsPreserveRepeatedFragments()
   console.log("PASS electron transport preserves repeated delta arg fragments")
   await testOwnerMetadataAttributesConcurrentSubagentsDeterministically()
   console.log("PASS electron transport attributes concurrent subagents via owner metadata")
+  await testInnerToolIdCollisionStillAllowsRealTaskCompletion()
+  console.log("PASS inner tool ID collision still allows real task completion")
+  await testValuesMarksOnlyLatestHumanTurnSubagentsObservedLive()
+  console.log("PASS values marks only latest-turn subagents observed live")
+  await testTaskResultMessageIdsAreScopedByTaskCall()
+  console.log("PASS task result message IDs are scoped by task call")
+  await testReusedTaskAndResultIdsAcrossStreamsCompleteLatestExecution()
+  console.log("PASS reused task and result IDs complete the latest stream execution")
+  await testValuesSnapshotUsesNearestReusedTaskInvocationForResults()
+  console.log("PASS values results follow the nearest reused task invocation")
+  await testReusedTaskIdKeepsOldResultAndLateAssistantOnFirstExecution()
+  console.log("PASS reused task IDs preserve old result and late assistant ownership")
+  await testIdlessTaskAdoptsProviderParentWithoutDuplicateExecution()
+  console.log("PASS id-less task adopts provider parent without duplicate execution")
+  await testRestartRestoresReusedTaskIdByPersistedInvocationIdentity()
+  console.log("PASS restart restores reused task IDs by persisted invocation identity")
+  await testPrunedValuesClaimsLegacyExecutionByUniquePrompt()
+  console.log("PASS pruned values claims legacy execution by unique prompt")
   await testSubagentIdlessContinuationChunksStitchArgsByIndex()
   console.log("PASS electron transport stitches id-less subagent arg chunks by index")
   await testPrefixedNamespaceRoutesConcurrentSubagentInternals()
@@ -10299,6 +11691,10 @@ async function run(): Promise<void> {
   console.log("PASS electron transport restores normal values-mode tool messages")
   await testRuntimeAgentModeEventUpdatesCurrentStreamParsing()
   console.log("PASS electron transport updates current stream parsing from agent_mode event")
+  await testQueuedSubagentSnapshotsCoalesceAndStayBounded()
+  console.log("PASS electron transport coalesces bounded queued subagent snapshots")
+  await testQueuedFinalCorrectionsPreserveRepairMetadata()
+  console.log("PASS electron transport preserves queued final repair metadata")
   await testFallbackToolMessageIdIsStableAcrossRepeatedMessages()
   console.log("PASS electron transport keeps ToolMessage fallback IDs stable")
   await testCoordinatorAiFallbackIdDedupesMessagesThenValues()
@@ -10341,8 +11737,667 @@ async function run(): Promise<void> {
   console.log("PASS electron transport keeps post-tool assistant distinct after growth")
   await testValuesModeRegistersAndCompletesSubagents()
   console.log("PASS electron transport values-mode subagent lifecycle")
+  await testStableTranscriptHistoryDoesNotReplayAcrossStreams()
+  console.log("PASS electron transport avoids stable transcript history replay across streams")
+  await testInterruptedStreamDoesNotSuppressStableTranscriptRecovery()
+  console.log("PASS electron transport rehydrates stable history after interruption")
+  await testStableTranscriptSignaturesDoNotThrashPastOneThousand()
+  console.log("PASS electron transport stable transcript signatures avoid 1000-entry thrash")
   await testSubagentThinkingStreamingAccumulation()
   console.log("PASS electron transport accumulates streamed subagent thinking")
+  await testSubagentCumulativeThinkingContinuesPast16k()
+  console.log("PASS electron transport keeps cumulative subagent text past 16k")
+  await testSubagentReasoningOnlyStreamingIsLosslessAndSeparate()
+  console.log("PASS electron transport keeps reasoning-only subagent streams lossless")
+  await testSubagentPrefixRelatedTextDeltasAreNotDropped()
+  console.log("PASS electron transport preserves prefix-related subagent text deltas")
+  await testSubagentRepeatedTextDeltasAreNotDropped()
+  console.log("PASS electron transport preserves repeated subagent text deltas")
+  await testTaskResultRebasesStreamedTerminalAssistant()
+  console.log("PASS electron transport rebases streamed terminal assistant on completion")
+  await testConcurrentSubagentsDoNotShareProviderAccumulator()
+  console.log("PASS electron transport isolates concurrent subagent provider ids")
+  await testTaskFinalRepairsPersistedLiveMessageAcrossTransportReset()
+  console.log("PASS electron transport repairs persisted live messages after reset")
+  await testIdlessSubagentAssistantTurnsSplitAtToolResult()
+  console.log("PASS electron transport splits id-less subagent turns at tool results")
+  await testFailedTaskResultBackfillsVisibleDiagnostic()
+  console.log("PASS electron transport backfills failed task diagnostics")
+  await testLaterValuesErrorUpgradesCompletedSubagentMonotonically()
+  console.log("PASS electron transport keeps subagent terminal status monotonic")
+  await testFinalReplayFingerprintIncludesCompleteMiddleContent()
+  console.log("PASS electron transport fingerprints complete final content")
+}
+
+async function testInnerToolIdCollisionStillAllowsRealTaskCompletion(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+  const sharedId = "task-and-inner-shared"
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "parent-collision",
+        toolCalls: [
+          {
+            id: sharedId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "collision task" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const ns = "agent:tools:collision-task-uuid|read_file:1"
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "child-collision-ai",
+        toolCalls: [{ id: sharedId, name: "read_file", args: { path: "a.ts" } }]
+      }),
+      { langgraph_checkpoint_ns: ns, [ownerKey]: sharedId }
+    )
+  )
+  const childResult = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "child-collision-result",
+        name: "read_file",
+        toolCallId: sharedId,
+        content: "child data"
+      }),
+      { langgraph_checkpoint_ns: ns, [ownerKey]: sharedId }
+    )
+  )
+  assert(
+    messageEvents(childResult).length === 0,
+    "an explicitly owned inner ToolMessage must not leak into the parent transcript"
+  )
+
+  const namelessInnerResult = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "nameless-inner-collision-result",
+        toolCallId: sharedId,
+        content: "nameless child data"
+      }),
+      { langgraph_checkpoint_ns: ns }
+    )
+  )
+  assert(
+    messageEvents(namelessInnerResult).length === 0 &&
+      customEvents(namelessInnerResult, "subagent_transcript_message").every(
+        (event) => asRecord(event.subagentMessage).id !== `subagent-final-${sharedId}`
+      ),
+    "a nameless inner result with namespace evidence must not complete the parent"
+  )
+
+  const parentResult = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "parent-collision-result",
+        name: "task",
+        toolCallId: sharedId,
+        content: "parent complete"
+      }),
+      { langgraph_node: "tools", langgraph_checkpoint_ns: ns }
+    )
+  )
+  const subagents = customEvents(parentResult, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const final = customEvents(parentResult, "subagent_transcript_message").find(
+    (event) => asRecord(event.subagentMessage).id === `subagent-final-${sharedId}`
+  )
+  assert(
+    subagents?.find((subagent) => subagent.id === sharedId)?.status === "completed",
+    "a root task ToolMessage must still complete the parent after an inner raw-ID collision"
+  )
+  assert(
+    final?.subagentId === sharedId &&
+      asRecord(final.subagentMessage).content === "parent complete",
+    "the real parent completion should produce the stable final transcript row"
+  )
+}
+
+async function testValuesMarksOnlyLatestHumanTurnSubagentsObservedLive(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const oldTaskId = "historical-values-task"
+  const currentTaskId = "current-values-task"
+  const values = convert(
+    transport,
+    streamValuesEvent([
+      aiMessage({
+        id: "historical-parent",
+        toolCalls: [
+          {
+            id: oldTaskId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "historical task" }
+          }
+        ]
+      }),
+      humanMessage("current turn", { id: "current-human" }),
+      aiMessage({
+        id: "current-parent",
+        toolCalls: [
+          {
+            id: currentTaskId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "current task" }
+          }
+        ]
+      })
+    ])
+  )
+  const subagents = customEvents(values, "subagents").at(-1)?.subagents as
+    | Array<Record<string, unknown>>
+    | undefined
+  assert(
+    subagents?.find((subagent) => subagent.toolCallId === oldTaskId)?.observedLive !== true,
+    "a historical values-only task before the latest HumanMessage must stay non-live"
+  )
+  assert(
+    subagents?.find((subagent) => subagent.toolCallId === currentTaskId)?.observedLive === true,
+    "a task after the latest HumanMessage must carry current-turn live evidence"
+  )
+}
+
+async function testTaskResultMessageIdsAreScopedByTaskCall(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const register = (parentId: string, taskId: string): void => {
+    convert(
+      transport,
+      streamMessageEvent(
+        aiMessage({
+          id: parentId,
+          toolCalls: [
+            {
+              id: taskId,
+              name: "task",
+              args: { subagent_type: "verifier", description: taskId }
+            }
+          ]
+        }),
+        { langgraph_node: "agent" }
+      )
+    )
+  }
+  register("parent-result-a", "task-result-a")
+  convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "provider-reused-result-id",
+        name: "task",
+        toolCallId: "task-result-a",
+        content: "result A"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  register("parent-result-b", "task-result-b")
+  const second = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "provider-reused-result-id",
+        name: "task",
+        toolCallId: "task-result-b",
+        content: "result B"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const subagents = customEvents(second, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const final = customEvents(second, "subagent_transcript_message").find(
+    (event) => event.subagentId === "task-result-b"
+  )
+  assert(
+    subagents?.find((subagent) => subagent.id === "task-result-b")?.status === "completed",
+    "the same provider result message ID under a different task call must complete task B"
+  )
+  assert(
+    asRecord(final?.subagentMessage).content === "result B",
+    "task B must not be routed to task A's result-message mapping"
+  )
+}
+
+async function testReusedTaskAndResultIdsAcrossStreamsCompleteLatestExecution(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const rawTaskId = "task-result-reused-across-streams"
+  const resultMessageId = "result-reused-across-streams"
+  const register = (parentId: string, description: string): SdkEvent[] =>
+    convert(
+      transport,
+      streamMessageEvent(
+        aiMessage({
+          id: parentId,
+          toolCalls: [
+            {
+              id: rawTaskId,
+              name: "task",
+              args: { subagent_type: "verifier", description }
+            }
+          ]
+        }),
+        { langgraph_node: "agent" }
+      )
+    )
+
+  const sharedParentId = "parent-result-reused-across-streams"
+  const firstRegistration = register(sharedParentId, "identical stream task")
+  const firstExecutionId = String(
+    (customEvents(firstRegistration, "subagents")[0]?.subagents as Array<
+      Record<string, unknown>
+    >)?.find((subagent) => subagent.toolCallId === rawTaskId)?.id
+  )
+  convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: resultMessageId,
+        name: "task",
+        toolCallId: rawTaskId,
+        content: "identical provider result"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+
+  // Entering the next transport lifecycle clears active executions but keeps
+  // replay identities. The generator need not run for this boundary assertion.
+  await transport.stream({
+    input: { messages: [{ type: "human", content: "next stream" }] },
+    config: { configurable: { thread_id: "thread-123", agent_mode: "normal" } },
+    signal: new AbortController().signal
+  } as never)
+
+  const secondRegistration = register(sharedParentId, "identical stream task")
+  const secondExecution = (
+    customEvents(secondRegistration, "subagents")[0]?.subagents as Array<
+      Record<string, unknown>
+    >
+  )?.find(
+    (subagent) => subagent.toolCallId === rawTaskId && subagent.status === "running"
+  )
+  assert(secondExecution?.id, "the second stream should register a new active execution")
+  assert(
+    secondExecution.id !== firstExecutionId,
+    "reusing parent/task IDs across streams must allocate a distinct transcript bucket"
+  )
+
+  const earlyInterior = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ id: "same-stream-child", content: "new interior" }), {
+      langgraph_checkpoint_ns: "agent:tools:new-stream-task-uuid|model:1",
+      cmb_subagent_owner_tool_call_id: rawTaskId
+    })
+  )
+  assert(
+    customEvents(earlyInterior, "subagent_transcript_message")[0]?.subagentId ===
+      secondExecution.id,
+    "interior output before values reconciliation must stay in the new stream bucket"
+  )
+
+  convert(
+    transport,
+    streamValuesEvent([
+      aiMessage({
+        id: sharedParentId,
+        toolCalls: [
+          {
+            id: rawTaskId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "identical stream task" }
+          }
+        ]
+      })
+    ])
+  )
+
+  const secondResult = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: resultMessageId,
+        name: "task",
+        toolCallId: rawTaskId,
+        content: "identical provider result"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const subagents = customEvents(secondResult, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const final = customEvents(secondResult, "subagent_transcript_message").find(
+    (event) => event.subagentId === secondExecution.id
+  )
+  assert(
+    subagents?.find((subagent) => subagent.id === secondExecution.id)?.status === "completed",
+    "a stale cross-stream result mapping must not leave the latest execution running"
+  )
+  assert(
+    asRecord(final?.subagentMessage).content === "identical provider result",
+    "the reused provider result must finalize the latest stream execution"
+  )
+}
+
+async function testValuesSnapshotUsesNearestReusedTaskInvocationForResults(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const rawTaskId = "task-result-reused-in-values"
+  const resultMessageId = "result-reused-in-values"
+  const events = convert(
+    transport,
+    streamValuesEvent([
+      aiMessage({
+        id: "parent-values-result-one",
+        toolCalls: [
+          {
+            id: rawTaskId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "first values invocation" }
+          }
+        ]
+      }),
+      toolMessage({
+        id: resultMessageId,
+        name: "task",
+        toolCallId: rawTaskId,
+        content: "identical values result"
+      }),
+      aiMessage({
+        id: "parent-values-result-two",
+        toolCalls: [
+          {
+            id: rawTaskId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "second values invocation" }
+          }
+        ]
+      }),
+      toolMessage({
+        id: resultMessageId,
+        name: "task",
+        toolCallId: rawTaskId,
+        content: "identical values result"
+      })
+    ])
+  )
+  const subagents = customEvents(events, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const executions = subagents?.filter((subagent) => subagent.toolCallId === rawTaskId) ?? []
+  assert(
+    executions.length === 2 && executions.every((subagent) => subagent.status === "completed"),
+    "each reused task occurrence in a values snapshot must receive its nearest result"
+  )
+  const finalExecutionIds = new Set(
+    customEvents(events, "subagent_transcript_message")
+      .filter((event) => asRecord(event.subagentMessage).content === "identical values result")
+      .map((event) => String(event.subagentId))
+  )
+  assert(
+    executions.every((subagent) => finalExecutionIds.has(String(subagent.id))),
+    "identical reused values results must finalize both logical executions"
+  )
+}
+
+async function testReusedTaskIdKeepsOldResultAndLateAssistantOnFirstExecution(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const ownerKey = "cmb_subagent_owner_tool_call_id"
+  const rawTaskId = "shared-task-reuse"
+  convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "parent-reuse-1",
+        toolCalls: [
+          {
+            id: rawTaskId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "first execution" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const oldNs = "agent:tools:old-task-uuid|model:1"
+  convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ id: "old-child-ai", content: "old start" }), {
+      langgraph_checkpoint_ns: oldNs,
+      [ownerKey]: rawTaskId
+    })
+  )
+  convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "old-parent-result",
+        name: "task",
+        toolCallId: rawTaskId,
+        content: "old final"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const secondRegistration = convert(
+    transport,
+    streamMessageEvent(
+      aiMessage({
+        id: "parent-reuse-2",
+        toolCalls: [
+          {
+            id: rawTaskId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "second execution" }
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    )
+  )
+  const registered = customEvents(secondRegistration, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const secondExecution = registered.find(
+    (subagent) => subagent.toolCallId === rawTaskId && subagent.id !== rawTaskId
+  )
+  assert(secondExecution?.status === "running", "the reused raw task ID should create execution 2")
+
+  const replay = convert(
+    transport,
+    streamMessageEvent(
+      toolMessage({
+        id: "old-parent-result",
+        name: "task",
+        toolCallId: rawTaskId,
+        content: "old final"
+      }),
+      { langgraph_node: "tools" }
+    )
+  )
+  const replayState = customEvents(replay, "subagents")[0]?.subagents as
+    | Array<Record<string, unknown>>
+    | undefined
+  assert(
+    !replayState ||
+      replayState.find((subagent) => subagent.id === secondExecution?.id)?.status === "running",
+    "replaying execution 1's result must not complete execution 2"
+  )
+
+  const late = convert(
+    transport,
+    streamMessageEvent(aiMessageChunk({ id: "old-child-ai", content: " late" }), {
+      langgraph_checkpoint_ns: oldNs,
+      [ownerKey]: rawTaskId
+    })
+  )
+  const lateTranscript = customEvents(late, "subagent_transcript_message")[0]
+  assert(
+    lateTranscript?.subagentId === rawTaskId,
+    "a checkpoint UUID pinned before raw task-ID reuse must keep late assistant text on execution 1"
+  )
+}
+
+async function testIdlessTaskAdoptsProviderParentWithoutDuplicateExecution(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const taskCall = {
+    id: "task-idless-provider",
+    name: "task",
+    args: { subagent_type: "verifier", description: "same invocation" }
+  }
+  convert(
+    transport,
+    streamMessageEvent(aiMessage({ toolCalls: [taskCall] }), { langgraph_node: "agent" })
+  )
+  const values = convert(
+    transport,
+    streamValuesEvent([aiMessage({ id: "provider-parent-adopted", toolCalls: [taskCall] })])
+  )
+  const subagents = customEvents(values, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  const promptPatch = customEvents(values, "subagent_transcript_message").find(
+    (event) => event.subagentId === taskCall.id
+  )
+  assert(
+    subagents?.filter((subagent) => subagent.toolCallId === taskCall.id).length === 1,
+    "id-less live registration and provider-ID values must resolve to one execution"
+  )
+  assert(
+    String(asRecord(promptPatch?.subagentMessage).subagent_invocation_scope).startsWith(
+      "task-v1-"
+    ),
+    "values reconciliation should patch the prompt with the shared checkpoint identity"
+  )
+}
+
+async function testRestartRestoresReusedTaskIdByPersistedInvocationIdentity(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const rawTaskId = "restart-reused-task"
+  const firstTask = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "implementer", description: "first persisted invocation" }
+  }
+  const secondTask = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "second persisted invocation" }
+  }
+  const firstScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: "provider-parent-first",
+    parentOccurrence: 1,
+    parentContent: "",
+    parentToolCalls: [firstTask],
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: firstTask.args
+  })
+  const secondScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: "provider-parent-second",
+    parentOccurrence: 1,
+    parentContent: "",
+    parentToolCalls: [secondTask],
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: secondTask.args
+  })
+  const secondExecutionId = `${rawTaskId}::invocation-old-fallback-parent`
+  const prompt = (executionId: string, content: string, scope: string): Message => ({
+    id: `subagent-prompt-${executionId}`,
+    role: "user",
+    content,
+    content_priority: 1,
+    subagent_tool_call_id: rawTaskId,
+    subagent_invocation_scope: scope,
+    created_at: new Date("2026-01-01T00:00:00.000Z")
+  })
+  transport.seedSubagentTranscriptBaseline("thread-123", {
+    [rawTaskId]: [prompt(rawTaskId, "first persisted invocation", firstScope)],
+    [secondExecutionId]: [
+      prompt(secondExecutionId, "second persisted invocation", secondScope)
+    ]
+  })
+
+  const values = convert(
+    transport,
+    streamValuesEvent([
+      aiMessage({ id: "provider-parent-first", toolCalls: [firstTask] }),
+      aiMessage({ id: "provider-parent-second", toolCalls: [secondTask] })
+    ])
+  )
+  const snapshots = customEvents(values, "subagents")
+  const subagents = snapshots.at(-1)?.subagents as Array<Record<string, unknown>> | undefined
+  const promptEvents = customEvents(values, "subagent_transcript_message").filter(
+    (event) => asRecord(event.subagentMessage).role === "user"
+  )
+
+  assert(
+    subagents?.some((subagent) => subagent.id === rawTaskId) &&
+      subagents.some((subagent) => subagent.id === secondExecutionId) &&
+      subagents.length === 2,
+    "restart recovery must reclaim both persisted buckets when a raw task id was reused"
+  )
+  assert(
+    promptEvents.length === 0,
+    "exact task-v1 identity matches must not create duplicate prompt rows after restart"
+  )
+}
+
+async function testPrunedValuesClaimsLegacyExecutionByUniquePrompt(): Promise<void> {
+  const transport = new ElectronIPCTransport()
+  const rawTaskId = "legacy-pruned-task"
+  const legacy = (executionId: string, prompt: string): Message => ({
+    id: `subagent-prompt-${executionId}`,
+    role: "user",
+    content: prompt,
+    created_at: new Date("2026-01-01T00:00:00.000Z")
+  })
+  transport.seedSubagentTranscriptBaseline("thread-123", {
+    [rawTaskId]: [legacy(rawTaskId, "old first prompt")],
+    [`${rawTaskId}::execution-2`]: [
+      legacy(`${rawTaskId}::execution-2`, "new retained prompt")
+    ]
+  })
+  const values = convert(
+    transport,
+    streamValuesEvent([
+      aiMessage({
+        id: "retained-parent",
+        toolCalls: [
+          {
+            id: rawTaskId,
+            name: "task",
+            args: { subagent_type: "verifier", description: "new retained prompt" }
+          }
+        ]
+      })
+    ])
+  )
+  const subagents = customEvents(values, "subagents")[0]?.subagents as Array<
+    Record<string, unknown>
+  >
+  assert(
+    subagents?.[0]?.id === `${rawTaskId}::execution-2`,
+    "a pruned snapshot must claim the uniquely matching legacy prompt, not the first raw bucket"
+  )
+  const promptPatch = customEvents(values, "subagent_transcript_message")[0]
+  assert(
+    promptPatch?.subagentId === `${rawTaskId}::execution-2`,
+    "legacy metadata repair must target the retained execution without overwriting execution 1"
+  )
 }
 
 run().catch((error: Error) => {

@@ -514,6 +514,10 @@ export function normalizeCompleteSnapshotMessageIds<T extends RoleCollisionMessa
   const snapshot = normalizeCompleteMessageIds(
     normalizeMessageRoleCollisionIds(baseline, incomingMessages)
   )
+  // With no durable baseline there is nothing to rebase. `snapshot` is already
+  // fully collision/occurrence-normalized; walking it below would repeatedly
+  // normalize an ever-growing prefix and turn history hydration into O(n²).
+  if (baseline.length === 0) return snapshot
   const highestBaselineOccurrence = new Map<string, number>()
   const baselineEntryKeys = new Set<string>()
   const baselineEntries = baseline.flatMap((message) => {
