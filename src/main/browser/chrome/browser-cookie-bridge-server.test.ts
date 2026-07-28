@@ -152,4 +152,51 @@ describe("browser cookie bridge server", () => {
       skippedCookies: 2
     })
   })
+
+  it("settles a timed-out export even when sending cancellation fails", async () => {
+    const pipePath = join(tmpdir(), `cmb-cookie-bridge-test-${randomUUID()}.sock`)
+    const secret = "test-secret"
+    const server = new BrowserCookieBridgeServer(pipePath, secret)
+    servers.push(server)
+    await server.start()
+
+    const socket = connect(pipePath)
+    sockets.push(socket)
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve)
+      socket.once("error", reject)
+    })
+    socket.write(
+      encodeNativeMessage({
+        origin: CMB_CHROME_EXTENSION_ORIGIN,
+        protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
+        secret,
+        type: "native-host-hello"
+      })
+    )
+    socket.write(
+      encodeNativeMessage({
+        extensionVersion: "0.1.0",
+        profileInstanceId: "profile-test",
+        protocolVersion: CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
+        type: "extension-ready"
+      })
+    )
+    await vi.waitFor(() => expect(server.connected).toBe(true))
+
+    const writableServer = server as unknown as {
+      write(client: unknown, message: unknown): void
+    }
+    const originalWrite = writableServer.write.bind(server)
+    vi.spyOn(writableServer, "write").mockImplementation((client, message) => {
+      if ((message as { type?: unknown }).type === "cancel-cookie-export") {
+        throw new Error("simulated cancellation write failure")
+      }
+      originalWrite(client, message)
+    })
+
+    const exportPromise = server.exportCookies(10)
+    await expect(exportPromise).rejects.toMatchObject({ code: "import_timeout" })
+    await expect(server.exportCookies(10)).rejects.toMatchObject({ code: "import_timeout" })
+  })
 })

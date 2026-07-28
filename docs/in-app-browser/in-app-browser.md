@@ -133,6 +133,14 @@ CDP 默认启用，无需额外配置。触发流程：
 3. TCP bridge server（`browser-cookie-bridge-server.ts`）将数据转发到主进程
 4. `browser-extension-cookie-importer.ts` 处理并导入 Cookie
 
+#### Native Host 连接生命周期
+
+- 扩展 Service Worker 启动时只尝试连接一次；首次失败后停止，不在后台持续拉起 Native Host
+- 已成功连接的会话意外断开时，按 1 秒、3 秒、10 秒最多恢复三次；连续失败后停止
+- 恢复后的连接稳定保持 30 秒才重置重试预算，避免短连接反复成功、断开形成无限循环
+- 扩展弹窗的状态轮询只读取状态，不会触发连接；用户可点击“重新连接”主动重置重试预算
+- App 退出会关闭 bridge socket，Native Host 随即退出；导出超时会取消并释放本次任务状态
+
 ### 3.3 关联类型定义
 
 | 文件 | 职责 |

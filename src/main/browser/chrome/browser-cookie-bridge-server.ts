@@ -156,7 +156,13 @@ export class BrowserCookieBridgeServer {
       (resolve, reject) => {
         const timer = setTimeout(() => {
           if (this.pending?.requestId !== requestId) return
-          this.write(client, { requestId, type: "cancel-cookie-export" })
+          try {
+            this.write(client, { requestId, type: "cancel-cookie-export" })
+          } catch (error) {
+            console.warn(
+              `[BrowserCookieBridge] Failed to send export cancellation: ${error instanceof Error ? error.message : String(error)}`
+            )
+          }
           this.failPending(
             new BrowserCookieBridgeError("import_timeout", "Chrome Cookie 导出超时，请重试")
           )
@@ -177,7 +183,11 @@ export class BrowserCookieBridgeServer {
           requestId,
           type: "export-cookies"
         }
-        this.write(client, request)
+        try {
+          this.write(client, request)
+        } catch (error) {
+          this.failPending(error instanceof Error ? error : new Error(String(error)))
+        }
       }
     )
   }
@@ -194,7 +204,8 @@ export class BrowserCookieBridgeServer {
       try {
         for (const message of client.decoder.push(chunk)) this.handleMessage(client, message)
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500)
+        const errorMsg =
+          error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500)
         console.warn(`[BrowserCookieBridge] Message error from client: ${errorMsg}`)
         try {
           socket.end(
@@ -219,8 +230,8 @@ export class BrowserCookieBridgeServer {
       }
     })
     socket.once("close", () => {
-      console.log(`[BrowserCookieBridge] Client disconnected, remaining=${this.clients.size - 1}`)
       this.clients.delete(client)
+      console.log(`[BrowserCookieBridge] Client disconnected, remaining=${this.clients.size}`)
       if (this.pending?.client === client) {
         this.failPending(
           new BrowserCookieBridgeError("extension_not_connected", "Chrome 扩展在导入过程中断开")
@@ -344,7 +355,9 @@ export class BrowserCookieBridgeServer {
     }
     clearTimeout(pending.timer)
     this.pending = null
-    console.log(`[BrowserCookieBridge] Cookie export complete, total=${pending.expectedTotal}, skipped=${pending.skipped}`)
+    console.log(
+      `[BrowserCookieBridge] Cookie export complete, total=${pending.expectedTotal}, skipped=${pending.skipped}`
+    )
     pending.resolve({ cookies: pending.cookies, skippedCookies: pending.skipped ?? 0 })
   }
 
@@ -359,7 +372,9 @@ export class BrowserCookieBridgeServer {
       typeof message.message === "string" && message.message.length <= 1_000
         ? message.message
         : "Chrome Cookie 导出失败"
-    console.warn(`[BrowserCookieBridge] Extension reported export error: code=${rawCode}, message=${errorMessage}`)
+    console.warn(
+      `[BrowserCookieBridge] Extension reported export error: code=${rawCode}, message=${errorMessage}`
+    )
     this.failPending(new BrowserCookieBridgeError(code, errorMessage))
   }
 
