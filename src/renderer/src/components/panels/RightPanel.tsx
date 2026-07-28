@@ -1287,20 +1287,64 @@ export function RightPanel({
                 onHidePreview={onRequestWorkMode}
               />
             ) : (
-              <div className="h-full min-h-0 flex items-center justify-center p-4">
-                <div className="w-full bg-background-elevated/80 px-5 py-6 text-center shadow-sm">
-                  <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-xl border border-border bg-muted/30">
-                    <FileText className="size-5 text-muted-foreground" />
+              <div className="flex h-full min-h-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
+                <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-4 py-5">
+                  <div className="mb-3">
+                    <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
+                      <FileText className="size-7" strokeWidth={1.7} />
+                    </div>
+                    <p className="text-[10px] font-semibold tracking-[0.18em] text-stone-500">
+                      FILE PREVIEW
+                    </p>
+                    <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
+                      从一个文件开始预览
+                    </h2>
+                    <p className="mt-2 text-xs leading-5 text-stone-600">
+                      生成或编辑文件后，新的可预览内容会自动在这里展示。
+                    </p>
                   </div>
-                  <div className="text-sm font-semibold text-foreground">暂无可预览文件</div>
-                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    生成或编辑文件后会自动在这里展示预览。 也可以在工具调用里点击预览图标快速打开。
-                  </p>
-                  <div className="mt-4 flex items-center justify-center gap-2">
+
+                  <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]">
+                    <div className="border-b border-stone-100 px-4 py-3">
+                      <p className="text-xs font-semibold text-stone-800">预览使用提示</p>
+                      <p className="mt-0.5 text-[11px] text-stone-500">
+                        把文件查看、跳转和验证集中到同一处。
+                      </p>
+                    </div>
+
+                    <div className="divide-y divide-stone-100">
+                      <div className="flex gap-3 px-4 py-3">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700">
+                          <Eye className="size-3.5" strokeWidth={1.8} />
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-stone-800">在工具调用里快速打开</p>
+                          <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                            点击预览图标，就能把对应文件直接切到这里查看完整内容。
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-3 px-4 py-3">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
+                          <Sparkles className="size-3.5" strokeWidth={1.8} />
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-stone-800">生成后自动接管预览区</p>
+                          <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                            当任务产出新的可预览文件时，这里会自动更新，不需要手动切换。
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex items-center justify-between gap-3">
+                    <p className="text-[11px] text-stone-500">准备好后，回到工作区继续生成内容。</p>
                     <button
                       type="button"
                       onClick={onRequestWorkMode}
-                      className="inline-flex items-center justify-center rounded-md border border-border/80 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                      className="inline-flex h-9 shrink-0 items-center justify-center rounded-xl border border-stone-200/90 bg-white px-4 text-xs font-medium text-stone-700 shadow-[0_8px_20px_rgba(41,37,36,0.06)] transition-[transform,background-color,color,box-shadow] hover:bg-stone-50 hover:text-stone-900 hover:shadow-[0_12px_28px_rgba(41,37,36,0.1)] active:scale-[0.98]"
                     >
                       返回工作目录
                     </button>

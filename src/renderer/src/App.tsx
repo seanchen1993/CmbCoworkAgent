@@ -90,6 +90,9 @@ const RIGHT_MIN = 250
 const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
 const RIGHT_PREVIEW_EXPAND_VW = 0.35
+const BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT = 66.67
+const BROWSER_FULLSCREEN_MIN_PANEL_PERCENT = 20
+const BROWSER_FULLSCREEN_MAX_PANEL_PERCENT = 80
 
 interface WorkerSplitHandleProps {
   onDrag: (totalDelta: number) => void
@@ -230,6 +233,9 @@ function App(): React.JSX.Element {
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
+  const [browserFullscreenRightPercent, setBrowserFullscreenRightPercent] = useState(
+    BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT
+  )
   const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
   const [rightModule, setRightModule] = useState<"work" | "preview" | "git" | "browser">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
@@ -251,6 +257,23 @@ function App(): React.JSX.Element {
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
   const isRightPanelFullscreen = previewFullscreen || browserFullscreen
+  const showRightResizeHandle = !previewFullscreen
+  const fullscreenMainClassName = browserFullscreen
+    ? "relative flex min-w-0 flex-col overflow-hidden"
+    : "relative flex flex-1 min-w-0 flex-col overflow-hidden"
+  const fullscreenMainStyle = browserFullscreen
+    ? { flex: `${100 - browserFullscreenRightPercent} 1 0%` }
+    : undefined
+  const fullscreenRightPanelClassName = browserFullscreen
+    ? "min-w-0"
+    : isRightPanelFullscreen
+      ? "min-w-0 flex-1"
+      : "shrink-0 pl-0"
+  const fullscreenRightPanelStyle = browserFullscreen
+    ? { flex: `${browserFullscreenRightPercent} 1 0%` }
+    : isRightPanelFullscreen
+      ? undefined
+      : { width: rightWidth }
   const isThreadWorkerFocusActive =
     mainView === "thread" &&
     Boolean(currentThreadId && workerFocusView?.threadId === currentThreadId)
@@ -395,8 +418,12 @@ function App(): React.JSX.Element {
 
   // Track drag start widths
   const dragStartWidths = useRef<{ left: number; right: number } | null>(null)
+  const rightPanelSplitRef = useRef<HTMLDivElement>(null)
   const workerSplitRef = useRef<HTMLDivElement>(null)
   const workerSplitStartRef = useRef<{ leftPercent: number; width: number } | null>(null)
+  const browserFullscreenSplitStartRef = useRef<{ rightPercent: number; width: number } | null>(
+    null
+  )
   const previewCollapsedWidthRef = useRef<number | null>(null)
 
   // Set platform-specific titlebar insets and track zoom
@@ -457,13 +484,30 @@ function App(): React.JSX.Element {
 
   const handleRightResize = useCallback(
     (totalDelta: number) => {
+      if (browserFullscreen) {
+        if (!browserFullscreenSplitStartRef.current) {
+          browserFullscreenSplitStartRef.current = {
+            rightPercent: browserFullscreenRightPercent,
+            width: rightPanelSplitRef.current?.clientWidth || window.innerWidth
+          }
+        }
+        const { rightPercent, width } = browserFullscreenSplitStartRef.current
+        const nextPercent = rightPercent - (totalDelta / Math.max(1, width)) * 100
+        setBrowserFullscreenRightPercent(
+          Math.min(
+            BROWSER_FULLSCREEN_MAX_PANEL_PERCENT,
+            Math.max(BROWSER_FULLSCREEN_MIN_PANEL_PERCENT, nextPercent)
+          )
+        )
+        return
+      }
       if (!dragStartWidths.current) {
         dragStartWidths.current = { left: leftWidth, right: rightWidth }
       }
       const newWidth = dragStartWidths.current.right - totalDelta
       setRightWidth(Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, newWidth)))
     },
-    [leftWidth, rightWidth]
+    [browserFullscreen, browserFullscreenRightPercent, leftWidth, rightWidth]
   )
 
   const handleWorkerSplitResize = useCallback(
@@ -660,6 +704,7 @@ function App(): React.JSX.Element {
     const handleMouseUp = (): void => {
       dragStartWidths.current = null
       workerSplitStartRef.current = null
+      browserFullscreenSplitStartRef.current = null
     }
     document.addEventListener("mouseup", handleMouseUp)
     return () => document.removeEventListener("mouseup", handleMouseUp)
@@ -1020,7 +1065,7 @@ function App(): React.JSX.Element {
             </main>
           </div>
         ) : mainView !== "claudecode" && mainView !== "dashboard" && mainView !== "harness" ? (
-          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+          <div ref={rightPanelSplitRef} className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
             {!sidebarCollapsed && !isAgentFocusActive && (
               <AnimatedThreadSidebar
@@ -1075,7 +1120,7 @@ function App(): React.JSX.Element {
                     </section>
                   </main>
                 ) : (
-                  <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+                  <main className={fullscreenMainClassName} style={fullscreenMainStyle}>
                     {currentThreadId ? (
                       <TabbedPanel
                         threadId={currentThreadId}
@@ -1097,11 +1142,11 @@ function App(): React.JSX.Element {
 
             {mainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
-                {!isRightPanelFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
                 {/* Right Panel - floating style */}
                 <div
-                  style={isRightPanelFullscreen ? undefined : { width: rightWidth }}
-                  className={isRightPanelFullscreen ? "flex-1 min-w-0" : "shrink-0 pl-0"}
+                  style={fullscreenRightPanelStyle}
+                  className={fullscreenRightPanelClassName}
                 >
                   <RightPanel
                     moduleMode={rightModule}
@@ -1139,7 +1184,7 @@ function App(): React.JSX.Element {
         {/* Harness Board 面板 */}
         {mainView === "harness" && (
           <div
-            ref={isHarnessAgentFocusActive ? workerSplitRef : undefined}
+            ref={isHarnessAgentFocusActive ? workerSplitRef : rightPanelSplitRef}
             className="relative flex flex-1 overflow-hidden bg-grid-subtle"
           >
             {!sidebarCollapsed && !isHarnessAgentFocusActive && (
@@ -1151,13 +1196,17 @@ function App(): React.JSX.Element {
             )}
             <main
               key="harness-main"
-              style={isHarnessAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
+              style={
+                isHarnessAgentFocusActive
+                  ? { width: `${workerSplitLeftPercent}%` }
+                  : fullscreenMainStyle
+              }
               className={
                 previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive
                   ? "hidden"
                   : isHarnessAgentFocusActive
                     ? "relative flex min-w-0 flex-col overflow-hidden"
-                    : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
+                    : fullscreenMainClassName
               }
             >
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
@@ -1186,10 +1235,10 @@ function App(): React.JSX.Element {
             )}
             {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
               <>
-                {!isRightPanelFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
                 <div
-                  style={isRightPanelFullscreen ? undefined : { width: rightWidth }}
-                  className={isRightPanelFullscreen ? "flex-1 min-w-0" : "shrink-0  pl-0"}
+                  style={fullscreenRightPanelStyle}
+                  className={fullscreenRightPanelClassName}
                 >
                   <RightPanel
                     threadId={harnessSessionThreadId}
