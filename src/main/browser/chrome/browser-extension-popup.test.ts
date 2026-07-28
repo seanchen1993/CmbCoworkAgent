@@ -28,6 +28,11 @@ function loadPopup({
   permissionGranted: boolean
   userAgent: string
 }) {
+  const testConsole = {
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn()
+  }
   const status = new FakeElement()
   const result = new FakeElement()
   const authorize = new FakeElement()
@@ -84,6 +89,7 @@ function loadPopup({
   const source = readFileSync(resolve(process.cwd(), "chrome-extension/popup.js"), "utf8")
   runInNewContext(source, {
     chrome,
+    console: testConsole,
     document: {
       querySelector: (selector: string) => elements.get(selector) ?? null
     },

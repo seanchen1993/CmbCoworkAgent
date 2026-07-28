@@ -22,6 +22,11 @@ interface ScheduledTimer {
 }
 
 function loadServiceWorker() {
+  const testConsole = {
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn()
+  }
   const timers: ScheduledTimer[] = []
   const ports: Array<{
     disconnect: () => void
@@ -94,7 +99,7 @@ function loadServiceWorker() {
     TextEncoder,
     chrome,
     clearTimeout,
-    console,
+    console: testConsole,
     crypto: { randomUUID: () => "profile-test" },
     setTimeout
   })
