@@ -40,10 +40,16 @@ function loadServiceWorker() {
 
   const chrome = {
     cookies: {
-      getAll: vi.fn(async () => []),
-      getAllCookieStores: vi.fn(async () => [{ id: "0" }])
+      getAll: vi.fn((_query: unknown, callback: (value: unknown[]) => void) => callback([])),
+      getAllCookieStores: vi.fn((callback: (value: Array<{ id: string }>) => void) =>
+        callback([{ id: "0" }])
+      )
     },
-    permissions: { contains: vi.fn(async () => true) },
+    permissions: {
+      contains: vi.fn((_permission: { origins: string[] }, callback: (value: boolean) => void) =>
+        callback(true)
+      )
+    },
     runtime: {
       connectNative: vi.fn(() => {
         const onDisconnect = new ChromeEvent<() => void>()
@@ -64,8 +70,10 @@ function loadServiceWorker() {
     },
     storage: {
       local: {
-        get: vi.fn(async () => ({})),
-        set: vi.fn(async () => undefined)
+        get: vi.fn((_keys: string[], callback: (value: Record<string, unknown>) => void) =>
+          callback({})
+        ),
+        set: vi.fn((_items: Record<string, unknown>, callback: () => void) => callback())
       }
     }
   }
