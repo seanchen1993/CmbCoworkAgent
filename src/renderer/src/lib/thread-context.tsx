@@ -19,6 +19,7 @@ import {
   parseContextCompactionLifecycleEvent,
   type ContextCompactionLifecycleEvent
 } from "../../../shared/context-compaction-events"
+import { resolveHydratedThreadModel } from "../../../shared/thread-model-selection"
 import {
   isCoordinatorModeMetadata,
   isExplicitNormalModeMetadata,
@@ -3782,7 +3783,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       // Load workspace path and thread metadata
       try {
-        const thread = await window.api.threads.get(threadId)
+        const [thread, routingMode] = await Promise.all([
+          window.api.threads.get(threadId),
+          window.api.routing.getMode().catch((error) => {
+            console.warn(
+              `[ThreadContext] Failed to load routing mode for thread ${threadId}; using pinned:`,
+              error
+            )
+            return "pinned" as const
+          })
+        ])
         if (thread) {
           persistedMessageTimes = getMessageTimeMap(thread.thread_values)
           persistedInternalGoalMessageTimes = getInternalGoalMessageTimeMap(thread.thread_values)
@@ -3801,26 +3811,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             // 文件树仅用于侧边栏/文件面板展示，和聊天历史恢复解耦后可显著缩短首屏等待。
             loadWorkspaceFilesInBackground(threadId, workspacePath)
           }
-          // Restore the effective model: prefer the routing-resolved model (smart routing),
-          // fall back to user's pinned model selection.
-          const routingState = metadata.routingState as
-            | { lastResolvedModelId?: string; lastResolvedTier?: string }
-            | undefined
-          const effectiveModel =
-            routingState?.lastResolvedModelId || (metadata.model as string) || ""
-          if (effectiveModel) {
+          // Pinned mode restores the user's explicit selection; auto mode restores the
+          // model that routing actually used for the previous turn.
+          const hydratedModel = resolveHydratedThreadModel(metadata, routingMode)
+          if (hydratedModel.modelId) {
             updateThreadState(threadId, () => ({
-              currentModel: effectiveModel,
-              ...(routingState?.lastResolvedModelId
+              currentModel: hydratedModel.modelId,
+              routingResult: hydratedModel.routingResult
                 ? {
-                    routingResult: {
-                      resolvedModelId: routingState.lastResolvedModelId!,
-                      resolvedTier:
-                        (routingState.lastResolvedTier as "premium" | "economy") ?? "premium",
-                      routeReason: "restored from thread state"
-                    }
+                    resolvedModelId: hydratedModel.routingResult.resolvedModelId,
+                    resolvedTier: hydratedModel.routingResult.resolvedTier,
+                    routeReason: "restored from thread state"
                   }
-                : {})
+                : null
             }))
           }
           // 双向水合:isRunning 是权威电平,false 也要落地——否则上次视图残留的
