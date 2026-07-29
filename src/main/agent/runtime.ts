@@ -3753,6 +3753,8 @@ export interface CreateAgentRuntimeOptions {
   projectDir?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
+  /** Optional IM inbox delivery context supplied by the transport-owned caller. */
+  imDeliveryContext?: ScheduledTaskImDeliveryContext
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
   /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
@@ -4654,38 +4656,12 @@ The workspace root is: ${workspacePath}`
     )
   }
   if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
-    let imDeliveryContext: ScheduledTaskImDeliveryContext | null = null
-    if (options.threadId) {
-      try {
-        const threadRow = getThread(options.threadId)
-        if (threadRow?.metadata) {
-          const meta = JSON.parse(threadRow.metadata)
-          const delivery = meta.imDeliveryContext as Record<string, unknown> | undefined
-          if (
-            meta.targetKind === "inbox" &&
-            delivery?.provider === "zhaohu" &&
-            typeof delivery.conversationKey === "string" &&
-            Number.isSafeInteger(delivery.deviceEpoch) &&
-            (delivery.deviceEpoch as number) > 0
-          ) {
-            imDeliveryContext = {
-              provider: "zhaohu",
-              conversationKey: delivery.conversationKey,
-              expectedDeviceEpoch: delivery.deviceEpoch as number,
-              inboxThreadId: options.threadId
-            }
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-    }
     extraTools.push(
       createSchedulerTool({
         workspacePath,
         modelId: options.modelId,
         threadId: options.threadId,
-        imDeliveryContext
+        imDeliveryContext: options.imDeliveryContext ?? null
       })
     )
   }

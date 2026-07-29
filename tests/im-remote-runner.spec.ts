@@ -18,7 +18,11 @@ import type {
 } from "../src/main/services/im/gateway-client"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
 import { ImReplyClient } from "../src/main/services/im/reply-client"
-import { ImRemoteRunner, createImInboxRemotePolicy } from "../src/main/services/im/remote-runner"
+import {
+  ImRemoteRunner,
+  createImInboxRemotePolicy,
+  resolveImInboxDeliveryContextForRuntime
+} from "../src/main/services/im/remote-runner"
 import { ImConversationTurnQueue } from "../src/main/services/im/conversation-turn-queue"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
 import {
@@ -535,6 +539,51 @@ function testInboxPolicyKeepsSchedulerButCutsRemoteRisks(): void {
   assert(!policy.blockedToolNames?.includes("manage_scheduler"))
 }
 
+function testInboxSchedulerDeliveryContextIsExplicitAndStrict(): void {
+  const metadata = {
+    targetKind: "inbox",
+    imDeliveryContext: {
+      provider: "zhaohu",
+      conversationKey: "conversation-1",
+      deviceEpoch: 7
+    }
+  }
+  assert.deepEqual(
+    resolveImInboxDeliveryContextForRuntime({
+      threadId: "inbox-thread",
+      targetKind: "inbox",
+      metadata
+    }),
+    {
+      provider: "zhaohu",
+      conversationKey: "conversation-1",
+      expectedDeviceEpoch: 7,
+      inboxThreadId: "inbox-thread"
+    }
+  )
+  assert.equal(
+    resolveImInboxDeliveryContextForRuntime({
+      threadId: "feature-thread",
+      targetKind: "feature",
+      metadata
+    }),
+    undefined,
+    "Feature runtimes never receive inbox scheduler delivery"
+  )
+  assert.equal(
+    resolveImInboxDeliveryContextForRuntime({
+      threadId: "inbox-thread",
+      targetKind: "inbox",
+      metadata: {
+        ...metadata,
+        imDeliveryContext: { ...metadata.imDeliveryContext, deviceEpoch: 0 }
+      }
+    }),
+    undefined,
+    "non-positive epochs retain the previous rejection semantics"
+  )
+}
+
 const tests: Array<[string, () => void | Promise<void>]> = [
   ["testSuccessfulRunAndDurableOutbox", testSuccessfulRunAndDurableOutbox],
   ["testForeignOwnerDefersWithoutRuntime", testForeignOwnerDefersWithoutRuntime],
@@ -552,6 +601,10 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   [
     "testInboxPolicyKeepsSchedulerButCutsRemoteRisks",
     testInboxPolicyKeepsSchedulerButCutsRemoteRisks
+  ],
+  [
+    "testInboxSchedulerDeliveryContextIsExplicitAndStrict",
+    testInboxSchedulerDeliveryContextIsExplicitAndStrict
   ]
 ]
 

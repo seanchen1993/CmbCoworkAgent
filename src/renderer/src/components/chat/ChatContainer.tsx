@@ -160,6 +160,7 @@ import {
   type MentionedWorkspaceFile
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
+import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
@@ -1351,7 +1352,9 @@ function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayI
   const delivery = metadata.imDeliveryContext
   if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return null
   const context = delivery as Record<string, unknown>
-  if (context.provider !== "zhaohu" || typeof context.conversationKey !== "string") return null
+  if (context.provider !== DEFAULT_IM_CHANNEL_ID || typeof context.conversationKey !== "string") {
+    return null
+  }
   if (metadata.targetKind === "inbox") {
     return {
       kind: "inbox",

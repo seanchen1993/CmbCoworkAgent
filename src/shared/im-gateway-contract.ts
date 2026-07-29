@@ -1,7 +1,25 @@
 export const IM_GATEWAY_SCHEMA_VERSION = 1 as const
+
+/**
+ * IM channel identifier. V1 only supports Zhaohu; add future channels to this
+ * union instead of comparing new string literals throughout the app.
+ */
+export type ImChannelId = "zhaohu"
+
+export const DEFAULT_IM_CHANNEL_ID: ImChannelId = "zhaohu"
+
+/**
+ * Current reply limits are Zhaohu channel capabilities, not universal IM
+ * limits. A future multi-channel gateway should select these per channel.
+ */
 export const IM_REPLY_MAX_SEGMENT_CHARACTERS = 2_800
 export const IM_REPLY_MAX_SEGMENTS = 8
 
+/**
+ * V1 assumes gateway-normalized one-to-one conversations containing text
+ * messages only. Group conversations and richer message types require an
+ * explicit contract revision instead of leaking channel payloads into clients.
+ */
 export interface RemoteImEventV1 {
   schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
   eventId: string

@@ -64,4 +64,39 @@ const main = read("src/main/index.ts")
 assert(main.includes("builtinRobotManager.start(app.getVersion())"))
 assert(main.includes("builtinRobotManager.stop()"))
 
+const imContract = read("src/shared/im-gateway-contract.ts")
+const mainTypes = read("src/main/types.ts")
+const agentRuntime = read("src/main/agent/runtime.ts")
+const imRunner = read("src/main/services/im/remote-runner.ts")
+const chatContainer = read("src/renderer/src/components/chat/ChatContainer.tsx")
+
+assert.equal(
+  (allSource.match(/"zhaohu"/g) ?? []).length,
+  2,
+  "the concrete IM channel literal must stay confined to its shared type and default value"
+)
+assert(imContract.includes('export type ImChannelId = "zhaohu"'))
+assert(imContract.includes("export const DEFAULT_IM_CHANNEL_ID: ImChannelId"))
+assert(mainTypes.includes("provider: ImChannelId"))
+assert(!agentRuntime.includes('"zhaohu"'), "the generic Agent Runtime cannot know a channel id")
+assert(
+  !agentRuntime.includes("const delivery = meta.imDeliveryContext"),
+  "the generic Agent Runtime cannot infer transport context from Thread metadata"
+)
+assert(
+  agentRuntime.includes("imDeliveryContext: options.imDeliveryContext ?? null"),
+  "the generic Agent Runtime only forwards caller-owned scheduler delivery context"
+)
+assert(
+  imRunner.includes("resolveImInboxDeliveryContextForRuntime({") &&
+    imRunner.includes("context.provider !== DEFAULT_IM_CHANNEL_ID") &&
+    imRunner.includes("Number.isSafeInteger(context.deviceEpoch)"),
+  "the IM caller validates and supplies inbox scheduler delivery context"
+)
+assert(
+  chatContainer.includes("context.provider !== DEFAULT_IM_CHANNEL_ID") &&
+    !chatContainer.includes('"zhaohu"'),
+  "the renderer uses the shared channel identifier"
+)
+
 console.log("im-clean-cut.spec.ts passed")

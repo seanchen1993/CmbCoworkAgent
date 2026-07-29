@@ -1,4 +1,5 @@
 import { resolve } from "node:path"
+import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
 import { coordinatorWorkerManager } from "../../agent/coordinator-worker-manager"
 import { SqlGoalStore } from "../../agent/goals/goal-store"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
@@ -84,7 +85,7 @@ function metadataMatchesTarget(
   if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return false
   const context = delivery as Record<string, unknown>
   if (
-    context.provider !== "zhaohu" ||
+    context.provider !== DEFAULT_IM_CHANNEL_ID ||
     context.targetId !== target.targetId ||
     context.conversationKey !== event.conversationKey ||
     context.deviceEpoch !== event.deviceEpoch ||

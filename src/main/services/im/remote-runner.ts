@@ -37,6 +37,7 @@ import { createSkillUseTracker } from "../../agent/skill-lifecycle/tracker"
 import { createPersistentThreadHookScope } from "../../hooks/thread-scope-persistence"
 import { makeBroadcastHookResultCallback } from "../../hooks/result-callback"
 import { flushStrict, getThread, updateThread } from "../../db"
+import type { ScheduledTaskImDeliveryContext } from "../../types"
 import { rememberRoutingDecision } from "../../routing"
 import {
   discardAgentAutoCommitTracking,
@@ -44,7 +45,7 @@ import {
   recordAgentTouchedFile,
   startAgentGitSnapshot
 } from "../agent-auto-commit"
-import type { RemoteImAckV1 } from "../../../shared/im-gateway-contract"
+import { DEFAULT_IM_CHANNEL_ID, type RemoteImAckV1 } from "../../../shared/im-gateway-contract"
 import {
   imRemoteCapabilityGuard,
   type ImRemoteCapabilityDecision,
@@ -223,6 +224,32 @@ export function createImInboxRemotePolicy(): RemoteTurnPolicy {
   }
 }
 
+/** Validate persisted inbox metadata before exposing remote delivery to the scheduler tool. */
+export function resolveImInboxDeliveryContextForRuntime(input: {
+  threadId: string
+  targetKind: "inbox" | "feature"
+  metadata: Record<string, unknown>
+}): ScheduledTaskImDeliveryContext | undefined {
+  if (input.targetKind !== "inbox" || input.metadata.targetKind !== "inbox") return undefined
+  const delivery = input.metadata.imDeliveryContext
+  if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return undefined
+  const context = delivery as Record<string, unknown>
+  if (
+    context.provider !== DEFAULT_IM_CHANNEL_ID ||
+    typeof context.conversationKey !== "string" ||
+    !Number.isSafeInteger(context.deviceEpoch) ||
+    (context.deviceEpoch as number) <= 0
+  ) {
+    return undefined
+  }
+  return {
+    provider: DEFAULT_IM_CHANNEL_ID,
+    conversationKey: context.conversationKey,
+    expectedDeviceEpoch: context.deviceEpoch as number,
+    inboxThreadId: input.threadId
+  }
+}
+
 export async function executePreparedRemoteStandardTurn(
   input: PreparedRemoteStandardTurnInput
 ): Promise<string> {
@@ -327,6 +354,11 @@ export async function executePreparedRemoteStandardTurn(
         allowDeferredUserInputRenderer: targetKind === "feature",
         interactionWaitHooks: targetKind === "feature" ? interactionWaitHooks : undefined,
         memoryEnabled: targetKind === "inbox" ? false : undefined,
+        imDeliveryContext: resolveImInboxDeliveryContextForRuntime({
+          threadId,
+          targetKind,
+          metadata
+        }),
         extraSystemPrompt: IM_UNTRUSTED_INPUT_CONTEXT,
         autoApproveFileEdits: targetKind === "inbox",
         onFileMutation: (filePath) => recordAgentTouchedFile(threadId, workspacePath, filePath)

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import { HARNESS_SOURCE, type HarnessFeatureSummary } from "../../../shared/harness-board-types"
+import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getLocalThreadRunLease } from "../../agent/thread-run-lease"
 import { getThread, createThread, deleteThread, updateThread, type ThreadRow } from "../../db"
@@ -109,7 +110,7 @@ function bindingMetadataMatches(
   return (
     feature.projectId === target.projectId &&
     feature.slug === target.featureSlug &&
-    context.provider === "zhaohu" &&
+    context.provider === DEFAULT_IM_CHANNEL_ID &&
     context.conversationKey === conversationKey &&
     context.deviceEpoch === deviceEpoch &&
     context.targetId === target.targetId &&
@@ -372,7 +373,7 @@ export class ImFeatureBindingService {
         source: HARNESS_SOURCE
       },
       imDeliveryContext: {
-        provider: "zhaohu",
+        provider: DEFAULT_IM_CHANNEL_ID,
         conversationKey: input.conversationKey,
         deviceEpoch: input.deviceEpoch,
         targetId,

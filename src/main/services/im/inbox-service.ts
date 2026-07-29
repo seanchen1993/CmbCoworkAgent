@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { lstat, mkdir, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
+import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
 import { createThread, getThread } from "../../db"
 import { getOpenworkDir } from "../../storage"
 import {
@@ -121,7 +122,7 @@ export class ImInboxService {
       remoteReadOnly: true,
       memoryEnabled: false,
       imDeliveryContext: {
-        provider: "zhaohu",
+        provider: DEFAULT_IM_CHANNEL_ID,
         conversationKey: input.conversationKey,
         deviceEpoch: input.deviceEpoch,
         targetId

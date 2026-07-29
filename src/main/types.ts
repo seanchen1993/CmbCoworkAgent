@@ -1,4 +1,5 @@
 import type { HookConfig } from "./hooks/types"
+import type { ImChannelId } from "../shared/im-gateway-contract"
 import type {
   ForkableCheckpoint as SharedForkableCheckpoint,
   ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
@@ -367,7 +368,7 @@ export type ScheduledTaskFrequency =
 export type ScheduledTaskType = "action" | "reminder"
 
 export interface ScheduledTaskImDeliveryContext {
-  provider: "zhaohu"
+  provider: ImChannelId
   conversationKey: string
   expectedDeviceEpoch: number
   inboxThreadId: string
