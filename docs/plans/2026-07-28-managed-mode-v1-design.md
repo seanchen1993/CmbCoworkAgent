@@ -4,7 +4,7 @@
 
 **Goal:** 在用户为 Feature 开启托管模式后，由框架在 Agent 结束时调用插件决策接口，并在不抢占当前页面的前提下继续已有会话或创建并启动一个或多个新会话。
 
-**Architecture:** 第一版在 Main 中建立统一的 `ManagedOrchestrator` 控制面。插件负责读取业务状态、判断下一步并返回平台动作；Main 负责事件、线程、工作区、Skill、消息和 Agent Runtime 操作；Renderer 只订阅并呈现状态，不参与托管动作执行。
+**Architecture:** 第一版在 Main 中建立统一的 `AutoModeController` 控制面。插件负责读取业务状态、判断下一步并返回平台动作；Main 负责事件、线程、工作区、Skill、消息和 Agent Runtime 操作；Renderer 只订阅并呈现状态，不参与托管动作执行。
 
 **Tech Stack:** Electron、TypeScript、React、现有 Harness Board 插件命令机制、现有 Thread/Agent IPC 与消息持久化机制。
 
@@ -44,8 +44,9 @@
    - 填入 Skill 和用户消息；
    - 根据 `autoSend` 决定是否自动发送；
    - 结束当前自动推进链。
-7. 新会话自动继承来源会话的 workspace。
+7. 新会话workspace：如果插件返回了 workspace，则使用插件的返回的绝对路径。否则默认自动继承来源会话的 workspace。
 8. 托管动作不主动切换用户当前正在查看的页面或会话。
+9. 特性创建好以后，如果开启了托管模式开关，仍需要用户创建第一个活跃的会话，然后才会激活托管模式。
 
 ### 2.2 非功能目标
 
@@ -100,7 +101,7 @@
 - 收集会话和上下文占用事实；
 - 调用插件命令；
 - 校验插件返回结构；
-- 由 Main `ManagedOrchestrator` 统一执行 action；
+- 由 Main `AutoModeController` 统一执行 action；
 - 在 Main 中创建线程、继承 workspace；
 - 在 Main 中解析 Skill、准备并持久化用户消息；
 - 根据 `autoSend` 从 Main 启动 Agent；
@@ -120,7 +121,7 @@
 ```mermaid
 sequenceDiagram
     participant Runtime as "Main: Agent Runtime"
-    participant Orchestrator as "Main: ManagedOrchestrator"
+    participant Orchestrator as "Main: AutoModeController"
     participant Plugin as "Plugin autoNextStep"
     participant Services as "Main: Thread / Agent Services"
     participant Renderer as "Renderer"
@@ -230,6 +231,8 @@ agent_turn_end
 
 正常完成、错误和用户取消使用同一个事件，通过 `outcome` 区分。
 
+补充：用户取消的时候，不再触发下一次 autoNextStep 留给用户手动操作，并在对话框 toast 提示
+
 ### 7.2 触发条件
 
 同时满足以下条件时调用 `autoNextStep`：
@@ -315,7 +318,7 @@ type AutoNextStepEvent =
 - 不包含 `runId`；
 - `eventTime` 使用 GMT+8 的 `YYYY-MM-DD HH:mm:ss`；
 - `threadId` 是来源会话的持久化 ID；
-- `eventId` 由 Main `ManagedOrchestrator` 为本次事件生成；
+- `eventId` 由 Main `AutoModeController` 为本次事件生成；
 - `contextUsage` 无法可靠获得时整体省略；
 - 插件需要上下文比例时自行计算 `inputTokens / maxTokens`。
 
@@ -421,14 +424,15 @@ interface AutoModeNextAction {
 ### 8.4 Action 数组约束
 
 - `action` 必须是数组；
-- 长度允许为 0～5；
-- 超过 5 个时整个响应无效，不截断执行；
+- 长度允许为 0～10；
+- 超过10个时整个响应无效，不截断执行；
 - 每个 action 拥有独立的 `nextAction`；
 - 一次响应最多包含一个 `continue_current_session`；
 - `complete` 必须是数组中的唯一 action；
 - `autoSend=true` 时 `userMessage` 必须非空；
 - `create_new_session + autoSend=true` 时 `slashSkill` 必须非空；
 - `autoSend` 缺失时按 `false` 处理。
+- sessionWorkspace存在时使用它作为新开会话的工作空间，不存在时则继承触发事件会话 工作区
 
 `action: []` 表示插件判断成功，但当前没有可执行动作，例如其他依赖 Task 仍在运行。
 
@@ -443,6 +447,7 @@ interface AutoModeNextAction {
   "action": [
     {
       "actionType": "create_new_session",
+      "sessionWorkspace": "/User/info/test"
       "nextAction": {
         "slashSkill": "autodev-code",
         "userMessage": "完成支付回调后端接口。",
@@ -508,7 +513,7 @@ T3 结束后，插件从结构化文件确认 T2、T3 均完成：
 
 ### 9.1 来源 threadId
 
-插件不需要在 action 中返回 `threadId`。Main `ManagedOrchestrator` 调用插件时已经持有 `agent_turn_end.threadId`，并在动作执行上下文中保留为 `sourceThreadId`。
+插件不需要在 action 中返回 `threadId`。Main `AutoModeController` 调用插件时已经持有 `agent_turn_end.threadId`，并在动作执行上下文中保留为 `sourceThreadId`。
 
 ### 9.2 continue_current_session
 
@@ -615,16 +620,16 @@ T3 结束后，插件从结构化文件确认 T2、T3 均完成：
 
 框架可以串行完成“创建线程和提交请求”这段很短的平台操作，但不限制已启动 Agent 的并发数量。
 
-## 11. Main ManagedOrchestrator
+## 11. Main AutoModeController
 
 第一版将托管决策和动作执行统一放在 Main。Renderer 不创建托管线程、不提交托管 Agent，也不维护托管 action 生命周期。
 
-`ManagedOrchestrator` 负责：
+`AutoModeController` 负责：
 
 1. 接收顶层 `agent_turn_end`；
 2. 查询 Feature binding 和 `autoMode`；
 3. 调用插件 `autoNextStep`；
-4. 校验插件返回的 0～5 个 action；
+4. 校验插件返回的 0～10个 action；
 5. 为每个 action 建立 Main 内部执行上下文；
 6. 调用 Thread Service 和 Agent Run Service；
 7. 在内存中记录动作执行结果；
@@ -656,7 +661,7 @@ interface ManagedActionResult {
 
 ## 12. Main Thread Service 与 Agent Run Service
 
-现有线程创建和 Agent 启动逻辑位于 Main IPC handler 中，但直接面向 Renderer IPC。为了让 ManagedOrchestrator 在不依赖 Renderer 的情况下复用相同行为，需要先进行行为保持型服务抽取。
+现有线程创建和 Agent 启动逻辑位于 Main IPC handler 中，但直接面向 Renderer IPC。为了让 AutoModeController 在不依赖 Renderer 的情况下复用相同行为，需要先进行行为保持型服务抽取。
 
 ### 12.1 Thread Service
 
@@ -673,7 +678,7 @@ async function createThreadService(
 ```text
 现有 threads:create IPC ───┐
                            ├── createThreadService
-ManagedOrchestrator ───────┘
+AutoModeController ───────┘
 ```
 
 该服务继续负责：
@@ -718,7 +723,7 @@ async function runAgent(
 ```text
 现有 agent:invoke IPC ─────┐
                           ├── runAgent
-ManagedOrchestrator ──────┘
+AutoModeController ──────┘
 ```
 
 抽取要求：
@@ -729,14 +734,14 @@ ManagedOrchestrator ──────┘
 - 原有审批、Hook、Goal、Workflow、Coordinator、取消和清理行为保持不变；
 - 第一阶段只做机械抽取，不顺便整理或改写分支；
 - 原有 IPC handler 变成薄适配器；
-- ManagedOrchestrator 使用 Main 内部入口，不伪造 IPC event。
+- AutoModeController 使用 Main 内部入口，不伪造 IPC event。
 
 现有 `agent:invoke` 使用来源 `BrowserWindow` 构造 `AgentRunDelivery`；
-ManagedOrchestrator 使用应用注册的可用主窗口构造 delivery。delivery 只负责把流式状态和审批请求送到 UI，
+AutoModeController 使用应用注册的可用主窗口构造 delivery。delivery 只负责把流式状态和审批请求送到 UI，
 Agent 运行所有权、消息持久化和结束清理由 Main 持有。只要应用仍有可用主窗口，即使用户位于项目列表页、
 Feature 详情页或其他会话，也可以启动托管 Agent。
 
-执行多个 `autoSend=true` action 时，ManagedOrchestrator 串行完成消息准备和 Agent 启动调用，
+执行多个 `autoSend=true` action 时，AutoModeController 串行完成消息准备和 Agent 启动调用，
 但不等待前一个 Agent 运行结束后再启动下一个。每个 Agent 的完成 Promise 由 Main Runtime 独立持有，
 结束时分别产生新的 `agent_turn_end`。
 
@@ -800,13 +805,13 @@ Renderer 的 ThreadProvider 初始化或打开线程时读取 `PendingAutoDraft`
   → runAgent
 
 托管模式
-  → ManagedOrchestrator
+  → AutoModeController
   → Main 内部 AgentRunRequest
   → 应用主窗口 delivery
   → runAgent
 ```
 
-两条入口只在调用来源和 delivery 构造上不同，共享同一个 Agent Runtime。ManagedOrchestrator 只会在
+两条入口只在调用来源和 delivery 构造上不同，共享同一个 Agent Runtime。AutoModeController 只会在
 Harness Feature、`autoMode=true` 且顶层运行结束时进入；普通 Chat、非 Harness Thread 和
 `autoMode=false` 不会经过任何托管分支。
 
@@ -947,7 +952,7 @@ Renderer 不调用 `createThread`、`stream.submit` 或页面导航。该状态�
 
 ### ADR-002：Action 使用数组
 
-**决策：** 插件一次返回 0～5 个 action。
+**决策：** 插件一次返回 0～10个 action。
 
 **理由：**
 
@@ -975,7 +980,7 @@ Renderer 不调用 `createThread`、`stream.submit` 或页面导航。该状态�
 
 **理由：**
 
-- 来源 threadId 已存在于触发事件和 ManagedOrchestrator 上下文；
+- 来源 threadId 已存在于触发事件和 AutoModeController 上下文；
 - 新 threadId 由框架生成；
 - 插件负责业务决策，不负责平台线程寻址。
 
@@ -996,7 +1001,7 @@ Renderer 不调用 `createThread`、`stream.submit` 或页面导航。该状态�
 
 ### ADR-006：控制面统一归属 Main
 
-**决策：** 托管决策、线程创建、消息写入和 Agent 启动统一由 Main `ManagedOrchestrator` 执行；Renderer 只观察状态。
+**决策：** 托管决策、线程创建、消息写入和 Agent 启动统一由 Main `AutoModeController` 执行；Renderer 只观察状态。
 
 **理由：**
 
@@ -1016,7 +1021,7 @@ Renderer 不调用 `createThread`、`stream.submit` 或页面导航。该状态�
 
 ### ADR-007：行为保持型抽取先于托管接入
 
-**决策：** 先单独抽取 Thread Service 和 Agent Run Service，验证现有行为不变后，再接入 ManagedOrchestrator。
+**决策：** 先单独抽取 Thread Service 和 Agent Run Service，验证现有行为不变后，再接入 AutoModeController。
 
 **理由：**
 
@@ -1059,7 +1064,7 @@ Renderer 不调用 `createThread`、`stream.submit` 或页面导航。该状态�
 - 增加按 projectId/featureId 查询 Feature binding 的内部方法；
 - 时间继续使用现有 GMT+8 格式化方法。
 
-### Task 3：增加 Feature 创建开关
+### Task 3：增加 Feature 级别的 autoMode 开关
 
 **Files:**
 
@@ -1067,11 +1072,11 @@ Renderer 不调用 `createThread`、`stream.submit` 或页面导航。该状态�
 
 **Changes:**
 
-- Feature 创建弹窗增加“托管模式（自动推进）”开关；
+- Feature 创建完成后，在详情页编辑绑定的发布单元左侧添加“托管模式（自动推进）”开关；
 - 默认关闭；
-- 弹窗关闭和重新打开时重置；
 - createFeature payload 传入 `autoMode`；
 - 不改变编辑 Feature 和非托管 Feature 行为。
+- 如果插件不存在 autoNextStep 命令则该开关置灰色，不可打开
 
 ### Task 4：增加插件命令框架适配
 
@@ -1122,7 +1127,7 @@ Renderer 不调用 `createThread`、`stream.submit` 或页面导航。该状态�
 - 现有 IPC handler 只负责构造 sink 并调用 service；
 - 本 Task 不接入托管模式，也不修改 `ChatContainer.tsx`。
 
-### Task 7：新增 Main ManagedOrchestrator
+### Task 7：新增 Main AutoModeController
 
 **Files:**
 
@@ -1201,25 +1206,24 @@ Lint 只对本次改动文件运行，不使用 `--fix`，不运行全项目 lin
 9. 超过 5 个 action 时全部拒绝；
 10. 审批弹窗期间不触发 `agent_turn_end`；
 11. success/error/cancelled 正确传递；
-12. 新会话继承来源 workspace；
+12. 新会话优先使用插件返回的路径，未传递则继承来源 workspace；
 13. Agent 调用前继续执行现有 `session_context_inject`；
 14. 普通 Chat 的手动发送、Skill、Stream、取消、错误和审批行为与抽取前一致；
-15. 非 Harness Thread 和 `autoMode=false` 不进入 ManagedOrchestrator；
+15. 非 Harness Thread 和 `autoMode=false` 不进入 AutoModeController；
 16. `PendingAutoDraft` 恢复到输入区后从 Thread 中清除，重新打开不会重复填入；
 17. 托管 Agent 请求审批时继续使用现有审批 UI，审批等待不触发结束事件；
 18. Renderer 只接收状态通知，不负责执行 action。
 
 ## 18. 验收标准
 
-- Feature 创建弹窗可以选择 `autoMode`；
 - `harness-board-features.json` 正确保存并兼容旧数据；
 - 非托管 Feature 没有行为变化；
 - 框架可以生成符合本文定义的 `agent_turn_end`；
-- 框架可以解析 0～5 个 action；
-- 新会话自动继承来源 workspace；
+- 框架可以解析 0～10 个 action；
+- 新会话优先使用插件返回的路径，未传递则继承来源 workspace；
 - 不需要插件回传 threadId；
 - `autoSend=true` 可以在任意主页面后台启动 Agent；
-- `autoSend=false` 可以通过目标线程 draft state 在打开会话时显示 Skill 和消息；
+- `autoSend=false` 可以通过目标线程 draft state 在打开会话时显示 Skill 和消息；这个可以复用现有的实现
 - 自动动作不切换当前页面；
 - Agent 后续触发审批时允许复用现有审批 UI 唤起对应会话；
 - `ChatContainer.tsx` 保持不变；
