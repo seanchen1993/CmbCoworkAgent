@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Check, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -55,6 +55,7 @@ export function BrowserCdpConfigCard({
   const [isSavingCdpConfig, setIsSavingCdpConfig] = useState(false)
   const [restartDialogOpen, setRestartDialogOpen] = useState(false)
   const [isRestartingApp, setIsRestartingApp] = useState(false)
+  const saveButtonRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -87,10 +88,12 @@ export function BrowserCdpConfigCard({
 
   const handleCdpEnabledChange = useCallback((enabled: boolean) => {
     setCdpConfig((current) => (current ? { ...current, enabled } : current))
+    saveButtonRef?.current?.scrollIntoView({behavior: "smooth"})
   }, [])
 
   const handleProfileImportEnabledChange = useCallback((profileImportEnabled: boolean) => {
     setCdpConfig((current) => (current ? { ...current, profileImportEnabled } : current))
+    saveButtonRef?.current?.scrollIntoView({ behavior: "smooth" })
   }, [])
 
   const handleSaveCdpConfig = useCallback(async () => {
@@ -219,7 +222,7 @@ export function BrowserCdpConfigCard({
           {/*  )}*/}
           {/*</div>*/}
 
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-3" ref={saveButtonRef}>
             <p className="text-[11px] leading-4 text-stone-500">保存后需重启应用生效。</p>
             <Button
               type="button"
