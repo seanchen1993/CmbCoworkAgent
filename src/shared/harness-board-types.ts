@@ -79,6 +79,7 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   developerSapId?: string
   organizationName?: string
   pullKnowledgeAvailable?: boolean
+  supportsAutoNextStep: boolean
   boardCompatibility: HarnessBoardCompatibility
 }
 
@@ -139,6 +140,7 @@ export interface HarnessFeatureDeployUnitBinding {
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
+  autoMode: boolean
 }
 
 function normalizeHarnessText(value: unknown): string {
@@ -352,6 +354,12 @@ export interface HarnessFeatureDeployUnitUpdateInput {
   selectedDeployUnits: HarnessDeployUnitMapping[]
 }
 
+export interface HarnessFeatureAutoModeUpdateInput {
+  projectId: string
+  featureId: string
+  autoMode: boolean
+}
+
 export interface HarnessSkipNodeInput {
   projectId: string
   slug: string
@@ -464,6 +472,7 @@ export interface HarnessProjectDetailViewModel {
     workspacePath: string
     sessionWorkspacePath?: string
     projectRootPath: string
+    supportsAutoNextStep: boolean
   }
   adapterSnapshot: {
     mode: "project"
@@ -511,6 +520,97 @@ export interface HarnessWorkflowNextAction {
     id?: string
     name?: string
   }
+}
+
+export interface AutoModeEventBase {
+  eventId: string
+  eventType: string
+  eventTime: string
+  threadId: string
+}
+
+export interface AgentTurnEndEvent extends AutoModeEventBase {
+  eventType: "agent_turn_end"
+  outcome: "success" | "error"
+  endReason: {
+    code: "normal" | "provider_error" | "hook_halt" | "failure_fuse" | "unknown"
+    message?: string
+  }
+  contextUsage?: {
+    inputTokens: number
+    maxTokens: number
+  }
+}
+
+export type AutoNextStepEvent = AgentTurnEndEvent
+
+export interface AutoModeNextAction {
+  slashSkill?: string
+  userMessage?: string
+  autoSend: boolean
+}
+
+export interface ContinueCurrentSessionAction {
+  actionType: "continue_current_session"
+  nextAction: AutoModeNextAction
+}
+
+export interface CreateNewSessionAction {
+  actionType: "create_new_session"
+  sessionWorkspace?: string
+  nextAction: AutoModeNextAction
+}
+
+export interface CompleteAction {
+  actionType: "complete"
+}
+
+export type AutoNextStepAction =
+  | ContinueCurrentSessionAction
+  | CreateNewSessionAction
+  | CompleteAction
+
+export interface AutoNextStepResult {
+  ok: boolean
+  messages: string
+  action: AutoNextStepAction[]
+}
+
+export interface ManagedActionResult {
+  eventId: string
+  actionIndex: number
+  actionType: AutoNextStepAction["actionType"]
+  status: "succeeded" | "failed"
+  targetThreadId?: string
+  message?: string
+}
+
+export interface PendingAutoDraft {
+  targetThreadId: string
+  slashSkill?: string
+  userMessage?: string
+}
+
+export const AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY = "harnessAutoModePendingDraft"
+export const AUTO_MODE_CANCELLED_MESSAGE = "当前会话托管模式已暂停，输入消息后继续"
+export const AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL =
+  "harnessBoard:managedAutoSendStreamStarted"
+
+export interface ManagedAutoSendStreamStartEvent {
+  runId: string
+  threadId: string
+  streamRequestId: string
+  agentMode?: "normal" | "coordinator" | "workflow"
+}
+
+export interface AutoModeStateChangedEvent {
+  eventId: string
+  projectId: string
+  featureId: string
+  sourceThreadId: string
+  messages: string
+  results: ManagedActionResult[]
+  pendingDrafts: PendingAutoDraft[]
 }
 
 export interface HarnessWorkflowStateDefinition {
@@ -618,6 +718,7 @@ export interface HarnessRunDetailViewModel {
     workspacePath: string
     sessionWorkspacePath?: string
     projectRootPath: string
+    supportsAutoNextStep: boolean
   }
   adapterSnapshot: {
     mode: "run"
@@ -642,6 +743,7 @@ export interface HarnessRunDetailViewModel {
     featureStatusLabel?: string
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
+    autoMode: boolean
     selectedDeployUnits: HarnessDeployUnitMapping[]
     currentNodeId: string
     nodes: HarnessRunNode[]

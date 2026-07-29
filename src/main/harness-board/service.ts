@@ -10,6 +10,10 @@ import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 import type { PluginMetadata } from "../types"
 import { normalizeHarnessAgentmdLoadStatus } from "../../shared/harness-board-types"
 import type {
+  AutoModeNextAction,
+  AutoNextStepAction,
+  AutoNextStepEvent,
+  AutoNextStepResult,
   HarnessAdapterRegistryItem,
   HarnessAdapterSnapshot,
   HarnessAdapterType,
@@ -23,6 +27,7 @@ import type {
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureAutoModeUpdateInput,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessFeatureDeployUnitBinding,
   HarnessFeatureStatus,
@@ -86,6 +91,7 @@ type HarnessInspectCommandName =
   | "skipNode"
   | "sessionContext"
   | "pullKnowledge"
+  | "autoNextStep"
 type HarnessInspectCommandConfigKey =
   | "project_status"
   | "feature_status"
@@ -95,6 +101,7 @@ type HarnessInspectCommandConfigKey =
   | "skip_node"
   | "session_context_inject"
   | "pull_knowledge"
+  | "auto_next_step"
 type HarnessPlatformConfigKey =
   | HarnessInspectCommandConfigKey
   | "system_prompt_inject"
@@ -113,7 +120,8 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
   dynamicWorkflow: "dynamic_workflow",
   skipNode: "skip_node",
   sessionContext: "session_context_inject",
-  pullKnowledge: "pull_knowledge"
+  pullKnowledge: "pull_knowledge",
+  autoNextStep: "auto_next_step"
 }
 
 interface ConfiguredHarnessInvocation {
@@ -145,6 +153,7 @@ interface HarnessCommandParseOptions {
   workflowTemplate?: string
   workflowNodes?: string
   nodeId?: string
+  eventJson?: string
   preserveMissingPlaceholders?: boolean
 }
 
@@ -316,7 +325,7 @@ function emptyFeatureDeployUnitBindingStore(): HarnessFeatureDeployUnitBindingSt
   }
 }
 
-function formatGmt8Timestamp(date = new Date()): string {
+export function formatGmt8Timestamp(date = new Date()): string {
   const gmt8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000)
   const pad = (value: number): string => String(value).padStart(2, "0")
   return [
@@ -473,6 +482,14 @@ function hasPullKnowledgeCommand(plugin: PluginMetadata): boolean {
   }
 }
 
+function hasAutoNextStepCommand(plugin: PluginMetadata): boolean {
+  try {
+    return readBoardConfigPlatformText(plugin.path, "auto_next_step") !== null
+  } catch {
+    return false
+  }
+}
+
 function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryItem {
   const id = pluginAdapterId(plugin)
   const useScenario = normalizeText(plugin.useScenario)
@@ -484,6 +501,7 @@ function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryI
     description: normalizeText(plugin.description),
     ...(useScenario ? { useScenario } : {}),
     pullKnowledgeAvailable: hasPullKnowledgeCommand(plugin),
+    supportsAutoNextStep: hasAutoNextStepCommand(plugin),
     boardCompatibility: evaluateBoardPluginCompatibility(plugin, normalizeText(plugin.name) || id)
   }
 }
@@ -560,6 +578,14 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
   const adapter = project["harness-adapter"]
   return findPluginByAdapterName(adapter)
+}
+
+function projectSupportsAutoNextStep(project: HarnessProjectMetadata): boolean {
+  const plugin = findAdapterPlugin(project)
+  if (!plugin) return false
+  const adapter = project["harness-adapter"]
+  const compatibility = evaluateBoardPluginCompatibility(plugin, adapter.name || adapter.id)
+  return compatibility.compatible && hasAutoNextStepCommand(plugin)
 }
 
 function toTrimmedOutput(value: unknown): string {
@@ -796,10 +822,11 @@ function replaceHarnessConfigPlaceholders(
     mode,
     workflowTemplate: options.workflowTemplate ?? "",
     workflowNodes: options.workflowNodes ?? "",
-    nodeId: options.nodeId ?? ""
+    nodeId: options.nodeId ?? "",
+    eventJson: options.eventJson ?? ""
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson)\}/g,
     (placeholder: string, key: string) => {
       const replacement = replacements[key]
       if (replacement) return replacement
@@ -1341,6 +1368,127 @@ function runHarnessJsonInvocation(
     )
     throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
   }
+}
+
+function normalizeAutoModeNextAction(
+  value: unknown,
+  actionType: "continue_current_session" | "create_new_session"
+): AutoModeNextAction {
+  if (!isObject(value)) {
+    throw new Error(`${actionType}.nextAction 必须是对象`)
+  }
+  if (value.slashSkill !== undefined && typeof value.slashSkill !== "string") {
+    throw new Error(`${actionType}.nextAction.slashSkill 必须是字符串`)
+  }
+  if (value.userMessage !== undefined && typeof value.userMessage !== "string") {
+    throw new Error(`${actionType}.nextAction.userMessage 必须是字符串`)
+  }
+  if (value.autoSend !== undefined && typeof value.autoSend !== "boolean") {
+    throw new Error(`${actionType}.nextAction.autoSend 必须是 boolean`)
+  }
+
+  const slashSkill = normalizeText(value.slashSkill).trim()
+  const userMessage = normalizeText(value.userMessage)
+  const autoSend = value.autoSend === true
+  if (autoSend && !userMessage.trim()) {
+    throw new Error(`${actionType} 在 autoSend=true 时必须提供 userMessage`)
+  }
+  return {
+    ...(slashSkill ? { slashSkill } : {}),
+    ...(value.userMessage !== undefined ? { userMessage } : {}),
+    autoSend
+  }
+}
+
+function normalizeAutoNextStepAction(value: unknown): AutoNextStepAction {
+  if (!isObject(value)) {
+    throw new Error("autoNextStep action 必须是对象")
+  }
+  const actionType = normalizeText(value.actionType).trim()
+  if (actionType === "complete") {
+    if (Object.prototype.hasOwnProperty.call(value, "nextAction")) {
+      throw new Error("complete action 不允许包含 nextAction")
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "sessionWorkspace")) {
+      throw new Error("complete action 不允许包含 sessionWorkspace")
+    }
+    return { actionType }
+  }
+  if (actionType !== "continue_current_session" && actionType !== "create_new_session") {
+    throw new Error(`不支持的 autoNextStep actionType：${actionType || "(empty)"}`)
+  }
+  if (
+    actionType === "continue_current_session" &&
+    Object.prototype.hasOwnProperty.call(value, "sessionWorkspace")
+  ) {
+    throw new Error("sessionWorkspace 只允许用于 create_new_session")
+  }
+
+  const nextAction = normalizeAutoModeNextAction(value.nextAction, actionType)
+  if (actionType === "continue_current_session") {
+    return { actionType, nextAction }
+  }
+  if (value.sessionWorkspace === undefined) {
+    return { actionType, nextAction }
+  }
+  if (typeof value.sessionWorkspace !== "string") {
+    throw new Error("create_new_session.sessionWorkspace 必须是字符串")
+  }
+  const sessionWorkspace = value.sessionWorkspace.trim()
+  if (
+    !sessionWorkspace ||
+    !isAbsolute(sessionWorkspace) ||
+    !existsSync(sessionWorkspace) ||
+    !statSync(sessionWorkspace).isDirectory()
+  ) {
+    throw new Error("create_new_session.sessionWorkspace 必须是已存在目录的绝对路径")
+  }
+  return { actionType, sessionWorkspace, nextAction }
+}
+
+function normalizeAutoNextStepResult(value: Record<string, unknown>): AutoNextStepResult {
+  if (typeof value.ok !== "boolean") {
+    throw new Error("autoNextStep.ok 必须是 boolean")
+  }
+  if (typeof value.messages !== "string") {
+    throw new Error("autoNextStep.messages 必须是 string")
+  }
+  if (!Array.isArray(value.action)) {
+    throw new Error("autoNextStep.action 必须是数组")
+  }
+  if (value.action.length > 10) {
+    throw new Error("autoNextStep.action 最多允许 10 个动作")
+  }
+
+  const action = value.action.map(normalizeAutoNextStepAction)
+  const continueCount = action.filter(
+    (item) => item.actionType === "continue_current_session"
+  ).length
+  if (continueCount > 1) {
+    throw new Error("autoNextStep.action 最多允许一个 continue_current_session")
+  }
+  if (action.some((item) => item.actionType === "complete") && action.length !== 1) {
+    throw new Error("complete 必须是 autoNextStep.action 中的唯一动作")
+  }
+  return {
+    ok: value.ok,
+    messages: value.messages,
+    action
+  }
+}
+
+export function invokeHarnessAutoNextStep(
+  projectId: string,
+  featureId: string,
+  event: AutoNextStepEvent
+): AutoNextStepResult | null {
+  const project = requireProject(projectId)
+  const configured = buildOptionalConfiguredHarnessInvocation(project, "autoNextStep", {
+    feature: featureId,
+    eventJson: JSON.stringify(event)
+  })
+  if (!configured) return null
+  return normalizeAutoNextStepResult(runHarnessJsonInvocation(configured, "autoNextStep"))
 }
 
 function assertSkipNodeInvocationResult(
@@ -2089,6 +2237,7 @@ function normalizeFeatureDeployUnitBinding(
     sessionContextInjectionSource: normalizeSessionContextInjectionSource(
       value.sessionContextInjectionSource
     ),
+    autoMode: value.autoMode === true,
     createdAt: normalizeText(value.createdAt).trim() || formatGmt8Timestamp(),
     updatedAt: normalizeText(value.updatedAt).trim() || undefined
   }
@@ -2253,6 +2402,7 @@ function saveFeatureDeployUnitBinding(
     featureId,
     selectedDeployUnitMappings,
     sessionContextInjectionSource,
+    autoMode: false,
     createdAt:
       existing?.createdAt && isGmt8Timestamp(existing.createdAt) ? existing.createdAt : now,
     updatedAt: now
@@ -2288,6 +2438,37 @@ function updateFeatureDeployUnitBinding(
   store.bindings[existingIndex] = binding
   writeFeatureDeployUnitBindingStore(store)
   return binding
+}
+
+function updateFeatureAutoModeBinding(
+  projectId: string,
+  featureId: string,
+  autoMode: boolean
+): HarnessFeatureDeployUnitBindingRecord {
+  const store = readFeatureDeployUnitBindingStore()
+  const key = featureDeployUnitBindingKey(projectId, featureId)
+  const existingIndex = store.bindings.findIndex(
+    (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
+  )
+  if (existingIndex < 0) {
+    throw new Error("未找到该特性的绑定记录")
+  }
+
+  const binding: HarnessFeatureDeployUnitBindingRecord = {
+    ...store.bindings[existingIndex],
+    autoMode,
+    updatedAt: formatGmt8Timestamp()
+  }
+  store.bindings[existingIndex] = binding
+  writeFeatureDeployUnitBindingStore(store)
+  return binding
+}
+
+export function getHarnessFeatureBinding(
+  projectId: string,
+  featureId: string
+): HarnessFeatureDeployUnitBinding | null {
+  return findFeatureDeployUnitBinding(projectId, featureId)
 }
 
 export function listHarnessDeployUnitMappings(): HarnessDeployUnitMapping[] {
@@ -2649,6 +2830,7 @@ function makeProjectDetailViewModel(
   }
 ): HarnessProjectDetailViewModel {
   const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project)
+  const supportsAutoNextStep = projectSupportsAutoNextStep(project)
 
   return {
     project: {
@@ -2660,7 +2842,8 @@ function makeProjectDetailViewModel(
       systemName: project.systemName,
       workspacePath: project.workspacePath,
       sessionWorkspacePath: project.sessionWorkspacePath,
-      projectRootPath: projectDirectoryPath(project)
+      projectRootPath: projectDirectoryPath(project),
+      supportsAutoNextStep
     },
     adapterSnapshot: {
       mode: "project",
@@ -3179,6 +3362,25 @@ export function updateHarnessFeatureDeployUnits(
     allowEmpty: true
   })
   return updateFeatureDeployUnitBinding(projectId, featureId, selectedDeployUnits)
+}
+
+export function updateHarnessFeatureAutoMode(
+  input: HarnessFeatureAutoModeUpdateInput
+): HarnessFeatureDeployUnitBinding {
+  const projectId = normalizeText(input.projectId).trim()
+  const featureId = normalizeText(input.featureId).trim()
+  if (!projectId || !featureId) {
+    throw new Error("Project and feature are required")
+  }
+  if (typeof input.autoMode !== "boolean") {
+    throw new Error("autoMode must be a boolean")
+  }
+  validateHarnessName(featureId, "特性名称")
+  const project = requireProject(projectId)
+  if (input.autoMode && !projectSupportsAutoNextStep(project)) {
+    throw new Error("当前插件未配置 auto_next_step，无法开启托管模式")
+  }
+  return updateFeatureAutoModeBinding(projectId, featureId, input.autoMode)
 }
 
 export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNodeResult {
@@ -3791,7 +3993,11 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
   const hookLogEntries = readHookLogRefs(project, hookLogRefs)
   const { nodes: nodesWithHookLogs, unmatchedHooks } = applyHookLogEntries(nodes, hookLogEntries)
   const skipNodeAvailable = hasConfiguredHarnessInvocation(project, "skipNode")
-  const selectedDeployUnits = resolveFeatureDeployUnitMappings(project.projectId, slug)
+  const featureBinding = findFeatureDeployUnitBinding(project.projectId, slug)
+  const selectedDeployUnits = featureBinding
+    ? resolveDeployUnitMappingSnapshots(featureBinding.selectedDeployUnitMappings)
+    : []
+  const supportsAutoNextStep = projectSupportsAutoNextStep(project)
   return {
     project: {
       projectId: project.projectId,
@@ -3801,7 +4007,8 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       systemId: project.systemId,
       workspacePath: project.workspacePath,
       sessionWorkspacePath: project.sessionWorkspacePath,
-      projectRootPath: projectDirectoryPath(project)
+      projectRootPath: projectDirectoryPath(project),
+      supportsAutoNextStep
     },
     adapterSnapshot: {
       mode: "run",
@@ -3820,6 +4027,7 @@ export function getHarnessRunDetail(projectId: string, slug: string): HarnessRun
       ...(featureStatusLabel ? { featureStatusLabel } : {}),
       overallStatus,
       skipNodeAvailable,
+      autoMode: featureBinding?.autoMode === true,
       selectedDeployUnits,
       hookLogRefs,
       watchRefs: normalizeWatchRefs(project, run.watchRefs, makeWatchRefs(featureSlug)),

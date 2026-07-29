@@ -1,4 +1,9 @@
-import type { HarnessWorkflowNextAction } from "@/types"
+import type { HarnessWorkflowNextAction, SkillMetadata } from "@/types"
+import {
+  mergeChatSkills,
+  selectSkillForSlashName
+} from "@/features/slash-commands/skill-merge"
+import { normalizeSkillId } from "./skill-ids"
 
 type Listener = () => void
 
@@ -77,4 +82,46 @@ export function subscribePendingHarnessNextActions(listener: Listener): () => vo
 
 export function getPendingHarnessNextActionVersion(): number {
   return version
+}
+
+export async function resolveHarnessNextActionSkill(
+  projectId: string,
+  slashSkill: string
+): Promise<SkillMetadata | null> {
+  const pluginSkillsPromise =
+    typeof window.api.skills.listPlugins === "function"
+      ? window.api.skills.listPlugins().catch((error) => {
+          console.warn("[HarnessNextAction] Failed to load plugin skills:", error)
+          return []
+        })
+      : Promise.resolve([])
+  const [loadedSkills, pluginSkills, disabledList] = await Promise.all([
+    window.api.skills.list(),
+    pluginSkillsPromise,
+    window.api.skills.getDisabled()
+  ])
+  let preferredPlugin: { id?: string; name?: string } | null = null
+  try {
+    const projects = await window.api.harnessBoard.listProjects()
+    const project = projects.find((item) => item.projectId === projectId)
+    if (project) {
+      preferredPlugin = {
+        id: project.harnessAdapter.id,
+        name: project.harnessAdapter.name
+      }
+    }
+  } catch {
+    // Keep the same non-critical fallback as the chat skill loader.
+  }
+
+  const availableSkills = loadedSkills.filter(
+    (skill) => skill.source === "project" || skill.source === "user"
+  )
+  const merged = mergeChatSkills(
+    availableSkills,
+    pluginSkills,
+    new Set(disabledList.map(normalizeSkillId)),
+    preferredPlugin
+  )
+  return selectSkillForSlashName(merged, slashSkill, preferredPlugin)
 }

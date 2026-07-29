@@ -75,6 +75,7 @@ import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessFeatureDeployUnitBinding,
+  HarnessFeatureAutoModeUpdateInput,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -86,6 +87,8 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  AutoModeStateChangedEvent,
+  ManagedAutoSendStreamStartEvent,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
@@ -811,6 +814,13 @@ interface CustomAPI {
       threadId: string,
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
+    ) => () => void
+    onManagedAutoSendStreamStart: (
+      callback: (event: ManagedAutoSendStreamStartEvent) => void
+    ) => () => void
+    observeManagedAutoSendStream: (
+      runId: string,
+      callback: (event: StreamEvent) => void
     ) => () => void
     goalControl: (
       threadId: string,
@@ -2456,6 +2466,9 @@ interface CustomAPI {
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
     ) => Promise<HarnessFeatureDeployUnitBinding>
+    updateFeatureAutoMode: (
+      input: HarnessFeatureAutoModeUpdateInput
+    ) => Promise<HarnessFeatureDeployUnitBinding>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
@@ -2474,6 +2487,7 @@ interface CustomAPI {
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
+    onAutoModeStateChanged: (callback: (event: AutoModeStateChangedEvent) => void) => () => void
   }
   update: {
     check: () => Promise<

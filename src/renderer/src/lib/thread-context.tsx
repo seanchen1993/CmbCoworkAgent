@@ -65,8 +65,12 @@ import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
+  AUTO_MODE_CANCELLED_MESSAGE,
+  AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY,
   normalizeHarnessAgentmdLoadStatus,
-  type HarnessAgentmdLoadStatusItem
+  type HarnessAgentmdLoadStatusItem,
+  type ManagedAutoSendStreamStartEvent,
+  type PendingAutoDraft
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
@@ -137,6 +141,7 @@ import {
 import { resolveIncomingSubagentStatus } from "./subagent-state"
 import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
 import { queueStorageKey } from "./queued-message-content"
+import { resolveHarnessNextActionSkill } from "./harness-next-action"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -151,6 +156,30 @@ type LiveMessageTimeMap = Record<string, { start_at: Date; end_at?: Date }>
 type PendingVisibleMessageCommit = {
   message: Message
   time: MessageTimeMap[string]
+}
+
+function readPendingAutoDraft(
+  threadId: string,
+  threadValues?: Record<string, unknown>
+): PendingAutoDraft | null {
+  const value = threadValues?.[AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY]
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (record.targetThreadId !== threadId) return null
+  const slashSkill = typeof record.slashSkill === "string" ? record.slashSkill.trim() : ""
+  const userMessage = typeof record.userMessage === "string" ? record.userMessage : undefined
+  return {
+    targetThreadId: threadId,
+    ...(slashSkill ? { slashSkill } : {}),
+    ...(userMessage !== undefined ? { userMessage } : {})
+  }
+}
+
+function readHarnessProjectId(metadata?: Record<string, unknown>): string | null {
+  const value = metadata?.harnessFeature
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const projectId = (value as Record<string, unknown>).projectId
+  return typeof projectId === "string" && projectId.trim() ? projectId.trim() : null
 }
 
 type LiveStreamAccumulator = {
@@ -1253,18 +1282,26 @@ interface CustomEventData {
 // Component that holds a stream and notifies subscribers
 function ThreadStreamHolder({
   threadId,
+  managedAutoSendRun,
   fallbackIndexBaselines,
   onStreamUpdate,
   onCustomEvent,
   onError
 }: {
   threadId: string
+  managedAutoSendRun?: ManagedAutoSendStreamStartEvent
   fallbackIndexBaselines: StreamFallbackIndexBaselines
   onStreamUpdate: (data: StreamData) => void
   onCustomEvent: (data: CustomEventData) => void
   onError: (error: Error) => void
 }): null {
-  const transport = useMemo(() => new ElectronIPCTransport(), [])
+  const transport = useMemo(
+    () =>
+      new ElectronIPCTransport(
+        managedAutoSendRun ? { managedAutoSendRunId: managedAutoSendRun.runId } : undefined
+      ),
+    [managedAutoSendRun]
+  )
 
   useEffect(() => {
     transport.setFallbackIndexBaselines(fallbackIndexBaselines)
@@ -1292,6 +1329,26 @@ function ThreadStreamHolder({
       onErrorRef.current(error instanceof Error ? error : new Error(String(error)))
     }
   })
+  const submittedManagedRunIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!managedAutoSendRun || submittedManagedRunIdRef.current === managedAutoSendRun.runId) {
+      return
+    }
+    submittedManagedRunIdRef.current = managedAutoSendRun.runId
+    void stream
+      .submit(null, {
+        config: {
+          configurable: {
+            thread_id: threadId,
+            ...(managedAutoSendRun.agentMode ? { agent_mode: managedAutoSendRun.agentMode } : {})
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        onErrorRef.current(error instanceof Error ? error : new Error(String(error)))
+      })
+  }, [managedAutoSendRun, stream, threadId])
 
   // Notify parent whenever stream data changes
   // Use refs to avoid stale closures and ensure we always have latest callback
@@ -1339,6 +1396,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const currentThreadId = useAppStore((state) => state.currentThreadId)
   const [threadStates, setThreadStates] = useState<Record<string, ThreadState>>({})
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(new Set())
+  const [managedAutoSendRuns, setManagedAutoSendRuns] = useState<
+    Record<string, ManagedAutoSendStreamStartEvent>
+  >({})
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({})
   const initializedThreadsRef = useRef<Set<string>>(new Set())
   const previousCurrentThreadIdRef = useRef<string | null>(null)
@@ -2341,6 +2401,48 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
     },
     []
+  )
+
+  const restorePendingAutoDraft = useCallback(
+    async (
+      threadId: string,
+      metadata?: Record<string, unknown>,
+      threadValues?: Record<string, unknown>
+    ): Promise<void> => {
+      const pendingDraft = readPendingAutoDraft(threadId, threadValues)
+      if (!pendingDraft) return
+
+      let draftSkill: SkillMetadata | null = null
+      if (pendingDraft.slashSkill) {
+        const projectId = readHarnessProjectId(metadata)
+        if (!projectId) {
+          console.warn(
+            `[ThreadContext] Cannot restore managed draft for ${threadId}: missing Harness project`
+          )
+          return
+        }
+        draftSkill = await resolveHarnessNextActionSkill(projectId, pendingDraft.slashSkill)
+        if (!draftSkill) {
+          console.warn(
+            `[ThreadContext] Cannot restore managed draft for ${threadId}: skill ${pendingDraft.slashSkill} is unavailable`
+          )
+          return
+        }
+      }
+
+      const currentState =
+        threadStatesRef.current[threadId] ?? normalizeThreadState(createDefaultThreadState())
+      if (currentState.draftInput.trim() || currentState.draftSkill) return
+
+      updateThreadState(threadId, () => ({
+        draftInput: pendingDraft.userMessage ?? "",
+        draftSkill
+      }))
+      await window.api.threads.mergeThreadValues(threadId, {
+        [AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY]: null
+      })
+    },
+    [updateThreadState]
   )
 
   const saveSubagentTranscripts = useCallback(
@@ -4190,6 +4292,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             thread.thread_values
           )
           const metadata = thread.metadata || {}
+          void restorePendingAutoDraft(threadId, metadata, thread.thread_values).catch((error) => {
+            console.warn(
+              `[ThreadContext] Failed to restore managed draft for ${threadId}:`,
+              error
+            )
+          })
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
             const workspacePath = metadata.workspacePath as string
@@ -4691,6 +4799,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getThreadActions,
       handleStreamUpdate,
       loadWorkspaceFilesInBackground,
+      restorePendingAutoDraft,
       scheduleCoordinatorNotificationTurn,
       seedLiveStreamBaselineFromCheckpoint,
       updateThreadState
@@ -5282,6 +5391,50 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
+    return window.api.agent.onManagedAutoSendStreamStart((event) => {
+      setManagedAutoSendRuns((prev) => ({
+        ...prev,
+        [event.threadId]: event
+      }))
+      initializeThread(event.threadId)
+    })
+  }, [initializeThread])
+
+  useEffect(() => {
+    return window.api.harnessBoard.onAutoModeStateChanged((event) => {
+      const targetThreadIds = new Set(
+        [
+          ...event.results.map((result) => result.targetThreadId),
+          ...event.pendingDrafts.map((draft) => draft.targetThreadId)
+        ].filter((threadId): threadId is string => Boolean(threadId))
+      )
+      void useAppStore
+        .getState()
+        .refreshThreads()
+        .then(() => {
+          for (const targetThreadId of targetThreadIds) {
+            if (initializedThreadsRef.current.has(targetThreadId)) {
+              loadThreadHistory(targetThreadId)
+            } else {
+              initializeThread(targetThreadId)
+            }
+          }
+        })
+        .catch((error) => {
+          console.warn("[ThreadProvider] Failed to refresh managed-mode threads:", error)
+        })
+
+      if (
+        event.messages === AUTO_MODE_CANCELLED_MESSAGE &&
+        event.results.length === 0 &&
+        event.pendingDrafts.length === 0
+      ) {
+        toast.info(AUTO_MODE_CANCELLED_MESSAGE)
+      }
+    })
+  }, [initializeThread, loadThreadHistory])
+
+  useEffect(() => {
     const previousThreadId = previousCurrentThreadIdRef.current
     if (previousThreadId && previousThreadId !== currentThreadId) {
       void window.api.agent.unbindCoordinatorWorkers(previousThreadId).catch((error: unknown) => {
@@ -5420,6 +5573,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         next.delete(threadId)
         return next
       })
+      setManagedAutoSendRuns((prev) => {
+        if (!prev[threadId]) return prev
+        const { [threadId]: _removed, ...rest } = prev
+        void _removed
+        return rest
+      })
       setThreadStates((prev) => {
         const { [threadId]: _removed, ...rest } = prev
         void _removed // Explicitly mark as intentionally unused
@@ -5513,19 +5672,23 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   return (
     <ThreadContext.Provider value={contextValue}>
       {/* Render stream holders for all active threads */}
-      {Array.from(activeThreadIds).map((threadId) => (
-        <ThreadStreamHolder
-          key={threadId}
-          threadId={threadId}
-          fallbackIndexBaselines={mergeFallbackIndexBaselines(
-            checkpointFallbackIndexBaselinesRef.current[threadId],
-            fallbackIndexBaselinesFromMessages(threadStates[threadId]?.messages ?? [])
-          )}
-          onStreamUpdate={(data) => handleStreamUpdate(threadId, data)}
-          onCustomEvent={(data) => handleCustomEvent(threadId, data)}
-          onError={(error) => handleError(threadId, error)}
-        />
-      ))}
+      {Array.from(activeThreadIds).map((threadId) => {
+        const managedAutoSendRun = managedAutoSendRuns[threadId]
+        return (
+          <ThreadStreamHolder
+            key={`${threadId}:${managedAutoSendRun?.runId ?? "standard"}`}
+            threadId={threadId}
+            managedAutoSendRun={managedAutoSendRun}
+            fallbackIndexBaselines={mergeFallbackIndexBaselines(
+              checkpointFallbackIndexBaselinesRef.current[threadId],
+              fallbackIndexBaselinesFromMessages(threadStates[threadId]?.messages ?? [])
+            )}
+            onStreamUpdate={(data) => handleStreamUpdate(threadId, data)}
+            onCustomEvent={(data) => handleCustomEvent(threadId, data)}
+            onError={(error) => handleError(threadId, error)}
+          />
+        )
+      })}
       {children}
     </ThreadContext.Provider>
   )

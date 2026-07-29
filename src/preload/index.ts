@@ -86,6 +86,7 @@ import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessFeatureDeployUnitBinding,
+  HarnessFeatureAutoModeUpdateInput,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -97,8 +98,13 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  AutoModeStateChangedEvent,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
+} from "../shared/harness-board-types"
+import {
+  AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
+  type ManagedAutoSendStreamStartEvent
 } from "../shared/harness-board-types"
 import type {
   FeatureGateCheckOptions,
@@ -289,6 +295,92 @@ function listenForAgentStreamRequest(
   return cleanup
 }
 
+interface ManagedAutoSendStreamBuffer {
+  start: ManagedAutoSendStreamStartEvent
+  requestChannel: string
+  requestHandler: (_event: unknown, data: StreamEvent) => void
+  bufferedEvents: StreamEvent[]
+  listeners: Set<(event: StreamEvent) => void>
+  terminal: boolean
+  cleanupTimer?: ReturnType<typeof setTimeout>
+}
+
+const MAX_MANAGED_AUTO_SEND_STREAMS = 100
+const MAX_MANAGED_AUTO_SEND_BUFFERED_EVENTS = 10000
+const MANAGED_AUTO_SEND_TERMINAL_RETENTION_MS = 30000
+const managedAutoSendStreams = new Map<string, ManagedAutoSendStreamBuffer>()
+const managedAutoSendStartListeners = new Set<
+  (event: ManagedAutoSendStreamStartEvent) => void
+>()
+
+function disposeManagedAutoSendStream(runId: string): void {
+  const stream = managedAutoSendStreams.get(runId)
+  if (!stream) return
+  ipcRenderer.removeListener(stream.requestChannel, stream.requestHandler)
+  if (stream.cleanupTimer) clearTimeout(stream.cleanupTimer)
+  managedAutoSendStreams.delete(runId)
+}
+
+function scheduleManagedAutoSendStreamCleanup(
+  runId: string,
+  stream: ManagedAutoSendStreamBuffer
+): void {
+  if (stream.cleanupTimer) clearTimeout(stream.cleanupTimer)
+  stream.cleanupTimer = setTimeout(() => {
+    if (managedAutoSendStreams.get(runId) === stream) {
+      disposeManagedAutoSendStream(runId)
+    }
+  }, MANAGED_AUTO_SEND_TERMINAL_RETENTION_MS)
+  stream.cleanupTimer.unref?.()
+}
+
+function registerManagedAutoSendStream(start: ManagedAutoSendStreamStartEvent): void {
+  disposeManagedAutoSendStream(start.runId)
+  const requestChannel = resolveAgentStreamRequestChannel(
+    `agent:stream:${start.threadId}`,
+    start.streamRequestId
+  )
+  const stream: ManagedAutoSendStreamBuffer = {
+    start,
+    requestChannel,
+    requestHandler: () => {},
+    bufferedEvents: [],
+    listeners: new Set(),
+    terminal: false
+  }
+  stream.requestHandler = (_event, data) => {
+    if (stream.listeners.size > 0) {
+      for (const listener of stream.listeners) listener(data)
+    } else {
+      stream.bufferedEvents.push(data)
+      if (stream.bufferedEvents.length > MAX_MANAGED_AUTO_SEND_BUFFERED_EVENTS) {
+        stream.bufferedEvents.shift()
+      }
+    }
+    if (classifyAgentStreamDelivery("request", data.type) === "deliver-and-close") {
+      stream.terminal = true
+      ipcRenderer.removeListener(stream.requestChannel, stream.requestHandler)
+      scheduleManagedAutoSendStreamCleanup(start.runId, stream)
+    }
+  }
+  managedAutoSendStreams.set(start.runId, stream)
+  ipcRenderer.on(requestChannel, stream.requestHandler)
+
+  while (managedAutoSendStreams.size > MAX_MANAGED_AUTO_SEND_STREAMS) {
+    const oldestRunId = managedAutoSendStreams.keys().next().value
+    if (!oldestRunId) break
+    disposeManagedAutoSendStream(oldestRunId)
+  }
+  for (const listener of managedAutoSendStartListeners) listener(start)
+}
+
+ipcRenderer.on(
+  AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
+  (_event, start: ManagedAutoSendStreamStartEvent) => {
+    registerManagedAutoSendStream(start)
+  }
+)
+
 // Custom APIs for renderer
 const api = {
   agent: {
@@ -390,6 +482,42 @@ const api = {
       )
       ipcRenderer.send("agent:interrupt", { threadId, streamRequestId, decision })
       return cleanup
+    },
+    onManagedAutoSendStreamStart: (
+      callback: (event: ManagedAutoSendStreamStartEvent) => void
+    ): (() => void) => {
+      managedAutoSendStartListeners.add(callback)
+      for (const stream of managedAutoSendStreams.values()) callback(stream.start)
+      return () => managedAutoSendStartListeners.delete(callback)
+    },
+    observeManagedAutoSendStream: (
+      runId: string,
+      callback: (event: StreamEvent) => void
+    ): (() => void) => {
+      const stream = managedAutoSendStreams.get(runId)
+      if (!stream) {
+        callback({
+          type: "error",
+          error: `Managed auto-send stream is unavailable: ${runId}`
+        })
+        return () => {}
+      }
+
+      if (stream.cleanupTimer) {
+        clearTimeout(stream.cleanupTimer)
+        delete stream.cleanupTimer
+      }
+      stream.listeners.add(callback)
+      const bufferedEvents = stream.bufferedEvents.splice(0)
+      for (const event of bufferedEvents) callback(event)
+      return () => {
+        stream.listeners.delete(callback)
+        if (stream.terminal && stream.listeners.size === 0) {
+          disposeManagedAutoSendStream(runId)
+        } else if (stream.listeners.size === 0) {
+          scheduleManagedAutoSendStreamCleanup(runId, stream)
+        }
+      }
     },
     goalControl: (
       threadId: string,
@@ -3523,6 +3651,13 @@ const api = {
         "harnessBoard:updateFeatureDeployUnits",
         input
       ) as Promise<HarnessFeatureDeployUnitBinding>,
+    updateFeatureAutoMode: (
+      input: HarnessFeatureAutoModeUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> =>
+      ipcRenderer.invoke(
+        "harnessBoard:updateFeatureAutoMode",
+        input
+      ) as Promise<HarnessFeatureDeployUnitBinding>,
     getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
       ipcRenderer.invoke(
         "harnessBoard:getDynamicWorkflowConfig",
@@ -3583,6 +3718,14 @@ const api = {
         callback(payload)
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
       return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
+    },
+    onAutoModeStateChanged: (
+      callback: (event: AutoModeStateChangedEvent) => void
+    ): (() => void) => {
+      const handler = (_event: unknown, payload: AutoModeStateChangedEvent): void =>
+        callback(payload)
+      ipcRenderer.on("harnessBoard:autoModeStateChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:autoModeStateChanged", handler)
     }
   },
   update: {
