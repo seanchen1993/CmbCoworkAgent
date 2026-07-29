@@ -39,6 +39,9 @@ components:
       in: header
       scheme: bearer
       bearerFormat: JWT
+      description: >-
+        Desktop 企业登录取得的标准 JWT ystIdToken。Java Gateway 必须在 HTTP Upgrade
+        阶段验证签名、允许算法、issuer、audience、exp、nbf 和主体 claim；不得只解码。
   messages:
     envelope:
       name: DesktopGatewayWsEnvelopeV1

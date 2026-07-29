@@ -105,21 +105,23 @@ V1 采用以下产品和技术结构：
 
 ### 3.3 V1 能力边界表
 
-| 能力 | 桌面 V1 | IM V1 |
-| --- | --- | --- |
-| 空闲 Thread 普通单轮 | 保持现状 | 支持，共享准备与 Runtime factory |
-| Goal/Coordinator/Workflow/内部通知 | 保持现状 | 不支持，提示回桌面 |
-| 同来源 Stop/Replace/Steer/Resume | 保持现状 | 仅 `/停止` 当前 IM owner |
-| 跨来源抢占或取消 | 不新增 | 不支持；排队或显示 busy |
-| 收件箱 Shell/外部写入/交互审批 | 不影响普通桌面 Thread | 禁用 |
-| Feature 工具审批/结构化输入 | 保持现状 | 由桌面完成，受远程 TTL 约束 |
-| 远程 Thread 桌面续聊 | 普通桌面 Thread 不受影响 | 收件箱只读；Feature 空闲时可本地续聊，结果不外发 IM |
+| 能力                               | 桌面 V1                  | IM V1                                               |
+| ---------------------------------- | ------------------------ | --------------------------------------------------- |
+| 空闲 Thread 普通单轮               | 保持现状                 | 支持，共享准备与 Runtime factory                    |
+| Goal/Coordinator/Workflow/内部通知 | 保持现状                 | 不支持，提示回桌面                                  |
+| 同来源 Stop/Replace/Steer/Resume   | 保持现状                 | 仅 `/停止` 当前 IM owner                            |
+| 跨来源抢占或取消                   | 不新增                   | 不支持；排队或显示 busy                             |
+| 收件箱 Shell/外部写入/交互审批     | 不影响普通桌面 Thread    | 禁用                                                |
+| Feature 工具审批/结构化输入        | 保持现状                 | 由桌面完成，受远程 TTL 约束                         |
+| 远程 Thread 桌面续聊               | 普通桌面 Thread 不受影响 | 收件箱只读；Feature 空闲时可本地续聊，结果不外发 IM |
 
-## 4. 当前实现基线
+## 4. 实施前代码基线（历史）
 
-当前 ChatX 远端入口在 [chatx.ts](../src/main/services/chatx.ts#L227) 中维护 WSS、内存去重、串行队列和 Thread 复用，但在 [chatx.ts](../src/main/services/chatx.ts#L353) 直接调用 `createAgentRuntime()`。
+制定本规格时，旧 ChatX 远端入口位于 `src/main/services/chatx.ts`：它维护 WSS、内存去重、
+串行队列和 Thread 复用，但直接调用 `createAgentRuntime()`。该文件已在 V1 Clean Cut 中删除，
+本节只保留当时的取舍依据，不描述当前代码。
 
-当前远端路径已经验证、可以复用的机制：
+旧远端路径已经验证、可作为新实现行为参考的机制：
 
 - WSS 重连、心跳和服务停止；
 - `chatId + fromId` 维度的串行 owner 与队列 drain；
@@ -129,16 +131,19 @@ V1 采用以下产品和技术结构：
 - StreamConverter、桌面流事件镜像和最终文本提取；
 - HTTP 下行超时后的保守重试策略。
 
-当前实现不能直接保留的部分：
+旧实现不能直接保留的部分：
 
 - `processedMsgIds` 是内存集合，重启后丢失；
 - 远端 Runtime 明确 `enableAgentsPrompt: false`；
 - 未经过桌面的 prompt/Skill/Hook/Harness 准备流程；
 - 未共用完整模型路由、Trace、自动提交和运行状态；对 Goal/Coordinator/Workflow 状态也没有安全能力门禁；
 - 每个用户配置独立机器人、密钥、工作目录和收件人；
-- 机器人 Thread 在桌面输入后由 [agent.ts](../src/main/ipc/agent.ts#L7989) 隐式 HTTP 外发，Scheduler 在 [scheduler.ts](../src/main/services/scheduler.ts#L333) 也有旧外发分支。
+- 机器人 Thread 在桌面输入后由 `src/main/ipc/agent.ts` 隐式 HTTP 外发，Scheduler 在
+  `src/main/services/scheduler.ts` 也有旧外发分支。
 
-本规格保留已经验证的可靠性机制，但替换身份、配置、持久化、目标模型和执行入口。
+当前 V1 已用 `src/main/services/im/` 下的 Gateway Client、Event Store、Conversation
+State、Remote Runner 与 Reply Client 替换旧路径；保留经验证的可靠性原则，但替换身份、
+配置、持久化、目标模型和执行入口。
 
 ## 5. 总体架构
 
@@ -188,6 +193,13 @@ interface BuiltinRobotSettings {
 
 ### 6.2 企业身份
 
+- `ystIdToken` 已确认是标准 JWT；Desktop 继续使用现有企业登录与刷新链路，V1 不新增
+  统一凭据管理器；
+- Desktop 在 WSS HTTP Upgrade 中发送 `Authorization: Bearer <ystIdToken>`；
+- Java 网关必须使用 Spring Security Resource Server 独立验证 JWT 签名、允许算法、
+  issuer、audience、`exp/nbf` 和主体 claim；客户端当前不存在可复用的本地验签逻辑；
+- 如果 `ystIdToken.aud` 不包含统一机器人网关，必须由身份服务提供 Token Exchange，
+  不得只 decode JWT 或关闭 audience 校验；
 - 网关负责把平台 OpenID 映射为企业 `principalId`；
 - 客户端只接收不可逆的 `principalId/conversationKey`，不得接收平台 Token；
 - 客户端不能自报 `fromId/toId/clientSecret`；
@@ -449,16 +461,16 @@ Feature 远程标准单轮必须继承：
 
 ### 10.1 V1 指令
 
-| 指令                   | 行为                                                   |
-| ---------------------- | ------------------------------------------------------ |
-| `/帮助`                | 显示控制指令                                           |
-| `/项目`                | 列出固定设备允许远程访问的项目                         |
-| `/功能 <项目编号>`     | 列出项目可绑定 Feature                                 |
-| `/绑定 <Feature 编号>` | 创建/恢复 binding，并把后续消息切到 Feature Thread     |
-| `/收件箱`              | 把后续消息切回托管收件箱                               |
-| `/当前`                | 显示当前目标、设备、运行、排队和审批状态               |
-| `/停止`                | 只中止当前 IM 启动的事件；不跨来源取消桌面任务         |
-| `/重试 <事件短码>`     | 显式重试最近的 outcome_unknown 事件，并提示副作用风险  |
+| 指令                   | 行为                                                  |
+| ---------------------- | ----------------------------------------------------- |
+| `/帮助`                | 显示控制指令                                          |
+| `/项目`                | 列出固定设备允许远程访问的项目                        |
+| `/功能 <项目编号>`     | 列出项目可绑定 Feature                                |
+| `/绑定 <Feature 编号>` | 创建/恢复 binding，并把后续消息切到 Feature Thread    |
+| `/收件箱`              | 把后续消息切回托管收件箱                              |
+| `/当前`                | 显示当前目标、设备、运行、排队和审批状态              |
+| `/停止`                | 只中止当前 IM 启动的事件；不跨来源取消桌面任务        |
+| `/重试 <事件短码>`     | 显式重试最近的 outcome_unknown 事件，并提示副作用风险 |
 
 ### 10.2 Selection Context
 
@@ -967,12 +979,13 @@ src/main/services/im/
 客户端可先依靠冻结 schema 和 Mock Gateway 开发，但下列事项必须在生产联调前关闭：
 
 1. 统一机器人网关的负责团队、代码仓库、部署边界、容量和 SLO；
-2. 官方机器人 Token、OpenID 获取和轮换方式；
-3. 企业 `principalId ↔ OpenID` 映射来源及账号解绑语义；
-4. 平台上行的正式传输、签名、顺序、重试和超时契约；
-5. 平台是否支持下行幂等键、发送结果查询及其结果未知语义；
-6. 网关无在线设备队列、route 设备离线队列、事件租约和保留时间；
-7. 生产数据保留、审计、限流、告警和故障响应要求。
+2. 招乎机器人 Token 获取/刷新接口的字段、过期时间、刷新轮换、并发语义和错误码；
+3. `ystIdToken` 的 issuer、JWKS、允许算法、gateway audience 和主体 claim；
+4. 企业 `principalId ↔ OpenID` 映射来源及账号解绑语义；
+5. 平台上行的正式传输、签名、顺序、重试和超时契约；
+6. 平台是否支持下行幂等键、发送结果查询及其结果未知语义；
+7. 网关无在线设备队列、route 设备离线队列、事件租约和保留时间；
+8. 生产数据保留、审计、限流、告警和故障响应要求。
 
 如果平台不能保证 `conversationSeq`，网关必须在入站侧自行建立并持久化顺序。阶段 G0 必须产出独立的网关 V1 规格；仅有客户端文档或 Mock Gateway 不得进入生产试点。
 

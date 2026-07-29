@@ -12,7 +12,9 @@
 2. 官方上行能力是 webhook 或 Kafka 回调，不是 WebSocket。当前 CMBDevClaw 收到的 WS 报文是中转服务自定义协议，不能当作招乎官方协议。
 3. 机器人密钥和 Bearer Token 应集中保存在服务端。桌面端无需、也不应保存机器人 `clientSecret`。
 4. 用户和群组的主标识分别是用户 OpenID、`groupOpenId`。`groupId` 仍兼容，但文档已不建议使用。
-5. 文档未包含 Token 获取、OpenID 映射、回调签名、回调超时/重试等完整契约；这些是上线前必须补齐的依赖，不能自行猜测。
+5. 已确认招乎另行提供机器人 Token 获取与刷新接口；本地原始附件未内嵌其字段契约，
+   只引用了“招乎令牌服务-开发指南”。OpenID 映射、回调签名、回调超时/重试等也仍需
+   在上线前冻结，不能自行猜测。
 
 ## 通用约定
 
@@ -39,36 +41,36 @@ ROBOT-MESSAGE-ID: <调用方生成的唯一 UUID>
 
 ### 常见错误
 
-| HTTP / code | 含义 | 处理建议 |
-| --- | --- | --- |
-| `200 / 0` | 成功 | 记录 `msg` 消息 ID |
-| `200 / 120` | 消息发送失败 | 检查接收方 OpenID |
-| `400` | 参数错误 | 校验请求结构和必填字段 |
-| `401` | Token 无效 | 刷新或重新获取 Token |
-| `403` | 无接口权限 | 检查机器人资源授权 |
-| `404` | 路径错误 | 检查环境基址和 URI |
-| `429` | 网关限流 | 指数退避；重试时复用幂等 ID |
+| HTTP / code | 含义         | 处理建议                    |
+| ----------- | ------------ | --------------------------- |
+| `200 / 0`   | 成功         | 记录 `msg` 消息 ID          |
+| `200 / 120` | 消息发送失败 | 检查接收方 OpenID           |
+| `400`       | 参数错误     | 校验请求结构和必填字段      |
+| `401`       | Token 无效   | 刷新或重新获取 Token        |
+| `403`       | 无接口权限   | 检查机器人资源授权          |
+| `404`       | 路径错误     | 检查环境基址和 URI          |
+| `429`       | 网关限流     | 指数退避；重试时复用幂等 ID |
 
 ## 下行单聊能力
 
-| 能力 | URI | 关键说明 |
-| --- | --- | --- |
-| 文本 | `/robot-service/single-message/text` | `content` 或 `base64Content`，最多 3,000 字符 |
-| 图片 | `/robot-service/single-message/image` | 先上传图片，再传图片 ID、大小及行内/行外链接 |
-| 多图文 | `/robot-service/single-message/multi-image-text` | 多单元、可跳转，点击可产生回执 |
-| 转发图文 | `/robot-service/single-message/image-text` | 标题、摘要、跳转链接，可带缩略图 |
-| 分享 | `/robot-service/single-message/share` | 标题、摘要、来源、链接和配图 |
-| 文件 | `/robot-service/single-message/file` | 先上传文件；招乎 APP/PC 支持 |
-| 审批通知 | `/robot-service/single-message/send-audit` | 卡片状态 0～6，可后续更新 |
-| 审批通知 2.0 | `/robot-service/single-message/send-audit-beta` | 同意/拒绝按钮会产生上行回执 |
-| 更新审批 | `/robot-service/single-message/update-audit` | 按原 `msgId` 更新，不产生新消息 |
-| 通知卡片 | `/robot-service/single-message/notify` | 标题、图、富文本、最多 3 个反馈操作和 3 个底部链接 |
-| 撤回 | `/robot-service/single-message/undo-message` | 按平台 `msgId` 撤回，时限 24 小时 |
-| 模板/富文本 | `/robot-service/single-message/template` | `templateId` 1001～1999 为模板，12 为富文本，15 为评价；终端兼容性不一致 |
-| 自定义卡片 | `/robot-service/single-message/custom-card` | 招乎 APP/PC V6.6+；组件化、交互、Markdown、图表、AI 内容 |
-| 更新自定义卡片 | `/robot-service/single-message/update-custom-card` | 用新 `content` 覆盖原卡片 |
-| 旧卡片 | `/robot-service/single-message/url` | 已废弃，不应新增接入 |
-| 名片 | `/robot-service/single-message/card` | 试用/内部能力，不建议作为通用功能依赖 |
+| 能力           | URI                                                | 关键说明                                                                 |
+| -------------- | -------------------------------------------------- | ------------------------------------------------------------------------ |
+| 文本           | `/robot-service/single-message/text`               | `content` 或 `base64Content`，最多 3,000 字符                            |
+| 图片           | `/robot-service/single-message/image`              | 先上传图片，再传图片 ID、大小及行内/行外链接                             |
+| 多图文         | `/robot-service/single-message/multi-image-text`   | 多单元、可跳转，点击可产生回执                                           |
+| 转发图文       | `/robot-service/single-message/image-text`         | 标题、摘要、跳转链接，可带缩略图                                         |
+| 分享           | `/robot-service/single-message/share`              | 标题、摘要、来源、链接和配图                                             |
+| 文件           | `/robot-service/single-message/file`               | 先上传文件；招乎 APP/PC 支持                                             |
+| 审批通知       | `/robot-service/single-message/send-audit`         | 卡片状态 0～6，可后续更新                                                |
+| 审批通知 2.0   | `/robot-service/single-message/send-audit-beta`    | 同意/拒绝按钮会产生上行回执                                              |
+| 更新审批       | `/robot-service/single-message/update-audit`       | 按原 `msgId` 更新，不产生新消息                                          |
+| 通知卡片       | `/robot-service/single-message/notify`             | 标题、图、富文本、最多 3 个反馈操作和 3 个底部链接                       |
+| 撤回           | `/robot-service/single-message/undo-message`       | 按平台 `msgId` 撤回，时限 24 小时                                        |
+| 模板/富文本    | `/robot-service/single-message/template`           | `templateId` 1001～1999 为模板，12 为富文本，15 为评价；终端兼容性不一致 |
+| 自定义卡片     | `/robot-service/single-message/custom-card`        | 招乎 APP/PC V6.6+；组件化、交互、Markdown、图表、AI 内容                 |
+| 更新自定义卡片 | `/robot-service/single-message/update-custom-card` | 用新 `content` 覆盖原卡片                                                |
+| 旧卡片         | `/robot-service/single-message/url`                | 已废弃，不应新增接入                                                     |
+| 名片           | `/robot-service/single-message/card`               | 试用/内部能力，不建议作为通用功能依赖                                    |
 
 ### 批量单聊
 
@@ -88,22 +90,22 @@ ROBOT-MESSAGE-ID: <调用方生成的唯一 UUID>
 
 ## 下行群聊能力
 
-| 能力 | URI | 关键说明 |
-| --- | --- | --- |
-| 文本 | `/robot-service/group-message/text` | 最多 3,000 字符 |
-| 图片 | `/robot-service/group-message/image` | 先上传图片 |
-| 多图文 | `/robot-service/group-message/multi-image-text` | 多单元、点击回执 |
-| 转发图文 | `/robot-service/group-message/image-text` | 标题、摘要、链接 |
-| 分享 | `/robot-service/group-message/share` | 分享卡片 |
-| 文件 | `/robot-service/group-message/file` | 招乎 APP/PC 支持 |
-| 群 @ | `/robot-service/group-message/at` | `toId` 可用逗号分隔多人；不支持 @所有人 |
-| 撤回 | `/robot-service/group-message/undo-message` | 24 小时内按 `msgId` 撤回 |
-| 模板/富文本 | `/robot-service/group-message/template` | 与单聊模板能力类似 |
-| 自定义卡片 | `/robot-service/group-message/custom-card` | V6.6+；V6.8+ 支持 `atIds` 和千人千面 |
-| 更新公共卡片 | `/robot-service/group-message/update-custom-card` | 覆盖群内原卡片公共内容 |
-| 增量/千人千面更新 | `/robot-service/group-message/increment-update-custom-card` | V6.8+；公共和个人组件按递增版本更新 |
-| 旧卡片 | `/robot-service/group-message/url` | 已废弃 |
-| 名片 | `/robot-service/group-message/card` | 试用/内部能力 |
+| 能力              | URI                                                         | 关键说明                                |
+| ----------------- | ----------------------------------------------------------- | --------------------------------------- |
+| 文本              | `/robot-service/group-message/text`                         | 最多 3,000 字符                         |
+| 图片              | `/robot-service/group-message/image`                        | 先上传图片                              |
+| 多图文            | `/robot-service/group-message/multi-image-text`             | 多单元、点击回执                        |
+| 转发图文          | `/robot-service/group-message/image-text`                   | 标题、摘要、链接                        |
+| 分享              | `/robot-service/group-message/share`                        | 分享卡片                                |
+| 文件              | `/robot-service/group-message/file`                         | 招乎 APP/PC 支持                        |
+| 群 @              | `/robot-service/group-message/at`                           | `toId` 可用逗号分隔多人；不支持 @所有人 |
+| 撤回              | `/robot-service/group-message/undo-message`                 | 24 小时内按 `msgId` 撤回                |
+| 模板/富文本       | `/robot-service/group-message/template`                     | 与单聊模板能力类似                      |
+| 自定义卡片        | `/robot-service/group-message/custom-card`                  | V6.6+；V6.8+ 支持 `atIds` 和千人千面    |
+| 更新公共卡片      | `/robot-service/group-message/update-custom-card`           | 覆盖群内原卡片公共内容                  |
+| 增量/千人千面更新 | `/robot-service/group-message/increment-update-custom-card` | V6.8+；公共和个人组件按递增版本更新     |
+| 旧卡片            | `/robot-service/group-message/url`                          | 已废弃                                  |
+| 名片              | `/robot-service/group-message/card`                         | 试用/内部能力                           |
 
 ## 上传资源
 
@@ -139,21 +141,21 @@ ROBOT-MESSAGE-ID: <调用方生成的唯一 UUID>
 
 ### 普通消息字段
 
-| 字段 | 说明 |
-| --- | --- |
-| `msgId` | 平台消息唯一 ID，应用侧去重主键 |
-| `msgType` | `text`、`at`、`custom`、`image`、`voice`、`reference` 等 |
-| `timestamp` | 消息时间戳 |
-| `fromId` | 实际发送人的用户 OpenID |
-| `toId` | 接收方/被 @ 机器人 OpenID |
-| `groupId` / `groupOpenId` / `groupName` | 群消息上下文；两种群 ID 都为空时为单聊 |
-| `msgContent` | 文本或群 @ 内容 |
-| `imageInfo` | 原图/缩略图的行内、行外链接 |
-| `voiceInfo` | 语音文件链接、`asrCode` 和可选 `asrText` |
-| `referenceInfo` | 被引用消息，可包含文本、图、语音、合并转发；最多嵌套 4 层 |
-| `netWorkStatus` | 0 未知、1 办公网、2 互联网、3 业务网 |
-| `deviceId` / `clientType` | 设备标识和 `pc/ios/android/pad` |
-| `skillCode` | V6.15+ 单聊快捷短语技能标识 |
+| 字段                                    | 说明                                                      |
+| --------------------------------------- | --------------------------------------------------------- |
+| `msgId`                                 | 平台消息唯一 ID，应用侧去重主键                           |
+| `msgType`                               | `text`、`at`、`custom`、`image`、`voice`、`reference` 等  |
+| `timestamp`                             | 消息时间戳                                                |
+| `fromId`                                | 实际发送人的用户 OpenID                                   |
+| `toId`                                  | 接收方/被 @ 机器人 OpenID                                 |
+| `groupId` / `groupOpenId` / `groupName` | 群消息上下文；两种群 ID 都为空时为单聊                    |
+| `msgContent`                            | 文本或群 @ 内容                                           |
+| `imageInfo`                             | 原图/缩略图的行内、行外链接                               |
+| `voiceInfo`                             | 语音文件链接、`asrCode` 和可选 `asrText`                  |
+| `referenceInfo`                         | 被引用消息，可包含文本、图、语音、合并转发；最多嵌套 4 层 |
+| `netWorkStatus`                         | 0 未知、1 办公网、2 互联网、3 业务网                      |
+| `deviceId` / `clientType`               | 设备标识和 `pc/ios/android/pad`                           |
+| `skillCode`                             | V6.15+ 单聊快捷短语技能标识                               |
 
 建议的对话归一化规则：
 
@@ -164,16 +166,16 @@ ROBOT-MESSAGE-ID: <调用方生成的唯一 UUID>
 
 ### 事件类回调
 
-| `msgType` | 说明 |
-| --- | --- |
-| `readNotify` | 用户已读通知；`msgContent` 是 JSON 字符串 |
-| `entrySession` | 用户进入机器人单聊；同终端 5 分钟最多一次 |
-| `updateAudit` | 审批 2.0 点击回执 |
-| `NotifyReply` | 通知卡片反馈回执 |
-| `FullTextReply` | 富文本操作回执 |
-| `ImageTextNotify` | 多图文点击回执 |
-| `CustomCard` | 自定义卡片按钮/表单回执 |
-| `robotSkillOperate` | V6.15+ 快捷短语技能开关回执 |
+| `msgType`           | 说明                                      |
+| ------------------- | ----------------------------------------- |
+| `readNotify`        | 用户已读通知；`msgContent` 是 JSON 字符串 |
+| `entrySession`      | 用户进入机器人单聊；同终端 5 分钟最多一次 |
+| `updateAudit`       | 审批 2.0 点击回执                         |
+| `NotifyReply`       | 通知卡片反馈回执                          |
+| `FullTextReply`     | 富文本操作回执                            |
+| `ImageTextNotify`   | 多图文点击回执                            |
+| `CustomCard`        | 自定义卡片按钮/表单回执                   |
+| `robotSkillOperate` | V6.15+ 快捷短语技能开关回执               |
 
 其中 `readNotify`、`entrySession` 和各类回执的 `msgContent` 常以“JSON 字符串”而非 JSON 对象返回，接入层需要二次解析并做好异常保护。
 
@@ -218,9 +220,10 @@ ROBOT-MESSAGE-ID: <调用方生成的唯一 UUID>
 - 千人千面群卡片
 - AI 流式卡片（获取完整流式协议后再做）
 
-## 原文未闭合、上线前必须确认
+## 本地附件未闭合、上线前必须确认
 
-1. Bearer Token 的申请、刷新、过期时间与缓存策略。
+1. 机器人 Bearer Token 获取/刷新接口已确认存在；仍需归档正式 URI、认证参数、返回字段、
+   过期时间、refresh token 是否轮换、并发刷新规则和错误码。
 2. 企业账号（当前客户端已有 `sapId/ystId`）到招乎用户 OpenID 的权威转换接口。
 3. webhook 的期望成功响应、超时、重试次数、顺序保证和是否存在签名头。
 4. Kafka 模式的 Topic、认证、分区键、消费确认和重投策略。
@@ -229,4 +232,3 @@ ROBOT-MESSAGE-ID: <调用方生成的唯一 UUID>
 7. 自定义卡片客户端版本探测方式，以及不支持时的降级行为。
 8. AI 自定义卡片流式输出的完整协议。
 9. OpenID、消息内容、附件和审计日志的数据分级与保留要求。
-

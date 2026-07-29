@@ -1,4 +1,4 @@
-# ChatX 统一机器人网关 V1：Java + Spring Boot 开发计划
+# ChatX 统一机器人网关 V1：JDK 1.8 + 内部增强版 Spring Boot 2.7.2 开发计划
 
 > 状态：可作为内网代码 Agent 的任务母版；生产开发前必须完成第 2 节冻结项
 >
@@ -7,10 +7,15 @@
 > 对应客户端规格：`docs/chatx-unified-bot-v1-implementation-spec.md`
 >
 > 平台能力摘要：`docs/chatx-im-robot-api-compact-reference.md`
+>
+> 已冻结技术基线（2026-07-29）：**JDK 1.8 + 内部增强版 Spring Boot 2.7.2**；
+> 桌面使用现有企业登录链路取得标准 JWT `ystIdToken`，V1 不新增统一凭据管理器；
+> 招乎已提供机器人 Token 获取与刷新接口，具体接口契约在 GW-00 固化。
 
 ## 1. 可行性结论
 
-可行。建议把网关实现为一个 **Java 21 + Spring Boot 模块化单体**，以关系数据库作为唯一持久协调点，首版只实现：
+可行。网关实现为一个 **JDK 1.8 + 内部增强版 Spring Boot 2.7.2 模块化单体**，
+以关系数据库作为唯一持久协调点，首版只实现：
 
 - 招乎单聊文本 webhook 入站；
 - 官方机器人 Token 托管和单聊文本下行；
@@ -25,40 +30,47 @@ V1 不需要微服务拆分，也不建议先引入 Redis。平台 webhook 落�
 
 以下三项任一未满足时，不得进入生产联调：
 
-1. OpenID 身份映射、桌面认证和官方机器人 Token 来源已经确定；
+1. OpenID 身份映射、桌面 JWT 验签参数和官方机器人 Token 获取/刷新契约已经确定；
 2. 平台 webhook 验真、成功响应、超时和重试契约已经确定；
 3. 客户端 WSS JSON Schema 与本计划的状态机已经冻结并完成双边契约测试。
 
 主要风险与处理：
 
-| 风险                               | 判断         | V1 处理                                                |
-| ---------------------------------- | ------------ | ------------------------------------------------------ |
-| 平台签名、Token、回调 ACK 尚未闭合 | 高，生产阻塞 | GW-00 冻结正式 Adapter；Agent 不得猜测                 |
-| OpenID 权威映射未确定              | 高，生产阻塞 | 身份同步先于消息使用；未知身份不投递桌面               |
-| 多实例 WSS 路由                    | 中，可控     | node-local socket + DB session/generation + DB polling |
-| 外部副作用 exactly-once            | 无法普遍保证 | lease、稳定幂等键和 `OUTCOME_UNKNOWN`，不自动重跑      |
-| 代码 Agent 能力有限                | 高，可控     | 一次一个 PR、冻结 schema、Testcontainers 和人工 gate   |
+| 风险                                      | 判断         | V1 处理                                                  |
+| ----------------------------------------- | ------------ | -------------------------------------------------------- |
+| 平台签名、Token 字段、回调 ACK 未完全闭合 | 高，生产阻塞 | Token 接口能力已确认；GW-00 冻结正式契约，Agent 不得猜测 |
+| OpenID 权威映射未确定                     | 高，生产阻塞 | 身份同步先于消息使用；未知身份不投递桌面                 |
+| 多实例 WSS 路由                           | 中，可控     | node-local socket + DB session/generation + DB polling   |
+| 外部副作用 exactly-once                   | 无法普遍保证 | lease、稳定幂等键和 `OUTCOME_UNKNOWN`，不自动重跑        |
+| Java 8 并发与依赖兼容                     | 中，可控     | 内部 BOM 锁版本、限界线程池、CI 禁止 Java 9+ API         |
+| 代码 Agent 能力有限                       | 高，可控     | 一次一个 PR、冻结 schema、Testcontainers 和人工 gate     |
 
 ## 2. 开发前必须冻结的输入
 
 代码 Agent 不得猜测下列配置。负责人先填写“生产决定”，再开始 GW-01：
 
-| 决策项       | 本计划开发默认                                      | 生产决定/阻塞条件                                   |
-| ------------ | --------------------------------------------------- | --------------------------------------------------- |
-| 部署边界     | 单企业、单官方机器人、一套网关部署                  | 若需要多企业，必须先补 tenant 隔离规格              |
-| JDK          | Java 21 LTS                                         | 若内网只允许 Java 17，在建仓前改定                  |
-| Spring Boot  | 使用内网批准的 Spring Boot 3.x parent/BOM           | Agent 不得自行选择“最新版”                          |
-| 构建         | Maven Wrapper                                       | 冻结内网仓库和 parent 坐标                          |
-| 数据库       | PostgreSQL 15+                                      | 若改 MySQL/Oracle，先重写锁与迁移测试               |
-| 平台上行     | webhook 优先                                        | Kafka 只作为后续入站 Adapter，不与 webhook 同时首发 |
-| 桌面认证     | Bearer JWT，由 Spring Security Resource Server 验证 | 冻结 issuer/JWKS、audience 和 `principalId` claim   |
-| 平台回调验真 | 入口网段 allowlist + 平台正式签名/认证              | 原文未定义签名；生产不得只信任请求体                |
-| 身份映射     | 权威服务同步 `principalId ↔ OpenID` 到网关          | 冻结同步方式、解绑和冲突处理                        |
-| 敏感字段加密 | 内网 KMS/密码服务提供 approved codec                | 禁止 Agent 自制生产加密算法                         |
-| 机器人 Token | 内网 Vault/凭据服务 + 正式 Token Provider           | 冻结获取、刷新、过期和轮换接口                      |
-| 运行环境     | 至少两个实例 + 负载均衡；WSS 保持长连接             | 冻结 pod/nodeId、TLS、超时和容量                    |
+| 决策项       | 本计划开发默认                                                 | 生产决定/阻塞条件                                   |
+| ------------ | -------------------------------------------------------------- | --------------------------------------------------- |
+| 部署边界     | 单企业、单官方机器人、一套网关部署                             | 若需要多企业，必须先补 tenant 隔离规格              |
+| JDK          | **JDK 1.8**                                                    | 已冻结；生产、CI、开发机均以 Java 8 字节码验收      |
+| Spring Boot  | **内部增强版 Spring Boot 2.7.2 parent/BOM**                    | 已冻结；补丁号和 parent 坐标由内网框架团队提供      |
+| 构建         | Maven Wrapper，`source/target=1.8`                             | 冻结内网仓库、Maven 版本和 parent 坐标              |
+| 数据库       | PostgreSQL 15+                                                 | 若改 MySQL/Oracle，先重写锁与迁移测试               |
+| 平台上行     | webhook 优先                                                   | Kafka 只作为后续入站 Adapter，不与 webhook 同时首发 |
+| 桌面认证     | 标准 JWT `ystIdToken`，由 Spring Security Resource Server 验证 | 冻结 issuer/JWKS、算法、audience 和主体 claim       |
+| 平台回调验真 | 入口网段 allowlist + 平台正式签名/认证                         | 原文未定义签名；生产不得只信任请求体                |
+| 身份映射     | 权威服务同步 `principalId ↔ OpenID` 到网关                     | 冻结同步方式、解绑和冲突处理                        |
+| 敏感字段加密 | 内网 KMS/密码服务提供 approved codec                           | 禁止 Agent 自制生产加密算法                         |
+| 机器人 Token | 招乎获取/刷新接口 + 网关 Token Provider；client 凭据进 Vault   | 接口已存在；冻结字段、过期时间、刷新轮换和错误码    |
+| 运行环境     | 至少两个实例 + 负载均衡；WSS 保持长连接                        | 冻结 pod/nodeId、TLS、超时和容量                    |
 
-开发环境允许使用 Mock Identity、Mock Token Provider 和测试加密 codec，但这些 Bean 只能存在于 `local/test` profile。`prod` profile 缺少任何正式实现时必须启动失败，不能静默降级。
+开发环境允许使用 Mock Identity、Mock Token Provider 和测试加密 codec，但这些 Bean 只能存在于
+`local/test` profile。`prod` profile 缺少任何正式实现时必须启动失败，不能静默降级。
+
+桌面 V1 继续使用现有登录、刷新和 `models:upsertUserInfo` 链路，不新增统一凭据管理器。
+网关不能复用客户端“验签代码”——客户端当前没有本地 JWT 验签；网关必须独立完成标准 JWT
+密码学验证。若 `ystIdToken` 的 `aud` 不包含统一机器人网关，则 GW-00 必须改为身份服务
+Token Exchange，禁止放宽 audience 校验。
 
 ## 3. V1 明确不做
 
@@ -90,18 +102,41 @@ V1 不需要微服务拆分，也不建议先引入 Redis。平台 webhook 落�
 - `flyway-core`
 - PostgreSQL JDBC Driver
 - `spring-boot-starter-test`
-- Testcontainers PostgreSQL
-- WireMock 或内网等价 HTTP Mock
+- 与 JDK 1.8 兼容并由内部 BOM 固定的 Testcontainers PostgreSQL 1.x
+- WireMock 2.x 或内网等价 HTTP Mock
 
 约束：
 
 - 使用 `NamedParameterJdbcTemplate` 和显式 SQL，不使用 JPA 自动状态更新；
-- 使用 Java `record` 定义协议 DTO，不使用 Lombok；
+- 协议 DTO 使用普通不可变 JavaBean（`final` 字段、构造器、getter、显式
+  `equals/hashCode/toString`），不使用 `record`，也不依赖 Lombok 生成协议语义；
 - 使用 Flyway 管理所有 schema 变更，禁止应用启动时 `ddl-auto`；
-- 平台 HTTP 调用使用 Spring `RestClient`；重试由持久 outbox worker 驱动，不用只存在内存中的注解重试；
-- WSS 使用 Spring Servlet WebSocket；允许在获批的 Spring Boot 版本中开启 Java 21 virtual threads；
+- 平台 HTTP 调用使用 Spring `RestTemplate` 与内部批准的连接池实现；必须配置连接、读取和
+  连接池等待超时；禁止使用 Spring 6 `RestClient` 或 Java 11 `HttpClient`；
+- 重试由持久 outbox worker 驱动，不用只存在内存中的注解重试；
+- WSS 使用 Spring Servlet WebSocket；worker、调度和异步任务使用有界
+  `ThreadPoolTaskExecutor`/`ThreadPoolTaskScheduler`，禁止虚拟线程和无界队列；
+- 使用 Spring Boot 2.7 的 `javax.servlet.*`、`javax.validation.*`，禁止引入 Boot 3 的
+  `jakarta.*` API；
+- 禁止 Java 9+ 语法/API，包括 `var`、`record`、sealed class、switch expression、
+  `List.of/Map.of`、`Stream.toList()` 和文本块；
 - 时间统一为 UTC `Instant`，数据库使用 `timestamptz`；
 - ID 使用服务端 UUID；外部 ID 永远按字符串保存，不推断格式。
+
+Maven 至少固定以下编译属性；若内部 parent 已提供相同配置，不重复覆盖：
+
+```xml
+<properties>
+  <java.version>1.8</java.version>
+  <maven.compiler.source>1.8</maven.compiler.source>
+  <maven.compiler.target>1.8</maven.compiler.target>
+  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+</properties>
+```
+
+CI 必须在 JDK 1.8 上执行 `./mvnw verify`，并检查产物 class major version 为 52。
+代码 Agent 不得自行把 parent、Spring Framework、Spring Security、Jackson、Flyway、
+PostgreSQL Driver、Testcontainers 或 WireMock 升级到内部 BOM 之外的版本。
 
 ### 4.2 工程结构
 
@@ -230,15 +265,15 @@ flowchart LR
 
 #### `chatx_gw_device`
 
-| 字段                        | 说明                  |
-| --------------------------- | --------------------- |
-| `device_id varchar(128) PK` | 桌面生成的稳定设备 ID |
-| `principal_id varchar(128)` | 必须等于认证 JWT 主体 |
-| `display_name varchar(128)` | 脱敏设备名            |
-| `preferred_remote boolean`  | 首次 route 优先设备   |
-| `status varchar(32)`        | `ACTIVE/REVOKED`      |
-| `last_seen_at timestamptz`  | 最近心跳              |
-| `version bigint`            | CAS                   |
+| 字段                        | 说明                                             |
+| --------------------------- | ------------------------------------------------ |
+| `device_id varchar(128) PK` | 桌面生成的稳定设备 ID                            |
+| `principal_id varchar(128)` | 必须等于 Spring Security 已验证的 JWT 主体 claim |
+| `display_name varchar(128)` | 脱敏设备名                                       |
+| `preferred_remote boolean`  | 首次 route 优先设备                              |
+| `status varchar(32)`        | `ACTIVE/REVOKED`                                 |
+| `last_seen_at timestamptz`  | 最近心跳                                         |
+| `version bigint`            | CAS                                              |
 
 唯一约束：一个 principal 最多一台 `preferred_remote=true` 设备；更新主设备必须事务化。
 
@@ -466,18 +501,85 @@ ROBOT-MESSAGE-ID: <chatx_gw_reply_outbox.platform_idempotency_uuid>
 - 平台消息 ID `msg` 必须持久化；
 - 网关生成的离线、身份未映射等固定文案同样走 reply outbox，不允许 Controller 直接发 HTTP。
 
+### 8.3 招乎机器人 Token 获取与刷新
+
+已确认招乎平台提供 Token 获取接口和刷新接口。两类 Token 必须严格分离：
+
+- Desktop 的 `ystIdToken` 只用于认证企业用户到本 Java 网关；
+- 招乎机器人 access token 只用于 Java 网关调用 `/robot-service/**`，绝不下发 Desktop。
+
+GW-00 必须从正式接口文档冻结：获取/刷新 URI、认证参数、请求方法、返回字段、
+`expiresIn` 单位、刷新提前量、refresh token 是否轮换、旧 refresh token 失效时点、
+错误码、并发刷新规则和 QPS。未冻结前只允许定义 Port 与 Mock Adapter，不得猜字段。
+
+Java 8 端口建议使用普通接口和不可变 JavaBean：
+
+```java
+public interface PlatformTokenProvider {
+    PlatformAccessToken getValidToken();
+    PlatformAccessToken forceRefreshAfterUnauthorized(String rejectedTokenFingerprint);
+}
+```
+
+实现要求：
+
+1. `clientId/clientSecret` 只从 Vault/内部凭据服务读取，不进入配置仓库或数据库明文；
+2. access token 根据平台返回的到期时间提前刷新，不解析或猜测 opaque token；
+3. 单节点使用互斥锁合并并发刷新，不允许每个 outbox worker 各刷一次；
+4. GW-00 根据平台语义二选一：允许多实例各持 Token 时使用节点内缓存；若 refresh token
+   会轮换或全局单活，则由凭据服务或加密共享记录配合 version CAS 协调；
+5. 平台 401 时只允许携带“被拒 Token 的指纹”触发一次强制刷新和一次原请求重试；
+   第二次仍为 401 时告警并停止该次发送，禁止无限刷新；
+6. Token 获取/刷新失败不丢 outbox，也不生成新 `ROBOT-MESSAGE-ID`；按持久状态机退避；
+7. 日志、异常、trace、审计和 metrics 不得记录 access token、refresh token、client secret
+   或完整 Authorization；允许记录不可逆且截断的 Token 指纹用于并发关联；
+8. `prod` profile 缺正式 Token Adapter 或凭据时启动自检失败；Mock/静态 Token 只存在于
+   `local/test`。
+
 ## 9. 桌面 WSS 契约
 
 ### 9.1 连接与认证
 
 建议路径：`/ws/v1/desktop`。
 
-- HTTP Upgrade 必须携带 Bearer JWT；
-- `principalId` 只取 Spring Security 认证结果，不从 JSON body 读取；
+- HTTP Upgrade 必须携带 `Authorization: Bearer <ystIdToken>`；`ystIdToken` 已确认是标准 JWT；
+- 使用 Spring Boot 2.7.2 / Spring Security 5.7 Resource Server 的 `NimbusJwtDecoder` 完成
+  密码学验签；配置 `issuer-uri` 或 `jwk-set-uri`，不得自己编写 JWT/Base64 解析器；
+- 必须校验允许的签名算法、`iss`、`aud`、`exp`、`nbf` 和可配置时钟偏差；JWKS key
+  rotation 由受测 decoder 配置处理；
+- `principalId` 只取 Spring Security 已验证的主体 claim，不从 HELLO/JSON body 读取；
+  主体 claim 是 `sub` 还是企业专用 claim 必须在 GW-00 明确，Agent 不得猜测；
+- 如果生产 `ystIdToken.aud` 不包含统一机器人网关，必须由身份服务提供 Token Exchange，
+  不得关闭 audience 校验或仅检查 Token 非空；
+- HTTP Upgrade 认证失败返回 401；主体有效但缺少网关权限返回 403；失败响应不回显 Token
+  或内部 decoder 异常；
+- WSS 不增加逐帧 HMAC：TLS + Upgrade JWT 负责通道机密性、完整性和主体认证；Schema、
+  `commandId/messageId`、route/epoch 和 permit 负责消息授权与业务防重；
+- 网关记录 JWT `exp`，到期时主动关闭 session，强制 Desktop 使用当前登录链路得到的新
+  Token 重连；V1 不新增 Desktop 统一凭据管理器；
+- Handshake 只把已验证的 `principalId`、JWT 到期时间和必要权限复制到 WebSocket session；
+  不得把原始 JWT 或 Authorization 保存到 session、数据库或日志；
+- Java 网关只接收 `ystIdToken`，不得接收或代管 Desktop 的 `ystRefreshToken/ystCode`，
+  也不得替 Desktop 调用 `/cowork/login-info`；401/403 由现有 App 登录/刷新链路处理；
 - 连接后 10 秒内必须发送 HELLO，否则关闭；
 - 默认心跳间隔 15 秒，45 秒无心跳标离线，数值配置化；
 - 每个节点只保存自己真实的 WebSocket 对象，DB 保存 nodeId/session/generation；
 - 新连接 generation 更高时替换旧连接；旧连接后到的 close 事件不得把新 session 标离线。
+
+建议由内部配置中心提供以下强类型配置，`prod` 缺任一必填项时启动失败：
+
+| 配置键                                     | 含义                                      |
+| ------------------------------------------ | ----------------------------------------- |
+| `gateway.security.jwt.jwk-set-uri`         | 企业身份服务 JWKS HTTPS 地址              |
+| `gateway.security.jwt.issuer`              | 允许的唯一 issuer                         |
+| `gateway.security.jwt.audience`            | 统一机器人网关 audience                   |
+| `gateway.security.jwt.principal-claim`     | 映射 `principalId` 的已验证 claim 名      |
+| `gateway.security.jwt.allowed-algorithm`   | 单一允许算法或经评审的最小 allowlist      |
+| `gateway.security.jwt.clock-skew-seconds`  | 仅处理可信时钟微小偏差，不得掩盖过期      |
+| `gateway.security.jwt.max-session-seconds` | WSS 最大认证会话时长，不得超过 JWT 有效期 |
+
+若内部增强框架已经提供 JWT Filter/Principal Context，应优先使用内部组件，但必须通过本节
+全部坏签名、issuer、audience、时间和 key rotation 契约测试；“框架已经认证”不能替代证据。
 
 统一 envelope：
 
@@ -651,7 +753,10 @@ V1 不使用 Redis，采用以下方案：
 
 - 平台 Token、机器人 OpenID、用户 OpenID 不下发桌面；
 - 不信任 callback body 中的来源身份，生产必须有正式验真或受控网关认证；
-- 不信任 HELLO 中的 principal，设备永远绑定 JWT 主体；
+- Desktop `ystIdToken` 必须由 Spring Security/Nimbus 通过 JWKS 做完整验签和 claims 校验；
+- 不信任 HELLO 中的 principal，设备永远绑定 JWT 已验证主体；
+- Java 8 运行时必须启用受内网批准的 TLS 1.2+、可信 CA 和 hostname verification，禁止
+  trust-all `TrustManager`、关闭证书校验或在生产接受明文 WS/HTTP；
 - OpenID、消息正文和回复正文加密落库；
 - 日志只允许 eventId、conversationKey、deviceId 后 6 位、reasonCode 和耗时；
 - 禁止记录 Authorization、ROBOT-MESSAGE-ID 对应正文、OpenID、消息正文、完整 WSS payload；
@@ -728,6 +833,9 @@ V1 不使用 Redis，采用以下方案：
 交付：
 
 - 填完第 2 节生产决定；
+- 冻结内部增强版 Spring Boot 2.7.2 parent/BOM 坐标、Maven/JDK 1.8 镜像与依赖仓库；
+- 冻结 `ystIdToken` 的 issuer、JWKS、签名算法、audience、主体 claim 和时钟偏差；
+- 冻结招乎 Token 获取/刷新接口及多实例刷新语义；
 - OpenAPI：平台 webhook、身份同步；
 - AsyncAPI/JSON Schema：WSS envelope 和全部 V1 message；
 - reasonCode、事件状态和 reply 状态枚举；
@@ -737,9 +845,11 @@ V1 不使用 Redis，采用以下方案：
 
 ### GW-01：Spring Boot 骨架
 
-交付：Maven Wrapper、内网 parent/BOM、包结构、profiles、Actuator、Spring Security 框架、Flyway 空基线、CI。
+交付：Maven Wrapper、内部增强版 Spring Boot 2.7.2 parent/BOM、Java 8 编译门禁、包结构、
+profiles、Actuator、Spring Security Resource Server 框架、Flyway 空基线、CI。
 
-测试：应用 context、local profile、prod 缺正式 Adapter 启动失败、未认证 WSS/管理端拒绝。
+测试：JDK 1.8 `./mvnw verify`、class major version 52、应用 context、local profile、prod
+缺正式 Adapter 启动失败、受保护测试入口拒绝缺失/错误签名/错误 issuer/audience/过期 JWT。
 
 禁止：数据库业务表、平台真实调用、route 逻辑。
 
@@ -761,9 +871,12 @@ V1 不使用 Redis，采用以下方案：
 
 ### GW-04：WSS 设备会话
 
-交付：JWT upgrade、HELLO/WELCOME、heartbeat、device/session/generation、主设备偏好、node-local SessionRegistry。
+交付：基于 `ystIdToken` 的 JWT upgrade、已验证主体 claim、JWT 到期关闭 session、
+HELLO/WELCOME、heartbeat、device/session/generation、主设备偏好、node-local SessionRegistry。
 
-测试：伪造 principal、HELLO 超时、重复 command、同设备重连、旧 close 不覆盖新 session、心跳过期、双节点 DB session 模拟。
+测试：合法 JWT、坏签名、错误算法/issuer/audience、过期/尚未生效、JWKS key rotation、
+伪造 principal、JWT 到期断线、HELLO 超时、重复 command、同设备重连、旧 close 不覆盖
+新 session、心跳过期、双节点 DB session 模拟。
 
 禁止：event dispatch、permit、reply。
 
@@ -785,9 +898,14 @@ V1 不使用 Redis，采用以下方案：
 
 ### GW-07：回复 outbox 与招乎文本下行
 
-交付：REMOTE_REPLY 验证/幂等、完整分段后按序发送、Token Provider、平台 client、持久 retry、SENT/UNKNOWN/永久失败、REPLY_RESULT。
+交付：REMOTE_REPLY 验证/幂等、完整分段后按序发送、正式招乎 Token 获取/刷新 Adapter、
+并发安全的 Token Provider、`RestTemplate` 平台 client、持久 retry、
+SENT/UNKNOWN/永久失败、REPLY_RESULT。
 
-测试：重复 key、相同 key 不同 payload、缺段、CLIENT_REPLY 超 2,800、任意文本超 3,000、超 8 段、conversation/direct 两类 target、动态 toId、固定 platform UUID、HTTP 200/code 非 0、401 刷新、429/5xx/超时、worker crash 在安全窗口内外的恢复。
+测试：Token 首次获取、到期前刷新、并发单飞、refresh token 轮换（若平台支持）、401
+强制刷新且只重试一次、刷新失败保留 outbox；重复 key、相同 key 不同 payload、缺段、
+CLIENT_REPLY 超 2,800、任意文本超 3,000、超 8 段、conversation/direct 两类 target、
+动态 toId、固定 platform UUID、HTTP 200/code 非 0、429/5xx/超时、worker crash 在安全窗口内外的恢复。
 
 禁止：群聊、卡片、生成新 key 绕过 UNKNOWN。
 
@@ -801,7 +919,9 @@ V1 不使用 Redis，采用以下方案：
 
 交付：第 12～14 节安全门禁、metrics、structured logging、审计、retention/recovery workers、runbook、告警规则和容量测试脚本。
 
-测试：日志敏感数据扫描、prod mock Bean 缺失、stale session/lease/SENDING 恢复、清理不删活跃记录、DB/平台故障注入、ACK 队头阻塞压测。
+测试：日志敏感数据扫描、TLS 校验、禁止 trust-all、prod mock Bean 缺失、Java 8 线程池
+饱和与优雅停机、stale session/lease/SENDING 恢复、清理不删活跃记录、DB/平台故障注入、
+ACK 队头阻塞压测。
 
 ### GW-10：双边契约与试点演练
 
@@ -814,15 +934,19 @@ V1 不使用 Redis，采用以下方案：
 每次只给它一个 GW 任务，并附以下提示词：
 
 ```text
-你只实现《ChatX 统一机器人网关 V1：Java + Spring Boot 开发计划》的 GW-XX。
+你只实现《ChatX 统一机器人网关 V1：JDK 1.8 + 内部增强版 Spring Boot 2.7.2 开发计划》的 GW-XX。
 
 开始前必须完整阅读：
 1. chatx-unified-bot-gateway-java-development-plan.md
 2. chatx-unified-bot-v1-implementation-spec.md 中 §6.2、§6.3、§12.6、§13、§15、§16.3、§16.4、§18～§20
-3. chatx-im-robot-api-compact-reference.md 中“先读结论”“通用约定”“下行单聊能力”“上行回调”“原文未闭合”
+3. chatx-im-robot-api-compact-reference.md 中“先读结论”“通用约定”“下行单聊能力”“上行回调”“本地附件未闭合”
 4. contracts/ 下已冻结的 OpenAPI、AsyncAPI 和 JSON Schema
 
 规则：
+- 只能使用 JDK 1.8 和内部增强版 Spring Boot 2.7.2 parent/BOM；不得升级或替换框架。
+- 只能使用 Java 8 语法和 `javax.*` API；禁止 record、var、sealed、switch expression、
+  List.of/Map.of、Stream.toList、Spring RestClient、Java 11 HttpClient、virtual thread 和
+  `jakarta.*`。
 - 不实现 GW-XX 之外的后续功能。
 - 不自行修改协议、状态枚举、表名、唯一约束、segment index 或 reasonCode。
 - 不自行选择或升级依赖版本。
@@ -842,7 +966,10 @@ Reviewer 每个 PR 固定检查：
 5. 是否遗漏唯一约束或稳定幂等键；
 6. 是否信任客户端 principal/OpenID/epoch；
 7. 是否在日志或指标泄漏敏感/高基数字段；
-8. 是否用 mock 行为冒充生产契约已完成。
+8. 是否用 mock 行为冒充生产契约已完成；
+9. 是否出现 Java 9+ 字节码/API、Boot 3/Jakarta import 或 BOM 外依赖；
+10. 是否完整验签 JWT 并校验 issuer/audience/时间，而不是只 decode；
+11. 是否把用户 `ystIdToken` 与招乎机器人 Token 混用。
 
 ## 17. V1 最终验收清单
 
@@ -870,15 +997,22 @@ Reviewer 每个 PR 固定检查：
 22. 客户端与网关使用同一份 schema golden fixtures，真实测试网关闭环通过。
 23. 未映射身份和不支持消息也经过 platform inbox 去重；重复 webhook 不重复发送 system notice。
 24. 投递前 EXPIRED/CANCELLED 会连续推进 delivery cursor，不会永久阻塞后续 seq。
+25. 坏签名、错误算法/issuer/audience、过期或尚未生效的 `ystIdToken` 无法完成 WSS Upgrade。
+26. WSS 主体只来自 Spring Security 已验证 claim，JWT 到期后 session 被关闭并重新认证。
+27. 招乎机器人 Token 获取、提前刷新、并发刷新和 401 单次重试均通过正式 Adapter 测试，
+    且与用户 `ystIdToken` 完全隔离。
+28. 网关在 JDK 1.8 上完成构建和测试，产物 class major version 为 52，不包含 Boot 3、
+    Jakarta 或 Java 9+ API。
 
 ## 18. 交付物
 
 网关团队最终需要交付：
 
-- 可复现构建的 Spring Boot 仓库与 Maven Wrapper；
+- 可在 JDK 1.8 复现构建的内部增强版 Spring Boot 2.7.2 仓库、Maven Wrapper、parent/BOM
+  坐标和 class version 校验；
 - Flyway migrations 和数据库容量/备份说明；
 - OpenAPI、AsyncAPI、JSON Schema 和 golden fixtures；
-- 平台/身份/凭据/加密 Adapter 及生产配置说明；
+- 平台/身份/凭据/加密 Adapter、JWT 验签参数、招乎 Token 获取/刷新配置及生产说明；
 - Dockerfile、部署清单、健康检查和资源基线；
 - dashboard、告警、runbook、数据保留和人工 reconciliation 工具；
 - 单元、集成、契约、并发、恢复和故障注入测试报告；

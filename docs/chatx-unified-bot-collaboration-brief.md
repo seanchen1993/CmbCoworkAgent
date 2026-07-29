@@ -1,5 +1,10 @@
 # ChatX 统一内置机器人：多智能体协作说明
 
+> **历史文档：已停止作为实施依据。** 后续 Agent 必须以
+> `chatx-unified-bot-v1-implementation-spec.md`、
+> `chatx-unified-bot-gateway-java-development-plan.md` 和 `contracts/` 为准；下文只保留早期
+> 方案形成过程，引用的旧 ChatX 文件可能已被 Clean Cut 删除。
+>
 > 工作分支：`codex/chatx-unified-bot-design`  
 > 当前阶段：方案评审与收敛，不直接进入大规模实现
 
@@ -54,7 +59,8 @@
 8. Project Mode 当前禁用 Scheduler Tool；本方案 V1 不通过机器人开放定时任务。
 9. 平台文本上限 3,000 字符；当前客户端把入站截到 1,000 字符。
 10. 平台提供 10 分钟 `ROBOT-MESSAGE-ID` 幂等窗口、自定义卡片、卡片更新、群 @、资源上传、语音 ASR、引用消息和事件回执。
-11. 原始文档没有闭合 Token 获取、OpenID 映射、webhook 签名/ACK/重试、QPS 配额和 AI 流式卡片协议。
+11. 已确认招乎另行提供机器人 Token 获取与刷新接口，但当前附件未内嵌其字段契约；
+    OpenID 映射、webhook 签名/ACK/重试、QPS 配额和 AI 流式卡片协议仍未闭合。
 
 ## 当前建议基线
 
