@@ -5,7 +5,11 @@ import { basename, join, relative } from "path"
 import { pathToFileURL } from "url"
 import { getOpenworkDir } from "./storage"
 import { copyDirRecursive } from "./utils/fs"
-import { getPetWindowPlatformPolicy, resizeWindowAroundPetBody } from "./pet-window-policy"
+import {
+  getPetWindowPlatformPolicy,
+  getPetWindowShapeRects,
+  resizeWindowAroundPetBody
+} from "./pet-window-policy"
 
 type PetManifest = {
   id: string
@@ -105,6 +109,7 @@ let petWindowLayout: PetWindowLayout = {
   bubbleTop: 0
 }
 let petWindowIgnoringMouseEvents = false
+let petWindowShapeBubbleVisible: boolean | null = null
 let petWindowLayoutChangeUntil = 0
 let suppressPetClickUntil = 0
 // 拖动窗口会触发高频 move 事件，这个时间戳用于节流状态同步，避免主进程连续 executeJavaScript。
@@ -188,7 +193,7 @@ export function markPetStartupReady(): void {
  *
  * macOS 上 hidden -> showInactive、主窗口重新 focus 时，floating 层级偶发会被后续窗口压住，
  * 因此非 Windows 保留 screen-saver；Windows 使用较低的 floating，减少高层透明窗口的合成压力。
- * moveTop() 只在真正显示/交互时调用，避免 hover 气泡频繁重排窗口栈。
+ * Windows 的 hover 气泡不再调用 moveTop()，避免频繁重排窗口栈触发额外合成。
  */
 function configurePetWindowLayer(window: BrowserWindow | null): void {
   if (!window || window.isDestroyed()) return
@@ -560,6 +565,7 @@ function closePetWindow(): void {
   petBubbleVisible = false
   petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
   petWindowIgnoringMouseEvents = false
+  petWindowShapeBubbleVisible = null
   petWindowLayoutChangeUntil = 0
   lastPetMoveStateAt = 0
 }
@@ -759,7 +765,7 @@ export function createPetWindow(): void {
     return
   }
 
-  // 首次展示会立即出现问候气泡，因此先使用完整尺寸；Windows 在气泡隐藏后收紧到宠物本体。
+  // 窗口始终预留气泡尺寸；Windows 用 shape 限制实际绘制和命中区域，避免动态 resize。
   const petWindowWidth = PET_WINDOW_RESERVED_WIDTH
   const petWindowHeight = PET_WINDOW_RESERVED_HEIGHT
   const petWindowMargin = 150
@@ -800,6 +806,7 @@ export function createPetWindow(): void {
   })
 
   petWindow.setBackgroundColor("#00000000")
+  updatePetWindowShape(false)
   configurePetWindowLayer(petWindow)
   petWindowOptions?.applyMacDockIcon()
 
@@ -1446,6 +1453,7 @@ export function createPetWindow(): void {
     petBubbleVisible = false
     petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
     petWindowIgnoringMouseEvents = false
+    petWindowShapeBubbleVisible = null
     petWindowLayoutChangeUntil = 0
     lastPetMoveStateAt = 0
     petWindowOptions?.applyMacDockIcon()
@@ -1453,6 +1461,8 @@ export function createPetWindow(): void {
 }
 
 function setPetWindowMouseEventsIgnored(ignored: boolean): void {
+  // Windows 使用窗口 shape 做透明区域 hit-testing，避免切换 WS_EX_TRANSPARENT 触发 DWM 重合成。
+  if (PET_PLATFORM_POLICY.useWindowShapeForHitTesting) return
   if (petWindowIgnoringMouseEvents === ignored) return
   petWindowIgnoringMouseEvents = ignored
   if (!petWindow || petWindow.isDestroyed()) return
@@ -1461,6 +1471,27 @@ function setPetWindowMouseEventsIgnored(ignored: boolean): void {
   } else {
     petWindow.setIgnoreMouseEvents(ignored)
   }
+}
+
+function updatePetWindowShape(bubbleVisible: boolean): void {
+  if (!PET_PLATFORM_POLICY.useWindowShapeForHitTesting) return
+  if (!petWindow || petWindow.isDestroyed()) return
+  if (petWindowShapeBubbleVisible === bubbleVisible) return
+
+  const petRect = {
+    x: petWindowLayout.petLeft,
+    y: petWindowLayout.petTop,
+    width: PET_BODY_WIDTH,
+    height: PET_BODY_HEIGHT
+  }
+  const bubbleRect = {
+    x: petWindowLayout.bubbleLeft,
+    y: petWindowLayout.bubbleTop,
+    width: PET_BUBBLE_WIDTH,
+    height: PET_BUBBLE_HEIGHT
+  }
+  petWindow.setShape(getPetWindowShapeRects(petRect, bubbleRect, bubbleVisible))
+  petWindowShapeBubbleVisible = bubbleVisible
 }
 
 function isPointInBounds(point: Electron.Point, bounds: Electron.Rectangle): boolean {
@@ -1495,6 +1526,7 @@ function getPetBubbleScreenBounds(): Electron.Rectangle | null {
 }
 
 function setPetWindowBubbleExpanded(expanded: boolean): void {
+  updatePetWindowShape(expanded)
   if (!PET_PLATFORM_POLICY.compactWhenBubbleHidden) return
   if (!petWindow || petWindow.isDestroyed()) return
 
@@ -1575,7 +1607,9 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
     `if (window.setPetBubble) window.setPetBubble(${JSON.stringify(message)});`,
     "show pet bubble"
   )
-  keepPetWindowOnTop(petWindow)
+  if (!PET_PLATFORM_POLICY.useWindowShapeForHitTesting) {
+    keepPetWindowOnTop(petWindow)
+  }
   logPetWindowEvent(
     `[Pets] Bubble shown: autoHide=${autoHideMs}ms, window=${petWindow.id}, visible=${petWindow.isVisible()}`
   )
@@ -1624,11 +1658,13 @@ function showPetHoverBubbleIfIdle(): void {
 }
 
 /**
- * 隐藏当前统一宠物气泡，并把同一个 BrowserWindow 恢复到宠物本体大小。
+ * 隐藏当前统一宠物气泡，并恢复平台对应的透明区域命中策略。
  */
 function hidePetBubble(reason = "unknown"): void {
   cancelPetBubbleHide()
-  logPetWindowDebug(`[Pets] hidePetBubble invoked, reason=${reason}, currentVisible=${petBubbleVisible}`)
+  logPetWindowDebug(
+    `[Pets] hidePetBubble invoked, reason=${reason}, currentVisible=${petBubbleVisible}`
+  )
 
   petBubbleVisible = false
   if (!petHovering) {
@@ -1648,7 +1684,7 @@ function startPetHoverPolling(): void {
     const petBounds = getPetBodyScreenBounds()
     if (!petBounds) return
     const bubbleBounds = petBubbleVisible ? getPetBubbleScreenBounds() : null
-    // 展示气泡时 BrowserWindow 会扩大；hover 仍只以宠物本体区域为准。
+    // hover 始终只以宠物本体区域为准，不把已经展示的气泡算作宠物 hover。
     const isHovering = isPointInBounds(point, petBounds)
     const isOnBubble = bubbleBounds ? isPointInBounds(point, bubbleBounds) : false
     setPetWindowMouseEventsIgnored(!isHovering && !isOnBubble)

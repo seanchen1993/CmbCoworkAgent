@@ -16,6 +16,7 @@ export type PetWindowPlatformPolicy = {
   compactWhenBubbleHidden: boolean
   forwardIgnoredMouseMoves: boolean
   idleFpsCap: number | null
+  useWindowShapeForHitTesting: boolean
   visibleOnAllWorkspaces: boolean
 }
 
@@ -24,9 +25,10 @@ export function getPetWindowPlatformPolicy(platform: NodeJS.Platform): PetWindow
     return {
       alwaysOnTopLevel: "floating",
       backgroundThrottling: true,
-      compactWhenBubbleHidden: true,
+      compactWhenBubbleHidden: false,
       forwardIgnoredMouseMoves: false,
       idleFpsCap: 2,
+      useWindowShapeForHitTesting: true,
       visibleOnAllWorkspaces: false
     }
   }
@@ -37,8 +39,17 @@ export function getPetWindowPlatformPolicy(platform: NodeJS.Platform): PetWindow
     compactWhenBubbleHidden: false,
     forwardIgnoredMouseMoves: true,
     idleFpsCap: null,
+    useWindowShapeForHitTesting: false,
     visibleOnAllWorkspaces: true
   }
+}
+
+export function getPetWindowShapeRects(
+  petRect: PetWindowBounds,
+  bubbleRect: PetWindowBounds,
+  bubbleVisible: boolean
+): PetWindowBounds[] {
+  return bubbleVisible ? [petRect, bubbleRect] : [petRect]
 }
 
 export function resizeWindowAroundPetBody(

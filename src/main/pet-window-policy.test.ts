@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest"
-import { getPetWindowPlatformPolicy, resizeWindowAroundPetBody } from "./pet-window-policy"
+import {
+  getPetWindowPlatformPolicy,
+  getPetWindowShapeRects,
+  resizeWindowAroundPetBody
+} from "./pet-window-policy"
 
 describe("pet window platform policy", () => {
   it("reduces Windows compositor and mouse-forwarding work", () => {
     expect(getPetWindowPlatformPolicy("win32")).toEqual({
       alwaysOnTopLevel: "floating",
       backgroundThrottling: true,
-      compactWhenBubbleHidden: true,
+      compactWhenBubbleHidden: false,
       forwardIgnoredMouseMoves: false,
       idleFpsCap: 2,
+      useWindowShapeForHitTesting: true,
       visibleOnAllWorkspaces: false
     })
   })
@@ -20,8 +25,22 @@ describe("pet window platform policy", () => {
       compactWhenBubbleHidden: false,
       forwardIgnoredMouseMoves: true,
       idleFpsCap: null,
+      useWindowShapeForHitTesting: false,
       visibleOnAllWorkspaces: true
     })
+  })
+})
+
+describe("pet window shape", () => {
+  const petRect = { x: 69, y: 40, width: 112, height: 124 }
+  const bubbleRect = { x: 0, y: 0, width: 250, height: 48 }
+
+  it("only accepts input over the pet while the bubble is hidden", () => {
+    expect(getPetWindowShapeRects(petRect, bubbleRect, false)).toEqual([petRect])
+  })
+
+  it("accepts input over both the pet and visible bubble", () => {
+    expect(getPetWindowShapeRects(petRect, bubbleRect, true)).toEqual([petRect, bubbleRect])
   })
 })
 
