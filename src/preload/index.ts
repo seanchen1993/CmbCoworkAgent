@@ -3104,6 +3104,11 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
+    projectModeExportData: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },
@@ -3381,7 +3386,12 @@ const api = {
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportExcel", sheets, options)

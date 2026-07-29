@@ -35,6 +35,7 @@ import {
   type DashboardCodeStats,
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
+import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
   executeDashboardEsQuery,
   type DashboardEsIndexAlias,
@@ -48,7 +49,6 @@ import {
   STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
-  isHarnessDevStageNodeName,
   type StageBucket
 } from "../../shared/harness-stage-bucket"
 
@@ -8258,7 +8258,10 @@ function makeMockStageBuckets(
 function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
   // stageBuckets is derived from each draft's totals after assembly (see below).
   const projectDrafts: Array<
-    Omit<ProjectModeProjectView, "stageBuckets" | "devStageConversationCount">
+    Omit<
+      ProjectModeProjectView,
+      "stageBuckets" | "devStageConversationCount" | "devAssociatedFeatureCount"
+    >
   > = [
     {
       projectId: "proj-cmb-cowork",
@@ -8512,14 +8515,21 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     Object.assign(project, mockCreators[index % mockCreators.length])
   })
   // 由各项目自身的代码/对话总量派生 stage×skill 三桶（DEV 演示用）。
-  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => ({
-    ...project,
-    devStageConversationCount: Math.round(project.conversationCount * 0.4),
-    lifecycleCreatedAt:
-      project.lifecycleCreatedAt ??
-      new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
-    stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
-  }))
+  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => {
+    const devStageConversationCount = Math.round(project.conversationCount * 0.4)
+    return {
+      ...project,
+      devStageConversationCount,
+      devAssociatedFeatureCount:
+        devStageConversationCount > 0
+          ? Math.min(project.featureCount, Math.max(1, Math.ceil(devStageConversationCount / 10)))
+          : 0,
+      lifecycleCreatedAt:
+        project.lifecycleCreatedAt ??
+        new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
+      stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
+    }
+  })
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   // DEV：把偶数下标的 mock 项目视为「精益项目」，让「仅精益项目」开关在无 ES 时也能可见地筛选。
@@ -8755,6 +8765,25 @@ function makeMockProjectModeProjects(
   options?: ProjectModeProjectPageOptions
 ): ProjectModeProjectPageData {
   return makeMockProjectModeProjectPage(makeMockProjectMode(range, options).projects, options)
+}
+
+function makeMockProjectModeExportData(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): ProjectModeExportData {
+  const mock = makeMockProjectMode(range, opts)
+  const archivedProjectTotal = mock.projects.filter(
+    (project) => project.lifecycleStatus === "archived"
+  ).length
+  return {
+    users: mock.analytics.topUsers,
+    projects: mock.projects,
+    projectTotal: mock.projects.length,
+    activeProjectTotal: mock.projects.length - archivedProjectTotal,
+    archivedProjectTotal,
+    projectLimit: PROJECT_MODE_EXPORT_PROJECT_LIMIT,
+    projectsTruncated: false
+  }
 }
 
 const MOCK_PROJECT_THREAD_NODE_NAMES = [
@@ -10498,6 +10527,8 @@ interface ProjectModeProjectView {
   conversationCount: number
   /** Conversations whose current workflow node belongs to the Dev group. */
   devStageConversationCount: number
+  /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: ProjectModeFeatureView[]
   topSkills: ProjectModeSkillCount[]
@@ -10552,6 +10583,16 @@ interface ProjectModeProjectPageData {
    * ES from/size + cardinality total, which the cap does not bound).
    */
   truncated: boolean
+}
+
+interface ProjectModeExportData {
+  users: ProjectModeTopUser[]
+  projects: ProjectModeProjectView[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 interface ProjectModeProjectPageOptions extends OrgFilterOptions {
@@ -11144,6 +11185,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     featureCount: asNumber(props.featureCount, features.length),
     conversationCount: 0,
     devStageConversationCount: 0,
+    devAssociatedFeatureCount: 0,
     hasError: typeof props.error === "string" && props.error.length > 0,
     features,
     topSkills: [],
@@ -11580,6 +11622,174 @@ const PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES = [
   "properties"
 ]
 
+const PROJECT_MODE_EXPORT_SNAPSHOT_PAGE_SIZE = 500
+const PROJECT_MODE_EXPORT_PROJECT_LIMIT = 2000
+const PROJECT_MODE_EXPORT_PROJECT_ID_PAGE_SIZE = 1000
+
+interface ProjectModeExportSnapshotResult {
+  projects: ProjectModeProjectView[]
+  total: number
+  activeTotal: number
+  archivedTotal: number
+  truncated: boolean
+}
+
+async function fetchProjectModeExportSnapshotGroup(
+  filters: Record<string, unknown>[],
+  archived: boolean,
+  limit: number
+): Promise<{ projects: ProjectModeProjectView[]; total: number }> {
+  const projects = new Map<string, ProjectModeProjectView>()
+  const seenCursors = new Set<string>()
+  let searchAfter: Array<string | number> | undefined
+  let total = 0
+  let firstPage = true
+
+  while (true) {
+    const remaining = Math.max(0, limit - projects.size)
+    const pageSize = Math.min(PROJECT_MODE_EXPORT_SNAPSHOT_PAGE_SIZE, remaining)
+    const body: Record<string, unknown> = {
+      track_total_hits: firstPage,
+      size: pageSize,
+      query: {
+        bool: {
+          filter: [
+            ...filters,
+            archived
+              ? { term: { "properties.lifecycleStatus": "archived" } }
+              : { bool: { must_not: { term: { "properties.lifecycleStatus": "archived" } } } }
+          ]
+        }
+      },
+      sort: [
+        { "properties.lifecycleCreatedAt": { order: "desc", missing: "_last" } },
+        { "properties.projectId": { order: "asc" } }
+      ],
+      _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
+    }
+    if (searchAfter) body.search_after = searchAfter
+
+    const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
+    const hits = raw.hits?.hits ?? []
+    if (firstPage) {
+      total = getTotalHits(raw, hits.length)
+      firstPage = false
+    }
+    if (pageSize === 0 || hits.length === 0) break
+
+    for (const hit of hits) {
+      const project = parseProjectModeSnapshotHit(hit)
+      if (project) projects.set(project.projectId, project)
+      if (projects.size >= limit) break
+    }
+    if (projects.size >= limit || hits.length < pageSize) break
+
+    const nextSearchAfter = hits[hits.length - 1]?.sort
+    if (!nextSearchAfter || nextSearchAfter.length === 0) {
+      throw new Error("项目导出分页游标缺失，无法保证数据顺序")
+    }
+    const cursor = JSON.stringify(nextSearchAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目导出分页游标重复，无法保证数据顺序")
+    }
+    seenCursors.add(cursor)
+    searchAfter = nextSearchAfter
+  }
+
+  return { projects: [...projects.values()], total }
+}
+
+/**
+ * Read at most the first 2,000 current project snapshots for export, ordered like
+ * the workbook (non-archived first, then newest creation time). Exact matching
+ * totals are returned separately so a truncated workbook remains explicit.
+ */
+async function fetchProjectModeExportSnapshotProjects(
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<ProjectModeExportSnapshotResult> {
+  const filters = projectModeSnapshotFilters(
+    buildProjectModeOrgFilter(opts, access),
+    opts?.fromLeanOnly === true
+  )
+  const active = await fetchProjectModeExportSnapshotGroup(
+    filters,
+    false,
+    PROJECT_MODE_EXPORT_PROJECT_LIMIT
+  )
+  const archived = await fetchProjectModeExportSnapshotGroup(
+    filters,
+    true,
+    Math.max(0, PROJECT_MODE_EXPORT_PROJECT_LIMIT - active.projects.length)
+  )
+  const projects = [...active.projects, ...archived.projects]
+  const total = active.total + archived.total
+  return {
+    projects,
+    total,
+    activeTotal: active.total,
+    archivedTotal: archived.total,
+    truncated: total > PROJECT_MODE_EXPORT_PROJECT_LIMIT
+  }
+}
+
+/**
+ * Resolve every matching project id only when the lean-project filter needs to
+ * scope the full user analysis. This is intentionally independent from the
+ * 2,000-row project worksheet limit.
+ */
+async function fetchProjectModeExportProjectIds(
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<string[]> {
+  const filters = projectModeSnapshotFilters(
+    buildProjectModeOrgFilter(opts, access),
+    opts?.fromLeanOnly === true
+  )
+  const projectIds: string[] = []
+  const seenCursors = new Set<string>()
+  let after: Record<string, string | number> | undefined
+
+  while (true) {
+    const raw = (await esQuery(getEsIndex("event"), {
+      size: 0,
+      track_total_hits: false,
+      query: { bool: { filter: filters } },
+      aggs: {
+        projects: {
+          composite: {
+            size: PROJECT_MODE_EXPORT_PROJECT_ID_PAGE_SIZE,
+            sources: [{ project_id: { terms: { field: "properties.projectId" } } }],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })) as EsSearchResponse
+    const projectsAgg = asRecord(asRecord(raw.aggregations).projects)
+    const buckets = projectsAgg.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+    for (const bucket of buckets) {
+      const projectId = asString(asRecord(asRecord(bucket).key).project_id)
+      if (projectId) projectIds.push(projectId)
+    }
+
+    const nextAfter = Object.fromEntries(
+      Object.entries(asRecord(projectsAgg.after_key)).filter(
+        ([, value]) => typeof value === "string" || typeof value === "number"
+      )
+    ) as Record<string, string | number>
+    if (Object.keys(nextAfter).length === 0) break
+    const cursor = JSON.stringify(nextAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目用户导出范围分页游标重复，无法保证全量数据")
+    }
+    seenCursors.add(cursor)
+    after = nextAfter
+  }
+
+  return projectIds
+}
+
 /**
  * Resolve the full set of project ids matching the list filters (no
  * pagination). Lightweight — a single `terms` agg returning only the ids, capped
@@ -11746,7 +11956,7 @@ async function fetchProjectModeProjectPageMetricSorted(
  */
 const PROJECT_MODE_PROJECT_ID_LIMIT = 10000
 const PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE = 10
-/** Per-project cap on feature buckets returned by the nested feature code-stats agg. */
+/** Per-project cap on feature buckets returned by nested per-feature aggregations. */
 const PROJECT_MODE_FEATURE_SLUG_LIMIT = 200
 
 /** Composite map key pairing a project id with one of its feature slugs. */
@@ -11774,7 +11984,11 @@ function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
     const latestHits = asRecord(asRecord(b.latest_user_info).hits).hits
     const latestHit = Array.isArray(latestHits) ? asRecord(latestHits[0]) : {}
     const source = asRecord(latestHit._source)
-    const sapId = asString(b.key, asString(source.sapId))
+    const rawKey = b.key
+    const sapId =
+      typeof rawKey === "string"
+        ? rawKey
+        : asString(asRecord(rawKey).sap_id, asString(source.sapId))
     if (!sapId) continue
     const ystId = asOptionalString(source.ystId)
     const userName = asString(source.userName, sapId)
@@ -11947,14 +12161,86 @@ async function fetchProjectModeUsage(
   }
 }
 
-function countDevStageConversations(rawBuckets: unknown): number {
-  if (!Array.isArray(rawBuckets)) return 0
-  return rawBuckets.reduce((total, bucket) => {
-    const item = asRecord(bucket)
-    return isHarnessDevStageNodeName(asString(item.key))
-      ? total + asNumber(item.doc_count)
-      : total
-  }, 0)
+const PROJECT_MODE_EXPORT_USER_PAGE_SIZE = 1000
+
+/**
+ * All project-mode users for Excel export. Composite pagination avoids the
+ * top-10 terms cap used by the on-screen ranking and keeps daily overview
+ * requests lightweight.
+ */
+async function fetchProjectModeExportUsers(
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext,
+  leanProjectIds?: string[]
+): Promise<ProjectModeTopUser[]> {
+  if (leanProjectIds && leanProjectIds.length === 0) return []
+
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const users: ProjectModeTopUser[] = []
+  const seenCursors = new Set<string>()
+  let after: Record<string, string | number> | undefined
+
+  while (true) {
+    const composite: Record<string, unknown> = {
+      size: PROJECT_MODE_EXPORT_USER_PAGE_SIZE,
+      sources: [{ sap_id: { terms: { field: "sapId" } } }],
+      ...(after ? { after } : {})
+    }
+    const raw = (await esQuery(getEsIndex("trace"), {
+      size: 0,
+      query: {
+        bool: {
+          filter: [
+            ...projectModeTraceFilters(range, orgFilterClause),
+            buildNonEmptySapIdFilter(),
+            ...(leanProjectIds ? [{ terms: { harnessProjectId: leanProjectIds } }] : [])
+          ]
+        }
+      },
+      aggs: {
+        users: {
+          composite,
+          aggs: {
+            latest_user_info: {
+              top_hits: {
+                size: 1,
+                sort: [{ startedAt: { order: "desc" } }],
+                _source: {
+                  includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+                }
+              }
+            }
+          }
+        }
+      }
+    })) as EsSearchResponse
+
+    const usersAgg = asRecord(asRecord(raw.aggregations).users)
+    const buckets = usersAgg.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+    users.push(...parseProjectModeTopUserBuckets(buckets))
+
+    const nextAfter = Object.fromEntries(
+      Object.entries(asRecord(usersAgg.after_key)).filter(
+        ([, value]) => typeof value === "string" || typeof value === "number"
+      )
+    ) as Record<string, string | number>
+    if (Object.keys(nextAfter).length === 0) break
+    const cursor = JSON.stringify(nextAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目用户导出分页游标重复，无法保证全量数据")
+    }
+    seenCursors.add(cursor)
+    after = nextAfter
+  }
+
+  return users.sort(
+    (a, b) =>
+      b.count - a.count ||
+      a.userName.localeCompare(b.userName, "zh-CN", { numeric: true }) ||
+      a.sapId.localeCompare(b.sapId)
+  )
 }
 
 async function fetchProjectModePageUsage(
@@ -11965,17 +12251,20 @@ async function fetchProjectModePageUsage(
 ): Promise<{
   perProject: Map<string, number>
   perProjectDevStage: Map<string, number>
+  perProjectDevAssociatedFeatures: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
   perProjectStageConversations: Map<string, Record<StageBucket, number>>
 }> {
   const perProject = new Map<string, number>()
   const perProjectDevStage = new Map<string, number>()
+  const perProjectDevAssociatedFeatures = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
   const perProjectStageConversations = new Map<string, Record<StageBucket, number>>()
   if (projectIds.length === 0) {
     return {
       perProject,
       perProjectDevStage,
+      perProjectDevAssociatedFeatures,
       perProjectSkills,
       perProjectStageConversations
     }
@@ -11999,6 +12288,17 @@ async function fetchProjectModePageUsage(
           skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } },
           by_node: { terms: { field: "harnessNodeName", size: 100 } },
+          by_feature: {
+            terms: {
+              field: "harnessFeatureSlug",
+              size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+            },
+            aggs: {
+              by_node: {
+                terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
+              }
+            }
+          },
           ...stageBucketTraceAggs()
         }
       }
@@ -12010,6 +12310,7 @@ async function fetchProjectModePageUsage(
     return {
       perProject,
       perProjectDevStage,
+      perProjectDevAssociatedFeatures,
       perProjectSkills,
       perProjectStageConversations
     }
@@ -12021,18 +12322,24 @@ async function fetchProjectModePageUsage(
     if (!key) continue
     perProject.set(key, asNumber(b.doc_count))
     perProjectDevStage.set(key, countDevStageConversations(asRecord(b.by_node).buckets))
+    perProjectDevAssociatedFeatures.set(
+      key,
+      countDevAssociatedFeatures(asRecord(b.by_feature).buckets)
+    )
     perProjectSkills.set(
       key,
-      combineSkillCountBuckets(
-        asRecord(b.skills).buckets,
-        asRecord(b.skill_source).buckets,
-        10
-      )
+      combineSkillCountBuckets(asRecord(b.skills).buckets, asRecord(b.skill_source).buckets, 10)
     )
     perProjectStageConversations.set(key, parseStageBucketConversations(b))
   }
 
-  return { perProject, perProjectDevStage, perProjectSkills, perProjectStageConversations }
+  return {
+    perProject,
+    perProjectDevStage,
+    perProjectDevAssociatedFeatures,
+    perProjectSkills,
+    perProjectStageConversations
+  }
 }
 
 /**
@@ -12399,6 +12706,38 @@ async function fetchProjectModeProjectCodeStats(
   return { byProject, byFeature, byProjectStage }
 }
 
+/** Add this-range trace/code metrics to current project snapshots. */
+async function enrichProjectModeProjectViews(
+  projects: ProjectModeProjectView[],
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<ProjectModeProjectView[]> {
+  const projectIds = projects.map((project) => project.projectId)
+  // Key code stats on the page's project ids (not just those with conversations)
+  // so a project ranked high by 原始生成行数 still shows its adoption columns.
+  const [usage, code] = await Promise.all([
+    fetchProjectModePageUsage(projectIds, range, opts, access),
+    fetchProjectModeProjectCodeStats(projectIds, range, opts, access)
+  ])
+  return projects.map((project) => ({
+    ...project,
+    conversationCount: usage.perProject.get(project.projectId) ?? 0,
+    devStageConversationCount: usage.perProjectDevStage.get(project.projectId) ?? 0,
+    devAssociatedFeatureCount: usage.perProjectDevAssociatedFeatures.get(project.projectId) ?? 0,
+    topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
+    codeStats: code.byProject.get(project.projectId) ?? null,
+    stageBuckets: buildStageBuckets(
+      usage.perProjectStageConversations.get(project.projectId),
+      code.byProjectStage.get(project.projectId)
+    ),
+    features: project.features.map((feature) => ({
+      ...feature,
+      codeStats: code.byFeature.get(projectFeatureKey(project.projectId, feature.slug)) ?? null
+    }))
+  }))
+}
+
 /** One list page: ES-paginated snapshot projects enriched with this-range usage / code. */
 async function fetchProjectModeProjectPage(
   range: TimeRange,
@@ -12414,30 +12753,53 @@ async function fetchProjectModeProjectPage(
   const sliced = metricSort
     ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
     : await fetchProjectModeProjectPageHits(options, access)
-  const projectIds = sliced.projects.map((project) => project.projectId)
-  const usage = await fetchProjectModePageUsage(projectIds, range, options, access)
-  // Key code stats on the page's project ids (not just those with conversations)
-  // so a project ranked high by 原始生成行数 still shows its adoption columns.
-  const code = await fetchProjectModeProjectCodeStats(projectIds, range, options, access)
   return {
     ...sliced,
     sortBy,
     sortOrder,
-    projects: sliced.projects.map((project) => ({
-      ...project,
-      conversationCount: usage.perProject.get(project.projectId) ?? 0,
-      devStageConversationCount: usage.perProjectDevStage.get(project.projectId) ?? 0,
-      topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
-      codeStats: code.byProject.get(project.projectId) ?? null,
-      stageBuckets: buildStageBuckets(
-        usage.perProjectStageConversations.get(project.projectId),
-        code.byProjectStage.get(project.projectId)
-      ),
-      features: project.features.map((feature) => ({
-        ...feature,
-        codeStats: code.byFeature.get(projectFeatureKey(project.projectId, feature.slug)) ?? null
-      }))
-    }))
+    projects: await enrichProjectModeProjectViews(sliced.projects, range, options, access)
+  }
+}
+
+const PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE = 100
+
+/** Fetch the full user-analysis and project-list datasets used by Excel export. */
+async function fetchProjectModeExportData(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<ProjectModeExportData> {
+  const access = requireDashboardProjectModeAccess()
+  const snapshotResult = await fetchProjectModeExportSnapshotProjects(opts, access)
+  const snapshots = snapshotResult.projects
+  const leanProjectIds =
+    opts?.fromLeanOnly === true
+      ? snapshotResult.truncated
+        ? await fetchProjectModeExportProjectIds(opts, access)
+        : snapshots.map((project) => project.projectId)
+      : undefined
+  const usersPromise = fetchProjectModeExportUsers(range, opts, access, leanProjectIds)
+  const projectsPromise = (async (): Promise<ProjectModeProjectView[]> => {
+    const projects: ProjectModeProjectView[] = []
+    for (
+      let offset = 0;
+      offset < snapshots.length;
+      offset += PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE
+    ) {
+      const batch = snapshots.slice(offset, offset + PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE)
+      projects.push(...(await enrichProjectModeProjectViews(batch, range, opts, access)))
+    }
+    return projects
+  })()
+
+  const [users, projects] = await Promise.all([usersPromise, projectsPromise])
+  return {
+    users,
+    projects,
+    projectTotal: snapshotResult.total,
+    activeProjectTotal: snapshotResult.activeTotal,
+    archivedProjectTotal: snapshotResult.archivedTotal,
+    projectLimit: PROJECT_MODE_EXPORT_PROJECT_LIMIT,
+    projectsTruncated: snapshotResult.truncated
   }
 }
 
@@ -13378,6 +13740,22 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle(
+    "dashboard:projectModeExportData",
+    async (_, range: TimeRange, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectModeExportData(range, opts) }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectModeExportData(range, opts) }
+      } catch (e) {
+        console.error("[Dashboard] projectModeExportData error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
     "dashboard:projectModeTraces",
     async (_, projectId: string, range: TimeRange, options?: ProjectModeTracesOptions) => {
       if (import.meta.env.DEV)
@@ -13923,7 +14301,12 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     "dashboard:exportExcel",
     async (
       _,
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ) => {
       try {
@@ -13932,13 +14315,19 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
         const wb = XLSX.utils.book_new()
         for (const sheet of sheets) {
-          const wsData = [sheet.header, ...sheet.rows]
+          const summaryRows = sheet.summaryRows ?? []
+          const wsData = [
+            ...summaryRows,
+            ...(summaryRows.length > 0 ? [[]] : []),
+            sheet.header,
+            ...sheet.rows
+          ]
           const ws = XLSX.utils.aoa_to_sheet(wsData)
 
           // Auto-size columns based on content
           const colWidths = sheet.header.map((h, i) => {
             let maxLen = h.length
-            for (const row of sheet.rows) {
+            for (const row of [...summaryRows, ...sheet.rows]) {
               const cellLen = String(row[i] ?? "").length
               if (cellLen > maxLen) maxLen = cellLen
             }
