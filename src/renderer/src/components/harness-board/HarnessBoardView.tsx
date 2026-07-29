@@ -60,6 +60,7 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
@@ -773,7 +774,8 @@ function createUnboundRunDetail(
       systemId: detail.project.systemId,
       workspacePath: detail.project.workspacePath,
       sessionWorkspacePath: detail.project.sessionWorkspacePath,
-      projectRootPath: detail.project.projectRootPath
+      projectRootPath: detail.project.projectRootPath,
+      supportsAutoNextStep: detail.project.supportsAutoNextStep
     },
     adapterSnapshot: {
       mode: "run",
@@ -788,6 +790,7 @@ function createUnboundRunDetail(
       hookLogRefs: [],
       watchRefs: [],
       skipNodeAvailable: false,
+      autoMode: false,
       selectedDeployUnits: [],
       currentNodeId: "",
       nodes: [],
@@ -1759,6 +1762,7 @@ function marketPluginToAdapter(
     ...(uploaderProfile?.userName ? { developerName: uploaderProfile.userName } : {}),
     ...(uploaderProfile?.sapId ? { developerSapId: uploaderProfile.sapId } : {}),
     ...(uploaderProfile?.orgName ? { organizationName: uploaderProfile.orgName } : {}),
+    supportsAutoNextStep: false,
     boardCompatibility: makeMissingMarketPluginCompatibility()
   }
 }
@@ -5929,6 +5933,7 @@ function FeatureDetailPage({
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
   const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
+  const [updatingAutoMode, setUpdatingAutoMode] = useState(false)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
     threadId: string | null
@@ -6036,6 +6041,32 @@ function FeatureDetailPage({
     sessionBusy,
     threadsById
   ])
+
+  const handleAutoModeChange = useCallback(async (autoMode: boolean): Promise<void> => {
+    if (
+      !detail ||
+      updatingAutoMode ||
+      projectInteractionDisabled ||
+      !detail.project.supportsAutoNextStep
+    ) {
+      return
+    }
+
+    setUpdatingAutoMode(true)
+    try {
+      await window.api.harnessBoard.updateFeatureAutoMode({
+        projectId: detail.project.projectId,
+        featureId: detail.run.slug,
+        autoMode
+      })
+      await onRefresh()
+      toast.success(autoMode ? "已开启托管模式" : "已关闭托管模式")
+    } catch (error) {
+      toast.error(cleanIpcError(error))
+    } finally {
+      setUpdatingAutoMode(false)
+    }
+  }, [detail, onRefresh, projectInteractionDisabled, updatingAutoMode])
 
   const handleContextReminderSessionCreated = useCallback((threadId: string): void => {
     if (!threadId) return
@@ -6283,6 +6314,28 @@ function FeatureDetailPage({
           </div>
           {effectiveActiveDetailTab === "feature" && (
             <div className={cn(harnessPageHeaderActionsClassName, "pt-0")}>
+              <label
+                className="flex h-8 items-center gap-2 rounded-md border border-border/80 bg-background/70 px-3 text-xs text-muted-foreground"
+                title={
+                  detail && !detail.project.supportsAutoNextStep
+                    ? "当前插件未配置 auto_next_step"
+                    : undefined
+                }
+              >
+                <span>托管模式</span>
+                <Switch
+                  checked={detail?.run.autoMode ?? false}
+                  onCheckedChange={(checked) => void handleAutoModeChange(checked)}
+                  disabled={
+                    loading ||
+                    !detail ||
+                    projectInteractionDisabled ||
+                    updatingAutoMode ||
+                    !detail.project.supportsAutoNextStep
+                  }
+                  aria-label="托管模式"
+                />
+              </label>
               <Button
                 type="button"
                 variant="ghost"

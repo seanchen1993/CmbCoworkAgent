@@ -49,6 +49,11 @@ export type StreamFallbackIndexBaselines = {
 }
 
 type TransportAgentMode = "normal" | "coordinator" | "workflow"
+type AgentIPCEvent = Parameters<Parameters<typeof window.api.agent.streamAgent>[3]>[0]
+
+interface ElectronIPCTransportOptions {
+  managedAutoSendRunId?: string
+}
 
 /**
  * Usage metadata from LangChain model responses.
@@ -511,6 +516,8 @@ function getWorkerSnapshotFallbackIndex(
  * LangGraph agent runs in the main process.
  */
 export class ElectronIPCTransport implements UseStreamTransport {
+  constructor(private readonly options: ElectronIPCTransportOptions = {}) {}
+
   // Track current message ID for grouping tokens across chunks
   private currentMessageId: string | null = null
   private currentMessageIndex: number | null = null
@@ -771,6 +778,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const coordinatorInternalNotification =
       payload.config?.configurable?.coordinator_internal_notification === true
     const userMessageId = payload.config?.configurable?.hook_turn_id as string | undefined
+    const managedAutoSendRunId = this.options.managedAutoSendRunId
     if (!threadId) {
       return this.createErrorGenerator("MISSING_THREAD_ID", "Thread ID is required")
     }
@@ -790,7 +798,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       : (lastHumanMessage?.content ?? "")
 
     // Only require message content if not resuming
-    if (!messageContent && !hasResumeCommand) {
+    if (!messageContent && !hasResumeCommand && !managedAutoSendRunId) {
       return this.createErrorGenerator("MISSING_MESSAGE", "Message content is required")
     }
 
@@ -803,7 +811,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       modelId,
       agentMode,
       coordinatorInternalNotification,
-      userMessageId
+      userMessageId,
+      managedAutoSendRunId
     )
   }
 
@@ -1167,7 +1176,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     modelId?: string,
     agentMode?: TransportAgentMode,
     coordinatorInternalNotification = false,
-    userMessageId?: string
+    userMessageId?: string,
+    managedAutoSendRunId?: string
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
     const eventQueue: QueuedStreamEvent[] = []
@@ -1178,7 +1188,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     let reachedDoneBoundary = false
 
     // Generate a run ID for this stream
-    const runId = crypto.randomUUID()
+    const runId = managedAutoSendRunId ?? crypto.randomUUID()
 
     // Emit metadata event first to establish run context
     yield {
@@ -1215,41 +1225,45 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     this.deferredStreamEventSink = enqueueStreamEvent
 
-    const cleanup = window.api.agent.streamAgent(
-      threadId,
-      message,
-      command,
-      (ipcEvent) => {
-        if (terminalReceived) return
-        if (
-          ipcEvent.type === "custom" &&
-          (ipcEvent.data as { type?: unknown; mode?: unknown } | undefined)?.type === "agent_mode"
-        ) {
-          const nextMode = (ipcEvent.data as { mode?: unknown }).mode
-          if (nextMode === "normal" || nextMode === "coordinator") {
-            currentAgentMode = nextMode
-          }
+    const subscribeToIPCEvents = (onEvent: (ipcEvent: AgentIPCEvent) => void): (() => void) =>
+      managedAutoSendRunId
+        ? window.api.agent.observeManagedAutoSendStream(managedAutoSendRunId, onEvent)
+        : window.api.agent.streamAgent(
+            threadId,
+            message,
+            command,
+            onEvent,
+            modelId,
+            agentMode,
+            coordinatorInternalNotification,
+            userMessageId
+          )
+    const cleanup = subscribeToIPCEvents((ipcEvent) => {
+      if (terminalReceived) return
+      if (
+        ipcEvent.type === "custom" &&
+        (ipcEvent.data as { type?: unknown; mode?: unknown } | undefined)?.type === "agent_mode"
+      ) {
+        const nextMode = (ipcEvent.data as { mode?: unknown }).mode
+        if (nextMode === "normal" || nextMode === "coordinator") {
+          currentAgentMode = nextMode
         }
-        // Convert IPC events to SDK format
-        const sdkEvents = this.convertToSDKEvents(ipcEvent as IPCEvent, threadId, currentAgentMode)
+      }
+      // Convert IPC events to SDK format
+      const sdkEvents = this.convertToSDKEvents(ipcEvent as IPCEvent, threadId, currentAgentMode)
 
-        for (const sdkEvent of sdkEvents) {
-          if (sdkEvent.event === "done" || sdkEvent.event === "error") {
-            for (const recoveryEvent of this.createActiveSubagentAssistantLosslessEvents()) {
-              enqueueStreamEvent(recoveryEvent)
-            }
-            isDone = true
-            terminalReceived = true
+      for (const sdkEvent of sdkEvents) {
+        if (sdkEvent.event === "done" || sdkEvent.event === "error") {
+          for (const recoveryEvent of this.createActiveSubagentAssistantLosslessEvents()) {
+            enqueueStreamEvent(recoveryEvent)
           }
-          enqueueStreamEvent(sdkEvent)
-          if (terminalReceived) break
+          isDone = true
+          terminalReceived = true
         }
-      },
-      modelId,
-      agentMode,
-      coordinatorInternalNotification,
-      userMessageId
-    )
+        enqueueStreamEvent(sdkEvent)
+        if (terminalReceived) break
+      }
+    })
 
     let cleanedUp = false
     const abortListener = (): void => {
@@ -1342,6 +1356,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // hydrate them again.
       if (!reachedDoneBoundary) {
         this.subagentStableTranscriptSignaturesByThread.delete(threadId)
+      }
+      if (this.options.managedAutoSendRunId === managedAutoSendRunId) {
+        this.options.managedAutoSendRunId = undefined
       }
     }
   }

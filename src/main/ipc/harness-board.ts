@@ -21,6 +21,7 @@ import {
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
   updateHarnessFeatureDeployUnits,
+  updateHarnessFeatureAutoMode,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import {
@@ -60,6 +61,7 @@ import type {
   HarnessDynamicWorkflowConfig,
   HarnessKnowledgePreviewResult,
   HarnessFeatureDeployUnitBinding,
+  HarnessFeatureAutoModeUpdateInput,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
@@ -198,6 +200,16 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       input: HarnessFeatureDeployUnitUpdateInput
     ): Promise<HarnessFeatureDeployUnitBinding> => {
       return updateHarnessFeatureDeployUnits(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:updateFeatureAutoMode",
+    async (
+      _event,
+      input: HarnessFeatureAutoModeUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> => {
+      return updateHarnessFeatureAutoMode(input)
     }
   )
 

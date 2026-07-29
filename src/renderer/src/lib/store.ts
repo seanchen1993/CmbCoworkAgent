@@ -836,6 +836,7 @@ interface AppState {
 
   // Thread actions
   loadThreads: () => Promise<void>
+  refreshThreads: () => Promise<void>
   createThread: (
     metadata?: Record<string, unknown>,
     options?: ThreadNavigationOptions
@@ -1001,6 +1002,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         await get().selectThread(firstChatThread.thread_id)
       }
     }
+  },
+
+  refreshThreads: async () => {
+    const threads = await window.api.threads.list()
+    set({ threads })
   },
 
   createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {

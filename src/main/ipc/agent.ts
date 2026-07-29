@@ -83,6 +83,7 @@ import {
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
 import {
+  type AgentTurnEndEvent,
   didHarnessSystemConstraintsLoadSuccessfully,
   type HarnessAgentmdLoadStatusItem,
   type HarnessDeployUnitMapping,
@@ -291,6 +292,10 @@ import {
   readHarnessFeatureMetadata,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
+import {
+  handleAutoModeAgentCancelled,
+  handleAutoModeAgentTurnEnd
+} from "../harness-board/auto-mode-controller"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
 import type { AgentAutoCommitResult } from "../types"
@@ -310,6 +315,12 @@ import type {
   Message
 } from "../types"
 import { emitAppAttention } from "../app-attention-events"
+import {
+  createBrowserWindowAgentRunDelivery,
+  registerAgentRunImplementation,
+  startAgentRun,
+  type AgentRunDelivery
+} from "../agent/agent-run-service"
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -359,6 +370,86 @@ function hasPendingApprovalForThread(threadId: string): boolean {
     if (approval.threadId === threadId || approval.runtimeThreadId === threadId) return true
   }
   return false
+}
+
+type AutoModeTerminal = Pick<AgentTurnEndEvent, "outcome" | "endReason">
+type AutoModeTerminalCode = AgentTurnEndEvent["endReason"]["code"]
+
+const reportedAutoModeTerminalTurnByThread = new Map<string, string>()
+
+function createAutoModeTerminal(
+  outcome: AutoModeTerminal["outcome"],
+  code: AutoModeTerminalCode,
+  message?: string
+): AutoModeTerminal {
+  return {
+    outcome,
+    endReason: {
+      code,
+      ...(message?.trim() ? { message: message.trim() } : {})
+    }
+  }
+}
+
+async function isAgentTurnAwaitingContinuation(threadId: string): Promise<boolean> {
+  if (hasPendingApprovalForThread(threadId)) return true
+
+  try {
+    return await withCheckpointer(threadId, async (checkpointer) => {
+      const tuple = await checkpointer.getTuple({
+        configurable: { thread_id: threadId, checkpoint_ns: "" }
+      })
+      if (!tuple) return false
+      return checkpointHasInterrupt(tuple.checkpoint) || (tuple.pendingWrites?.length ?? 0) > 0
+    })
+  } catch (error) {
+    console.warn("[AutoMode] Failed to inspect terminal checkpoint:", {
+      threadId,
+      error
+    })
+    return false
+  }
+}
+
+async function queueAutoModeAgentTurnEnd(input: {
+  threadId: string
+  turnId?: string
+  terminal: AutoModeTerminal
+  contextUsage?: AgentTurnEndEvent["contextUsage"]
+  delivery: AgentRunDelivery
+  isStillCurrent: () => boolean
+}): Promise<void> {
+  if (!input.isStillCurrent()) return
+  if (await isAgentTurnAwaitingContinuation(input.threadId)) {
+    console.info("[AutoMode] Agent turn is awaiting continuation; terminal event skipped:", {
+      threadId: input.threadId,
+      turnId: input.turnId
+    })
+    return
+  }
+  if (!input.isStillCurrent()) return
+
+  const turnId = input.turnId?.trim()
+  if (turnId && reportedAutoModeTerminalTurnByThread.get(input.threadId) === turnId) {
+    console.info("[AutoMode] Duplicate agent terminal event skipped:", {
+      threadId: input.threadId,
+      turnId
+    })
+    return
+  }
+  if (turnId) reportedAutoModeTerminalTurnByThread.set(input.threadId, turnId)
+
+  setImmediate(() => {
+    void handleAutoModeAgentTurnEnd({
+      threadId: input.threadId,
+      outcome: input.terminal.outcome,
+      endReason: input.terminal.endReason,
+      ...(input.contextUsage ? { contextUsage: input.contextUsage } : {}),
+      delivery: input.delivery
+    }).catch((error) => {
+      console.error(`[AutoMode] Failed to handle terminal run for ${input.threadId}:`, error)
+    })
+  })
 }
 
 async function markLatestForkBoundary(input: {
@@ -1369,6 +1460,7 @@ export function disposeAgentThreadState(threadId: string): void {
 
 export function disposeDeletedAgentThreadRuntime(threadId: string): void {
   disposeAgentThreadState(threadId)
+  reportedAutoModeTerminalTurnByThread.delete(threadId)
   invalidateCurrentRunMessagePreparer(threadId)
   clearCurrentRunMessageQueue(threadId)
   discardPendingStreamTranscriptMessagesForThread(threadId)
@@ -1380,6 +1472,7 @@ export function disposeAllAgentThreadStates(): void {
     clearAdoptionContext(threadId)
   }
   turnStates.clear()
+  reportedAutoModeTerminalTurnByThread.clear()
 }
 
 function disposeTurnRuntimeState(threadId: string, state: TurnState): void {
@@ -5302,11 +5395,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  // Handle agent invocation with streaming
-  ipcMain.on(
-    "agent:invoke",
+  registerAgentRunImplementation(
     async (
-      event,
       {
         threadId,
         message,
@@ -5315,21 +5405,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         userMessageId,
         agentMode: requestedAgentMode,
         coordinatorInternalNotification
-      }: AgentInvokeParams
+      }: AgentInvokeParams,
+      delivery
     ) => {
       const baseChannel = `agent:stream:${threadId}`
-      const window = BrowserWindow.fromWebContents(event.sender)
+      const window = delivery.window
 
       console.log("[Agent] Received invoke request:", {
         threadId,
         message: message.substring(0, 50),
         modelId
       })
-
-      if (!window) {
-        console.error("[Agent] No window found")
-        return
-      }
 
       const hasCoordinatorNotificationPrefixAtInvoke = message
         .trimStart()
@@ -6162,6 +6248,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let toolErrorCount = 0
       // High-water mark of input tokens — hoisted for catch/finally access
       let highWaterInputTokens = 0
+      let autoModeTerminal: AutoModeTerminal | undefined
+      const markAutoModeTerminal = (
+        outcome: "success" | "error",
+        code: AutoModeTerminalCode,
+        terminalMessage?: string
+      ): void => {
+        autoModeTerminal = createAutoModeTerminal(outcome, code, terminalMessage)
+      }
       // Actual model used after failover — hoisted for catch/finally routing feedback
       let usedModelId: string | undefined
       let soloTaskTraceManager: SoloTaskTraceManager | undefined
@@ -6271,6 +6365,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             message: "Please select a workspace folder before sending messages."
           })
           await tracer.finish("error", "WORKSPACE_REQUIRED")
+          markAutoModeTerminal("error", "unknown", "WORKSPACE_REQUIRED")
           return
         }
 
@@ -6449,10 +6544,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
               await tracer.finish("error", preparedPrompt.reason)
               turnStateShouldDispose = true
+              markAutoModeTerminal("error", "unknown", preparedPrompt.reason)
             } else if (preparedPrompt.blockedBy === "user_prompt_submit") {
               pauseActiveGoalForRuntimeStop("UserPromptSubmit hook stopped the turn.")
               sendHookBlocked("UserPromptSubmit", preparedPrompt.hookResult, "消息被 Hook 策略拦截")
               await tracer.finish("cancelled", "UserPromptSubmit hook stopped the turn")
+              markAutoModeTerminal(
+                "error",
+                "hook_halt",
+                "UserPromptSubmit hook stopped the turn"
+              )
             } else {
               throw new Error(preparedPrompt.reason)
             }
@@ -6561,6 +6662,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (workflowBlock) {
             safeSendToWindow(window, channel, { type: "error", error: workflowBlock })
             await tracer.finish("error", "WORKFLOW_LEAVE_BLOCKED")
+            markAutoModeTerminal("error", "unknown", workflowBlock)
             return
           }
         }
@@ -6580,6 +6682,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
             sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
             await tracer.finish("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
+            markAutoModeTerminal("error", "unknown", errorMessage)
             return
           }
         }
@@ -6626,6 +6729,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
             sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
             await tracer.finish("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
+            markAutoModeTerminal("error", "unknown", errorMessage)
             return
           }
         }
@@ -8036,10 +8140,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               pauseActiveGoalForRuntimeStop("Stop hook blocked completion.")
               await tracer.finish("error", "Stop hook blocked completion")
               turnStateShouldDispose = true
+              markAutoModeTerminal("error", "hook_halt", "Stop hook blocked completion")
               return
             }
             if (completionOutcome === "halted") {
               markInvokeIncomplete("Stop hook halted the turn.")
+              markAutoModeTerminal("error", "hook_halt", "Stop hook halted the turn")
               pauseActiveGoalForRuntimeStop("Stop hook halted the turn.")
               // A halted workflow-notification turn must NOT fall through to
               // the success settlement below the loop — that would persist
@@ -8339,6 +8445,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               sendHookBlocked("UserPromptSubmit", promptSubmitResult, "Goal 续跑被 Hook 策略拦截")
               await tracer.finish("cancelled", "UserPromptSubmit hook stopped goal continuation")
               turnStateShouldDispose = true
+              markAutoModeTerminal(
+                "error",
+                "hook_halt",
+                "UserPromptSubmit hook stopped goal continuation"
+              )
               return
             }
             continuationPrompt = buildGoalContinuationPromptFromHookContexts(continuationPrompt, {
@@ -8699,6 +8810,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
           }
+          if (!autoModeTerminal) {
+            if (invokeFinalOutcome === "success") {
+              markAutoModeTerminal("success", "normal")
+            } else {
+              markAutoModeTerminal("error", "unknown", invokeFinalReason)
+            }
+          }
         } else {
           pauseActiveGoalForRuntimeStop("Agent run was aborted.")
           syncUsedSkillsContext()
@@ -8746,6 +8864,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
           }
           turnStateShouldDispose = true
+          markAutoModeTerminal("error", "hook_halt", error.reason)
           return
         }
         const failureFuseHalt = getFailureFuseHaltError(error)
@@ -8767,6 +8886,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
           }
           turnStateShouldDispose = true
+          markAutoModeTerminal("error", "failure_fuse", failureFuseHalt.decision.reason)
           return
         }
         // Ignore abort-related errors (expected when stream is cancelled)
@@ -8854,6 +8974,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
           }
           turnStateShouldDispose = true
+          markAutoModeTerminal("error", "provider_error", errMsg)
         } else {
           pauseActiveGoalForRuntimeStop("Agent run was aborted.")
           syncUsedSkillsContext()
@@ -8900,6 +9021,46 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         window.removeListener("closed", onWindowClosed)
         await settleDrainedCoordinatorNotifications("restore")
+        const terminal = autoModeTerminal
+        if (
+          terminal &&
+          !abortController.signal.aborted &&
+          !isTrustedCoordinatorNotificationInvoke &&
+          !isWorkflowNotificationInvoke
+        ) {
+          let contextUsage: AgentTurnEndEvent["contextUsage"]
+          try {
+            const contextModelId =
+              usedModelId ?? invokeRoutingResult?.resolvedModelId ?? modelId
+            const maxTokens = (
+              contextModelId
+                ? getModelConfigByRef(contextModelId)
+                : getDefaultModelConfig()
+            )?.maxTokens
+            if (
+              highWaterInputTokens > 0 &&
+              typeof maxTokens === "number" &&
+              Number.isFinite(maxTokens) &&
+              maxTokens > 0
+            ) {
+              contextUsage = {
+                inputTokens: highWaterInputTokens,
+                maxTokens
+              }
+            }
+          } catch (error) {
+            console.warn("[AutoMode] Failed to resolve context usage:", error)
+          }
+          await queueAutoModeAgentTurnEnd({
+            threadId,
+            turnId: ensureTurnId(turnState, threadId, "invoke"),
+            terminal,
+            ...(contextUsage ? { contextUsage } : {}),
+            delivery,
+            isStillCurrent: () =>
+              isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
+          })
+        }
         const currentController = activeRuns.get(threadId)
         const stillOwnsPhysicalRun =
           currentController === abortController &&
@@ -8967,6 +9128,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
     }
   )
+
+  // Handle agent invocation with streaming
+  ipcMain.on("agent:invoke", (event, request: AgentInvokeParams) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window) {
+      console.error("[Agent] No window found")
+      return
+    }
+
+    void startAgentRun(request, createBrowserWindowAgentRunDelivery(window))
+      .then((handle) => {
+        void handle.completion.catch((error) => {
+          console.error(`[Agent] Run completion failed for thread ${handle.threadId}:`, error)
+        })
+      })
+      .catch((error) => {
+        console.error(`[Agent] Failed to start run for thread ${request.threadId}:`, error)
+      })
+  })
 
   // Handle agent resume (after interrupt approval/rejection via useStream)
   ipcMain.on(
@@ -9482,6 +9662,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       })
 
       let resumeErrorModelId: string | undefined
+      let resumeAutoModeTerminal: AutoModeTerminal | undefined
       physicalStreamRunSetupGuard.handoff()
       pendingPhysicalStreamRunSetupGuard = undefined
       try {
@@ -9860,6 +10041,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
 
           if (completionOutcome === "failed") {
+            resumeAutoModeTerminal = createAutoModeTerminal(
+              "error",
+              "hook_halt",
+              "Stop hook blocked completion"
+            )
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
             pauseActiveGoalAfterBoundary(
               threadId,
@@ -9873,6 +10059,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             return
           }
           if (completionOutcome === "halted") {
+            resumeAutoModeTerminal = createAutoModeTerminal(
+              "error",
+              "hook_halt",
+              "Stop hook halted the turn"
+            )
             pauseActiveGoalAfterBoundary(
               threadId,
               window,
@@ -9915,6 +10106,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
           turnStateShouldDispose = true
+          resumeAutoModeTerminal = createAutoModeTerminal("success", "normal")
           safeSendToWindow(window, channel, { type: "done" })
           if (!boundaryGoalId) {
             emitAppAttention({
@@ -9930,6 +10122,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           return
         }
         if (isHookHaltError(error)) {
+          resumeAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", error.reason)
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
           console.warn("[Agent] Resume hook halted turn:", error.reason)
           pauseActiveGoalAfterBoundary(
@@ -9946,6 +10139,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         const failureFuseHalt = getFailureFuseHaltError(error)
         if (failureFuseHalt) {
+          resumeAutoModeTerminal = createAutoModeTerminal(
+            "error",
+            "failure_fuse",
+            failureFuseHalt.decision.reason
+          )
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
           console.warn("[Agent] Resume failure fuse halted turn:", failureFuseHalt.decision.reason)
           pauseActiveGoalAfterBoundary(
@@ -9967,6 +10165,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error.message.includes("Controller is already closed"))
 
         if (!isAbortError) {
+          resumeAutoModeTerminal = createAutoModeTerminal(
+            "error",
+            "provider_error",
+            error instanceof Error ? error.message : "Unknown error"
+          )
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
           console.error("[Agent] Resume error:", error)
           pauseActiveGoalAfterBoundary(
@@ -9996,6 +10199,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       } finally {
         window.removeListener("closed", onWindowClosed)
         await settleResumeDrainedCoordinatorNotifications("restore")
+        if (resumeAutoModeTerminal && !abortController.signal.aborted) {
+          await queueAutoModeAgentTurnEnd({
+            threadId,
+            turnId: turnState.turnId,
+            terminal: resumeAutoModeTerminal,
+            delivery: createBrowserWindowAgentRunDelivery(window),
+            isStillCurrent: () =>
+              isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
+          })
+        }
         const currentController = activeRuns.get(threadId)
         const stillOwnsPhysicalRun =
           currentController === abortController &&
@@ -10530,6 +10743,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     })
 
     let interruptErrorModelId: string | undefined
+    let interruptAutoModeTerminal: AutoModeTerminal | undefined
     physicalStreamRunSetupGuard.handoff()
     pendingPhysicalStreamRunSetupGuard = undefined
     try {
@@ -10883,6 +11097,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
 
           if (completionOutcome === "failed") {
+            interruptAutoModeTerminal = createAutoModeTerminal(
+              "error",
+              "hook_halt",
+              "Stop hook blocked completion"
+            )
             clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
             pauseActiveGoalAfterBoundary(
               threadId,
@@ -10896,6 +11115,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             return
           }
           if (completionOutcome === "halted") {
+            interruptAutoModeTerminal = createAutoModeTerminal(
+              "error",
+              "hook_halt",
+              "Stop hook halted the turn"
+            )
             pauseActiveGoalAfterBoundary(
               threadId,
               window,
@@ -10938,6 +11162,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
           turnStateShouldDispose = true
+          interruptAutoModeTerminal = createAutoModeTerminal("success", "normal")
           safeSendToWindow(window, channel, { type: "done" })
           if (!boundaryGoalId) {
             emitAppAttention({
@@ -10970,6 +11195,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return
       }
       if (isHookHaltError(error)) {
+        interruptAutoModeTerminal = createAutoModeTerminal("error", "hook_halt", error.reason)
         console.warn("[Agent] Interrupt hook halted turn:", error.reason)
         pauseActiveGoalAfterBoundary(
           threadId,
@@ -10985,6 +11211,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       const failureFuseHalt = getFailureFuseHaltError(error)
       if (failureFuseHalt) {
+        interruptAutoModeTerminal = createAutoModeTerminal(
+          "error",
+          "failure_fuse",
+          failureFuseHalt.decision.reason
+        )
         console.warn("[Agent] Interrupt failure fuse halted turn:", failureFuseHalt.decision.reason)
         pauseActiveGoalAfterBoundary(
           threadId,
@@ -11005,6 +11236,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error.message.includes("Controller is already closed"))
 
       if (!isAbortError) {
+        interruptAutoModeTerminal = createAutoModeTerminal(
+          "error",
+          "provider_error",
+          error instanceof Error ? error.message : "Unknown error"
+        )
         clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
         console.error("[Agent] Interrupt error:", error)
         pauseActiveGoalAfterBoundary(
@@ -11034,6 +11270,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     } finally {
       window.removeListener("closed", onWindowClosed)
       await settleInterruptDrainedCoordinatorNotifications("restore")
+      if (interruptAutoModeTerminal && !abortController.signal.aborted) {
+        await queueAutoModeAgentTurnEnd({
+          threadId,
+          turnId: turnState.turnId,
+          terminal: interruptAutoModeTerminal,
+          delivery: createBrowserWindowAgentRunDelivery(window),
+          isStillCurrent: () =>
+            isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
+        })
+      }
       const currentController = activeRuns.get(threadId)
       const stillOwnsPhysicalRun =
         currentController === abortController &&
@@ -11101,13 +11347,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       pendingPhysicalStreamRunSetupGuard?.abandon()
       pendingPhysicalStreamRunSetupGuard = undefined
     }
-  })
+    }
+  )
 
   // Handle cancellation
   ipcMain.handle(
     "agent:cancel",
     async (event, { threadId, cancelWorkers = false }: AgentCancelParams) => {
-      return withThreadRunMutationLock(threadId, async () => {
+      const cancelled = await withThreadRunMutationLock(threadId, async () => {
         const controller = activeRuns.get(threadId)
         const activeRunToken = turnStates.get(threadId)?.runToken
         console.log(
@@ -11175,6 +11422,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         return Boolean(controller && !cancelWorkers)
       })
+      if (cancelled) handleAutoModeAgentCancelled(threadId)
+      return cancelled
     }
   )
 }
