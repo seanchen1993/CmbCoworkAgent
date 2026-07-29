@@ -5,6 +5,15 @@ import micromatch from "micromatch"
 import { scheduleGitHookEventSync } from "./git-hook-service"
 import { isGitCommitSignalPath } from "./git-refs"
 
+/**
+ * Files directly under .git/ that signal meta-relevant changes:
+ * - .git/index  → staging/unstaging (changes diff, branch tracking may update)
+ * - .git/HEAD   → branch switch / checkout
+ */
+function isGitMetaPath(relativePath: string): boolean {
+  return relativePath === ".git/index" || relativePath === ".git/HEAD"
+}
+
 interface ActiveWorkspaceWatcher {
   watcher: fs.FSWatcher
   workspacePath: string
@@ -328,6 +337,11 @@ export function startWatching(
           if (isGitCommitSignalPath(relativePath)) {
             scheduleGitHookEventSync(workspacePath)
           }
+          // Git metadata changes (.git/index, .git/HEAD) should trigger a full
+          // refresh including branch/commit/pushability meta in the Git panel.
+          if (isGitMetaPath(relativePath)) {
+            notifyMetaRenderer(threadId, workspacePath)
+          }
           return
         }
         const isGitIgnore = leaf === ".gitignore"
@@ -421,15 +435,24 @@ export function stopAllWatching(): void {
 /**
  * Notify renderer windows about file changes.
  */
-function notifyRenderer(threadId: string, workspacePath: string): void {
+function notifyRenderer(
+  threadId: string,
+  workspacePath: string,
+  changeType?: "file" | "meta"
+): void {
   const windows = BrowserWindow.getAllWindows()
 
   for (const win of windows) {
     win.webContents.send("workspace:files-changed", {
       threadId,
-      workspacePath
+      workspacePath,
+      changeType
     })
   }
+}
+
+function notifyMetaRenderer(threadId: string, workspacePath: string): void {
+  notifyRenderer(threadId, workspacePath, "meta")
 }
 
 function notifyWorkspaceHooksChanged(threadId: string, workspacePath: string): void {
