@@ -219,6 +219,7 @@ if (!browserNativeMessagingHostLaunch) {
   process.on("unhandledRejection", (reason) => {
     console.error("[Main] Unhandled rejection:", reason)
   })
+}
 
 // Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
 // does not fire Node's `exit` event, so flush the log tail before quitting.
