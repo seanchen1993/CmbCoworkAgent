@@ -7,6 +7,8 @@ export interface LocalThreadRunLease {
   acquiredAt: string
 }
 
+export type LocalThreadRunLeaseReleasedListener = (lease: LocalThreadRunLease) => void
+
 export type LocalThreadRunLeaseClaim =
   | {
       acquired: true
@@ -31,6 +33,7 @@ export interface ClaimLocalThreadRunLeaseInput {
 }
 
 const activeLeases = new Map<string, LocalThreadRunLease>()
+const releaseListeners = new Set<LocalThreadRunLeaseReleasedListener>()
 
 function requireIdentifier(value: string, label: string): string {
   const normalized = value.trim()
@@ -40,6 +43,25 @@ function requireIdentifier(value: string, label: string): string {
 
 function copyLease(lease: LocalThreadRunLease): LocalThreadRunLease {
   return { ...lease }
+}
+
+function notifyReleased(lease: LocalThreadRunLease): void {
+  queueMicrotask(() => {
+    for (const listener of releaseListeners) {
+      try {
+        listener(copyLease(lease))
+      } catch (error) {
+        console.error("[ThreadRunLease] Release listener failed:", error)
+      }
+    }
+  })
+}
+
+export function onLocalThreadRunLeaseReleased(
+  listener: LocalThreadRunLeaseReleasedListener
+): () => void {
+  releaseListeners.add(listener)
+  return () => releaseListeners.delete(listener)
 }
 
 export function getLocalThreadRunLease(threadId: string): LocalThreadRunLease | undefined {
@@ -94,6 +116,7 @@ export function releaseLocalThreadRunLease(
   const current = activeLeases.get(threadId)
   if (!current || current.owner !== owner || current.runId !== runId) return false
   activeLeases.delete(threadId)
+  notifyReleased(current)
   return true
 }
 

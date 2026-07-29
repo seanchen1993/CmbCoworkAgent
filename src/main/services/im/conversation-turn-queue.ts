@@ -4,28 +4,48 @@ import {
   type ImEventRecord,
   type ImEventStore
 } from "./event-store"
+import { onLocalThreadRunLeaseReleased } from "../../agent/thread-run-lease"
 
 export type ImTurnQueueHandler = (event: ImEventRecord, signal: AbortSignal) => Promise<void>
 
 export class ImConversationTurnQueue {
   private readonly pumps = new Map<string, Promise<void>>()
+  private readonly pendingNotifications = new Set<string>()
   private readonly currentRuns = new Map<
     string,
     { eventId: string; abortController: AbortController }
   >()
+  private readonly unregisterLeaseReleaseListener: () => void
   private stopped = false
 
   constructor(
     private readonly handler: ImTurnQueueHandler,
     private readonly eventStore: ImEventStore = imEventStore
-  ) {}
+  ) {
+    this.unregisterLeaseReleaseListener = onLocalThreadRunLeaseReleased((lease) => {
+      void this.notifyQueuedForThread(lease.threadId).catch((error) => {
+        console.error("[IM] Failed to wake queue after Thread lease release:", error)
+      })
+    })
+  }
 
   notify(conversationKey: string): Promise<void> {
-    const existing = this.pumps.get(conversationKey)
-    if (existing) return existing
     if (this.stopped) return Promise.resolve()
+    const existing = this.pumps.get(conversationKey)
+    if (existing) {
+      // A lease may become idle while the current pump is still unwinding its
+      // deferred result. Remember the wake-up so finally starts a fresh pump.
+      this.pendingNotifications.add(conversationKey)
+      return existing
+    }
     const pump = this.pump(conversationKey).finally(() => {
-      if (this.pumps.get(conversationKey) === pump) this.pumps.delete(conversationKey)
+      if (this.pumps.get(conversationKey) !== pump) return
+      this.pumps.delete(conversationKey)
+      if (this.pendingNotifications.delete(conversationKey) && !this.stopped) {
+        void this.notify(conversationKey).catch((error) => {
+          console.error("[IM] Conversation queue re-pump failed:", error)
+        })
+      }
     })
     this.pumps.set(conversationKey, pump)
     return pump
@@ -74,8 +94,18 @@ export class ImConversationTurnQueue {
 
   async stop(): Promise<void> {
     this.stopped = true
+    this.unregisterLeaseReleaseListener()
+    this.pendingNotifications.clear()
     for (const current of this.currentRuns.values()) current.abortController.abort()
     await Promise.allSettled(this.pumps.values())
+  }
+
+  private async notifyQueuedForThread(threadId: string): Promise<void> {
+    if (this.stopped) return
+    const conversationKeys = this.eventStore.listQueuedConversationKeys().filter((key) => {
+      return this.eventStore.getNextQueuedEvent(key)?.targetSnapshot?.threadId === threadId
+    })
+    await Promise.all(conversationKeys.map((key) => this.notify(key)))
   }
 
   private async pump(conversationKey: string): Promise<void> {

@@ -5,6 +5,7 @@ import {
   claimLocalThreadRunLease,
   getLocalThreadRunLease,
   isLocalThreadRunOwnedByAnotherSource,
+  onLocalThreadRunLeaseReleased,
   releaseLocalThreadRunLease
 } from "../src/main/agent/thread-run-lease"
 
@@ -136,6 +137,46 @@ function testIdempotentClaimPreservesTimestampAndSnapshotIsolation(): void {
   assert(releaseLocalThreadRunLease(threadId, "scheduler", "scheduled-run"), "lease releases")
 }
 
+async function testReleaseNotificationIsIdentityFencedAndUnsubscribable(): Promise<void> {
+  const threadId = "lease-release-notification"
+  const notifications: Array<{ threadId: string; owner: string; runId: string }> = []
+  const unsubscribe = onLocalThreadRunLeaseReleased((lease) => notifications.push(lease))
+  const flushNotification = () => new Promise<void>((resolve) => queueMicrotask(resolve))
+
+  assert(
+    claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "desktop-run" }).acquired,
+    "desktop run acquires"
+  )
+  assert(
+    !releaseLocalThreadRunLease(threadId, "scheduler", "desktop-run"),
+    "wrong identity cannot release"
+  )
+  await flushNotification()
+  assert(notifications.length === 0, "failed release does not emit an idle notification")
+
+  assert(
+    releaseLocalThreadRunLease(threadId, "desktop", "desktop-run"),
+    "matching identity releases"
+  )
+  await flushNotification()
+  assert(notifications.length === 1, "successful release emits exactly once")
+  assert(
+    notifications[0].threadId === threadId &&
+      notifications[0].owner === "desktop" &&
+      notifications[0].runId === "desktop-run",
+    "notification identifies the released physical run"
+  )
+
+  unsubscribe()
+  assert(
+    claimLocalThreadRunLease({ threadId, owner: "scheduler", runId: "scheduler-run" }).acquired,
+    "next run acquires"
+  )
+  assert(releaseLocalThreadRunLease(threadId, "scheduler", "scheduler-run"), "next run releases")
+  await flushNotification()
+  assert(notifications.length === 1, "unsubscribed listener receives no later release")
+}
+
 function testRuntimeEntryPointArchitecture(): void {
   const leaseSource = read("src/main/agent/thread-run-lease.ts")
   const standardTurn = read("src/main/agent/standard-thread-turn.ts")
@@ -255,15 +296,24 @@ function testRuntimeEntryPointArchitecture(): void {
   )
 }
 
-for (const test of [
+const tests: Array<() => void | Promise<void>> = [
   testForeignOwnerCannotSteal,
   testSameOwnerHandoffRequiresExactRunId,
   testLateReleaseIsIdentityFenced,
   testIdempotentClaimPreservesTimestampAndSnapshotIsolation,
+  testReleaseNotificationIsIdentityFencedAndUnsubscribable,
   testRuntimeEntryPointArchitecture
-]) {
-  test()
-  console.log(`PASS ${test.name}`)
+]
+
+async function main(): Promise<void> {
+  for (const test of tests) {
+    await test()
+    console.log(`PASS ${test.name}`)
+  }
+  console.log("local-thread-run-lease.spec.ts passed")
 }
 
-console.log("local-thread-run-lease.spec.ts passed")
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

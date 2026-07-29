@@ -617,6 +617,7 @@ interface LocalThreadRunLease {
 - 桌面遇到 IM owner 时显示“远程任务正在执行”，不得直接操作该 IM run；
 - IM `/停止` 只中止 IM owner；桌面 Stop 只中止 desktop owner；
 - 租约在 Runtime、Checkpointer 和 run-scoped 清理全部完成后释放；
+- 租约成功释放后必须按 `threadId` 唤醒等待该 Thread 的 IM 持久队列；唤醒不得依赖新入站消息、网关重连或应用重启，身份不匹配的迟到释放不得触发；
 - `agent:invoke`、Resume、Interrupt 等所有可能创建桌面 Runtime 的入口都必须经过同一个 foreign-owner 守卫；
 - 租约异常不得通过超时强行产生第二 owner。
 
@@ -1086,7 +1087,7 @@ Feature 客户端执行可以同时针对 Mock Gateway 开发，不必等待收�
 14. Headless 状态下受支持的 IM 标准单轮可以执行；打开桌面后 Thread 历史完整可恢复。
 15. IM 遇到 active/paused Goal、Coordinator、Workflow、内部通知或非普通 Agent Mode 时稳定拒绝并引导到桌面，不执行 Runtime，也不改变其状态。
 16. 本地 Thread 运行租约保证桌面、IM、Scheduler 不会同时创建 Runtime 或写同一 Checkpoint。
-17. desktop owner 存在时 IM 消息持久排队；IM owner 存在时桌面显示远程忙；两侧都不能跨来源 Stop/Replace/Steer。
+17. desktop owner 或 Scheduler owner 存在时 IM 消息持久排队；对应租约释放后无需新消息、重连或重启即可自动执行；IM owner 存在时桌面显示远程忙；两侧都不能跨来源 Stop/Replace/Steer。
 18. `agent:invoke`、Resume、Interrupt 和盘点出的所有 Runtime 创建入口均经过 foreign-owner 守卫；桌面自身原有 owner 规则不变。
 
 ### 20.3 Feature 与切换

@@ -19,11 +19,13 @@ import type {
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
 import { ImReplyClient } from "../src/main/services/im/reply-client"
 import { ImRemoteRunner, createImInboxRemotePolicy } from "../src/main/services/im/remote-runner"
+import { ImConversationTurnQueue } from "../src/main/services/im/conversation-turn-queue"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
 import {
   claimLocalThreadRunLease,
   getLocalThreadRunLease,
-  releaseLocalThreadRunLease
+  releaseLocalThreadRunLease,
+  type LocalThreadRunOwner
 } from "../src/main/agent/thread-run-lease"
 import type { ThreadRow } from "../src/main/db"
 
@@ -101,6 +103,18 @@ async function queueFeatureEvent(context: Context, index: number) {
   const remote = eventFixture(index)
   await context.events.receiveEvent(remote, featureTarget)
   return context.events.queueEvent(remote.eventId)
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  message: string,
+  timeoutMs = 2_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message)
+    await new Promise<void>((resolve) => setTimeout(resolve, 5))
+  }
 }
 
 class TestGateway implements ImGatewayClientPort {
@@ -291,6 +305,106 @@ async function testForeignOwnerDefersWithoutRuntime(): Promise<void> {
   }
 }
 
+async function runForeignOwnerReleaseWakeScenario(
+  owner: Extract<LocalThreadRunOwner, "desktop" | "scheduler">
+): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  let executions = 0
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    capabilityGuard: capabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    setThreadLifecycle: async () => undefined,
+    createRunId: () => `im-after-${owner}`,
+    executeTurn: async () => {
+      executions += 1
+      return `${owner} released`
+    }
+  })
+  const queue = new ImConversationTurnQueue(async (event, signal) => {
+    await runner.invoke(event, signal)
+  }, context.events)
+  const foreignRunId = `${owner}-run`
+  assert(
+    claimLocalThreadRunLease({ threadId: target.threadId, owner, runId: foreignRunId }).acquired
+  )
+  try {
+    const queued = await queueEvent(context, 1)
+    await queue.notify(queued.conversationKey)
+    assert.equal(context.events.getEvent(queued.eventId)?.state, "queued")
+    assert.equal(executions, 0)
+
+    assert(releaseLocalThreadRunLease(target.threadId, owner, foreignRunId))
+    await waitFor(
+      () => context.events.getEvent(queued.eventId)?.state === "completed",
+      `${owner} lease release did not wake the queued IM event`
+    )
+
+    assert.equal(executions, 1)
+    assert.equal(gateway.replies.at(-1)?.message.content, `${owner} released`)
+  } finally {
+    await queue.stop()
+    releaseLocalThreadRunLease(target.threadId, owner, foreignRunId)
+    context.database.close()
+  }
+}
+
+async function testDesktopAndSchedulerReleaseWakeDeferredEvents(): Promise<void> {
+  await runForeignOwnerReleaseWakeScenario("desktop")
+  await runForeignOwnerReleaseWakeScenario("scheduler")
+}
+
+async function testLeaseReleaseDuringDeferredPumpIsNotLost(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  let executions = 0
+  let releasedInsideHandler = false
+  const runner = new ImRemoteRunner({
+    gateway,
+    eventStore: context.events,
+    capabilityGuard: capabilityGuard(context),
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    setThreadLifecycle: async () => undefined,
+    createRunId: () => "im-after-racing-release",
+    executeTurn: async () => {
+      executions += 1
+      return "race recovered"
+    }
+  })
+  const queue = new ImConversationTurnQueue(async (event, signal) => {
+    const disposition = await runner.invoke(event, signal)
+    if (disposition === "deferred_thread_busy" && !releasedInsideHandler) {
+      releasedInsideHandler = true
+      assert(releaseLocalThreadRunLease(target.threadId, "desktop", "racing-desktop-run"))
+      // Let the release callback call notify() while this pump is still active.
+      await new Promise<void>((resolve) => queueMicrotask(resolve))
+    }
+  }, context.events)
+  assert(
+    claimLocalThreadRunLease({
+      threadId: target.threadId,
+      owner: "desktop",
+      runId: "racing-desktop-run"
+    }).acquired
+  )
+  try {
+    const queued = await queueEvent(context, 1)
+    await queue.notify(queued.conversationKey)
+    await waitFor(
+      () => context.events.getEvent(queued.eventId)?.state === "completed",
+      "release notification was lost while the deferred pump was unwinding"
+    )
+    assert.equal(releasedInsideHandler, true)
+    assert.equal(executions, 1)
+  } finally {
+    await queue.stop()
+    releaseLocalThreadRunLease(target.threadId, "desktop", "racing-desktop-run")
+    context.database.close()
+  }
+}
+
 async function testPermitRevocationBecomesOutcomeUnknown(): Promise<void> {
   const context = await createContext()
   const gateway = new TestGateway()
@@ -424,6 +538,11 @@ function testInboxPolicyKeepsSchedulerButCutsRemoteRisks(): void {
 const tests: Array<[string, () => void | Promise<void>]> = [
   ["testSuccessfulRunAndDurableOutbox", testSuccessfulRunAndDurableOutbox],
   ["testForeignOwnerDefersWithoutRuntime", testForeignOwnerDefersWithoutRuntime],
+  [
+    "testDesktopAndSchedulerReleaseWakeDeferredEvents",
+    testDesktopAndSchedulerReleaseWakeDeferredEvents
+  ],
+  ["testLeaseReleaseDuringDeferredPumpIsNotLost", testLeaseReleaseDuringDeferredPumpIsNotLost],
   ["testPermitRevocationBecomesOutcomeUnknown", testPermitRevocationBecomesOutcomeUnknown],
   [
     "testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume",
