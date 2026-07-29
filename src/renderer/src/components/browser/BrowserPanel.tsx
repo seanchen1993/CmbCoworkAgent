@@ -97,6 +97,9 @@ function describeBrowserState(state: BrowserState | null | undefined): string {
 }
 
 function detectRendererZoomLevel(): number {
+  // On Windows, outer/inner window ratios include non-client frame pixels and
+  // can nudge native BrowserView bounds a few pixels down-right.
+  if (window.electron.process.platform === "win32") return 1
   const widthRatio = window.innerWidth > 0 ? window.outerWidth / window.innerWidth : 1
   const heightRatio = window.innerHeight > 0 ? window.outerHeight / window.innerHeight : 1
   const candidate = [widthRatio, heightRatio].find(
@@ -461,11 +464,15 @@ export function BrowserPanel({
       }
       const rect = element.getBoundingClientRect()
       const zoomLevel = detectRendererZoomLevel()
+      const scaledLeft = rect.left * zoomLevel
+      const scaledTop = rect.top * zoomLevel
+      const scaledRight = rect.right * zoomLevel
+      const scaledBottom = rect.bottom * zoomLevel
       const bounds: BrowserBounds = {
-        x: Math.round(rect.left * zoomLevel),
-        y: Math.round(rect.top * zoomLevel),
-        width: Math.round(rect.width * zoomLevel),
-        height: Math.round(rect.height * zoomLevel)
+        x: Math.floor(scaledLeft),
+        y: Math.floor(scaledTop),
+        width: Math.max(0, Math.ceil(scaledRight) - Math.floor(scaledLeft)),
+        height: Math.max(0, Math.ceil(scaledBottom) - Math.floor(scaledTop))
       }
       const layoutVisible = rect.width >= 8 && rect.height >= 8
       const modalDialogOpen = hasOpenModalDialog()
