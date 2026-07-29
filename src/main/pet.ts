@@ -581,12 +581,9 @@ export function getPetWindowDebugInfo(): Record<string, unknown> {
   }
 }
 
-function logPetWindowDebug(message: string, extra?: Record<string, unknown>): void {
+function logPetWindowDebug(message: string): void {
   if (app.isPackaged && process.env.CMB_PET_DEBUG !== "1") return
-  console.debug(message, {
-    ...extra,
-    pet: getPetWindowDebugInfo()
-  })
+  console.debug(message)
 }
 
 function logPetWindowEvent(message: string): void {
@@ -1098,6 +1095,20 @@ export function createPetWindow(): void {
       setTransientState("running", 0);
     });
     petLayer.addEventListener("pointermove", function onPointerMove(event) {
+      // 防御：pointerDown 为 true 但实际未按下任何按键，说明 pointerup 丢失（快速拖拽时
+      // 鼠标移出窗口导致 setIgnoreMouseEvents 拦截了 pointerup），重置拖拽状态。
+      if (pointerDown && event.buttons === 0) {
+        pointerDown = false;
+        pointerMoved = false;
+        document.body.classList.remove("dragging");
+        document.title = "pet-pointer-up:" + Date.now();
+        if (dragTitleFrame) {
+          window.cancelAnimationFrame(dragTitleFrame);
+          dragTitleFrame = 0;
+        }
+        clearTransientState("running");
+        return;
+      }
       if (!pointerDown) return;
       const dx = event.screenX - dragStartX;
       const dy = event.screenY - dragStartY;
@@ -1617,10 +1628,7 @@ function showPetHoverBubbleIfIdle(): void {
  */
 function hidePetBubble(reason = "unknown"): void {
   cancelPetBubbleHide()
-  logPetWindowDebug("[Pets] hidePetBubble invoked", {
-    reason,
-    petBubbleVisible
-  })
+  logPetWindowDebug(`[Pets] hidePetBubble invoked, reason=${reason}, currentVisible=${petBubbleVisible}`)
 
   petBubbleVisible = false
   if (!petHovering) {
