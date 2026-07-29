@@ -3,6 +3,7 @@ import type { ToolCall, ToolCallChunk } from "@langchain/core/messages"
 import type { StreamPayload, StreamEvent, IPCEvent, IPCStreamEvent } from "../../../types"
 import type { Message, Subagent } from "../types"
 import { COORDINATOR_NOTIFICATION_PROMPT } from "./message-display-helpers"
+import { getToolLabel } from "./tool-labels"
 import { useAppStore } from "./store"
 import {
   isCoordinatorWorkerToolName,
@@ -6217,7 +6218,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
         events.push(
           this.createSubagentLogEntryEvent({
             kind: "tool_call",
-            title: `调用工具：${toolCall.name || "未知工具"}`,
+            title: `调用工具：${
+              toolCall.name
+                ? getToolLabel(toolCall.name, {
+                    args:
+                      toolCall.args &&
+                      typeof toolCall.args === "object" &&
+                      !Array.isArray(toolCall.args)
+                        ? (toolCall.args as Record<string, unknown>)
+                        : undefined,
+                    showToolName: false
+                  })
+                : "未知工具"
+            }`,
             content: this.formatSubagentToolArgs(toolCall.args),
             status: "waiting",
             checkpointNs,

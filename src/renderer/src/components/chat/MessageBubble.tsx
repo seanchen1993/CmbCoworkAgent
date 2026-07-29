@@ -160,7 +160,10 @@ function stripThinkBlocksForDisplay(text: string): string {
 
 // 获取工具调用的简要描述
 function getToolCallSummary(toolCall: { name: string; args?: Record<string, unknown> }): string {
-  const label = getToolLabel(toolCall.name, { showToolName: false })
+  const label = getToolLabel(toolCall.name, {
+    args: toolCall.args,
+    showToolName: false
+  })
   const args = toolCall.args || {}
 
   // 获取主要参数用于显示
@@ -1109,9 +1112,7 @@ function MessageBubbleImpl({
                 (needsApproval
                   ? "awaiting_approval"
                   : result !== undefined
-                    ? result.is_error
-                      ? "failed"
-                      : "completed"
+                    ? "completed"
                     : isResultlessCompletedToolCall(resolvedToolCall)
                       ? "completed"
                     : isStreaming
@@ -1124,7 +1125,7 @@ function MessageBubbleImpl({
                 : collapsedTools.has(toolId)
               const summary = getToolCallSummary(resolvedToolCall)
               const previewPath = getToolPreviewPath(resolvedToolCall)
-              const isOk = result !== undefined && !result.is_error
+              const isOk = result !== undefined && !result?.is_error
 
               // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
               if (needsApproval) {

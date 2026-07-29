@@ -106,6 +106,19 @@ import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
 import type {
+  AiRecordingSession,
+  AiRecordingStartOptions,
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserCdpConfig,
+  BrowserNavigateOptions,
+  BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportResult,
+  BrowserScreenshotResult,
+  BrowserState
+} from "../shared/browser-types"
+import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent,
   WindowCloseBehavior
@@ -1656,6 +1669,31 @@ interface CustomAPI {
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
   }
+  browser: {
+    attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
+    detach: () => Promise<BrowserState>
+    setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
+    navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
+    goBack: () => Promise<BrowserState>
+    goForward: () => Promise<BrowserState>
+    reload: () => Promise<BrowserState>
+    stop: () => Promise<BrowserState>
+    clearConsole: () => Promise<BrowserState>
+    getState: () => Promise<BrowserState>
+    startAiRecording: (options?: AiRecordingStartOptions) => Promise<AiRecordingSession>
+    stopAiRecording: () => Promise<AiRecordingSession>
+    getAiRecording: () => Promise<AiRecordingSession>
+    getCdpConfig: () => Promise<BrowserCdpConfig>
+    isProfileImportRuntimeEnabled: () => Promise<boolean>
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
+    captureScreenshot: () => Promise<BrowserScreenshotResult>
+    importProfileData: (
+      options: BrowserProfileImportOptions
+    ) => Promise<BrowserProfileImportResult>
+    disposeAllForRendererUnload: () => void
+    onState: (callback: (state: BrowserState) => void) => () => void
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
+  }
   lsp: {
     getConfig: () => Promise<LspConfig>
     saveConfig: (updates: Partial<LspConfig>) => Promise<void>
@@ -2501,6 +2539,9 @@ interface CustomAPI {
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
+  }
+  app: {
+    restart: () => Promise<void>
   }
   update: {
     check: () => Promise<

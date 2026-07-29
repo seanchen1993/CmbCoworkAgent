@@ -117,6 +117,23 @@ import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
+  BROWSER_PANEL_REQUEST_CHANNEL,
+  BROWSER_SESSION_ID
+} from "../shared/browser-types"
+import type {
+  BrowserAttachOptions,
+  AiRecordingSession,
+  AiRecordingStartOptions,
+  BrowserBounds,
+  BrowserCdpConfig,
+  BrowserNavigateOptions,
+  BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportResult,
+  BrowserScreenshotResult,
+  BrowserState
+} from "../shared/browser-types"
+import {
   APP_ATTENTION_CHANNEL,
   getAgentStreamAttentionKind,
   type AppAttentionKind
@@ -2199,6 +2216,72 @@ const api = {
     list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>
       ipcRenderer.invoke("taskCards:list", query) as Promise<TaskCardsListResult>
   },
+  browser: {
+    attach: (options?: BrowserAttachOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:attach", options) as Promise<BrowserState>
+    },
+    detach: (): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:detach") as Promise<BrowserState>
+    },
+    setBounds: (bounds: BrowserBounds, visible?: boolean): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>
+    },
+    navigate: (url: string, options?: BrowserNavigateOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:navigate", url, options) as Promise<BrowserState>
+    },
+    goBack: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goBack") as Promise<BrowserState>,
+    goForward: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goForward") as Promise<BrowserState>,
+    reload: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:reload") as Promise<BrowserState>,
+    stop: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:stop") as Promise<BrowserState>,
+    clearConsole: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
+    getState: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
+    startAiRecording: (options?: AiRecordingStartOptions): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:startAiRecording", options) as Promise<AiRecordingSession>,
+    stopAiRecording: (): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:stopAiRecording") as Promise<AiRecordingSession>,
+    getAiRecording: (): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:getAiRecording") as Promise<AiRecordingSession>,
+    getCdpConfig: (): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
+    isProfileImportRuntimeEnabled: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:isProfileImportRuntimeEnabled") as Promise<boolean>,
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:saveCdpConfig", updates) as Promise<BrowserCdpConfig>,
+    captureScreenshot: (): Promise<BrowserScreenshotResult> =>
+      ipcRenderer.invoke("browser:captureScreenshot") as Promise<BrowserScreenshotResult>,
+    importProfileData: (
+      options: BrowserProfileImportOptions
+    ): Promise<BrowserProfileImportResult> =>
+      ipcRenderer.invoke("browser:importProfileData", options) as Promise<BrowserProfileImportResult>,
+    disposeAllForRendererUnload: (): void => {
+      ipcRenderer.send("browser:disposeAllForRendererUnload")
+    },
+    onState: (callback: (state: BrowserState) => void): (() => void) => {
+      const channel = `browser:state:${BROWSER_SESSION_ID}`
+      const handler = (_: unknown, state: BrowserState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void): (() => void) => {
+      const handler = (_: unknown, request: BrowserPanelRequest): void => {
+        callback(request)
+      }
+      ipcRenderer.on(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      }
+    }
+  },
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>
       ipcRenderer.invoke("heartbeat:getConfig") as Promise<HeartbeatConfig>,
@@ -3634,6 +3717,9 @@ const api = {
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
       return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
     }
+  },
+  app: {
+    restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>
   },
   update: {
     check: (): Promise<

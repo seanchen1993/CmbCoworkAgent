@@ -21,6 +21,7 @@ const TOOL_LABELS: Record<string, string> = {
 }
 
 interface ToolLabelOptions {
+  args?: Record<string, unknown>
   showToolName?: boolean
 }
 
@@ -33,9 +34,16 @@ function formatMappedLabel(
   return `${chineseLabel}（${toolName}）`
 }
 
+export function getChineseLabel(
+  toolName: string,
+  options?: ToolLabelOptions
+): string | null {
+  return TOOL_LABELS[toolName] ?? null
+}
+
 export function getToolLabel(toolName: string, options?: ToolLabelOptions): string {
-  const exact = TOOL_LABELS[toolName]
-  if (exact) return formatMappedLabel(toolName, exact, options)
+  const chineseLabel = getChineseLabel(toolName, options)
+  if (chineseLabel) return formatMappedLabel(toolName, chineseLabel, options)
 
   // For compact/collapsed display, if no explicit Chinese mapping exists,
   // keep the original tool name instead of synthesizing a Chinese label.

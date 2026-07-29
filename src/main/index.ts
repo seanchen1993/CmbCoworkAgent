@@ -1,4 +1,20 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
+import {
+  isBrowserNativeMessagingHostLaunch,
+  runBrowserNativeMessagingHost
+} from "./browser/chrome/browser-native-messaging-host"
+import { configureBrowserCdpEndpoint } from "./browser/cdp/browser-cdp"
+import { autoRegisterPlaywrightMcpConnector } from "./browser/cdp/browser-playwright-mcp-connector"
+import { BUILTIN_BROWSER_LOG_PREFIX } from "../shared/browser-types"
+
+const MAIN_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[Main]`
+const RENDERER_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[RendererBrowser]`
+const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
+
+const browserCdpPort = configureBrowserCdpEndpoint(app.commandLine)
+if (browserCdpPort !== null) {
+  console.info(`${MAIN_BROWSER_LOG_PREFIX} Browser CDP endpoint enabled on http://127.0.0.1:${browserCdpPort}.`)
+}
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -92,6 +108,17 @@ function getConsoleLevelName(level: number): string {
   }
 }
 
+function shouldMirrorRendererBrowserLog(message: string): boolean {
+  return message.startsWith(BUILTIN_BROWSER_LOG_PREFIX)
+}
+
+function formatMirroredRendererBrowserLog(message: string): string {
+  const suffix = message.startsWith(BUILTIN_BROWSER_LOG_PREFIX)
+    ? message.slice(BUILTIN_BROWSER_LOG_PREFIX.length)
+    : ` ${message}`
+  return `${RENDERER_BROWSER_LOG_PREFIX}${suffix}`
+}
+
 function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): string {
   if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`
   if (typeof value === "string") return value
@@ -165,32 +192,33 @@ function withMainFileLogging<T extends (...args: unknown[]) => void>(level: stri
   }) as T
 }
 
-// Guard console writes so broken stdout/stderr pipes don't crash main process.
-console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
-console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
-console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
-console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
-console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
+if (!browserNativeMessagingHostLaunch) {
+  // Native messaging reserves stdout exclusively for length-prefixed protocol frames.
+  console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
+  console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
+  console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
+  console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
+  console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
 
-// Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
-// or when the renderer window is destroyed while the main process is still logging).
-process.stdout.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return
-  console.error("[Main] stdout error:", err)
-})
-process.stderr.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return
-  // Don't re-log to stderr here to avoid infinite loop
-})
-process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return // silently ignore broken pipe
-  console.error("[Main] Uncaught exception:", err)
-  // Persist the buffered tail (incl. this error) in case the process dies next.
-  flushLogsSync()
-})
-process.on("unhandledRejection", (reason) => {
-  console.error("[Main] Unhandled rejection:", reason)
-})
+  // Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
+  // or when the renderer window is destroyed while the main process is still logging).
+  process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return
+    console.error("[Main] stdout error:", err)
+  })
+  process.stderr.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return
+    // Don't re-log to stderr here to avoid infinite loop
+  })
+  process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return // silently ignore broken pipe
+    console.error("[Main] Uncaught exception:", err)
+    // Persist the buffered tail (incl. this error) in case the process dies next.
+    flushLogsSync()
+  })
+  process.on("unhandledRejection", (reason) => {
+    console.error("[Main] Unhandled rejection:", reason)
+  })
 
 // Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
 // does not fire Node's `exit` event, so flush the log tail before quitting.
@@ -238,6 +266,9 @@ import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
+import { registerBrowserHandlers } from "./ipc/browser"
+import { registerBrowserProfileImportHandlers, stopBrowserProfileImportRuntime } from "./ipc/browser-profile-import"
+import { setGlobalBrowserService } from "./browser/core/browser-service-registry"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -290,6 +321,7 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
+let browserService: ReturnType<typeof registerBrowserHandlers> | null = null
 let closeToTrayPromptOpen = false
 let closeToTrayPromptRequestId = 0
 let closeToTrayPromptTimer: NodeJS.Timeout | null = null
@@ -313,6 +345,13 @@ function schedulePetStartupAfterMainLoad(window: BrowserWindow): void {
     markPetStartupReady()
   }, PET_STARTUP_DELAY_MS)
   petStartupTimer.unref?.()
+}
+
+function disposeBrowserServiceForMainWindow(reason: string): void {
+  const disposedSessionId = browserService?.disposeAll() ?? null
+  if (disposedSessionId) {
+    console.info(`${MAIN_BROWSER_LOG_PREFIX} Disposed BrowserView session ${disposedSessionId} because ${reason}.`)
+  }
 }
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -544,6 +583,10 @@ function createWindow(): void {
 
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
+    if (shouldMirrorRendererBrowserLog(message)) {
+      const location = sourceId ? `${sourceId}:${line}` : `line:${line}`
+      console.log(`${formatMirroredRendererBrowserLog(message)} (${location})`)
+    }
   })
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
@@ -561,6 +604,7 @@ function createWindow(): void {
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     clearCloseToTrayPromptState()
+    disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
   })
 
@@ -620,6 +664,7 @@ function createWindow(): void {
       pet: getPetWindowDebugInfo()
     })
     cancelDelayedPetStartup()
+    disposeBrowserServiceForMainWindow("the main window closed")
     clearCloseToTrayPromptState()
     mainWindow = null
     if (process.platform !== "darwin") {
@@ -680,9 +725,19 @@ function prewarmRecentSandboxWorkspaces(): void {
   LocalSandbox.prewarmForWorkspaces(workspaces)
 }
 
-// Ensure only a single instance is running (prevents duplicate schedulers on Windows)
-const gotTheLock = app.requestSingleInstanceLock()
-if (!gotTheLock) {
+// Native hosts must not participate in the desktop app's single-instance lifecycle.
+const gotTheLock = browserNativeMessagingHostLaunch ? false : app.requestSingleInstanceLock()
+if (browserNativeMessagingHostLaunch) {
+  void runBrowserNativeMessagingHost().then(
+    () => app.exit(typeof process.exitCode === "number" ? process.exitCode : 0),
+    (error) => {
+      process.stderr.write(
+        `[CmbBrowserNativeHost] ${error instanceof Error ? error.message : String(error)}\n`
+      )
+      app.exit(1)
+    }
+  )
+} else if (!gotTheLock) {
   app.quit()
 } else {
   app.on("second-instance", () => {
@@ -749,6 +804,9 @@ if (!gotTheLock) {
     registerModelHandlers(ipcMain)
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
+    autoRegisterPlaywrightMcpConnector(browserCdpPort).catch((err) =>
+      console.error(`${MAIN_BROWSER_LOG_PREFIX} Failed to auto-register Playwright MCP connector:`, err)
+    )
     registerScheduledTaskHandlers(ipcMain)
     registerHeartbeatHandlers(ipcMain)
     registerMemoryHandlers(ipcMain)
@@ -778,6 +836,8 @@ if (!gotTheLock) {
     registerTaskCardHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
+    browserService = registerBrowserHandlers(ipcMain, () => mainWindow)
+    registerBrowserProfileImportHandlers(ipcMain, () => mainWindow, browserService)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -926,6 +986,14 @@ if (!gotTheLock) {
 
     ipcMain.handle("get-version", async () => {
       return app.getVersion()
+    })
+
+    ipcMain.handle("app:restart", async () => {
+      // Mark the app as quitting first so the main window doesn't collapse into
+      // the tray when we intentionally relaunch from the renderer.
+      setAppQuitting(true)
+      app.relaunch()
+      app.quit()
     })
 
     ipcMain.handle("open-login-window", async () => {
@@ -1107,6 +1175,10 @@ if (!gotTheLock) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
+    browserService?.disposeAll()
+    browserService = null
+    setGlobalBrowserService(null)
+    stopBrowserProfileImportRuntime()
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()

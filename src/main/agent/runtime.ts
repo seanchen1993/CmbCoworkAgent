@@ -207,6 +207,10 @@ import {
 } from "../mcp/capability-service"
 import { createEagerMcpTool } from "../mcp/langchain-tool"
 import {
+  autoSelectPlaywrightInAppBrowserTab,
+  invokeMcpToolWithPlaywrightInAppBrowserSupport
+} from "../browser/cdp/playwright-mcp-bridge"
+import {
   InterleavedThinkingChatOpenAICompletions,
   ReasoningDisplayChatOpenAICompletions
 } from "./interleaved-thinking-completions"
@@ -1050,9 +1054,29 @@ Summary:`
 
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
-  tools: McpCapabilityTool[]
+  tools: McpCapabilityTool[],
+  context: { workspacePath: string; threadId?: string }
 ): DynamicStructuredTool[] {
-  return tools.map((tool) => createEagerMcpTool(capabilityService, tool))
+  return tools.map((tool) =>
+    createEagerMcpTool(
+      {
+        listTools: capabilityService.listTools.bind(capabilityService),
+        getSnapshot: capabilityService.getSnapshot?.bind(capabilityService),
+        getTool: capabilityService.getTool.bind(capabilityService),
+        invoke: async (_idOrAlias, args) =>
+          invokeMcpToolWithPlaywrightInAppBrowserSupport({
+            tool,
+            workspacePath: context.workspacePath,
+            threadId: context.threadId,
+            args,
+            invoke: () => capabilityService.invoke(tool.capabilityId, args)
+          }),
+        invalidate: capabilityService.invalidate.bind(capabilityService),
+        close: capabilityService.close.bind(capabilityService)
+      },
+      tool
+    )
+  )
 }
 
 export function isRetryableMcpTransportError(error: unknown): boolean {
@@ -1376,21 +1400,45 @@ export function createScopedMcpCapabilityService(
 
       const effectiveArgs = mergeUpdatedInput(args, preResult?.updatedInput)
 
+      const tabsTool =
+        tool.toolName === "browser_tabs"
+          ? tool
+          : snapshot.tools.find(
+              (candidate) =>
+                candidate.providerKey === tool.providerKey && candidate.toolName === "browser_tabs"
+            ) ?? null
+
+      await autoSelectPlaywrightInAppBrowserTab({
+        tool,
+        tabsTool,
+        capabilityService: service,
+        workspacePath: baseContext.workspacePath,
+        threadId: baseContext.threadId
+      })
+
       if (pluginId) hookScope.activatePlugin(pluginId)
-      let result: McpInvocationResult
-      try {
-        result = await service.invoke(tool.capabilityId, effectiveArgs)
-      } catch (error) {
-        const fallbackTool = shouldFallbackMcpError(error)
-          ? findFallbackTool(tool, snapshot.tools)
-          : null
-        if (!fallbackTool) throw error
-        result = appendFallbackNotice(
-          await service.invoke(fallbackTool.capabilityId, effectiveArgs),
-          tool,
-          fallbackTool
-        )
-      }
+      const result = await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+        tool,
+        workspacePath: baseContext.workspacePath,
+        threadId: baseContext.threadId,
+        args: effectiveArgs,
+        prepareBeforeInvoke: false,
+        invoke: async () => {
+          try {
+            return await service.invoke(tool.capabilityId, effectiveArgs)
+          } catch (error) {
+            const fallbackTool = shouldFallbackMcpError(error)
+              ? findFallbackTool(tool, snapshot.tools)
+              : null
+            if (!fallbackTool) throw error
+            return appendFallbackNotice(
+              await service.invoke(fallbackTool.capabilityId, effectiveArgs),
+              tool,
+              fallbackTool
+            )
+          }
+        }
+      })
       const postContext: HookContext = {
         ...hookContext,
         toolArgs: effectiveArgs,
@@ -4599,7 +4647,10 @@ The workspace root is: ${workspacePath}`
     // no lazy catalogue, no toolSearchTools, codeExecRouteEnabled stays false.
     allMcpTools = await capabilityService.listTools()
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
-    mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
+    mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata, {
+      workspacePath,
+      threadId: options.threadId
+    })
     console.log(
       "[Runtime] Constrained coordinator worker: keeping",
       eagerMcpMetadata.length,
@@ -4613,7 +4664,10 @@ The workspace root is: ${workspacePath}`
       codeExecEnabled && allMcpTools.length > 0 && runtimePolicy.includeCodeExecRoute
     eagerMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "eager")
     lazyMcpMetadata = allMcpTools.filter((tool) => tool.visibility === "lazy")
-    mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata)
+    mcpTools = createEagerMcpTools(capabilityService, eagerMcpMetadata, {
+      workspacePath,
+      threadId: options.threadId
+    })
     toolSearchTools = await createToolSearchTools(
       capabilityService,
       { workspacePath, threadId: options.threadId },
