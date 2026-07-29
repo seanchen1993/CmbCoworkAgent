@@ -2,11 +2,18 @@ import type { BrowserWindow, IpcMain } from "electron"
 import { BrowserService } from "../browser/core/browser-service"
 import { syncPlaywrightMcpConnectorForBrowserCdpConfig } from "../browser/cdp/browser-playwright-mcp-connector"
 import { setGlobalBrowserService } from "../browser/core/browser-service-registry"
+import {
+  getAiRecording,
+  startAiRecording,
+  stopAiRecording
+} from "../browser/recording/ai-recording-service"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { getBrowserCdpConfigAsync, saveBrowserCdpConfigAsync } from "../storage"
 import { BUILTIN_BROWSER_LOG_PREFIX } from "../../shared/browser-types"
 import type {
   BrowserAttachOptions,
+  AiRecordingStartOptions,
+  AiRecordingSession,
   BrowserBounds,
   BrowserCdpConfig,
   BrowserNavigateOptions
@@ -68,6 +75,15 @@ export function registerBrowserHandlers(
   ipcMain.handle("browser:getState", () => browserService.getState())
 
   ipcMain.handle("browser:getCdpConfig", () => getBrowserCdpConfigAsync())
+  ipcMain.handle(
+    "browser:startAiRecording",
+    (_event, options?: AiRecordingStartOptions): AiRecordingSession => startAiRecording(options)
+  )
+
+  ipcMain.handle("browser:stopAiRecording", (): AiRecordingSession => stopAiRecording())
+
+  ipcMain.handle("browser:getAiRecording", (): AiRecordingSession => getAiRecording())
+
 
   ipcMain.handle(
     "browser:saveCdpConfig",

@@ -1263,6 +1263,7 @@ export function RightPanel({
         <div className="flex h-full min-h-0 flex-col  bg-background">
           <Suspense fallback={<LazySectionFallback label="加载 Browser..." />}>
             <BrowserPanel
+              threadId={currentThreadId ?? null}
               workspacePath={threadState?.workspacePath ?? null}
               initialUrl={browserPreviewUrl}
               reloadToken={previewReloadToken}

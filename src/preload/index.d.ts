@@ -93,6 +93,8 @@ import type {
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type {
+  AiRecordingSession,
+  AiRecordingStartOptions,
   BrowserAttachOptions,
   BrowserBounds,
   BrowserCdpConfig,
@@ -1560,6 +1562,9 @@ interface CustomAPI {
     stop: () => Promise<BrowserState>
     clearConsole: () => Promise<BrowserState>
     getState: () => Promise<BrowserState>
+    startAiRecording: (options?: AiRecordingStartOptions) => Promise<AiRecordingSession>
+    stopAiRecording: () => Promise<AiRecordingSession>
+    getAiRecording: () => Promise<AiRecordingSession>
     getCdpConfig: () => Promise<BrowserCdpConfig>
     isProfileImportRuntimeEnabled: () => Promise<boolean>
     saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>

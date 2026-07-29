@@ -19,12 +19,14 @@ import {
   ShieldAlert,
   Terminal,
   Trash2,
+  Video,
   X
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
+import { BrowserAiRecordingControls } from "./BrowserAiRecordingControls"
 import { BrowserCdpConfigCard } from "./BrowserCdpConfigCard"
 import {
   BUILTIN_BROWSER_LOG_PREFIX,
@@ -36,6 +38,7 @@ import {
 } from "../../../../shared/browser-types"
 
 interface BrowserPanelProps {
+  threadId?: string | null
   workspacePath?: string | null
   initialUrl?: string | null
   reloadToken?: number
@@ -359,6 +362,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
 }
 
 export function BrowserPanel({
+  threadId,
   workspacePath,
   initialUrl,
   reloadToken,
@@ -387,6 +391,7 @@ export function BrowserPanel({
   >([])
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
+  const [aiRecordingBoxOpen, setAiRecordingBoxOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isHiddenByModalDialog, setIsHiddenByModalDialog] = useState(false)
   const showBrowserWelcome = isInitialBrowserPage(state.url)
@@ -837,6 +842,7 @@ export function BrowserPanel({
       toast.success("失败站点列表已复制")
     })
   }, [browserProfileImportSkippedWebsites])
+
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
   }
@@ -992,54 +998,71 @@ export function BrowserPanel({
         <div ref={viewportRef} className="pointer-events-none absolute inset-0" />
       </div>
 
-      <div className="flex shrink-0 items-center justify-start gap-2 border-t border-border bg-background-elevated px-2 py-2">
+      {aiRecordingBoxOpen && (
+        <div className="shrink-0 border-t border-border bg-background px-3 py-2">
+          <BrowserAiRecordingControls threadId={threadId} browserCreated={state.created} />
+        </div>
+      )}
+
+      <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-background-elevated px-2 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <IconPopoverButton
+            className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+            side="left"
+            icon={
+              isResettingHome ? (
+                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+              ) : (
+                <House className="size-4" strokeWidth={1.8} />
+              )
+            }
+            popoverContent="回到首页"
+            aria-label="Home"
+            disabled={isResettingHome}
+            onClick={() => void resetToHome()}
+          />
+          <IconPopoverButton
+            className={BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME}
+            side="left"
+            icon={
+              <span className="inline-flex items-center gap-1">
+                <Terminal className="size-4" strokeWidth={1.8} />
+                {consoleCount > 0 && (
+                  <span className="min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
+                    {consoleCount > 99 ? "99+" : consoleCount}
+                  </span>
+                )}
+              </span>
+            }
+            popoverContent={consoleToggleTitle}
+            aria-label={consoleToggleTitle}
+            aria-pressed={consoleOpen}
+            onClick={() => setConsoleOpen((open) => !open)}
+          />
+          <IconPopoverButton
+            className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+            side="left"
+            icon={
+              isCapturing ? (
+                <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+              ) : (
+                <Camera className="size-4" strokeWidth={1.8} />
+              )
+            }
+            popoverContent="截图"
+            aria-label="截图"
+            disabled={isCapturing || !state.created}
+            onClick={captureScreenshot}
+          />
+        </div>
         <IconPopoverButton
           className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
           side="left"
-          icon={
-            isResettingHome ? (
-              <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-            ) : (
-              <House className="size-4" strokeWidth={1.8} />
-            )
-          }
-          popoverContent="回到首页"
-          aria-label="Home"
-          disabled={isResettingHome}
-          onClick={() => void resetToHome()}
-        />
-        <IconPopoverButton
-          className={BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME}
-          side="left"
-          icon={
-            <span className="inline-flex items-center gap-1">
-              <Terminal className="size-4" strokeWidth={1.8} />
-              {consoleCount > 0 && (
-                <span className="min-w-4 rounded-full bg-foreground px-1 text-center text-[9px] leading-4 text-background">
-                  {consoleCount > 99 ? "99+" : consoleCount}
-                </span>
-              )}
-            </span>
-          }
-          popoverContent={consoleToggleTitle}
-          aria-label={consoleToggleTitle}
-          aria-pressed={consoleOpen}
-          onClick={() => setConsoleOpen((open) => !open)}
-        />
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          side="left"
-          icon={
-            isCapturing ? (
-              <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-            ) : (
-              <Camera className="size-4" strokeWidth={1.8} />
-            )
-          }
-          popoverContent="截图"
-          aria-label="截图"
-          disabled={isCapturing || !state.created}
-          onClick={captureScreenshot}
+          icon={<Video className="size-4" strokeWidth={1.8} />}
+          popoverContent="AI 录制自动化脚本"
+          aria-label="AI 录制自动化脚本"
+          aria-pressed={aiRecordingBoxOpen}
+          onClick={() => setAiRecordingBoxOpen((open) => !open)}
         />
       </div>
 

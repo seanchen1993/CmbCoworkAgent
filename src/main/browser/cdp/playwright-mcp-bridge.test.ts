@@ -8,6 +8,11 @@ import { BROWSER_SESSION_ID, type BrowserState } from "../../../shared/browser-t
 import { DEFAULT_BROWSER_CDP_PORT } from "../../../shared/browser-types"
 import { configureBrowserCdpEndpoint } from "./browser-cdp"
 import {
+  getAiRecording,
+  resetAiRecordingForTests,
+  startAiRecording
+} from "../recording/ai-recording-service"
+import {
   autoSelectPlaywrightInAppBrowserTab,
   invokeMcpToolWithPlaywrightInAppBrowserSupport,
   preparePlaywrightInAppBrowser,
@@ -80,6 +85,7 @@ function createCapabilityInvoker(
 
 describe("Playwright MCP in-app browser bridge", () => {
   beforeEach(() => {
+    resetAiRecordingForTests()
     configureBrowserCdpEndpoint(
       { appendSwitch: vi.fn() },
       { enabled: true, port: DEFAULT_BROWSER_CDP_PORT }
@@ -314,6 +320,30 @@ describe("Playwright MCP in-app browser bridge", () => {
     expect(invoke).toHaveBeenCalledTimes(1)
     expect(requestPanel).toHaveBeenCalledWith("thread-1")
     expect(result).toEqual(mcpResult("ok"))
+  })
+
+  it("records successful in-app browser tool calls for the active AI recording session", async () => {
+    startAiRecording({ threadId: "thread-1" })
+    const getState = vi.fn().mockReturnValue(browserState(true))
+    const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
+    const requestPanel = vi.fn()
+    const invoke = vi.fn().mockResolvedValue(mcpResult("ok"))
+
+    await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+      tool: inAppBrowserTool,
+      workspacePath: "/workspace",
+      threadId: "thread-1",
+      args: { url: "https://example.com/dashboard" },
+      invoke,
+      browserService: { getState, prepareTarget, requestPanel }
+    })
+
+    expect(getAiRecording().actions).toEqual([
+      expect.objectContaining({
+        kind: "navigate",
+        url: "https://example.com/dashboard"
+      })
+    ])
   })
 
   it("can skip dedicated pre-prepare when the browser was already prepared upstream", async () => {

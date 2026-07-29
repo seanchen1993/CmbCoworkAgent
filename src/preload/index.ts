@@ -102,6 +102,8 @@ import {
 } from "../shared/browser-types"
 import type {
   BrowserAttachOptions,
+  AiRecordingSession,
+  AiRecordingStartOptions,
   BrowserBounds,
   BrowserCdpConfig,
   BrowserNavigateOptions,
@@ -2010,6 +2012,12 @@ const api = {
       ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
     getState: (): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
+    startAiRecording: (options?: AiRecordingStartOptions): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:startAiRecording", options) as Promise<AiRecordingSession>,
+    stopAiRecording: (): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:stopAiRecording") as Promise<AiRecordingSession>,
+    getAiRecording: (): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:getAiRecording") as Promise<AiRecordingSession>,
     getCdpConfig: (): Promise<BrowserCdpConfig> =>
       ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
     isProfileImportRuntimeEnabled: (): Promise<boolean> =>

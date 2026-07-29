@@ -799,6 +799,7 @@ function createEagerMcpTools(
             tool,
             workspacePath: context.workspacePath,
             threadId: context.threadId,
+            args,
             invoke: () => capabilityService.invoke(tool.capabilityId, args)
           }),
         invalidate: capabilityService.invalidate.bind(capabilityService),
@@ -1151,6 +1152,7 @@ export function createScopedMcpCapabilityService(
         tool,
         workspacePath: baseContext.workspacePath,
         threadId: baseContext.threadId,
+        args: effectiveArgs,
         prepareBeforeInvoke: false,
         invoke: async () => {
           try {

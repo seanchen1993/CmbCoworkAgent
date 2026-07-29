@@ -53,6 +53,59 @@ export interface BrowserScreenshotResult {
   error?: string
 }
 
+export type AiRecordedBrowserAction =
+  | {
+      id: string
+      timestamp: string
+      kind: "navigate"
+      url: string
+    }
+  | {
+      id: string
+      timestamp: string
+      kind: "click"
+      target?: string
+      doubleClick: boolean
+    }
+  | {
+      id: string
+      timestamp: string
+      kind: "fill"
+      target?: string
+      value: string
+      sensitive: boolean
+    }
+  | {
+      id: string
+      timestamp: string
+      kind: "selectOption"
+      target?: string
+      values: string[]
+    }
+  | {
+      id: string
+      timestamp: string
+      kind: "press"
+      key: string
+      target?: string
+    }
+
+export type AiRecordingStatus = "idle" | "recording" | "completed"
+
+export interface AiRecordingStartOptions {
+  threadId?: string
+}
+
+export interface AiRecordingSession {
+  id?: string
+  status: AiRecordingStatus
+  threadId?: string
+  startedAt?: string
+  stoppedAt?: string
+  actions: AiRecordedBrowserAction[]
+  script: string
+}
+
 export const DEFAULT_BROWSER_CDP_PORT = 7777
 
 export interface BrowserCdpConfig {
