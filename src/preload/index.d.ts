@@ -1373,16 +1373,17 @@ interface CustomAPI {
   pet: {
     // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
     list: () => Promise<PetManifest[]>
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    ) => Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }>
     // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
     setState: (state: PetState) => void
     // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
     clearCompletedTasks: () => void
     getSettings: () => Promise<PetSettings>
     updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
+    onSettingsChanged: (callback: (settings: PetSettings) => void) => () => void
     uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }

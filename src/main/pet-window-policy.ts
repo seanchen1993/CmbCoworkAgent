@@ -15,10 +15,18 @@ export type PetWindowPlatformPolicy = {
   backgroundThrottling: boolean
   compactWhenBubbleHidden: boolean
   forwardIgnoredMouseMoves: boolean
+  hoverPollIntervalMs: number
   idleFpsCap: number | null
-  useWindowShapeForHitTesting: boolean
+  raiseOnBubbleShow: boolean
   visibleOnAllWorkspaces: boolean
 }
+
+export type PetSettingsSnapshot = {
+  enabled: boolean
+  selectedPetKey: string | null
+}
+
+export type PetWindowRefreshAction = "none" | "close" | "create" | "recreate"
 
 export function getPetWindowPlatformPolicy(platform: NodeJS.Platform): PetWindowPlatformPolicy {
   if (platform === "win32") {
@@ -27,8 +35,9 @@ export function getPetWindowPlatformPolicy(platform: NodeJS.Platform): PetWindow
       backgroundThrottling: true,
       compactWhenBubbleHidden: false,
       forwardIgnoredMouseMoves: false,
+      hoverPollIntervalMs: 100,
       idleFpsCap: 2,
-      useWindowShapeForHitTesting: true,
+      raiseOnBubbleShow: false,
       visibleOnAllWorkspaces: false
     }
   }
@@ -38,18 +47,31 @@ export function getPetWindowPlatformPolicy(platform: NodeJS.Platform): PetWindow
     backgroundThrottling: false,
     compactWhenBubbleHidden: false,
     forwardIgnoredMouseMoves: true,
+    hoverPollIntervalMs: 250,
     idleFpsCap: null,
-    useWindowShapeForHitTesting: false,
+    raiseOnBubbleShow: true,
     visibleOnAllWorkspaces: true
   }
 }
 
-export function getPetWindowShapeRects(
-  petRect: PetWindowBounds,
-  bubbleRect: PetWindowBounds,
-  bubbleVisible: boolean
-): PetWindowBounds[] {
-  return bubbleVisible ? [petRect, bubbleRect] : [petRect]
+export function shouldIgnorePetWindowMouseEvents(options: {
+  dragging: boolean
+  hoveringPet: boolean
+  hoveringBubble: boolean
+}): boolean {
+  return !options.dragging && !options.hoveringPet && !options.hoveringBubble
+}
+
+export function getPetWindowRefreshAction(
+  previous: PetSettingsSnapshot,
+  next: PetSettingsSnapshot
+): PetWindowRefreshAction {
+  if (previous.enabled === next.enabled && previous.selectedPetKey === next.selectedPetKey) {
+    return "none"
+  }
+  if (!next.enabled) return previous.enabled ? "close" : "none"
+  if (!previous.enabled) return "create"
+  return previous.selectedPetKey === next.selectedPetKey ? "none" : "recreate"
 }
 
 export function resizeWindowAroundPetBody(

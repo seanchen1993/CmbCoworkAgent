@@ -158,6 +158,7 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
@@ -1491,13 +1492,14 @@ const api = {
     list: (): Promise<PetManifest[]> => {
       return ipcRenderer.invoke("pet:list") as Promise<PetManifest[]>
     },
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ): Promise<{ success: boolean; dataUrl?: string; error?: string }> => {
-      return ipcRenderer.invoke("pet:getSpriteDataUrl", directoryId, source) as Promise<{
+    ): Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }> => {
+      return ipcRenderer.invoke("pet:getSpriteBytes", directoryId, source) as Promise<{
         success: boolean
-        dataUrl?: string
+        bytes?: Uint8Array
+        mimeType?: string
         error?: string
       }>
     },
@@ -1514,6 +1516,11 @@ const api = {
     },
     updateSettings: (settings: Partial<PetSettings>): Promise<PetSettings> => {
       return ipcRenderer.invoke("pet:updateSettings", settings) as Promise<PetSettings>
+    },
+    onSettingsChanged: (callback: (settings: PetSettings) => void): (() => void) => {
+      const handler = (_event: unknown, settings: PetSettings): void => callback(settings)
+      ipcRenderer.on(PET_SETTINGS_CHANGED_CHANNEL, handler)
+      return () => ipcRenderer.removeListener(PET_SETTINGS_CHANGED_CHANNEL, handler)
     },
     uploadCustomFolder: (): Promise<{ success: boolean; pet?: PetManifest; error?: string }> => {
       return ipcRenderer.invoke("pet:uploadCustomFolder") as Promise<{

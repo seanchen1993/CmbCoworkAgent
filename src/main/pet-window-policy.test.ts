@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest"
 import {
   getPetWindowPlatformPolicy,
-  getPetWindowShapeRects,
-  resizeWindowAroundPetBody
+  getPetWindowRefreshAction,
+  resizeWindowAroundPetBody,
+  shouldIgnorePetWindowMouseEvents
 } from "./pet-window-policy"
 
 describe("pet window platform policy", () => {
@@ -12,8 +13,9 @@ describe("pet window platform policy", () => {
       backgroundThrottling: true,
       compactWhenBubbleHidden: false,
       forwardIgnoredMouseMoves: false,
+      hoverPollIntervalMs: 100,
       idleFpsCap: 2,
-      useWindowShapeForHitTesting: true,
+      raiseOnBubbleShow: false,
       visibleOnAllWorkspaces: false
     })
   })
@@ -24,23 +26,85 @@ describe("pet window platform policy", () => {
       backgroundThrottling: false,
       compactWhenBubbleHidden: false,
       forwardIgnoredMouseMoves: true,
+      hoverPollIntervalMs: 250,
       idleFpsCap: null,
-      useWindowShapeForHitTesting: false,
+      raiseOnBubbleShow: true,
       visibleOnAllWorkspaces: true
     })
   })
 })
 
-describe("pet window shape", () => {
-  const petRect = { x: 69, y: 40, width: 112, height: 124 }
-  const bubbleRect = { x: 0, y: 0, width: 250, height: 48 }
-
-  it("only accepts input over the pet while the bubble is hidden", () => {
-    expect(getPetWindowShapeRects(petRect, bubbleRect, false)).toEqual([petRect])
+describe("pet window settings refresh", () => {
+  it("does nothing for unchanged settings or selection changes while disabled", () => {
+    expect(
+      getPetWindowRefreshAction(
+        { enabled: false, selectedPetKey: null },
+        { enabled: false, selectedPetKey: null }
+      )
+    ).toBe("none")
+    expect(
+      getPetWindowRefreshAction(
+        { enabled: false, selectedPetKey: null },
+        { enabled: false, selectedPetKey: "builtin:pipi" }
+      )
+    ).toBe("none")
   })
 
-  it("accepts input over both the pet and visible bubble", () => {
-    expect(getPetWindowShapeRects(petRect, bubbleRect, true)).toEqual([petRect, bubbleRect])
+  it("creates, closes, or recreates only when the visible window must change", () => {
+    expect(
+      getPetWindowRefreshAction(
+        { enabled: false, selectedPetKey: "builtin:pipi" },
+        { enabled: true, selectedPetKey: "builtin:pipi" }
+      )
+    ).toBe("create")
+    expect(
+      getPetWindowRefreshAction(
+        { enabled: true, selectedPetKey: "builtin:pipi" },
+        { enabled: false, selectedPetKey: "builtin:pipi" }
+      )
+    ).toBe("close")
+    expect(
+      getPetWindowRefreshAction(
+        { enabled: true, selectedPetKey: "builtin:pipi" },
+        { enabled: true, selectedPetKey: "builtin:qie" }
+      )
+    ).toBe("recreate")
+  })
+})
+
+describe("pet window mouse hit testing", () => {
+  it("ignores transparent space only while the pet is idle", () => {
+    expect(
+      shouldIgnorePetWindowMouseEvents({
+        dragging: false,
+        hoveringPet: false,
+        hoveringBubble: false
+      })
+    ).toBe(true)
+    expect(
+      shouldIgnorePetWindowMouseEvents({
+        dragging: false,
+        hoveringPet: true,
+        hoveringBubble: false
+      })
+    ).toBe(false)
+  })
+
+  it("keeps mouse input enabled for the bubble and throughout a drag", () => {
+    expect(
+      shouldIgnorePetWindowMouseEvents({
+        dragging: false,
+        hoveringPet: false,
+        hoveringBubble: true
+      })
+    ).toBe(false)
+    expect(
+      shouldIgnorePetWindowMouseEvents({
+        dragging: true,
+        hoveringPet: false,
+        hoveringBubble: false
+      })
+    ).toBe(false)
   })
 })
 
