@@ -1187,7 +1187,7 @@ const api = {
       return ipcRenderer.invoke("workspace:readBinaryFile", { threadId, filePath })
     },
     readExternalFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -1195,10 +1195,10 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalFile", { token })
     },
     readExternalBinaryFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -1206,7 +1206,17 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalBinaryFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalBinaryFile", { token })
+    },
+    requestExternalFileRead: (
+      filePath: string
+    ): Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:requestExternalFileRead", filePath)
     },
     clearWorktreeContext: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("workspace:clearWorktreeContext", threadId) as Promise<void>
@@ -1501,11 +1511,11 @@ const api = {
       >
     },
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:removeWorktree", {
-        gitRoot,
+        threadId,
         worktreePath
       }) as Promise<{ success: boolean; error?: string }>
     },
@@ -1610,9 +1620,9 @@ const api = {
     },
     // Listen for file changes in the workspace
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string }) => void
+      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
     ): (() => void) => {
-      const handler = (_: unknown, data: { threadId: string; workspacePath: string }): void => {
+      const handler = (_: unknown, data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }): void => {
         callback(data)
       }
       ipcRenderer.on("workspace:files-changed", handler)
