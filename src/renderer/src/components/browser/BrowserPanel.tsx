@@ -27,6 +27,7 @@ import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import { BrowserCdpConfigCard } from "./BrowserCdpConfigCard"
 import {
+  BUILTIN_BROWSER_LOG_PREFIX,
   BROWSER_SESSION_ID,
   type BrowserBounds,
   type BrowserConsoleEntry,
@@ -59,6 +60,7 @@ const BROWSER_INPUT_ICON_BUTTON_CLASSNAME = "absolute right-1 size-6 rounded"
 const BROWSER_CONSOLE_ICON_BUTTON_CLASSNAME = "size-7 rounded transition-colors hover:bg-muted"
 const BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME =
   "h-8 min-w-8 shrink-0 rounded-md px-1 transition-colors hover:bg-muted"
+const BROWSER_PANEL_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserPanel]`
 
 function isInitialBrowserPage(url: string): boolean {
   return !url || url === "about:blank"
@@ -379,6 +381,7 @@ export function BrowserPanel({
   const [isCapturing, setIsCapturing] = useState(false)
   const [isResettingHome, setIsResettingHome] = useState(false)
   const [isImportingBrowserProfile, setIsImportingBrowserProfile] = useState(false)
+  const [isProfileImportRuntimeEnabled, setIsProfileImportRuntimeEnabled] = useState(false)
   const [browserProfileImportSkippedWebsites, setBrowserProfileImportSkippedWebsites] = useState<
     BrowserProfileImportSkippedWebsite[]
   >([])
@@ -388,6 +391,27 @@ export function BrowserPanel({
   const [isHiddenByModalDialog, setIsHiddenByModalDialog] = useState(false)
   const showBrowserWelcome = isInitialBrowserPage(state.url)
 
+  useEffect(() => {
+    let cancelled = false
+    window.api.browser
+      .isProfileImportRuntimeEnabled()
+      .then((enabled) => {
+        if (cancelled) return
+        setIsProfileImportRuntimeEnabled(enabled)
+      })
+      .catch((error) => {
+        console.error(
+          `${BROWSER_PANEL_LOG_PREFIX} Failed to load browser profile import runtime state: ${formatError(error)}`
+        )
+        if (cancelled) return
+        setIsProfileImportRuntimeEnabled(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const applyBrowserState = useCallback((nextState: BrowserState) => {
     isSessionCreatedRef.current = nextState.created
     isInitialBrowserPageRef.current = isInitialBrowserPage(nextState.url)
@@ -395,12 +419,12 @@ export function BrowserPanel({
   }, [])
 
   useEffect(() => {
-    console.info(`[BrowserPanel] Subscribing to Browser state channel for ${BROWSER_SESSION_ID}.`)
+    console.info(`${BROWSER_PANEL_LOG_PREFIX} Subscribing to Browser state channel for ${BROWSER_SESSION_ID}.`)
     const unsubscribe = window.api.browser.onState((nextState) => {
       const previousState = lastObservedStateRef.current
       if (!previousState || !browserStatesEqual(previousState, nextState)) {
         console.info(
-          `[BrowserPanel] State update for ${BROWSER_SESSION_ID}: prev={${describeBrowserState(previousState)}} next={${describeBrowserState(nextState)}}.`
+          `${BROWSER_PANEL_LOG_PREFIX} State update for ${BROWSER_SESSION_ID}: prev={${describeBrowserState(previousState)}} next={${describeBrowserState(nextState)}}.`
         )
       }
       lastObservedStateRef.current = nextState
@@ -410,7 +434,7 @@ export function BrowserPanel({
       }
     })
     return () => {
-      console.info(`[BrowserPanel] Unsubscribing Browser state channel for ${BROWSER_SESSION_ID}.`)
+      console.info(`${BROWSER_PANEL_LOG_PREFIX} Unsubscribing Browser state channel for ${BROWSER_SESSION_ID}.`)
       unsubscribe()
     }
   }, [applyBrowserState])
@@ -419,14 +443,14 @@ export function BrowserPanel({
     (reason: string) => {
       if (!isSessionCreatedRef.current) {
         console.info(
-          `[BrowserPanel] Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; session not created.`
+          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; session not created.`
         )
         return
       }
       const element = viewportRef.current
       if (!element) {
         console.info(
-          `[BrowserPanel] Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport missing.`
+          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport missing.`
         )
         return
       }
@@ -444,7 +468,7 @@ export function BrowserPanel({
       const visible = layoutVisible && !modalDialogOpen && !initialBrowserPage
       if (!layoutVisible && hasVisibleBoundsRef.current) {
         console.info(
-          `[BrowserPanel] Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport hidden after first visible; rect=${formatRect(rect)} zoom=${zoomLevel} lastBounds=${formatBounds(lastBoundsRef.current)}.`
+          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport hidden after first visible; rect=${formatRect(rect)} zoom=${zoomLevel} lastBounds=${formatBounds(lastBoundsRef.current)}.`
         )
         return
       }
@@ -460,13 +484,13 @@ export function BrowserPanel({
       lastBrowserViewVisibleRef.current = visible
       if (layoutVisible) hasVisibleBoundsRef.current = true
       console.info(
-        `[BrowserPanel] Syncing bounds for ${BROWSER_SESSION_ID}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} modalDialogOpen=${modalDialogOpen} initialBrowserPage=${initialBrowserPage} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
+        `${BROWSER_PANEL_LOG_PREFIX} Syncing bounds for ${BROWSER_SESSION_ID}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} modalDialogOpen=${modalDialogOpen} initialBrowserPage=${initialBrowserPage} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
       )
       void window.api.browser
         .setBounds(bounds, visible)
         .then(applyBrowserState)
         .catch((error) => {
-          console.error(`[BrowserPanel] Bounds sync failed: ${formatError(error)}`)
+          console.error(`${BROWSER_PANEL_LOG_PREFIX} Bounds sync failed: ${formatError(error)}`)
         })
     },
     [applyBrowserState]
@@ -498,9 +522,9 @@ export function BrowserPanel({
     }
 
     console.info(
-      `[BrowserPanel] Mounting BrowserPanel for ${BROWSER_SESSION_ID}; workspacePath=${workspacePath || "(none)"} initialUrl=${initialUrl || "(none)"} reloadToken=${reloadToken ?? "(none)"}.`
+      `${BROWSER_PANEL_LOG_PREFIX} Mounting BrowserPanel for ${BROWSER_SESSION_ID}; workspacePath=${workspacePath || "(none)"} initialUrl=${initialUrl || "(none)"} reloadToken=${reloadToken ?? "(none)"}.`
     )
-    console.info(`[BrowserPanel] Attaching Browser session ${BROWSER_SESSION_ID}.`)
+    console.info(`${BROWSER_PANEL_LOG_PREFIX} Attaching Browser session ${BROWSER_SESSION_ID}.`)
     window.api.browser
       .attach({ workspacePath, visible: false })
       .then((nextState) => {
@@ -509,11 +533,11 @@ export function BrowserPanel({
         if (!isUrlFocusedRef.current) setUrlInput(getBrowserAddressValue(nextState.url))
         scheduleStabilizedSync()
         console.info(
-          `[BrowserPanel] Browser session ${BROWSER_SESSION_ID} attached with state={${describeBrowserState(nextState)}}.`
+          `${BROWSER_PANEL_LOG_PREFIX} Browser session ${BROWSER_SESSION_ID} attached with state={${describeBrowserState(nextState)}}.`
         )
       })
       .catch((error) => {
-        console.error(`[BrowserPanel] Browser attach failed: ${formatError(error)}`)
+        console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser attach failed: ${formatError(error)}`)
         toast.error("内置浏览器启动失败")
       })
 
@@ -526,7 +550,7 @@ export function BrowserPanel({
 
     return () => {
       console.info(
-        `[BrowserPanel] Unmounting BrowserPanel for ${BROWSER_SESSION_ID}; lastBounds=${formatBounds(lastBoundsRef.current)} lastVisible=${lastBrowserViewVisibleRef.current ?? "(none)"} localState={${describeBrowserState(lastObservedStateRef.current)}}.`
+        `${BROWSER_PANEL_LOG_PREFIX} Unmounting BrowserPanel for ${BROWSER_SESSION_ID}; lastBounds=${formatBounds(lastBoundsRef.current)} lastVisible=${lastBrowserViewVisibleRef.current ?? "(none)"} localState={${describeBrowserState(lastObservedStateRef.current)}}.`
       )
       cancelled = true
       for (const timer of timers) window.clearTimeout(timer)
@@ -613,7 +637,7 @@ export function BrowserPanel({
     if (lastInitialNavigationRef.current === key) return
     lastInitialNavigationRef.current = key
 
-    console.info(`[BrowserPanel] Opening initial URL ${target}.`)
+    console.info(`${BROWSER_PANEL_LOG_PREFIX} Opening initial URL ${target}.`)
     window.api.browser
       .navigate(target, { workspacePath })
       .then((nextState) => {
@@ -626,10 +650,10 @@ export function BrowserPanel({
         if (!isUrlFocusedRef.current) {
           setUrlInput(nextState.url || target)
         }
-        console.info(`[BrowserPanel] Initial URL opened as ${nextState.url || target}.`)
+        console.info(`${BROWSER_PANEL_LOG_PREFIX} Initial URL opened as ${nextState.url || target}.`)
       })
       .catch((error) => {
-        console.error(`[BrowserPanel] Initial URL open failed: ${formatError(error)}`)
+        console.error(`${BROWSER_PANEL_LOG_PREFIX} Initial URL open failed: ${formatError(error)}`)
         toast.error("HTML 预览加载失败")
       })
   }, [applyBrowserState, initialUrl, reloadToken, workspacePath])
@@ -648,9 +672,9 @@ export function BrowserPanel({
           return
         }
         setUrlInput(nextState.url || target)
-        console.info(`[BrowserPanel] Navigated to ${nextState.url || target}.`)
+        console.info(`${BROWSER_PANEL_LOG_PREFIX} Navigated to ${nextState.url || target}.`)
       } catch (error) {
-        console.error(`[BrowserPanel] Navigation failed: ${formatError(error)}`)
+        console.error(`${BROWSER_PANEL_LOG_PREFIX} Navigation failed: ${formatError(error)}`)
         toast.error("页面加载失败")
       }
     },
@@ -668,7 +692,7 @@ export function BrowserPanel({
       setCopiedConsole(false)
       setConsoleOpen(false)
     } catch (error) {
-      console.error(`[BrowserPanel] Return home failed: ${formatError(error)}`)
+      console.error(`${BROWSER_PANEL_LOG_PREFIX} Return home failed: ${formatError(error)}`)
       toast.error("返回欢迎页失败")
     } finally {
       setIsResettingHome(false)
@@ -689,7 +713,7 @@ export function BrowserPanel({
       link.click()
       toast.success("截图已生成")
     } catch (error) {
-      console.error(`[BrowserPanel] Screenshot failed: ${formatError(error)}`)
+      console.error(`${BROWSER_PANEL_LOG_PREFIX} Screenshot failed: ${formatError(error)}`)
       toast.error("截图失败")
     } finally {
       setIsCapturing(false)
@@ -712,7 +736,7 @@ export function BrowserPanel({
       }, 1500)
       toast.success("Console 内容已复制")
     } catch (error) {
-      console.error(`[BrowserPanel] Copy console failed: ${formatError(error)}`)
+      console.error(`${BROWSER_PANEL_LOG_PREFIX} Copy console failed: ${formatError(error)}`)
       toast.error("复制 Console 内容失败")
     }
   }, [state.consoleEntries])
@@ -722,12 +746,16 @@ export function BrowserPanel({
       .clearConsole()
       .then(applyBrowserState)
       .catch((error) => {
-        console.error(`[BrowserPanel] Clear console failed: ${formatError(error)}`)
+        console.error(`${BROWSER_PANEL_LOG_PREFIX} Clear console failed: ${formatError(error)}`)
         toast.error("清空控制台失败")
       })
   }, [applyBrowserState])
 
   const importBrowserProfileData = useCallback(async () => {
+    if (!isProfileImportRuntimeEnabled) {
+      toast.error("浏览器数据导入功能在当前会话未生效，请保存配置后重启应用")
+      return
+    }
     if (!state.created) return
 
     setIsImportingBrowserProfile(true)
@@ -770,7 +798,7 @@ export function BrowserPanel({
       const message = skipped > 0 ? `${summary}${profileLabel}，跳过 ${skipped} 条` : `${summary}${profileLabel}`
       if (skippedWebsites.length > 0) {
         const fullList = skippedWebsites.map(formatSkippedWebsite).join("\n")
-        console.info(`[BrowserPanel] Browser profile import skipped websites:\n${fullList}`)
+        console.info(`${BROWSER_PANEL_LOG_PREFIX} Browser profile import skipped websites:\n${fullList}`)
       }
       if (result.warning) {
         toast.warning(`${result.warning}（${message}）`, { duration: 12_000 })
@@ -778,17 +806,25 @@ export function BrowserPanel({
         toast.success(message, { duration: 10_000 })
       }
     } catch (error) {
-      console.error(`[BrowserPanel] Browser profile import failed: ${formatError(error)}`)
+      console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser profile import failed: ${formatError(error)}`)
       toast.error("浏览器数据导入失败", { duration: 15_000 })
     } finally {
       setIsImportingBrowserProfile(false)
     }
-  }, [applyBrowserState, state.created])
+  }, [applyBrowserState, isProfileImportRuntimeEnabled, state.created])
 
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
   const consoleToggleTitle = latestConsoleEntry ? `控制台 (${consoleCount})` : "控制台"
-  const browserProfileImportDisabled = isImportingBrowserProfile || !state.created
+  const browserProfileImportDisabled =
+    isImportingBrowserProfile || !state.created || !isProfileImportRuntimeEnabled
+  const browserProfileImportPopoverContent = !isProfileImportRuntimeEnabled
+    ? "浏览器数据导入在当前会话未开启，请保存配置后重启应用"
+    : isImportingBrowserProfile
+      ? "正在导入浏览器数据"
+      : !state.created
+        ? "内置浏览器尚未就绪"
+        : "导入浏览器数据"
   const hasBrowserProfileImportSkippedWebsites = browserProfileImportSkippedWebsites.length > 0
   const browserProfileImportSkippedCookieCount = browserProfileImportSkippedWebsites.reduce(
     (total, site) => total + site.skippedCookies,
@@ -890,7 +926,7 @@ export function BrowserPanel({
               <KeyRound className="size-4" strokeWidth={1.8} />
             )
           }
-          popoverContent="导入浏览器数据"
+          popoverContent={browserProfileImportPopoverContent}
           aria-label="导入浏览器数据"
           disabled={browserProfileImportDisabled}
           onClick={() => void importBrowserProfileData()}

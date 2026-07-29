@@ -30,6 +30,7 @@ export interface BrowserState {
 }
 
 /** The app owns one BrowserView shared by every thread. */
+export const BUILTIN_BROWSER_LOG_PREFIX = "[内置浏览器]"
 export const BROWSER_SESSION_ID = "app-browser"
 export const BROWSER_PANEL_REQUEST_CHANNEL = "browser:panel-request"
 
@@ -56,6 +57,7 @@ export const DEFAULT_BROWSER_CDP_PORT = 7777
 
 export interface BrowserCdpConfig {
   enabled: boolean
+  profileImportEnabled: boolean
   port: number
 }
 

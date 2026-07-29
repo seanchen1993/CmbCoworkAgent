@@ -2012,6 +2012,8 @@ const api = {
       ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
     getCdpConfig: (): Promise<BrowserCdpConfig> =>
       ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
+    isProfileImportRuntimeEnabled: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:isProfileImportRuntimeEnabled") as Promise<boolean>,
     saveCdpConfig: (updates: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> =>
       ipcRenderer.invoke("browser:saveCdpConfig", updates) as Promise<BrowserCdpConfig>,
     captureScreenshot: (): Promise<BrowserScreenshotResult> =>

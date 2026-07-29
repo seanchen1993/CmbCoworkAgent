@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef } from "react"
-import { BROWSER_SESSION_ID } from "../../../../shared/browser-types"
+import {
+  BUILTIN_BROWSER_LOG_PREFIX,
+  BROWSER_SESSION_ID
+} from "../../../../shared/browser-types"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 
 const HIDDEN_BROWSER_BOUNDS = { x: 0, y: 0, width: 0, height: 0 }
+const BROWSER_APP_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[App]`
 
 function formatBrowserViewLifecycleError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -41,17 +45,17 @@ export function useBrowserViewLifecycle({
       (mainView === "harness" && Boolean(harnessSessionThreadId)))
 
   const hideBrowserSession = useCallback((reason: string) => {
-    console.info(`[App] Hiding Browser session ${BROWSER_SESSION_ID} because ${reason}.`)
+    console.info(`${BROWSER_APP_LOG_PREFIX} Hiding Browser session ${BROWSER_SESSION_ID} because ${reason}.`)
     void window.api.browser.setBounds(HIDDEN_BROWSER_BOUNDS, false).catch((error) => {
       console.error(
-        `[App] Browser session ${BROWSER_SESSION_ID} hide failed: ${formatBrowserViewLifecycleError(error)}.`
+        `${BROWSER_APP_LOG_PREFIX} Browser session ${BROWSER_SESSION_ID} hide failed: ${formatBrowserViewLifecycleError(error)}.`
       )
     })
   }, [])
 
   useEffect(() => {
     console.info(
-      `[App] Browser panel visibility snapshot: visible=${isBrowserPanelVisible} module=${rightModule} collapsed=${rightPanelCollapsed} agentFocus=${isAgentFocusActive} mainView=${mainView} currentThreadId=${currentThreadId ?? "(none)"} harnessThreadId=${harnessSessionThreadId ?? "(none)"} session=${BROWSER_SESSION_ID}.`
+      `${BROWSER_APP_LOG_PREFIX} Browser panel visibility snapshot: visible=${isBrowserPanelVisible} module=${rightModule} collapsed=${rightPanelCollapsed} agentFocus=${isAgentFocusActive} mainView=${mainView} currentThreadId=${currentThreadId ?? "(none)"} harnessThreadId=${harnessSessionThreadId ?? "(none)"} session=${BROWSER_SESSION_ID}.`
     )
   }, [
     currentThreadId,
@@ -70,7 +74,7 @@ export function useBrowserViewLifecycle({
       if (rendererUnloadBrowserCleanupSentRef.current) return
       rendererUnloadBrowserCleanupSentRef.current = true
       console.info(
-        `[App] Renderer unload requested BrowserView cleanup; session=${BROWSER_SESSION_ID} browserPanelVisible=${isBrowserPanelVisible}.`
+        `${BROWSER_APP_LOG_PREFIX} Renderer unload requested BrowserView cleanup; session=${BROWSER_SESSION_ID} browserPanelVisible=${isBrowserPanelVisible}.`
       )
       window.api.browser.disposeAllForRendererUnload()
     }
@@ -87,12 +91,12 @@ export function useBrowserViewLifecycle({
   useEffect(() => {
     if (isBrowserPanelVisible) {
       wasBrowserPanelVisibleRef.current = true
-      console.info(`[App] Browser panel became visible; session=${BROWSER_SESSION_ID}.`)
+      console.info(`${BROWSER_APP_LOG_PREFIX} Browser panel became visible; session=${BROWSER_SESSION_ID}.`)
       return
     }
 
     if (!wasBrowserPanelVisibleRef.current) {
-      console.info("[App] Browser panel hidden with no visible Browser session to hide.")
+      console.info(`${BROWSER_APP_LOG_PREFIX} Browser panel hidden with no visible Browser session to hide.`)
       return
     }
     wasBrowserPanelVisibleRef.current = false
@@ -111,7 +115,7 @@ export function useBrowserViewLifecycle({
       modalDialogOpenRef.current = modalDialogOpen
       window.dispatchEvent(new Event(MODAL_DIALOG_CHANGE_EVENT))
       console.info(
-        `[App] Modal dialog visibility changed: open=${modalDialogOpen}; session=${BROWSER_SESSION_ID}.`
+        `${BROWSER_APP_LOG_PREFIX} Modal dialog visibility changed: open=${modalDialogOpen}; session=${BROWSER_SESSION_ID}.`
       )
       if (modalDialogOpen && wasBrowserPanelVisibleRef.current) {
         hideBrowserSession("a modal dialog is open")
@@ -148,7 +152,7 @@ export function useBrowserViewLifecycle({
       setRightPanelCollapsed(false)
       selectBrowserModule()
       console.info(
-        `[App] Showing Browser panel for ${requestedThreadId || activeThreadId || "active thread"}.`
+        `${BROWSER_APP_LOG_PREFIX} Showing Browser panel for ${requestedThreadId || activeThreadId || "active thread"}.`
       )
     })
   }, [

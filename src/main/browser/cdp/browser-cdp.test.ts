@@ -11,15 +11,18 @@ vi.mock("../../storage", () => storageMocks)
 
 import {
   autoRegisterPlaywrightMcpConnector,
-  configureBrowserCdpEndpoint,
-  resolveBrowserCdpPort,
   syncPlaywrightMcpConnectorForBrowserCdpConfig
+} from "./browser-playwright-mcp-connector"
+import {
+  configureBrowserCdpEndpoint,
+  resolveBrowserCdpPort
 } from "./browser-cdp"
 
 describe("browser CDP configuration", () => {
   beforeEach(() => {
     storageMocks.getBrowserCdpConfig.mockReturnValue({
       enabled: true,
+      profileImportEnabled: false,
       port: DEFAULT_BROWSER_CDP_PORT
     })
     storageMocks.getMcpConnectors.mockReturnValue([])
@@ -57,6 +60,7 @@ describe("resolveBrowserCdpPort", () => {
   beforeEach(() => {
     storageMocks.getBrowserCdpConfig.mockReturnValue({
       enabled: true,
+      profileImportEnabled: false,
       port: DEFAULT_BROWSER_CDP_PORT
     })
   })
@@ -163,6 +167,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
 
     const result = await syncPlaywrightMcpConnectorForBrowserCdpConfig({
       enabled: true,
+      profileImportEnabled: false,
       port: 9222
     })
 
@@ -197,6 +202,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
 
     const result = await syncPlaywrightMcpConnectorForBrowserCdpConfig({
       enabled: false,
+      profileImportEnabled: false,
       port: 7777
     })
 
@@ -219,6 +225,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
 
     const result = await syncPlaywrightMcpConnectorForBrowserCdpConfig({
       enabled: true,
+      profileImportEnabled: false,
       port: 9222
     })
 

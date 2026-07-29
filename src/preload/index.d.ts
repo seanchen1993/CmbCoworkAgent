@@ -1561,6 +1561,7 @@ interface CustomAPI {
     clearConsole: () => Promise<BrowserState>
     getState: () => Promise<BrowserState>
     getCdpConfig: () => Promise<BrowserCdpConfig>
+    isProfileImportRuntimeEnabled: () => Promise<boolean>
     saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
     captureScreenshot: () => Promise<BrowserScreenshotResult>
     importProfileData: (

@@ -12,7 +12,11 @@ import {
 } from "@/components/ui/dialog"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
-import { DEFAULT_BROWSER_CDP_PORT, type BrowserCdpConfig } from "../../../../shared/browser-types"
+import {
+  BUILTIN_BROWSER_LOG_PREFIX,
+  DEFAULT_BROWSER_CDP_PORT,
+  type BrowserCdpConfig
+} from "../../../../shared/browser-types"
 
 interface BrowserCdpConfigCardProps {
   className?: string
@@ -20,6 +24,8 @@ interface BrowserCdpConfigCardProps {
   onSaved?: (config: BrowserCdpConfig) => void
   title?: string
 }
+
+const BROWSER_CDP_CONFIG_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserCdpConfigCard]`
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -61,11 +67,12 @@ export function BrowserCdpConfigCard({
       })
       .catch((error) => {
         console.error(
-          `[BrowserCdpConfigCard] Failed to load Browser CDP config: ${formatError(error)}`
+          `${BROWSER_CDP_CONFIG_LOG_PREFIX} Failed to load Browser CDP config: ${formatError(error)}`
         )
         if (cancelled) return
         const fallbackConfig: BrowserCdpConfig = {
           enabled: true,
+          profileImportEnabled: false,
           port: DEFAULT_BROWSER_CDP_PORT
         }
         setCdpConfig(fallbackConfig)
@@ -80,6 +87,10 @@ export function BrowserCdpConfigCard({
 
   const handleCdpEnabledChange = useCallback((enabled: boolean) => {
     setCdpConfig((current) => (current ? { ...current, enabled } : current))
+  }, [])
+
+  const handleProfileImportEnabledChange = useCallback((profileImportEnabled: boolean) => {
+    setCdpConfig((current) => (current ? { ...current, profileImportEnabled } : current))
   }, [])
 
   const handleSaveCdpConfig = useCallback(async () => {
@@ -98,6 +109,7 @@ export function BrowserCdpConfigCard({
     try {
       const saved = await window.api.browser.saveCdpConfig({
         enabled: cdpConfig.enabled,
+        profileImportEnabled: cdpConfig.profileImportEnabled,
         port
       })
       setCdpConfig(saved)
@@ -107,7 +119,7 @@ export function BrowserCdpConfigCard({
       setRestartDialogOpen(true)
     } catch (error) {
       console.error(
-        `[BrowserCdpConfigCard] Failed to save Browser CDP config: ${formatError(error)}`
+        `${BROWSER_CDP_CONFIG_LOG_PREFIX} Failed to save Browser CDP config: ${formatError(error)}`
       )
       toast.error("保存内置浏览器配置失败")
     } finally {
@@ -129,7 +141,7 @@ export function BrowserCdpConfigCard({
       await new Promise((resolve) => window.setTimeout(resolve, 150))
       await window.api.app.restart()
     } catch (error) {
-      console.error(`[BrowserCdpConfigCard] Failed to restart app: ${formatError(error)}`)
+      console.error(`${BROWSER_CDP_CONFIG_LOG_PREFIX} Failed to restart app: ${formatError(error)}`)
       setIsRestartingApp(false)
       toast.error("重启应用失败，请稍后手动重启")
     }
@@ -152,7 +164,8 @@ export function BrowserCdpConfigCard({
           <div className="flex items-center justify-between gap-4 rounded-lg border border-stone-200/80 bg-stone-50/80 px-3 py-2.5">
             <div className="min-w-0">
               <p className="text-xs font-medium text-stone-800">
-                启用内置浏览器 （{cdpConfig?.enabled ? "已启用" : "未启用"}）
+                Agent操控内置浏览器
+                {/*（{cdpConfig?.enabled ? "已启用" : "未启用"}）*/}
               </p>
               <p className="mt-1 text-[11px] leading-4 text-stone-500">
                 开启后，才能让Agent连接并操控当前内置浏览器。
@@ -162,6 +175,23 @@ export function BrowserCdpConfigCard({
               checked={cdpConfig?.enabled ?? true}
               disabled={!cdpConfig || isSavingCdpConfig}
               onCheckedChange={handleCdpEnabledChange}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-stone-200/80 bg-stone-50/80 px-3 py-2.5">
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-stone-800">
+                导入已有Chrome登陆数据
+                {/*（{cdpConfig?.profileImportEnabled ? "已启用" : "未启用"}）*/}
+              </p>
+              <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                开启后，支持加载导入已有Chrome浏览器数据所需能力。
+              </p>
+            </div>
+            <Switch
+              checked={cdpConfig?.profileImportEnabled ?? false}
+              disabled={!cdpConfig || isSavingCdpConfig}
+              onCheckedChange={handleProfileImportEnabledChange}
             />
           </div>
 

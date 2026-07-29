@@ -3,13 +3,17 @@ import {
   isBrowserNativeMessagingHostLaunch,
   runBrowserNativeMessagingHost
 } from "./browser/chrome/browser-native-messaging-host"
-import { configureBrowserCdpEndpoint, autoRegisterPlaywrightMcpConnector } from "./browser/cdp/browser-cdp"
+import { configureBrowserCdpEndpoint } from "./browser/cdp/browser-cdp"
+import { autoRegisterPlaywrightMcpConnector } from "./browser/cdp/browser-playwright-mcp-connector"
+import { BUILTIN_BROWSER_LOG_PREFIX } from "../shared/browser-types"
 
+const MAIN_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[Main]`
+const RENDERER_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[RendererBrowser]`
 const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
 
 const browserCdpPort = configureBrowserCdpEndpoint(app.commandLine)
 if (browserCdpPort !== null) {
-  console.info(`[Main] Browser CDP endpoint enabled on http://127.0.0.1:${browserCdpPort}.`)
+  console.info(`${MAIN_BROWSER_LOG_PREFIX} Browser CDP endpoint enabled on http://127.0.0.1:${browserCdpPort}.`)
 }
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
@@ -116,7 +120,14 @@ function getConsoleLevelName(level: number): string {
 }
 
 function shouldMirrorRendererBrowserLog(message: string): boolean {
-  return message.startsWith("[BrowserPanel]") || (message.startsWith("[App]") && message.includes("Browser"))
+  return message.startsWith(BUILTIN_BROWSER_LOG_PREFIX)
+}
+
+function formatMirroredRendererBrowserLog(message: string): string {
+  const suffix = message.startsWith(BUILTIN_BROWSER_LOG_PREFIX)
+    ? message.slice(BUILTIN_BROWSER_LOG_PREFIX.length)
+    : ` ${message}`
+  return `${RENDERER_BROWSER_LOG_PREFIX}${suffix}`
 }
 
 function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): string {
@@ -260,7 +271,8 @@ import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
-import { registerBrowserHandlers, stopCookieBridgeServer } from "./ipc/browser"
+import { registerBrowserHandlers } from "./ipc/browser"
+import { registerBrowserProfileImportHandlers, stopBrowserProfileImportRuntime } from "./ipc/browser-profile-import"
 import { setGlobalBrowserService } from "./browser/core/browser-service-registry"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
@@ -305,7 +317,7 @@ const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 function disposeBrowserServiceForMainWindow(reason: string): void {
   const disposedSessionId = browserService?.disposeAll() ?? null
   if (disposedSessionId) {
-    console.info(`[Main] Disposed BrowserView session ${disposedSessionId} because ${reason}.`)
+    console.info(`${MAIN_BROWSER_LOG_PREFIX} Disposed BrowserView session ${disposedSessionId} because ${reason}.`)
   }
 }
 
@@ -502,7 +514,7 @@ function createWindow(): void {
     writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
     if (shouldMirrorRendererBrowserLog(message)) {
       const location = sourceId ? `${sourceId}:${line}` : `line:${line}`
-      console.log(`[RendererBrowser] ${message} (${location})`)
+      console.log(`${formatMirroredRendererBrowserLog(message)} (${location})`)
     }
   })
 
@@ -707,7 +719,7 @@ if (browserNativeMessagingHostLaunch) {
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
     autoRegisterPlaywrightMcpConnector(browserCdpPort).catch((err) =>
-      console.error("[Main] Failed to auto-register Playwright MCP connector:", err)
+      console.error(`${MAIN_BROWSER_LOG_PREFIX} Failed to auto-register Playwright MCP connector:`, err)
     )
     registerScheduledTaskHandlers(ipcMain)
     registerHeartbeatHandlers(ipcMain)
@@ -738,6 +750,7 @@ if (browserNativeMessagingHostLaunch) {
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
     browserService = registerBrowserHandlers(ipcMain, () => mainWindow)
+    registerBrowserProfileImportHandlers(ipcMain, () => mainWindow, browserService)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -950,7 +963,7 @@ if (browserNativeMessagingHostLaunch) {
     browserService?.disposeAll()
     browserService = null
     setGlobalBrowserService(null)
-    stopCookieBridgeServer()
+    stopBrowserProfileImportRuntime()
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()

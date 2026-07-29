@@ -5,16 +5,18 @@ import { homedir, tmpdir } from "os"
 import { join, resolve } from "path"
 import { promisify } from "util"
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
-import type {
-  BrowserProfileImportOptions,
-  BrowserProfileImportPreview,
-  BrowserProfileImportProfile,
-  BrowserProfileImportSkipReason,
-  BrowserProfileImportSkippedWebsite
+import {
+  BUILTIN_BROWSER_LOG_PREFIX,
+  type BrowserProfileImportOptions,
+  type BrowserProfileImportPreview,
+  type BrowserProfileImportProfile,
+  type BrowserProfileImportSkipReason,
+  type BrowserProfileImportSkippedWebsite
 } from "../../../shared/browser-types"
 import type { BrowserSessionCookie, BrowserSessionData } from "../core/browser-session-data"
 
 const execFileAsync = promisify(execFile)
+const BROWSER_PROFILE_IMPORT_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserProfileImport]`
 
 const CHROME_LOCAL_STATE = "Local State"
 const CHROME_PREFERENCES = "Preferences"
@@ -403,7 +405,7 @@ export async function readBrowserProfileImportData(
   const localState = await readJsonFile(join(preview.sourceUserDataDirectory, CHROME_LOCAL_STATE))
   const result = await readChromeCookies(cookieStorePath, localState, options)
   console.info(
-    `[BrowserProfileImport] Chrome profile data read profile=${profile.profileDirectory} cookies=${result.cookies.length} skipped=${result.skippedCookies}.`
+    `${BROWSER_PROFILE_IMPORT_LOG_PREFIX} Chrome profile data read profile=${profile.profileDirectory} cookies=${result.cookies.length} skipped=${result.skippedCookies}.`
   )
   return {
     data: { cookies: result.cookies, localStorage: [] },
