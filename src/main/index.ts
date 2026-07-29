@@ -284,6 +284,7 @@ import {
   configurePetWindow,
   createPetWindow,
   getPetWindowDebugInfo,
+  markPetStartupReady,
   registerPetHandlers
 } from "./pet"
 
@@ -295,6 +296,24 @@ let closeToTrayPromptTimer: NodeJS.Timeout | null = null
 let closeToTrayPromptReason: CloseToTrayPromptReason | null = null
 let closeToTrayPromptRememberChoiceAllowed = false
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
+const PET_STARTUP_DELAY_MS = 750
+let petStartupTimer: NodeJS.Timeout | null = null
+
+function cancelDelayedPetStartup(): void {
+  if (!petStartupTimer) return
+  clearTimeout(petStartupTimer)
+  petStartupTimer = null
+}
+
+function schedulePetStartupAfterMainLoad(window: BrowserWindow): void {
+  cancelDelayedPetStartup()
+  petStartupTimer = setTimeout(() => {
+    petStartupTimer = null
+    if (mainWindow !== window || window.isDestroyed() || window.webContents.isDestroyed()) return
+    markPetStartupReady()
+  }, PET_STARTUP_DELAY_MS)
+  petStartupTimer.unref?.()
+}
 
 function cleanupLegacySkillEvalRecords(): void {
   const roots = new Set(
@@ -552,6 +571,7 @@ function createWindow(): void {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("version", version)
       mainWindow.webContents.send("ip", getLocalIP())
+      schedulePetStartupAfterMainLoad(mainWindow)
     }
   })
 
@@ -599,6 +619,7 @@ function createWindow(): void {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
+    cancelDelayedPetStartup()
     clearCloseToTrayPromptState()
     mainWindow = null
     if (process.platform !== "darwin") {
@@ -969,8 +990,6 @@ if (!gotTheLock) {
         applyMacDockIcon()
       }
     })
-    createPetWindow()
-
     // Background services can execute immediately on startup. Wait for the
     // initial catalog request so due work never runs against a temporary
     // fallback merely because the remote manifest was still loading.
@@ -994,9 +1013,11 @@ if (!gotTheLock) {
     })
 
     app.on("activate", () => {
-      ensureMainWindowVisible()
+      const activatedWindow = ensureMainWindowVisible()
       applyMacDockIcon()
-      createPetWindow()
+      if (activatedWindow && !activatedWindow.webContents.isLoadingMainFrame()) {
+        createPetWindow()
+      }
     })
   })
 
