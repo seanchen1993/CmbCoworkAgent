@@ -12,6 +12,10 @@ import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
+import {
+  redactTraceDetailForDisplay,
+  redactTraceSkillEvalRecordForDisplay
+} from "../agent/trace/display-redaction"
 import { TRACE_OBSERVABILITY_SCHEMA_VERSION } from "../agent/trace/types"
 import type {
   AgentTrace,
@@ -1246,7 +1250,7 @@ function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayloa
   const skill = asString(payload.skill).trim()
   const range = asRecord(payload.range)
   const traces = Array.isArray(payload.traces)
-    ? payload.traces.map((trace) => trace as DashboardTraceDetail)
+    ? payload.traces.map((trace) => redactTraceDetailForDisplay(trace as DashboardTraceDetail))
     : []
   const page = typeof payload.page === "number" ? payload.page : undefined
   const pageSize = typeof payload.pageSize === "number" ? payload.pageSize : undefined
@@ -2126,7 +2130,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
     }
 
-    return {
+    return redactTraceDetailForDisplay({
       traceId: trace.traceId || asString(source.traceId, hit._id ?? ""),
       threadId: trace.threadId || asString(source.threadId),
       startedAt: trace.startedAt || asString(source.startedAt),
@@ -2163,12 +2167,12 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       ...(nodes ? { nodes } : {}),
       rawAvailable: !rawError,
       ...(rawError ? { rawError } : {})
-    }
+    })
   }
 
   const fallbackInputTokens = asNumber(source.totalInputTokens)
   const fallbackOutputTokens = asNumber(source.totalOutputTokens)
-  return {
+  return redactTraceDetailForDisplay({
     traceId: asString(source.traceId, hit._id ?? ""),
     threadId: asString(source.threadId),
     startedAt: asString(source.startedAt),
@@ -2196,7 +2200,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     triggerSource: normalizeTraceTriggerSource(source.triggerSource),
     rawAvailable: false,
     rawError: parsed.error
-  }
+  })
 }
 
 function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
@@ -2209,7 +2213,7 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
   }
 
-  return {
+  return redactTraceDetailForDisplay({
     traceId: trace.traceId,
     threadId: trace.threadId,
     startedAt: trace.startedAt,
@@ -2233,7 +2237,7 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     ...(nodes ? { nodes } : {}),
     rawAvailable: !rawError,
     ...(rawError ? { rawError } : {})
-  }
+  })
 }
 
 function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
@@ -4416,7 +4420,7 @@ async function fetchSkillEvalRecordPage(
     ? await fetchTraceDetailsForSkillEvalRecords(pageRecords)
     : undefined
   const pageRuns = aggregateSkillEvalTaskRuns(
-    skillEvalStoredRecordsToDashboardRuns(pageRecords, traceDetails, skillFilter)
+    skillEvalStoredRecordsToDashboardRuns(pageRecords, traceDetails, skillFilter, undefined, true)
   )
     .sort(compareSkillEvalRunsByStartedAtDesc)
     .slice(0, size)
@@ -4605,7 +4609,8 @@ function skillEvalStoredRecordsToDashboardRuns(
   records: TraceSkillEvalRecord[],
   traceDetails?: Map<string, DashboardTraceDetail>,
   skillFilter?: SkillEvalFilter,
-  allowedSkillNames?: Set<string>
+  allowedSkillNames?: Set<string>,
+  redactForDisplay = false
 ): DashboardSkillEvalRun[] {
   return records
     .filter((record) => {
@@ -4614,7 +4619,10 @@ function skillEvalStoredRecordsToDashboardRuns(
       }
       return hasAllowedSkillName(record.skillName, allowedSkillNames)
     })
-    .map((record) => {
+    .map((rawRecord) => {
+      const record = redactForDisplay
+        ? redactTraceSkillEvalRecordForDisplay(rawRecord)
+        : rawRecord
       const fallbackTraceDetail = fallbackTraceDetailFromSkillEvalRecord(record)
       const traceDetail = traceDetails?.get(record.traceId) ?? fallbackTraceDetail
       // Current window semantics keep these arrays equal; the context fallback is for
@@ -7745,7 +7753,8 @@ function makeMockSkillEvalSummary(
     records,
     traceDetails,
     baseFilter,
-    allowedSkillNames
+    allowedSkillNames,
+    true
   )
     .filter((run) => matchesSkillSearch(run.skillName, skillSearch))
     .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
