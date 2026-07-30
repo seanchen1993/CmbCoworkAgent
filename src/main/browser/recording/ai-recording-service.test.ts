@@ -134,9 +134,9 @@ describe("AI recording service", () => {
 
     expect(session.actions).toHaveLength(3)
     expect(session.script).toContain(
-      'await page.getByText("Actions tab in repository navigation", { exact: true }).click();'
+      'await page.getByRole("tab", { name: "Actions" }).click();'
     )
-    expect(session.script.match(/Actions tab in repository navigation/g)).toHaveLength(1)
+    expect(session.script.match(/getByRole\("tab", \{ name: "Actions" \}\)/g)).toHaveLength(1)
     expect(session.script.match(/Branch selector/g)).toHaveLength(1)
     expect(session.script).toContain(
       'await page.getByRole("textbox", { name: "Search" }).press("Enter");'
@@ -190,6 +190,38 @@ describe("AI recording service", () => {
       'await page.getByRole("textbox", { name: "Password" }).fill(process.env.PLAYWRIGHT_TEST_PASSWORD ?? "");'
     )
     expect(session.script).not.toContain("my-secret")
+  })
+
+  it("uses richer locator metadata when available", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_click",
+      threadId: "thread-1",
+      args: {
+        target: "Login button",
+        role: "button",
+        testId: "login-submit",
+        label: "登录"
+      }
+    })
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_fill",
+      threadId: "thread-1",
+      args: {
+        target: "Card number input",
+        placeholder: "Card number",
+        framePath: ['iframe[name="payment"]'],
+        text: "4242424242424242"
+      }
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.script).toContain('await page.getByTestId("login-submit").click();')
+    expect(session.script).toContain(
+      'await page.frameLocator("iframe[name=\\"payment\\"]").getByPlaceholder("Card number").fill("4242424242424242");'
+    )
   })
 
   it("ignores an immediately repeated browser_fill_form batch", () => {

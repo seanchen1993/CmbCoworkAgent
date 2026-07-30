@@ -1,8 +1,10 @@
 import type {
   AiRecordedBrowserAction,
+  BrowserLocatorMetadata,
   AiRecordingSession,
   AiRecordingStartOptions
 } from "../../../shared/browser-types"
+import { buildPlaywrightLocator, type LocatorRole, type LocatorSource } from "./locator-generator"
 
 let activeSession: AiRecordingSession | null = null
 let lastSession: AiRecordingSession | null = null
@@ -60,10 +62,65 @@ function isSensitiveTarget(target: string | undefined, args: Record<string, unkn
 
 type AiRecordedBrowserActionInput =
   | { kind: "navigate"; url: string }
-  | { kind: "click"; target?: string; doubleClick: boolean }
-  | { kind: "fill"; target?: string; value: string; sensitive: boolean }
-  | { kind: "selectOption"; target?: string; values: string[] }
-  | { kind: "press"; key: string; target?: string }
+  | { kind: "click"; target?: string; doubleClick: boolean; locator?: BrowserLocatorMetadata }
+  | { kind: "fill"; target?: string; value: string; sensitive: boolean; locator?: BrowserLocatorMetadata }
+  | { kind: "selectOption"; target?: string; values: string[]; locator?: BrowserLocatorMetadata }
+  | { kind: "press"; key: string; target?: string; locator?: BrowserLocatorMetadata }
+
+const LOCATOR_ROLES: LocatorRole[] = [
+  "button",
+  "checkbox",
+  "combobox",
+  "link",
+  "menuitem",
+  "option",
+  "radio",
+  "switch",
+  "tab",
+  "textbox"
+]
+
+function readLocatorRole(value: unknown): LocatorRole | undefined {
+  const text = readString(value)?.toLowerCase()
+  if (!text) return undefined
+  return LOCATOR_ROLES.find((role) => role === text)
+}
+
+function buildLocatorMetadata(
+  args: Record<string, unknown>,
+  fallbackTarget?: string
+): BrowserLocatorMetadata | undefined {
+  const metadata: BrowserLocatorMetadata = {
+    target: fallbackTarget ?? getTarget(args),
+    role:
+      readLocatorRole(args.role) ??
+      readLocatorRole(args.ariaRole) ??
+      readLocatorRole(args.controlType) ??
+      readLocatorRole(args.type),
+    label: readString(args.label),
+    placeholder: readString(args.placeholder),
+    testId:
+      readString(args.testId) ??
+      readString(args.testid) ??
+      readString(args["data-testid"]),
+    accessibleName: readString(args.accessibleName) ?? readString(args.ariaLabel),
+    textContent: readString(args.textContent),
+    selector: readString(args.selector),
+    tagName: readString(args.tagName) ?? readString(args.tag),
+    inputType: readString(args.inputType) ?? readString(args.input_type) ?? readString(args.type),
+    framePath: (() => {
+      const values = readStringArray(args.framePath ?? args.frameSelectors ?? args.frames)
+      return values.length > 0 ? values : undefined
+    })()
+  }
+
+  return Object.values(metadata).some((value) => {
+    if (Array.isArray(value)) return value.length > 0
+    return value !== undefined && value !== ""
+  })
+    ? metadata
+    : undefined
+}
 
 function makeAction(action: AiRecordedBrowserActionInput): AiRecordedBrowserAction {
   nextActionNumber += 1
@@ -89,7 +146,8 @@ function normalizeToolCall(
         makeAction({
           kind: "click",
           target,
-          doubleClick: args.doubleClick === true || args.clickCount === 2
+          doubleClick: args.doubleClick === true || args.clickCount === 2,
+          locator: buildLocatorMetadata(args, target)
         })
       ]
     }
@@ -102,11 +160,19 @@ function normalizeToolCall(
           kind: "fill",
           target,
           value: sensitive ? "" : getValue(args),
-          sensitive
+          sensitive,
+          locator: buildLocatorMetadata(args, target)
         })
       ]
       if (args.submit === true) {
-        actions.push(makeAction({ kind: "press", key: "Enter", target }))
+        actions.push(
+          makeAction({
+            kind: "press",
+            key: "Enter",
+            target,
+            locator: buildLocatorMetadata(args, target)
+          })
+        )
       }
       return actions
     }
@@ -125,7 +191,8 @@ function normalizeToolCall(
             kind: "fill",
             target,
             value: sensitive ? "" : value,
-            sensitive
+            sensitive,
+            locator: buildLocatorMetadata(fieldObj, target)
           })
         ]
       })
@@ -136,14 +203,18 @@ function normalizeToolCall(
         makeAction({
           kind: "selectOption",
           target: getTarget(args),
-          values
+          values,
+          locator: buildLocatorMetadata(args)
         })
       ]
     }
     case "browser_press_key":
     case "browser_key": {
       const key = readString(args.key) ?? readString(args.keys)
-      return key ? [makeAction({ kind: "press", key, target: getTarget(args) })] : []
+      const target = getTarget(args)
+      return key
+        ? [makeAction({ kind: "press", key, target, locator: buildLocatorMetadata(args, target) })]
+        : []
     }
     default:
       return []
@@ -246,45 +317,26 @@ function quote(value: unknown): string {
   return JSON.stringify(value)
 }
 
-type LocatorRole = "button" | "link" | "checkbox" | "radio" | "textbox" | "combobox"
-
-interface TargetLocator {
-  name: string
-  role?: LocatorRole
-}
-
-const ROLE_SUFFIXES: Array<{ pattern: RegExp; role: LocatorRole }> = [
-  { pattern: /\s*(?:button|按钮)$/iu, role: "button" },
-  { pattern: /\s*(?:link|链接)$/iu, role: "link" },
-  { pattern: /\s*(?:checkbox|复选框)$/iu, role: "checkbox" },
-  { pattern: /\s*(?:radio(?: button)?|单选框)$/iu, role: "radio" },
-  { pattern: /\s*(?:select|dropdown|combobox|下拉框|选择框)$/iu, role: "combobox" },
-  { pattern: /\s*(?:textbox|text field|input|输入框|文本框)$/iu, role: "textbox" }
-]
-
-function parseTargetLocator(target: string | undefined, defaultRole?: LocatorRole): TargetLocator | null {
-  if (!target) return null
-
-  const normalized = target
-    .replace(/^(?:the\s+)?/iu, "")
-    .replace(/^["']|["']$/gu, "")
-    .trim()
-  for (const entry of ROLE_SUFFIXES) {
-    if (!entry.pattern.test(normalized)) continue
-    const name = normalized.replace(entry.pattern, "").replace(/^["']|["']$/gu, "").trim()
-    return { name: name || normalized, role: entry.role }
+function getLocator(
+  action: Extract<AiRecordedBrowserAction, { target?: string }>,
+  defaultRole?: LocatorRole
+): string {
+  const locator = action.locator
+  const source: LocatorSource = {
+    target: locator?.target ?? action.target,
+    role: readLocatorRole(locator?.role),
+    label: locator?.label,
+    placeholder: locator?.placeholder,
+    testId: locator?.testId,
+    accessibleName: locator?.accessibleName,
+    textContent: locator?.textContent,
+    selector: locator?.selector,
+    tagName: locator?.tagName,
+    inputType: locator?.inputType,
+    framePath: locator?.framePath
   }
 
-  return { name: normalized, role: defaultRole }
-}
-
-function getLocator(target: string | undefined, defaultRole?: LocatorRole): string {
-  const locator = parseTargetLocator(target, defaultRole)
-  if (!locator) return 'page.locator("TODO_SELECTOR")'
-  if (locator.role) {
-    return `page.getByRole(${quote(locator.role)}, { name: ${quote(locator.name)} })`
-  }
-  return `page.getByText(${quote(locator.name)}, { exact: true })`
+  return buildPlaywrightLocator(source, { defaultRole })
 }
 
 function generateActionLine(action: AiRecordedBrowserAction): string {
@@ -292,18 +344,18 @@ function generateActionLine(action: AiRecordedBrowserAction): string {
     case "navigate":
       return `await page.goto(${quote(action.url)});`
     case "click":
-      return `await ${getLocator(action.target)}.${action.doubleClick ? "dblclick" : "click"}();`
+      return `await ${getLocator(action)}.${action.doubleClick ? "dblclick" : "click"}();`
     case "fill":
-      return `await ${getLocator(action.target, "textbox")}.fill(${
+      return `await ${getLocator(action, "textbox")}.fill(${
         action.sensitive ? 'process.env.PLAYWRIGHT_TEST_PASSWORD ?? ""' : quote(action.value)
       });`
     case "selectOption":
-      return `await ${getLocator(action.target, "combobox")}.selectOption(${quote(
+      return `await ${getLocator(action, "combobox")}.selectOption(${quote(
         action.values.length === 1 ? action.values[0]! : action.values
       )});`
     case "press":
       return action.target
-        ? `await ${getLocator(action.target)}.press(${quote(action.key)});`
+        ? `await ${getLocator(action)}.press(${quote(action.key)});`
         : `await page.keyboard.press(${quote(action.key)});`
   }
 }

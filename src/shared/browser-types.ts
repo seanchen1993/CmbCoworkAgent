@@ -34,6 +34,20 @@ export const BUILTIN_BROWSER_LOG_PREFIX = "[内置浏览器]"
 export const BROWSER_SESSION_ID = "app-browser"
 export const BROWSER_PANEL_REQUEST_CHANNEL = "browser:panel-request"
 
+export interface BrowserLocatorMetadata {
+  target?: string
+  role?: string
+  label?: string
+  placeholder?: string
+  testId?: string
+  accessibleName?: string
+  textContent?: string
+  selector?: string
+  tagName?: string
+  inputType?: string
+  framePath?: string[]
+}
+
 export interface BrowserPanelRequest {
   threadId?: string
 }
@@ -59,6 +73,7 @@ export type AiRecordedBrowserAction =
       timestamp: string
       kind: "navigate"
       url: string
+      locator?: BrowserLocatorMetadata
     }
   | {
       id: string
@@ -66,6 +81,7 @@ export type AiRecordedBrowserAction =
       kind: "click"
       target?: string
       doubleClick: boolean
+      locator?: BrowserLocatorMetadata
     }
   | {
       id: string
@@ -74,6 +90,7 @@ export type AiRecordedBrowserAction =
       target?: string
       value: string
       sensitive: boolean
+      locator?: BrowserLocatorMetadata
     }
   | {
       id: string
@@ -81,6 +98,7 @@ export type AiRecordedBrowserAction =
       kind: "selectOption"
       target?: string
       values: string[]
+      locator?: BrowserLocatorMetadata
     }
   | {
       id: string
@@ -88,6 +106,7 @@ export type AiRecordedBrowserAction =
       kind: "press"
       key: string
       target?: string
+      locator?: BrowserLocatorMetadata
     }
 
 export type AiRecordingStatus = "idle" | "recording" | "completed"
