@@ -332,7 +332,7 @@ describe("Playwright MCP in-app browser bridge", () => {
     await invokeMcpToolWithPlaywrightInAppBrowserSupport({
       tool: inAppBrowserTool,
       workspacePath: "/workspace",
-      threadId: "thread-1",
+      threadId: "thread-2",
       args: { url: "https://example.com/dashboard" },
       invoke,
       browserService: { getState, prepareTarget, requestPanel }

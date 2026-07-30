@@ -392,13 +392,8 @@ function toView(session: AiRecordingSession | null): AiRecordingSession {
   }
 }
 
-export function startAiRecording(options: AiRecordingStartOptions = {}): AiRecordingSession {
+export function startAiRecording(_options: AiRecordingStartOptions = {}): AiRecordingSession {
   if (activeSession?.status === "recording") {
-    const activeThreadId = activeSession.threadId ?? null
-    const nextThreadId = options.threadId ?? null
-    if (activeThreadId !== nextThreadId) {
-      throw new Error("已有其他任务正在进行 AI 录制，请先停止当前录制。")
-    }
     return toView(activeSession)
   }
 
@@ -406,7 +401,6 @@ export function startAiRecording(options: AiRecordingStartOptions = {}): AiRecor
   activeSession = {
     id: `ai-recording-${Date.now()}-${nextSessionNumber}`,
     status: "recording",
-    threadId: options.threadId,
     startedAt: now(),
     actions: [],
     script: ""
@@ -435,7 +429,6 @@ export function recordSuccessfulAiBrowserToolCall(options: {
   toolName: string
 }): void {
   if (!activeSession || activeSession.status !== "recording") return
-  if (activeSession.threadId && activeSession.threadId !== options.threadId) return
 
   const normalizedActions = normalizeToolCall(options.toolName, options.args)
   if (hasDuplicateTrailingBatch(activeSession.actions, normalizedActions)) return

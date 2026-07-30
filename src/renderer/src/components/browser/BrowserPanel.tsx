@@ -1007,7 +1007,7 @@ export function BrowserPanel({
 
       {aiRecordingBoxOpen && (
         <div className="shrink-0 border-t border-border bg-background px-2 py-1">
-          <BrowserAiRecordingControls threadId={threadId} browserCreated={state.created} />
+          <BrowserAiRecordingControls browserCreated={state.created} />
         </div>
       )}
 

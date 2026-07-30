@@ -5,7 +5,6 @@ import {
   Download,
   FileCode2,
   Loader2,
-  Lock,
   Pause,
   Sparkles,
   Video
@@ -26,7 +25,6 @@ import { cn } from "@/lib/utils"
 import type { AiRecordedBrowserAction, AiRecordingSession } from "../../../../shared/browser-types"
 
 interface BrowserAiRecordingControlsProps {
-  threadId?: string | null
   browserCreated: boolean
 }
 
@@ -102,7 +100,6 @@ function getAiRecordedActionTone(kind: AiRecordedBrowserAction["kind"]): string 
 }
 
 export function BrowserAiRecordingControls({
-  threadId,
   browserCreated
 }: BrowserAiRecordingControlsProps): React.JSX.Element {
   const [aiRecording, setAiRecording] = useState<AiRecordingSession>(EMPTY_AI_RECORDING)
@@ -126,7 +123,7 @@ export function BrowserAiRecordingControls({
 
   useEffect(() => {
     void refreshAiRecording()
-  }, [refreshAiRecording, threadId])
+  }, [refreshAiRecording])
 
   useEffect(() => {
     if (aiRecording.status !== "recording") return
@@ -149,11 +146,9 @@ export function BrowserAiRecordingControls({
   const startAiRecordingSession = useCallback(async () => {
     setIsAiRecordingBusy(true)
     try {
-      const nextSession = await window.api.browser.startAiRecording({
-        threadId: threadId ?? undefined
-      })
+      const nextSession = await window.api.browser.startAiRecording()
       setAiRecording(nextSession)
-      toast.success("AI 录制已开始。让 Agent 在当前任务中操作页面即可。")
+      toast.success("AI 录制已开始。让 Agent 在任意会话中操作页面即可。")
     } catch (error) {
       console.error(
         `[BrowserAiRecordingControls] Failed to start AI recording: ${formatError(error)}`
@@ -162,7 +157,7 @@ export function BrowserAiRecordingControls({
     } finally {
       setIsAiRecordingBusy(false)
     }
-  }, [threadId])
+  }, [])
 
   const stopAiRecordingSession = useCallback(async () => {
     setIsAiRecordingBusy(true)
@@ -244,86 +239,67 @@ export function BrowserAiRecordingControls({
     setSaveFilename("")
   }, [])
 
-  const aiRecordingOwnedByCurrentThread =
-    !aiRecording.threadId || !threadId || aiRecording.threadId === threadId
-  const aiRecordingLockedByOtherThread =
-    aiRecording.status === "recording" &&
-    Boolean(aiRecording.threadId) &&
-    aiRecording.threadId !== threadId
-  const aiRecordingActionCount = aiRecordingOwnedByCurrentThread ? aiRecording.actions.length : 0
+  const aiRecordingActionCount = aiRecording.actions.length
   const aiRecordingScriptReady = aiRecording.script.trim().length > 0
   const aiRecordingHasOutput =
-    aiRecordingOwnedByCurrentThread &&
-    (aiRecording.status === "recording" || aiRecordingActionCount > 0 || aiRecordingScriptReady)
+    aiRecording.status === "recording" || aiRecordingActionCount > 0 || aiRecordingScriptReady
   const aiRecordingScriptLineCount = aiRecordingScriptReady
     ? aiRecording.script.split(/\r?\n/).length
     : 0
-  const aiRecordingStatusText = aiRecordingLockedByOtherThread
-    ? "其他任务正在录制 AI 流程"
-    : aiRecording.status === "recording"
-      ? `录制进行中，已捕获 ${aiRecordingActionCount} 步`
-      : aiRecordingActionCount > 0
-        ? `最近一次录制生成了 ${aiRecordingActionCount} 步`
-        : "当前任务可开始 AI 录制"
-  const aiRecordingStatusBadge = aiRecordingLockedByOtherThread
+  const aiRecordingStatusText =
+    aiRecording.status === "recording"
+    ? `录制进行中，已捕获 ${aiRecordingActionCount} 步`
+    : aiRecordingActionCount > 0
+      ? `最近一次录制生成了 ${aiRecordingActionCount} 步`
+      : "可开始 AI 录制"
+  const aiRecordingStatusBadge = aiRecording.status === "recording"
     ? {
-        label: "占用中",
-        variant: "warning" as const,
-        containerClassName: "border-status-warning/30 bg-status-warning/10",
-        iconClassName: "border-status-warning/20 bg-status-warning/15 text-status-warning"
+        label: "录制中",
+        variant: "info" as const,
+        containerClassName: "border-status-info/30 bg-status-info/10",
+        iconClassName: "border-status-info/20 bg-status-info/15 text-status-info"
       }
-    : aiRecording.status === "recording"
+    : aiRecordingActionCount > 0 || aiRecordingScriptReady
       ? {
-          label: "录制中",
-          variant: "info" as const,
-          containerClassName: "border-status-info/30 bg-status-info/10",
-          iconClassName: "border-status-info/20 bg-status-info/15 text-status-info"
+          label: "已生成",
+          variant: "nominal" as const,
+          containerClassName: "border-status-nominal/25 bg-status-nominal/10",
+          iconClassName: "border-status-nominal/20 bg-status-nominal/15 text-status-nominal"
         }
-      : aiRecordingActionCount > 0 || aiRecordingScriptReady
+      : browserCreated
         ? {
-            label: "已生成",
-            variant: "nominal" as const,
-            containerClassName: "border-status-nominal/25 bg-status-nominal/10",
-            iconClassName: "border-status-nominal/20 bg-status-nominal/15 text-status-nominal"
+            label: "就绪",
+            variant: "outline" as const,
+            containerClassName: "border-border/70 bg-background/85",
+            iconClassName: "border-primary/15 bg-primary/10 text-primary"
           }
-        : browserCreated
-          ? {
-              label: "就绪",
-              variant: "outline" as const,
-              containerClassName: "border-border/70 bg-background/85",
-              iconClassName: "border-primary/15 bg-primary/10 text-primary"
-            }
-          : {
-              label: "等待浏览器",
-              variant: "outline" as const,
-              containerClassName: "border-border/70 bg-background/85",
-              iconClassName: "border-border/70 bg-muted/60 text-muted-foreground"
-            }
+        : {
+            label: "等待浏览器",
+            variant: "outline" as const,
+            containerClassName: "border-border/70 bg-background/85",
+            iconClassName: "border-border/70 bg-muted/60 text-muted-foreground"
+          }
 
-  const mainButtonDisabled = isAiRecordingBusy || !browserCreated || aiRecordingLockedByOtherThread
+  const mainButtonDisabled = isAiRecordingBusy || !browserCreated
   const mainButtonDisabledReason = useMemo(() => {
     if (isAiRecordingBusy) return "正在处理中，请稍候"
-    if (aiRecordingLockedByOtherThread) return "其他任务正在录制 AI 流程，请先停止"
     if (!browserCreated) return "浏览器尚未就绪，请等待页面加载完成"
     return null
-  }, [isAiRecordingBusy, browserCreated, aiRecordingLockedByOtherThread])
-  const mainButtonIsRecording =
-    aiRecording.status === "recording" && !aiRecordingLockedByOtherThread
+  }, [isAiRecordingBusy, browserCreated])
+  const mainButtonIsRecording = aiRecording.status === "recording"
   const mainButtonLabel = isAiRecordingBusy
     ? "处理中..."
     : mainButtonIsRecording
       ? "停止录制"
       : "开始录制"
   const mainButtonVariant = mainButtonIsRecording ? "warning" : "info"
-  const aiRecordingStatusDotClassName = aiRecordingLockedByOtherThread
-    ? "bg-status-warning"
-    : mainButtonIsRecording
-      ? "bg-status-info animate-tactical-pulse"
-      : aiRecordingActionCount > 0 || aiRecordingScriptReady
-        ? "bg-status-nominal"
-        : browserCreated
-          ? "bg-primary"
-          : "bg-muted-foreground/60"
+  const aiRecordingStatusDotClassName = mainButtonIsRecording
+    ? "bg-status-info animate-tactical-pulse"
+    : aiRecordingActionCount > 0 || aiRecordingScriptReady
+      ? "bg-status-nominal"
+      : browserCreated
+        ? "bg-primary"
+        : "bg-muted-foreground/60"
 
   return (
     <>
@@ -333,7 +309,9 @@ export function BrowserAiRecordingControls({
           <span className="hidden shrink-0 text-[11px] font-medium text-foreground/85 sm:inline">
             AI 录制
           </span>
-          <span className="truncate text-[11px] text-muted-foreground">{aiRecordingStatusText}</span>
+          <span className="truncate text-[11px] text-muted-foreground">
+            {aiRecordingStatusText}
+          </span>
         </div>
 
         {aiRecordingHasOutput && (
@@ -341,7 +319,6 @@ export function BrowserAiRecordingControls({
             type="button"
             size="sm"
             variant="ghost"
-            disabled={!aiRecordingOwnedByCurrentThread}
             className="h-8 rounded-md px-2 text-[11px] text-muted-foreground hover:text-foreground"
             onClick={() => setAiRecordingDialogOpen(true)}
           >
@@ -438,228 +415,208 @@ export function BrowserAiRecordingControls({
                   <div className="min-w-0">
                     <DialogTitle className="text-base">自动化脚本录制结果</DialogTitle>
                     <DialogDescription className="mt-1 text-[12px] leading-5">
-                      {aiRecordingOwnedByCurrentThread
-                        ? aiRecording.status === "recording"
-                          ? "Agent 在当前任务中对内置浏览器的成功操作会实时沉淀为 Playwright 草稿。"
-                          : "下面是本次 AI 录制生成的步骤和 Playwright 脚本初稿。"
-                        : "当前录制属于其他任务，这里不展示其脚本内容。"}
+                      {aiRecording.status === "recording"
+                        ? "Agent 对内置浏览器的成功操作会实时沉淀为 Playwright 草稿。"
+                        : "下面是最近一次 AI 录制生成的步骤和 Playwright 脚本初稿。"}
                     </DialogDescription>
                   </div>
                 </div>
               </div>
 
-              {aiRecordingOwnedByCurrentThread && (
-                <div className="flex flex-wrap items-center gap-2 mr-8">
-                  <Badge variant={aiRecordingStatusBadge.variant}>
-                    {aiRecordingStatusBadge.label}
-                  </Badge>
-                  <span className="inline-flex items-center rounded-full border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
-                    <span className="mr-1 font-medium text-foreground">
-                      {aiRecordingActionCount}
-                    </span>
-                    个步骤
+              <div className="flex flex-wrap items-center gap-2 mr-8">
+                <Badge variant={aiRecordingStatusBadge.variant}>
+                  {aiRecordingStatusBadge.label}
+                </Badge>
+                <span className="inline-flex items-center rounded-full border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
+                  <span className="mr-1 font-medium text-foreground">{aiRecordingActionCount}</span>
+                  个步骤
+                </span>
+                <span className="inline-flex items-center rounded-full border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
+                  <span className="mr-1 font-medium text-foreground">
+                    {aiRecordingScriptLineCount}
                   </span>
-                  <span className="inline-flex items-center rounded-full border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
-                    <span className="mr-1 font-medium text-foreground">
-                      {aiRecordingScriptLineCount}
-                    </span>
-                    行脚本
-                  </span>
-                </div>
-              )}
+                  行脚本
+                </span>
+              </div>
             </div>
           </DialogHeader>
 
-          {aiRecordingOwnedByCurrentThread ? (
-            <div className="grid min-h-0 flex-1 bg-background md:grid-cols-[300px_minmax(0,1fr)]">
-              <div className="border-b border-border/70 bg-muted/20 md:border-b-0 md:border-r">
-                <div className="border-b border-border/70 px-4 py-3">
-                  <p className="text-sm font-medium text-foreground">步骤列表</p>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    共 {aiRecordingActionCount} 步，来源为当前任务中的 AI 浏览器操作。
-                  </p>
-                </div>
-                <div className="max-h-[58vh] space-y-2.5 overflow-auto px-3 py-3">
-                  {aiRecording.actions.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-border/80 bg-background/90 px-4 py-5 text-[12px] leading-5 text-muted-foreground shadow-sm">
-                      <div className="mb-3 flex size-9 items-center justify-center rounded-lg border border-border/70 bg-muted/40 text-muted-foreground">
-                        <Sparkles className="size-4" strokeWidth={1.8} />
+          <div className="grid min-h-0 flex-1 bg-background md:grid-cols-[300px_minmax(0,1fr)]">
+            <div className="border-b border-border/70 bg-muted/20 md:border-b-0 md:border-r">
+              <div className="border-b border-border/70 px-4 py-3">
+                <p className="text-sm font-medium text-foreground">步骤列表</p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  共 {aiRecordingActionCount} 步，来源为共享的 AI 浏览器录制结果。
+                </p>
+              </div>
+              <div className="max-h-[58vh] space-y-2.5 overflow-auto px-3 py-3">
+                {aiRecording.actions.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-border/80 bg-background/90 px-4 py-5 text-[12px] leading-5 text-muted-foreground shadow-sm">
+                    <div className="mb-3 flex size-9 items-center justify-center rounded-lg border border-border/70 bg-muted/40 text-muted-foreground">
+                      <Sparkles className="size-4" strokeWidth={1.8} />
+                    </div>
+                    还没有采集到可生成脚本的操作。先开始录制，再让 Agent
+                    导航、点击、输入或选择页面元素。
+                  </div>
+                ) : (
+                  aiRecording.actions.map((action, index) => (
+                    <div
+                      key={action.id}
+                      className={cn(
+                        "rounded-xl border px-3 py-3 transition-colors",
+                        aiRecording.status === "recording" &&
+                          index === aiRecording.actions.length - 1
+                          ? "border-status-info/35 bg-status-info/10 shadow-sm"
+                          : "border-border/70 bg-background/90 hover:border-border-emphasis"
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="rounded-full border border-border/60 bg-background/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-foreground/80">
+                              Step {index + 1}
+                            </span>
+                            <span
+                              className={cn(
+                                "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+                                getAiRecordedActionTone(action.kind)
+                              )}
+                            >
+                              {describeAiRecordedActionKind(action.kind)}
+                            </span>
+                          </div>
+                          <p className="mt-1.5 text-[12px] leading-5 text-foreground/90">
+                            {describeAiRecordedAction(action)}
+                          </p>
+                        </div>
+                        <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                          {formatAiRecordingTime(action.timestamp)}
+                        </span>
                       </div>
-                      还没有采集到可生成脚本的操作。先开始录制，再让 Agent
-                      导航、点击、输入或选择页面元素。
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="flex min-h-0 flex-col">
+              <div className="border-b border-border/70 px-4 py-3">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex size-8 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-900 text-slate-200">
+                        <FileCode2 className="size-4" strokeWidth={1.8} />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-foreground">Playwright 脚本</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          第一版会优先保留语义化定位；复杂页面仍建议人工复查 locator。
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {isSavingToWorkspace ? (
+                    <div className="flex flex-1 flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-muted/25 p-2 xl:max-w-[420px] xl:justify-end">
+                      <Input
+                        ref={saveFilenameInputRef}
+                        type="text"
+                        value={saveFilename}
+                        onChange={(e) => setSaveFilename(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") confirmSaveToWorkspace()
+                          if (e.key === "Escape") cancelSaveToWorkspace()
+                        }}
+                        placeholder="输入文件名（不含扩展名）"
+                        className="h-9 min-w-[220px] flex-1 rounded-lg border-border/80 bg-background text-xs shadow-none placeholder:text-muted-foreground/80"
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="default"
+                        className="h-9 rounded-lg"
+                        disabled={!saveFilename.trim()}
+                        onClick={confirmSaveToWorkspace}
+                      >
+                        <Check className="size-3.5" strokeWidth={1.8} />
+                        保存
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-9 rounded-lg"
+                        onClick={cancelSaveToWorkspace}
+                      >
+                        取消
+                      </Button>
                     </div>
                   ) : (
-                    aiRecording.actions.map((action, index) => (
-                      <div
-                        key={action.id}
-                        className={cn(
-                          "rounded-xl border px-3 py-3 transition-colors",
-                          aiRecording.status === "recording" &&
-                            index === aiRecording.actions.length - 1
-                            ? "border-status-info/35 bg-status-info/10 shadow-sm"
-                            : "border-border/70 bg-background/90 hover:border-border-emphasis"
-                        )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-9 rounded-lg"
+                        disabled={!aiRecordingScriptReady}
+                        onClick={() => void saveAiRecordingScriptToWorkspace()}
                       >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="rounded-full border border-border/60 bg-background/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-foreground/80">
-                                Step {index + 1}
-                              </span>
-                              <span
-                                className={cn(
-                                  "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
-                                  getAiRecordedActionTone(action.kind)
-                                )}
-                              >
-                                {describeAiRecordedActionKind(action.kind)}
-                              </span>
-                            </div>
-                            <p className="mt-1.5 text-[12px] leading-5 text-foreground/90">
-                              {describeAiRecordedAction(action)}
-                            </p>
-                          </div>
-                          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
-                            {formatAiRecordingTime(action.timestamp)}
-                          </span>
-                        </div>
-                      </div>
-                    ))
+                        <Download className="size-3.5" strokeWidth={1.8} />
+                        保存文件
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-9 rounded-lg"
+                        disabled={!aiRecordingScriptReady}
+                        onClick={() => void copyAiRecordingScriptForBrowser()}
+                      >
+                        <Copy className="size-3.5" strokeWidth={1.8} />
+                        复制给内置浏览器
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className={cn(
+                          "h-9 rounded-lg transition-colors",
+                          copiedAiScript &&
+                            "border-status-nominal/30 bg-status-nominal/10 text-status-nominal hover:bg-status-nominal/15 hover:text-status-nominal"
+                        )}
+                        disabled={!aiRecordingScriptReady}
+                        onClick={() => void copyAiRecordingScript()}
+                      >
+                        {copiedAiScript ? (
+                          <Check className="size-3.5" strokeWidth={1.8} />
+                        ) : (
+                          <Copy className="size-3.5" strokeWidth={1.8} />
+                        )}
+                        {copiedAiScript ? "已复制" : "复制脚本"}
+                      </Button>
+                    </div>
                   )}
                 </div>
               </div>
 
-              <div className="flex min-h-0 flex-col">
-                <div className="border-b border-border/70 px-4 py-3">
-                  <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <div className="flex size-8 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-900 text-slate-200">
-                          <FileCode2 className="size-4" strokeWidth={1.8} />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-foreground">Playwright 脚本</p>
-                          <p className="mt-1 text-[11px] text-muted-foreground">
-                            第一版会优先保留语义化定位；复杂页面仍建议人工复查 locator。
-                          </p>
-                        </div>
-                      </div>
+              <div className="min-h-0 flex-1 p-4 pt-3">
+                <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-900/80 bg-[#0b0f14] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                  <div className="flex items-center justify-between border-b border-white/10 bg-[#11161d] px-4 py-2 text-[11px] text-slate-400">
+                    <div className="flex items-center gap-2">
+                      <FileCode2 className="size-3.5" strokeWidth={1.8} />
+                      <span>playwright.spec.ts 草稿</span>
                     </div>
-
-                    {isSavingToWorkspace ? (
-                      <div className="flex flex-1 flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-muted/25 p-2 xl:max-w-[420px] xl:justify-end">
-                        <Input
-                          ref={saveFilenameInputRef}
-                          type="text"
-                          value={saveFilename}
-                          onChange={(e) => setSaveFilename(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") confirmSaveToWorkspace()
-                            if (e.key === "Escape") cancelSaveToWorkspace()
-                          }}
-                          placeholder="输入文件名（不含扩展名）"
-                          className="h-9 min-w-[220px] flex-1 rounded-lg border-border/80 bg-background text-xs shadow-none placeholder:text-muted-foreground/80"
-                        />
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="default"
-                          className="h-9 rounded-lg"
-                          disabled={!saveFilename.trim()}
-                          onClick={confirmSaveToWorkspace}
-                        >
-                          <Check className="size-3.5" strokeWidth={1.8} />
-                          保存
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          className="h-9 rounded-lg"
-                          onClick={cancelSaveToWorkspace}
-                        >
-                          取消
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="h-9 rounded-lg"
-                          disabled={!aiRecordingScriptReady}
-                          onClick={() => void saveAiRecordingScriptToWorkspace()}
-                        >
-                          <Download className="size-3.5" strokeWidth={1.8} />
-                          保存文件
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="h-9 rounded-lg"
-                          disabled={!aiRecordingScriptReady}
-                          onClick={() => void copyAiRecordingScriptForBrowser()}
-                        >
-                          <Copy className="size-3.5" strokeWidth={1.8} />
-                          复制给内置浏览器
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className={cn(
-                            "h-9 rounded-lg transition-colors",
-                            copiedAiScript &&
-                              "border-status-nominal/30 bg-status-nominal/10 text-status-nominal hover:bg-status-nominal/15 hover:text-status-nominal"
-                          )}
-                          disabled={!aiRecordingScriptReady}
-                          onClick={() => void copyAiRecordingScript()}
-                        >
-                          {copiedAiScript ? (
-                            <Check className="size-3.5" strokeWidth={1.8} />
-                          ) : (
-                            <Copy className="size-3.5" strokeWidth={1.8} />
-                          )}
-                          {copiedAiScript ? "已复制" : "复制脚本"}
-                        </Button>
-                      </div>
-                    )}
+                    <span className="font-mono tabular-nums">
+                      {aiRecordingScriptReady ? `${aiRecordingScriptLineCount} lines` : "waiting"}
+                    </span>
                   </div>
-                </div>
-
-                <div className="min-h-0 flex-1 p-4 pt-3">
-                  <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-900/80 bg-[#0b0f14] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-                    <div className="flex items-center justify-between border-b border-white/10 bg-[#11161d] px-4 py-2 text-[11px] text-slate-400">
-                      <div className="flex items-center gap-2">
-                        <FileCode2 className="size-3.5" strokeWidth={1.8} />
-                        <span>playwright.spec.ts 草稿</span>
-                      </div>
-                      <span className="font-mono tabular-nums">
-                        {aiRecordingScriptReady ? `${aiRecordingScriptLineCount} lines` : "waiting"}
-                      </span>
-                    </div>
-                    <pre className="min-h-0 flex-1 overflow-auto px-4 py-4 font-mono text-[12px] leading-6 text-slate-100">
-                      <code>{aiRecording.script || "// No script generated yet."}</code>
-                    </pre>
-                  </div>
+                  <pre className="min-h-0 flex-1 overflow-auto px-4 py-4 font-mono text-[12px] leading-6 text-slate-100  max-h-[300px]">
+                    <code>{aiRecording.script || "// No script generated yet."}</code>
+                  </pre>
                 </div>
               </div>
             </div>
-          ) : (
-            <div className="px-5 py-6 text-sm text-muted-foreground">
-              <div className="flex items-start gap-3 rounded-xl border border-status-warning/25 bg-status-warning/10 px-4 py-4 text-status-warning">
-                <Lock className="mt-0.5 size-4 shrink-0" strokeWidth={1.8} />
-                <div className="min-w-0">
-                  <p className="font-medium text-foreground">当前录制由其他任务持有</p>
-                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                    请切换回对应任务查看录制详情，或先停止那边的录制。
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
+          </div>
         </DialogContent>
       </Dialog>
     </>

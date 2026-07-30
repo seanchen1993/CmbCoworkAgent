@@ -111,14 +111,11 @@ export type AiRecordedBrowserAction =
 
 export type AiRecordingStatus = "idle" | "recording" | "completed"
 
-export interface AiRecordingStartOptions {
-  threadId?: string
-}
+export interface AiRecordingStartOptions {}
 
 export interface AiRecordingSession {
   id?: string
   status: AiRecordingStatus
-  threadId?: string
   startedAt?: string
   stoppedAt?: string
   actions: AiRecordedBrowserAction[]

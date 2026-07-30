@@ -23,7 +23,7 @@ describe("AI recording service", () => {
     })
     recordSuccessfulAiBrowserToolCall({
       toolName: "browser_click",
-      threadId: "thread-1",
+      threadId: "thread-2",
       args: { element: "Login button" }
     })
     recordSuccessfulAiBrowserToolCall({
@@ -70,7 +70,7 @@ describe("AI recording service", () => {
     expect(session.script).not.toContain("super-secret")
   })
 
-  it("ignores unsupported tools and calls from other threads", () => {
+  it("ignores unsupported tools but records calls from any thread", () => {
     startAiRecording({ threadId: "thread-1" })
 
     recordSuccessfulAiBrowserToolCall({
@@ -85,15 +85,22 @@ describe("AI recording service", () => {
     })
 
     const session = getAiRecording()
-    expect(session.actions).toHaveLength(0)
+    expect(session.actions).toEqual([
+      expect.objectContaining({
+        kind: "navigate",
+        url: "https://should-not-record.test"
+      })
+    ])
   })
 
-  it("prevents another thread from taking over an active recording session", () => {
-    startAiRecording({ threadId: "thread-a" })
+  it("reuses the current recording session across repeated starts", () => {
+    const firstSession = startAiRecording({ threadId: "thread-a" })
+    const secondSession = startAiRecording({ threadId: "thread-b" })
 
-    expect(() => startAiRecording({ threadId: "thread-b" })).toThrow(
-      "已有其他任务正在进行 AI 录制，请先停止当前录制。"
-    )
+    expect(secondSession).toMatchObject({
+      id: firstSession.id,
+      status: "recording"
+    })
   })
 
   it("dedupes consecutive identical click, select, and press actions", () => {
