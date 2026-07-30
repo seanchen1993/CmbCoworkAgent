@@ -737,6 +737,10 @@ if (!gotTheLock) {
         console.warn(
           "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
         )
+      } else if (traceStorage.migrationSkipped) {
+        console.log(
+          `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
+        )
       } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
         console.warn(
           `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`

@@ -10,7 +10,7 @@ import {
   writeFileSync
 } from "fs"
 import { tmpdir } from "os"
-import { join } from "path"
+import { dirname, join } from "path"
 import { afterEach, describe, expect, it } from "vitest"
 import { resolveTraceStorageMode, TraceLocalStorage, type TraceKeyProtector } from "./local-storage"
 
@@ -42,6 +42,7 @@ class TestKeyProtector implements TraceKeyProtector {
 }
 
 const tempRoots: string[] = []
+const MIGRATION_MARKER_FILE_NAME = ".trace-migration-v1.complete"
 
 function makeRoot(prefix: string): string {
   const root = mkdtempSync(join(tmpdir(), prefix))
@@ -148,12 +149,95 @@ describe("encrypted local trace storage", () => {
       expect(statSync(threadDir).mode & 0o777).toBe(0o700)
       expect(statSync(traceFile).mode & 0o777).toBe(0o600)
       expect(statSync(join(root, ".trace-key-v1.json")).mode & 0o777).toBe(0o600)
+      expect(statSync(join(root, MIGRATION_MARKER_FILE_NAME)).mode & 0o777).toBe(0o600)
     }
     expect(Math.abs(statSync(traceFile).mtime.getTime() - legacyMtime.getTime())).toBeLessThan(1000)
   })
 
+  it("skips unchanged trace contents after a successful migration", () => {
+    const root = makeRoot("trace-storage-migration-marker-")
+    const threadDir = join(root, "thread-legacy")
+    const traceFile = join(threadDir, "legacy.jsonl")
+    mkdirSync(threadDir, { recursive: true })
+    writeFileSync(traceFile, '{"secret":"legacy-value"}\n', "utf8")
+
+    const first = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(first.initialize()).toMatchObject({
+      ready: true,
+      migratedFiles: 1,
+      migrationSkipped: false
+    })
+    const migratedContent = readFileSync(traceFile, "utf8")
+    const markerPath = join(root, MIGRATION_MARKER_FILE_NAME)
+    const markerContent = readFileSync(markerPath, "utf8")
+
+    const restarted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(restarted.initialize()).toMatchObject({
+      ready: true,
+      migratedFiles: 0,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: true
+    })
+    expect(readFileSync(traceFile, "utf8")).toBe(migratedContent)
+    expect(readFileSync(markerPath, "utf8")).toBe(markerContent)
+  })
+
+  it("rechecks only trace directories changed after the migration marker", () => {
+    const root = makeRoot("trace-storage-incremental-migration-")
+    const changedDir = join(root, "thread-changed")
+    const unchangedDir = join(root, "thread-unchanged")
+    const changedExistingFile = join(changedDir, "existing.jsonl")
+    const unchangedFile = join(unchangedDir, "existing.jsonl")
+    mkdirSync(changedDir, { recursive: true })
+    mkdirSync(unchangedDir, { recursive: true })
+    writeFileSync(changedExistingFile, '{"secret":"changed-existing"}\n', "utf8")
+    writeFileSync(unchangedFile, '{"secret":"unchanged-existing"}\n', "utf8")
+
+    const first = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(first.initialize()).toMatchObject({ migratedFiles: 2, failedFiles: 0 })
+    const unchangedEncryptedContent = readFileSync(unchangedFile, "utf8")
+
+    const newLegacyFile = join(changedDir, "restored-legacy.jsonl")
+    writeFileSync(newLegacyFile, '{"secret":"restored-after-migration"}\n', "utf8")
+    const changedDirectoryTime = new Date(Date.now() + 5_000)
+    utimesSync(changedDir, changedDirectoryTime, changedDirectoryTime)
+
+    const restarted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(restarted.initialize()).toMatchObject({
+      ready: true,
+      migratedFiles: 1,
+      protectedFiles: 1,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    expect(readFileSync(newLegacyFile, "utf8")).not.toContain("restored-after-migration")
+    expect(readFileSync(unchangedFile, "utf8")).toBe(unchangedEncryptedContent)
+
+    const verified = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(verified.initialize()).toMatchObject({ migrationSkipped: true, failedFiles: 0 })
+  })
+
   it("fails closed when secure key protection is unavailable", () => {
     const root = makeRoot("trace-storage-unavailable-")
+    const legacyFile = join(root, "thread-legacy", "legacy.jsonl")
+    mkdirSync(dirname(legacyFile), { recursive: true })
+    writeFileSync(legacyFile, '{"secret":"retry-after-key-recovery"}\n', "utf8")
     const storage = new TraceLocalStorage(root, {
       mode: "encrypted",
       protector: new TestKeyProtector(false)
@@ -163,8 +247,22 @@ describe("encrypted local trace storage", () => {
 
     expect(result.ready).toBe(false)
     expect(result.reason).toContain("unavailable")
+    expect(existsSync(join(root, MIGRATION_MARKER_FILE_NAME))).toBe(false)
     expect(() => storage.appendJsonLine(traceFile, '{"secret":"value"}')).toThrow()
     expect(existsSync(traceFile)).toBe(false)
+    expect(readFileSync(legacyFile, "utf8")).toContain("retry-after-key-recovery")
+
+    const recovered = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(recovered.initialize()).toMatchObject({
+      ready: true,
+      migratedFiles: 1,
+      failedFiles: 0
+    })
+    expect(readFileSync(legacyFile, "utf8")).not.toContain("retry-after-key-recovery")
+    expect(existsSync(join(root, MIGRATION_MARKER_FILE_NAME))).toBe(true)
   })
 
   it("rejects Electron's Linux basic_text backend", () => {
@@ -197,6 +295,36 @@ describe("trace storage modes", () => {
 
     expect(storage.appendJsonLine(traceFile, '{"fixture":"plain"}')).toBe(true)
     expect(readFileSync(traceFile, "utf8")).toContain('"fixture":"plain"')
+  })
+
+  it("invalidates the migration marker before plaintext mode can add traces", () => {
+    const root = makeRoot("trace-storage-plaintext-invalidates-marker-")
+    const markerPath = join(root, MIGRATION_MARKER_FILE_NAME)
+    const encrypted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(encrypted.initialize()).toMatchObject({ ready: true, failedFiles: 0 })
+    expect(existsSync(markerPath)).toBe(true)
+
+    const plaintext = new TraceLocalStorage(root, { mode: "plaintext" })
+    expect(plaintext.initialize()).toMatchObject({ ready: true })
+    expect(existsSync(markerPath)).toBe(false)
+    const traceFile = join(root, "thread-legacy", "legacy.jsonl")
+    expect(plaintext.appendJsonLine(traceFile, '{"secret":"plaintext-after-marker"}')).toBe(true)
+
+    const restarted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(restarted.initialize()).toMatchObject({
+      ready: true,
+      migratedFiles: 1,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    expect(readFileSync(traceFile, "utf8")).not.toContain("plaintext-after-marker")
+    expect(existsSync(markerPath)).toBe(true)
   })
 
   it("does not create a trace file when storage is off", () => {
