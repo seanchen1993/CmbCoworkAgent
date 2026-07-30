@@ -4,6 +4,8 @@ const CHATX_USER_MESSAGE_PREFIX = "chatx-user:"
 const CHATX_ASSISTANT_MESSAGE_PREFIX = "chatx-assistant:"
 const CHATX_TOOL_MESSAGE_PREFIX = "chatx-tool:"
 const CHATX_TOOL_CALL_PREFIX = "chatx-tool-call:"
+const CHATX_SUBAGENT_MESSAGE_PREFIX = "chatx-subagent-message:"
+const CHATX_SUBAGENT_LOG_PREFIX = "chatx-subagent-log:"
 
 export function getChatXUserMessageId(msgId: string): string {
   return `${CHATX_USER_MESSAGE_PREFIX}${msgId}`
@@ -72,6 +74,180 @@ function namespaceSubagents(turnId: string, subagents: unknown): unknown {
   })
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+function scopeOpaqueId(prefix: string, turnId: string, id: string): string {
+  return id.startsWith(prefix) ? id : `${prefix}${turnId}:${id}`
+}
+
+function namespaceSubagentAssistantMessageId(
+  turnId: string,
+  id: string,
+  rawSubagentId: string,
+  scopedSubagentId: string
+): string {
+  const syntheticPrefix = `subagent-assistant-${rawSubagentId}-`
+  if (id.startsWith(syntheticPrefix)) {
+    return `subagent-assistant-${scopedSubagentId}-${id.slice(syntheticPrefix.length)}`
+  }
+  return getChatXAssistantMessageId(turnId, id)
+}
+
+function namespaceSubagentTranscriptMessage(
+  turnId: string,
+  rawSubagentId: string,
+  scopedSubagentId: string,
+  value: unknown
+): unknown {
+  if (!isRecord(value)) return value
+  const message = value
+  const rawId = typeof message.id === "string" ? message.id : undefined
+  let id = rawId
+  if (rawId === `subagent-prompt-${rawSubagentId}`) {
+    id = `subagent-prompt-${scopedSubagentId}`
+  } else if (rawId === `subagent-final-${rawSubagentId}`) {
+    id = `subagent-final-${scopedSubagentId}`
+  } else if (rawId && message.role === "tool") {
+    id = getChatXToolMessageId(turnId, rawId)
+  } else if (rawId && message.role === "assistant") {
+    id = namespaceSubagentAssistantMessageId(
+      turnId,
+      rawId,
+      rawSubagentId,
+      scopedSubagentId
+    )
+  } else if (rawId) {
+    id = scopeOpaqueId(CHATX_SUBAGENT_MESSAGE_PREFIX, turnId, rawId)
+  }
+
+  const namespaceAssistantId = (candidate: unknown): unknown =>
+    typeof candidate === "string"
+      ? namespaceSubagentAssistantMessageId(
+          turnId,
+          candidate,
+          rawSubagentId,
+          scopedSubagentId
+        )
+      : candidate
+  const namespaceAssistantIds = (candidate: unknown): unknown =>
+    Array.isArray(candidate) ? candidate.map(namespaceAssistantId) : candidate
+
+  return {
+    ...message,
+    ...(id ? { id } : {}),
+    // `subagent_tool_call_id` is the provider/checkpoint identity used by fork
+    // filtering. Keep it raw; only UI routing ids are scoped per ChatX turn.
+    ...(typeof message.tool_call_id === "string"
+      ? { tool_call_id: getChatXToolCallId(turnId, message.tool_call_id) }
+      : {}),
+    ...(Array.isArray(message.tool_calls)
+      ? { tool_calls: namespaceToolCalls(turnId, message.tool_calls) }
+      : {}),
+    ...(message.replaces_message_id !== undefined
+      ? { replaces_message_id: namespaceAssistantId(message.replaces_message_id) }
+      : {}),
+    ...(message.replaces_message_id_prefix !== undefined
+      ? { replaces_message_id_prefix: namespaceAssistantId(message.replaces_message_id_prefix) }
+      : {}),
+    ...(message.compatible_replaces_message_id_prefix !== undefined
+      ? {
+          compatible_replaces_message_id_prefix: namespaceAssistantId(
+            message.compatible_replaces_message_id_prefix
+          )
+        }
+      : {}),
+    ...(message.replaced_message_ids !== undefined
+      ? { replaced_message_ids: namespaceAssistantIds(message.replaced_message_ids) }
+      : {}),
+    ...(message.replaced_message_id_prefixes !== undefined
+      ? {
+          replaced_message_id_prefixes: namespaceAssistantIds(
+            message.replaced_message_id_prefixes
+          )
+        }
+      : {}),
+    ...(message.compatible_replaced_message_id_prefixes !== undefined
+      ? {
+          compatible_replaced_message_id_prefixes: namespaceAssistantIds(
+            message.compatible_replaced_message_id_prefixes
+          )
+        }
+      : {})
+  }
+}
+
+function namespaceSubagentTranscriptEvent(
+  turnId: string,
+  event: Extract<SchedulerEvent, { type: "custom" }>
+): SchedulerEvent {
+  const rawSubagentId = event.data.subagentId
+  if (typeof rawSubagentId !== "string") return event
+  const scopedSubagentId = getChatXToolCallId(turnId, rawSubagentId)
+  return {
+    ...event,
+    data: {
+      ...event.data,
+      subagentId: scopedSubagentId,
+      ...(event.data.subagentMessage !== undefined
+        ? {
+            subagentMessage: namespaceSubagentTranscriptMessage(
+              turnId,
+              rawSubagentId,
+              scopedSubagentId,
+              event.data.subagentMessage
+            )
+          }
+        : {}),
+      ...(Array.isArray(event.data.subagentMessages)
+        ? {
+            subagentMessages: event.data.subagentMessages.map((message) =>
+              namespaceSubagentTranscriptMessage(
+                turnId,
+                rawSubagentId,
+                scopedSubagentId,
+                message
+              )
+            )
+          }
+        : {})
+    }
+  }
+}
+
+function namespaceSubagentLogEvent(
+  turnId: string,
+  event: Extract<SchedulerEvent, { type: "custom" }>
+): SchedulerEvent {
+  if (!isRecord(event.data.entry)) return event
+  const entry = event.data.entry
+  const kind = entry.kind
+  return {
+    ...event,
+    data: {
+      ...event.data,
+      entry: {
+        ...entry,
+        ...(typeof entry.id === "string"
+          ? {
+              id:
+                kind === "assistant"
+                  ? getChatXAssistantMessageId(turnId, entry.id)
+                  : scopeOpaqueId(CHATX_SUBAGENT_LOG_PREFIX, turnId, entry.id)
+            }
+          : {}),
+        ...(typeof entry.toolCallId === "string"
+          ? { toolCallId: getChatXToolCallId(turnId, entry.toolCallId) }
+          : {}),
+        ...(typeof entry.subagentToolCallId === "string"
+          ? { subagentToolCallId: getChatXToolCallId(turnId, entry.subagentToolCallId) }
+          : {})
+      }
+    }
+  }
+}
+
 export function namespaceChatXStreamEventIds(
   event: SchedulerEvent,
   currentMsgId: string
@@ -99,14 +275,22 @@ export function namespaceChatXStreamEventIds(
   }
 
   if (event.type === "custom") {
-    if (event.data.type !== "subagents" || !Array.isArray(event.data.subagents)) return event
-    return {
-      ...event,
-      data: {
-        ...event.data,
-        subagents: namespaceSubagents(currentMsgId, event.data.subagents)
+    if (event.data.type === "subagents" && Array.isArray(event.data.subagents)) {
+      return {
+        ...event,
+        data: {
+          ...event.data,
+          subagents: namespaceSubagents(currentMsgId, event.data.subagents)
+        }
       }
     }
+    if (event.data.type === "subagent_transcript_message") {
+      return namespaceSubagentTranscriptEvent(currentMsgId, event)
+    }
+    if (event.data.type === "subagent_log_entry") {
+      return namespaceSubagentLogEvent(currentMsgId, event)
+    }
+    return event
   }
 
   if (event.type !== "full-messages") return event

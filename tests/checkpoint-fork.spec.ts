@@ -41,6 +41,7 @@ import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId
 } from "../src/shared/message-role-collision"
+import { buildSubagentTaskInvocationIdentity } from "../src/shared/subagent-invocation-identity"
 
 function config(threadId: string, checkpointId?: string, checkpointNs = ""): RunnableConfig {
   return {
@@ -788,6 +789,282 @@ function testThreadValuesFiltering(): void {
   console.log("PASS fork thread_values are rebuilt from the checkpoint transcript")
 }
 
+function testRepeatedTaskInvocationForkFilteringPreservesSidecarRefs(): void {
+  const rawTaskId = "task-reused-at-fork"
+  const firstTaskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "first invocation" }
+  }
+  const secondTaskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "second invocation" }
+  }
+  const firstParent = {
+    id: "parent-first-task-invocation",
+    type: "ai",
+    content: "",
+    tool_calls: [firstTaskCall]
+  }
+  const secondParent = {
+    id: "parent-second-task-invocation",
+    type: "ai",
+    content: "",
+    tool_calls: [secondTaskCall]
+  }
+  const firstInvocationScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: firstParent.id,
+    parentOccurrence: 1,
+    parentContent: firstParent.content,
+    parentToolCalls: firstParent.tool_calls,
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: firstTaskCall.args
+  })
+  const secondInvocationScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: secondParent.id,
+    parentOccurrence: 1,
+    parentContent: secondParent.content,
+    parentToolCalls: secondParent.tool_calls,
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: secondTaskCall.args
+  })
+  const firstExecutionId = rawTaskId
+  const secondExecutionId = `${rawTaskId}::invocation-second`
+  const firstContentRef = {
+    v: 1,
+    sha256: "1".repeat(64),
+    bytes: 48_001,
+    kind: "content"
+  }
+  const firstToolCallsRef = {
+    v: 1,
+    sha256: "2".repeat(64),
+    bytes: 48_002,
+    kind: "tool_calls"
+  }
+  const secondContentRef = {
+    v: 1,
+    sha256: "3".repeat(64),
+    bytes: 48_003,
+    kind: "content"
+  }
+  const secondToolCallsRef = {
+    v: 1,
+    sha256: "4".repeat(64),
+    bytes: 48_004,
+    kind: "tool_calls"
+  }
+  const sourceTranscripts = {
+    [firstExecutionId]: [
+      {
+        id: `subagent-prompt-${firstExecutionId}`,
+        role: "user",
+        content: "first invocation",
+        subagent_tool_call_id: rawTaskId,
+        subagent_invocation_scope: firstInvocationScope
+      },
+      {
+        id: `subagent-final-${firstExecutionId}`,
+        role: "assistant",
+        content: "first sidecar preview",
+        content_ref: firstContentRef,
+        tool_calls_ref: firstToolCallsRef
+      }
+    ],
+    [secondExecutionId]: [
+      {
+        id: `subagent-prompt-${secondExecutionId}`,
+        role: "user",
+        content: "second invocation",
+        subagent_tool_call_id: rawTaskId,
+        subagent_invocation_scope: secondInvocationScope
+      },
+      {
+        id: `subagent-final-${secondExecutionId}`,
+        role: "assistant",
+        content: "second sidecar preview",
+        content_ref: secondContentRef,
+        tool_calls_ref: secondToolCallsRef
+      }
+    ]
+  }
+
+  const firstBoundary = makeCheckpoint("cp-first-reused-task-boundary")
+  ;(firstBoundary.channel_values as Record<string, unknown>).messages = [
+    { id: "user-before-first-task", type: "human", content: "first" },
+    firstParent,
+    {
+      id: "first-task-result",
+      type: "tool",
+      content: "first result",
+      tool_call_id: rawTaskId,
+      name: "task"
+    }
+  ]
+  const secondBoundary = makeCheckpoint("cp-second-reused-task-boundary")
+  ;(secondBoundary.channel_values as Record<string, unknown>).messages = [
+    ...((firstBoundary.channel_values as Record<string, unknown>).messages as unknown[]),
+    { id: "user-before-second-task", type: "human", content: "second" },
+    secondParent,
+    {
+      id: "second-task-result",
+      type: "tool",
+      content: "second result",
+      tool_call_id: rawTaskId,
+      name: "task"
+    }
+  ]
+
+  const bothFiltered = buildFilteredThreadValues(
+    { subagentTranscripts: sourceTranscripts },
+    deriveCheckpointTranscriptIndex(secondBoundary)
+  ).subagentTranscripts as Record<string, Array<Record<string, unknown>>>
+  assert.deepEqual(Object.keys(bothFiltered), [firstExecutionId, secondExecutionId])
+  assert.deepEqual(bothFiltered[firstExecutionId][1].content_ref, firstContentRef)
+  assert.deepEqual(bothFiltered[firstExecutionId][1].tool_calls_ref, firstToolCallsRef)
+  assert.deepEqual(bothFiltered[secondExecutionId][1].content_ref, secondContentRef)
+  assert.deepEqual(bothFiltered[secondExecutionId][1].tool_calls_ref, secondToolCallsRef)
+
+  const firstOnlyFiltered = buildFilteredThreadValues(
+    { subagentTranscripts: sourceTranscripts },
+    deriveCheckpointTranscriptIndex(firstBoundary)
+  ).subagentTranscripts as Record<string, Array<Record<string, unknown>>>
+  assert.deepEqual(
+    Object.keys(firstOnlyFiltered),
+    [firstExecutionId],
+    "forking at invocation one must not retain invocation two from the reused raw task ID"
+  )
+  assert.deepEqual(firstOnlyFiltered[firstExecutionId], sourceTranscripts[firstExecutionId])
+  console.log("PASS repeated task invocation fork filtering preserves exact sidecar references")
+}
+
+function testIdlessTaskProviderAdoptionKeepsInvocationBucket(): void {
+  const rawTaskId = "task-idless-provider-fork"
+  const providerParentId = "provider-parent-after-idless-live"
+  const taskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "adopt provider parent" }
+  }
+  const providerSnapshotParent = {
+    id: ["langchain_core", "messages", "AIMessage"],
+    kwargs: {
+      id: providerParentId,
+      content: "",
+      tool_calls: [taskCall],
+      additional_kwargs: {}
+    }
+  }
+  const invocationScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: providerParentId,
+    parentOccurrence: 1,
+    parentContent: providerSnapshotParent.kwargs.content,
+    parentToolCalls: providerSnapshotParent.kwargs.tool_calls,
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: taskCall.args
+  })
+  const executionId = `${rawTaskId}::invocation-idless-live`
+  const checkpoint = makeCheckpoint("cp-idless-provider-adoption")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [providerSnapshotParent]
+  const index = deriveCheckpointTranscriptIndex(checkpoint)
+  assert.deepEqual(index.subagentTranscriptInvocations, [
+    { toolCallId: rawTaskId, invocationScope }
+  ])
+
+  const filtered = buildFilteredThreadValues(
+    {
+      subagentTranscripts: {
+        [executionId]: [
+          {
+            id: `subagent-prompt-${executionId}`,
+            role: "user",
+            content: "adopt provider parent",
+            subagent_tool_call_id: rawTaskId,
+            subagent_invocation_scope: invocationScope
+          }
+        ]
+      }
+    },
+    index
+  ).subagentTranscripts as Record<string, unknown>
+  assert.deepEqual(
+    Object.keys(filtered),
+    [executionId],
+    "the values/provider identity adopted after an id-less live parent must keep its bucket"
+  )
+  console.log("PASS id-less task provider adoption shares the checkpoint invocation identity")
+}
+
+function testCrossRoleParentIdCollisionKeepsInvocationBucket(): void {
+  const sharedParentId = "shared-human-and-task-parent-id"
+  const rawTaskId = "task-cross-role-parent-fork"
+  const taskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "cross-role provider identity" }
+  }
+  const taskParent = {
+    id: ["langchain_core", "messages", "AIMessage"],
+    kwargs: {
+      id: sharedParentId,
+      content: "",
+      tool_calls: [taskCall],
+      additional_kwargs: {}
+    }
+  }
+  const invocationScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: sharedParentId,
+    parentOccurrence: 1,
+    parentContent: taskParent.kwargs.content,
+    parentToolCalls: taskParent.kwargs.tool_calls,
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: taskCall.args
+  })
+  const executionId = `${rawTaskId}::invocation-cross-role`
+  const checkpoint = makeCheckpoint("cp-cross-role-parent-id")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: sharedParentId, type: "human", content: "human owns the raw render id" },
+    taskParent
+  ]
+  const index = deriveCheckpointTranscriptIndex(checkpoint)
+  assert.notEqual(
+    index.visibleMessages[1]?.renderId,
+    sharedParentId,
+    "the assistant should receive a collision-safe render ID"
+  )
+  assert.deepEqual(index.subagentTranscriptInvocations, [
+    { toolCallId: rawTaskId, invocationScope }
+  ])
+
+  const filtered = buildFilteredThreadValues(
+    {
+      subagentTranscripts: {
+        [executionId]: [
+          {
+            id: `subagent-prompt-${executionId}`,
+            role: "user",
+            content: "cross-role provider identity",
+            subagent_tool_call_id: rawTaskId,
+            subagent_invocation_scope: invocationScope
+          }
+        ]
+      }
+    },
+    index
+  ).subagentTranscripts as Record<string, unknown>
+  assert.deepEqual(
+    Object.keys(filtered),
+    [executionId],
+    "render-ID collision repair must not change the shared raw parent invocation identity"
+  )
+  console.log("PASS cross-role parent ID reuse keeps the shared invocation identity")
+}
+
 function testPersistedTranscriptFilteringUsesCheckpointBoundary(): void {
   const checkpoint = makeCheckpoint("cp-transcript-filter")
   const index = deriveCheckpointTranscriptIndex(checkpoint)
@@ -1514,6 +1791,9 @@ async function main(): Promise<void> {
     await testConfigurableCheckpointRetention(dir)
     await testMetadataUpdatePreservesCheckpointShape(dir)
     testThreadValuesFiltering()
+    testRepeatedTaskInvocationForkFilteringPreservesSidecarRefs()
+    testIdlessTaskProviderAdoptionKeepsInvocationBucket()
+    testCrossRoleParentIdCollisionKeepsInvocationBucket()
     testPersistedTranscriptFilteringUsesCheckpointBoundary()
     testMessagesAfterCheckpointVisibleIds()
     testMessagesAfterCheckpointMatchesRoleScopedCollisionIdentity()

@@ -51,7 +51,10 @@ import type {
   ForkableCheckpoint,
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
-  ThreadForkResponse
+  ThreadForkResponse,
+  SubagentTranscriptPage,
+  SubagentTranscriptBlobExportResult,
+  SubagentTranscriptBlobField
 } from "../main/types"
 import {
   classifyAgentStreamDelivery,
@@ -171,6 +174,7 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
@@ -656,6 +660,9 @@ const api = {
     get: (threadId: string): Promise<Thread | null> => {
       return ipcRenderer.invoke("threads:get", threadId)
     },
+    getProjectSubagentsAvailable: (threadId: string): Promise<boolean> => {
+      return ipcRenderer.invoke("threads:getProjectSubagentsAvailable", threadId)
+    },
     create: (metadata?: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:create", metadata)
     },
@@ -675,6 +682,40 @@ const api = {
     },
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:mergeThreadValues", { threadId, patch })
+    },
+    getSubagentTranscripts: (threadId: string): Promise<Record<string, unknown>> => {
+      return ipcRenderer.invoke("threads:getSubagentTranscripts", threadId)
+    },
+    getSubagentTranscript: (
+      threadId: string,
+      subagentId: string,
+      before?: number
+    ): Promise<SubagentTranscriptPage> => {
+      return ipcRenderer.invoke("threads:getSubagentTranscript", { threadId, subagentId, before })
+    },
+    exportSubagentTranscriptBlob: (
+      threadId: string,
+      subagentId: string,
+      messageIndex: number,
+      expectedMessageId: string,
+      field: SubagentTranscriptBlobField
+    ): Promise<SubagentTranscriptBlobExportResult> => {
+      return ipcRenderer.invoke("threads:exportSubagentTranscriptBlob", {
+        threadId,
+        subagentId,
+        messageIndex,
+        expectedMessageId,
+        field
+      })
+    },
+    persistSubagentTranscripts: (
+      threadId: string,
+      transcripts: Record<string, unknown>
+    ): Promise<Record<string, unknown>> => {
+      return ipcRenderer.invoke("threads:persistSubagentTranscripts", {
+        threadId,
+        transcripts
+      })
     },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
@@ -1147,7 +1188,7 @@ const api = {
       return ipcRenderer.invoke("workspace:readBinaryFile", { threadId, filePath })
     },
     readExternalFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -1155,10 +1196,10 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalFile", { token })
     },
     readExternalBinaryFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -1166,7 +1207,17 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalBinaryFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalBinaryFile", { token })
+    },
+    requestExternalFileRead: (
+      filePath: string
+    ): Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:requestExternalFileRead", filePath)
     },
     clearWorktreeContext: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("workspace:clearWorktreeContext", threadId) as Promise<void>
@@ -1461,11 +1512,11 @@ const api = {
       >
     },
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:removeWorktree", {
-        gitRoot,
+        threadId,
         worktreePath
       }) as Promise<{ success: boolean; error?: string }>
     },
@@ -1570,9 +1621,9 @@ const api = {
     },
     // Listen for file changes in the workspace
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string }) => void
+      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
     ): (() => void) => {
-      const handler = (_: unknown, data: { threadId: string; workspacePath: string }): void => {
+      const handler = (_: unknown, data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }): void => {
         callback(data)
       }
       ipcRenderer.on("workspace:files-changed", handler)
@@ -1587,13 +1638,14 @@ const api = {
     list: (): Promise<PetManifest[]> => {
       return ipcRenderer.invoke("pet:list") as Promise<PetManifest[]>
     },
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ): Promise<{ success: boolean; dataUrl?: string; error?: string }> => {
-      return ipcRenderer.invoke("pet:getSpriteDataUrl", directoryId, source) as Promise<{
+    ): Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }> => {
+      return ipcRenderer.invoke("pet:getSpriteBytes", directoryId, source) as Promise<{
         success: boolean
-        dataUrl?: string
+        bytes?: Uint8Array
+        mimeType?: string
         error?: string
       }>
     },
@@ -1610,6 +1662,11 @@ const api = {
     },
     updateSettings: (settings: Partial<PetSettings>): Promise<PetSettings> => {
       return ipcRenderer.invoke("pet:updateSettings", settings) as Promise<PetSettings>
+    },
+    onSettingsChanged: (callback: (settings: PetSettings) => void): (() => void) => {
+      const handler = (_event: unknown, settings: PetSettings): void => callback(settings)
+      ipcRenderer.on(PET_SETTINGS_CHANGED_CHANNEL, handler)
+      return () => ipcRenderer.removeListener(PET_SETTINGS_CHANGED_CHANNEL, handler)
     },
     uploadCustomFolder: (): Promise<{ success: boolean; pet?: PetManifest; error?: string }> => {
       return ipcRenderer.invoke("pet:uploadCustomFolder") as Promise<{

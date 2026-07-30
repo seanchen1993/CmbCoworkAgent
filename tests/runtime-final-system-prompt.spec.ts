@@ -450,6 +450,24 @@ function testPluginAgentsFinalPrompt(workspacePath: string): string {
   return finalPrompt
 }
 
+function testSoloPromptOmitsTaskToolGuidance(workspacePath: string): void {
+  const soloPrompt = buildBaseRuntimePrompt(workspacePath, undefined, {
+    includeSubagents: false
+  })
+  const multiPrompt = buildBaseRuntimePrompt(workspacePath, undefined, {
+    includeSubagents: true
+  })
+
+  assert(
+    !soloPrompt.includes("## Working with Subagents (task tool)"),
+    "Solo prompt should omit task guidance"
+  )
+  assert(
+    multiPrompt.includes("## Working with Subagents (task tool)"),
+    "Multi prompt should include task guidance"
+  )
+}
+
 async function run(): Promise<void> {
   const cliOptions = parseCliOptions(process.argv.slice(2))
   if (cliOptions.help) {
@@ -469,6 +487,8 @@ async function run(): Promise<void> {
     const pluginPrompt = testPluginAgentsFinalPrompt(workspacePath)
     printFinalPrompt("PLUGIN AGENTS", pluginPrompt)
     console.log("PASS plugin AGENTS final system prompt")
+    testSoloPromptOmitsTaskToolGuidance(workspacePath)
+    console.log("PASS Solo task-tool prompt exclusion")
     testTaskSubagentPromptModeMatrix()
     console.log("PASS task subagent prompt mode matrix")
   })

@@ -289,6 +289,7 @@ import {
   buildHarnessFeatureAgentContext,
   markHarnessProjectSystemConstraintsLoaded,
   readHarnessFeatureMetadata,
+  resolveHarnessProjectTaskToolEnabled,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
@@ -798,18 +799,30 @@ function getHarnessAgentContext(
   metadata: Record<string, unknown>,
   options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
 ): HarnessAgentContext {
-  const isHarnessProjectSession =
-    Boolean(metadata.harnessProjectSession) &&
+  const harnessProjectSession =
+    metadata.harnessProjectSession &&
     typeof metadata.harnessProjectSession === "object" &&
     !Array.isArray(metadata.harnessProjectSession)
+      ? (metadata.harnessProjectSession as Record<string, unknown>)
+      : undefined
+  const isHarnessProjectSession = Boolean(harnessProjectSession)
+  const harnessFeature = readHarnessFeatureMetadata(metadata)
+  const isHarnessProjectContext = isHarnessProjectSession || Boolean(harnessFeature)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
+    const projectSessionTaskToolEnabled =
+      typeof harnessProjectSession?.projectId === "string"
+        ? resolveHarnessProjectTaskToolEnabled(harnessProjectSession.projectId)
+        : undefined
     const featureContext = buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
     if (!featureContext) {
       return {
         ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
+        ...(projectSessionTaskToolEnabled !== undefined
+          ? { enableTaskTool: projectSessionTaskToolEnabled }
+          : {}),
         ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
       }
     }
@@ -853,6 +866,10 @@ function getHarnessAgentContext(
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
     return {
       ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
+      ...(isHarnessProjectContext ? { enableTaskTool: false } : {}),
+      ...(harnessFeature
+        ? { featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }
+        : {}),
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
     }
   }
@@ -2866,7 +2883,14 @@ function buildNormalModeGuardMessage(state: NormalModeGuardState): string {
     .map((worker) => `${worker.worker_id}: ${worker.description}`)
     .join("; ")
   const suffix = workerList ? `相关 worker：${workerList}` : "请先切回 Agent Team 处理这些结果。"
-  return "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent。" + suffix
+  return "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切换到 Solo 或 Multi。" + suffix
+}
+
+function shouldDisableNormalModeSubagents(
+  agentMode: AgentMode,
+  metadata: Record<string, unknown>
+): boolean {
+  return agentMode === "normal" && metadata.subagentsEnabled === false
 }
 
 function renderCoordinatorWorkerNotifications(
@@ -6838,7 +6862,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }).catch(() => null)
         throwIfInvokeAborted()
         let effectiveModelId = invokeRoutingResult?.resolvedModelId ?? requestedModelId
-        if (effectiveAgentMode === "normal") {
+        const normalModeSubagentsEnabled =
+          effectiveAgentMode === "normal" && metadata.subagentsEnabled !== false
+        if (normalModeSubagentsEnabled) {
           try {
             soloTaskTraceManager = new SoloTaskTraceManager({
               parent: runtimeTraceContext,
@@ -6945,6 +6971,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
+              disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -7233,7 +7260,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const isAI = className.includes("AI")
             const isTool = className.includes("Tool")
             const soloTaskOwnerId =
-              effectiveAgentMode === "normal"
+              normalModeSubagentsEnabled
                 ? getSoloTaskOwnerIdFromStreamPayload(payload)
                 : undefined
             const isCapturedSoloTaskMessage =
@@ -7797,6 +7824,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             enableRequestUserInput: true,
             noSkillEvolutionTool: true,
             agentMode: effectiveAgentMode,
+            disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
             traceContext: runtimeTraceContext,
             soloTaskTraceManager,
             retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -7936,6 +7964,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
+              disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
               traceContext: runtimeTraceContext,
               soloTaskTraceManager,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -9023,7 +9052,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             safeSendToWindow(window, channel, {
               type: "error",
               error: "WORKSPACE_REQUIRED",
-              message: "该线程缺少工作区路径，无法安全切回 Solo Agent。请先重新选择工作区后再切换。"
+              message: "该线程缺少工作区路径，无法安全切换到 Solo 或 Multi。请先重新选择工作区后再切换。"
             })
             return
           }
@@ -9535,6 +9564,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: resumeAgentMode,
+              disableSubagents: shouldDisableNormalModeSubagents(resumeAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -9778,6 +9808,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: resumeAgentMode,
+              disableSubagents: shouldDisableNormalModeSubagents(resumeAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -10566,6 +10597,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
+              disableSubagents: shouldDisableNormalModeSubagents(interruptAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -10802,6 +10834,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
+              disableSubagents: shouldDisableNormalModeSubagents(interruptAgentMode, metadata),
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),

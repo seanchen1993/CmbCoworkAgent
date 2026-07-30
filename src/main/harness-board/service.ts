@@ -2740,7 +2740,7 @@ function isHarnessSessionContextOk(value: unknown): boolean {
   return value === true
 }
 
-export type HarnessRuntimeAgentMode = "solo" | "agent_team"
+export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"
 
 export interface HarnessAgentConfig {
   agentMode?: HarnessRuntimeAgentMode
@@ -2754,7 +2754,11 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
   if (!isObject(value)) return undefined
 
   const agentMode =
-    value.agentMode === "solo" || value.agentMode === "agent_team" ? value.agentMode : undefined
+    value.agentMode === "solo" ||
+    value.agentMode === "multi" ||
+    value.agentMode === "agent_team"
+      ? value.agentMode
+      : undefined
   const toolConfig: Record<string, { enabled?: boolean }> = {}
   if (isObject(value.toolConfig)) {
     for (const [toolName, config] of Object.entries(value.toolConfig)) {
@@ -3046,6 +3050,13 @@ export function getHarnessProjectPublicAgentmdDeployUnits(projectId: string): st
   )
   if (!boardCompatibility.compatible) return []
   return boardConfigPublicAgentmdDeployUnits(plugin.path)
+}
+
+export function resolveHarnessProjectTaskToolEnabled(projectId: string): boolean | undefined {
+  const normalizedProjectId = normalizeText(projectId).trim()
+  if (!normalizedProjectId) return undefined
+  const project = requireProject(normalizedProjectId)
+  return boardConfigEnableTaskTool(adapterPluginDir(project))
 }
 
 export function getHarnessLocalAgentmdDeployUnitMappings(

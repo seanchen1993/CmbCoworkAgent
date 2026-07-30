@@ -149,6 +149,18 @@ function getFileName(path: string): string {
   return path.split("/").pop() || path
 }
 
+/** Count lines without allocating one substring per line for large tool arguments. */
+function countTextLines(content: string): number {
+  let count = 1
+  let offset = 0
+  while (true) {
+    const nextBreak = content.indexOf("\n", offset)
+    if (nextBreak < 0) return count
+    count += 1
+    offset = nextBreak + 1
+  }
+}
+
 // Render todos nicely
 function TodosDisplay({ todos }: { todos: Todo[] }): React.JSX.Element {
   const statusConfig: Record<string, { icon: typeof Circle; color: string }> = {
@@ -264,9 +276,9 @@ function GrepResultsDisplay({
 
 // Render file content preview
 function FileContentPreview({ content }: { content: string; path?: string }): React.JSX.Element {
-  const lines = content.split("\n")
-  const preview = lines.slice(0, 10)
-  const hasMore = lines.length > 10
+  const lineCount = countTextLines(content)
+  const preview = content.split("\n", 10)
+  const hasMore = lineCount > preview.length
 
   return (
     <div className="text-xs font-mono bg-background rounded-sm overflow-hidden w-full">
@@ -282,7 +294,7 @@ function FileContentPreview({ content }: { content: string; path?: string }): Re
       </pre>
       {hasMore && (
         <div className="px-2 py-1 text-muted-foreground bg-background-elevated border-t border-border">
-          ... {lines.length - 10} more lines
+          ... {lineCount - preview.length} more lines
         </div>
       )}
     </div>
@@ -302,12 +314,12 @@ function FileEditSummary({ args }: { args: Record<string, unknown> }): React.JSX
       <div className="text-xs space-y-2">
         <div className="flex items-center gap-1.5 text-status-critical">
           <span className="font-mono bg-status-critical/10 px-1.5 py-0.5 rounded">
-            - {oldStr.split("\n").length} lines
+            - {countTextLines(oldStr)} lines
           </span>
         </div>
         <div className="flex items-center gap-1.5 text-status-nominal">
           <span className="font-mono bg-nominal/10 px-1.5 py-0.5 rounded">
-            + {newStr.split("\n").length} lines
+            + {countTextLines(newStr)} lines
           </span>
         </div>
       </div>
@@ -315,7 +327,7 @@ function FileEditSummary({ args }: { args: Record<string, unknown> }): React.JSX
   }
 
   if (content) {
-    const lines = content.split("\n").length
+    const lines = countTextLines(content)
     return (
       <div className="text-xs text-muted-foreground">
         Writing {lines} lines to {getFileName(path)}
@@ -524,7 +536,7 @@ export function ToolCallRenderer({
     switch (toolCall.name) {
       case "read_file": {
         const content = typeof result === "string" ? result : safeStringify(result)
-        const lines = content.split("\n").length
+        const lines = countTextLines(content)
         return (
           <div className="space-y-2">
             <div className="text-xs text-status-nominal flex items-center gap-1.5">

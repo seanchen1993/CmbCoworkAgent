@@ -1404,7 +1404,7 @@ function testQueuedSendHydratesAgentMode(): void {
   )
   assertIncludes(
     submitQueuedMessageBody,
-    "loadResolvedAgentMode().catch(",
+    "loadResolvedAgentMode()",
     "submitQueuedMessage awaits loadResolvedAgentMode when unhydrated"
   )
 }
@@ -1538,7 +1538,7 @@ function testWillEnqueueDistinguishesLivePreparationFromPumpInFlight(): void {
     "if (shouldLockSubmit) liveSubmitPreparingThreads.add(threadId)"
   )
   assert(liveSubmitStart >= 0, "live submit preparation marker not found")
-  const liveSubmitBody = chat.slice(liveSubmitStart, liveSubmitStart + 14000)
+  const liveSubmitBody = chat.slice(liveSubmitStart, liveSubmitStart + 16000)
   assertSourceOrder(
     liveSubmitBody,
     "if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)",
@@ -2072,7 +2072,11 @@ function testDisabledSliderModesRemainVisibleAndExplained(): void {
     "toast.message(",
     "attempting to select an unavailable slider stop explains why it was rejected"
   )
-  assertIncludes(switcher, "max={MODES.length - 1}", "disabled stops keep their physical positions")
+  assertIncludes(
+    switcher,
+    "max={visibleModes.length - 1}",
+    "disabled stops keep their physical positions"
+  )
 }
 
 function testPumpHoldsSharedSubmitInFlightLock(): void {
@@ -2189,7 +2193,13 @@ function testPumpClaimsCurrentVersionAndWaitsForHandoff(): void {
   const submitBody = chat.slice(submitStart, submitStart + 9000)
   assertSourceOrder(
     submitBody,
-    "await loadResolvedAgentMode().catch(",
+    "projectSubagentsAvailable === null",
+    "canClaimQueuedMessage(queued, currentQueued)",
+    "pump waits for project subagent policy before claiming the queued draft"
+  )
+  assertSourceOrder(
+    submitBody,
+    "await loadResolvedAgentMode()",
     "canClaimQueuedMessage(queued, currentQueued)",
     "pump revalidates the authoritative draft after asynchronous mode hydration"
   )
@@ -2204,6 +2214,12 @@ function testPumpClaimsCurrentVersionAndWaitsForHandoff(): void {
   )
   const pumpStart = chat.indexOf("// Auto-drain the queue head once the thread is idle")
   const pumpBody = chat.slice(pumpStart, pumpStart + 3000)
+  assertSourceOrder(
+    pumpBody,
+    "isProjectModeAgentContext && projectSubagentsAvailable === null",
+    "tryAcquireSubmitInFlightLock",
+    "auto-drain waits for project subagent policy before acquiring the submit lock"
+  )
   assertIncludes(
     pumpBody,
     "if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return",

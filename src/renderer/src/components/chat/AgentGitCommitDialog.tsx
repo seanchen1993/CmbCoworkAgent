@@ -11,7 +11,9 @@ import {
 } from "@/components/ui/select"
 import { TaskCardPicker } from "@/components/git/TaskCardPicker"
 import { useWorkspaceTaskCard } from "@/components/git/use-workspace-task-card"
+import { VirtualList } from "@/components/ui/virtual-list"
 import { cn } from "@/lib/utils"
+import { parseUnifiedDiffRows, type DiffRow } from "@/lib/diff-utils"
 import type { TaskCardItem } from "../../../../shared/task-card-types"
 
 const COMMIT_TYPES = [
@@ -42,11 +44,6 @@ function parseSuggestedMessage(raw?: string): { type?: CommitType; message: stri
   return { message: text }
 }
 
-type DiffRowType = "file" | "hunk" | "add" | "del" | "context"
-interface DiffRow {
-  type: DiffRowType
-  text: string
-}
 type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
 interface DiffFile {
   path: string
@@ -56,41 +53,6 @@ interface DiffFile {
   deletions: number
   diff: string
   diffLoaded?: boolean
-}
-
-/** Drop git metadata lines that add noise without informing the reviewer. */
-const DIFF_METADATA_LINE =
-  /^(index |--- |\+\+\+ |new file mode|deleted file mode|old mode|new mode|similarity index|dissimilarity index|rename (from|to)|copy (from|to)|GIT binary patch|Binary files)/
-
-/**
- * Parse a unified diff into display rows. File-header lines collapse into a single
- * filename row, metadata is dropped, and +/- markers are stripped (the gutter shows them),
- * so the body can wrap freely instead of forcing a wide horizontal scroll.
- */
-function parseUnifiedDiffRows(diff: string): DiffRow[] {
-  const rows: DiffRow[] = []
-  for (const raw of diff.split("\n")) {
-    if (raw.startsWith("diff --git")) {
-      const match = raw.match(/ b\/(.+)$/)
-      rows.push({ type: "file", text: match ? match[1] : raw.replace(/^diff --git\s+/, "") })
-      continue
-    }
-    if (DIFF_METADATA_LINE.test(raw)) continue
-    if (raw.startsWith("@@")) {
-      rows.push({ type: "hunk", text: raw })
-      continue
-    }
-    if (raw.startsWith("+")) {
-      rows.push({ type: "add", text: raw.slice(1) })
-      continue
-    }
-    if (raw.startsWith("-")) {
-      rows.push({ type: "del", text: raw.slice(1) })
-      continue
-    }
-    rows.push({ type: "context", text: raw.startsWith(" ") ? raw.slice(1) : raw })
-  }
-  return rows
 }
 
 function basename(filePath: string): string {
@@ -247,60 +209,68 @@ function buildInitialSelectedPaths(
   return selected
 }
 
+/** Fixed row height for virtualized diff (matched to leading-5 = 20px). */
+const DIFF_ROW_HEIGHT = 20
+
+function renderDiffListItem(row: DiffRow): React.ReactNode {
+  if (row.type === "file") {
+    return (
+      <div className="h-5 leading-5 truncate border-t border-border/60 bg-muted/60 px-2 font-medium text-foreground first:border-t-0">
+        {row.text}
+      </div>
+    )
+  }
+  if (row.type === "hunk") {
+    return (
+      <div className="h-5 leading-5 truncate bg-muted/30 px-2 text-muted-foreground">
+        {row.text}
+      </div>
+    )
+  }
+  const sign = row.type === "add" ? "+" : row.type === "del" ? "-" : " "
+  return (
+    <div
+      className={cn(
+        "flex h-5 gap-2 px-2",
+        row.type === "add" && "bg-emerald-500/10",
+        row.type === "del" && "bg-rose-500/10"
+      )}
+    >
+      <span
+        className={cn(
+          "w-3 shrink-0 select-none text-right leading-5",
+          row.type === "add"
+            ? "text-emerald-600 dark:text-emerald-400"
+            : row.type === "del"
+              ? "text-rose-600 dark:text-rose-400"
+              : "text-muted-foreground/40"
+        )}
+      >
+        {sign}
+      </span>
+      <span className="min-w-0 flex-1 truncate leading-5">
+        {row.text || "\u00a0"}
+      </span>
+    </div>
+  )
+}
+
 /**
- * GitHub-style wrapping unified diff for a single file — no horizontal scroll, fills its
- * container and scrolls vertically. The parent supplies height + border.
+ * Virtualized unified diff for a single file — renders only visible rows into the DOM.
+ * The parent supplies height + border.
  */
 function UnifiedDiffView({ diff }: { diff: string }): React.JSX.Element {
   const rows = useMemo(() => parseUnifiedDiffRows(diff), [diff])
   return (
-    <div className="h-full overflow-y-auto overflow-x-hidden bg-background-secondary font-mono text-[11px] leading-5">
-      {rows.map((row, index) => {
-        if (row.type === "file") {
-          return (
-            <div
-              key={index}
-              className="break-all border-t border-border/60 bg-muted/60 px-2 py-1 font-medium text-foreground first:border-t-0"
-            >
-              {row.text}
-            </div>
-          )
-        }
-        if (row.type === "hunk") {
-          return (
-            <div key={index} className="break-all bg-muted/30 px-2 py-0.5 text-muted-foreground">
-              {row.text}
-            </div>
-          )
-        }
-        const sign = row.type === "add" ? "+" : row.type === "del" ? "-" : " "
-        return (
-          <div
-            key={index}
-            className={cn(
-              "flex gap-2 px-2",
-              row.type === "add" && "bg-emerald-500/10",
-              row.type === "del" && "bg-rose-500/10"
-            )}
-          >
-            <span
-              className={cn(
-                "w-3 shrink-0 select-none text-right",
-                row.type === "add"
-                  ? "text-emerald-600 dark:text-emerald-400"
-                  : row.type === "del"
-                    ? "text-rose-600 dark:text-rose-400"
-                    : "text-muted-foreground/40"
-              )}
-            >
-              {sign}
-            </span>
-            <span className="min-w-0 flex-1 whitespace-pre-wrap break-all">
-              {row.text || " "}
-            </span>
-          </div>
-        )
-      })}
+    <div className="h-full bg-background-secondary font-mono text-[11px]">
+      <VirtualList
+        items={rows}
+        itemHeight={DIFF_ROW_HEIGHT}
+        maxHeight="100%"
+        overscanCount={30}
+        renderItem={(row) => renderDiffListItem(row)}
+        listClassName="overflow-x-auto"
+      />
     </div>
   )
 }

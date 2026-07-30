@@ -128,13 +128,18 @@ import {
   shouldSkipLiveStreamAccumulatorMessage
 } from "./live-stream-transcript"
 import {
+  applyPersistedSubagentTranscriptRefs,
   getSubagentTranscriptsFromThreadValues,
   mergeSubagentTranscripts,
+  rebasePendingSubagentTranscriptRows,
+  restoreSubagentsFromTranscripts,
+  selectSubagentTranscriptPersistFollowUp,
+  selectMergedTranscriptRowsForPersistence,
   serializeSubagentTranscripts,
   SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY,
   upsertTranscriptMessages
 } from "./subagent-transcripts"
-import { resolveIncomingSubagentStatus } from "./subagent-state"
+import { mergeSubagentSnapshotWithHistory } from "./subagent-state"
 import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
 import { queueStorageKey } from "./queued-message-content"
 
@@ -566,6 +571,8 @@ export interface ThreadState {
    * subagent's nested interior on demand without polluting the main thread.
    */
   subagentTranscripts: Record<string, Message[]>
+  /** True only after the dedicated transcript API has hydrated successfully. */
+  subagentTranscriptBaselineReady: boolean
   coordinatorWorkers: CoordinatorWorkerView[]
   subagentToolCallCount: number
   subagentInternalLogs: SubagentInternalLogEntry[]
@@ -801,6 +808,7 @@ const createDefaultThreadState = (): ThreadState => ({
   gitContext: null,
   subagents: [],
   subagentTranscripts: {},
+  subagentTranscriptBaselineReady: false,
   coordinatorWorkers: [],
   subagentToolCallCount: 0,
   subagentInternalLogs: [],
@@ -1254,17 +1262,26 @@ interface CustomEventData {
 function ThreadStreamHolder({
   threadId,
   fallbackIndexBaselines,
+  subagentTranscriptBaseline,
   onStreamUpdate,
   onCustomEvent,
   onError
 }: {
   threadId: string
   fallbackIndexBaselines: StreamFallbackIndexBaselines
+  subagentTranscriptBaseline: Record<string, Message[]>
   onStreamUpdate: (data: StreamData) => void
   onCustomEvent: (data: CustomEventData) => void
   onError: (error: Error) => void
 }): null {
-  const transport = useMemo(() => new ElectronIPCTransport(), [])
+  // The holder is mounted only after transcript hydration succeeds. Seed the
+  // transport synchronously, before useStream can subscribe or convert any
+  // live values snapshot, so reused raw task IDs cannot claim a legacy bucket.
+  const [transport] = useState(() => {
+    const seededTransport = new ElectronIPCTransport()
+    seededTransport.seedSubagentTranscriptBaseline(threadId, subagentTranscriptBaseline)
+    return seededTransport
+  })
 
   useEffect(() => {
     transport.setFallbackIndexBaselines(fallbackIndexBaselines)
@@ -1366,10 +1383,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const coordinatorNotificationSuppressTimersRef = useRef<Record<string, number>>({})
   const contextCompactionDismissTimersRef = useRef<Record<string, number>>({})
   const subagentTranscriptPersistTimersRef = useRef<Record<string, number>>({})
+  const subagentTranscriptPersistRetryTimersRef = useRef<Record<string, number>>({})
   // subagentIds whose transcript changed since the last persist, per thread.
   // Lets the debounced persist serialize only the subagents that actually
   // changed instead of every subagent's full transcript each time.
   const subagentTranscriptDirtyIdsRef = useRef<Record<string, Set<string>>>({})
+  // Message-level deltas for each dirty bucket. Sending only these rows avoids
+  // serializing an ever-growing transcript on every heartbeat/tool result.
+  const subagentTranscriptPendingMessagesRef = useRef<
+    Record<string, Record<string, Message[]>>
+  >({})
+  const subagentTranscriptUrgentIdsRef = useRef<Record<string, Set<string>>>({})
+  const subagentTranscriptPersistChainsRef = useRef<
+    Partial<Record<string, Promise<void>>>
+  >({})
+  const subagentTranscriptPersistRetryCountRef = useRef<Record<string, number>>({})
+  const subagentTranscriptHydrationRetryTimersRef = useRef<Record<string, number>>({})
+  const threadHistoryLoadGenerationRef = useRef<Record<string, number>>({})
+  const saveSubagentTranscriptsRef = useRef<
+    (
+      threadId: string,
+      transcripts: Record<string, Message[]>,
+      changedIds?: Set<string>,
+      urgent?: boolean
+    ) => void
+  >(() => {})
+  const scheduleSubagentTranscriptsPersistRef = useRef<(threadId: string) => void>(() => {})
+  const threadProviderMountedRef = useRef(true)
   const environmentCoordinatorThreadIdsRef = useRef<Set<string>>(new Set())
   const allStreamSubscribersRef = useRef<Set<() => void>>(new Set())
   const liveStreamAccumulatorsRef = useRef<Record<string, LiveStreamAccumulator>>({})
@@ -2344,46 +2384,305 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   const saveSubagentTranscripts = useCallback(
-    (threadId: string, transcripts: Record<string, Message[]>, changedIds?: Set<string>) => {
-      // Serialize only the subagents that changed since the last persist. The DB
-      // deep-merges thread values (see mergeThreadValueObjects), so unchanged
-      // subagents are preserved without re-serializing their full transcripts on
-      // every keystroke. When changedIds is absent, fall back to the full map.
-      const subset =
-        changedIds && changedIds.size > 0
-          ? Object.fromEntries(
-              Array.from(changedIds)
-                .filter((id) => transcripts[id] !== undefined)
-                .map((id) => [id, transcripts[id]])
+    (
+      threadId: string,
+      transcripts: Record<string, Message[]>,
+      changedIds?: Set<string>,
+      urgent = false
+    ) => {
+      const ids = new Set(changedIds?.size ? changedIds : Object.keys(transcripts))
+      if (ids.size === 0) return
+      const markDirty = (pendingIds: Iterable<string>): void => {
+        const dirtyIds =
+          subagentTranscriptDirtyIdsRef.current[threadId] ?? new Set<string>()
+        for (const id of pendingIds) dirtyIds.add(id)
+        subagentTranscriptDirtyIdsRef.current[threadId] = dirtyIds
+      }
+      markDirty(ids)
+      if (urgent) {
+        const urgentIds =
+          subagentTranscriptUrgentIdsRef.current[threadId] ?? new Set<string>()
+        for (const id of ids) urgentIds.add(id)
+        subagentTranscriptUrgentIdsRef.current[threadId] = urgentIds
+      }
+
+      // A failed read leaves the persisted baseline unknown. Keep the dirty ids
+      // queued until hydration succeeds; consuming them here would silently lose
+      // the last debounced assistant delta when a scheduler run ends.
+      if (!threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady) return
+      if (subagentTranscriptPersistRetryTimersRef.current[threadId] !== undefined) return
+      // One write may be in flight per thread. Further calls only union their
+      // message deltas into the next bounded batch.
+      if (subagentTranscriptPersistChainsRef.current[threadId]) return
+      const pendingIds = subagentTranscriptDirtyIdsRef.current[threadId]
+      if (!pendingIds?.size) return
+      delete subagentTranscriptDirtyIdsRef.current[threadId]
+      const batchIds = new Set(pendingIds)
+      const urgentIds = subagentTranscriptUrgentIdsRef.current[threadId]
+      const batchWasUrgent = Array.from(batchIds).some((id) => urgentIds?.has(id))
+      if (urgentIds) {
+        for (const id of batchIds) urgentIds.delete(id)
+        if (urgentIds.size === 0) delete subagentTranscriptUrgentIdsRef.current[threadId]
+      }
+
+      const current = subagentTranscriptsRef.current[threadId] ?? transcripts
+      const pendingBySubagent =
+        subagentTranscriptPendingMessagesRef.current[threadId] ?? {}
+      const subset: Record<string, Message[]> = {}
+      for (const id of batchIds) {
+        const pendingMessages = pendingBySubagent[id]
+        const fallbackMessages = current[id]
+        if (pendingMessages?.length) subset[id] = pendingMessages
+        else if (fallbackMessages) subset[id] = fallbackMessages
+        delete pendingBySubagent[id]
+      }
+      if (Object.keys(pendingBySubagent).length === 0) {
+        delete subagentTranscriptPendingMessagesRef.current[threadId]
+      } else {
+        subagentTranscriptPendingMessagesRef.current[threadId] = pendingBySubagent
+      }
+
+      let attemptFailed = false
+      const persist = (async () => {
+        if (Object.keys(subset).length === 0) return
+        let manifests: Record<string, unknown>
+        try {
+          manifests = await window.api.threads.persistSubagentTranscripts(
+            threadId,
+            serializeSubagentTranscripts(subset)
+          )
+        } catch (error) {
+          const requeued =
+            subagentTranscriptPendingMessagesRef.current[threadId] ?? {}
+          for (const [id, failedMessages] of Object.entries(subset)) {
+            requeued[id] = upsertTranscriptMessages(
+              failedMessages,
+              requeued[id] ?? [],
+              { completeSnapshot: true }
             )
-          : transcripts
-      if (Object.keys(subset).length === 0) return
-      window.api.threads
-        .mergeThreadValues(threadId, {
-          [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: serializeSubagentTranscripts(subset)
-        })
-        .catch((error) =>
+          }
+          subagentTranscriptPendingMessagesRef.current[threadId] = requeued
+          markDirty(batchIds)
+          if (batchWasUrgent) {
+            const retryUrgent =
+              subagentTranscriptUrgentIdsRef.current[threadId] ?? new Set<string>()
+            for (const id of batchIds) retryUrgent.add(id)
+            subagentTranscriptUrgentIdsRef.current[threadId] = retryUrgent
+          }
+          throw error
+        }
+        delete subagentTranscriptPersistRetryCountRef.current[threadId]
+        if (
+          !threadProviderMountedRef.current ||
+          !initializedThreadsRef.current.has(threadId)
+        ) {
+          return
+        }
+        const latest = subagentTranscriptsRef.current[threadId]
+        if (!latest) return
+        const withRefs = applyPersistedSubagentTranscriptRefs(latest, subset, manifests)
+        if (withRefs === latest) return
+        subagentTranscriptsRef.current[threadId] = withRefs
+        updateThreadState(threadId, () => ({ subagentTranscripts: withRefs }))
+      })()
+        .catch((error) => {
+          attemptFailed = true
           console.warn("[ThreadContext] Failed to save subagent transcripts:", error)
+          if (
+            !threadProviderMountedRef.current ||
+            !initializedThreadsRef.current.has(threadId)
+          ) {
+            return
+          }
+          const retryCount =
+            (subagentTranscriptPersistRetryCountRef.current[threadId] ?? 0) + 1
+          subagentTranscriptPersistRetryCountRef.current[threadId] = retryCount
+          const debounceTimer = subagentTranscriptPersistTimersRef.current[threadId]
+          if (debounceTimer !== undefined) {
+            window.clearTimeout(debounceTimer)
+            delete subagentTranscriptPersistTimersRef.current[threadId]
+          }
+          if (
+            subagentTranscriptPersistRetryTimersRef.current[threadId] !== undefined
+          ) {
+            return
+          }
+          subagentTranscriptPersistRetryTimersRef.current[threadId] = window.setTimeout(() => {
+            delete subagentTranscriptPersistRetryTimersRef.current[threadId]
+            if (
+              !threadProviderMountedRef.current ||
+              !initializedThreadsRef.current.has(threadId) ||
+              !threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady
+            ) {
+              return
+            }
+            const retryTranscripts = subagentTranscriptsRef.current[threadId]
+            const retryIds = subagentTranscriptDirtyIdsRef.current[threadId]
+            if (!retryTranscripts || !retryIds?.size) return
+            saveSubagentTranscriptsRef.current(threadId, retryTranscripts, retryIds)
+          }, Math.min(30_000, 500 * 2 ** Math.min(retryCount - 1, 6)))
+        })
+      subagentTranscriptPersistChainsRef.current[threadId] = persist
+      void persist.finally(() => {
+        if (subagentTranscriptPersistChainsRef.current[threadId] === persist) {
+          delete subagentTranscriptPersistChainsRef.current[threadId]
+        }
+        const pendingIds = subagentTranscriptDirtyIdsRef.current[threadId]
+        const latest = subagentTranscriptsRef.current[threadId]
+        const hasUrgent = Array.from(pendingIds ?? []).some((id) =>
+          subagentTranscriptUrgentIdsRef.current[threadId]?.has(id)
         )
+        const followUp = selectSubagentTranscriptPersistFollowUp({
+          attemptFailed,
+          hasPending: !!pendingIds?.size && !!latest,
+          canPersist:
+            threadProviderMountedRef.current &&
+            initializedThreadsRef.current.has(threadId) &&
+            threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady === true,
+          timerScheduled:
+            subagentTranscriptPersistTimersRef.current[threadId] !== undefined ||
+            subagentTranscriptPersistRetryTimersRef.current[threadId] !== undefined,
+          hasUrgent
+        })
+        if (followUp === "immediate" && latest && pendingIds) {
+          saveSubagentTranscriptsRef.current(threadId, latest, pendingIds, true)
+        } else if (followUp === "debounced") {
+          scheduleSubagentTranscriptsPersistRef.current(threadId)
+        }
+      })
     },
-    []
+    [updateThreadState]
   )
+  saveSubagentTranscriptsRef.current = saveSubagentTranscripts
 
   const scheduleSubagentTranscriptsPersist = useCallback(
     (threadId: string) => {
       const existingTimer = subagentTranscriptPersistTimersRef.current[threadId]
-      if (existingTimer !== undefined) {
-        window.clearTimeout(existingTimer)
-      }
+      if (existingTimer !== undefined) return
+      if (subagentTranscriptPersistRetryTimersRef.current[threadId] !== undefined) return
+      const dirtyIds = subagentTranscriptDirtyIdsRef.current[threadId]
+      const transcripts = subagentTranscriptsRef.current[threadId] ?? {}
+      const largestDirtyBucket = Array.from(dirtyIds ?? []).reduce(
+        (largest, id) => Math.max(largest, transcripts[id]?.length ?? 0),
+        0
+      )
+      const delayMs = Math.min(5_000, 600 + Math.floor(largestDirtyBucket / 500) * 400)
       subagentTranscriptPersistTimersRef.current[threadId] = window.setTimeout(() => {
         delete subagentTranscriptPersistTimersRef.current[threadId]
+        if (!threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady) return
         const transcripts = subagentTranscriptsRef.current[threadId] ?? {}
         const changedIds = subagentTranscriptDirtyIdsRef.current[threadId]
-        delete subagentTranscriptDirtyIdsRef.current[threadId]
         saveSubagentTranscripts(threadId, transcripts, changedIds)
-      }, 600)
+      }, delayMs)
     },
     [saveSubagentTranscripts]
+  )
+  scheduleSubagentTranscriptsPersistRef.current = scheduleSubagentTranscriptsPersist
+
+  const mergeHydratedSubagentTranscripts = useCallback(
+    (
+      threadId: string,
+      persistedTranscripts: Record<string, Message[]>,
+      loadGeneration: number
+    ): boolean => {
+      if (
+        !threadProviderMountedRef.current ||
+        !initializedThreadsRef.current.has(threadId) ||
+        threadHistoryLoadGenerationRef.current[threadId] !== loadGeneration
+      ) {
+        return false
+      }
+      const liveTranscripts =
+        subagentTranscriptsRef.current[threadId] ??
+        threadStatesRef.current[threadId]?.subagentTranscripts ??
+        {}
+      const mergedTranscripts = { ...persistedTranscripts }
+      for (const [subagentId, messages] of Object.entries(liveTranscripts)) {
+        mergedTranscripts[subagentId] = upsertTranscriptMessages(
+          mergedTranscripts[subagentId] ?? [],
+          messages,
+          { completeSnapshot: true }
+        )
+      }
+      subagentTranscriptsRef.current[threadId] = mergedTranscripts
+      const pendingBySubagent = subagentTranscriptPendingMessagesRef.current[threadId]
+      if (pendingBySubagent) {
+        const rebasedPending = rebasePendingSubagentTranscriptRows(
+          mergedTranscripts,
+          pendingBySubagent
+        )
+        if (Object.keys(rebasedPending).length > 0) {
+          subagentTranscriptPendingMessagesRef.current[threadId] = rebasedPending
+        } else {
+          delete subagentTranscriptPendingMessagesRef.current[threadId]
+        }
+      }
+      const restoredSubagents = restoreSubagentsFromTranscripts(
+        mergedTranscripts,
+        threadStatesRef.current[threadId]?.subagents ?? []
+      )
+      updateThreadState(threadId, () => ({
+        subagentTranscripts: mergedTranscripts,
+        subagents: restoredSubagents,
+        subagentTranscriptBaselineReady: true
+      }))
+      return true
+    },
+    [updateThreadState]
+  )
+
+  const scheduleSubagentTranscriptHydrationRetry = useCallback(
+    (threadId: string, loadGeneration: number) => {
+      const isCurrentLoad = (): boolean =>
+        threadProviderMountedRef.current &&
+        initializedThreadsRef.current.has(threadId) &&
+        threadHistoryLoadGenerationRef.current[threadId] === loadGeneration
+      if (!isCurrentLoad()) return
+      if (subagentTranscriptHydrationRetryTimersRef.current[threadId] !== undefined) return
+
+      const scheduleAttempt = (attempt: number): void => {
+        if (!isCurrentLoad()) return
+        if (threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady) return
+        const delayMs = Math.min(30_000, 500 * 2 ** Math.min(attempt, 6))
+        subagentTranscriptHydrationRetryTimersRef.current[threadId] = window.setTimeout(() => {
+          delete subagentTranscriptHydrationRetryTimersRef.current[threadId]
+          if (!isCurrentLoad()) return
+          void window.api.threads
+            .getSubagentTranscripts(threadId)
+            .then((rawTranscripts) => {
+              if (!isCurrentLoad()) return
+              const persistedTranscripts = getSubagentTranscriptsFromThreadValues({
+                [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: rawTranscripts
+              })
+              if (
+                !mergeHydratedSubagentTranscripts(
+                  threadId,
+                  persistedTranscripts,
+                  loadGeneration
+                )
+              ) {
+                return
+              }
+              // The stream holder and send path intentionally stay unavailable
+              // while the baseline is unknown. Make that state explicit through
+              // historyLoading, then release both only after a successful retry.
+              if (!isCurrentLoad()) return
+              updateThreadState(threadId, () => ({ historyLoading: false }))
+              if (subagentTranscriptDirtyIdsRef.current[threadId]?.size) {
+                scheduleSubagentTranscriptsPersist(threadId)
+              }
+            })
+            .catch((error) => {
+              if (!isCurrentLoad()) return
+              console.warn("[ThreadContext] Failed to retry subagent transcript hydration:", error)
+              scheduleAttempt(attempt + 1)
+            })
+        }, delayMs)
+      }
+
+      scheduleAttempt(0)
+    },
+    [mergeHydratedSubagentTranscripts, scheduleSubagentTranscriptsPersist, updateThreadState]
   )
 
   const appendSubagentTranscriptMessages = useCallback(
@@ -2406,16 +2705,77 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         options
       )
       subagentTranscriptsRef.current[threadId] = nextTranscripts
+      const pendingBySubagent =
+        subagentTranscriptPendingMessagesRef.current[threadId] ?? {}
+      const mergedRows = selectMergedTranscriptRowsForPersistence(
+        nextTranscripts[subagentId] ?? [],
+        messages
+      )
+      pendingBySubagent[subagentId] = upsertTranscriptMessages(
+        pendingBySubagent[subagentId] ?? [],
+        mergedRows,
+        options
+      )
+      subagentTranscriptPendingMessagesRef.current[threadId] = pendingBySubagent
       const dirtyIds = subagentTranscriptDirtyIdsRef.current[threadId] ?? new Set<string>()
       dirtyIds.add(subagentId)
       subagentTranscriptDirtyIdsRef.current[threadId] = dirtyIds
+      if (
+        (subagentTranscriptPersistRetryCountRef.current[threadId] ?? 0) > 3 &&
+        !subagentTranscriptPersistChainsRef.current[threadId] &&
+        subagentTranscriptPersistRetryTimersRef.current[threadId] === undefined
+      ) {
+        delete subagentTranscriptPersistRetryCountRef.current[threadId]
+      }
       updateThreadState(threadId, () => ({
         subagentTranscripts: nextTranscripts
       }))
-      scheduleSubagentTranscriptsPersist(threadId)
+      // Stream listeners are registered before history hydration completes so
+      // no live event is missed. Do not persist a partial live-only bucket in
+      // that window: the main process would replace the same persisted bucket
+      // before its historical messages have been merged in the renderer.
+      if (currentState.historyLoading || !currentState.subagentTranscriptBaselineReady) return
+      const shouldPersistImmediately = messages.some(
+        (message) =>
+          (message.content_priority ?? 0) > 0 ||
+          message.is_error === true
+      )
+      if (shouldPersistImmediately) {
+        const existingTimer = subagentTranscriptPersistTimersRef.current[threadId]
+        if (existingTimer !== undefined) {
+          window.clearTimeout(existingTimer)
+          delete subagentTranscriptPersistTimersRef.current[threadId]
+        }
+        saveSubagentTranscripts(threadId, nextTranscripts, dirtyIds, true)
+      } else {
+        scheduleSubagentTranscriptsPersist(threadId)
+      }
     },
-    [scheduleSubagentTranscriptsPersist, updateThreadState]
+    [saveSubagentTranscripts, scheduleSubagentTranscriptsPersist, updateThreadState]
   )
+
+  useEffect(() => {
+    threadProviderMountedRef.current = true
+    return () => {
+      threadProviderMountedRef.current = false
+      for (const timer of Object.values(subagentTranscriptHydrationRetryTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      subagentTranscriptHydrationRetryTimersRef.current = {}
+      for (const [threadId, timer] of Object.entries(
+        subagentTranscriptPersistTimersRef.current
+      )) {
+        window.clearTimeout(timer)
+        const transcripts = subagentTranscriptsRef.current[threadId] ?? {}
+        const dirtyIds = subagentTranscriptDirtyIdsRef.current[threadId]
+        if (dirtyIds?.size) saveSubagentTranscripts(threadId, transcripts, dirtyIds)
+      }
+      for (const timer of Object.values(subagentTranscriptPersistRetryTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      subagentTranscriptPersistRetryTimersRef.current = {}
+    }
+  }, [saveSubagentTranscripts])
 
   const scheduleCoordinatorNotificationTurn = useCallback((threadId: string) => {
     if (coordinatorNotificationAutoRunSuppressedRef.current.has(threadId)) return
@@ -3202,33 +3562,26 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "subagents":
           if (Array.isArray(data.subagents)) {
             const parentStreamData = streamDataRef.current[threadId]
+            const parentStreamIsActive =
+              parentStreamData?.isLoading === true ||
+              threadStatesRef.current[threadId]?.scheduledTaskLoading === true
             const parentStreamHasStopped =
               parentStreamData?.isLoading === false &&
               threadStatesRef.current[threadId]?.scheduledTaskLoading !== true
             const fallbackCompletedAt = parentStreamHasStopped ? new Date() : undefined
+            const incomingSubagents = data.subagents.map((subagent) => ({
+              ...subagent,
+              id: subagent.id || crypto.randomUUID(),
+              name: subagent.name || "Subagent",
+              description: subagent.description ?? "",
+              status: (subagent.status || "running") as Subagent["status"]
+            }))
             updateThreadState(threadId, (prev) => ({
-              subagents: data.subagents!.map((s) => {
-                const existing = prev.subagents.find((p) => p.id === s.id)
-                const effectiveStatus = resolveIncomingSubagentStatus({
-                  incomingStatus: s.status,
-                  existingStatus: existing?.status,
-                  parentStreamHasStopped
-                })
-                return {
-                  id: s.id || crypto.randomUUID(),
-                  toolCallId: s.toolCallId ?? existing?.toolCallId,
-                  name: s.name || existing?.name || "Subagent",
-                  description: s.description ?? existing?.description ?? "",
-                  status: effectiveStatus,
-                  startedAt: s.startedAt ?? existing?.startedAt,
-                  completedAt:
-                    s.completedAt ??
-                    (effectiveStatus === "cancelled" ? fallbackCompletedAt : existing?.completedAt),
-                  subagentType: s.subagentType ?? existing?.subagentType,
-                  currentTool: s.currentTool ?? existing?.currentTool,
-                  lastActivityAt: s.lastActivityAt ?? existing?.lastActivityAt
-                }
-              })
+              subagents: mergeSubagentSnapshotWithHistory(
+                prev.subagents,
+                incomingSubagents,
+                { parentStreamHasStopped, parentStreamIsActive, fallbackCompletedAt }
+              )
             }))
           }
           break
@@ -4159,12 +4512,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const loadThreadHistory = useCallback(
     async (threadId: string) => {
+      const loadGeneration = (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
+      threadHistoryLoadGenerationRef.current[threadId] = loadGeneration
+      const isCurrentLoad = (): boolean =>
+        threadProviderMountedRef.current &&
+        initializedThreadsRef.current.has(threadId) &&
+        threadHistoryLoadGenerationRef.current[threadId] === loadGeneration
       const actions = getThreadActions(threadId)
       let persistedMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimeOrder: MessageTimeEntry[] = []
       let persistedMessageTimeOrder: MessageTimeEntry[] = []
       let persistedSubagentTranscripts: Record<string, Message[]> = {}
+      let subagentTranscriptHydrationSucceeded = false
       let rawRestoredMessages: Message[] = []
       let restoredMessages: Message[] = []
       let restoredGoalEvents: GoalNoticeEvent[] = []
@@ -4174,11 +4534,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let visiblePersistedThreadMessages: Message[] = []
       let hasPersistedVisibleTailAfterCheckpoint = false
       let checkpointMessagesLoaded = false
-      updateThreadState(threadId, () => ({ historyLoading: true }))
+      const existingTranscriptRetryTimer =
+        subagentTranscriptHydrationRetryTimersRef.current[threadId]
+      if (existingTranscriptRetryTimer !== undefined) {
+        window.clearTimeout(existingTranscriptRetryTimer)
+        delete subagentTranscriptHydrationRetryTimersRef.current[threadId]
+      }
+      updateThreadState(threadId, () => ({
+        historyLoading: true,
+        subagentTranscriptBaselineReady: false
+      }))
 
       // Load workspace path and thread metadata
       try {
-        const thread = await window.api.threads.get(threadId)
+        const transcriptLoad = window.api.threads
+          .getSubagentTranscripts(threadId)
+          .then((rawTranscripts) => ({ succeeded: true as const, rawTranscripts }))
+          .catch((error) => {
+            if (isCurrentLoad()) {
+              console.warn("[ThreadContext] Failed to hydrate subagent transcripts:", error)
+            }
+            return { succeeded: false as const, rawTranscripts: {} }
+          })
+        const [thread, transcriptResult] = await Promise.all([
+          window.api.threads.get(threadId),
+          transcriptLoad
+        ])
+        if (!isCurrentLoad()) return
         if (thread) {
           persistedMessageTimes = getMessageTimeMap(thread.thread_values)
           persistedInternalGoalMessageTimes = getInternalGoalMessageTimeMap(thread.thread_values)
@@ -4186,9 +4568,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             thread.thread_values
           )
           persistedMessageTimeOrder = getMessageTimeOrder(thread.thread_values)
-          persistedSubagentTranscripts = getSubagentTranscriptsFromThreadValues(
-            thread.thread_values
-          )
+          if (transcriptResult.succeeded) {
+            persistedSubagentTranscripts = getSubagentTranscriptsFromThreadValues({
+              [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: transcriptResult.rawTranscripts
+            })
+            subagentTranscriptHydrationSucceeded = true
+          }
           const metadata = thread.metadata || {}
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
@@ -4228,6 +4613,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             window.api.scheduledTasks
               .isRunning(taskId)
               .then((running) => {
+                if (!isCurrentLoad()) return
                 updateThreadState(threadId, (prev) =>
                   prev.scheduledTaskLoading === running ? {} : { scheduledTaskLoading: running }
                 )
@@ -4238,6 +4624,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             window.api.heartbeat
               .isRunning()
               .then((running) => {
+                if (!isCurrentLoad()) return
                 updateThreadState(threadId, (prev) =>
                   prev.scheduledTaskLoading === running ? {} : { scheduledTaskLoading: running }
                 )
@@ -4248,6 +4635,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           window.api.agent
             .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
             .then((workers) => {
+              if (!isCurrentLoad()) return
               updateThreadState(threadId, (prev) => ({
                 coordinatorWorkers: mergeCoordinatorWorkers(prev.coordinatorWorkers, workers, {
                   authoritative: true
@@ -4260,6 +4648,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           window.api.agent
             .hasCoordinatorWorkerNotifications(threadId)
             .then((hasPending) => {
+              if (!isCurrentLoad()) return
               if (hasPending) scheduleCoordinatorNotificationTurn(threadId)
             })
             .catch((error) => {
@@ -4267,14 +4656,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             })
         }
       } catch (error) {
+        if (!isCurrentLoad()) return
         console.error("[ThreadContext] Failed to load thread details:", error)
       }
+      if (!isCurrentLoad()) return
 
       try {
         restoredGoalEvents = await window.api.threads.getGoalEvents(threadId, { restore: true })
       } catch (error) {
+        if (!isCurrentLoad()) return
         console.error("[ThreadContext] Failed to load goal events:", error)
       }
+      if (!isCurrentLoad()) return
 
       try {
         persistedThreadMessages = normalizePersistedThreadMessages(
@@ -4284,13 +4677,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           isVisibleCheckpointTranscriptMessage
         )
       } catch (error) {
+        if (!isCurrentLoad()) return
         console.error("[ThreadContext] Failed to load persisted thread messages:", error)
       }
+      if (!isCurrentLoad()) return
 
       // Load runtime state from checkpoints. Transcript restore only falls back
       // here when the durable main-DB transcript has no messages yet.
       try {
         const history = await window.api.threads.getHistory(threadId)
+        if (!isCurrentLoad()) return
         if (history.length > 0) {
           const latestCheckpoint = history[0] as {
             checkpoint?: {
@@ -4552,8 +4948,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
         }
       } catch (error) {
+        if (!isCurrentLoad()) return
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
+      if (!isCurrentLoad()) return
 
       const restoredGoalUiEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
       if (checkpointMessagesLoaded) {
@@ -4589,8 +4987,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           try {
             await window.api.threads.appendMessages(threadId, transcriptRepairs)
           } catch (error) {
+            if (!isCurrentLoad()) return
             console.warn("[ThreadContext] Failed to repair checkpoint transcript:", error)
           }
+          if (!isCurrentLoad()) return
         }
       }
       const checkpointTranscript = buildRestoredCheckpointTranscript(
@@ -4608,6 +5008,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         persistedMessageTimeOrder,
         visiblePersistedThreadMessages
       )
+      if (!isCurrentLoad()) return
       actions.setMessages(restoredTranscriptMessages)
       // A renderer can reload after main has injected a steered draft but before
       // it receives the IPC acknowledgement. The checkpoint is then the durable
@@ -4625,20 +5026,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         persistQueuedMessages(threadId, nextQueuedMessages)
         return { queuedMessages: nextQueuedMessages }
       })
-      if (Object.keys(persistedSubagentTranscripts).length > 0) {
-        updateThreadState(threadId, (prev) => {
-          const merged = { ...persistedSubagentTranscripts }
-          for (const [subagentId, messages] of Object.entries(prev.subagentTranscripts)) {
-            merged[subagentId] = upsertTranscriptMessages(merged[subagentId] ?? [], messages, {
-              completeSnapshot: true
-            })
-          }
-          subagentTranscriptsRef.current[threadId] = merged
-          return { subagentTranscripts: merged }
-        })
+      if (subagentTranscriptHydrationSucceeded) {
+        if (
+          !mergeHydratedSubagentTranscripts(
+            threadId,
+            persistedSubagentTranscripts,
+            loadGeneration
+          )
+        ) {
+          return
+        }
       }
       try {
         const goalUi = await window.api.threads.getGoalState(threadId, { includeEvents: false })
+        if (!isCurrentLoad()) return
         updateThreadState(threadId, (state) => ({
           goalUi: {
             goal: goalUi.goal,
@@ -4647,6 +5048,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
         }))
       } catch (error) {
+        if (!isCurrentLoad()) return
         console.warn("[ThreadContext] Failed to load goal UI state:", error)
         updateThreadState(threadId, (state) => ({
           goalUi: {
@@ -4656,6 +5058,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
         }))
       }
+      if (!isCurrentLoad()) return
 
       seedLiveStreamBaselineFromCheckpoint(
         threadId,
@@ -4666,8 +5069,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             )
           : restoredTranscript
       )
-      updateThreadState(threadId, () => ({ historyLoading: false }))
+      if (
+        subagentTranscriptHydrationSucceeded &&
+        subagentTranscriptDirtyIdsRef.current[threadId]?.size
+      ) {
+        scheduleSubagentTranscriptsPersist(threadId)
+      } else if (!subagentTranscriptHydrationSucceeded) {
+        scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration)
+      }
+      if (subagentTranscriptHydrationSucceeded) {
+        if (!isCurrentLoad()) return
+        updateThreadState(threadId, () => ({ historyLoading: false }))
+      }
 
+      if (!isCurrentLoad()) return
       const pendingGoalSubturnMessages =
         liveStreamAccumulatorsRef.current[threadId]?.pendingGoalSubturnMessages.splice(0) ?? []
       for (const pendingMessages of pendingGoalSubturnMessages) {
@@ -4691,7 +5106,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       getThreadActions,
       handleStreamUpdate,
       loadWorkspaceFilesInBackground,
+      mergeHydratedSubagentTranscripts,
       scheduleCoordinatorNotificationTurn,
+      scheduleSubagentTranscriptHydrationRetry,
+      scheduleSubagentTranscriptsPersist,
       seedLiveStreamBaselineFromCheckpoint,
       updateThreadState
     ]
@@ -4753,6 +5171,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           scheduledTaskLoading: false,
           error: (event.error as string) || "Scheduled task failed"
         }))
+        // Match the done path: remount from the durable transcript baseline so
+        // a later foreground values replay can adopt the scheduler execution
+        // identities instead of manufacturing duplicate buckets.
+        loadThreadHistory(threadId)
         return
       }
 
@@ -5336,6 +5758,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const cleanupThread = useCallback(
     (threadId: string) => {
+      // Invalidate every in-flight history/transcript hydration request before
+      // any cleanup can yield back to the event loop. Keep the counter instead
+      // of deleting it so a later reinitialization cannot reuse a stale token.
+      threadHistoryLoadGenerationRef.current[threadId] =
+        (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
       void window.api.agent.unbindCoordinatorWorkers(threadId).catch((error: unknown) => {
         console.warn("[ThreadProvider] Failed to unbind coordinator worker updates:", error)
       })
@@ -5380,6 +5807,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       }
       delete subagentTranscriptDirtyIdsRef.current[threadId]
+      delete subagentTranscriptPendingMessagesRef.current[threadId]
+      delete subagentTranscriptUrgentIdsRef.current[threadId]
+      delete subagentTranscriptPersistChainsRef.current[threadId]
+      delete subagentTranscriptPersistRetryCountRef.current[threadId]
+      const subagentTranscriptHydrationRetryTimer =
+        subagentTranscriptHydrationRetryTimersRef.current[threadId]
+      if (subagentTranscriptHydrationRetryTimer !== undefined) {
+        window.clearTimeout(subagentTranscriptHydrationRetryTimer)
+        delete subagentTranscriptHydrationRetryTimersRef.current[threadId]
+      }
+      const subagentTranscriptPersistRetryTimer =
+        subagentTranscriptPersistRetryTimersRef.current[threadId]
+      if (subagentTranscriptPersistRetryTimer !== undefined) {
+        window.clearTimeout(subagentTranscriptPersistRetryTimer)
+        delete subagentTranscriptPersistRetryTimersRef.current[threadId]
+      }
       const coordinatorNotificationTimer = coordinatorNotificationTimersRef.current[threadId]
       if (coordinatorNotificationTimer !== undefined) {
         window.clearTimeout(coordinatorNotificationTimer)
@@ -5451,6 +5894,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (!initializedThreadsRef.current.has(threadId)) return
           if (threadStatesRef.current[threadId]?.scheduledTaskLoading !== true) return
           clearSchedulerStreamingForThread(threadId)
+          finalizeRunningSubagentsForStoppedStream(threadId)
           loadThreadHistory(threadId)
           updateThreadState(threadId, () => ({ scheduledTaskLoading: false }))
         })
@@ -5465,7 +5909,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (!taskId || !initializedThreadsRef.current.has(threadId)) continue
       reconcileThread(threadId, window.api.scheduledTasks.isRunning(taskId))
     }
-  }, [clearSchedulerStreamingForThread, loadThreadHistory, updateThreadState])
+  }, [
+    clearSchedulerStreamingForThread,
+    finalizeRunningSubagentsForStoppedStream,
+    loadThreadHistory,
+    updateThreadState
+  ])
 
   useEffect(() => {
     const offHeartbeat = window.api.heartbeat.onChanged(reconcileScheduledRunStates)
@@ -5513,19 +5962,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   return (
     <ThreadContext.Provider value={contextValue}>
       {/* Render stream holders for all active threads */}
-      {Array.from(activeThreadIds).map((threadId) => (
-        <ThreadStreamHolder
-          key={threadId}
-          threadId={threadId}
-          fallbackIndexBaselines={mergeFallbackIndexBaselines(
-            checkpointFallbackIndexBaselinesRef.current[threadId],
-            fallbackIndexBaselinesFromMessages(threadStates[threadId]?.messages ?? [])
-          )}
-          onStreamUpdate={(data) => handleStreamUpdate(threadId, data)}
-          onCustomEvent={(data) => handleCustomEvent(threadId, data)}
-          onError={(error) => handleError(threadId, error)}
-        />
-      ))}
+      {Array.from(activeThreadIds).map((threadId) => {
+        const state = threadStates[threadId]
+        if (!state?.subagentTranscriptBaselineReady) return null
+        return (
+          <ThreadStreamHolder
+            key={threadId}
+            threadId={threadId}
+            fallbackIndexBaselines={mergeFallbackIndexBaselines(
+              checkpointFallbackIndexBaselinesRef.current[threadId],
+              fallbackIndexBaselinesFromMessages(state.messages)
+            )}
+            subagentTranscriptBaseline={state.subagentTranscripts}
+            onStreamUpdate={(data) => handleStreamUpdate(threadId, data)}
+            onCustomEvent={(data) => handleCustomEvent(threadId, data)}
+            onError={(error) => handleError(threadId, error)}
+          />
+        )
+      })}
       {children}
     </ThreadContext.Provider>
   )

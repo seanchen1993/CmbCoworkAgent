@@ -6,6 +6,7 @@ import {
   CircleHelp,
   Route,
   Sparkles,
+  Users,
   Workflow,
   Zap
 } from "lucide-react"
@@ -14,12 +15,13 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 
-export type ChatAgentMode = "normal" | "coordinator" | "workflow"
+export type ChatAgentMode = "normal" | "multi" | "coordinator" | "workflow"
 
 interface AgentModeSwitcherProps {
   mode: ChatAgentMode
   locked?: boolean
   lockedReason?: string
+  showWorkflow?: boolean
   disabledModes?: Partial<Record<ChatAgentMode, boolean>>
   disabledModeReasons?: Partial<Record<ChatAgentMode, string>>
   onChange: (mode: ChatAgentMode) => void
@@ -37,16 +39,24 @@ const MODES: Array<{
     value: "normal",
     label: "Solo Agent",
     shortLabel: "Solo",
-    description: "单主控轻量执行，必要时并行委派。",
-    detail: "适合日常问答、明确小改动、快速排查与独立子任务。",
-    badge: "轻量"
+    description: "单智能体独立完成任务，不启用子代理。",
+    detail: "适合治理类任务、小改动、低风险和上下文集中的任务。",
+    badge: "独立"
+  },
+  {
+    value: "multi",
+    label: "Multi Agent",
+    shortLabel: "Multi",
+    description: "主智能体直接执行，并按需调用专业子代理协同。",
+    detail: "适合以主任务为中心的并行分析、局部实现和专家辅助。",
+    badge: "分工"
   },
   {
     value: "coordinator",
     label: "Agent Team",
     shortLabel: "Team",
-    description: "多代理并行研究、实现、验证与汇总。",
-    detail: "适合复杂开发、深度排查、文档产出和高可信交付。",
+    description: "协调器负责拆解调度，多个独立智能体异步推进。",
+    detail: "适合跨模块长任务、持续并行开发和分阶段汇总交付。",
     badge: "编排"
   },
   {
@@ -61,6 +71,7 @@ const MODES: Array<{
 
 const MODE_ICONS: Record<ChatAgentMode, typeof Zap> = {
   normal: Zap,
+  multi: Users,
   coordinator: Workflow,
   workflow: Sparkles
 }
@@ -78,7 +89,7 @@ const NEUTRAL_THEME: ModeTheme = {
   trigger:
     "border-border bg-background/80 text-muted-foreground hover:bg-muted hover:text-foreground",
   triggerIcon: "bg-muted text-muted-foreground",
-  sliderFill: "bg-[#0a84ff]",
+  sliderFill: "bg-muted-foreground/30",
   activeIcon: "bg-muted text-muted-foreground",
   badge: "border-border bg-background text-muted-foreground",
   selectedInfo: "border-border bg-muted/60"
@@ -86,17 +97,8 @@ const NEUTRAL_THEME: ModeTheme = {
 
 const MODE_THEMES: Record<ChatAgentMode, ModeTheme> = {
   normal: NEUTRAL_THEME,
-  coordinator: {
-    trigger:
-      "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300",
-    triggerIcon: "bg-emerald-500 text-white",
-    sliderFill: "bg-emerald-500",
-    activeIcon: "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300",
-    badge:
-      "border-emerald-200 bg-emerald-100 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300",
-    selectedInfo:
-      "border-emerald-200 bg-emerald-50/80 dark:border-emerald-500/30 dark:bg-emerald-500/10"
-  },
+  multi: NEUTRAL_THEME,
+  coordinator: NEUTRAL_THEME,
   workflow: {
     trigger:
       "border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-300",
@@ -339,6 +341,7 @@ function AgentModeSwitcherImpl({
   mode,
   locked,
   lockedReason,
+  showWorkflow = true,
   disabledModes,
   disabledModeReasons,
   onChange
@@ -350,22 +353,42 @@ function AgentModeSwitcherImpl({
   const [pressedStopIndex, setPressedStopIndex] = useState<number | null>(null)
   const lockedReasonId = useId()
   const disabledModesReasonId = useId()
-  const activeMode = MODES.find((item) => item.value === mode) ?? MODES[0]
+  const visibleModes = showWorkflow
+    ? MODES
+    : MODES.filter((item) => item.value !== "workflow")
+  const activeMode = visibleModes.find((item) => item.value === mode) ?? visibleModes[0]
   const activeTheme = MODE_THEMES[activeMode.value]
   const ActiveIcon = MODE_ICONS[activeMode.value]
   const activeIndex = Math.max(
     0,
-    MODES.findIndex((item) => item.value === activeMode.value)
+    visibleModes.findIndex((item) => item.value === activeMode.value)
   )
-  const sliderStopPositions = ["0.9375rem", "50%", "calc(100% - 0.9375rem)"] as const
-  const sliderThumbPositions = ["0.9375rem", "50%", "calc(100% - 0.9375rem)"] as const
-  const sliderFillProgressByMode = ["0%", "calc(50% + 0.9375rem)", "100%"] as const
+  const sliderStopPositions =
+    visibleModes.length === 3
+      ? ["0.9375rem", "50%", "calc(100% - 0.9375rem)"]
+      : [
+          "0.9375rem",
+          "calc(33.3333% + 0.3125rem)",
+          "calc(66.6667% - 0.3125rem)",
+          "calc(100% - 0.9375rem)"
+        ]
+  const sliderThumbPositions = sliderStopPositions
+  const sliderFillProgressByMode =
+    visibleModes.length === 3
+      ? ["0%", "calc(50% + 0.375rem)", "100%"]
+      : [
+          "0%",
+          "calc(33.3333% + 0.6875rem)",
+          "calc(66.6667% + 0.0625rem)",
+          "100%"
+        ]
   const sliderThumbPosition = sliderThumbPositions[activeIndex]
   const sliderFillProgress = sliderFillProgressByMode[activeIndex]
-  const selectableModeIndexes = MODES.flatMap((item, index) =>
+  const selectableModeIndexes = visibleModes.flatMap((item, index) =>
     disabledModes?.[item.value] ? [] : [index]
   )
-  const disabledModesDescription = MODES.filter((item) => disabledModes?.[item.value])
+  const disabledModesDescription = visibleModes
+    .filter((item) => disabledModes?.[item.value])
     .map(
       (item) =>
         `${item.shortLabel}：${disabledModeReasons?.[item.value] ?? "当前环境不可用"}`
@@ -373,11 +396,12 @@ function AgentModeSwitcherImpl({
     .join("；")
 
   const handleSliderChange = (index: number): void => {
-    const nextMode = MODES[index]?.value
+    const nextMode = visibleModes[index]?.value
     if (!nextMode) return
     if (disabledModes?.[nextMode]) {
       toast.message(
-        disabledModeReasons?.[nextMode] ?? `${MODES[index]?.shortLabel ?? "该模式"} 当前不可用`
+        disabledModeReasons?.[nextMode] ??
+          `${visibleModes[index]?.shortLabel ?? "该模式"} 当前不可用`
       )
       return
     }
@@ -427,7 +451,7 @@ function AgentModeSwitcherImpl({
       {infoOpen && (
         <div className="absolute bottom-[calc(100%+0.75rem)] -left-px z-[60] w-[calc(100%+2px)] rounded-xl border border-border bg-popover p-2 text-left text-popover-foreground shadow-xl">
           <div className="space-y-1">
-            {MODES.map((item) => {
+            {visibleModes.map((item) => {
               const Icon = MODE_ICONS[item.value]
               const theme = MODE_THEMES[item.value]
               const selected = item.value === mode
@@ -521,13 +545,13 @@ function AgentModeSwitcherImpl({
                 activeMode.value === "workflow"
                   ? "transition-none"
                   : "transition-[width] duration-300 ease-out",
-                activeMode.value === "workflow" ? "bg-[#edf0f2]" : activeTheme.sliderFill
+                activeMode.value === "workflow" ? NEUTRAL_THEME.sliderFill : activeTheme.sliderFill
               )}
               style={{ width: sliderFillProgress }}
             />
             {activeMode.value === "workflow" && <WorkflowMosaicCanvas />}
             {sliderStopPositions.map((position, index) => {
-              const stopMode = MODES[index]?.value
+              const stopMode = visibleModes[index]?.value
               const stopDisabled = Boolean(stopMode && disabledModes?.[stopMode])
               return (
                 <span
@@ -559,7 +583,7 @@ function AgentModeSwitcherImpl({
           <input
             type="range"
             min={0}
-            max={MODES.length - 1}
+            max={visibleModes.length - 1}
             step={1}
             value={activeIndex}
             disabled={locked || selectableModeIndexes.length <= 1}
@@ -569,7 +593,9 @@ function AgentModeSwitcherImpl({
             onChange={(event) => handleSliderChange(Number(event.currentTarget.value))}
             onPointerMove={(event) => {
               const rect = event.currentTarget.getBoundingClientRect()
-              const stopCenters = [15, rect.width / 2, rect.width - 15]
+              const stopCenters = visibleModes.map(
+                (_, index) => 15 + ((rect.width - 30) * index) / (visibleModes.length - 1)
+              )
               const thumbCenterX = stopCenters[activeIndex] ?? stopCenters[0]
               const distanceX = event.clientX - rect.left - thumbCenterX
               const distanceY = event.clientY - rect.top - rect.height / 2
@@ -582,7 +608,7 @@ function AgentModeSwitcherImpl({
                     : nearest,
                 0
               )
-              const nearestMode = MODES[nearestStopIndex]?.value
+              const nearestMode = visibleModes[nearestStopIndex]?.value
               setHoveredStopIndex(
                 Math.abs(pointerX - stopCenters[nearestStopIndex]) <= 14 &&
                   Math.abs(distanceY) <= 14 &&
@@ -608,22 +634,35 @@ function AgentModeSwitcherImpl({
           )}
         </div>
         <div className="relative mt-0.5 h-4">
-          {MODES.map((item, index) => (
+          {visibleModes.map((item, index) => (
             <div
               key={item.value}
               aria-disabled={disabledModes?.[item.value] || undefined}
               title={disabledModes?.[item.value] ? disabledModeReasons?.[item.value] : undefined}
               className={cn(
-                "absolute top-0 min-w-0 transition-colors",
-                index === 0 && "left-0 w-24 text-left",
-                index === 1 && "left-1/2 w-28 -translate-x-1/2 text-center",
-                index === 2 && "right-0 w-28 text-right",
+                "absolute top-0 w-24 min-w-0 transition-colors",
                 disabledModes?.[item.value]
                   ? "cursor-not-allowed text-muted-foreground/35"
                   : index === activeIndex
                     ? "text-foreground"
                     : "text-muted-foreground"
               )}
+              style={{
+                left:
+                  index === 0
+                    ? "0"
+                    : index === visibleModes.length - 1
+                      ? "100%"
+                      : sliderStopPositions[index],
+                textAlign:
+                  index === 0 ? "left" : index === visibleModes.length - 1 ? "right" : "center",
+                transform:
+                  index === 0
+                    ? undefined
+                    : index === visibleModes.length - 1
+                      ? "translateX(-100%)"
+                      : "translateX(-50%)"
+              }}
             >
               <div className="truncate text-xs font-normal">{item.shortLabel}</div>
             </div>
