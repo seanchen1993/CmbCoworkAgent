@@ -4,7 +4,10 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import { generateAiRecordingScript } from "../../../../shared/browser-ai-recording-script"
+import {
+  extractAiRecordingVariableNames,
+  generateAiRecordingScript
+} from "../../../../shared/browser-ai-recording-script"
 import type {
   AiRecordingSession,
   BrowserScriptLibraryEntry
@@ -35,9 +38,12 @@ export function BrowserAiRecordingControls({
   workspacePath
 }: BrowserAiRecordingControlsProps): React.JSX.Element {
   const [aiRecording, setAiRecording] = useState<AiRecordingSession>(EMPTY_AI_RECORDING)
+  const [hasPendingUnsavedAiRecording, setHasPendingUnsavedAiRecording] = useState(false)
   const [draftScript, setDraftScript] = useState("")
   const [isDraftScriptDirty, setIsDraftScriptDirty] = useState(false)
   const [selectedActionIds, setSelectedActionIds] = useState<string[]>([])
+  const [variableActionIds, setVariableActionIds] = useState<string[]>([])
+  const [variableActionNames, setVariableActionNames] = useState<Record<string, string>>({})
   const [selectionSyncKey, setSelectionSyncKey] = useState("")
   const [isAiRecordingBusy, setIsAiRecordingBusy] = useState(false)
   const [aiRecordingDialogOpen, setAiRecordingDialogOpen] = useState(false)
@@ -48,12 +54,35 @@ export function BrowserAiRecordingControls({
   const [isScriptLibraryLoading, setIsScriptLibraryLoading] = useState(false)
   const [scriptLibraryError, setScriptLibraryError] = useState<string | null>(null)
   const [loadingLibraryFileName, setLoadingLibraryFileName] = useState<string | null>(null)
-  const [loadingLibraryAction, setLoadingLibraryAction] = useState<"copy" | "delete" | null>(null)
+  const [loadingLibraryAction, setLoadingLibraryAction] = useState<
+    "copy" | "execution" | "delete" | null
+  >(null)
   const hasWorkspace = Boolean(workspacePath?.trim())
 
   const resetSaveForm = useCallback(() => {
     setSaveDisplayName("")
   }, [])
+
+  const buildDraftScript = useCallback(
+    (
+      nextSelectedActionIds: string[],
+      nextVariableActionIds: string[],
+      nextVariableActionNames: Record<string, string>
+    ): string => {
+      const nextActions = aiRecording.actions.filter((action) =>
+        nextSelectedActionIds.includes(action.id)
+      )
+      const namedVariableActionIds = nextVariableActionIds.filter((actionId) =>
+        nextVariableActionNames[actionId]?.trim()
+      )
+
+      return generateAiRecordingScript(nextActions, {
+        variableActionIds: namedVariableActionIds,
+        variableActionNames: nextVariableActionNames
+      })
+    },
+    [aiRecording.actions]
+  )
 
   const refreshAiRecording = useCallback(async () => {
     try {
@@ -92,6 +121,8 @@ export function BrowserAiRecordingControls({
 
     const nextSelectedActionIds = aiRecording.actions.map((action) => action.id)
     setSelectedActionIds(nextSelectedActionIds)
+    setVariableActionIds([])
+    setVariableActionNames({})
     setDraftScript(generateAiRecordingScript(aiRecording.actions))
     setIsDraftScriptDirty(false)
     setSelectionSyncKey(nextSelectionSyncKey)
@@ -102,6 +133,7 @@ export function BrowserAiRecordingControls({
     try {
       const nextSession = await window.api.browser.startAiRecording()
       setAiRecording(nextSession)
+      setHasPendingUnsavedAiRecording(false)
       toast.success("AI 录制已开始。让 Agent 在任意会话中操作页面即可。")
     } catch (error) {
       console.error(
@@ -118,6 +150,7 @@ export function BrowserAiRecordingControls({
     try {
       const nextSession = await window.api.browser.stopAiRecording()
       setAiRecording(nextSession)
+      setHasPendingUnsavedAiRecording(true)
       setAiRecordingDialogOpen(true)
       if (nextSession.actions.length > 0) {
         toast.success(`AI 录制已停止，已生成 ${nextSession.actions.length} 个步骤。`)
@@ -161,6 +194,10 @@ export function BrowserAiRecordingControls({
     void loadScriptLibraryEntries()
   }, [loadScriptLibraryEntries])
 
+  const hasUnnamedVariableActions = variableActionIds.some(
+    (actionId) => !variableActionNames[actionId]?.trim()
+  )
+
   const confirmSaveToLibrary = useCallback(async () => {
     const displayName = saveDisplayName.trim()
     if (!displayName) {
@@ -175,6 +212,10 @@ export function BrowserAiRecordingControls({
       toast.error("当前没有可保存的脚本内容")
       return
     }
+    if (hasUnnamedVariableActions) {
+      toast.error("请先为已标记为变量的步骤填写变量名")
+      return
+    }
 
     setIsSaveSubmitting(true)
     try {
@@ -185,10 +226,11 @@ export function BrowserAiRecordingControls({
         workspacePath
       })
       toast.success(`脚本已保存`)
+      setHasPendingUnsavedAiRecording(false)
+      setAiRecordingDialogOpen(false)
+      setScriptLibraryOpen(true)
       resetSaveForm()
-      if (scriptLibraryOpen) {
-        void loadScriptLibraryEntries()
-      }
+      void loadScriptLibraryEntries()
     } catch (error) {
       console.error(
         `[BrowserAiRecordingControls] Failed to save browser script library entry: ${formatError(error)}`
@@ -199,10 +241,10 @@ export function BrowserAiRecordingControls({
     }
   }, [
     draftScript,
+    hasUnnamedVariableActions,
     loadScriptLibraryEntries,
     resetSaveForm,
     saveDisplayName,
-    scriptLibraryOpen,
     threadId,
     workspacePath
   ])
@@ -228,8 +270,17 @@ export function BrowserAiRecordingControls({
   }, [])
 
   const copyLibraryExecutionPrompt = useCallback(async (entry: BrowserScriptLibraryEntry) => {
-    const prompt = `读取这个脚本内容~/.cmbcoworkagent/browser/${entry.fileName}，分析里面的操作步骤，然后使用内置浏览器来执行里面的操作，禁止使用screenshot和runcode。`
+    setLoadingLibraryFileName(entry.fileName)
+    setLoadingLibraryAction("execution")
     try {
+      const script = await window.api.browser.readScriptLibraryScript({
+        fileName: entry.fileName
+      })
+      const variableNames = extractAiRecordingVariableNames(script)
+      const variableAssignments = variableNames
+        .map((variableName) => `${variableName}=用户输入；`)
+        .join("")
+      const prompt = `${variableAssignments} \n\n读取这个脚本内容~/.cmbcoworkagent/browser/${entry.fileName}，分析里面的操作步骤，然后使用内置浏览器来执行里面的操作，禁止使用screenshot和runcode。`
       await navigator.clipboard.writeText(prompt)
       toast.success("已复制，会话输入框里粘贴使用")
     } catch (error) {
@@ -237,6 +288,9 @@ export function BrowserAiRecordingControls({
         `[BrowserAiRecordingControls] Failed to copy browser execution prompt ${entry.fileName}: ${formatError(error)}`
       )
       toast.error("复制执行指令失败")
+    } finally {
+      setLoadingLibraryFileName(null)
+      setLoadingLibraryAction(null)
     }
   }, [])
 
@@ -273,24 +327,90 @@ export function BrowserAiRecordingControls({
         const nextSelectedActionIds = aiRecording.actions
           .map((action) => action.id)
           .filter((id) => currentSet.has(id))
-        const nextActions = aiRecording.actions.filter((action) => currentSet.has(action.id))
+        const nextVariableActionIds = variableActionIds.filter((id) => currentSet.has(id))
 
         if (isDraftScriptDirty) {
           toast.info("已按勾选步骤重新生成脚本草稿，未保存的手动修改已覆盖。")
         }
 
-        setDraftScript(generateAiRecordingScript(nextActions))
+        setVariableActionIds(nextVariableActionIds)
+        setDraftScript(
+          buildDraftScript(nextSelectedActionIds, nextVariableActionIds, variableActionNames)
+        )
         setIsDraftScriptDirty(false)
         return nextSelectedActionIds
       })
     },
-    [aiRecording.actions, isDraftScriptDirty]
+    [
+      aiRecording.actions,
+      buildDraftScript,
+      isDraftScriptDirty,
+      variableActionIds,
+      variableActionNames
+    ]
+  )
+
+  const toggleActionVariable = useCallback(
+    (actionId: string) => {
+      setVariableActionIds((current) => {
+        const currentSet = new Set(current)
+        if (currentSet.has(actionId)) {
+          currentSet.delete(actionId)
+        } else {
+          currentSet.add(actionId)
+        }
+
+        const nextVariableActionIds = aiRecording.actions
+          .map((action) => action.id)
+          .filter((id) => selectedActionIds.includes(id) && currentSet.has(id))
+        if (isDraftScriptDirty) {
+          toast.info("已按变量标记重新生成脚本草稿，未保存的手动修改已覆盖。")
+        }
+
+        setDraftScript(
+          buildDraftScript(selectedActionIds, nextVariableActionIds, variableActionNames)
+        )
+        setIsDraftScriptDirty(false)
+        return nextVariableActionIds
+      })
+    },
+    [
+      aiRecording.actions,
+      buildDraftScript,
+      isDraftScriptDirty,
+      selectedActionIds,
+      variableActionNames
+    ]
+  )
+
+  const updateActionVariableName = useCallback(
+    (actionId: string, value: string) => {
+      setVariableActionNames((current) => {
+        const nextVariableActionNames = {
+          ...current,
+          [actionId]: value
+        }
+
+        if (isDraftScriptDirty) {
+          toast.info("已按变量名重新生成脚本草稿，未保存的手动修改已覆盖。")
+        }
+
+        setDraftScript(
+          buildDraftScript(selectedActionIds, variableActionIds, nextVariableActionNames)
+        )
+        setIsDraftScriptDirty(false)
+        return nextVariableActionNames
+      })
+    },
+    [buildDraftScript, isDraftScriptDirty, selectedActionIds, variableActionIds]
   )
 
   const aiRecordingActionCount = aiRecording.actions.length
   const aiRecordingScriptReady = draftScript.trim().length > 0
   const aiRecordingHasOutput =
     aiRecording.status === "recording" || aiRecordingActionCount > 0 || aiRecordingScriptReady
+  const showAiRecordingResultButton =
+    aiRecording.status === "completed" && aiRecordingHasOutput && hasPendingUnsavedAiRecording
   const aiRecordingStatusText =
     aiRecording.status === "recording"
       ? `录制进行中，已捕获 ${aiRecordingActionCount} 步`
@@ -332,7 +452,7 @@ export function BrowserAiRecordingControls({
           </span>
         </div>
 
-        {aiRecordingHasOutput ? (
+        {showAiRecordingResultButton ? (
           <Button
             type="button"
             size="sm"
@@ -435,6 +555,10 @@ export function BrowserAiRecordingControls({
         aiRecording={aiRecording}
         selectedActionIds={selectedActionIds}
         onToggleActionSelection={(actionId) => toggleActionSelection(actionId)}
+        variableActionIds={variableActionIds}
+        onToggleActionVariable={(actionId) => toggleActionVariable(actionId)}
+        variableActionNames={variableActionNames}
+        onVariableActionNameChange={(actionId, value) => updateActionVariableName(actionId, value)}
         draftScript={draftScript}
         onDraftScriptChange={(value) => {
           setDraftScript(value)
@@ -444,6 +568,7 @@ export function BrowserAiRecordingControls({
         onSaveDisplayNameChange={setSaveDisplayName}
         isSaveSubmitting={isSaveSubmitting}
         hasWorkspace={hasWorkspace}
+        hasUnnamedVariableActions={hasUnnamedVariableActions}
         onConfirmSave={() => void confirmSaveToLibrary()}
       />
 

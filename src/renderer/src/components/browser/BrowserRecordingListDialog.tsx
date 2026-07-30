@@ -18,7 +18,7 @@ interface BrowserRecordingListDialogProps {
   entries: BrowserScriptLibraryEntry[]
   currentThreadId?: string | null
   loadingFileName: string | null
-  loadingAction: "copy" | "delete" | null
+  loadingAction: "copy" | "execution" | "delete" | null
   onRefresh: () => void
   onCopyScript: (entry: BrowserScriptLibraryEntry) => void
   onCopyExecution: (entry: BrowserScriptLibraryEntry) => void
@@ -112,6 +112,7 @@ export function BrowserRecordingListDialog({
                     )
                     const isEntryLoading = loadingFileName === entry.fileName
                     const isCopyLoading = isEntryLoading && loadingAction === "copy"
+                    const isExecutionLoading = isEntryLoading && loadingAction === "execution"
                     const isDeleteLoading = isEntryLoading && loadingAction === "delete"
 
                     return (
@@ -120,7 +121,13 @@ export function BrowserRecordingListDialog({
                         className="border-b border-border/60 last:border-0 hover:bg-muted/25"
                       >
                         <td className="px-3 py-3">
-                          {isCurrentThread ? <span className={'flex '}>是 <Check className={'size-4 text-green-500 ml-2'}/></span> : <span>否</span>}
+                          {isCurrentThread ? (
+                            <span className="flex">
+                              是 <Check className="ml-2 size-4 text-green-500" />
+                            </span>
+                          ) : (
+                            <span>否</span>
+                          )}
                         </td>
                         <td
                           className="max-w-72 px-3 py-3 font-mono text-[11px] text-foreground"
@@ -159,7 +166,11 @@ export function BrowserRecordingListDialog({
                               disabled={isEntryLoading}
                               onClick={() => onCopyExecution(entry)}
                             >
-                              <Copy className="size-3.5" strokeWidth={1.8} />
+                              {isExecutionLoading ? (
+                                <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                              ) : (
+                                <Copy className="size-3.5" strokeWidth={1.8} />
+                              )}
                               内置浏览器执行
                             </Button>
                             <Button

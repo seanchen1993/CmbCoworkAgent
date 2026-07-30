@@ -30,6 +30,16 @@ interface LocatorBuildOptions {
   defaultRole?: LocatorRole
 }
 
+export interface AiRecordingScriptOptions {
+  variableActionIds?: Iterable<string>
+  variableActionNames?: Record<string, string>
+}
+
+interface VariableDescriptor {
+  displayName: string
+  identifier: string
+}
+
 type LocatorCandidateKind =
   | "testId"
   | "label"
@@ -351,7 +361,107 @@ function getLocator(
   )
 }
 
-function generateActionLine(action: AiRecordedBrowserAction): string {
+function supportsVariablePlaceholder(
+  action: AiRecordedBrowserAction
+): action is Extract<AiRecordedBrowserAction, { kind: "fill" }> {
+  return action.kind === "fill"
+}
+
+function stripVariableFieldWords(value: string): string {
+  return value
+    .replace(/^(?:请输入|请填写|填写|输入|选择)\s*/u, "")
+    .replace(
+      /\s*(?:输入框|文本框|输入栏|文本域|字段|下拉框|选择框|input|textbox|text\s*box|text\s*field|input\s*field|field|dropdown|select)$/iu,
+      ""
+    )
+    .trim()
+}
+
+function deriveVariableBaseName(
+  action: Extract<AiRecordedBrowserAction, { kind: "fill" }>
+): string {
+  const locator = action.locator
+  const candidates = [
+    locator?.label,
+    locator?.placeholder,
+    locator?.accessibleName,
+    locator?.target,
+    action.target,
+    locator?.textContent
+  ]
+
+  for (const candidate of candidates) {
+    if (!candidate) continue
+    const derived = deriveTargetName(candidate)
+    const rawName = stripVariableFieldWords(normalizeText(derived.name ?? candidate))
+    if (!rawName) continue
+    return rawName
+  }
+
+  return "值"
+}
+
+function toSafeVariableStem(value: string): string {
+  const normalized = normalizeText(value)
+  const stem = normalized.replace(/[^\p{L}\p{N}_]+/gu, "")
+  return stem || "值"
+}
+
+function toPromptVariableName(identifier: string): string {
+  return identifier.replace(/^变量_/u, "变量-").replace(/_/gu, "-")
+}
+
+function normalizeVariableDisplayName(value: string | undefined): string {
+  return value?.trim() ?? ""
+}
+
+function buildVariableDescriptorMap(
+  actions: AiRecordedBrowserAction[],
+  variableActionIds?: Iterable<string>,
+  variableActionNames?: Record<string, string>
+): Map<string, VariableDescriptor> {
+  const variableIds = new Set(variableActionIds)
+  const variableDescriptors = new Map<string, VariableDescriptor>()
+  const usedIdentifiers = new Set<string>()
+  const usedPromptNames = new Set<string>()
+
+  for (const action of actions) {
+    if (!variableIds.has(action.id) || !supportsVariablePlaceholder(action)) continue
+    const requestedDisplayName = normalizeVariableDisplayName(variableActionNames?.[action.id])
+    const fallbackDisplayName = variableActionNames
+      ? ""
+      : stripVariableFieldWords(deriveVariableBaseName(action))
+    const displayNameBase = requestedDisplayName || fallbackDisplayName
+    if (!displayNameBase) continue
+
+    const baseName = toSafeVariableStem(displayNameBase)
+    let suffix = 0
+    let identifier = ""
+    let promptName = ""
+
+    do {
+      suffix += 1
+      const identifierSuffix = suffix === 1 ? "" : `_${suffix}`
+      const promptSuffix = suffix === 1 ? "" : `${suffix}`
+      identifier = `变量_${baseName}${identifierSuffix}`
+      promptName = `变量-${displayNameBase}${promptSuffix}`
+    } while (usedIdentifiers.has(identifier) || usedPromptNames.has(promptName))
+
+    usedIdentifiers.add(identifier)
+    usedPromptNames.add(promptName)
+    variableDescriptors.set(action.id, {
+      displayName: promptName,
+      identifier
+    })
+  }
+
+  return variableDescriptors
+}
+
+function generateActionLine(
+  action: AiRecordedBrowserAction,
+  variableDescriptor?: VariableDescriptor
+): string {
   switch (action.kind) {
     case "navigate":
       return `await page.goto(${quote(action.url)});`
@@ -359,7 +469,11 @@ function generateActionLine(action: AiRecordedBrowserAction): string {
       return `await ${getLocator(action)}.${action.doubleClick ? "dblclick" : "click"}();`
     case "fill":
       return `await ${getLocator(action, "textbox")}.fill(${
-        action.sensitive ? 'process.env.PLAYWRIGHT_TEST_PASSWORD ?? ""' : quote(action.value)
+        variableDescriptor
+          ? variableDescriptor.identifier
+          : action.sensitive
+            ? 'process.env.PLAYWRIGHT_TEST_PASSWORD ?? ""'
+            : quote(action.value)
       });`
     case "selectOption":
       return `await ${getLocator(action, "combobox")}.selectOption(${quote(
@@ -372,14 +486,48 @@ function generateActionLine(action: AiRecordedBrowserAction): string {
   }
 }
 
-export function generateAiRecordingScript(actions: AiRecordedBrowserAction[]): string {
-  const lines = actions.map(generateActionLine)
+export function extractAiRecordingVariableNames(script: string): string[] {
+  const variableNames = new Set<string>()
+
+  for (const match of script.matchAll(
+    /const\s+变量_[^\s=]+\s*=\s*"";\s*\/\/\s*(变量-[^\n\r]+)/gu
+  )) {
+    variableNames.add(match[1]!.trim())
+  }
+
+  for (const match of script.matchAll(/变量(?:_[\p{L}\p{N}_]+|\d+)/gu)) {
+    const identifier = match[0]
+    variableNames.add(
+      identifier.startsWith("变量_") ? toPromptVariableName(identifier) : identifier
+    )
+  }
+
+  return Array.from(variableNames)
+}
+
+export function generateAiRecordingScript(
+  actions: AiRecordedBrowserAction[],
+  options: AiRecordingScriptOptions = {}
+): string {
+  const variableDescriptorMap = buildVariableDescriptorMap(
+    actions,
+    options.variableActionIds,
+    options.variableActionNames
+  )
+  const variableDeclarations = Array.from(variableDescriptorMap.values())
+    .map((descriptor) => `const ${descriptor.identifier} = ""; // ${descriptor.displayName}`)
+    .join("\n")
+  const lines = actions.map((action) =>
+    generateActionLine(action, variableDescriptorMap.get(action.id))
+  )
   const body =
     lines.length > 0
       ? lines.map((line) => `  ${line}`).join("\n")
       : "  // No supported Playwright browser actions were recorded."
 
   return `import { test } from "@playwright/test";
+
+${variableDeclarations ? `${variableDeclarations}\n` : ""}
 
 test("AI recorded flow", async ({ page }) => {
   // Review generated locators before committing this test.

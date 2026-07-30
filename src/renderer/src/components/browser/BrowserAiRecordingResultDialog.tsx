@@ -18,12 +18,17 @@ interface BrowserAiRecordingResultDialogProps {
   aiRecording: AiRecordingSession
   selectedActionIds: string[]
   onToggleActionSelection: (actionId: string) => void
+  variableActionIds: string[]
+  onToggleActionVariable: (actionId: string) => void
+  variableActionNames: Record<string, string>
+  onVariableActionNameChange: (actionId: string, value: string) => void
   draftScript: string
   onDraftScriptChange: (value: string) => void
   saveDisplayName: string
   onSaveDisplayNameChange: (value: string) => void
   isSaveSubmitting: boolean
   hasWorkspace: boolean
+  hasUnnamedVariableActions: boolean
   onConfirmSave: () => void
 }
 
@@ -82,19 +87,28 @@ export function BrowserAiRecordingResultDialog({
   aiRecording,
   selectedActionIds,
   onToggleActionSelection,
+  variableActionIds,
+  onToggleActionVariable,
+  variableActionNames,
+  onVariableActionNameChange,
   draftScript,
   onDraftScriptChange,
   saveDisplayName,
   onSaveDisplayNameChange,
   isSaveSubmitting,
   hasWorkspace,
+  hasUnnamedVariableActions,
   onConfirmSave
 }: BrowserAiRecordingResultDialogProps): React.JSX.Element {
   const aiRecordingActionCount = aiRecording.actions.length
   const aiRecordingScriptReady = draftScript.trim().length > 0
   const aiRecordingScriptLineCount = aiRecordingScriptReady ? draftScript.split(/\r?\n/).length : 0
   const saveDisabled =
-    !saveDisplayName.trim() || !hasWorkspace || !aiRecordingScriptReady || isSaveSubmitting
+    !saveDisplayName.trim() ||
+    !hasWorkspace ||
+    !aiRecordingScriptReady ||
+    isSaveSubmitting ||
+    hasUnnamedVariableActions
   const aiRecordingStatusBadge =
     aiRecording.status === "recording"
       ? {
@@ -153,7 +167,7 @@ export function BrowserAiRecordingResultDialog({
             <div className="border-b border-border/70 px-4 py-3">
               <p className="text-sm font-medium text-foreground">步骤列表</p>
               <p className="mt-1 text-[11px] text-muted-foreground">
-                共 {aiRecordingActionCount} 步，默认全选；取消勾选后会同步移除对应脚本步骤。
+                共 {aiRecordingActionCount} 步，默认全选；输入步骤可标记为变量，并手动填写变量名。
               </p>
             </div>
             <div className="max-h-[58vh] space-y-2.5 overflow-auto px-3 py-3">
@@ -168,46 +182,98 @@ export function BrowserAiRecordingResultDialog({
               ) : (
                 aiRecording.actions.map((action, index) => {
                   const isSelected = selectedActionIds.includes(action.id)
+                  const canUseVariable = action.kind === "fill"
+                  const isVariable = variableActionIds.includes(action.id)
+                  const variableName = variableActionNames[action.id] ?? ""
+                  const hasVariableName = variableName.trim().length > 0
                   return (
-                    <label
+                    <div
                       key={action.id}
                       className={cn(
-                        "flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-3 transition-colors",
+                        "flex items-start gap-3 rounded-xl border px-3 py-3 transition-colors",
                         aiRecording.status === "recording" &&
                           index === aiRecording.actions.length - 1 &&
                           isSelected
                           ? "border-status-info/35 bg-status-info/10 shadow-sm"
-                          : "border-border/70 bg-background/90 hover:border-border-emphasis",
+                          : "border-gray-200 bg-background/90 hover:border-border-emphasis",
                         !isSelected && "opacity-55"
                       )}
                     >
-                      <div className="flex min-w-0 flex-1 items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="rounded-full border border-border/60 bg-background/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-foreground/80">
-                              Step {index + 1}
-                            </span>
-                            <span
-                              className={cn(
-                                "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
-                                getAiRecordedActionTone(action.kind)
-                              )}
-                            >
-                              {describeAiRecordedActionKind(action.kind)}
-                            </span>
+                      <div className="flex min-w-0 flex-1 flex-col gap-2">
+                        <label className="flex min-w-0 cursor-pointer items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="rounded-full border border-border/60 bg-background/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-foreground/80">
+                                Step {index + 1}
+                              </span>
+                              <span
+                                className={cn(
+                                  "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+                                  getAiRecordedActionTone(action.kind)
+                                )}
+                              >
+                                {describeAiRecordedActionKind(action.kind)}
+                              </span>
+                            </div>
+                            <p className="mt-1.5 break-all text-[12px] leading-5 text-foreground/90">
+                              {describeAiRecordedAction(action)}
+                            </p>
                           </div>
-                          <p className="mt-1.5 break-all text-[12px] leading-5 text-foreground/90">
-                            {describeAiRecordedAction(action)}
-                          </p>
-                        </div>
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => onToggleActionSelection(action.id)}
-                          className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-border/80 text-primary focus:ring-primary"
-                        />
+                          <span className={"flex items-center space-x-2 w-[50px]"}>
+                            <span className={"text-xs"}>使用</span>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => onToggleActionSelection(action.id)}
+                              className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-border/80 text-primary focus:ring-primary"
+                            />
+                          </span>
+                        </label>
+                        {canUseVariable && (
+                          <div className={"flex space-x-2 border-t pt-2"}>
+                            {canUseVariable ? (
+                              <label
+                                className={cn(
+                                  "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium transition-colors",
+                                  isVariable
+                                    ? "border-primary/35 bg-primary/10 text-primary"
+                                    : "border-border/70 bg-background/70 text-muted-foreground hover:border-border-emphasis",
+                                  !isSelected && "cursor-not-allowed"
+                                )}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isVariable}
+                                  disabled={!isSelected}
+                                  onChange={() => onToggleActionVariable(action.id)}
+                                  className="size-3 shrink-0 cursor-pointer rounded border-border/80 text-primary focus:ring-primary disabled:cursor-not-allowed"
+                                />
+                                变量
+                              </label>
+                            ) : null}
+                            {canUseVariable && isVariable ? (
+                              <div className="space-y-1">
+                                <Input
+                                  type="text"
+                                  value={variableName}
+                                  disabled={!isSelected}
+                                  onChange={(e) =>
+                                    onVariableActionNameChange(action.id, e.target.value)
+                                  }
+                                  placeholder="变量名，例如：用户名"
+                                  className="h-8 rounded-lg border-border/80 bg-background text-xs shadow-none"
+                                />
+                                {!hasVariableName ? (
+                                  <p className="text-[11px] text-status-warning">
+                                    变量名必填，复制执行提示时会展示给用户。
+                                  </p>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
                       </div>
-                    </label>
+                    </div>
                   )
                 })
               )}
@@ -266,6 +332,10 @@ export function BrowserAiRecordingResultDialog({
                     <p className="text-[11px] text-status-warning">
                       当前会话还没有选择工作区，暂时无法保存。
                     </p>
+                  ) : hasUnnamedVariableActions ? (
+                    <p className="text-[11px] text-status-warning">
+                      已勾选变量的步骤需要先填写变量名。
+                    </p>
                   ) : null}
                 </div>
               </div>
@@ -288,7 +358,7 @@ export function BrowserAiRecordingResultDialog({
                     spellCheck={false}
                     value={draftScript}
                     onChange={(e) => onDraftScriptChange(e.target.value)}
-                    className="h-[300px] w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500"
+                    className="h-full w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500"
                     placeholder="// No script generated yet."
                   />
                 </div>

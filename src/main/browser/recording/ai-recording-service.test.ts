@@ -7,6 +7,7 @@ import {
   startAiRecording,
   stopAiRecording
 } from "./ai-recording-service"
+import { extractAiRecordingVariableNames } from "../../../shared/browser-ai-recording-script"
 
 describe("AI recording service", () => {
   beforeEach(() => {
@@ -65,7 +66,9 @@ describe("AI recording service", () => {
     })
     expect(session.script).toContain('await page.goto("https://example.com/login");')
     expect(session.script).toContain('await page.getByRole("button", { name: "Login" }).click();')
-    expect(session.script).toContain('await page.getByRole("textbox", { name: "Email" }).fill("final@example.com");')
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "Email" }).fill("final@example.com");'
+    )
     expect(session.script).toContain('process.env.PLAYWRIGHT_TEST_PASSWORD ?? ""')
     expect(session.script).not.toContain("super-secret")
   })
@@ -140,9 +143,7 @@ describe("AI recording service", () => {
     const session = stopAiRecording()
 
     expect(session.actions).toHaveLength(3)
-    expect(session.script).toContain(
-      'await page.getByRole("tab", { name: "Actions" }).click();'
-    )
+    expect(session.script).toContain('await page.getByRole("tab", { name: "Actions" }).click();')
     expect(session.script.match(/getByRole\("tab", \{ name: "Actions" \}\)/g)).toHaveLength(1)
     expect(session.script.match(/Branch selector/g)).toHaveLength(1)
     expect(session.script).toContain(
@@ -262,5 +263,45 @@ describe("AI recording service", () => {
   it("returns a placeholder script when no actions were captured", () => {
     const script = generateAiRecordingScript([])
     expect(script).toContain("No supported Playwright browser actions were recorded")
+  })
+
+  it("replaces marked fill values with semantic variables", () => {
+    const actions = [
+      {
+        id: "fill-email",
+        timestamp: "2026-07-30T00:00:00.000Z",
+        kind: "fill" as const,
+        target: "用户名输入框",
+        value: "recorded@example.com",
+        sensitive: false
+      },
+      {
+        id: "fill-password",
+        timestamp: "2026-07-30T00:00:01.000Z",
+        kind: "fill" as const,
+        target: "密码输入框",
+        value: "",
+        sensitive: true
+      }
+    ]
+
+    const script = generateAiRecordingScript(actions, {
+      variableActionIds: ["fill-email", "fill-password"],
+      variableActionNames: {
+        "fill-email": "用户名",
+        "fill-password": "密码"
+      }
+    })
+
+    expect(script).toContain('const 变量_用户名 = ""; // 变量-用户名')
+    expect(script).toContain('const 变量_密码 = ""; // 变量-密码')
+    expect(script).toContain(
+      'await page.getByRole("textbox", { name: "用户名输入框" }).fill(变量_用户名);'
+    )
+    expect(script).toContain(
+      'await page.getByRole("textbox", { name: "密码输入框" }).fill(变量_密码);'
+    )
+    expect(script).not.toContain("recorded@example.com")
+    expect(extractAiRecordingVariableNames(script)).toEqual(["变量-用户名", "变量-密码"])
   })
 })
