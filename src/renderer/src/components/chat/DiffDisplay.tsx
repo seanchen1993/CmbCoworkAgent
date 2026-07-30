@@ -1,10 +1,60 @@
 import { GitCommit, Maximize2, Minimize2, Eye, Minus, Plus } from "lucide-react"
 import { memo, useEffect, useMemo, useState } from "react"
+import { VirtualList } from "@/components/ui/virtual-list"
 import { cn } from "@/lib/utils"
+import { parseUnifiedDiffRows, type DiffRow } from "@/lib/diff-utils"
 
 type DiffViewerModule = typeof import("react-diff-viewer-continued")
 
 let diffViewerModulePromise: Promise<DiffViewerModule> | null = null
+
+/** Fixed row height for virtualized diff (matched to leading-5 = 20px). */
+const DIFF_ROW_HEIGHT = 20
+/** Diff lines exceeding this threshold switch to virtualized rendering in fullscreen. */
+const VIRTUALIZED_DIFF_LINE_THRESHOLD = 200
+
+function renderDiffListItem(row: DiffRow): React.ReactNode {
+  if (row.type === "file") {
+    return (
+      <div className="h-5 leading-5 truncate border-t border-border/60 bg-muted/60 px-2 font-medium text-foreground first:border-t-0">
+        {row.text}
+      </div>
+    )
+  }
+  if (row.type === "hunk") {
+    return (
+      <div className="h-5 leading-5 truncate bg-muted/30 px-2 text-muted-foreground">
+        {row.text}
+      </div>
+    )
+  }
+  const sign = row.type === "add" ? "+" : row.type === "del" ? "-" : " "
+  return (
+    <div
+      className={cn(
+        "flex h-5 gap-2 px-2",
+        row.type === "add" && "bg-emerald-500/10",
+        row.type === "del" && "bg-rose-500/10"
+      )}
+    >
+      <span
+        className={cn(
+          "w-3 shrink-0 select-none text-right leading-5",
+          row.type === "add"
+            ? "text-emerald-600 dark:text-emerald-400"
+            : row.type === "del"
+              ? "text-rose-600 dark:text-rose-400"
+              : "text-muted-foreground/40"
+        )}
+      >
+        {sign}
+      </span>
+      <span className="min-w-0 flex-1 truncate leading-5">
+        {row.text || "\u00a0"}
+      </span>
+    </div>
+  )
+}
 
 function loadDiffViewerModule(): Promise<DiffViewerModule> {
   if (!diffViewerModulePromise) {
@@ -203,6 +253,17 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
     return parseUnifiedDiffFiles(diffToUse)
   }, [diffToUse, oldValue, newValue])
 
+  // Parse unified diff into rows for virtualized rendering (only needed for large diffs)
+  const virtualizedDiffRows = useMemo<DiffRow[]>(() => {
+    if (oldValue !== undefined || newValue !== undefined) return []
+    const totalLineCount = diffFiles.reduce((sum, f) => sum + f.totalLines, 0)
+    if (totalLineCount <= VIRTUALIZED_DIFF_LINE_THRESHOLD) return []
+    return parseUnifiedDiffRows(diffToUse)
+  }, [diffToUse, diffFiles, oldValue, newValue])
+
+  const shouldVirtualizeFullscreen =
+    virtualizedDiffRows.length > 0 && !(oldValue !== undefined || newValue !== undefined)
+
   useEffect(() => {
     setSelectedFileId((current) => {
       if (current && diffFiles.some((file) => file.id === current)) {
@@ -281,6 +342,22 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
   }
 
   const makeDiffViewer = (fullscreen: boolean) => {
+    // Fullscreen large diff → virtualized self-rendering for performance
+    if (fullscreen && shouldVirtualizeFullscreen) {
+      return (
+        <div className="h-full bg-background-secondary font-mono text-[11px]">
+          <VirtualList
+            items={virtualizedDiffRows}
+            itemHeight={DIFF_ROW_HEIGHT}
+            maxHeight="100%"
+            overscanCount={30}
+            renderItem={(row) => renderDiffListItem(row)}
+            listClassName="overflow-x-auto"
+          />
+        </div>
+      )
+    }
+
     const viewerUsesPreview = !fullscreen && shouldUsePreview
     const viewerOldValue = fullscreen ? sourceOldContent : displayOldContent
     const viewerNewValue = fullscreen ? sourceNewContent : displayNewContent

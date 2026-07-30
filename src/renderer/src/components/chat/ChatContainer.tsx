@@ -93,7 +93,19 @@ import {
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
 import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
-import { isCoordinatorModeMetadata, isWorkflowModeMetadata } from "@/lib/coordinator-mode-helpers"
+import {
+  buildToolResultAssociations,
+  getWorkerToolUiKey
+} from "@/lib/worker-tool-result-key"
+import {
+  buildVisibleMessageLayout,
+  messageHasVisibleRow
+} from "@/lib/message-display-visibility"
+import {
+  isCoordinatorModeMetadata,
+  isMultiModeMetadata,
+  isWorkflowModeMetadata
+} from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
@@ -178,6 +190,7 @@ import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import {
   liveStreamMessageRole,
+  normalizeLiveStreamMessageIds,
   normalizeLiveStreamMessageContent,
   stringifyMessageContentForReport,
   type LiveStreamMessage as StreamMessage
@@ -1367,47 +1380,6 @@ function getMessageForkCheckpointHint(errorMessage?: string): string {
   return `${message} ${MESSAGE_FORK_CHECKPOINT_HINT}`
 }
 
-const getMessageBubbleText = (content: Message["content"]): string => {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-
-  return content
-    .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-    .filter(Boolean)
-    .join("\n")
-}
-
-// MessageBubble renders `null` for messages with no visible content: tool-result
-// messages, empty system notices, and assistant/user messages whose text is empty
-// and that carry no tool calls or reasoning. Such empty wrappers must NOT get content-visibility
-// containment — when scrolled off-screen the intrinsic-size fallback would reserve
-// phantom height (stacking across many empty tool results into a large blank gap
-// between tools and text). Detection is intentionally generous: a false positive
-// only skips a cheap optimization on an already-short message (harmless), while a
-// false negative reintroduces the gap.
-//
-// Match each role to its actual render path: assistant/user bubbles render only
-// `text` blocks (getMessageBubbleText), while the system branch renders via
-// extractMessagePlainText, which also reads string `block.content` — so system
-// must use getMessageText (same text+content logic) or a notice carried in a
-// content block would be misclassified as empty.
-const messageRendersNothing = (message: Message): boolean => {
-  if (message.role === "tool") return true
-  const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
-  if (hasToolCalls) return false
-  if (message.role === "assistant" && typeof message.reasoning === "string") {
-    return (
-      message.reasoning.trim().length === 0 &&
-      getMessageBubbleText(message.content).trim().length === 0
-    )
-  }
-  const visibleText =
-    message.role === "system"
-      ? getMessageText(message.content)
-      : getMessageBubbleText(message.content)
-  return visibleText.trim().length === 0
-}
-
 function RotatingHeadline() {
   const [wordIndex, setWordIndex] = useState(0)
   const [displayed, setDisplayed] = useState("")
@@ -1752,6 +1724,7 @@ interface ChatMessageListProps {
   isLoading: boolean
   toolResults: Map<string, ChatToolResultInfo>
   toolCallStates: Map<string, ToolCallState>
+  pendingApprovalToolCallKeys: Set<string>
   pendingApproval: HITLRequest | null
   autoApproveGitPush: boolean
   onApprovalDecision: (decision: ChatApprovalDecision) => void
@@ -1776,6 +1749,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
   isLoading,
   toolResults,
   toolCallStates,
+  pendingApprovalToolCallKeys,
   pendingApproval,
   autoApproveGitPush,
   onApprovalDecision,
@@ -1788,11 +1762,23 @@ const ChatMessageList = React.memo(function ChatMessageList({
   assistantDurationMsById,
   userSendTimeLabelById
 }: ChatMessageListProps): React.JSX.Element {
+  const visibleMessageLayout = useMemo(
+    () =>
+      buildVisibleMessageLayout(messages, (message) => {
+        const hasHookLogChip =
+          hookLoggingEnabled &&
+          message.role === "user" &&
+          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+        return messageHasVisibleRow(message, hasHookLogChip)
+      }),
+    [hookLogBucketByTurnId, hookLoggingEnabled, messages]
+  )
+
   return (
     <>
       {messages.map((message, index) => {
-        const previousMessage = index > 0 ? messages[index - 1] : null
-        const isLastMessage = index === messages.length - 1
+        const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
+        const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
         const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
         const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
 
@@ -1800,9 +1786,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
           hookLoggingEnabled && message.role === "user"
             ? hookLogBucketByTurnId.get(message.id)
             : undefined
-        const rendersNothing = messageRendersNothing(message)
         const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
-        if (rendersNothing && !hasHookLogChip) return null
+        if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
         const navigatorRef = setMessageRef(message.id, message.role)
         const combinedRef = (node: HTMLDivElement | null): void => {
@@ -1815,7 +1800,11 @@ const ChatMessageList = React.memo(function ChatMessageList({
         }
 
         return (
-          <div key={message.id} ref={combinedRef} data-message-role={message.role}>
+          <div
+            key={`${message.role}:${message.id}`}
+            ref={combinedRef}
+            data-message-role={message.role}
+          >
             <MessageBubble
               message={message}
               previousMessage={previousMessage}
@@ -1823,6 +1812,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
               showAssistantMeta={showAssistantMeta}
               toolResults={toolResults}
               toolCallStates={toolCallStates}
+              pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
               pendingApproval={pendingApproval}
               autoApproveGitPush={autoApproveGitPush}
               onApprovalDecision={onApprovalDecision}
@@ -2059,12 +2049,17 @@ export function ChatContainer({
     ? "workflow"
     : isCoordinatorModeMetadata(initialThreadMetadata)
       ? "coordinator"
-      : "normal"
+      : isMultiModeMetadata(initialThreadMetadata)
+        ? "multi"
+        : "normal"
   const [agentMode, setAgentMode] = useState<ChatAgentMode>(initialAgentMode)
-  const agentModeHydratedRef = useRef(initialAgentMode !== "normal")
+  const agentModeHydratedRef = useRef(
+    initialAgentMode === "coordinator" || initialAgentMode === "workflow"
+  )
   const persistedAgentModeRef = useRef<ChatAgentMode>(initialAgentMode)
   const agentModeChangeRequestRef = useRef(0)
   const agentModeChangeChainRef = useRef<Promise<void>>(Promise.resolve())
+  const agentModeSaveRef = useRef<Promise<void>>(Promise.resolve())
   // Draft-queue UI state: inline edit, drag-reorder, and a pump tick that
   // re-triggers the auto-drain effect after each queued send settles.
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
@@ -2173,6 +2168,9 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
+  const [projectSubagentsAvailable, setProjectSubagentsAvailable] = useState<boolean | null>(null)
+  const disableMultiModeOption =
+    isProjectModeAgentContext && projectSubagentsAvailable !== true
   const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
   const disableWorkflowModeOption = isProjectModeAgentContext
   const pendingHarnessNextActionVersion = useSyncExternalStore(
@@ -2185,6 +2183,27 @@ export function ChatContainer({
     [pendingHarnessNextActionVersion, threadId]
   )
   const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
+
+  useEffect(() => {
+    if (!isProjectModeAgentContext) {
+      setProjectSubagentsAvailable(null)
+      return
+    }
+    let cancelled = false
+    setProjectSubagentsAvailable(null)
+    void window.api.threads
+      .getProjectSubagentsAvailable(threadId)
+      .then((available) => {
+        if (!cancelled) setProjectSubagentsAvailable(available)
+      })
+      .catch((error) => {
+        console.warn("[ChatContainer] Failed to load project subagent policy:", error)
+        if (!cancelled) setProjectSubagentsAvailable(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isProjectModeAgentContext, threadId])
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
@@ -2206,9 +2225,10 @@ export function ChatContainer({
           console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
           return false
         })
-      return environmentForcedCoordinator && !disableCoordinatorModeOption
-        ? "coordinator"
-        : "normal"
+      if (environmentForcedCoordinator && !disableCoordinatorModeOption) {
+        return "coordinator"
+      }
+      return isMultiModeMetadata(metadata) ? "multi" : "normal"
     },
     [disableCoordinatorModeOption, disableWorkflowModeOption]
   )
@@ -2236,10 +2256,13 @@ export function ChatContainer({
             ? "workflow"
             : isCoordinatorModeMetadata(currentThread?.metadata)
               ? "coordinator"
-              : "normal"
+              : isMultiModeMetadata(currentThread?.metadata)
+                ? "multi"
+                : "normal"
     setAgentMode(metadataDerivedMode)
     persistedAgentModeRef.current = metadataDerivedMode
-    agentModeHydratedRef.current = metadataDerivedMode !== "normal"
+    agentModeHydratedRef.current =
+      metadataDerivedMode === "coordinator" || metadataDerivedMode === "workflow"
 
     void loadResolvedAgentMode()
       .then((nextMode) => {
@@ -2402,6 +2425,7 @@ export function ChatContainer({
     setActiveTurnStartTime,
     clearFinishedWorkflowRun,
     appendMessage,
+    syncDurableTranscript,
     removeLocalMessage,
     addQueuedMessage,
     prependQueuedMessage,
@@ -2561,14 +2585,22 @@ export function ChatContainer({
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
+      if (submitInFlightRef.current.has(threadId)) {
+        toast.message("消息正在提交，请稍后切换执行模式")
+        return
+      }
       const requestId = ++agentModeChangeRequestRef.current
       const operation = agentModeChangeChainRef.current.then(async () => {
+        if (disableMultiModeOption && nextMode === "multi") {
+          toast.error("项目配置已禁用 task 子代理，不能使用 Multi。")
+          return
+        }
         if (disableCoordinatorModeOption && nextMode === "coordinator") {
-          toast.error("项目模式暂不支持子代理协同，只能使用 Solo Agent。")
+          toast.error("项目模式暂不支持 Agent Team。")
           return
         }
         if (disableWorkflowModeOption && nextMode === "workflow") {
-          toast.error("项目模式暂不支持 Workflow，只能使用 Solo Agent。")
+          toast.error("项目模式暂不支持 Workflow。")
           return
         }
         if (historyLoading) {
@@ -2610,7 +2642,15 @@ export function ChatContainer({
         const thread = await window.api.threads.get(threadId)
         if (requestId !== agentModeChangeRequestRef.current) return
         const metadata = thread?.metadata ?? {}
-        const nextMetadata: Record<string, unknown> = { ...metadata, agentMode: nextMode }
+        const nextMetadata: Record<string, unknown> = {
+          ...metadata,
+          agentMode: nextMode === "multi" ? "normal" : nextMode
+        }
+        if (nextMode === "normal" || nextMode === "multi") {
+          nextMetadata.subagentsEnabled = nextMode === "multi"
+        } else {
+          delete nextMetadata.subagentsEnabled
+        }
         if (nextMode !== "coordinator") {
           delete nextMetadata.coordinatorMode
         }
@@ -2621,17 +2661,25 @@ export function ChatContainer({
       })
       // Serialize writes so an older request can never finish after a newer one
       // and overwrite thread metadata with the wrong execution mode.
+      agentModeSaveRef.current = operation
       agentModeChangeChainRef.current = operation.catch(() => undefined)
-      void operation.catch((error) => {
-        if (requestId !== agentModeChangeRequestRef.current) return
-        console.error("[ChatContainer] Failed to update agent mode:", error)
-        agentModeHydratedRef.current = true
-        setAgentMode(persistedAgentModeRef.current)
-        toast.error("Agent 模式保存失败，请重试")
-      })
+      void operation
+        .catch((error) => {
+          if (requestId !== agentModeChangeRequestRef.current) return
+          console.error("[ChatContainer] Failed to update agent mode:", error)
+          agentModeHydratedRef.current = true
+          setAgentMode(persistedAgentModeRef.current)
+          toast.error("Agent 模式保存失败，请重试")
+        })
+        .finally(() => {
+          if (agentModeSaveRef.current === operation) {
+            agentModeSaveRef.current = Promise.resolve()
+          }
+        })
     },
     [
       disableCoordinatorModeOption,
+      disableMultiModeOption,
       disableWorkflowModeOption,
       historyLoading,
       threadId,
@@ -3132,7 +3180,11 @@ export function ChatContainer({
             }
           },
           config: {
-            configurable: { thread_id: threadId, model_id: currentModel, agent_mode: agentMode }
+            configurable: {
+              thread_id: threadId,
+              model_id: currentModel,
+              agent_mode: agentMode === "multi" ? "normal" : agentMode
+            }
           }
         })
       } catch (err) {
@@ -3273,9 +3325,21 @@ export function ChatContainer({
   }, [isLoading])
 
   const displayMessages = useMemo(() => {
+    const normalizedLiveMessages = normalizeLiveStreamMessageIds(
+      threadMessages.map((message) => ({
+        id: message.id,
+        type:
+          message.role === "user"
+            ? "human"
+            : message.role === "assistant"
+              ? "ai"
+              : message.role
+      })),
+      streamData.liveMessages || []
+    )
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
     const liveReasoningById = new Map<string, string>()
-    for (const liveMessage of streamData.liveMessages || []) {
+    for (const liveMessage of normalizedLiveMessages) {
       if (
         liveMessage.id &&
         liveStreamMessageRole(liveMessage.type) === "assistant" &&
@@ -3290,7 +3354,7 @@ export function ChatContainer({
       const liveReasoning = liveReasoningById.get(message.id)
       return liveReasoning ? { ...message, reasoning: liveReasoning } : message
     })
-    const streamingMsgs: Message[] = (streamData.liveMessages || [])
+    const streamingMsgs: Message[] = normalizedLiveMessages
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
       .map((streamMsg) => {
@@ -3372,70 +3436,79 @@ export function ChatContainer({
   }, [displayMessages, hookLogBuckets])
 
   const lastContentMessageId = useMemo(() => {
-    // Match what actually renders: empty messages are skipped from the DOM
-    // (see messageRendersNothing), so they own no contentMessageRefs entry and
-    // must not be returned here, or precise scroll alignment would silently fall
-    // back to scroll-to-bottom.
+    // Match what actually renders: ordinary empty messages are skipped, while
+    // an empty user row with Hook entries still owns a visible chip and scroll
+    // anchor. Returning a skipped row would make precise alignment fall back to
+    // scroll-to-bottom; omitting the Hook-only row would anchor one turn early.
     for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
       const message = displayMessages[index]
-      if (!messageRendersNothing(message)) return message.id
+      const hasHookLogChip = Boolean(
+        hookLogConfig.enabled &&
+        message.role === "user" &&
+        hookLogBucketByTurnId.get(message.id)?.entries.length
+      )
+      if (messageHasVisibleRow(message, hasHookLogChip)) return message.id
     }
     return null
-  }, [displayMessages])
+  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
 
-  // Per-message derived flags precomputed in a single O(n) reverse pass. The
-  // render loop previously recomputed these with `slice().find/some` for every
-  // message, which is O(n^2) on every render (and renders fire on every
-  // streaming token). Here we walk right-to-left once, tracking the nearest
-  // non-tool message role and whether a later user message exists.
+  // Per-message derived flags precomputed in a single O(n) reverse pass. Use
+  // the same visibility rule as ChatMessageList so invisible tool/empty rows do
+  // not affect assistant actions or turn boundaries.
   const perMessageFlags = useMemo(() => {
     const n = displayMessages.length
     const showAssistantMeta: boolean[] = new Array(n)
     const hasUserAfterHead: boolean[] = new Array(n)
-    let nextNonToolRole: string | null = null
+    let nextVisibleRole: string | null = null
     let userAfter = false
     for (let index = n - 1; index >= 0; index -= 1) {
       const message = displayMessages[index]
       hasUserAfterHead[index] = userAfter
+      const hasHookLogChip =
+        hookLogConfig.enabled &&
+        message.role === "user" &&
+        Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+      if (!messageHasVisibleRow(message, hasHookLogChip)) {
+        showAssistantMeta[index] = false
+        continue
+      }
       showAssistantMeta[index] =
-        message.role !== "assistant" || nextNonToolRole === null || nextNonToolRole !== "assistant"
+        message.role !== "assistant" || nextVisibleRole === null || nextVisibleRole !== "assistant"
       if (message.role === "user") userAfter = true
-      if (message.role !== "tool") nextNonToolRole = message.role
+      nextVisibleRole = message.role
     }
     return { showAssistantMeta, hasUserAfterHead }
-  }, [displayMessages])
+  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
 
-  // Build tool results map from tool messages
-  const toolResults = useMemo(() => {
-    const results = new Map<string, { content: string | unknown; is_error?: boolean }>()
-    for (const msg of displayMessages) {
-      if (msg.role === "tool" && msg.tool_call_id) {
-        results.set(msg.tool_call_id, {
-          content: msg.content,
-          is_error: msg.is_error
-        })
-      }
-    }
-    return results
-  }, [displayMessages])
+  const toolResults = useMemo(
+    () => buildToolResultAssociations(displayMessages),
+    [displayMessages]
+  )
 
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
     () => buildMessageBubbleTimingMeta(displayMessages),
     [displayMessages]
   )
 
-  const toolCallDisplayStates = useMemo(() => {
-    const orderedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
-    const seenToolCallIds = new Set<string>()
+  const { toolCallDisplayStates, pendingApprovalToolCallKeys } = useMemo(() => {
+    const orderedToolCalls: Array<{
+      key: string
+      call: { id: string; name: string; args: Record<string, unknown> }
+    }> = []
 
     for (const message of displayMessages) {
       if (!Array.isArray(message.tool_calls)) continue
-      for (const toolCall of message.tool_calls) {
-        if (!toolCall?.id || seenToolCallIds.has(toolCall.id)) continue
-        seenToolCallIds.add(toolCall.id)
-        orderedToolCalls.push(toolCall)
-      }
+      message.tool_calls.forEach((toolCall, index) => {
+        if (!toolCall?.id) return
+        orderedToolCalls.push({
+          key: getWorkerToolUiKey(message.id, toolCall.id, index),
+          call: toolCall
+        })
+      })
     }
+
+    const lastOccurrenceKeyByCallId = new Map<string, string>()
+    for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
 
     const currentApprovalIds = new Set<string>()
     if (pendingApproval?.pendingToolCallIds?.length) {
@@ -3445,21 +3518,29 @@ export function ChatContainer({
     } else if (pendingApproval?.tool_call?.id) {
       currentApprovalIds.add(pendingApproval.tool_call.id)
     }
+    const approvalKeys = new Set<string>()
+    for (const id of currentApprovalIds) {
+      const key = lastOccurrenceKeyByCallId.get(id)
+      if (key) approvalKeys.add(key)
+    }
 
     let activeAssigned = false
     const nextStates = new Map<string, ToolCallState>()
 
-    for (const toolCall of orderedToolCalls) {
-      const baseState = toolCallStates[toolCall.id]
+    for (const { key, call: toolCall } of orderedToolCalls) {
+      const baseState =
+        lastOccurrenceKeyByCallId.get(toolCall.id) === key
+          ? toolCallStates[toolCall.id]
+          : undefined
       const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
-      const result = toolResults.get(toolCall.id)
+      const result = toolResults.get(key)
       let status: ToolCallStatus
 
       if (result !== undefined) {
         status = result.is_error ? "failed" : "completed"
       } else if (isTerminalToolCallStatus(baseState?.status)) {
-        status = baseState.status
-      } else if (currentApprovalIds.has(toolCall.id)) {
+        status = baseState!.status
+      } else if (approvalKeys.has(key)) {
         status = "awaiting_approval"
         activeAssigned = true
       } else if (!isLoading) {
@@ -3471,7 +3552,7 @@ export function ChatContainer({
         status = "queued"
       }
 
-      nextStates.set(toolCall.id, {
+      nextStates.set(key, {
         id: toolCall.id,
         status,
         name: toolCall.name || baseState?.name,
@@ -3486,7 +3567,10 @@ export function ChatContainer({
       })
     }
 
-    return nextStates
+    return {
+      toolCallDisplayStates: nextStates,
+      pendingApprovalToolCallKeys: approvalKeys
+    }
   }, [displayMessages, isLoading, pendingApproval, toolCallStates, toolResults])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
@@ -4214,6 +4298,21 @@ export function ChatContainer({
         }
       }
 
+      // Solo/Multi differ only in thread metadata. Wait before claiming and
+      // clearing the composer so a failed mode save cannot send under the old
+      // policy or lose the user's draft.
+      const pendingModeSave = agentModeSaveRef.current
+      try {
+        await pendingModeSave
+      } catch {
+        toast.error("Agent 模式保存失败，消息未发送；再次发送将使用原模式")
+        return
+      }
+      if (isProjectModeAgentContext && projectSubagentsAvailable === null) {
+        toast.message("正在加载项目执行策略，请稍后重试")
+        return
+      }
+
       // Reset both the error message and its structured detail at turn start so
       // no stale diagnostics linger into the new turn.
       if (threadError || errorDetail) {
@@ -4385,16 +4484,27 @@ export function ChatContainer({
         ? "normal"
         : coordinatorPrefixed
           ? "coordinator"
-          : agentMode
+          : persistedAgentModeRef.current
       if (disableWorkflowModeOption && submitAgentMode === "workflow") {
         submitAgentMode = "normal"
       }
+      if (disableMultiModeOption && submitAgentMode === "multi") {
+        submitAgentMode = "normal"
+      }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
-        submitAgentMode = await loadResolvedAgentMode().catch((error) => {
-          console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
-          return agentMode
-        })
+        submitAgentMode = await loadResolvedAgentMode()
+          .then((resolvedMode) => {
+            persistedAgentModeRef.current = resolvedMode
+            return resolvedMode
+          })
+          .catch((error) => {
+            console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
+            return agentMode
+          })
         if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+          submitAgentMode = "normal"
+        }
+        if (disableMultiModeOption && submitAgentMode === "multi") {
           submitAgentMode = "normal"
         }
         agentModeHydratedRef.current = true
@@ -4403,6 +4513,7 @@ export function ChatContainer({
         }
       }
       if (
+        (disableMultiModeOption && agentMode === "multi") ||
         (disableCoordinatorModeOption && agentMode === "coordinator") ||
         (disableWorkflowModeOption && agentMode === "workflow")
       ) {
@@ -4482,7 +4593,7 @@ export function ChatContainer({
               configurable: {
                 thread_id: threadId,
                 model_id: currentModel,
-                agent_mode: submitAgentMode,
+                agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
                 ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
               }
             }
@@ -4819,6 +4930,13 @@ export function ChatContainer({
       // thread was composed, queued while busy, and the run finishes before the user
       // ever hits a live send), so `agentModeHydratedRef` may still be unresolved here.
       // Skipping this hydration would route that turn through the wrong mode.
+      const pendingModeSave = agentModeSaveRef.current
+      try {
+        await pendingModeSave
+      } catch {
+        return
+      }
+      if (isProjectModeAgentContext && projectSubagentsAvailable === null) return
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
@@ -4826,16 +4944,27 @@ export function ChatContainer({
         ? "normal"
         : coordinatorPrefixed
           ? "coordinator"
-          : agentMode
+          : persistedAgentModeRef.current
       if (disableWorkflowModeOption && submitAgentMode === "workflow") {
         submitAgentMode = "normal"
       }
+      if (disableMultiModeOption && submitAgentMode === "multi") {
+        submitAgentMode = "normal"
+      }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
-        submitAgentMode = await loadResolvedAgentMode().catch((error) => {
-          console.warn("[ChatContainer] Failed to resolve queued draft agent mode:", error)
-          return agentMode
-        })
+        submitAgentMode = await loadResolvedAgentMode()
+          .then((resolvedMode) => {
+            persistedAgentModeRef.current = resolvedMode
+            return resolvedMode
+          })
+          .catch((error) => {
+            console.warn("[ChatContainer] Failed to resolve queued draft agent mode:", error)
+            return agentMode
+          })
         if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+          submitAgentMode = "normal"
+        }
+        if (disableMultiModeOption && submitAgentMode === "multi") {
           submitAgentMode = "normal"
         }
         agentModeHydratedRef.current = true
@@ -4844,6 +4973,7 @@ export function ChatContainer({
         }
       }
       if (
+        (disableMultiModeOption && agentMode === "multi") ||
         (disableCoordinatorModeOption && agentMode === "coordinator") ||
         (disableWorkflowModeOption && agentMode === "workflow")
       ) {
@@ -4892,7 +5022,7 @@ export function ChatContainer({
               configurable: {
                 thread_id: threadId,
                 model_id: queuedModelId,
-                agent_mode: submitAgentMode,
+                agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
                 ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
               }
             }
@@ -4909,11 +5039,14 @@ export function ChatContainer({
       currentModel,
       deleteQueuedMessage,
       disableCoordinatorModeOption,
+      disableMultiModeOption,
       disableWorkflowModeOption,
       generateTitleForFirstMessage,
       getQueuedMessage,
+      isProjectModeAgentContext,
       loadResolvedAgentMode,
       models,
+      projectSubagentsAvailable,
       setActiveTurnStartTime,
       setError,
       stream,
@@ -4957,23 +5090,30 @@ export function ChatContainer({
         threadId,
         handedOff.map((queued) => queued.id)
       )
-      .then(({ pendingIds, injectedIds, durableIds }) => {
+      .then(async ({ pendingIds, injectedIds, durableIds }) => {
         if (cancelled) return
         const pending = new Set([...pendingIds, ...injectedIds])
         const durable = new Set(durableIds)
         const visibleIds = new Set(threadMessages.map((message) => message.id))
+        const missingDurableIds = handedOff
+          .filter((queued) => durable.has(queued.id) && !visibleIds.has(queued.id))
+          .map((queued) => queued.id)
+        const missingDurableIdSet = new Set(missingDurableIds)
+        if (missingDurableIds.length > 0) {
+          const synced = await syncDurableTranscript(missingDurableIds)
+          if (cancelled) return
+          if (!synced) {
+            scheduleRetry()
+            return
+          }
+        }
         let shouldRetry = false
         for (const queued of handedOff) {
           if (durable.has(queued.id)) {
-            if (!visibleIds.has(queued.id)) {
-              appendMessage({
-                id: queued.id,
-                role: "user",
-                content: guardCoordinatorPlainText(getQueuedDisplayContent(queued)),
-                created_at: new Date()
-              })
-            }
-            deleteQueuedMessage(queued.id)
+            // Missing durable messages and their handed-off drafts are committed
+            // atomically by syncDurableTranscript. A separately queued delete
+            // could otherwise run after its lifecycle fence became stale.
+            if (!missingDurableIdSet.has(queued.id)) deleteQueuedMessage(queued.id)
           } else if (pending.has(queued.id)) {
             shouldRetry = true
           } else {
@@ -4998,13 +5138,13 @@ export function ChatContainer({
       if (retryTimer) clearTimeout(retryTimer)
     }
   }, [
-    appendMessage,
     deleteQueuedMessage,
     historyLoading,
     isLoading,
     pendingApproval,
     queuePumpTick,
     queuedMessages,
+    syncDurableTranscript,
     threadId,
     threadMessages,
     updateQueuedMessage
@@ -5029,6 +5169,7 @@ export function ChatContainer({
   // a re-check after each settle.
   useEffect(() => {
     if (queueAutoDrainSuppressed) return
+    if (isProjectModeAgentContext && projectSubagentsAvailable === null) return
     if (submitInFlightRef.current.has(threadId)) return
     if (isLoading || pendingApproval || threadError || !stream) return
     if (historyLoading || readOnly || contextReminderPending) return
@@ -5092,10 +5233,12 @@ export function ChatContainer({
     currentModel,
     hasActiveGoalRunning,
     historyLoading,
+    isProjectModeAgentContext,
     isLoading,
     models,
     pendingApproval,
     prependQueuedMessage,
+    projectSubagentsAvailable,
     queueAutoDrainSuppressed,
     queuePumpTick,
     queuedMessages,
@@ -6704,6 +6847,7 @@ export function ChatContainer({
                     isLoading={isLoading}
                     toolResults={toolResults}
                     toolCallStates={toolCallDisplayStates}
+                    pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
                     pendingApproval={pendingApproval}
                     autoApproveGitPush={!yoloModeLoaded || yoloMode}
                     onApprovalDecision={handleApprovalDecision}
@@ -7477,7 +7621,9 @@ export function ChatContainer({
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
+                            showWorkflow={!isProjectModeAgentContext}
                             mode={
+                              (disableMultiModeOption && agentMode === "multi") ||
                               (disableCoordinatorModeOption && agentMode === "coordinator") ||
                               (disableWorkflowModeOption && agentMode === "workflow")
                                 ? "normal"
@@ -7486,21 +7632,29 @@ export function ChatContainer({
                             locked={isLoading || !canChangeAgentMode}
                             lockedReason={agentModeSwitchDisabledReason}
                             disabledModes={
-                              disableCoordinatorModeOption || disableWorkflowModeOption
+                              disableMultiModeOption ||
+                              disableCoordinatorModeOption ||
+                              disableWorkflowModeOption
                                 ? {
+                                    multi: disableMultiModeOption,
                                     coordinator: disableCoordinatorModeOption,
                                     workflow: disableWorkflowModeOption
                                   }
                                 : undefined
                             }
                             disabledModeReasons={
-                              disableCoordinatorModeOption || disableWorkflowModeOption
+                              disableMultiModeOption ||
+                              disableCoordinatorModeOption ||
+                              disableWorkflowModeOption
                                 ? {
+                                    multi: disableMultiModeOption
+                                      ? "项目配置已禁用 task 子代理。"
+                                      : undefined,
                                     coordinator: disableCoordinatorModeOption
-                                      ? "项目模式暂不支持子代理协同，只能使用 Solo Agent。"
+                                      ? "项目模式暂不支持 Agent Team。"
                                       : undefined,
                                     workflow: disableWorkflowModeOption
-                                      ? "项目模式暂不支持 Workflow，只能使用 Solo Agent。"
+                                      ? "项目模式暂不支持 Workflow。"
                                       : undefined
                                   }
                                 : undefined

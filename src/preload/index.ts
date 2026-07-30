@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
+import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import {
   isWindowCloseBehavior,
@@ -50,8 +51,15 @@ import type {
   ForkableCheckpoint,
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
-  ThreadForkResponse
+  ThreadForkResponse,
+  SubagentTranscriptPage,
+  SubagentTranscriptBlobExportResult,
+  SubagentTranscriptBlobField
 } from "../main/types"
+import {
+  classifyAgentStreamDelivery,
+  resolveAgentStreamRequestChannel
+} from "../shared/agent-stream-channel"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -63,10 +71,16 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
@@ -74,6 +88,8 @@ import type {
   HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -158,6 +174,7 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
@@ -238,6 +255,44 @@ const electronAPI = {
   }
 }
 
+function listenForAgentStreamRequest(
+  ambientChannel: string,
+  requestChannel: string,
+  threadId: string,
+  onEvent: (event: StreamEvent) => void,
+  notifyUser: boolean
+): () => void {
+  let listening = true
+  const cleanup = (): void => {
+    if (!listening) return
+    listening = false
+    ipcRenderer.removeListener(requestChannel, requestHandler)
+    if (requestChannel !== ambientChannel) {
+      ipcRenderer.removeListener(ambientChannel, ambientHandler)
+    }
+  }
+  const deliver = (data: StreamEvent): void => {
+    onEvent(data)
+    if (notifyUser) notifyForAgentStreamEvent(data, threadId)
+  }
+  const requestHandler = (_: unknown, data: StreamEvent): void => {
+    const decision = classifyAgentStreamDelivery("request", data.type)
+    deliver(data)
+    if (decision === "deliver-and-close") cleanup()
+  }
+  const ambientHandler = (_: unknown, data: StreamEvent): void => {
+    // Thread-scoped broadcasts carry asynchronous worker, hook, and message-id
+    // events. A terminal event always belongs to a concrete request and must not
+    // detach another request that is queued behind the replacement lock.
+    if (classifyAgentStreamDelivery("ambient", data.type) === "ignore") return
+    deliver(data)
+  }
+
+  ipcRenderer.on(requestChannel, requestHandler)
+  if (requestChannel !== ambientChannel) ipcRenderer.on(ambientChannel, ambientHandler)
+  return cleanup
+}
+
 // Custom APIs for renderer
 const api = {
   agent: {
@@ -251,23 +306,21 @@ const api = {
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
-      const channel = coordinatorInternalNotification
+      const ambientChannel = coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
         : `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent(data)
-        if (!coordinatorInternalNotification) {
-          notifyForAgentStreamEvent(data, threadId)
-        }
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        onEvent,
+        !coordinatorInternalNotification
+      )
       ipcRenderer.send("agent:invoke", {
         threadId,
+        streamRequestId,
         message,
         modelId,
         agentMode,
@@ -275,9 +328,7 @@ const api = {
         userMessageId
       })
 
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      return cleanup
     },
     streamAgent: (
       threadId: string,
@@ -289,27 +340,33 @@ const api = {
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
-      const channel = coordinatorInternalNotification
+      const ambientChannel = command
+        ? `agent:stream:${threadId}`
+        : coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
         : `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent(data)
-        if (!coordinatorInternalNotification) {
-          notifyForAgentStreamEvent(data, threadId)
-        }
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        onEvent,
+        !coordinatorInternalNotification
+      )
 
       if (command) {
-        ipcRenderer.send("agent:resume", { threadId, command, modelId, agentMode })
+        ipcRenderer.send("agent:resume", {
+          threadId,
+          streamRequestId,
+          command,
+          modelId,
+          agentMode
+        })
       } else {
         ipcRenderer.send("agent:invoke", {
           threadId,
+          streamRequestId,
           message,
           modelId,
           agentMode,
@@ -318,32 +375,25 @@ const api = {
         })
       }
 
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      return cleanup
     },
     interrupt: (
       threadId: string,
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
     ): (() => void) => {
-      const channel = `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent?.(data)
-        notifyForAgentStreamEvent(data, threadId)
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:interrupt", { threadId, decision })
-
-      // Return cleanup function
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      const ambientChannel = `agent:stream:${threadId}`
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        (data) => onEvent?.(data),
+        true
+      )
+      ipcRenderer.send("agent:interrupt", { threadId, streamRequestId, decision })
+      return cleanup
     },
     goalControl: (
       threadId: string,
@@ -610,6 +660,9 @@ const api = {
     get: (threadId: string): Promise<Thread | null> => {
       return ipcRenderer.invoke("threads:get", threadId)
     },
+    getProjectSubagentsAvailable: (threadId: string): Promise<boolean> => {
+      return ipcRenderer.invoke("threads:getProjectSubagentsAvailable", threadId)
+    },
     create: (metadata?: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:create", metadata)
     },
@@ -629,6 +682,40 @@ const api = {
     },
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:mergeThreadValues", { threadId, patch })
+    },
+    getSubagentTranscripts: (threadId: string): Promise<Record<string, unknown>> => {
+      return ipcRenderer.invoke("threads:getSubagentTranscripts", threadId)
+    },
+    getSubagentTranscript: (
+      threadId: string,
+      subagentId: string,
+      before?: number
+    ): Promise<SubagentTranscriptPage> => {
+      return ipcRenderer.invoke("threads:getSubagentTranscript", { threadId, subagentId, before })
+    },
+    exportSubagentTranscriptBlob: (
+      threadId: string,
+      subagentId: string,
+      messageIndex: number,
+      expectedMessageId: string,
+      field: SubagentTranscriptBlobField
+    ): Promise<SubagentTranscriptBlobExportResult> => {
+      return ipcRenderer.invoke("threads:exportSubagentTranscriptBlob", {
+        threadId,
+        subagentId,
+        messageIndex,
+        expectedMessageId,
+        field
+      })
+    },
+    persistSubagentTranscripts: (
+      threadId: string,
+      transcripts: Record<string, unknown>
+    ): Promise<Record<string, unknown>> => {
+      return ipcRenderer.invoke("threads:persistSubagentTranscripts", {
+        threadId,
+        transcripts
+      })
     },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
@@ -1101,7 +1188,7 @@ const api = {
       return ipcRenderer.invoke("workspace:readBinaryFile", { threadId, filePath })
     },
     readExternalFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -1109,10 +1196,10 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalFile", { token })
     },
     readExternalBinaryFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -1120,7 +1207,17 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalBinaryFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalBinaryFile", { token })
+    },
+    requestExternalFileRead: (
+      filePath: string
+    ): Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:requestExternalFileRead", filePath)
     },
     clearWorktreeContext: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("workspace:clearWorktreeContext", threadId) as Promise<void>
@@ -1415,11 +1512,11 @@ const api = {
       >
     },
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:removeWorktree", {
-        gitRoot,
+        threadId,
         worktreePath
       }) as Promise<{ success: boolean; error?: string }>
     },
@@ -1524,9 +1621,9 @@ const api = {
     },
     // Listen for file changes in the workspace
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string }) => void
+      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
     ): (() => void) => {
-      const handler = (_: unknown, data: { threadId: string; workspacePath: string }): void => {
+      const handler = (_: unknown, data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }): void => {
         callback(data)
       }
       ipcRenderer.on("workspace:files-changed", handler)
@@ -1541,13 +1638,14 @@ const api = {
     list: (): Promise<PetManifest[]> => {
       return ipcRenderer.invoke("pet:list") as Promise<PetManifest[]>
     },
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ): Promise<{ success: boolean; dataUrl?: string; error?: string }> => {
-      return ipcRenderer.invoke("pet:getSpriteDataUrl", directoryId, source) as Promise<{
+    ): Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }> => {
+      return ipcRenderer.invoke("pet:getSpriteBytes", directoryId, source) as Promise<{
         success: boolean
-        dataUrl?: string
+        bytes?: Uint8Array
+        mimeType?: string
         error?: string
       }>
     },
@@ -1564,6 +1662,11 @@ const api = {
     },
     updateSettings: (settings: Partial<PetSettings>): Promise<PetSettings> => {
       return ipcRenderer.invoke("pet:updateSettings", settings) as Promise<PetSettings>
+    },
+    onSettingsChanged: (callback: (settings: PetSettings) => void): (() => void) => {
+      const handler = (_event: unknown, settings: PetSettings): void => callback(settings)
+      ipcRenderer.on(PET_SETTINGS_CHANGED_CHANNEL, handler)
+      return () => ipcRenderer.removeListener(PET_SETTINGS_CHANGED_CHANNEL, handler)
     },
     uploadCustomFolder: (): Promise<{ success: boolean; pet?: PetManifest; error?: string }> => {
       return ipcRenderer.invoke("pet:uploadCustomFolder") as Promise<{
@@ -3444,6 +3547,25 @@ const api = {
         "harnessBoard:searchEnterpriseProjects",
         input
       ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    searchDeployUnits: (
+      input: HarnessDeployUnitSearchInput
+    ): Promise<HarnessDeployUnitSearchResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:searchDeployUnits",
+        input
+      ) as Promise<HarnessDeployUnitSearchResult>,
+    queryPipelines: (input: HarnessPipelineQueryInput): Promise<HarnessPipelineQueryResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:queryPipelines",
+        input
+      ) as Promise<HarnessPipelineQueryResult>,
+    queryPipelineLabels: (
+      input: HarnessPipelineLabelQueryInput
+    ): Promise<HarnessPipelineLabelQueryResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:queryPipelineLabels",
+        input
+      ) as Promise<HarnessPipelineLabelQueryResult>,
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ): Promise<HarnessEnterpriseProjectDetailResult> =>
@@ -3461,6 +3583,13 @@ const api = {
         "harnessBoard:createFeature",
         input
       ) as Promise<HarnessFeatureCreateResult>,
+    updateFeatureDeployUnits: (
+      input: HarnessFeatureDeployUnitUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> =>
+      ipcRenderer.invoke(
+        "harnessBoard:updateFeatureDeployUnits",
+        input
+      ) as Promise<HarnessFeatureDeployUnitBinding>,
     getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
       ipcRenderer.invoke(
         "harnessBoard:getDynamicWorkflowConfig",

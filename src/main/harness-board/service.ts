@@ -23,6 +23,7 @@ import type {
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessFeatureDeployUnitBinding,
   HarnessFeatureStatus,
   HarnessAgentmdLoadStatusItem,
@@ -34,6 +35,7 @@ import type {
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
+  HarnessProjectModeSubagentConfig,
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionContextInjectionSource,
@@ -1002,8 +1004,7 @@ function formatMarkdownTableCell(value: string): string {
 
 function resolveHarnessAdditionalWorkspaceRootMappings(
   projectId: string,
-  featureId: string,
-  _workspacePath: string
+  featureId: string
 ): HarnessDeployUnitMapping[] {
   const seen = new Set<string>()
   const mappings: HarnessDeployUnitMapping[] = []
@@ -2265,6 +2266,30 @@ function saveFeatureDeployUnitBinding(
   return binding
 }
 
+function updateFeatureDeployUnitBinding(
+  projectId: string,
+  featureId: string,
+  selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+): HarnessFeatureDeployUnitBindingRecord {
+  const store = readFeatureDeployUnitBindingStore()
+  const key = featureDeployUnitBindingKey(projectId, featureId)
+  const existingIndex = store.bindings.findIndex(
+    (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
+  )
+  if (existingIndex < 0) {
+    throw new Error("未找到该特性的发布单元绑定记录")
+  }
+
+  const binding: HarnessFeatureDeployUnitBindingRecord = {
+    ...store.bindings[existingIndex],
+    selectedDeployUnitMappings,
+    updatedAt: formatGmt8Timestamp()
+  }
+  store.bindings[existingIndex] = binding
+  writeFeatureDeployUnitBindingStore(store)
+  return binding
+}
+
 export function listHarnessDeployUnitMappings(): HarnessDeployUnitMapping[] {
   return readDeployUnitMappingStore().mappings
 }
@@ -2431,13 +2456,13 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
 }
 
 function resolveFeatureSelectedDeployUnits(
-  input: HarnessFeatureCreateInput,
-  _project: HarnessProjectMetadata
+  selectedDeployUnits: HarnessDeployUnitMapping[] | undefined,
+  options: { allowEmpty?: boolean } = {}
 ): HarnessDeployUnitMapping[] {
-  if (!Array.isArray(input.selectedDeployUnits)) return []
+  if (!Array.isArray(selectedDeployUnits)) return []
 
-  const selected = normalizeDeployUnitMappings(input.selectedDeployUnits)
-  if (selected.length === 0) {
+  const selected = normalizeDeployUnitMappings(selectedDeployUnits)
+  if (selected.length === 0 && !(options.allowEmpty && selectedDeployUnits.length === 0)) {
     throw new Error("请至少选择一个发布单元")
   }
 
@@ -2684,6 +2709,7 @@ export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   enableAgentsPrompt?: boolean
   enableTaskTool?: boolean
+  agentConfig?: HarnessAgentConfig
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
   additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
@@ -2714,10 +2740,68 @@ function isHarnessSessionContextOk(value: unknown): boolean {
   return value === true
 }
 
+export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"
+
+export interface HarnessAgentConfig {
+  agentMode?: HarnessRuntimeAgentMode
+  toolConfig?: Record<string, { enabled?: boolean }>
+  subagentConfig?: HarnessProjectModeSubagentConfig
+}
+
+const HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS = new Set(["task"])
+
+function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undefined {
+  if (!isObject(value)) return undefined
+
+  const agentMode =
+    value.agentMode === "solo" ||
+    value.agentMode === "multi" ||
+    value.agentMode === "agent_team"
+      ? value.agentMode
+      : undefined
+  const toolConfig: Record<string, { enabled?: boolean }> = {}
+  if (isObject(value.toolConfig)) {
+    for (const [toolName, config] of Object.entries(value.toolConfig)) {
+      if (!HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS.has(toolName) || !isObject(config)) continue
+      if (typeof config.enabled === "boolean") {
+        toolConfig[toolName] = { enabled: config.enabled }
+      }
+    }
+  }
+
+  const normalizeStringList = (input: unknown): string[] => {
+    if (!Array.isArray(input)) return []
+    return [
+      ...new Set(
+        input
+          .filter((item): item is string => typeof item === "string")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    ]
+  }
+  const subagentConfig = isObject(value.subagentConfig)
+    ? {
+        disabledBuiltinSubagents: normalizeStringList(
+          value.subagentConfig.disabledBuiltinSubagents
+        ),
+        customSubagentFiles: normalizeStringList(value.subagentConfig.customSubagentFiles)
+      }
+    : undefined
+
+  if (!agentMode && Object.keys(toolConfig).length === 0 && !subagentConfig) return undefined
+  return {
+    ...(agentMode ? { agentMode } : {}),
+    ...(Object.keys(toolConfig).length > 0 ? { toolConfig } : {}),
+    ...(subagentConfig ? { subagentConfig } : {})
+  }
+}
+
 interface HarnessSessionContextInjectResult {
   prompt?: string
   warning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
+  agentConfig?: HarnessAgentConfig
 }
 
 function formatSessionContextInjectWarning(detail: string): string {
@@ -2769,6 +2853,7 @@ function readHarnessFeatureSessionContextAgentPrompt(
       })
       return { warning: formatSessionContextInjectWarning(detail) }
     }
+    const agentConfig = normalizeHarnessAgentConfig(result.agentConfig)
     if (sessionContext.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
       console.warn("[HarnessBoard] session_context_inject sessionContext truncated:", {
         chars: sessionContext.length,
@@ -2776,10 +2861,15 @@ function readHarnessFeatureSessionContextAgentPrompt(
       })
       return {
         prompt: sessionContext.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS),
-        agentmdLoadStatus
+        agentmdLoadStatus,
+        ...(agentConfig ? { agentConfig } : {})
       }
     }
-    return { prompt: sessionContext, agentmdLoadStatus }
+    return {
+      prompt: sessionContext,
+      agentmdLoadStatus,
+      ...(agentConfig ? { agentConfig } : {})
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     console.error("[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:", {
@@ -2807,7 +2897,7 @@ export function buildHarnessFeatureAgentContext(
   const plugin = findAdapterPlugin(project)
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
-  const enableTaskTool = boardConfigEnableTaskTool(cwd)
+  const boardConfigTaskToolEnabled = boardConfigEnableTaskTool(cwd)
   const systemId = normalizeText(project.systemId).trim()
   const featureBinding = findFeatureDeployUnitBinding(project.projectId, feature.slug)
   const sessionContextInjectionSource =
@@ -2828,12 +2918,14 @@ export function buildHarnessFeatureAgentContext(
   const sessionContextInjectResult = usePluginAgentsPrompt
     ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, { sessionWorkspacePath })
     : undefined
+  const agentConfig = sessionContextInjectResult?.agentConfig
+  const enableTaskTool =
+    agentConfig?.toolConfig?.task?.enabled ?? boardConfigTaskToolEnabled
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
   const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
   const additionalWorkspaceRootMappings = resolveHarnessAdditionalWorkspaceRootMappings(
     project.projectId,
-    feature.slug,
-    sessionWorkspacePath
+    feature.slug
   )
   const additionalWorkspaceRoots = additionalWorkspaceRootMappings.map(
     (mapping) => mapping.localRepoPath
@@ -2849,6 +2941,7 @@ export function buildHarnessFeatureAgentContext(
     systemPromptInject,
     enableAgentsPrompt: !pluginPromptLoaded,
     ...(enableTaskTool !== undefined ? { enableTaskTool } : {}),
+    ...(agentConfig ? { agentConfig } : {}),
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
       ? {
@@ -2959,6 +3052,13 @@ export function getHarnessProjectPublicAgentmdDeployUnits(projectId: string): st
   return boardConfigPublicAgentmdDeployUnits(plugin.path)
 }
 
+export function resolveHarnessProjectTaskToolEnabled(projectId: string): boolean | undefined {
+  const normalizedProjectId = normalizeText(projectId).trim()
+  if (!normalizedProjectId) return undefined
+  const project = requireProject(normalizedProjectId)
+  return boardConfigEnableTaskTool(adapterPluginDir(project))
+}
+
 export function getHarnessLocalAgentmdDeployUnitMappings(
   mappings: HarnessDeployUnitMapping[]
 ): string[] {
@@ -3031,7 +3131,7 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
-  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input, project)
+  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input.selectedDeployUnits)
   const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
     input.sessionContextInjectionSource
   )
@@ -3073,6 +3173,23 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
     title: feature,
     workspacePath
   }
+}
+
+export function updateHarnessFeatureDeployUnits(
+  input: HarnessFeatureDeployUnitUpdateInput
+): HarnessFeatureDeployUnitBinding {
+  const projectId = normalizeText(input.projectId).trim()
+  const featureId = normalizeText(input.featureId).trim()
+  if (!projectId || !featureId) {
+    throw new Error("Project and feature are required")
+  }
+  validateHarnessName(featureId, "特性名称")
+  requireProject(projectId)
+
+  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input.selectedDeployUnits, {
+    allowEmpty: true
+  })
+  return updateFeatureDeployUnitBinding(projectId, featureId, selectedDeployUnits)
 }
 
 export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNodeResult {

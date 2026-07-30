@@ -10,6 +10,10 @@ import {
   namespaceChatXStreamEventIds
 } from "../src/main/services/chatx-stream-ids.ts"
 import type { SchedulerEvent } from "../src/main/agent/stream-converter.ts"
+import {
+  buildFilteredThreadValues,
+  deriveCheckpointTranscriptIndex
+} from "../src/shared/checkpoint-transcript.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
@@ -548,6 +552,105 @@ function testNonSubagentCustomEventsAreUnchanged(): void {
   assertEqual(namespaced, event, "non-subagent custom events should be returned unchanged")
 }
 
+function testChatXSubagentStorageIdentitySurvivesForkFiltering(): void {
+  const turnId = "fork-turn"
+  const rawTaskId = "raw-chatx-task"
+  const parentId = "raw-chatx-parent"
+  const taskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "verify fork" }
+  }
+  const checkpoint = {
+    channel_values: {
+      messages: [
+        {
+          id: ["langchain_core", "messages", "AIMessage"],
+          kwargs: {
+            id: parentId,
+            content: "",
+            tool_calls: [taskCall],
+            additional_kwargs: {}
+          }
+        }
+      ]
+    }
+  }
+  const index = deriveCheckpointTranscriptIndex(checkpoint as never)
+  const invocation = index.subagentTranscriptInvocations[0]
+  if (!invocation) throw new Error("expected checkpoint task invocation")
+  const rawExecutionId = `${rawTaskId}::invocation-example`
+  const promptEvent = namespaceChatXStreamEventIds(
+    {
+      type: "custom",
+      data: {
+        type: "subagent_transcript_message",
+        subagentId: rawExecutionId,
+        subagentMessage: {
+          id: `subagent-prompt-${rawExecutionId}`,
+          role: "user",
+          content: "verify fork",
+          subagent_tool_call_id: rawTaskId,
+          subagent_invocation_scope: invocation.invocationScope
+        }
+      }
+    },
+    turnId
+  )
+  if (promptEvent.type !== "custom") throw new Error("expected custom prompt event")
+  const scopedExecutionId = promptEvent.data.subagentId as string
+  const scopedPrompt = promptEvent.data.subagentMessage as Record<string, unknown>
+  assertEqual(
+    scopedPrompt.subagent_tool_call_id,
+    rawTaskId,
+    "ChatX must preserve the provider task id used by checkpoint fork identity"
+  )
+  assertEqual(
+    scopedPrompt.id,
+    `subagent-prompt-${scopedExecutionId}`,
+    "ChatX prompt render id must still follow the scoped execution bucket"
+  )
+  const filtered = buildFilteredThreadValues(
+    { subagentTranscripts: { [scopedExecutionId]: [scopedPrompt] } },
+    index
+  ).subagentTranscripts as Record<string, unknown>
+  assertEqual(
+    Object.keys(filtered)[0],
+    scopedExecutionId,
+    "a canonical ChatX bucket must survive checkpoint filtering"
+  )
+
+  const provisionalEvent = namespaceChatXStreamEventIds(
+    {
+      type: "custom",
+      data: {
+        type: "subagent_transcript_message",
+        subagentId: rawExecutionId,
+        subagentMessage: {
+          id: `subagent-prompt-${rawExecutionId}`,
+          role: "user",
+          content: "verify fork",
+          subagent_tool_call_id: rawTaskId,
+          subagent_invocation_scope: parentId
+        }
+      }
+    },
+    turnId
+  )
+  if (provisionalEvent.type !== "custom") throw new Error("expected provisional custom event")
+  const provisionalId = provisionalEvent.data.subagentId as string
+  const provisionalPrompt = provisionalEvent.data.subagentMessage as Record<string, unknown>
+  const provisionalFiltered = buildFilteredThreadValues(
+    { subagentTranscripts: { [provisionalId]: [provisionalPrompt] } },
+    index
+  ).subagentTranscripts as Record<string, unknown>
+  assertEqual(
+    Object.keys(provisionalFiltered)[0],
+    provisionalId,
+    "a messages-only provisional ChatX prompt must retain its raw-id fork fallback"
+  )
+}
+
 testRepeatedProviderAssistantIdsAreScopedByChatXTurn()
 testRepeatedProviderToolCallIdsAreScopedByChatXTurn()
 testToolMessageUsesMatchingToolCallScope()
@@ -558,5 +661,6 @@ testNonSubagentCustomEventsAreUnchanged()
 testFullMessagesUseNearestChatXUserTurn()
 testFullMessagesScopeToolCallPairsByTurn()
 testFullMessagesPlainUserClearsActiveChatXTurn()
+testChatXSubagentStorageIdentitySurvivesForkFiltering()
 
 console.log("chatx-stream-message-ids.spec.ts passed")

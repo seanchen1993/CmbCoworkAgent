@@ -358,11 +358,12 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
       abortSignal: abortController.signal
     })
 
-    const converter = new StreamConverter()
+    const currentTurnUserMessageId = getChatXUserMessageId(msg.msgId)
+    const converter = new StreamConverter(`chatx:${msg.msgId}`, currentTurnUserMessageId)
 
     const stream = await agent.stream(
       {
-        messages: [new HumanMessage({ id: getChatXUserMessageId(msg.msgId), content: msg.content })]
+        messages: [new HumanMessage({ id: currentTurnUserMessageId, content: msg.content })]
       },
       {
         configurable: { thread_id: threadId },

@@ -29,6 +29,7 @@ export type ThreadStatus = "idle" | "busy" | "interrupted" | "error"
 // Agent IPC
 export interface AgentInvokeParams {
   threadId: string
+  streamRequestId?: string
   message: string
   modelId?: string
   agentMode?: "normal" | "coordinator" | "workflow"
@@ -39,6 +40,7 @@ export interface AgentInvokeParams {
 
 export interface AgentResumeParams {
   threadId: string
+  streamRequestId?: string
   command: {
     resume?: {
       decision?: string
@@ -52,6 +54,7 @@ export interface AgentResumeParams {
 
 export interface AgentInterruptParams {
   threadId: string
+  streamRequestId?: string
   decision: HITLDecision
 }
 
@@ -155,6 +158,33 @@ export interface Subagent {
   lastActivityAt?: string
   /** Registration order (0-based). Used to match LangGraph checkpoint_ns index (e.g. "tools:0"). */
   spawnIndex?: number
+  /** True only after this execution was observed in the current live stream. */
+  observedLive?: boolean
+  /** Renderer-only provenance for a prompt row restored without a stable final. */
+  restoredFromPromptOnly?: boolean
+}
+
+export interface SubagentTranscriptPage {
+  messages: unknown[]
+  deferredHydration: boolean
+  deferredExport?: {
+    messageIndex: number
+    expectedMessageId: string
+    fields: SubagentTranscriptBlobField[]
+  }
+  end: number
+  start: number
+  nextBefore?: number
+  total: number
+}
+
+export type SubagentTranscriptBlobField = "content" | "reasoning" | "tool_calls"
+
+export interface SubagentTranscriptBlobExportResult {
+  success: boolean
+  canceled?: boolean
+  filePath?: string
+  error?: string
 }
 
 // Stream events from agent
@@ -173,6 +203,8 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  provider_source_id?: string
+  provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number

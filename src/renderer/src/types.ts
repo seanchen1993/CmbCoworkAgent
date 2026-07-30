@@ -7,6 +7,7 @@ import type {
   ThreadForkParams as SharedThreadForkParams,
   ThreadForkResponse as SharedThreadForkResponse
 } from "../../shared/checkpoint-forkability"
+import type { SubagentTranscriptBlobRef } from "../../shared/subagent-transcript-storage"
 
 export type { ForkBoundarySource, ForkUnstableReason } from "../../shared/checkpoint-forkability"
 
@@ -120,9 +121,18 @@ import type {
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailItem,
   HarnessEnterpriseProjectDetailResult,
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchItem,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelItem,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryItem,
+  HarnessPipelineQueryResult,
   HarnessArtifact,
   HarnessArtifactStatus,
   HarnessArtifactType,
@@ -139,6 +149,7 @@ import type {
   HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessFeatureDeployUnitBinding,
   HarnessDynamicWorkflowConfig,
   HarnessDynamicWorkflowNode,
@@ -207,9 +218,18 @@ export type {
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailItem,
   HarnessEnterpriseProjectDetailResult,
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchItem,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelItem,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryItem,
+  HarnessPipelineQueryResult,
   HarnessArtifact,
   HarnessArtifactStatus,
   HarnessArtifactType,
@@ -226,6 +246,7 @@ export type {
   HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessDynamicWorkflowConfig,
   HarnessDynamicWorkflowNode,
   HarnessDynamicWorkflowTemplate,
@@ -264,11 +285,42 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  provider_source_id?: string
+  provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number
+  // A bounded in-flight projection keeps the stream responsive while retaining
+  // enough identity to reconcile it with a later lossless snapshot.
+  content_is_projection?: boolean
+  content_full_length?: number
+  // Large transcript fields are persisted out-of-line. The renderer keeps the
+  // hydrated value for display and the reference for compact subsequent saves.
+  content_ref?: SubagentTranscriptBlobRef
+  // Internal transcript aliases used to collapse a provisional subagent
+  // assistant row into its stable task-completion row across reloads/replays.
+  replaced_message_ids?: string[]
+  replaced_message_id_prefixes?: string[]
+  compatible_replaced_message_id_prefixes?: string[]
+  // Persisted on the prompt row so fork filtering can distinguish repeated
+  // provider task IDs by their canonical parent assistant invocation.
+  subagent_tool_call_id?: string
+  subagent_invocation_scope?: string
+  subagent_prompt_fingerprint?: string
+  subagent_content_fingerprint?: string
+  subagent_reasoning_fingerprint?: string
+  // Main-process-only startup summaries must never replace their full stored row.
+  subagent_startup_projection?: boolean
+  subagent_startup_tool_calls_projection?: boolean
+  subagent_name?: string
+  subagent_description?: string
+  subagent_type?: string
   reasoning?: string
+  reasoning_is_projection?: boolean
+  reasoning_full_length?: number
+  reasoning_ref?: SubagentTranscriptBlobRef
   tool_calls?: ToolCall[]
+  tool_calls_ref?: SubagentTranscriptBlobRef
   // For tool messages - links result to its tool call
   tool_call_id?: string
   // For tool messages - the name of the tool
