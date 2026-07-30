@@ -67,12 +67,12 @@ webPreferences: {
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `enabled` | 关闭后不再暴露 CDP endpoint，也不会自动接管内置浏览器 | `true` |
-| `port` | CDP 端口号 | `7777` |
+| `port` | CDP 端口号 | `38127` |
 
 启动时调用 `app.commandLine.appendSwitch("remote-debugging-port", port)` 开放 CDP endpoint。CDP 开启时，自动注册名为 `"In-app-browser"` 的 MCP 连接器：
 
 ```bash
-npx -y @playwright/mcp@latest --cdp-endpoint=http://127.0.0.1:7777
+npx -y @playwright/mcp@latest --cdp-endpoint=http://127.0.0.1:38127
 ```
 
 CDP 连接器名和默认端口定义在 `browser-cdp.ts` 中：
@@ -166,7 +166,7 @@ CDP 默认启用，无需额外配置。触发流程：
 ## 五、配置说明
 
 - **内置浏览器面板**: 始终可用，通过右侧面板 "浏览器" Tab 打开
-- **CDP 端口**: 由 `BrowserWelcomePanel` 手动配置，默认启用，端口 7777；保存后重启应用生效
+- **CDP 端口**: 由 `BrowserWelcomePanel` 手动配置，默认启用，端口 38127；保存后重启应用生效
 
 ---
 

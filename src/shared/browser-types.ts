@@ -106,7 +106,7 @@ export interface AiRecordingSession {
   script: string
 }
 
-export const DEFAULT_BROWSER_CDP_PORT = 7777
+export const DEFAULT_BROWSER_CDP_PORT = 38127
 
 export interface BrowserCdpConfig {
   enabled: boolean
