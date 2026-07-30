@@ -660,9 +660,6 @@ const api = {
     get: (threadId: string): Promise<Thread | null> => {
       return ipcRenderer.invoke("threads:get", threadId)
     },
-    getProjectSubagentsAvailable: (threadId: string): Promise<boolean> => {
-      return ipcRenderer.invoke("threads:getProjectSubagentsAvailable", threadId)
-    },
     create: (metadata?: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:create", metadata)
     },

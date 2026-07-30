@@ -108,10 +108,7 @@ import {
   type CheckpointTuple
 } from "@langchain/langgraph-checkpoint"
 import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
-import {
-  buildHarnessFeatureAgentContext,
-  resolveHarnessProjectTaskToolEnabled
-} from "../harness-board/service"
+import { buildHarnessFeatureAgentContext } from "../harness-board/service"
 import {
   acquireSubagentTranscriptBlobReadPin,
   advanceSubagentTranscriptReferenceEpoch,
@@ -346,31 +343,6 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
 
 function parseThreadValues(raw: string | null | undefined): Record<string, unknown> {
   return parseJsonObject(raw) ?? {}
-}
-
-function resolveProjectSubagentsAvailable(metadata: Record<string, unknown> | undefined): boolean {
-  if (!metadata) return true
-  const hasHarnessFeature =
-    metadata.harnessFeature !== null &&
-    typeof metadata.harnessFeature === "object" &&
-    !Array.isArray(metadata.harnessFeature)
-  const hasHarnessProjectSession =
-    metadata.harnessProjectSession !== null &&
-    typeof metadata.harnessProjectSession === "object" &&
-    !Array.isArray(metadata.harnessProjectSession)
-  if (!hasHarnessFeature && !hasHarnessProjectSession) return true
-
-  const projectBinding = (
-    hasHarnessFeature ? metadata.harnessFeature : metadata.harnessProjectSession
-  ) as Record<string, unknown>
-  const projectId =
-    typeof projectBinding.projectId === "string" ? projectBinding.projectId : undefined
-  try {
-    return (projectId ? resolveHarnessProjectTaskToolEnabled(projectId) : undefined) ?? true
-  } catch (error) {
-    console.warn("[Threads] Failed to resolve project subagent policy:", error)
-    return false
-  }
 }
 
 function serializeThreadRow(row: NonNullable<ReturnType<typeof getThread>>): Thread {
@@ -2233,12 +2205,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       thread_values: threadValuesWithoutSubagentTranscripts(row.thread_values),
       title: row.title
     }
-  })
-
-  ipcMain.handle("threads:getProjectSubagentsAvailable", async (_event, threadId: string) => {
-    const row = getThread(threadId)
-    if (!row) throw new Error("Thread not found")
-    return resolveProjectSubagentsAvailable(parseJsonObject(row.metadata))
   })
 
   ipcMain.handle("threads:messages", async (_event, threadId: string) => {

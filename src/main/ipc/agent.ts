@@ -289,7 +289,6 @@ import {
   buildHarnessFeatureAgentContext,
   markHarnessProjectSystemConstraintsLoaded,
   readHarnessFeatureMetadata,
-  resolveHarnessProjectTaskToolEnabled,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
@@ -724,7 +723,6 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
 interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
-  enableTaskTool?: boolean
   subagentConfig?: HarnessProjectModeSubagentConfig
   isHarnessProjectSession?: boolean
   harnessAgentsPrompt?: string
@@ -807,22 +805,14 @@ function getHarnessAgentContext(
       : undefined
   const isHarnessProjectSession = Boolean(harnessProjectSession)
   const harnessFeature = readHarnessFeatureMetadata(metadata)
-  const isHarnessProjectContext = isHarnessProjectSession || Boolean(harnessFeature)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
-    const projectSessionTaskToolEnabled =
-      typeof harnessProjectSession?.projectId === "string"
-        ? resolveHarnessProjectTaskToolEnabled(harnessProjectSession.projectId)
-        : undefined
     const featureContext = buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
     if (!featureContext) {
       return {
         ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-        ...(projectSessionTaskToolEnabled !== undefined
-          ? { enableTaskTool: projectSessionTaskToolEnabled }
-          : {}),
         ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
       }
     }
@@ -840,7 +830,6 @@ function getHarnessAgentContext(
     return {
       pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
-      enableTaskTool: featureContext.enableTaskTool,
       subagentConfig: featureContext.agentConfig?.subagentConfig,
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
@@ -866,7 +855,6 @@ function getHarnessAgentContext(
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
     return {
       ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-      ...(isHarnessProjectContext ? { enableTaskTool: false } : {}),
       ...(harnessFeature
         ? { featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }
         : {}),

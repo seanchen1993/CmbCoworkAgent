@@ -454,16 +454,11 @@ const SHARED_TOOL_NAMES = new Set([
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
 
-function resolveProjectModeTaskToolEnabled(enableTaskTool?: boolean): boolean {
-  return enableTaskTool ?? true
-}
-
 type RuntimePromptToolPolicy = {
   isProjectMode: boolean
   includeCurrentTime: boolean
   includeTimestampRule: boolean
   includeMemory: boolean
-  includeSubagents: boolean
   includeCodeExecRoute: boolean
   includeSavedCodeExecTools: boolean
   includeInjectedToolUsagePrompt: boolean
@@ -475,7 +470,6 @@ function createRuntimePromptToolPolicy(input: {
   isHarnessProjectSession?: boolean
   agentMode: AgentMode
   memoryEnabled: boolean
-  enableTaskTool?: boolean
 }): RuntimePromptToolPolicy {
   const isProjectMode = Boolean(input.featureId) || input.isHarnessProjectSession === true
   return {
@@ -483,7 +477,6 @@ function createRuntimePromptToolPolicy(input: {
     includeCurrentTime: !isProjectMode,
     includeTimestampRule: !isProjectMode,
     includeMemory: input.memoryEnabled && isMemoryAllowedForProjectMode(input.featureId),
-    includeSubagents: !isProjectMode || resolveProjectModeTaskToolEnabled(input.enableTaskTool),
     includeCodeExecRoute: !isProjectMode && input.agentMode !== "coordinator",
     includeSavedCodeExecTools: true,
     includeInjectedToolUsagePrompt: true,
@@ -3797,8 +3790,6 @@ export interface CreateAgentRuntimeOptions {
   enableRequestUserInput?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
-  /** Project-mode plugin switch for the inline task tool. Undefined keeps legacy env behavior. */
-  enableTaskTool?: boolean
   /** Project-mode Solo selection of bundled and explicit user-format subagents. */
   subagentConfig?: HarnessProjectModeSubagentConfig
   /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
@@ -3936,7 +3927,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxRetryAttempts,
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
-    enableTaskTool,
     subagentConfig,
     harnessAgentsPrompt,
     agentmdLoadStatus,
@@ -3966,6 +3956,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
+  const mainSubagentsEnabled = !isCoordinatorMode && !disableSubagents
 
   if (!threadId) {
     throw new Error("Thread ID is required for checkpointing.")
@@ -3992,8 +3983,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     featureId,
     isHarnessProjectSession,
     agentMode,
-    memoryEnabled: memoryEnabledForThread,
-    enableTaskTool
+    memoryEnabled: memoryEnabledForThread
   })
   const projectModeSoloSubagentConfig =
     runtimePolicy.isProjectMode && agentMode === "normal" ? subagentConfig : undefined
@@ -4003,9 +3993,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
   if (runtimePolicy.isProjectMode) {
-    console.log(
-      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"})`
-    )
+    console.log(`[Runtime] Project mode subagents enabled: ${mainSubagentsEnabled}`)
     const memoryEnvValue =
       (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
     console.log(
@@ -4352,7 +4340,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     options.filesystemAccess?.workload === "read_only"
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, {
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-    includeSubagents: runtimePolicy.includeSubagents && !disableSubagents,
+    includeSubagents: mainSubagentsEnabled,
     includeMemory: runtimePolicy.includeMemory,
     includeCurrentTime: runtimePolicy.includeCurrentTime
   })
@@ -5819,7 +5807,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
-    mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && runtimePolicy.includeSubagents,
+    mainSubagentsEnabled,
     filesystemAccess: options.filesystemAccess,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox

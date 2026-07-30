@@ -2168,9 +2168,6 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
-  const [projectSubagentsAvailable, setProjectSubagentsAvailable] = useState<boolean | null>(null)
-  const disableMultiModeOption =
-    isProjectModeAgentContext && projectSubagentsAvailable !== true
   const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
   const disableWorkflowModeOption = isProjectModeAgentContext
   const pendingHarnessNextActionVersion = useSyncExternalStore(
@@ -2183,27 +2180,6 @@ export function ChatContainer({
     [pendingHarnessNextActionVersion, threadId]
   )
   const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
-
-  useEffect(() => {
-    if (!isProjectModeAgentContext) {
-      setProjectSubagentsAvailable(null)
-      return
-    }
-    let cancelled = false
-    setProjectSubagentsAvailable(null)
-    void window.api.threads
-      .getProjectSubagentsAvailable(threadId)
-      .then((available) => {
-        if (!cancelled) setProjectSubagentsAvailable(available)
-      })
-      .catch((error) => {
-        console.warn("[ChatContainer] Failed to load project subagent policy:", error)
-        if (!cancelled) setProjectSubagentsAvailable(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [isProjectModeAgentContext, threadId])
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
@@ -2591,10 +2567,6 @@ export function ChatContainer({
       }
       const requestId = ++agentModeChangeRequestRef.current
       const operation = agentModeChangeChainRef.current.then(async () => {
-        if (disableMultiModeOption && nextMode === "multi") {
-          toast.error("项目配置已禁用 task 子代理，不能使用 Multi。")
-          return
-        }
         if (disableCoordinatorModeOption && nextMode === "coordinator") {
           toast.error("项目模式暂不支持 Agent Team。")
           return
@@ -2679,7 +2651,6 @@ export function ChatContainer({
     },
     [
       disableCoordinatorModeOption,
-      disableMultiModeOption,
       disableWorkflowModeOption,
       historyLoading,
       threadId,
@@ -4308,11 +4279,6 @@ export function ChatContainer({
         toast.error("Agent 模式保存失败，消息未发送；再次发送将使用原模式")
         return
       }
-      if (isProjectModeAgentContext && projectSubagentsAvailable === null) {
-        toast.message("正在加载项目执行策略，请稍后重试")
-        return
-      }
-
       // Reset both the error message and its structured detail at turn start so
       // no stale diagnostics linger into the new turn.
       if (threadError || errorDetail) {
@@ -4488,9 +4454,6 @@ export function ChatContainer({
       if (disableWorkflowModeOption && submitAgentMode === "workflow") {
         submitAgentMode = "normal"
       }
-      if (disableMultiModeOption && submitAgentMode === "multi") {
-        submitAgentMode = "normal"
-      }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
         submitAgentMode = await loadResolvedAgentMode()
           .then((resolvedMode) => {
@@ -4504,16 +4467,12 @@ export function ChatContainer({
         if (disableWorkflowModeOption && submitAgentMode === "workflow") {
           submitAgentMode = "normal"
         }
-        if (disableMultiModeOption && submitAgentMode === "multi") {
-          submitAgentMode = "normal"
-        }
         agentModeHydratedRef.current = true
         if (submitAgentMode !== agentMode) {
           setAgentMode(submitAgentMode)
         }
       }
       if (
-        (disableMultiModeOption && agentMode === "multi") ||
         (disableCoordinatorModeOption && agentMode === "coordinator") ||
         (disableWorkflowModeOption && agentMode === "workflow")
       ) {
@@ -4936,7 +4895,6 @@ export function ChatContainer({
       } catch {
         return
       }
-      if (isProjectModeAgentContext && projectSubagentsAvailable === null) return
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
@@ -4946,9 +4904,6 @@ export function ChatContainer({
           ? "coordinator"
           : persistedAgentModeRef.current
       if (disableWorkflowModeOption && submitAgentMode === "workflow") {
-        submitAgentMode = "normal"
-      }
-      if (disableMultiModeOption && submitAgentMode === "multi") {
         submitAgentMode = "normal"
       }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
@@ -4964,16 +4919,12 @@ export function ChatContainer({
         if (disableWorkflowModeOption && submitAgentMode === "workflow") {
           submitAgentMode = "normal"
         }
-        if (disableMultiModeOption && submitAgentMode === "multi") {
-          submitAgentMode = "normal"
-        }
         agentModeHydratedRef.current = true
         if (submitAgentMode !== agentMode) {
           setAgentMode(submitAgentMode)
         }
       }
       if (
-        (disableMultiModeOption && agentMode === "multi") ||
         (disableCoordinatorModeOption && agentMode === "coordinator") ||
         (disableWorkflowModeOption && agentMode === "workflow")
       ) {
@@ -5039,14 +4990,11 @@ export function ChatContainer({
       currentModel,
       deleteQueuedMessage,
       disableCoordinatorModeOption,
-      disableMultiModeOption,
       disableWorkflowModeOption,
       generateTitleForFirstMessage,
       getQueuedMessage,
-      isProjectModeAgentContext,
       loadResolvedAgentMode,
       models,
-      projectSubagentsAvailable,
       setActiveTurnStartTime,
       setError,
       stream,
@@ -5169,7 +5117,6 @@ export function ChatContainer({
   // a re-check after each settle.
   useEffect(() => {
     if (queueAutoDrainSuppressed) return
-    if (isProjectModeAgentContext && projectSubagentsAvailable === null) return
     if (submitInFlightRef.current.has(threadId)) return
     if (isLoading || pendingApproval || threadError || !stream) return
     if (historyLoading || readOnly || contextReminderPending) return
@@ -5233,12 +5180,10 @@ export function ChatContainer({
     currentModel,
     hasActiveGoalRunning,
     historyLoading,
-    isProjectModeAgentContext,
     isLoading,
     models,
     pendingApproval,
     prependQueuedMessage,
-    projectSubagentsAvailable,
     queueAutoDrainSuppressed,
     queuePumpTick,
     queuedMessages,
@@ -7623,7 +7568,6 @@ export function ChatContainer({
                           <AgentModeSwitcher
                             showWorkflow={!isProjectModeAgentContext}
                             mode={
-                              (disableMultiModeOption && agentMode === "multi") ||
                               (disableCoordinatorModeOption && agentMode === "coordinator") ||
                               (disableWorkflowModeOption && agentMode === "workflow")
                                 ? "normal"
@@ -7632,24 +7576,18 @@ export function ChatContainer({
                             locked={isLoading || !canChangeAgentMode}
                             lockedReason={agentModeSwitchDisabledReason}
                             disabledModes={
-                              disableMultiModeOption ||
                               disableCoordinatorModeOption ||
                               disableWorkflowModeOption
                                 ? {
-                                    multi: disableMultiModeOption,
                                     coordinator: disableCoordinatorModeOption,
                                     workflow: disableWorkflowModeOption
                                   }
                                 : undefined
                             }
                             disabledModeReasons={
-                              disableMultiModeOption ||
                               disableCoordinatorModeOption ||
                               disableWorkflowModeOption
                                 ? {
-                                    multi: disableMultiModeOption
-                                      ? "项目配置已禁用 task 子代理。"
-                                      : undefined,
                                     coordinator: disableCoordinatorModeOption
                                       ? "项目模式暂不支持 Agent Team。"
                                       : undefined,
