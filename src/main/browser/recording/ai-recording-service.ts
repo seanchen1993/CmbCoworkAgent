@@ -4,7 +4,10 @@ import type {
   AiRecordingSession,
   AiRecordingStartOptions
 } from "../../../shared/browser-types"
-import { buildPlaywrightLocator, type LocatorRole, type LocatorSource } from "./locator-generator"
+import {
+  generateAiRecordingScript,
+  type LocatorRole
+} from "../../../shared/browser-ai-recording-script"
 
 let activeSession: AiRecordingSession | null = null
 let lastSession: AiRecordingSession | null = null
@@ -55,15 +58,21 @@ function getValue(args: Record<string, unknown>): string {
 function isSensitiveTarget(target: string | undefined, args: Record<string, unknown>): boolean {
   return Boolean(
     target &&
-      (SENSITIVE_TARGET_PATTERN.test(target) ||
-        SENSITIVE_TARGET_PATTERN.test(readString(args.type) ?? ""))
+    (SENSITIVE_TARGET_PATTERN.test(target) ||
+      SENSITIVE_TARGET_PATTERN.test(readString(args.type) ?? ""))
   )
 }
 
 type AiRecordedBrowserActionInput =
   | { kind: "navigate"; url: string }
   | { kind: "click"; target?: string; doubleClick: boolean; locator?: BrowserLocatorMetadata }
-  | { kind: "fill"; target?: string; value: string; sensitive: boolean; locator?: BrowserLocatorMetadata }
+  | {
+      kind: "fill"
+      target?: string
+      value: string
+      sensitive: boolean
+      locator?: BrowserLocatorMetadata
+    }
   | { kind: "selectOption"; target?: string; values: string[]; locator?: BrowserLocatorMetadata }
   | { kind: "press"; key: string; target?: string; locator?: BrowserLocatorMetadata }
 
@@ -99,10 +108,7 @@ function buildLocatorMetadata(
       readLocatorRole(args.type),
     label: readString(args.label),
     placeholder: readString(args.placeholder),
-    testId:
-      readString(args.testId) ??
-      readString(args.testid) ??
-      readString(args["data-testid"]),
+    testId: readString(args.testId) ?? readString(args.testid) ?? readString(args["data-testid"]),
     accessibleName: readString(args.accessibleName) ?? readString(args.ariaLabel),
     textContent: readString(args.textContent),
     selector: readString(args.selector),
@@ -269,10 +275,7 @@ function appendAction(session: AiRecordingSession, action: AiRecordedBrowserActi
   session.actions.push(action)
 }
 
-function actionsMatch(
-  left: AiRecordedBrowserAction,
-  right: AiRecordedBrowserAction
-): boolean {
+function actionsMatch(left: AiRecordedBrowserAction, right: AiRecordedBrowserAction): boolean {
   if (left.kind !== right.kind) return false
 
   switch (left.kind) {
@@ -310,71 +313,12 @@ function hasDuplicateTrailingBatch(
   if (nextActions.length === 0 || existingActions.length < nextActions.length) return false
 
   const offset = existingActions.length - nextActions.length
-  return nextActions.every((action, index) => actionsMatch(existingActions[offset + index]!, action))
+  return nextActions.every((action, index) =>
+    actionsMatch(existingActions[offset + index]!, action)
+  )
 }
 
-function quote(value: unknown): string {
-  return JSON.stringify(value)
-}
-
-function getLocator(
-  action: Extract<AiRecordedBrowserAction, { target?: string }>,
-  defaultRole?: LocatorRole
-): string {
-  const locator = action.locator
-  const source: LocatorSource = {
-    target: locator?.target ?? action.target,
-    role: readLocatorRole(locator?.role),
-    label: locator?.label,
-    placeholder: locator?.placeholder,
-    testId: locator?.testId,
-    accessibleName: locator?.accessibleName,
-    textContent: locator?.textContent,
-    selector: locator?.selector,
-    tagName: locator?.tagName,
-    inputType: locator?.inputType,
-    framePath: locator?.framePath
-  }
-
-  return buildPlaywrightLocator(source, { defaultRole })
-}
-
-function generateActionLine(action: AiRecordedBrowserAction): string {
-  switch (action.kind) {
-    case "navigate":
-      return `await page.goto(${quote(action.url)});`
-    case "click":
-      return `await ${getLocator(action)}.${action.doubleClick ? "dblclick" : "click"}();`
-    case "fill":
-      return `await ${getLocator(action, "textbox")}.fill(${
-        action.sensitive ? 'process.env.PLAYWRIGHT_TEST_PASSWORD ?? ""' : quote(action.value)
-      });`
-    case "selectOption":
-      return `await ${getLocator(action, "combobox")}.selectOption(${quote(
-        action.values.length === 1 ? action.values[0]! : action.values
-      )});`
-    case "press":
-      return action.target
-        ? `await ${getLocator(action)}.press(${quote(action.key)});`
-        : `await page.keyboard.press(${quote(action.key)});`
-  }
-}
-
-export function generateAiRecordingScript(actions: AiRecordedBrowserAction[]): string {
-  const lines = actions.map(generateActionLine)
-  const body =
-    lines.length > 0
-      ? lines.map((line) => `  ${line}`).join("\n")
-      : "  // No supported Playwright browser actions were recorded."
-
-  return `import { test } from "@playwright/test";
-
-test("AI recorded flow", async ({ page }) => {
-  // Review generated locators before committing this test.
-${body}
-});
-`
-}
+export { generateAiRecordingScript }
 
 function toView(session: AiRecordingSession | null): AiRecordingSession {
   if (!session) {
@@ -393,6 +337,7 @@ function toView(session: AiRecordingSession | null): AiRecordingSession {
 }
 
 export function startAiRecording(_options: AiRecordingStartOptions = {}): AiRecordingSession {
+  void _options
   if (activeSession?.status === "recording") {
     return toView(activeSession)
   }

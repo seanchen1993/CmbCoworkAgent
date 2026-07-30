@@ -93,22 +93,24 @@ import type {
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type {
-  AiRecordingSession,
   AiRecordingStartOptions,
+  AiRecordingSession,
   BrowserAttachOptions,
   BrowserBounds,
   BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
   BrowserNavigateOptions,
   BrowserPanelRequest,
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
   BrowserScreenshotResult,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserScriptLibrarySaveInput,
   BrowserState
 } from "../shared/browser-types"
-import type {
-  CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
-} from "../shared/close-to-tray"
+import type { CloseToTrayPromptAction, CloseToTrayPromptEvent } from "../shared/close-to-tray"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -1565,13 +1567,19 @@ interface CustomAPI {
     startAiRecording: (options?: AiRecordingStartOptions) => Promise<AiRecordingSession>
     stopAiRecording: () => Promise<AiRecordingSession>
     getAiRecording: () => Promise<AiRecordingSession>
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ) => Promise<BrowserScriptLibraryEntry>
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ) => Promise<BrowserScriptLibraryEntry[]>
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
     getCdpConfig: () => Promise<BrowserCdpConfig>
     isProfileImportRuntimeEnabled: () => Promise<boolean>
     saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
     captureScreenshot: () => Promise<BrowserScreenshotResult>
-    importProfileData: (
-      options: BrowserProfileImportOptions
-    ) => Promise<BrowserProfileImportResult>
+    importProfileData: (options: BrowserProfileImportOptions) => Promise<BrowserProfileImportResult>
     disposeAllForRendererUnload: () => void
     onState: (callback: (state: BrowserState) => void) => () => void
     onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
@@ -2345,15 +2353,11 @@ interface CustomAPI {
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
-    getProjectReviews: (
-      input: HarnessProjectReviewInput
-    ) => Promise<HarnessProjectReviewResult>
+    getProjectReviews: (input: HarnessProjectReviewInput) => Promise<HarnessProjectReviewResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
-    getLocalAgentmdDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ) => Promise<string[]>
+    getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput

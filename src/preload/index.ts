@@ -1,8 +1,5 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
-import type {
-  CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
-} from "../shared/close-to-tray"
+import type { CloseToTrayPromptAction, CloseToTrayPromptEvent } from "../shared/close-to-tray"
 import type {
   Thread,
   Message,
@@ -96,21 +93,23 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
-import {
-  BROWSER_PANEL_REQUEST_CHANNEL,
-  BROWSER_SESSION_ID
-} from "../shared/browser-types"
+import { BROWSER_PANEL_REQUEST_CHANNEL, BROWSER_SESSION_ID } from "../shared/browser-types"
 import type {
-  BrowserAttachOptions,
-  AiRecordingSession,
   AiRecordingStartOptions,
+  AiRecordingSession,
+  BrowserAttachOptions,
   BrowserBounds,
   BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
   BrowserNavigateOptions,
   BrowserPanelRequest,
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
   BrowserScreenshotResult,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserScriptLibrarySaveInput,
   BrowserState
 } from "../shared/browser-types"
 import {
@@ -2006,8 +2005,7 @@ const api = {
       ipcRenderer.invoke("browser:goForward") as Promise<BrowserState>,
     reload: (): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:reload") as Promise<BrowserState>,
-    stop: (): Promise<BrowserState> =>
-      ipcRenderer.invoke("browser:stop") as Promise<BrowserState>,
+    stop: (): Promise<BrowserState> => ipcRenderer.invoke("browser:stop") as Promise<BrowserState>,
     clearConsole: (): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
     getState: (): Promise<BrowserState> =>
@@ -2018,6 +2016,23 @@ const api = {
       ipcRenderer.invoke("browser:stopAiRecording") as Promise<AiRecordingSession>,
     getAiRecording: (): Promise<AiRecordingSession> =>
       ipcRenderer.invoke("browser:getAiRecording") as Promise<AiRecordingSession>,
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ): Promise<BrowserScriptLibraryEntry> =>
+      ipcRenderer.invoke(
+        "browser:saveScriptLibraryEntry",
+        input
+      ) as Promise<BrowserScriptLibraryEntry>,
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ): Promise<BrowserScriptLibraryEntry[]> =>
+      ipcRenderer.invoke("browser:listScriptLibraryEntries", options) as Promise<
+        BrowserScriptLibraryEntry[]
+      >,
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput): Promise<string> =>
+      ipcRenderer.invoke("browser:readScriptLibraryScript", input) as Promise<string>,
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput): Promise<void> =>
+      ipcRenderer.invoke("browser:deleteScriptLibraryEntry", input) as Promise<void>,
     getCdpConfig: (): Promise<BrowserCdpConfig> =>
       ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
     isProfileImportRuntimeEnabled: (): Promise<boolean> =>
@@ -2029,7 +2044,10 @@ const api = {
     importProfileData: (
       options: BrowserProfileImportOptions
     ): Promise<BrowserProfileImportResult> =>
-      ipcRenderer.invoke("browser:importProfileData", options) as Promise<BrowserProfileImportResult>,
+      ipcRenderer.invoke(
+        "browser:importProfileData",
+        options
+      ) as Promise<BrowserProfileImportResult>,
     disposeAllForRendererUnload: (): void => {
       ipcRenderer.send("browser:disposeAllForRendererUnload")
     },
@@ -3257,16 +3275,17 @@ const api = {
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
     getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
-      ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<HarnessDeployUnitMapping[]>,
+      ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
+        HarnessDeployUnitMapping[]
+      >,
     getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
     saveDeployUnitMappings: (
       mappings: HarnessDeployUnitMapping[]
     ): Promise<HarnessDeployUnitMapping[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:saveDeployUnitMappings",
-        mappings
-      ) as Promise<HarnessDeployUnitMapping[]>,
+      ipcRenderer.invoke("harnessBoard:saveDeployUnitMappings", mappings) as Promise<
+        HarnessDeployUnitMapping[]
+      >,
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
       ipcRenderer.invoke(
         "harnessBoard:saveLeanTokenConfig",
@@ -3298,9 +3317,7 @@ const api = {
         "harnessBoard:getEnterpriseProjectDetails",
         input
       ) as Promise<HarnessEnterpriseProjectDetailResult>,
-    getProjectReviews: (
-      input: HarnessProjectReviewInput
-    ): Promise<HarnessProjectReviewResult> =>
+    getProjectReviews: (input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> =>
       ipcRenderer.invoke(
         "harnessBoard:getProjectReviews",
         input
@@ -3316,17 +3333,13 @@ const api = {
         projectId
       ) as Promise<HarnessDynamicWorkflowConfig | null>,
     getPublicAgentmdDeployUnits: (projectId: string): Promise<string[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:getPublicAgentmdDeployUnits",
-        projectId
-      ) as Promise<string[]>,
-    getLocalAgentmdDeployUnitMappings: (
-      mappings: HarnessDeployUnitMapping[]
-    ): Promise<string[]> =>
-      ipcRenderer.invoke(
-        "harnessBoard:getLocalAgentmdDeployUnitMappings",
-        mappings
-      ) as Promise<string[]>,
+      ipcRenderer.invoke("harnessBoard:getPublicAgentmdDeployUnits", projectId) as Promise<
+        string[]
+      >,
+    getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]): Promise<string[]> =>
+      ipcRenderer.invoke("harnessBoard:getLocalAgentmdDeployUnitMappings", mappings) as Promise<
+        string[]
+      >,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput

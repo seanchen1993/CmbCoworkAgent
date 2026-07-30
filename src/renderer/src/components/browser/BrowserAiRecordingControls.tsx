@@ -1,31 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import {
-  Check,
-  Copy,
-  Download,
-  FileCode2,
-  Loader2,
-  Pause,
-  Sparkles,
-  Video
-} from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { FileCode2, FolderOpen, Loader2, Pause, Video } from "lucide-react"
 import { toast } from "sonner"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import type { AiRecordedBrowserAction, AiRecordingSession } from "../../../../shared/browser-types"
+import { generateAiRecordingScript } from "../../../../shared/browser-ai-recording-script"
+import type {
+  AiRecordingSession,
+  BrowserScriptLibraryEntry
+} from "../../../../shared/browser-types"
+import { BrowserAiRecordingResultDialog } from "./BrowserAiRecordingResultDialog"
+import { BrowserRecordingListDialog } from "./BrowserRecordingListDialog"
 
 interface BrowserAiRecordingControlsProps {
   browserCreated: boolean
+  threadId?: string | null
+  workspacePath?: string | null
 }
 
 const AI_RECORDING_POLL_MS = 800
@@ -39,76 +29,31 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function formatAiRecordingTime(timestamp: string): string {
-  const date = new Date(timestamp)
-  if (Number.isNaN(date.getTime())) return "--:--:--"
-  return date.toLocaleTimeString("zh-CN", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  })
-}
-
-function describeAiRecordedAction(action: AiRecordedBrowserAction): string {
-  switch (action.kind) {
-    case "navigate":
-      return `打开页面 ${action.url}`
-    case "click":
-      return action.doubleClick
-        ? `双击 ${action.target || "目标元素"}`
-        : `点击 ${action.target || "目标元素"}`
-    case "fill":
-      return action.sensitive
-        ? `填写 ${action.target || "输入框"}（敏感值已脱敏）`
-        : `填写 ${action.target || "输入框"} = ${action.value || "(空值)"}`
-    case "selectOption":
-      return `在 ${action.target || "下拉框"} 中选择 ${action.values.join(", ") || "(空值)"}`
-    case "press":
-      return action.target ? `在 ${action.target} 上按下 ${action.key}` : `按下 ${action.key}`
-  }
-}
-
-function describeAiRecordedActionKind(kind: AiRecordedBrowserAction["kind"]): string {
-  switch (kind) {
-    case "navigate":
-      return "导航"
-    case "click":
-      return "点击"
-    case "fill":
-      return "输入"
-    case "selectOption":
-      return "选择"
-    case "press":
-      return "按键"
-  }
-}
-
-function getAiRecordedActionTone(kind: AiRecordedBrowserAction["kind"]): string {
-  switch (kind) {
-    case "navigate":
-      return "border-status-info/25 bg-status-info/10 text-status-info"
-    case "click":
-      return "border-primary/25 bg-primary/10 text-foreground"
-    case "fill":
-      return "border-status-warning/25 bg-status-warning/10 text-status-warning"
-    case "selectOption":
-      return "border-status-nominal/25 bg-status-nominal/10 text-status-nominal"
-    case "press":
-      return "border-border/70 bg-background/80 text-muted-foreground"
-  }
-}
-
 export function BrowserAiRecordingControls({
-  browserCreated
+  browserCreated,
+  threadId,
+  workspacePath
 }: BrowserAiRecordingControlsProps): React.JSX.Element {
   const [aiRecording, setAiRecording] = useState<AiRecordingSession>(EMPTY_AI_RECORDING)
+  const [draftScript, setDraftScript] = useState("")
+  const [isDraftScriptDirty, setIsDraftScriptDirty] = useState(false)
+  const [selectedActionIds, setSelectedActionIds] = useState<string[]>([])
+  const [selectionSyncKey, setSelectionSyncKey] = useState("")
   const [isAiRecordingBusy, setIsAiRecordingBusy] = useState(false)
   const [aiRecordingDialogOpen, setAiRecordingDialogOpen] = useState(false)
-  const [copiedAiScript, setCopiedAiScript] = useState(false)
-  const [isSavingToWorkspace, setIsSavingToWorkspace] = useState(false)
-  const [saveFilename, setSaveFilename] = useState("")
-  const saveFilenameInputRef = useRef<HTMLInputElement>(null)
+  const [isSaveSubmitting, setIsSaveSubmitting] = useState(false)
+  const [saveDisplayName, setSaveDisplayName] = useState("")
+  const [scriptLibraryOpen, setScriptLibraryOpen] = useState(false)
+  const [scriptLibraryEntries, setScriptLibraryEntries] = useState<BrowserScriptLibraryEntry[]>([])
+  const [isScriptLibraryLoading, setIsScriptLibraryLoading] = useState(false)
+  const [scriptLibraryError, setScriptLibraryError] = useState<string | null>(null)
+  const [loadingLibraryFileName, setLoadingLibraryFileName] = useState<string | null>(null)
+  const [loadingLibraryAction, setLoadingLibraryAction] = useState<"copy" | "delete" | null>(null)
+  const hasWorkspace = Boolean(workspacePath?.trim())
+
+  const resetSaveForm = useCallback(() => {
+    setSaveDisplayName("")
+  }, [])
 
   const refreshAiRecording = useCallback(async () => {
     try {
@@ -136,12 +81,21 @@ export function BrowserAiRecordingControls({
   }, [aiRecording.status, refreshAiRecording])
 
   useEffect(() => {
-    if (isSavingToWorkspace) {
-      setSaveFilename("ai-recording")
-      saveFilenameInputRef.current?.focus()
-      saveFilenameInputRef.current?.select()
-    }
-  }, [isSavingToWorkspace])
+    const nextSelectionSyncKey = [
+      aiRecording.id ?? "idle",
+      aiRecording.status,
+      aiRecording.actions.length,
+      aiRecording.stoppedAt ?? aiRecording.startedAt ?? ""
+    ].join(":")
+
+    if (selectionSyncKey === nextSelectionSyncKey) return
+
+    const nextSelectedActionIds = aiRecording.actions.map((action) => action.id)
+    setSelectedActionIds(nextSelectedActionIds)
+    setDraftScript(generateAiRecordingScript(aiRecording.actions))
+    setIsDraftScriptDirty(false)
+    setSelectionSyncKey(nextSelectionSyncKey)
+  }, [aiRecording, selectionSyncKey])
 
   const startAiRecordingSession = useCallback(async () => {
     setIsAiRecordingBusy(true)
@@ -180,105 +134,169 @@ export function BrowserAiRecordingControls({
     }
   }, [])
 
-  const copyAiRecordingScript = useCallback(async () => {
-    if (!aiRecording.script.trim()) return
+  const loadScriptLibraryEntries = useCallback(async () => {
+    if (!workspacePath?.trim()) {
+      setScriptLibraryEntries([])
+      setScriptLibraryError("当前会话还没有选择工作区")
+      return
+    }
+
+    setIsScriptLibraryLoading(true)
+    setScriptLibraryError(null)
     try {
-      await navigator.clipboard.writeText(aiRecording.script)
-      setCopiedAiScript(true)
-      window.setTimeout(() => {
-        setCopiedAiScript(false)
-      }, 1500)
+      const entries = await window.api.browser.listScriptLibraryEntries({ workspacePath })
+      setScriptLibraryEntries(entries)
+    } catch (error) {
+      console.error(
+        `[BrowserAiRecordingControls] Failed to load browser script library: ${formatError(error)}`
+      )
+      setScriptLibraryError(formatError(error) || "读取脚本库失败")
+    } finally {
+      setIsScriptLibraryLoading(false)
+    }
+  }, [workspacePath])
+
+  const openScriptLibrary = useCallback(() => {
+    setScriptLibraryOpen(true)
+    void loadScriptLibraryEntries()
+  }, [loadScriptLibraryEntries])
+
+  const confirmSaveToLibrary = useCallback(async () => {
+    const displayName = saveDisplayName.trim()
+    if (!displayName) {
+      toast.error("请输入文件中文名")
+      return
+    }
+    if (!workspacePath?.trim()) {
+      toast.error("当前会话还没有选择工作区")
+      return
+    }
+    if (!draftScript.trim()) {
+      toast.error("当前没有可保存的脚本内容")
+      return
+    }
+
+    setIsSaveSubmitting(true)
+    try {
+      await window.api.browser.saveScriptLibraryEntry({
+        displayName,
+        script: draftScript,
+        threadId,
+        workspacePath
+      })
+      toast.success(`脚本已保存`)
+      resetSaveForm()
+      if (scriptLibraryOpen) {
+        void loadScriptLibraryEntries()
+      }
+    } catch (error) {
+      console.error(
+        `[BrowserAiRecordingControls] Failed to save browser script library entry: ${formatError(error)}`
+      )
+      toast.error(formatError(error) || "保存脚本失败")
+    } finally {
+      setIsSaveSubmitting(false)
+    }
+  }, [
+    draftScript,
+    loadScriptLibraryEntries,
+    resetSaveForm,
+    saveDisplayName,
+    scriptLibraryOpen,
+    threadId,
+    workspacePath
+  ])
+
+  const copyLibraryScript = useCallback(async (entry: BrowserScriptLibraryEntry) => {
+    setLoadingLibraryFileName(entry.fileName)
+    setLoadingLibraryAction("copy")
+    try {
+      const script = await window.api.browser.readScriptLibraryScript({
+        fileName: entry.fileName
+      })
+      await navigator.clipboard.writeText(script)
       toast.success("脚本已复制")
     } catch (error) {
       console.error(
-        `[BrowserAiRecordingControls] Failed to copy AI recording script: ${formatError(error)}`
+        `[BrowserAiRecordingControls] Failed to copy library script ${entry.fileName}: ${formatError(error)}`
       )
-      toast.error("复制脚本失败")
+      toast.error(formatError(error) || "复制脚本失败")
+    } finally {
+      setLoadingLibraryFileName(null)
+      setLoadingLibraryAction(null)
     }
-  }, [aiRecording.script])
-
-  const copyAiRecordingScriptForBrowser = useCallback(async () => {
-    if (!aiRecording.script.trim()) return
-    const prefix = "分析这个脚本内容，使用内置浏览器执行这个脚本里面的步骤，不允许使用screenshot 和runcode。脚本为："
-    try {
-      await navigator.clipboard.writeText(prefix + aiRecording.script)
-      toast.success("脚本已复制（内置浏览器使用）")
-    } catch (error) {
-      console.error(
-        `[BrowserAiRecordingControls] Failed to copy AI recording script for browser: ${formatError(error)}`
-      )
-      toast.error("复制脚本失败")
-    }
-  }, [aiRecording.script])
-
-  const saveAiRecordingScriptToWorkspace = useCallback(() => {
-    if (!aiRecording.script.trim()) return
-    setIsSavingToWorkspace(true)
-  }, [aiRecording.script])
-
-  const confirmSaveToWorkspace = useCallback(() => {
-    const trimmed = saveFilename.trim()
-    if (!trimmed) return
-    const safeName = trimmed.replace(/[\\/:*?"<>|]/g, "_")
-    const blob = new Blob([aiRecording.script], { type: "text/plain" })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement("a")
-    link.href = url
-    link.download = `${safeName}.spec.ts`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
-    toast.success(`脚本已保存为 ${safeName}.spec.ts`)
-    setIsSavingToWorkspace(false)
-    setSaveFilename("")
-  }, [saveFilename, aiRecording.script])
-
-  const cancelSaveToWorkspace = useCallback(() => {
-    setIsSavingToWorkspace(false)
-    setSaveFilename("")
   }, [])
 
+  const copyLibraryExecutionPrompt = useCallback(async (entry: BrowserScriptLibraryEntry) => {
+    const prompt = `读取这个脚本内容~/.cmbcoworkagent/browser/${entry.fileName}，分析里面的操作步骤，然后使用内置浏览器来执行里面的操作，禁止使用screenshot和runcode。`
+    try {
+      await navigator.clipboard.writeText(prompt)
+      toast.success("已复制，会话输入框里粘贴使用")
+    } catch (error) {
+      console.error(
+        `[BrowserAiRecordingControls] Failed to copy browser execution prompt ${entry.fileName}: ${formatError(error)}`
+      )
+      toast.error("复制执行指令失败")
+    }
+  }, [])
+
+  const deleteLibraryEntry = useCallback(async (entry: BrowserScriptLibraryEntry) => {
+    setLoadingLibraryFileName(entry.fileName)
+    setLoadingLibraryAction("delete")
+    try {
+      await window.api.browser.deleteScriptLibraryEntry({ fileName: entry.fileName })
+      setScriptLibraryEntries((current) =>
+        current.filter((item) => item.fileName !== entry.fileName)
+      )
+      toast.success("脚本文件及映射已删除")
+    } catch (error) {
+      console.error(
+        `[BrowserAiRecordingControls] Failed to delete library script ${entry.fileName}: ${formatError(error)}`
+      )
+      toast.error(formatError(error) || "删除脚本失败")
+    } finally {
+      setLoadingLibraryFileName(null)
+      setLoadingLibraryAction(null)
+    }
+  }, [])
+
+  const toggleActionSelection = useCallback(
+    (actionId: string) => {
+      setSelectedActionIds((current) => {
+        const currentSet = new Set(current)
+        if (currentSet.has(actionId)) {
+          currentSet.delete(actionId)
+        } else {
+          currentSet.add(actionId)
+        }
+
+        const nextSelectedActionIds = aiRecording.actions
+          .map((action) => action.id)
+          .filter((id) => currentSet.has(id))
+        const nextActions = aiRecording.actions.filter((action) => currentSet.has(action.id))
+
+        if (isDraftScriptDirty) {
+          toast.info("已按勾选步骤重新生成脚本草稿，未保存的手动修改已覆盖。")
+        }
+
+        setDraftScript(generateAiRecordingScript(nextActions))
+        setIsDraftScriptDirty(false)
+        return nextSelectedActionIds
+      })
+    },
+    [aiRecording.actions, isDraftScriptDirty]
+  )
+
   const aiRecordingActionCount = aiRecording.actions.length
-  const aiRecordingScriptReady = aiRecording.script.trim().length > 0
+  const aiRecordingScriptReady = draftScript.trim().length > 0
   const aiRecordingHasOutput =
     aiRecording.status === "recording" || aiRecordingActionCount > 0 || aiRecordingScriptReady
-  const aiRecordingScriptLineCount = aiRecordingScriptReady
-    ? aiRecording.script.split(/\r?\n/).length
-    : 0
   const aiRecordingStatusText =
     aiRecording.status === "recording"
-    ? `录制进行中，已捕获 ${aiRecordingActionCount} 步`
-    : aiRecordingActionCount > 0
-      ? `最近一次录制生成了 ${aiRecordingActionCount} 步`
-      : "可开始 AI 录制"
-  const aiRecordingStatusBadge = aiRecording.status === "recording"
-    ? {
-        label: "录制中",
-        variant: "info" as const,
-        containerClassName: "border-status-info/30 bg-status-info/10",
-        iconClassName: "border-status-info/20 bg-status-info/15 text-status-info"
-      }
-    : aiRecordingActionCount > 0 || aiRecordingScriptReady
-      ? {
-          label: "已生成",
-          variant: "nominal" as const,
-          containerClassName: "border-status-nominal/25 bg-status-nominal/10",
-          iconClassName: "border-status-nominal/20 bg-status-nominal/15 text-status-nominal"
-        }
-      : browserCreated
-        ? {
-            label: "就绪",
-            variant: "outline" as const,
-            containerClassName: "border-border/70 bg-background/85",
-            iconClassName: "border-primary/15 bg-primary/10 text-primary"
-          }
-        : {
-            label: "等待浏览器",
-            variant: "outline" as const,
-            containerClassName: "border-border/70 bg-background/85",
-            iconClassName: "border-border/70 bg-muted/60 text-muted-foreground"
-          }
+      ? `录制进行中，已捕获 ${aiRecordingActionCount} 步`
+      : aiRecordingActionCount > 0
+        ? `最近一次录制生成了 ${aiRecordingActionCount} 步`
+        : "可开始 AI 录制"
 
   const mainButtonDisabled = isAiRecordingBusy || !browserCreated
   const mainButtonDisabledReason = useMemo(() => {
@@ -314,7 +332,7 @@ export function BrowserAiRecordingControls({
           </span>
         </div>
 
-        {aiRecordingHasOutput && (
+        {aiRecordingHasOutput ? (
           <Button
             type="button"
             size="sm"
@@ -324,13 +342,25 @@ export function BrowserAiRecordingControls({
           >
             <FileCode2 className="size-3.5" strokeWidth={1.8} />
             查看
-            {aiRecordingActionCount > 0 && (
+            {aiRecordingActionCount > 0 ? (
               <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
                 {aiRecordingActionCount}
               </span>
-            )}
+            ) : null}
           </Button>
-        )}
+        ) : null}
+
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-8 rounded-md px-2 text-[11px] text-muted-foreground hover:text-foreground"
+          disabled={!hasWorkspace}
+          onClick={openScriptLibrary}
+        >
+          <FolderOpen className="size-3.5" strokeWidth={1.8} />
+          录制列表
+        </Button>
 
         <TooltipProvider delayDuration={300}>
           <Tooltip>
@@ -385,240 +415,53 @@ export function BrowserAiRecordingControls({
                 </Button>
               )}
             </TooltipTrigger>
-            {mainButtonDisabledReason && (
+            {mainButtonDisabledReason ? (
               <TooltipContent side="top">
                 <p>{mainButtonDisabledReason}</p>
               </TooltipContent>
-            )}
+            ) : null}
           </Tooltip>
         </TooltipProvider>
       </div>
 
-      <Dialog
+      <BrowserAiRecordingResultDialog
         open={aiRecordingDialogOpen}
         onOpenChange={(open) => {
           if (!open) {
-            setIsSavingToWorkspace(false)
-            setSaveFilename("")
+            resetSaveForm()
           }
           setAiRecordingDialogOpen(open)
         }}
-      >
-        <DialogContent className="max-h-[88vh] max-w-5xl gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
-          <DialogHeader className="gap-3 border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_9%,transparent),transparent)] px-5 py-4">
-            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-              <div className="min-w-0">
-                <div className="flex items-start gap-3">
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
-                    <Sparkles className="size-4" strokeWidth={1.9} />
-                  </div>
-                  <div className="min-w-0">
-                    <DialogTitle className="text-base">自动化脚本录制结果</DialogTitle>
-                    <DialogDescription className="mt-1 text-[12px] leading-5">
-                      {aiRecording.status === "recording"
-                        ? "Agent 对内置浏览器的成功操作会实时沉淀为 Playwright 草稿。"
-                        : "下面是最近一次 AI 录制生成的步骤和 Playwright 脚本初稿。"}
-                    </DialogDescription>
-                  </div>
-                </div>
-              </div>
+        aiRecording={aiRecording}
+        selectedActionIds={selectedActionIds}
+        onToggleActionSelection={(actionId) => toggleActionSelection(actionId)}
+        draftScript={draftScript}
+        onDraftScriptChange={(value) => {
+          setDraftScript(value)
+          setIsDraftScriptDirty(true)
+        }}
+        saveDisplayName={saveDisplayName}
+        onSaveDisplayNameChange={setSaveDisplayName}
+        isSaveSubmitting={isSaveSubmitting}
+        hasWorkspace={hasWorkspace}
+        onConfirmSave={() => void confirmSaveToLibrary()}
+      />
 
-              <div className="flex flex-wrap items-center gap-2 mr-8">
-                <Badge variant={aiRecordingStatusBadge.variant}>
-                  {aiRecordingStatusBadge.label}
-                </Badge>
-                <span className="inline-flex items-center rounded-full border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
-                  <span className="mr-1 font-medium text-foreground">{aiRecordingActionCount}</span>
-                  个步骤
-                </span>
-                <span className="inline-flex items-center rounded-full border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground">
-                  <span className="mr-1 font-medium text-foreground">
-                    {aiRecordingScriptLineCount}
-                  </span>
-                  行脚本
-                </span>
-              </div>
-            </div>
-          </DialogHeader>
-
-          <div className="grid min-h-0 flex-1 bg-background md:grid-cols-[300px_minmax(0,1fr)]">
-            <div className="border-b border-border/70 bg-muted/20 md:border-b-0 md:border-r">
-              <div className="border-b border-border/70 px-4 py-3">
-                <p className="text-sm font-medium text-foreground">步骤列表</p>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  共 {aiRecordingActionCount} 步，来源为共享的 AI 浏览器录制结果。
-                </p>
-              </div>
-              <div className="max-h-[58vh] space-y-2.5 overflow-auto px-3 py-3">
-                {aiRecording.actions.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-border/80 bg-background/90 px-4 py-5 text-[12px] leading-5 text-muted-foreground shadow-sm">
-                    <div className="mb-3 flex size-9 items-center justify-center rounded-lg border border-border/70 bg-muted/40 text-muted-foreground">
-                      <Sparkles className="size-4" strokeWidth={1.8} />
-                    </div>
-                    还没有采集到可生成脚本的操作。先开始录制，再让 Agent
-                    导航、点击、输入或选择页面元素。
-                  </div>
-                ) : (
-                  aiRecording.actions.map((action, index) => (
-                    <div
-                      key={action.id}
-                      className={cn(
-                        "rounded-xl border px-3 py-3 transition-colors",
-                        aiRecording.status === "recording" &&
-                          index === aiRecording.actions.length - 1
-                          ? "border-status-info/35 bg-status-info/10 shadow-sm"
-                          : "border-border/70 bg-background/90 hover:border-border-emphasis"
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="rounded-full border border-border/60 bg-background/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-foreground/80">
-                              Step {index + 1}
-                            </span>
-                            <span
-                              className={cn(
-                                "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
-                                getAiRecordedActionTone(action.kind)
-                              )}
-                            >
-                              {describeAiRecordedActionKind(action.kind)}
-                            </span>
-                          </div>
-                          <p className="mt-1.5 text-[12px] leading-5 text-foreground/90">
-                            {describeAiRecordedAction(action)}
-                          </p>
-                        </div>
-                        <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
-                          {formatAiRecordingTime(action.timestamp)}
-                        </span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            <div className="flex min-h-0 flex-col">
-              <div className="border-b border-border/70 px-4 py-3">
-                <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <div className="flex size-8 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-900 text-slate-200">
-                        <FileCode2 className="size-4" strokeWidth={1.8} />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-foreground">Playwright 脚本</p>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          第一版会优先保留语义化定位；复杂页面仍建议人工复查 locator。
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {isSavingToWorkspace ? (
-                    <div className="flex flex-1 flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-muted/25 p-2 xl:max-w-[420px] xl:justify-end">
-                      <Input
-                        ref={saveFilenameInputRef}
-                        type="text"
-                        value={saveFilename}
-                        onChange={(e) => setSaveFilename(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") confirmSaveToWorkspace()
-                          if (e.key === "Escape") cancelSaveToWorkspace()
-                        }}
-                        placeholder="输入文件名（不含扩展名）"
-                        className="h-9 min-w-[220px] flex-1 rounded-lg border-border/80 bg-background text-xs shadow-none placeholder:text-muted-foreground/80"
-                      />
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="default"
-                        className="h-9 rounded-lg"
-                        disabled={!saveFilename.trim()}
-                        onClick={confirmSaveToWorkspace}
-                      >
-                        <Check className="size-3.5" strokeWidth={1.8} />
-                        保存
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-9 rounded-lg"
-                        onClick={cancelSaveToWorkspace}
-                      >
-                        取消
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-9 rounded-lg"
-                        disabled={!aiRecordingScriptReady}
-                        onClick={() => void saveAiRecordingScriptToWorkspace()}
-                      >
-                        <Download className="size-3.5" strokeWidth={1.8} />
-                        保存文件
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-9 rounded-lg"
-                        disabled={!aiRecordingScriptReady}
-                        onClick={() => void copyAiRecordingScriptForBrowser()}
-                      >
-                        <Copy className="size-3.5" strokeWidth={1.8} />
-                        复制给内置浏览器
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className={cn(
-                          "h-9 rounded-lg transition-colors",
-                          copiedAiScript &&
-                            "border-status-nominal/30 bg-status-nominal/10 text-status-nominal hover:bg-status-nominal/15 hover:text-status-nominal"
-                        )}
-                        disabled={!aiRecordingScriptReady}
-                        onClick={() => void copyAiRecordingScript()}
-                      >
-                        {copiedAiScript ? (
-                          <Check className="size-3.5" strokeWidth={1.8} />
-                        ) : (
-                          <Copy className="size-3.5" strokeWidth={1.8} />
-                        )}
-                        {copiedAiScript ? "已复制" : "复制脚本"}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="min-h-0 flex-1 p-4 pt-3">
-                <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-900/80 bg-[#0b0f14] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-                  <div className="flex items-center justify-between border-b border-white/10 bg-[#11161d] px-4 py-2 text-[11px] text-slate-400">
-                    <div className="flex items-center gap-2">
-                      <FileCode2 className="size-3.5" strokeWidth={1.8} />
-                      <span>playwright.spec.ts 草稿</span>
-                    </div>
-                    <span className="font-mono tabular-nums">
-                      {aiRecordingScriptReady ? `${aiRecordingScriptLineCount} lines` : "waiting"}
-                    </span>
-                  </div>
-                  <pre className="min-h-0 flex-1 overflow-auto px-4 py-4 font-mono text-[12px] leading-6 text-slate-100  max-h-[300px]">
-                    <code>{aiRecording.script || "// No script generated yet."}</code>
-                  </pre>
-                </div>
-              </div>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <BrowserRecordingListDialog
+        open={scriptLibraryOpen}
+        onOpenChange={setScriptLibraryOpen}
+        hasWorkspace={hasWorkspace}
+        isLoading={isScriptLibraryLoading}
+        error={scriptLibraryError}
+        entries={scriptLibraryEntries}
+        currentThreadId={threadId}
+        loadingFileName={loadingLibraryFileName}
+        loadingAction={loadingLibraryAction}
+        onRefresh={() => void loadScriptLibraryEntries()}
+        onCopyScript={(entry) => void copyLibraryScript(entry)}
+        onCopyExecution={(entry) => void copyLibraryExecutionPrompt(entry)}
+        onDelete={(entry) => void deleteLibraryEntry(entry)}
+      />
     </>
   )
 }

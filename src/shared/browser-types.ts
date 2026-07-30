@@ -122,6 +122,35 @@ export interface AiRecordingSession {
   script: string
 }
 
+export interface BrowserScriptLibraryEntry {
+  createdAt: string
+  description: string
+  displayName: string
+  fileName: string
+  threadId: string
+  workspacePath: string
+}
+
+export interface BrowserScriptLibraryListOptions {
+  workspacePath?: string | null
+}
+
+export interface BrowserScriptLibraryDeleteInput {
+  fileName: string
+}
+
+export interface BrowserScriptLibraryReadInput {
+  fileName: string
+}
+
+export interface BrowserScriptLibrarySaveInput {
+  description?: string | null
+  displayName: string
+  script: string
+  threadId?: string | null
+  workspacePath: string
+}
+
 export const DEFAULT_BROWSER_CDP_PORT = 38127
 
 export interface BrowserCdpConfig {

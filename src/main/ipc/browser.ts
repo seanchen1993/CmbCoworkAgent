@@ -7,6 +7,18 @@ import {
   startAiRecording,
   stopAiRecording
 } from "../browser/recording/ai-recording-service"
+import {
+  deleteBrowserScriptLibraryEntry,
+  listBrowserScriptLibraryEntries,
+  readBrowserScriptLibraryScript,
+  saveBrowserScriptLibraryEntry
+} from "../browser/recording/browser-script-library-service"
+import type {
+  BrowserScriptLibraryDeleteInput,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserScriptLibrarySaveInput
+} from "../../shared/browser-types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { getBrowserCdpConfigAsync, saveBrowserCdpConfigAsync } from "../storage"
 import { BUILTIN_BROWSER_LOG_PREFIX } from "../../shared/browser-types"
@@ -84,6 +96,33 @@ export function registerBrowserHandlers(
 
   ipcMain.handle("browser:getAiRecording", (): AiRecordingSession => getAiRecording())
 
+  ipcMain.handle(
+    "browser:saveScriptLibraryEntry",
+    async (_event, input: BrowserScriptLibrarySaveInput) => {
+      return saveBrowserScriptLibraryEntry(input)
+    }
+  )
+
+  ipcMain.handle(
+    "browser:listScriptLibraryEntries",
+    async (_event, options?: BrowserScriptLibraryListOptions) => {
+      return listBrowserScriptLibraryEntries(options)
+    }
+  )
+
+  ipcMain.handle(
+    "browser:readScriptLibraryScript",
+    async (_event, input: BrowserScriptLibraryReadInput) => {
+      return readBrowserScriptLibraryScript(input)
+    }
+  )
+
+  ipcMain.handle(
+    "browser:deleteScriptLibraryEntry",
+    async (_event, input: BrowserScriptLibraryDeleteInput) => {
+      return deleteBrowserScriptLibraryEntry(input)
+    }
+  )
 
   ipcMain.handle(
     "browser:saveCdpConfig",
@@ -102,8 +141,7 @@ export function registerBrowserHandlers(
         sanitized.port = updates.port
       }
       const saved = await saveBrowserCdpConfigAsync(sanitized)
-      const { invalidateCapabilities } =
-        await syncPlaywrightMcpConnectorForBrowserCdpConfig(saved)
+      const { invalidateCapabilities } = await syncPlaywrightMcpConnectorForBrowserCdpConfig(saved)
       if (invalidateCapabilities) {
         await invalidateGlobalMcpCapabilityService("browser:saveCdpConfig")
       }
