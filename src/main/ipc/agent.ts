@@ -60,6 +60,7 @@ import {
 import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
+import { imDesktopCompletionObserver } from "../services/im/desktop-completion"
 import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
 import { clearAdoptionContext, setAdoptionContext } from "../services/adoption-tracker"
@@ -2956,6 +2957,62 @@ const pendingStreamTranscriptMessages = new Map<
   { messages: Message[]; timer?: ReturnType<typeof setTimeout> }
 >()
 
+interface StreamAssistantCandidate {
+  messageId: string
+  revision: number
+}
+
+let streamAssistantRevision = 0
+const latestStreamAssistantCandidate = new Map<string, StreamAssistantCandidate>()
+
+function captureStreamAssistantCursor(threadId: string): number {
+  return latestStreamAssistantCandidate.get(threadId)?.revision ?? 0
+}
+
+function messageContentToText(content: Message["content"]): string {
+  if (typeof content === "string") return content
+  return content
+    .map((block) => {
+      if (block.type === "text") return block.text ?? ""
+      return typeof block.content === "string" ? block.content : ""
+    })
+    .filter(Boolean)
+    .join("\n")
+}
+
+function scheduleDesktopTurnCompletion(threadId: string, cursor: number): void {
+  let candidate: StreamAssistantCandidate | undefined
+  try {
+    flushPendingStreamTranscriptMessages(threadId, { throwOnError: true })
+    const latest = latestStreamAssistantCandidate.get(threadId)
+    if (!latest || latest.revision <= cursor) return
+    candidate = { ...latest }
+  } catch (error) {
+    console.warn("[IM] Failed to prepare desktop completion observation:", error)
+    return
+  }
+
+  void (async () => {
+    try {
+      // The delivery id is derived only after the final assistant row is on
+      // disk. This side task never feeds failure back into agent:invoke.
+      await flushStrict()
+      const message = getThreadMessagesByIds(threadId, [candidate!.messageId])[0]
+      if (!message || message.role !== "assistant" || message.tool_calls?.length) return
+      const finalText = messageContentToText(message.content).trim()
+      if (!finalText) return
+      await imDesktopCompletionObserver.observe({
+        source: "desktop",
+        threadId,
+        finalAssistantMessageId: message.id,
+        finalText
+      })
+    } catch (error) {
+      console.warn("[IM] Desktop completion observation failed without affecting the turn:", error)
+    }
+  })()
+}
+
 function hasUsefulQueuedContent(content: Message["content"]): boolean {
   return typeof content === "string" ? content.length > 0 : content.length > 0
 }
@@ -3052,6 +3109,12 @@ function queueStreamTranscriptMessage(
     pendingStreamTranscriptMessages.set(threadId, pending)
   }
   pending.messages.push(message)
+  if (message.role === "assistant") {
+    latestStreamAssistantCandidate.set(threadId, {
+      messageId: message.id,
+      revision: ++streamAssistantRevision
+    })
+  }
 
   if (options.deferFlush) return
   if (pending.timer) return
@@ -4888,6 +4951,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
       const runToken = startTurnStateRun(turnState, nextInvokeRunToken)
+      const desktopCompletionCursor = captureStreamAssistantCursor(threadId)
       setCurrentRunMessageQueueOwner(threadId, runToken)
       let turnStateShouldDispose = false
       const runGoal = goalManager.getActive(threadId)
@@ -7373,6 +7437,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               source: "agent_run_complete"
             })
           }
+          if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
+            scheduleDesktopTurnCompletion(threadId, desktopCompletionCursor)
+          }
           turnStateShouldDispose = true
           safeSendToWindow(window, channel, { type: "done" })
           if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
@@ -7995,6 +8062,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // continuity while pruning scopes that did not opt in to interrupt persistence.
       const turnState = getOrCreateTurnState(threadId)
       const runToken = startTurnStateRun(turnState, nextResumeRunToken)
+      const desktopCompletionCursor = captureStreamAssistantCursor(threadId)
       pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
       ensureTurnId(turnState, threadId, "resume")
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
@@ -8607,6 +8675,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnId: turnState.turnId,
             source: "agent_run_complete"
           })
+          scheduleDesktopTurnCompletion(threadId, desktopCompletionCursor)
           pauseActiveGoalAfterBoundary(
             threadId,
             window,
@@ -8847,6 +8916,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     )
     const turnState = getOrCreateTurnState(threadId)
     const runToken = startTurnStateRun(turnState, nextInterruptRunToken)
+    const desktopCompletionCursor = captureStreamAssistantCursor(threadId)
     pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
     ensureTurnId(turnState, threadId, "interrupt")
     const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
@@ -9433,6 +9503,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnId: turnState.turnId,
             source: "agent_run_complete"
           })
+          scheduleDesktopTurnCompletion(threadId, desktopCompletionCursor)
           pauseActiveGoalAfterBoundary(
             threadId,
             window,

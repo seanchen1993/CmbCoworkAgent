@@ -24,6 +24,7 @@ import {
   resolveImInboxDeliveryContextForRuntime
 } from "../src/main/services/im/remote-runner"
 import { ImConversationTurnQueue } from "../src/main/services/im/conversation-turn-queue"
+import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
 import {
   claimLocalThreadRunLease,
@@ -37,6 +38,7 @@ interface Context {
   database: Awaited<ReturnType<typeof initSqlJs>>["Database"]["prototype"]
   conversations: ImConversationStateStore
   events: ImEventStore
+  grants: ImRemoteGrantStore
   clock: { now: number }
 }
 
@@ -53,6 +55,8 @@ const featureTarget: Extract<ImTargetSnapshot, { kind: "feature" }> = {
   threadId: "thread-feature",
   workspacePath: "/managed/feature",
   bindingId: "binding-feature",
+  grantId: "grant-feature",
+  grantVersion: 1,
   projectId: "project-1",
   projectName: "统一机器人",
   featureSlug: "approval-flow",
@@ -87,13 +91,14 @@ async function createContext(): Promise<Context> {
   }
   const conversations = new ImConversationStateStore(dependencies)
   const events = new ImEventStore(dependencies)
+  const grants = new ImRemoteGrantStore(dependencies, () => "grant-feature")
   await conversations.ensureConversation({
     conversationKey: "conversation-1",
     principalId: "principal-1",
     deviceEpoch: 1
   })
   await conversations.registerTarget("conversation-1", target, { activate: true })
-  return { database: database as never, conversations, events, clock }
+  return { database: database as never, conversations, events, grants, clock }
 }
 
 async function queueEvent(context: Context, index: number) {
@@ -103,6 +108,17 @@ async function queueEvent(context: Context, index: number) {
 }
 
 async function queueFeatureEvent(context: Context, index: number) {
+  await context.grants.enableFeatureGrant({
+    route: {
+      principalId: "principal-1",
+      conversationKey: "conversation-1",
+      deviceEpoch: 1
+    },
+    projectId: featureTarget.projectId,
+    featureSlug: featureTarget.featureSlug,
+    projectName: featureTarget.projectName ?? "Project",
+    featureTitle: featureTarget.featureTitle ?? "Feature"
+  })
   await context.conversations.registerTarget("conversation-1", featureTarget, { activate: true })
   const remote = eventFixture(index)
   await context.events.receiveEvent(remote, featureTarget)
@@ -194,7 +210,8 @@ function capabilityGuard(context: Context): ImRemoteCapabilityGuard {
     },
     workflow: { isBusyForThread: () => false },
     hasPendingApproval: () => false,
-    hasPendingUserInput: () => false
+    hasPendingUserInput: () => false,
+    grants: context.grants
   })
 }
 
@@ -235,6 +252,7 @@ function featureCapabilityGuard(context: Context): ImRemoteCapabilityGuard {
     workflow: { isBusyForThread: () => false },
     hasPendingApproval: () => false,
     hasPendingUserInput: () => false,
+    grants: context.grants,
     validateFeatureTarget: async () => ({
       valid: true,
       project: { id: featureTarget.projectId, name: featureTarget.projectName ?? "Project" },

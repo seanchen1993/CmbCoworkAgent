@@ -83,7 +83,7 @@ function activeFeature(run: HarnessFeatureSummary): boolean {
 
 function settingsAllowFeatures(dependencies: FeatureBindingDependencies): boolean {
   const settings = dependencies.getSettings()
-  return settings.enabled && settings.remoteAccess === "inbox-and-features"
+  return settings.enabled
 }
 
 function bindingMetadataMatches(
@@ -284,6 +284,8 @@ export class ImFeatureBindingService {
     deviceEpoch: number
     projectId: string
     featureSlug: string
+    grantId: string
+    grantVersion: number
   }): Promise<Extract<ImTargetSnapshot, { kind: "feature" }>> {
     this.dependencies.conversationState.assertCurrentRoute(
       input.conversationKey,
@@ -322,21 +324,20 @@ export class ImFeatureBindingService {
         ) &&
         existingDirectory(reusable.snapshot.workspacePath) === validation.workspacePath
       ) {
-        await this.dependencies.conversationState.updateTargetState(
-          reusable.snapshot.targetId,
-          "active"
-        )
+        const refreshed = await this.dependencies.conversationState.refreshGrantTarget({
+          targetId: reusable.snapshot.targetId,
+          grantId: input.grantId,
+          grantVersion: input.grantVersion,
+          workspacePath: validation.workspacePath,
+          activate: true
+        })
         this.dependencies.updateThread(reusable.snapshot.threadId, {
           metadata: JSON.stringify({
             ...parseStandardThreadMetadata(thread.metadata).metadata,
             remoteState: "active"
           })
         })
-        await this.dependencies.conversationState.setActiveTarget(
-          input.conversationKey,
-          reusable.snapshot.targetId
-        )
-        return reusable.snapshot
+        return refreshed as Extract<ImTargetSnapshot, { kind: "feature" }>
       }
       await this.dependencies.conversationState.updateTargetState(
         reusable.snapshot.targetId,
@@ -352,6 +353,8 @@ export class ImFeatureBindingService {
       kind: "feature",
       targetId,
       bindingId,
+      grantId: input.grantId,
+      grantVersion: input.grantVersion,
       projectId: input.projectId,
       featureSlug: input.featureSlug,
       projectName: validation.project.name,

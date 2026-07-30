@@ -62,6 +62,7 @@ async function main(): Promise<void> {
             sentAt: new Date().toISOString(),
             payload: {
               sessionId: "session-1",
+              principalId: "opaque-principal",
               serverTime: new Date().toISOString(),
               heartbeatIntervalSeconds: 60
             }
@@ -77,6 +78,7 @@ async function main(): Promise<void> {
             payload: {
               routes: [
                 {
+                  principalId: "opaque-principal",
                   conversationKey: "conversation-remote",
                   deviceEpoch: 3,
                   state: "active",
@@ -158,6 +160,8 @@ async function main(): Promise<void> {
   assert(receivedTypes.includes("HELLO"))
   await waitFor(() => client.getStatus().routes.length === 1, "route sync")
   assert.equal(client.getStatus().routes[0].ownedByCurrentDevice, false)
+  assert.equal(client.getStatus().principalId, "opaque-principal")
+  assert.equal(client.getStatus().routes[0].principalId, "opaque-principal")
 
   const event: RemoteImEventV1 = {
     schemaVersion: 1,

@@ -57,6 +57,7 @@ import {
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import { generateTitle } from "../services/title-generator"
+import { imRemoteAccessService } from "../services/im/remote-access-service"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { disposeAgentThreadState } from "./agent"
@@ -2306,6 +2307,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         await waitForCleanupBestEffort(cancelledWorkers.map((worker) => worker.worker_id))
       }
       await waitForCleanupBestEffort()
+
+      // Revoke remote access before deleting the local authority record. If the
+      // durable revocation fails, abort deletion so an active grant can never
+      // outlive a missing thread by accident.
+      await imRemoteAccessService.disableThread(threadId)
 
       // Delete from our metadata store — the point of no return.
       dbDeleteThread(threadId)

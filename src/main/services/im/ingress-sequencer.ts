@@ -68,7 +68,10 @@ export class ImIngressSequencer {
     this.resolveTarget =
       options.resolveTarget ??
       (async (event) => {
-        const target = this.conversationState.getActiveTarget(event.conversationKey)
+        // Keep the selected target in the immutable event snapshot even after its
+        // grant is revoked. Ordinary turns then fail closed in capability-guard,
+        // while control commands can still switch to inbox or another grant.
+        const target = this.conversationState.getSelectedTarget(event.conversationKey)?.snapshot
         return (
           target ??
           inboxService.ensureInbox({

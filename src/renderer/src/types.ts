@@ -459,11 +459,15 @@ export type {
 } from "../../main/hooks/types"
 export type {
   BuiltinRobotConnectionState,
+  BuiltinRobotFeatureGrantStatus,
   BuiltinRobotIdentityState,
   BuiltinRobotFeatureBindingStatus,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
   BuiltinRobotRouteStatus,
   BuiltinRobotSettings,
   BuiltinRobotStatus,
   BuiltinRobotTakeoverRequest,
-  BuiltinRobotTakeoverResult
+  BuiltinRobotTakeoverResult,
+  BuiltinRobotThreadGrantStatus
 } from "../../main/types"

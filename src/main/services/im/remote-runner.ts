@@ -106,7 +106,7 @@ export interface PreparedRemoteStandardTurnInput {
   rawMessage: string
   userMessageId: string
   threadId: string
-  targetKind: "inbox" | "feature"
+  targetKind: "inbox" | "feature" | "thread"
   metadata: Record<string, unknown>
   workspacePath: string
   runId: string
@@ -147,9 +147,12 @@ class ImCompletionHookRejectedError extends Error {
 }
 
 function targetPrefix(target: ImTargetSnapshot | null, switched = false): string | undefined {
-  return target?.kind === "feature"
-    ? `【${target.projectName ?? target.projectId} / ${target.featureTitle ?? target.featureSlug}】${switched ? "（切换前任务）" : ""}`
-    : undefined
+  if (!target || target.kind === "inbox") return undefined
+  const label =
+    target.kind === "thread"
+      ? target.title
+      : `${target.projectName ?? target.projectId} / ${target.featureTitle ?? target.featureSlug}`
+  return `【${label}】${switched ? "（切换前任务）" : ""}`
 }
 
 function acknowledgementForTerminal(event: ImEventRecord): RemoteImAckV1 {
@@ -193,6 +196,9 @@ export async function setRemoteThreadLifecycle(
 ): Promise<void> {
   const threadId = event.targetSnapshot?.threadId
   if (!threadId) return
+  // A desktop-created Thread remains a normal local Thread. Remote grant/target
+  // tables own its channel lifecycle; do not mutate its metadata as a side effect.
+  if (event.targetSnapshot?.kind === "thread") return
   const thread = getThread(threadId)
   if (!thread) return
   let metadata: Record<string, unknown> = {}
@@ -227,7 +233,7 @@ export function createImInboxRemotePolicy(): RemoteTurnPolicy {
 /** Validate persisted inbox metadata before exposing remote delivery to the scheduler tool. */
 export function resolveImInboxDeliveryContextForRuntime(input: {
   threadId: string
-  targetKind: "inbox" | "feature"
+  targetKind: "inbox" | "feature" | "thread"
   metadata: Record<string, unknown>
 }): ScheduledTaskImDeliveryContext | undefined {
   if (input.targetKind !== "inbox" || input.metadata.targetKind !== "inbox") return undefined
@@ -350,9 +356,9 @@ export async function executePreparedRemoteStandardTurn(
         skillHookKeys,
         skillUseTracker,
         onHookResult,
-        enableRequestUserInput: targetKind === "feature",
-        allowDeferredUserInputRenderer: targetKind === "feature",
-        interactionWaitHooks: targetKind === "feature" ? interactionWaitHooks : undefined,
+        enableRequestUserInput: targetKind !== "inbox",
+        allowDeferredUserInputRenderer: targetKind !== "inbox",
+        interactionWaitHooks: targetKind !== "inbox" ? interactionWaitHooks : undefined,
         memoryEnabled: targetKind === "inbox" ? false : undefined,
         imDeliveryContext: resolveImInboxDeliveryContextForRuntime({
           threadId,
@@ -581,7 +587,7 @@ export class ImRemoteRunner {
     }
     this.activePermitRevocations.set(event.eventId, revokeActivePermit)
     const interactionWaitHooks: RuntimeInteractionWaitHooks | undefined =
-      target.kind === "feature"
+      target.kind !== "inbox"
         ? {
             onWaitStart: async (interaction) => {
               await serializeInteractionMutation(async () => {

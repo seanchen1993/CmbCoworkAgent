@@ -622,7 +622,8 @@ public interface PlatformTokenProvider {
 
 网关到客户端：
 
-- `WELCOME`：`sessionId/serverTime/heartbeatIntervalSeconds`；
+- `WELCOME`：`sessionId/principalId/serverTime/heartbeatIntervalSeconds`。`principalId`
+  必须来自 Upgrade 阶段已经验签的 JWT 主体，不得信任 HELLO payload；
 - `REMOTE_EVENT`：`RemoteImEventV1`；
 - `PERMIT_RESULT`：回显 `commandId`；payload 含 `eventId/status=GRANTED|DENIED`，
   GRANTED 必须含当前/新 `leaseId/expiresAt`，DENIED 必须含稳定 `reasonCode`；
@@ -634,7 +635,9 @@ public interface PlatformTokenProvider {
   `conversationKey/principalId/previousDeviceEpoch/deviceEpoch/status/reasonCode?`。
   SUCCESS 必须返回网关生成的不可逆 `principalId`，新设备不得用本地 sapId/ystId
   自报主体；
-- `SYNC_STATE`；
+- `SYNC_STATE`：每条 route 必须包含
+  `principalId/conversationKey/deviceEpoch/state/deviceId/deviceName?`，其中
+  `principalId` 必须与当前 WELCOME 一致；
 - `ERROR`：稳定 reasonCode，不含内部异常。若用于拒绝某条命令，必须回显该命令的
   `commandId`，并按命令类型同时回显 `eventId`、`idempotencyKey` 或
   `conversationKey`；字段不匹配时客户端按协议错误断开，不能误完成其他请求。

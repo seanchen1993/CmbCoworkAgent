@@ -16,6 +16,8 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
   BuiltinRobotSettings,
   BuiltinRobotStatus,
   BuiltinRobotTakeoverRequest,
@@ -1753,6 +1755,17 @@ interface CustomAPI {
   }
   builtinRobot: {
     getStatus: () => Promise<BuiltinRobotStatus>
+    getRemoteAccess: () => Promise<BuiltinRobotRemoteAccessOverview>
+    setThreadRemoteAccess: (
+      threadId: string,
+      enabled: boolean
+    ) => Promise<BuiltinRobotRemoteAccessOverview>
+    setFeatureRemoteAccess: (
+      projectId: string,
+      featureSlug: string,
+      enabled: boolean
+    ) => Promise<BuiltinRobotRemoteAccessOverview>
+    listGrantableFeatures: () => Promise<BuiltinRobotGrantableFeature[]>
     saveSettings: (updates: Partial<BuiltinRobotSettings>) => Promise<BuiltinRobotStatus>
     reconnect: () => Promise<BuiltinRobotStatus>
     disconnect: () => Promise<BuiltinRobotStatus>

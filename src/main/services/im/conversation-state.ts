@@ -16,11 +16,23 @@ export type ImTargetSnapshot =
       kind: "feature"
       targetId: string
       bindingId: string
+      /** Missing only on pre-grant V1 rows; such targets fail capability checks. */
+      grantId?: string
+      grantVersion?: number
       projectId: string
       featureSlug: string
       projectName?: string
       featureTitle?: string
       threadId: string
+      workspacePath: string
+    }
+  | {
+      kind: "thread"
+      targetId: string
+      grantId: string
+      grantVersion: number
+      threadId: string
+      title: string
       workspacePath: string
     }
 
@@ -49,13 +61,16 @@ interface ImConversationRow {
 interface ImTargetRow {
   target_id: string
   conversation_key: string
-  kind: "inbox" | "feature"
+  kind: "inbox" | "feature" | "thread"
   thread_id: string
   binding_id: string | null
+  grant_id: string | null
+  grant_version: number | null
   project_id: string | null
   feature_slug: string | null
   project_name: string | null
   feature_title: string | null
+  thread_title: string | null
   workspace_path: string
   state: ImTargetState
   suspend_reason: string | null
@@ -108,6 +123,23 @@ function targetSnapshot(row: ImTargetRow): ImTargetSnapshot {
       workspacePath: row.workspace_path
     }
   }
+  if (row.kind === "thread") {
+    if (!row.grant_id || !row.grant_version || !row.thread_title) {
+      throw new ImConversationStateError(
+        "TARGET_IDENTITY_CONFLICT",
+        "Thread target identity is incomplete"
+      )
+    }
+    return {
+      kind: "thread",
+      targetId: row.target_id,
+      grantId: row.grant_id,
+      grantVersion: Number(row.grant_version),
+      threadId: row.thread_id,
+      title: row.thread_title,
+      workspacePath: row.workspace_path
+    }
+  }
   if (!row.binding_id || !row.project_id || !row.feature_slug) {
     throw new ImConversationStateError(
       "TARGET_IDENTITY_CONFLICT",
@@ -118,6 +150,8 @@ function targetSnapshot(row: ImTargetRow): ImTargetSnapshot {
     kind: "feature",
     targetId: row.target_id,
     bindingId: row.binding_id,
+    ...(row.grant_id ? { grantId: row.grant_id } : {}),
+    ...(row.grant_version ? { grantVersion: Number(row.grant_version) } : {}),
     projectId: row.project_id,
     featureSlug: row.feature_slug,
     ...(row.project_name ? { projectName: row.project_name } : {}),
@@ -134,11 +168,18 @@ function sameTarget(row: ImTargetRow, candidate: ImTargetSnapshot): boolean {
     row.thread_id === candidate.threadId &&
     row.workspace_path === candidate.workspacePath &&
     (candidate.kind === "inbox" ||
-      (row.binding_id === candidate.bindingId &&
+      (candidate.kind === "thread"
+        ? row.grant_id === candidate.grantId &&
+          Number(row.grant_version) === candidate.grantVersion &&
+          row.thread_title === candidate.title
+        : row.binding_id === candidate.bindingId &&
+          (row.grant_id ?? undefined) === candidate.grantId &&
+          (row.grant_version === null ? undefined : Number(row.grant_version)) ===
+            candidate.grantVersion &&
         row.project_id === candidate.projectId &&
         row.feature_slug === candidate.featureSlug &&
         (row.project_name ?? undefined) === candidate.projectName &&
-        (row.feature_title ?? undefined) === candidate.featureTitle))
+          (row.feature_title ?? undefined) === candidate.featureTitle))
   )
 }
 
@@ -236,6 +277,27 @@ export class ImConversationStateStore {
     return targetSnapshot(row)
   }
 
+  getSelectedTarget(conversationKey: string): {
+    snapshot: ImTargetSnapshot
+    state: ImTargetState
+    suspendReason: string | null
+  } | null {
+    const row = readOne<ImTargetRow>(
+      this.dependencies.getDatabase(),
+      `SELECT target.*
+       FROM im_conversations conversation
+       JOIN im_targets target ON target.target_id = conversation.active_target_id
+       WHERE conversation.conversation_key = ?`,
+      [conversationKey]
+    )
+    if (!row) return null
+    return {
+      snapshot: targetSnapshot(row),
+      state: row.state,
+      suspendReason: row.suspend_reason ?? null
+    }
+  }
+
   listTargets(conversationKey: string): Array<{
     snapshot: ImTargetSnapshot
     state: ImTargetState
@@ -265,6 +327,12 @@ export class ImConversationStateStore {
       required(target.bindingId, "bindingId")
       required(target.projectId, "projectId")
       required(target.featureSlug, "featureSlug")
+    } else if (target.kind === "thread") {
+      required(target.grantId, "grantId")
+      required(target.title, "title")
+      if (!Number.isSafeInteger(target.grantVersion) || target.grantVersion < 1) {
+        throw new Error("grantVersion must be a positive integer")
+      }
     }
     const database = this.dependencies.getDatabase()
     const conversation = readOne<ImConversationRow>(
@@ -300,20 +368,24 @@ export class ImConversationStateStore {
       if (!existing) {
         database.run(
           `INSERT INTO im_targets (
-             target_id, conversation_key, kind, thread_id, binding_id, project_id,
-             feature_slug, project_name, feature_title, workspace_path, state,
+             target_id, conversation_key, kind, thread_id, binding_id, grant_id,
+             grant_version, project_id, feature_slug, project_name, feature_title,
+             thread_title, workspace_path, state,
              suspend_reason, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
           [
             target.targetId,
             conversationKey,
             target.kind,
             target.threadId,
             target.kind === "feature" ? target.bindingId : null,
+            target.kind === "inbox" ? null : (target.grantId ?? null),
+            target.kind === "inbox" ? null : (target.grantVersion ?? null),
             target.kind === "feature" ? target.projectId : null,
             target.kind === "feature" ? target.featureSlug : null,
             target.kind === "feature" ? (target.projectName ?? null) : null,
             target.kind === "feature" ? (target.featureTitle ?? null) : null,
+            target.kind === "thread" ? target.title : null,
             target.workspacePath,
             state,
             now,
@@ -377,6 +449,85 @@ export class ImConversationStateStore {
     this.dependencies.markDirty()
     await this.dependencies.flushStrict()
     return targetSnapshot(target)
+  }
+
+  /**
+   * Refresh the mutable grant fence for an already-known remote target. Queued
+   * events retain their old snapshot and therefore fail closed after this update.
+   */
+  async refreshGrantTarget(input: {
+    targetId: string
+    grantId: string
+    grantVersion: number
+    workspacePath: string
+    title?: string
+    activate?: boolean
+  }): Promise<ImTargetSnapshot> {
+    required(input.targetId, "targetId")
+    required(input.grantId, "grantId")
+    required(input.workspacePath, "workspacePath")
+    if (!Number.isSafeInteger(input.grantVersion) || input.grantVersion < 1) {
+      throw new Error("grantVersion must be a positive integer")
+    }
+    const database = this.dependencies.getDatabase()
+    const existing = readOne<ImTargetRow>(database, "SELECT * FROM im_targets WHERE target_id = ?", [
+      input.targetId
+    ])
+    if (!existing) throw new ImConversationStateError("TARGET_NOT_FOUND", "Target is unknown")
+    if (existing.kind === "inbox") {
+      throw new ImConversationStateError(
+        "TARGET_IDENTITY_CONFLICT",
+        "Inbox target cannot carry a remote grant"
+      )
+    }
+    if (existing.kind === "thread" && !input.title?.trim()) {
+      throw new Error("title is required for a Thread target")
+    }
+    const now = this.dependencies.now()
+    withImTransaction(database, () => {
+      database.run(
+        `UPDATE im_targets
+         SET grant_id = ?, grant_version = ?, thread_title = ?, workspace_path = ?,
+             state = 'active', suspend_reason = NULL, updated_at = ?
+         WHERE target_id = ?`,
+        [
+          input.grantId,
+          input.grantVersion,
+          existing.kind === "thread" ? input.title!.trim() : existing.thread_title,
+          input.workspacePath,
+          now,
+          input.targetId
+        ]
+      )
+      if (existing.kind === "feature") {
+        database.run(
+          `UPDATE im_feature_bindings
+           SET workspace_path = ?, state = 'active', suspend_reason = NULL, updated_at = ?
+           WHERE target_id = ?`,
+          [input.workspacePath, now, input.targetId]
+        )
+      }
+      if (input.activate) {
+        database.run(
+          `UPDATE im_conversations
+           SET active_target_id = ?, updated_at = ?
+           WHERE conversation_key = ? AND state = 'active'`,
+          [input.targetId, now, existing.conversation_key]
+        )
+        if (database.getRowsModified() !== 1) {
+          throw new ImConversationStateError("CONVERSATION_REVOKED", "Conversation is unavailable")
+        }
+      }
+    })
+    this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
+    const refreshed = readOne<ImTargetRow>(
+      database,
+      "SELECT * FROM im_targets WHERE target_id = ?",
+      [input.targetId]
+    )
+    if (!refreshed) throw new ImConversationStateError("TARGET_NOT_FOUND", "Target is unknown")
+    return targetSnapshot(refreshed)
   }
 
   async updateTargetState(

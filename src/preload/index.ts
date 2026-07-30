@@ -23,6 +23,8 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
   BuiltinRobotSettings,
   BuiltinRobotStatus,
   BuiltinRobotTakeoverRequest,
@@ -2147,6 +2149,32 @@ const api = {
   builtinRobot: {
     getStatus: (): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:getStatus") as Promise<BuiltinRobotStatus>,
+    getRemoteAccess: (): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke(
+        "builtinRobot:getRemoteAccess"
+      ) as Promise<BuiltinRobotRemoteAccessOverview>,
+    setThreadRemoteAccess: (
+      threadId: string,
+      enabled: boolean
+    ): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke("builtinRobot:setThreadRemoteAccess", {
+        id: threadId,
+        enabled
+      }) as Promise<BuiltinRobotRemoteAccessOverview>,
+    setFeatureRemoteAccess: (
+      projectId: string,
+      featureSlug: string,
+      enabled: boolean
+    ): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke("builtinRobot:setFeatureRemoteAccess", {
+        projectId,
+        featureSlug,
+        enabled
+      }) as Promise<BuiltinRobotRemoteAccessOverview>,
+    listGrantableFeatures: (): Promise<BuiltinRobotGrantableFeature[]> =>
+      ipcRenderer.invoke(
+        "builtinRobot:listGrantableFeatures"
+      ) as Promise<BuiltinRobotGrantableFeature[]>,
     saveSettings: (updates: Partial<BuiltinRobotSettings>): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:saveSettings", updates) as Promise<BuiltinRobotStatus>,
     reconnect: (): Promise<BuiltinRobotStatus> =>

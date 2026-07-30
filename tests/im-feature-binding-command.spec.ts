@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import initSqlJs from "sql.js"
@@ -18,6 +18,11 @@ import { ImInboxService } from "../src/main/services/im/inbox-service"
 import { ImIngressSequencer } from "../src/main/services/im/ingress-sequencer"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
 import { ImReplyClient } from "../src/main/services/im/reply-client"
+import {
+  ImRemoteAccessError,
+  ImRemoteAccessService
+} from "../src/main/services/im/remote-access-service"
+import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
 import { eventShortCode } from "../src/main/services/im/reply-segmentation"
 import {
   ImSelectionContextError,
@@ -165,6 +170,23 @@ async function createContext() {
     getThread: (threadId) => threads.get(threadId) ?? null,
     ensureDirectory: async () => undefined
   })
+  const grants = new ImRemoteGrantStore(persistence, () => `grant-${++id}`)
+  const access = new ImRemoteAccessService({
+    conversations,
+    grants,
+    features: featureService,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    createId: () => `target-${++id}`,
+    getGoal: () => null,
+    coordinator: {
+      hasRunningWorkersForThread: () => false,
+      hasNotifications: () => false,
+      hasTerminalWorkerAwaitingNotificationForThread: () => false
+    },
+    workflow: { isBusyForThread: () => false },
+    hasPendingApproval: () => false,
+    hasPendingUserInput: () => false
+  })
   return {
     root,
     database,
@@ -176,6 +198,9 @@ async function createContext() {
     threads,
     updateLocalThread,
     featureService,
+    grants,
+    access,
+    makeThread,
     inbox
   }
 }
@@ -186,9 +211,8 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
     conversations: context.conversations,
     events: context.events,
     inbox: context.inbox,
-    features: context.featureService,
+    access: context.access,
     selections: context.selections,
-    getSettings: () => ({ enabled: true, remoteAccess: "inbox-and-features" }),
     getCurrentEventId: () => null,
     abortCurrent: () => false
   })
@@ -198,22 +222,25 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
     deviceEpoch: 1
   }
   try {
-    const projects = await router.handle({
+    const retired = await router.handle({
       ...commandInput,
       command: parseImCommand("/项目")!
     })
-    assert(projects.includes("支付平台"))
-    assert(!projects.includes(context.root))
-    assert(!projects.includes("project-secret-id"))
-    assert(!projects.includes("must-not-leak"))
+    assert(retired.includes("已合并为 /会话"))
 
-    const features = await router.handle({
-      ...commandInput,
-      command: parseImCommand("/功能 1")!
+    const grant = await context.access.enableFeature({
+      route: commandInput,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
     })
-    assert(features.includes("快捷支付"))
-    assert(features.includes("feature-pay"))
-    assert(!features.includes(context.root))
+    const sessions = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(sessions.includes("支付平台 / 快捷支付"))
+    assert(!sessions.includes(context.root))
+    assert(!sessions.includes("project-secret-id"))
+    assert(!sessions.includes("must-not-leak"))
 
     const bound = await router.handle({
       ...commandInput,
@@ -240,14 +267,17 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
     const rebound = await context.featureService.bindFeature({
       ...commandInput,
       projectId: "project-secret-id",
-      featureSlug: "feature-pay"
+      featureSlug: "feature-pay",
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
     })
     assert.equal(rebound.threadId, target.threadId)
     assert.equal(context.threads.size, 1)
 
-    await router.handle({ ...commandInput, command: parseImCommand("/项目")! })
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    await context.access.disableFeature("project-secret-id", "feature-pay")
     const stale = await router.handle({ ...commandInput, command: parseImCommand("/绑定 1")! })
-    assert(stale.includes("请先发送 /功能"))
+    assert(stale.includes("授权已变化"))
 
     const switched = await router.handle({
       ...commandInput,
@@ -264,12 +294,23 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
 async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
   const context = await createContext()
   try {
-    const target = await context.featureService.bindFeature({
-      conversationKey: "conversation-1",
-      principalId: "principal-1",
-      deviceEpoch: 1,
+    const grant = await context.access.enableFeature({
+      route: {
+        conversationKey: "conversation-1",
+        principalId: "principal-1",
+        deviceEpoch: 1
+      },
       projectId: "project-secret-id",
       featureSlug: "feature-pay"
+    })
+    const target = await context.access.bindFeatureGrant({
+      route: {
+        conversationKey: "conversation-1",
+        principalId: "principal-1",
+        deviceEpoch: 1
+      },
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
     })
     const event: ImEventRecord = {
       eventId: "feature-event",
@@ -310,6 +351,7 @@ async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
       workflow: { isBusyForThread: () => false },
       hasPendingApproval: () => false,
       hasPendingUserInput: () => false,
+      grants: context.grants,
       validateFeatureTarget: async () => ({
         valid: false,
         reasonCode: "REMOTE_FEATURE_UNAVAILABLE",
@@ -329,6 +371,148 @@ async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
       unknown
     >
     assert.equal(metadata.remoteState, "suspended")
+    assert.equal(
+      context.grants.getFeatureGrant("project-secret-id", "feature-pay")?.state,
+      "suspended"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections
+  })
+  const route = {
+    conversationKey: "conversation-1",
+    principalId: "principal-1",
+    deviceEpoch: 1
+  }
+  try {
+    const originalMetadata = {
+      title: "支付排障会话",
+      workspacePath: context.root,
+      agentMode: "normal"
+    }
+    context.makeThread("desktop-thread", originalMetadata)
+    await context.access.enableThread({ route, threadId: "desktop-thread" })
+
+    const sessions = await router.handle({ ...route, command: parseImCommand("/会话")! })
+    assert(sessions.includes("支付排障会话"))
+    const bound = await router.handle({ ...route, command: parseImCommand("/绑定 1")! })
+    assert(bound.includes("支付排障会话"))
+    const target = context.conversations.getActiveTarget(route.conversationKey)
+    assert.equal(target?.kind, "thread")
+    assert.equal(target?.threadId, "desktop-thread")
+    if (target?.kind !== "thread") throw new Error("thread target expected")
+    assert.deepEqual(
+      JSON.parse(context.threads.get("desktop-thread")!.metadata!),
+      originalMetadata,
+      "grant authority stays in dedicated tables and does not mutate desktop metadata"
+    )
+
+    const event: ImEventRecord = {
+      eventId: "desktop-thread-event",
+      platformMessageId: "desktop-thread-platform",
+      conversationKey: route.conversationKey,
+      conversationSeq: 1,
+      principalId: route.principalId,
+      deviceEpoch: route.deviceEpoch,
+      leaseId: "lease",
+      leaseExpiresAt: context.clock.now + 60_000,
+      permitState: "unacquired",
+      permitExpiresAt: null,
+      messageText: "检查支付代码",
+      occurredAt: context.clock.now,
+      targetSnapshot: target,
+      state: "queued",
+      runId: null,
+      retryOfEventId: null,
+      resultText: null,
+      reasonCode: null,
+      retryable: null,
+      createdAt: context.clock.now,
+      updatedAt: context.clock.now,
+      acceptedAt: context.clock.now,
+      executionStartedAt: null,
+      finishedAt: null
+    }
+    const guard = new ImRemoteCapabilityGuard({
+      conversationState: context.conversations,
+      getThread: (threadId) => context.threads.get(threadId) ?? null,
+      getGoal: () => null,
+      coordinator: {
+        hasRunningWorkersForThread: () => false,
+        hasNotifications: () => false,
+        hasTerminalWorkerAwaitingNotificationForThread: () => false
+      },
+      workflow: { isBusyForThread: () => false },
+      hasPendingApproval: () => false,
+      hasPendingUserInput: () => false,
+      grants: context.grants
+    })
+    const allowed = await guard.evaluate(event)
+    assert.equal(allowed.allowed, true, JSON.stringify(allowed))
+
+    const transientlyBusyAccess = new ImRemoteAccessService({
+      conversations: context.conversations,
+      grants: context.grants,
+      features: context.featureService,
+      getThread: (threadId) => context.threads.get(threadId) ?? null,
+      getGoal: () => ({ status: "active" }),
+      coordinator: {
+        hasRunningWorkersForThread: () => true,
+        hasNotifications: () => true,
+        hasTerminalWorkerAwaitingNotificationForThread: () => true
+      },
+      workflow: { isBusyForThread: () => true },
+      hasPendingApproval: () => true,
+      hasPendingUserInput: () => true
+    })
+    const deliveryTarget =
+      transientlyBusyAccess.validateThreadForCompletionDelivery("desktop-thread")
+    assert.equal(deliveryTarget.thread.thread_id, "desktop-thread")
+    assert.equal(deliveryTarget.workspacePath, await realpath(context.root))
+    assert.throws(
+      () => transientlyBusyAccess.validateThreadForRemoteAccess("desktop-thread"),
+      (error) => error instanceof ImRemoteAccessError && error.code === "REMOTE_THREAD_UNSUPPORTED"
+    )
+
+    context.updateLocalThread("desktop-thread", {
+      metadata: JSON.stringify({ ...originalMetadata, agentMode: "coordinator" })
+    })
+    assert.equal(
+      context.access.validateThreadForCompletionDelivery("desktop-thread").thread.thread_id,
+      "desktop-thread"
+    )
+    assert.throws(
+      () => context.access.validateThreadForRemoteAccess("desktop-thread"),
+      (error) => error instanceof ImRemoteAccessError && error.code === "REMOTE_THREAD_UNSUPPORTED"
+    )
+    const unsupported = await guard.evaluate(event)
+    assert.equal(unsupported.allowed, false)
+    assert.equal(
+      unsupported.allowed ? null : unsupported.reasonCode,
+      "REMOTE_AGENT_MODE_UNSUPPORTED"
+    )
+
+    context.updateLocalThread("desktop-thread", { metadata: JSON.stringify(originalMetadata) })
+    await context.grants.revokeThreadGrant("desktop-thread")
+    const revoked = await guard.evaluate(event)
+    assert.equal(revoked.allowed, false)
+    assert.equal(revoked.allowed ? null : revoked.reasonCode, "REMOTE_GRANT_INVALID")
+
+    await context.access.disableThread("desktop-thread")
+    assert.equal(context.conversations.getSelectedTarget(route.conversationKey)?.state, "suspended")
+    const recovered = await router.handle({ ...route, command: parseImCommand("/收件箱")! })
+    assert(recovered.includes("已切换到【收件箱】"))
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })
@@ -388,7 +572,7 @@ async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<v
     conversations: context.conversations,
     events: context.events,
     inbox: context.inbox,
-    features: context.featureService,
+    access: context.access,
     selections: context.selections
   })
   try {
@@ -437,6 +621,10 @@ const tests: Array<[string, () => Promise<void>]> = [
     testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths
   ],
   ["testFeatureRevalidationSuspendsBinding", testFeatureRevalidationSuspendsBinding],
+  [
+    "testDesktopThreadGrantBindsWithoutMutatingMetadata",
+    testDesktopThreadGrantBindsWithoutMutatingMetadata
+  ],
   [
     "testControlIngressCompletesOutsideTurnQueueAndSelectionExpires",
     testControlIngressCompletesOutsideTurnQueueAndSelectionExpires

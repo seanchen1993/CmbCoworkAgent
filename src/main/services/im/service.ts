@@ -11,6 +11,8 @@ import { getBuiltinRobotSettings } from "../../storage"
 import { imSelectionContextStore } from "./selection-context"
 import { imEventStore } from "./event-store"
 import { buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
+import { registerImDesktopCompletionReplyDrainer } from "./desktop-completion"
+import { imRemoteApprovalService } from "./remote-approval-service"
 
 /**
  * Headless orchestration boundary used by the production WSS adapter and the
@@ -25,6 +27,8 @@ export class ImUnifiedBotService {
   readonly commandRouter: ImCommandRouter
   readonly replyClient: ImReplyClient
   private readonly unregisterSchedulerGateway: () => void
+  private readonly unregisterDesktopCompletionReplyDrainer: () => void
+  private readonly unregisterRemoteApprovalReplyDrainer: () => void
   private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
@@ -33,6 +37,12 @@ export class ImUnifiedBotService {
   ) {
     this.replyClient = new ImReplyClient(gateway)
     this.unregisterSchedulerGateway = registerImInboxSchedulerGateway(gateway, this.replyClient)
+    this.unregisterDesktopCompletionReplyDrainer = registerImDesktopCompletionReplyDrainer(
+      this.replyClient
+    )
+    this.unregisterRemoteApprovalReplyDrainer = imRemoteApprovalService.registerReplyDrainer(
+      this.replyClient
+    )
     this.runner = new ImRemoteRunner({
       gateway,
       replyClient: this.replyClient,
@@ -156,6 +166,8 @@ export class ImUnifiedBotService {
     if (this.outboxRetryTimer) clearInterval(this.outboxRetryTimer)
     this.outboxRetryTimer = undefined
     this.unregisterSchedulerGateway()
+    this.unregisterDesktopCompletionReplyDrainer()
+    this.unregisterRemoteApprovalReplyDrainer()
     return this.turnQueue.stop()
   }
 

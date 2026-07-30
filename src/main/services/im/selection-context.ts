@@ -3,11 +3,14 @@ import { flushStrict, getDb, saveToDisk } from "../../db"
 import type { ImPersistenceDependencies } from "./persistence"
 import { readOne, withImTransaction } from "./persistence"
 
-export type ImSelectionKind = "project" | "feature"
+export type ImSelectionKind = "project" | "feature" | "remote_target"
 
 export interface ImSelectionCandidate {
   id: string
   label: string
+  targetKind?: "thread_grant" | "feature_grant"
+  grantId?: string
+  grantVersion?: number
 }
 
 export interface ImSelectionContext {
@@ -81,7 +84,12 @@ export class ImSelectionContextStore {
     if (candidates.length === 0) throw new Error("selection candidates are required")
     const normalized = candidates.map((candidate) => ({
       id: candidate.id.trim(),
-      label: candidate.label.trim()
+      label: candidate.label.trim(),
+      ...(candidate.targetKind ? { targetKind: candidate.targetKind } : {}),
+      ...(candidate.grantId ? { grantId: candidate.grantId.trim() } : {}),
+      ...(candidate.grantVersion !== undefined
+        ? { grantVersion: candidate.grantVersion }
+        : {})
     }))
     if (normalized.some((candidate) => !candidate.id || !candidate.label)) {
       throw new Error("selection candidate id and label are required")
@@ -125,7 +133,9 @@ export class ImSelectionContextStore {
         "SELECTION_MISSING",
         kind === "project"
           ? "请先发送 /项目 获取最新项目编号。"
-          : "请先发送 /功能 获取最新 Feature 编号。"
+          : kind === "feature"
+            ? "请先发送 /功能 获取最新 Feature 编号。"
+            : "请先发送 /会话 获取最新会话编号。"
       )
     }
     if (Number(row.expires_at) <= this.dependencies.now()) {

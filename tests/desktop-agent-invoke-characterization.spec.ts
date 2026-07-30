@@ -59,6 +59,7 @@ const agentIpc = read("src/main/ipc/agent.ts")
 const runtime = read("src/main/agent/runtime.ts")
 const standardTurn = read("src/main/agent/standard-thread-turn.ts")
 const sandboxIpc = read("src/main/ipc/sandbox.ts")
+const approvalBroker = read("src/main/agent/approval-decision-broker.ts")
 
 const invoke = sliceBetween(
   agentIpc,
@@ -359,8 +360,23 @@ function testApprovalAndStructuredInputRemainDesktopManaged(): void {
   )
   assertIncludes(
     sandboxIpc,
+    "approvalDecisionBroker.decide({",
+    "renderer approval decisions use the shared broker"
+  )
+  assertIncludes(
+    sandboxIpc,
+    'source: { kind: "desktop", webContentsId: event.sender.id }',
+    "renderer approval retains its desktop source identity"
+  )
+  assertIncludes(
+    approvalBroker,
     "decision.tool_call_id !== expectedToolCallId",
-    "approval decision is bound to the requested tool call"
+    "shared approval decisions remain bound to the requested tool call"
+  )
+  assertIncludes(
+    approvalBroker,
+    '"approve_permanent"',
+    "the desktop broker retains permanent approval decisions"
   )
   assertOccurrences(
     invoke,

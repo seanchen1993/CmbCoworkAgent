@@ -50,6 +50,7 @@ export interface ImGatewayWsStatus {
   connectionState: BuiltinRobotConnectionState
   authenticationFailed: boolean
   sessionId: string | null
+  principalId: string | null
   lastConnectedAt: string | null
   lastError: string | null
   routes: BuiltinRobotRouteStatus[]
@@ -153,6 +154,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     connectionState: "offline",
     authenticationFailed: false,
     sessionId: null,
+    principalId: null,
     lastConnectedAt: null,
     lastError: null,
     routes: []
@@ -188,7 +190,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     const socket = this.socket
     this.socket = null
     if (socket && socket.readyState !== WebSocket.CLOSED) socket.close(1000, "client disconnect")
-    this.updateStatus({ connectionState: "offline", sessionId: null })
+    this.updateStatus({
+      connectionState: "offline",
+      sessionId: null,
+      principalId: null,
+      routes: []
+    })
   }
 
   reconnect(): void {
@@ -320,6 +327,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       this.updateStatus({
         connectionState: "error",
         sessionId: null,
+        principalId: null,
+        routes: [],
         lastError: !token ? "企业身份尚未完成，无法连接统一机器人。" : "统一机器人网关地址未配置。"
       })
       return
@@ -328,6 +337,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       this.updateStatus({
         connectionState: "error",
         sessionId: null,
+        principalId: null,
+        routes: [],
         lastError: "统一机器人网关必须使用 WSS（仅本机调试允许 WS）。"
       })
       return
@@ -336,7 +347,9 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       connectionState: "connecting",
       authenticationFailed: false,
       lastError: null,
-      sessionId: null
+      sessionId: null,
+      principalId: null,
+      routes: []
     })
     let socket: WebSocket
     try {
@@ -401,6 +414,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         connectionState: "error",
         authenticationFailed,
         sessionId: null,
+        principalId: null,
+        routes: [],
         lastError: authenticationFailed
           ? "企业身份认证失败，请重新登录。"
           : `统一机器人网关拒绝连接（${response.statusCode}）。`
@@ -420,10 +435,20 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       )
       if (this.stopped) return
       if (this.status.authenticationFailed) {
-        this.updateStatus({ connectionState: "error", sessionId: null })
+        this.updateStatus({
+          connectionState: "error",
+          sessionId: null,
+          principalId: null,
+          routes: []
+        })
         return
       }
-      this.updateStatus({ connectionState: "offline", sessionId: null })
+      this.updateStatus({
+        connectionState: "offline",
+        sessionId: null,
+        principalId: null,
+        routes: []
+      })
       this.scheduleReconnect()
     })
   }
@@ -453,7 +478,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       case "WELCOME": {
         assertOnlyKeys(
           payload,
-          ["sessionId", "serverTime", "heartbeatIntervalSeconds"],
+          ["sessionId", "principalId", "serverTime", "heartbeatIntervalSeconds"],
           "WELCOME payload"
         )
         if (!commandId || commandId !== this.helloCommandId) {
@@ -461,10 +486,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         }
         this.helloCommandId = null
         const sessionId = nonEmptyString(payload.sessionId)
+        const principalId = nonEmptyString(payload.principalId)
         const serverTime = nonEmptyString(payload.serverTime)
         const heartbeatIntervalSeconds = positiveInteger(payload.heartbeatIntervalSeconds)
         if (
           !sessionId ||
+          !principalId ||
           !serverTime ||
           !Number.isFinite(Date.parse(serverTime)) ||
           !heartbeatIntervalSeconds ||
@@ -480,6 +507,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           connectionState: "online",
           authenticationFailed: false,
           sessionId,
+          principalId,
           lastConnectedAt: new Date(this.now()).toISOString(),
           lastError: null
         })
@@ -672,7 +700,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       ...(nonEmptyString(payload.message) ? { message: String(payload.message) } : {})
     }
     if (result.success && result.deviceEpoch) {
+      const principalId = result.principalId ?? this.status.principalId
+      if (!principalId) {
+        throw new ImGatewayProtocolError("Takeover result is missing authenticated principalId")
+      }
       const route: BuiltinRobotRouteStatus = {
+        principalId,
         conversationKey,
         deviceEpoch: result.deviceEpoch,
         state: "active",
@@ -700,14 +733,15 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     for (const value of routes) {
       const route = record(value)
       const conversationKey = nonEmptyString(route?.conversationKey)
+      const principalId = nonEmptyString(route?.principalId)
       const deviceEpoch = positiveInteger(route?.deviceEpoch)
       const deviceId = nonEmptyString(route?.deviceId)
-      if (!route || !conversationKey || !deviceEpoch || !deviceId) {
+      if (!route || !principalId || !conversationKey || !deviceEpoch || !deviceId) {
         throw new ImGatewayProtocolError("SYNC_STATE route is invalid")
       }
       assertOnlyKeys(
         route,
-        ["conversationKey", "deviceEpoch", "state", "deviceId", "deviceName"],
+        ["principalId", "conversationKey", "deviceEpoch", "state", "deviceId", "deviceName"],
         "SYNC_STATE route"
       )
       const stateValue = String(route.state ?? "active").toLowerCase()
@@ -715,12 +749,16 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         throw new ImGatewayProtocolError("SYNC_STATE route state is invalid")
       }
       const state = stateValue
+      if (!this.status.principalId || principalId !== this.status.principalId) {
+        throw new ImGatewayProtocolError("SYNC_STATE route principal does not match WELCOME")
+      }
       const deviceName =
         route.deviceName === undefined ? undefined : nonEmptyString(route.deviceName)
       if (route.deviceName !== undefined && !deviceName) {
         throw new ImGatewayProtocolError("SYNC_STATE route deviceName is invalid")
       }
       normalized.push({
+        principalId,
         conversationKey,
         deviceEpoch,
         state,
@@ -863,7 +901,13 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   }
 
   private failConnection(message: string): void {
-    this.updateStatus({ connectionState: "error", sessionId: null, lastError: message })
+    this.updateStatus({
+      connectionState: "error",
+      sessionId: null,
+      principalId: null,
+      routes: [],
+      lastError: message
+    })
     this.scheduleReconnect()
   }
 

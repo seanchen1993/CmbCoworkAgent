@@ -196,9 +196,10 @@
     "welcome": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sessionId", "serverTime", "heartbeatIntervalSeconds"],
+      "required": ["sessionId", "principalId", "serverTime", "heartbeatIntervalSeconds"],
       "properties": {
         "sessionId": { "type": "string", "minLength": 1 },
+        "principalId": { "type": "string", "minLength": 1 },
         "serverTime": { "type": "string", "format": "date-time" },
         "heartbeatIntervalSeconds": { "type": "integer", "minimum": 5, "maximum": 300 }
       }
@@ -307,8 +308,9 @@
     "route": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["conversationKey", "deviceEpoch", "state", "deviceId"],
+      "required": ["principalId", "conversationKey", "deviceEpoch", "state", "deviceId"],
       "properties": {
+        "principalId": { "type": "string", "minLength": 1 },
         "conversationKey": { "type": "string", "minLength": 1 },
         "deviceEpoch": { "type": "integer", "minimum": 1 },
         "state": { "enum": ["active", "suspended", "revoked"] },

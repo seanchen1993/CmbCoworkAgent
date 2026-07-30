@@ -10,6 +10,8 @@ import {
 import type {
   BuiltinRobotRouteStatus,
   BuiltinRobotFeatureBindingStatus,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
   BuiltinRobotSettings,
   BuiltinRobotStatus,
   BuiltinRobotTakeoverRequest,
@@ -22,6 +24,9 @@ import { ImGatewayWsClient, type ImGatewayWsStatus } from "./gateway-ws-client"
 import { imInboxService } from "./inbox-service"
 import { imSelectionContextStore } from "./selection-context"
 import { ImUnifiedBotService } from "./service"
+import { imFeatureBindingService } from "./feature-binding-service"
+import { imRemoteAccessService } from "./remote-access-service"
+import type { ImGrantRouteIdentity } from "./remote-grant-store"
 
 type StatusListener = (status: BuiltinRobotStatus) => void
 
@@ -72,6 +77,7 @@ export class BuiltinRobotManager {
     connectionState: "offline",
     authenticationFailed: false,
     sessionId: null,
+    principalId: null,
     lastConnectedAt: null,
     lastError: null,
     routes: []
@@ -155,6 +161,7 @@ export class BuiltinRobotManager {
     const routeMap = new Map<string, BuiltinRobotRouteStatus>()
     for (const conversation of imConversationStateStore.listConversations()) {
       routeMap.set(conversation.conversationKey, {
+        principalId: conversation.principalId,
         conversationKey: conversation.conversationKey,
         deviceEpoch: conversation.deviceEpoch,
         state: conversation.state,
@@ -196,6 +203,7 @@ export class BuiltinRobotManager {
       deviceId: device.deviceId,
       deviceName: device.deviceName,
       sessionId: this.gatewayStatus.sessionId,
+      principalId: this.gatewayStatus.principalId,
       lastConnectedAt: this.gatewayStatus.lastConnectedAt,
       lastError,
       legacyConfigDetected: hasLegacyChatXRobotCredentials(),
@@ -216,6 +224,96 @@ export class BuiltinRobotManager {
 
   takeover(request: BuiltinRobotTakeoverRequest): Promise<BuiltinRobotTakeoverResult> {
     return this.enqueue(() => this.takeoverNow(request))
+  }
+
+  getRemoteAccessOverview(): BuiltinRobotRemoteAccessOverview {
+    const resolved = this.resolveGrantRoute(false)
+    return {
+      routeAvailable: Boolean(resolved.route),
+      routeReason: resolved.reason,
+      activeRoute: resolved.status,
+      threadGrants: imRemoteAccessService.listThreadGrants().map((grant) => ({
+        kind: "thread",
+        grantId: grant.grantId,
+        threadId: grant.threadId,
+        title: grant.titleSnapshot,
+        state: grant.state,
+        grantVersion: grant.grantVersion,
+        conversationKey: grant.conversationKey,
+        deviceEpoch: grant.deviceEpoch,
+        suspendReason: grant.suspendReason
+      })),
+      featureGrants: imRemoteAccessService.listFeatureGrants().map((grant) => ({
+        kind: "feature",
+        grantId: grant.grantId,
+        projectId: grant.projectId,
+        featureSlug: grant.featureSlug,
+        projectName: grant.projectNameSnapshot,
+        featureTitle: grant.featureTitleSnapshot,
+        state: grant.state,
+        grantVersion: grant.grantVersion,
+        conversationKey: grant.conversationKey,
+        deviceEpoch: grant.deviceEpoch,
+        suspendReason: grant.suspendReason
+      }))
+    }
+  }
+
+  setThreadRemoteAccess(threadId: string, enabled: boolean): Promise<BuiltinRobotRemoteAccessOverview> {
+    return this.enqueue(async () => {
+      if (enabled) {
+        await imRemoteAccessService.enableThread({
+          route: this.requireGrantRoute(),
+          threadId
+        })
+      } else {
+        await imRemoteAccessService.disableThread(threadId)
+      }
+      this.emitStatus()
+      return this.getRemoteAccessOverview()
+    })
+  }
+
+  setFeatureRemoteAccess(
+    projectId: string,
+    featureSlug: string,
+    enabled: boolean
+  ): Promise<BuiltinRobotRemoteAccessOverview> {
+    return this.enqueue(async () => {
+      if (enabled) {
+        await imRemoteAccessService.enableFeature({
+          route: this.requireGrantRoute(),
+          projectId,
+          featureSlug
+        })
+      } else {
+        await imRemoteAccessService.disableFeature(projectId, featureSlug)
+      }
+      this.emitStatus()
+      return this.getRemoteAccessOverview()
+    })
+  }
+
+  listGrantableFeatures(): Promise<BuiltinRobotGrantableFeature[]> {
+    return this.enqueue(async () => {
+      const projects = await imFeatureBindingService.listRemoteProjects()
+      const result: BuiltinRobotGrantableFeature[] = []
+      for (const project of projects) {
+        const features = await imFeatureBindingService.listRemoteFeatures(project.id)
+        for (const feature of features) {
+          result.push({
+            projectId: project.id,
+            projectName: project.name,
+            featureSlug: feature.slug,
+            featureTitle: feature.title,
+            featureStatus: feature.status,
+            granted:
+              imRemoteAccessService.getFeatureGrant(project.id, feature.slug)?.state === "active"
+          })
+        }
+      }
+      return result
+    })
   }
 
   private async startNow(): Promise<void> {
@@ -302,6 +400,7 @@ export class BuiltinRobotManager {
       ...this.gatewayStatus,
       connectionState: "offline",
       sessionId: null,
+      principalId: null,
       routes: []
     }
     this.emitStatus()
@@ -328,6 +427,11 @@ export class BuiltinRobotManager {
         await this.service.turnQueue.waitForIdle(request.conversationKey)
       }
       const oldTargets = imConversationStateStore.listTargets(request.conversationKey)
+      await imRemoteAccessService.suspendRoute(
+        request.conversationKey,
+        request.expectedDeviceEpoch,
+        "ROUTE_TAKEOVER"
+      )
       await imEventStore.applyDeviceTakeover(request.conversationKey, request.expectedDeviceEpoch)
       for (const { snapshot } of oldTargets) {
         const thread = getThread(snapshot.threadId)
@@ -377,6 +481,52 @@ export class BuiltinRobotManager {
       return
     }
     for (const listener of this.listeners) listener(status)
+  }
+
+  private requireGrantRoute(): ImGrantRouteIdentity {
+    const resolved = this.resolveGrantRoute(true)
+    if (!resolved.route) throw new Error(resolved.reason ?? "当前没有可用的招乎单聊路由")
+    return resolved.route
+  }
+
+  private resolveGrantRoute(requireOnline: boolean): {
+    route: ImGrantRouteIdentity | null
+    status: BuiltinRobotRouteStatus | null
+    reason: string | null
+  } {
+    if (requireOnline && this.gatewayStatus.connectionState !== "online") {
+      return { route: null, status: null, reason: "统一机器人尚未连接。" }
+    }
+    const principalId = this.gatewayStatus.principalId
+    if (!principalId) {
+      return { route: null, status: null, reason: "网关尚未返回已验证的企业主体。" }
+    }
+    const candidates = this.gatewayStatus.routes.filter(
+      (route) =>
+        route.principalId === principalId &&
+        route.state === "active" &&
+        route.ownedByCurrentDevice
+    )
+    if (candidates.length === 0) {
+      return {
+        route: null,
+        status: null,
+        reason: "请先在招乎中向内置机器人发送一条消息，并确认路由属于本设备。"
+      }
+    }
+    if (candidates.length > 1) {
+      return { route: null, status: null, reason: "存在多个招乎单聊路由，当前无法安全消歧。" }
+    }
+    const status = candidates[0]
+    return {
+      route: {
+        principalId,
+        conversationKey: status.conversationKey,
+        deviceEpoch: status.deviceEpoch
+      },
+      status: { ...status },
+      reason: null
+    }
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {

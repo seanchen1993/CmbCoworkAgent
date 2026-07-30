@@ -427,6 +427,7 @@ export interface TaskRunRecord {
 export interface BuiltinRobotSettings {
   enabled: boolean
   remoteAccess: "inbox-only" | "inbox-and-features"
+  remoteApprovalEnabled: boolean
   waitingDesktopTtlMinutes: number
 }
 
@@ -434,6 +435,8 @@ export type BuiltinRobotConnectionState = "connecting" | "online" | "offline" | 
 export type BuiltinRobotIdentityState = "mapped" | "missing" | "error"
 
 export interface BuiltinRobotRouteStatus {
+  /** Opaque enterprise subject asserted by the authenticated Gateway session. */
+  principalId: string
   conversationKey: string
   deviceEpoch: number
   state: "active" | "suspended" | "revoked"
@@ -453,6 +456,49 @@ export interface BuiltinRobotFeatureBindingStatus {
   activeTarget: boolean
 }
 
+export interface BuiltinRobotThreadGrantStatus {
+  kind: "thread"
+  grantId: string
+  threadId: string
+  title: string
+  state: "active" | "suspended" | "revoked"
+  grantVersion: number
+  conversationKey: string
+  deviceEpoch: number
+  suspendReason: string | null
+}
+
+export interface BuiltinRobotFeatureGrantStatus {
+  kind: "feature"
+  grantId: string
+  projectId: string
+  featureSlug: string
+  projectName: string
+  featureTitle: string
+  state: "active" | "suspended" | "revoked"
+  grantVersion: number
+  conversationKey: string
+  deviceEpoch: number
+  suspendReason: string | null
+}
+
+export interface BuiltinRobotRemoteAccessOverview {
+  routeAvailable: boolean
+  routeReason: string | null
+  activeRoute: BuiltinRobotRouteStatus | null
+  threadGrants: BuiltinRobotThreadGrantStatus[]
+  featureGrants: BuiltinRobotFeatureGrantStatus[]
+}
+
+export interface BuiltinRobotGrantableFeature {
+  projectId: string
+  projectName: string
+  featureSlug: string
+  featureTitle: string
+  featureStatus: string
+  granted: boolean
+}
+
 export interface BuiltinRobotStatus {
   settings: BuiltinRobotSettings
   connectionState: BuiltinRobotConnectionState
@@ -460,6 +506,7 @@ export interface BuiltinRobotStatus {
   deviceId: string
   deviceName: string
   sessionId: string | null
+  principalId: string | null
   lastConnectedAt: string | null
   lastError: string | null
   legacyConfigDetected: boolean

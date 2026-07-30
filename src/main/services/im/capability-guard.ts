@@ -1,3 +1,4 @@
+import { existsSync, realpathSync, statSync } from "node:fs"
 import { resolve } from "node:path"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
 import { coordinatorWorkerManager } from "../../agent/coordinator-worker-manager"
@@ -14,6 +15,11 @@ import {
 } from "./conversation-state"
 import type { ImEventRecord } from "./event-store"
 import { validateImFeatureTarget } from "./feature-binding-service"
+import {
+  ImRemoteGrantError,
+  imRemoteGrantStore,
+  type ImRemoteGrantStore
+} from "./remote-grant-store"
 
 export type ImRemoteCapabilityReason =
   | "REMOTE_TARGET_INVALID"
@@ -32,6 +38,7 @@ export type ImRemoteCapabilityReason =
   | "REMOTE_FEATURE_UNAVAILABLE"
   | "REMOTE_WORKSPACE_UNAVAILABLE"
   | "REMOTE_HARNESS_CONTEXT_UNAVAILABLE"
+  | "REMOTE_GRANT_INVALID"
 
 export type ImRemoteCapabilityDecision =
   | {
@@ -59,6 +66,24 @@ export interface ImRemoteCapabilityGuardDependencies {
   hasPendingApproval(threadId: string): boolean
   hasPendingUserInput(threadId: string): boolean
   validateFeatureTarget?: typeof validateImFeatureTarget
+  grants: ImRemoteGrantStore
+}
+
+function canonicalPath(path: string): string {
+  const resolved = resolve(path)
+  try {
+    return realpathSync(resolved)
+  } catch {
+    return resolved
+  }
+}
+
+function existingDirectory(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean {
@@ -66,12 +91,19 @@ function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean 
     left.kind === right.kind &&
     left.targetId === right.targetId &&
     left.threadId === right.threadId &&
-    resolve(left.workspacePath) === resolve(right.workspacePath) &&
+    canonicalPath(left.workspacePath) === canonicalPath(right.workspacePath) &&
     (left.kind === "inbox" ||
-      (right.kind === "feature" &&
+      (left.kind === "thread" && right.kind === "thread"
+        ? left.grantId === right.grantId &&
+          left.grantVersion === right.grantVersion &&
+          left.title === right.title
+        : left.kind === "feature" &&
+          right.kind === "feature" &&
         left.bindingId === right.bindingId &&
+        left.grantId === right.grantId &&
+        left.grantVersion === right.grantVersion &&
         left.projectId === right.projectId &&
-        left.featureSlug === right.featureSlug))
+          left.featureSlug === right.featureSlug))
   )
 }
 
@@ -80,7 +112,10 @@ function metadataMatchesTarget(
   target: ImTargetSnapshot,
   event: Pick<ImEventRecord, "conversationKey" | "deviceEpoch">
 ): boolean {
-  if (resolve(String(metadata.workspacePath ?? "")) !== resolve(target.workspacePath)) return false
+  if (canonicalPath(String(metadata.workspacePath ?? "")) !== canonicalPath(target.workspacePath)) {
+    return false
+  }
+  if (target.kind === "thread") return true
   const delivery = metadata.imDeliveryContext
   if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return false
   const context = delivery as Record<string, unknown>
@@ -113,7 +148,8 @@ export class ImRemoteCapabilityGuard {
       coordinator: coordinatorWorkerManager,
       workflow: workflowRunManager,
       hasPendingApproval: hasPendingApprovalForRuntimeThread,
-      hasPendingUserInput: hasPendingUserInputForThread
+      hasPendingUserInput: hasPendingUserInputForThread,
+      grants: imRemoteGrantStore
     }
   ) {}
 
@@ -146,6 +182,40 @@ export class ImRemoteCapabilityGuard {
       }
     }
 
+    try {
+      const route = {
+        principalId: event.principalId,
+        conversationKey: event.conversationKey,
+        deviceEpoch: event.deviceEpoch
+      }
+      if (snapshot.kind === "thread") {
+        this.dependencies.grants.assertActiveThreadGrant({
+          grantId: snapshot.grantId,
+          grantVersion: snapshot.grantVersion,
+          route,
+          threadId: snapshot.threadId
+        })
+      } else if (snapshot.kind === "feature") {
+        if (!snapshot.grantId || !snapshot.grantVersion) {
+          throw new ImRemoteGrantError("GRANT_NOT_FOUND", "Legacy Feature target has no grant")
+        }
+        this.dependencies.grants.assertActiveFeatureGrant({
+          grantId: snapshot.grantId,
+          grantVersion: snapshot.grantVersion,
+          route,
+          projectId: snapshot.projectId,
+          featureSlug: snapshot.featureSlug
+        })
+      }
+    } catch (error) {
+      if (!(error instanceof ImRemoteGrantError)) throw error
+      return {
+        allowed: false,
+        reasonCode: "REMOTE_GRANT_INVALID",
+        message: "该远程授权已撤销或发生变化，请在招乎中重新选择会话。"
+      }
+    }
+
     const thread = this.dependencies.getThread(snapshot.threadId)
     if (!thread) {
       return {
@@ -155,11 +225,33 @@ export class ImRemoteCapabilityGuard {
       }
     }
     const parsed = parseStandardThreadMetadata(thread.metadata)
+    if (
+      snapshot.kind === "thread" &&
+      (!parsed.workspacePath ||
+        !existingDirectory(parsed.workspacePath) ||
+        !existingDirectory(snapshot.workspacePath))
+    ) {
+      return {
+        allowed: false,
+        reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
+        message: "该会话的桌面工作区已不可用，请撤销授权后重新配置。"
+      }
+    }
     if (!parsed.workspacePath || !metadataMatchesTarget(parsed.metadata, snapshot, event)) {
       return {
         allowed: false,
         reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
         message: "远程会话上下文不一致，已阻止执行，请回到桌面检查。"
+      }
+    }
+    if (
+      snapshot.kind === "thread" &&
+      (parsed.metadata.remoteThread === true || parsed.metadata.targetKind === "inbox")
+    ) {
+      return {
+        allowed: false,
+        reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
+        message: "该授权目标已不再是桌面普通会话，请撤销授权后重新选择。"
       }
     }
     if (snapshot.kind === "feature") {
@@ -168,6 +260,13 @@ export class ImRemoteCapabilityGuard {
         parsed.metadata
       )
       if (!validation.valid) {
+        if (snapshot.grantId) {
+          await this.dependencies.grants.suspendGrant(
+            "feature",
+            snapshot.grantId,
+            validation.reasonCode
+          )
+        }
         await this.dependencies.conversationState.updateTargetState(
           snapshot.targetId,
           "suspended",

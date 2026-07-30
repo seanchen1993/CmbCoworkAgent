@@ -54,7 +54,10 @@ for (const forbiddenField of ["clientSecret", "toUserList", "workDir", "modelId"
   )
 }
 assert(panel.includes("内置统一机器人"))
-assert(panel.includes("远程访问范围"))
+assert(panel.includes("接入招乎"))
+assert(panel.includes("setThreadRemoteAccess"))
+assert(panel.includes("setFeatureRemoteAccess"))
+assert(!panel.includes("inbox-and-features"), "global Feature access toggle is retired")
 assert(panel.includes("强制接管"))
 
 const preload = read("src/preload/index.ts")

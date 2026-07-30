@@ -221,9 +221,12 @@ async function testSchemaAndTargetLifecycle(): Promise<void> {
       "im_conversations",
       "im_events",
       "im_feature_bindings",
+      "im_feature_grants",
+      "im_remote_approval_audit",
       "im_reply_outbox",
       "im_selection_contexts",
-      "im_targets"
+      "im_targets",
+      "im_thread_grants"
     ])
 
     await seedConversation(context)
@@ -240,6 +243,11 @@ async function testSchemaAndTargetLifecycle(): Promise<void> {
     assert.throws(() => context.conversationStore.getActiveTarget("conversation-1"), {
       message: "Active target is unavailable"
     })
+    assert.deepEqual(context.conversationStore.getSelectedTarget("conversation-1"), {
+      snapshot: featureTarget,
+      state: "suspended",
+      suspendReason: "missing"
+    })
     await context.conversationStore.updateTargetState(featureTarget.targetId, "active")
     await context.conversationStore.resetForDeviceTakeover("conversation-1", 1, 2)
     assert.equal(context.conversationStore.getActiveTarget("conversation-1"), null)
@@ -250,6 +258,88 @@ async function testSchemaAndTargetLifecycle(): Promise<void> {
     )
   } finally {
     context.database.close()
+  }
+}
+
+async function testRemoteControlSchemaMigrationPreservesV1Rows(): Promise<void> {
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  try {
+    database.run(`
+      CREATE TABLE im_targets (
+        target_id TEXT PRIMARY KEY,
+        conversation_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('inbox', 'feature')),
+        thread_id TEXT NOT NULL,
+        binding_id TEXT,
+        project_id TEXT,
+        feature_slug TEXT,
+        project_name TEXT,
+        feature_title TEXT,
+        workspace_path TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'active', 'suspended', 'revoked')),
+        suspend_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(conversation_key, thread_id),
+        UNIQUE(binding_id)
+      )
+    `)
+    database.run(
+      `INSERT INTO im_targets (
+         target_id, conversation_key, kind, thread_id, binding_id, project_id, feature_slug,
+         project_name, feature_title, workspace_path, state, suspend_reason, created_at, updated_at
+       ) VALUES (?, ?, 'feature', ?, ?, ?, ?, ?, ?, ?, 'active', NULL, 1, 1)`,
+      [
+        "legacy-target",
+        "legacy-conversation",
+        "legacy-thread",
+        "legacy-binding",
+        "legacy-project",
+        "legacy-feature",
+        "旧项目",
+        "旧 Feature",
+        "/legacy/workspace"
+      ]
+    )
+    database.run(`
+      CREATE TABLE im_selection_contexts (
+        token TEXT PRIMARY KEY,
+        conversation_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('project', 'feature')),
+        candidates_json TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `)
+    database.run(
+      "INSERT INTO im_selection_contexts VALUES ('legacy-selection', 'legacy-conversation', 'project', '[]', 2, 1)"
+    )
+
+    ensureImServiceSchema(database)
+
+    const target = database.exec(
+      "SELECT kind, thread_id, grant_id, grant_version FROM im_targets WHERE target_id = 'legacy-target'"
+    )[0]?.values[0]
+    assert.deepEqual(target, ["feature", "legacy-thread", null, null])
+    database.run(
+      `INSERT INTO im_targets (
+         target_id, conversation_key, kind, thread_id, binding_id, grant_id, grant_version,
+         project_id, feature_slug, project_name, feature_title, thread_title, workspace_path,
+         state, suspend_reason, created_at, updated_at
+       ) VALUES ('thread-target', 'legacy-conversation', 'thread', 'desktop-thread', NULL,
+                 'grant-1', 1, NULL, NULL, NULL, NULL, '桌面会话', '/workspace',
+                 'active', NULL, 2, 2)`
+    )
+    database.run(
+      "INSERT INTO im_selection_contexts VALUES ('remote-selection', 'legacy-conversation', 'remote_target', '[]', 3, 2)"
+    )
+    assert.equal(
+      database.exec("SELECT COUNT(*) FROM im_selection_contexts")[0]?.values[0]?.[0],
+      2
+    )
+  } finally {
+    database.close()
   }
 }
 
@@ -745,6 +835,7 @@ async function main(): Promise<void> {
     testFrozenContractFixtures,
     testImArchitectureBoundaries,
     testSchemaAndTargetLifecycle,
+    testRemoteControlSchemaMigrationPreservesV1Rows,
     testDurableDedupAndImmutableSnapshot,
     testPermitStateMachineAndAtomicOutbox,
     testFlushFailureIsNeverAcknowledgedAsDurable,

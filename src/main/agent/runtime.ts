@@ -182,6 +182,7 @@ import type {
   Message,
   ScheduledTaskImDeliveryContext
 } from "../types"
+import { approvalDecisionBroker } from "./approval-decision-broker"
 import { emitAppAttention } from "../app-attention-events"
 import {
   isTraceReasoningTruncated,
@@ -4211,6 +4212,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         settled = true
         cleanup()
         pendingApprovals.delete(req.id)
+        approvalDecisionBroker.unregister(req.id)
         if (attentionRaised) {
           attentionRaised = false
           emitAppAttention({
@@ -4259,6 +4261,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         // hasPendingWorkflowApproval can tell which workflow run is blocked.
         runtimeThreadId: threadId,
         targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
+      })
+      approvalDecisionBroker.register({
+        request: req,
+        threadId: approvalThreadId,
+        runtimeThreadId: threadId,
+        resolve: (decision) => pendingApprovals.get(req.id)?.resolve(decision)
       })
       options.abortSignal?.addEventListener("abort", onAbort, { once: true })
       if (options.abortSignal?.aborted) {

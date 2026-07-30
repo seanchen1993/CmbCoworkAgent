@@ -15,6 +15,7 @@ import {
   setSandboxNuxCompleted
 } from "../storage"
 import { pendingApprovals } from "../agent/runtime"
+import { approvalDecisionBroker } from "../agent/approval-decision-broker"
 import { isFailureFuseUserNoticeEnabled } from "../agent/failure-fuse"
 import type { ApprovalDecision, ApprovalRequest } from "../types"
 
@@ -761,14 +762,6 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
   // When the renderer makes a decision on an approval request, it sends it here.
   // We look up the pending promise and resolve it.
 
-  const VALID_DECISION_TYPES = new Set([
-    "approve",
-    "approve_session",
-    "approve_permanent",
-    "reject",
-    "error"
-  ])
-
   ipcMain.on("sandbox:approvalDecision", (event, decision: ApprovalDecision & { requestId: string }) => {
     // P2 fix: validate sender is a known BrowserWindow
     const senderWindow = BrowserWindow.getAllWindows().find(w => w.webContents.id === event.sender.id)
@@ -777,8 +770,7 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
       return
     }
 
-    // Validate decision type
-    if (!decision || !decision.requestId || !VALID_DECISION_TYPES.has(decision.type)) {
+    if (!decision || !decision.requestId) {
       console.warn("[Sandbox] Rejected approval decision with invalid type:", decision?.type)
       return
     }
@@ -795,19 +787,14 @@ export function registerSandboxHandlers(ipcMain: IpcMain): void {
         )
       }
 
-      // P2 fix: validate tool_call_id matches the original request
-      // When expected ID exists, decision MUST provide a matching non-empty value
-      // (prevents bypass via empty string or omitted field)
-      const expectedToolCallId = pending.request.tool_call?.id
-      if (expectedToolCallId) {
-        if (!decision.tool_call_id || decision.tool_call_id !== expectedToolCallId) {
-          console.warn(
-            `[Sandbox] Rejected approval decision: tool_call_id mismatch (expected=${expectedToolCallId}, got=${decision.tool_call_id ?? "(missing)"})`
-          )
-          return
-        }
+      const result = approvalDecisionBroker.decide({
+        source: { kind: "desktop", webContentsId: event.sender.id },
+        requestId: decision.requestId,
+        decision
+      })
+      if (!result.accepted) {
+        console.warn("[Sandbox] Rejected approval decision:", result.reasonCode)
       }
-      pending.resolve(decision)
     } else {
       console.warn("[Sandbox] Received approval decision for unknown request:", decision.requestId)
     }

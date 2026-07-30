@@ -13,6 +13,96 @@ function ensureColumn(
   if (!exists) database.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`)
 }
 
+function tableDefinition(database: SqlJsDatabase, table: string): string | null {
+  const statement = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1"
+  )
+  statement.bind([table])
+  try {
+    if (!statement.step()) return null
+    const row = statement.getAsObject() as { sql?: unknown }
+    return typeof row.sql === "string" ? row.sql : null
+  } finally {
+    statement.free()
+  }
+}
+
+function createTargetsTable(database: SqlJsDatabase): void {
+  database.run(`
+    CREATE TABLE IF NOT EXISTS im_targets (
+      target_id TEXT PRIMARY KEY,
+      conversation_key TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('inbox', 'feature', 'thread')),
+      thread_id TEXT NOT NULL,
+      binding_id TEXT,
+      grant_id TEXT,
+      grant_version INTEGER CHECK(grant_version IS NULL OR grant_version >= 1),
+      project_id TEXT,
+      feature_slug TEXT,
+      project_name TEXT,
+      feature_title TEXT,
+      thread_title TEXT,
+      workspace_path TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('pending', 'active', 'suspended', 'revoked')),
+      suspend_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(conversation_key, thread_id),
+      UNIQUE(binding_id)
+    )
+  `)
+}
+
+function ensureTargetsSupportThread(database: SqlJsDatabase): void {
+  const definition = tableDefinition(database, "im_targets")
+  if (!definition || definition.includes("'thread'")) return
+  database.run("ALTER TABLE im_targets RENAME TO im_targets_before_remote_control")
+  createTargetsTable(database)
+  database.run(`
+    INSERT INTO im_targets (
+      target_id, conversation_key, kind, thread_id, binding_id, grant_id, grant_version,
+      project_id, feature_slug, project_name, feature_title, thread_title, workspace_path,
+      state, suspend_reason, created_at, updated_at
+    )
+    SELECT
+      target_id, conversation_key, kind, thread_id, binding_id, NULL, NULL,
+      project_id, feature_slug, project_name, feature_title, NULL, workspace_path,
+      state, suspend_reason, created_at, updated_at
+    FROM im_targets_before_remote_control
+  `)
+  database.run("DROP TABLE im_targets_before_remote_control")
+}
+
+function createSelectionContextsTable(database: SqlJsDatabase): void {
+  database.run(`
+    CREATE TABLE IF NOT EXISTS im_selection_contexts (
+      token TEXT PRIMARY KEY,
+      conversation_key TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('project', 'feature', 'remote_target')),
+      candidates_json TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `)
+}
+
+function ensureSelectionContextsSupportRemoteTargets(database: SqlJsDatabase): void {
+  const definition = tableDefinition(database, "im_selection_contexts")
+  if (!definition || definition.includes("'remote_target'")) return
+  database.run(
+    "ALTER TABLE im_selection_contexts RENAME TO im_selection_contexts_before_remote_control"
+  )
+  createSelectionContextsTable(database)
+  database.run(`
+    INSERT INTO im_selection_contexts (
+      token, conversation_key, kind, candidates_json, expires_at, created_at
+    )
+    SELECT token, conversation_key, kind, candidates_json, expires_at, created_at
+    FROM im_selection_contexts_before_remote_control
+  `)
+  database.run("DROP TABLE im_selection_contexts_before_remote_control")
+}
+
 export function ensureImServiceSchema(database: SqlJsDatabase): void {
   database.run(`
     CREATE TABLE IF NOT EXISTS im_conversations (
@@ -28,29 +118,14 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     )
   `)
 
-  database.run(`
-    CREATE TABLE IF NOT EXISTS im_targets (
-      target_id TEXT PRIMARY KEY,
-      conversation_key TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK(kind IN ('inbox', 'feature')),
-      thread_id TEXT NOT NULL,
-      binding_id TEXT,
-      project_id TEXT,
-      feature_slug TEXT,
-      project_name TEXT,
-      feature_title TEXT,
-      workspace_path TEXT NOT NULL,
-      state TEXT NOT NULL CHECK(state IN ('pending', 'active', 'suspended', 'revoked')),
-      suspend_reason TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      UNIQUE(conversation_key, thread_id),
-      UNIQUE(binding_id)
-    )
-  `)
+  createTargetsTable(database)
+  ensureTargetsSupportThread(database)
 
   ensureColumn(database, "im_targets", "project_name", "TEXT")
   ensureColumn(database, "im_targets", "feature_title", "TEXT")
+  ensureColumn(database, "im_targets", "grant_id", "TEXT")
+  ensureColumn(database, "im_targets", "grant_version", "INTEGER")
+  ensureColumn(database, "im_targets", "thread_title", "TEXT")
 
   database.run(`
     CREATE TABLE IF NOT EXISTS im_feature_bindings (
@@ -126,13 +201,58 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     )
   `)
 
+  createSelectionContextsTable(database)
+  ensureSelectionContextsSupportRemoteTargets(database)
+
   database.run(`
-    CREATE TABLE IF NOT EXISTS im_selection_contexts (
-      token TEXT PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS im_thread_grants (
+      grant_id TEXT PRIMARY KEY,
+      principal_id TEXT NOT NULL,
       conversation_key TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK(kind IN ('project', 'feature')),
-      candidates_json TEXT NOT NULL,
-      expires_at INTEGER NOT NULL,
+      device_epoch INTEGER NOT NULL CHECK(device_epoch >= 1),
+      thread_id TEXT NOT NULL UNIQUE,
+      title_snapshot TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('active', 'suspended', 'revoked')),
+      grant_version INTEGER NOT NULL CHECK(grant_version >= 1),
+      suspend_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      revoked_at INTEGER
+    )
+  `)
+
+  database.run(`
+    CREATE TABLE IF NOT EXISTS im_feature_grants (
+      grant_id TEXT PRIMARY KEY,
+      principal_id TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      device_epoch INTEGER NOT NULL CHECK(device_epoch >= 1),
+      project_id TEXT NOT NULL,
+      feature_slug TEXT NOT NULL,
+      project_name_snapshot TEXT NOT NULL,
+      feature_title_snapshot TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('active', 'suspended', 'revoked')),
+      grant_version INTEGER NOT NULL CHECK(grant_version >= 1),
+      suspend_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      revoked_at INTEGER,
+      UNIQUE(project_id, feature_slug)
+    )
+  `)
+
+  database.run(`
+    CREATE TABLE IF NOT EXISTS im_remote_approval_audit (
+      audit_id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL UNIQUE,
+      tool_call_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      principal_id TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      device_epoch INTEGER NOT NULL CHECK(device_epoch >= 1),
+      operation TEXT NOT NULL,
+      decision TEXT NOT NULL CHECK(decision IN ('approve', 'reject')),
+      summary TEXT NOT NULL,
       created_at INTEGER NOT NULL
     )
   `)
@@ -152,5 +272,14 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
   )
   database.run(
     "CREATE INDEX IF NOT EXISTS idx_im_selection_expiry ON im_selection_contexts(expires_at)"
+  )
+  database.run(
+    "CREATE INDEX IF NOT EXISTS idx_im_thread_grants_route ON im_thread_grants(conversation_key, state)"
+  )
+  database.run(
+    "CREATE INDEX IF NOT EXISTS idx_im_feature_grants_route ON im_feature_grants(conversation_key, state)"
+  )
+  database.run(
+    "CREATE INDEX IF NOT EXISTS idx_im_remote_approval_audit_thread ON im_remote_approval_audit(thread_id, created_at DESC)"
   )
 }
