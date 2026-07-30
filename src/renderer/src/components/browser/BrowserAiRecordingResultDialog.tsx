@@ -234,7 +234,7 @@ export function BrowserAiRecordingResultDialog({
                             {canUseVariable ? (
                               <label
                                 className={cn(
-                                  "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium transition-colors",
+                                  "h-[30px] flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium transition-colors",
                                   isVariable
                                     ? "border-primary/35 bg-primary/10 text-primary"
                                     : "border-border/70 bg-background/70 text-muted-foreground hover:border-border-emphasis",
