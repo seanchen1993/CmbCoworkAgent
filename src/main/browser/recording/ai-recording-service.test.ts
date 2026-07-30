@@ -192,6 +192,34 @@ describe("AI recording service", () => {
     expect(session.script).not.toContain("my-secret")
   })
 
+  it("ignores an immediately repeated browser_fill_form batch", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    const args = {
+      fields: [
+        { name: "Email input", type: "textbox", value: "test@qq.com" },
+        { name: "Password input", type: "textbox", value: "123456" }
+      ]
+    }
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_fill_form",
+      threadId: "thread-1",
+      args
+    })
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_fill_form",
+      threadId: "thread-1",
+      args
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.actions).toHaveLength(2)
+    expect(session.script.match(/test@qq\.com/g)).toHaveLength(1)
+    expect(session.script.match(/PLAYWRIGHT_TEST_PASSWORD/g)).toHaveLength(1)
+  })
+
   it("returns a placeholder script when no actions were captured", () => {
     const script = generateAiRecordingScript([])
     expect(script).toContain("No supported Playwright browser actions were recorded")

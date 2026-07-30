@@ -198,6 +198,50 @@ function appendAction(session: AiRecordingSession, action: AiRecordedBrowserActi
   session.actions.push(action)
 }
 
+function actionsMatch(
+  left: AiRecordedBrowserAction,
+  right: AiRecordedBrowserAction
+): boolean {
+  if (left.kind !== right.kind) return false
+
+  switch (left.kind) {
+    case "navigate":
+      return left.url === (right.kind === "navigate" ? right.url : null)
+    case "click":
+      return (
+        right.kind === "click" &&
+        left.target === right.target &&
+        left.doubleClick === right.doubleClick
+      )
+    case "fill":
+      return (
+        right.kind === "fill" &&
+        left.target === right.target &&
+        left.value === right.value &&
+        left.sensitive === right.sensitive
+      )
+    case "selectOption":
+      return (
+        right.kind === "selectOption" &&
+        left.target === right.target &&
+        left.values.length === right.values.length &&
+        left.values.every((value, index) => value === right.values[index])
+      )
+    case "press":
+      return right.kind === "press" && left.target === right.target && left.key === right.key
+  }
+}
+
+function hasDuplicateTrailingBatch(
+  existingActions: AiRecordedBrowserAction[],
+  nextActions: AiRecordedBrowserAction[]
+): boolean {
+  if (nextActions.length === 0 || existingActions.length < nextActions.length) return false
+
+  const offset = existingActions.length - nextActions.length
+  return nextActions.every((action, index) => actionsMatch(existingActions[offset + index]!, action))
+}
+
 function quote(value: unknown): string {
   return JSON.stringify(value)
 }
@@ -341,7 +385,10 @@ export function recordSuccessfulAiBrowserToolCall(options: {
   if (!activeSession || activeSession.status !== "recording") return
   if (activeSession.threadId && activeSession.threadId !== options.threadId) return
 
-  for (const action of normalizeToolCall(options.toolName, options.args)) {
+  const normalizedActions = normalizeToolCall(options.toolName, options.args)
+  if (hasDuplicateTrailingBatch(activeSession.actions, normalizedActions)) return
+
+  for (const action of normalizedActions) {
     appendAction(activeSession, action)
   }
 }
