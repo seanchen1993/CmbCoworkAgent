@@ -31,7 +31,7 @@ export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null)
       args: existing.args ?? [],
       env: existing.env,
       enabled: false,
-      lazyLoad: existing.lazyLoad ?? false
+      lazyLoad: existing.lazyLoad ?? true
     })
     console.info(`${BROWSER_MAIN_LOG_PREFIX} Disabled Playwright MCP connector because Browser CDP is turned off.`)
     return
@@ -53,7 +53,7 @@ export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null)
     args: nextArgs,
     env: existing?.env,
     enabled: true,
-    lazyLoad: existing?.lazyLoad ?? false
+    lazyLoad: existing?.lazyLoad ?? true
   })
   console.info(
     `${BROWSER_MAIN_LOG_PREFIX} ${existing ? "Synced" : "Auto-registered"} Playwright MCP connector on port ${cdpPort}.`
@@ -80,7 +80,7 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       args: existing.args ?? [],
       env: existing.env,
       enabled: false,
-      lazyLoad: existing.lazyLoad ?? false
+      lazyLoad: existing.lazyLoad ?? true
     })
     console.info(
       `${BROWSER_MAIN_LOG_PREFIX} Synced Playwright MCP connector disabled state from Browser CDP config.`
@@ -104,7 +104,7 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       args: nextArgs,
       env: existing?.env,
       enabled: true,
-      lazyLoad: existing?.lazyLoad ?? false
+      lazyLoad: existing?.lazyLoad ?? true
     })
     console.info(
       `${BROWSER_MAIN_LOG_PREFIX} Synced Playwright MCP connector enabled state from Browser CDP config; runtimePort=${connectorPort}, desiredPort=${desiredPort}.`
