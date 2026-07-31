@@ -3626,7 +3626,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             for (const toolCall of visibleToolCalls) {
               if (toolCall.name === "task" && toolCall.id) {
                 const args = toolCall.args || {}
-                if (args.subagent_type || args.description) {
+                if (args.subagent_type) {
                   const invocationScope =
                     taskInvocationScopesByToolCallId.get(toolCall.id)?.shift() ??
                     ((typeof kwargs.id === "string" && kwargs.id) ||
@@ -6829,7 +6829,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // Check if this is a "task" tool call
       if (toolCall.name === "task") {
         const args = toolCall.args || {}
-        if (args.subagent_type || args.description) {
+        if (args.subagent_type) {
           const registration = this.registerSubagent(toolCall.id, args, parentMessageId)
           if (!registration.created && !registration.updated) continue
           events.push(this.createSubagentEvent())
