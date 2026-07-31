@@ -229,7 +229,7 @@ export function UserInputRequestDialog({
             <p className="mt-0.5 text-xs text-muted-foreground">
               {answeredCount}/{request.questions.length} 已选择
               {remainingSeconds !== null && (
-                <> · 将在 {formatRemainingTime(remainingSeconds)}后自动继续</>
+                <> · 将在 {formatRemainingTime(remainingSeconds)}后按推荐项自动提交</>
               )}
             </p>
           </div>

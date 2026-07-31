@@ -3,12 +3,13 @@ import { BrowserWindow } from "electron"
 import type { UserInputQuestion, UserInputRequest, UserInputResponse } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 
-interface AutoResolvedUserInputResponse {
-  requestId: string
+interface AutoResolvedUserInputResponse extends UserInputResponse {
   autoResolved: true
 }
 
 type UserInputResult = UserInputResponse | AutoResolvedUserInputResponse
+
+export const DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS = 5 * 60 * 1_000
 
 interface PendingUserInput {
   request: UserInputRequest
@@ -23,7 +24,7 @@ interface PendingUserInput {
 interface RequestUserInputParams {
   threadId: string
   questions: UserInputQuestion[]
-  autoResolutionMs?: number
+  autoResolutionMs?: number | null
   abortSignal?: AbortSignal
 }
 
@@ -79,6 +80,39 @@ function cleanupPending(requestId: string): PendingUserInput | undefined {
   return pending
 }
 
+function recommendedOptionIndex(question: UserInputQuestion): number {
+  const markedIndex = question.options.findIndex((option) =>
+    /[（(]\s*(recommended|推荐)\s*[）)]\s*$/i.test(option.label)
+  )
+  // The tool contract requires the recommended option to be listed first. The
+  // label check supports older callers that omitted the suffix.
+  return markedIndex >= 0 ? markedIndex : 0
+}
+
+export function buildAutoResolvedUserInputResponse(
+  request: Pick<UserInputRequest, "requestId" | "questions">
+): AutoResolvedUserInputResponse {
+  const answers: Record<string, UserInputResponse["answers"][string]> = {}
+  for (const question of request.questions) {
+    const optionIndex = recommendedOptionIndex(question)
+    const option = question.options[optionIndex]
+    if (!option) continue
+    answers[question.id] = {
+      type: "option",
+      questionId: question.id,
+      optionIndex,
+      label: option.label,
+      description: option.description
+    }
+  }
+  return {
+    requestId: request.requestId,
+    answers,
+    submittedAt: new Date().toISOString(),
+    autoResolved: true
+  }
+}
+
 export function requestUserInput(params: RequestUserInputParams): Promise<UserInputResult> {
   const { threadId, questions, autoResolutionMs, abortSignal } = params
   if (abortSignal?.aborted) {
@@ -105,11 +139,16 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
     )
   }
 
+  const effectiveAutoResolutionMs =
+    autoResolutionMs === null
+      ? undefined
+      : (autoResolutionMs ?? DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS)
+
   const request: UserInputRequest = {
     requestId: randomUUID(),
     threadId,
     questions,
-    autoResolutionMs,
+    ...(effectiveAutoResolutionMs ? { autoResolutionMs: effectiveAutoResolutionMs } : {}),
     createdAt: new Date().toISOString()
   }
 
@@ -139,20 +178,18 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       )
     }, USER_INPUT_ACK_TIMEOUT_MS)
 
-    const autoResolutionTimeout = autoResolutionMs === undefined
-      ? undefined
-      : setTimeout(() => {
-          const pending = cleanupPending(request.requestId)
-          if (!pending) return
-          sendToThread(threadId, "cancel", {
-            requestId: request.requestId,
-            reason: "The user input request was automatically resolved."
-          })
-          pending.resolve({
-            requestId: request.requestId,
-            autoResolved: true
-          })
-        }, autoResolutionMs)
+    const autoResolutionTimeout =
+      effectiveAutoResolutionMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            const pending = cleanupPending(request.requestId)
+            if (!pending) return
+            sendToThread(threadId, "cancel", {
+              requestId: request.requestId,
+              reason: "The user input request was automatically resolved."
+            })
+            pending.resolve(buildAutoResolvedUserInputResponse(request))
+          }, effectiveAutoResolutionMs)
 
     pendingUserInputs.set(request.requestId, {
       request,

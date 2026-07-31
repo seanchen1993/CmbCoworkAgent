@@ -1,6 +1,10 @@
 import { tool } from "langchain"
 import { z } from "zod"
-import { requestUserInput, UserInputRequestRejectedError } from "../../services/user-input"
+import {
+  DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS,
+  requestUserInput,
+  UserInputRequestRejectedError
+} from "../../services/user-input"
 
 const optionSchema = z.object({
   label: z.string().min(1).max(80).describe("User-facing label, 1-5 words."),
@@ -20,13 +24,13 @@ const questionSchema = z.object({
     "Single-sentence prompt shown to the user."
   ),
   options: z.array(optionSchema).min(2).max(5).describe(
-    "Provide 2-5 mutually exclusive choices. Put the recommended option first and suffix its label with '(Recommended)'. Do not include an 'Other' option; the client adds free-form Other automatically."
+    "Provide 2-5 mutually exclusive choices. Put the recommended option first and suffix its label with '(Recommended)'; this option is automatically submitted if the user times out. Do not include an 'Other' option; the client adds free-form Other automatically."
   )
 })
 
 const requestUserInputSchema = z.object({
-  autoResolutionMs: z.number().int().min(30_000).max(240_000).optional().describe(
-    "Automatically resolve after 30,000-240,000 milliseconds when the question is useful but non-blocking. Omit this when explicit user input is required."
+  autoResolutionMs: z.number().int().min(30_000).max(DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS).nullable().optional().describe(
+    "By default, the recommended options are automatically submitted after 300,000 milliseconds when the user does not respond. Set a shorter 30,000-300,000 millisecond timeout when appropriate; set null only when explicit user input is required and the request must wait indefinitely."
   ),
   questions: z.array(questionSchema).min(1).max(10).describe(
     "Questions to show the user. Prefer 1 and do not exceed 10."
@@ -64,9 +68,10 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
           return JSON.stringify({
             status: "auto_resolved",
             requestId: response.requestId,
-            answers: {},
+            submittedAt: response.submittedAt,
+            answers: response.answers,
             message:
-              "The user did not answer within the configured time. Do not infer or assume any option selections; continue with your best judgment."
+              "The user did not answer before the timeout. The recommended options were automatically submitted; continue using the returned answers."
           }, null, 2)
         }
         if (response.ignored) {
@@ -102,7 +107,7 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
     {
       name: "request_user_input",
       description:
-        "Request user input for one to ten short questions and wait for the response, with optional automatic resolution for non-blocking questions.",
+        "Request user input for one to ten short questions. By default, recommended options are submitted after five minutes when the user does not respond.",
       schema: requestUserInputSchema
     }
   )
