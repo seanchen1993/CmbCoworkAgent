@@ -46,6 +46,26 @@ export interface BrowserLocatorMetadata {
   tagName?: string
   inputType?: string
   framePath?: string[]
+  /**
+   * A validated locator chain reported by Playwright MCP, for example
+   * `getByRole('button', { name: 'Save' })` or
+   * `frameLocator('iframe[name="payment"]').getByPlaceholder('Card number')`.
+   */
+  playwrightLocator?: string
+  textExact?: boolean
+  /**
+   * The snapshot may identify several elements with the same semantic locator.
+   * Keep the occurrence so the generated script stays strict-mode compatible.
+   */
+  matchCount?: number
+  nth?: number
+}
+
+interface AiRecordedBrowserActionBase {
+  id: string
+  timestamp: string
+  threadId?: string
+  locator?: BrowserLocatorMetadata
 }
 
 export interface BrowserPanelRequest {
@@ -68,54 +88,47 @@ export interface BrowserScreenshotResult {
 }
 
 export type AiRecordedBrowserAction =
-  | {
-      id: string
-      timestamp: string
+  | (AiRecordedBrowserActionBase & {
       kind: "navigate"
       url: string
-      locator?: BrowserLocatorMetadata
-    }
-  | {
-      id: string
-      timestamp: string
+    })
+  | (AiRecordedBrowserActionBase & {
       kind: "click"
       target?: string
       doubleClick: boolean
-      locator?: BrowserLocatorMetadata
-    }
-  | {
-      id: string
-      timestamp: string
+    })
+  | (AiRecordedBrowserActionBase & {
       kind: "fill"
       target?: string
       value: string
       sensitive: boolean
-      locator?: BrowserLocatorMetadata
-    }
-  | {
-      id: string
-      timestamp: string
+    })
+  | (AiRecordedBrowserActionBase & {
       kind: "selectOption"
       target?: string
       values: string[]
-      locator?: BrowserLocatorMetadata
-    }
-  | {
-      id: string
-      timestamp: string
+    })
+  | (AiRecordedBrowserActionBase & {
+      kind: "fileUpload"
+      paths: string[]
+    })
+  | (AiRecordedBrowserActionBase & {
       kind: "press"
       key: string
       target?: string
-      locator?: BrowserLocatorMetadata
-    }
+    })
 
 export type AiRecordingStatus = "idle" | "recording" | "completed"
 
-export interface AiRecordingStartOptions {}
+export interface AiRecordingStartOptions {
+  /** The task that started the global recording session. */
+  threadId?: string
+}
 
 export interface AiRecordingSession {
   id?: string
   status: AiRecordingStatus
+  threadId?: string
   startedAt?: string
   stoppedAt?: string
   actions: AiRecordedBrowserAction[]

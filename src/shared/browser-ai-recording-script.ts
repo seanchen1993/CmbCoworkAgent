@@ -24,6 +24,10 @@ export interface LocatorSource {
   tagName?: string
   inputType?: string
   framePath?: string[]
+  playwrightLocator?: string
+  textExact?: boolean
+  matchCount?: number
+  nth?: number
 }
 
 interface LocatorBuildOptions {
@@ -38,6 +42,7 @@ export interface AiRecordingScriptOptions {
 interface VariableDescriptor {
   displayName: string
   identifier: string
+  declaration: string
 }
 
 type LocatorCandidateKind =
@@ -128,6 +133,18 @@ function buildFrameRoot(framePath: string[] | undefined): string {
   }, "page")
 }
 
+function applyOccurrenceHint(locator: string, source: LocatorSource): string {
+  if (typeof source.nth === "number" && Number.isInteger(source.nth) && source.nth >= 0) {
+    return `${locator}.nth(${source.nth})`
+  }
+
+  if (typeof source.matchCount === "number" && source.matchCount > 1) {
+    return `${locator}.first()`
+  }
+
+  return locator
+}
+
 function buildCandidate(
   kind: LocatorCandidateKind,
   locator: string,
@@ -184,7 +201,7 @@ function buildRoleCandidate(
 
 function buildLabelCandidate(root: string, label: string | undefined): LocatorCandidate | null {
   if (!label) return null
-  return buildCandidate("label", `${root}.getByLabel(${quote(label)})`, 96, true, "explicit label")
+  return buildCandidate("label", `${root}.getByLabel(${quote(label)})`, 90, true, "explicit label")
 }
 
 function buildPlaceholderCandidate(
@@ -226,11 +243,15 @@ function buildSelectorCandidate(
   )
 }
 
-function buildTextCandidate(root: string, text: string | undefined): LocatorCandidate | null {
+function buildTextCandidate(
+  root: string,
+  text: string | undefined,
+  exact = true
+): LocatorCandidate | null {
   if (!text) return null
   return buildCandidate(
     "text",
-    `${root}.getByText(${quote(text)}, { exact: true })`,
+    `${root}.getByText(${quote(text)}, { exact: ${exact ? "true" : "false"} })`,
     55,
     false,
     "text fallback"
@@ -277,9 +298,9 @@ function compareCandidates(left: LocatorCandidate, right: LocatorCandidate): num
 
   const order: Record<LocatorCandidateKind, number> = {
     testId: 0,
-    label: 1,
+    role: 1,
     placeholder: 2,
-    role: 3,
+    label: 3,
     selector: 4,
     text: 5,
     css: 6,
@@ -293,6 +314,8 @@ export function buildPlaywrightLocator(
   source: LocatorSource,
   options: LocatorBuildOptions = {}
 ): string {
+  if (source.playwrightLocator) return `page.${source.playwrightLocator}`
+
   const root = buildFrameRoot(source.framePath)
   const candidates: LocatorCandidate[] = []
   const normalizedLabel = source.label ? normalizeText(source.label) : undefined
@@ -323,11 +346,14 @@ export function buildPlaywrightLocator(
         : derivedTarget.inferredRole
           ? "inferred role from target"
           : "default role",
-      source.role ? 90 : derivedTarget.inferredRole ? 85 : 80
+      source.role ? 96 : derivedTarget.inferredRole ? 86 : 82
     )
   )
   pushCandidate(candidates, buildSelectorCandidate(root, normalizedSelector))
-  pushCandidate(candidates, buildTextCandidate(root, normalizedText ?? normalizedTarget))
+  pushCandidate(
+    candidates,
+    buildTextCandidate(root, normalizedText ?? normalizedTarget, source.textExact !== false)
+  )
   pushCandidate(candidates, buildCssCandidate(root, source.tagName, source.inputType))
 
   if (candidates.length === 0) {
@@ -335,60 +361,97 @@ export function buildPlaywrightLocator(
   }
 
   candidates.sort(compareCandidates)
-  return candidates[0]!.locator
+  return applyOccurrenceHint(candidates[0]!.locator, source)
+}
+
+function toLocatorSource(
+  action: Extract<AiRecordedBrowserAction, { target?: string }>
+): LocatorSource {
+  const locator = action.locator
+  return {
+    target: locator?.target ?? action.target,
+    role: locator?.role as LocatorRole | undefined,
+    label: locator?.label,
+    placeholder: locator?.placeholder,
+    testId: locator?.testId,
+    accessibleName: locator?.accessibleName,
+    textContent: locator?.textContent,
+    selector: locator?.selector,
+    tagName: locator?.tagName,
+    inputType: locator?.inputType,
+    framePath: locator?.framePath,
+    playwrightLocator: locator?.playwrightLocator,
+    textExact: locator?.textExact,
+    matchCount: locator?.matchCount,
+    nth: locator?.nth
+  }
 }
 
 function getLocator(
   action: Extract<AiRecordedBrowserAction, { target?: string }>,
   defaultRole?: LocatorRole
 ): string {
+  return buildPlaywrightLocator(toLocatorSource(action), { defaultRole })
+}
+
+function canVariableizeClick(action: Extract<AiRecordedBrowserAction, { kind: "click" }>): boolean {
   const locator = action.locator
-  return buildPlaywrightLocator(
-    {
-      target: locator?.target ?? action.target,
-      role: locator?.role as LocatorRole | undefined,
-      label: locator?.label,
-      placeholder: locator?.placeholder,
-      testId: locator?.testId,
-      accessibleName: locator?.accessibleName,
-      textContent: locator?.textContent,
-      selector: locator?.selector,
-      tagName: locator?.tagName,
-      inputType: locator?.inputType,
-      framePath: locator?.framePath
-    },
-    { defaultRole }
+  return Boolean(
+    locator?.textContent ??
+    locator?.accessibleName ??
+    locator?.label ??
+    locator?.placeholder ??
+    locator?.target ??
+    action.target
   )
 }
 
 function supportsVariablePlaceholder(
   action: AiRecordedBrowserAction
-): action is Extract<AiRecordedBrowserAction, { kind: "fill" }> {
-  return action.kind === "fill"
+): action is
+  | Extract<AiRecordedBrowserAction, { kind: "fill" | "selectOption" }>
+  | Extract<AiRecordedBrowserAction, { kind: "click" | "fileUpload" }> {
+  if (action.kind === "fill" || action.kind === "selectOption" || action.kind === "fileUpload") {
+    return true
+  }
+  return action.kind === "click" && canVariableizeClick(action)
 }
 
 function stripVariableFieldWords(value: string): string {
   return value
-    .replace(/^(?:请输入|请填写|填写|输入|选择)\s*/u, "")
+    .replace(/^(?:请输入|请填写|填写|输入|选择|点击)\s*/u, "")
     .replace(
-      /\s*(?:输入框|文本框|输入栏|文本域|字段|下拉框|选择框|input|textbox|text\s*box|text\s*field|input\s*field|field|dropdown|select)$/iu,
+      /\s*(?:输入框|文本框|输入栏|文本域|字段|下拉框|选择框|按钮|链接|选项|流水线|input|textbox|text\s*box|text\s*field|input\s*field|field|dropdown|select|button|link|option)$/iu,
       ""
     )
     .trim()
 }
 
 function deriveVariableBaseName(
-  action: Extract<AiRecordedBrowserAction, { kind: "fill" }>
+  action:
+    | Extract<AiRecordedBrowserAction, { kind: "fill" | "selectOption" }>
+    | Extract<AiRecordedBrowserAction, { kind: "click" | "fileUpload" }>
 ): string {
   const locator = action.locator
-  const candidates = [
-    locator?.label,
-    locator?.placeholder,
-    locator?.accessibleName,
-    locator?.target,
-    action.target,
-    locator?.textContent
-  ]
+  if (action.kind === "fileUpload") return "上传文件路径"
+  const candidates =
+    action.kind === "click"
+      ? [
+          locator?.textContent,
+          locator?.accessibleName,
+          locator?.label,
+          locator?.placeholder,
+          locator?.target,
+          action.target
+        ]
+      : [
+          locator?.label,
+          locator?.placeholder,
+          locator?.accessibleName,
+          locator?.target,
+          action.target,
+          locator?.textContent
+        ]
 
   for (const candidate of candidates) {
     if (!candidate) continue
@@ -451,11 +514,36 @@ function buildVariableDescriptorMap(
     usedPromptNames.add(promptName)
     variableDescriptors.set(action.id, {
       displayName: promptName,
-      identifier
+      identifier,
+      declaration:
+        action.kind === "fileUpload" && action.paths.length > 1
+          ? `const ${identifier}: string[] = []; // ${promptName}`
+          : `const ${identifier} = ""; // ${promptName}`
     })
   }
 
   return variableDescriptors
+}
+
+function buildVariableizedClickLocator(
+  action: Extract<AiRecordedBrowserAction, { kind: "click" }>,
+  variableIdentifier: string
+): string {
+  const source = toLocatorSource(action)
+  const root = buildFrameRoot(source.framePath)
+  const derivedTarget = deriveTargetName(source.target)
+  const role = source.role ?? derivedTarget.inferredRole
+  if (role) {
+    return applyOccurrenceHint(
+      `${root}.getByRole(${quote(role)}, { name: ${variableIdentifier} })`,
+      source
+    )
+  }
+
+  return applyOccurrenceHint(
+    `${root}.getByText(${variableIdentifier}, { exact: ${source.textExact !== false ? "true" : "false"} })`,
+    source
+  )
 }
 
 function generateActionLine(
@@ -466,7 +554,11 @@ function generateActionLine(
     case "navigate":
       return `await page.goto(${quote(action.url)});`
     case "click":
-      return `await ${getLocator(action)}.${action.doubleClick ? "dblclick" : "click"}();`
+      return `await ${
+        variableDescriptor
+          ? buildVariableizedClickLocator(action, variableDescriptor.identifier)
+          : getLocator(action)
+      }.${action.doubleClick ? "dblclick" : "click"}();`
     case "fill":
       return `await ${getLocator(action, "textbox")}.fill(${
         variableDescriptor
@@ -476,14 +568,72 @@ function generateActionLine(
             : quote(action.value)
       });`
     case "selectOption":
-      return `await ${getLocator(action, "combobox")}.selectOption(${quote(
-        action.values.length === 1 ? action.values[0]! : action.values
+      return `await ${getLocator(action, "combobox")}.selectOption(${
+        variableDescriptor
+          ? variableDescriptor.identifier
+          : quote(action.values.length === 1 ? action.values[0]! : action.values)
+      });`
+    case "fileUpload":
+      return `await page.locator("input[type=\\"file\\"]").setInputFiles(${formatFileUploadPaths(
+        action,
+        variableDescriptor
       )});`
     case "press":
       return action.target
         ? `await ${getLocator(action)}.press(${quote(action.key)});`
         : `await page.keyboard.press(${quote(action.key)});`
   }
+}
+
+function formatFileUploadPaths(
+  action: Extract<AiRecordedBrowserAction, { kind: "fileUpload" }>,
+  variableDescriptor?: VariableDescriptor
+): string {
+  if (variableDescriptor) return variableDescriptor.identifier
+  return quote(action.paths.length === 1 ? action.paths[0]! : action.paths)
+}
+
+function fileChooserVariableNames(actionIndex: number): {
+  chooser: string
+  promise: string
+} {
+  const suffix = actionIndex + 1
+  return {
+    chooser: `fileChooser${suffix}`,
+    promise: `fileChooserPromise${suffix}`
+  }
+}
+
+function generateAiRecordingActionLines(
+  actions: AiRecordedBrowserAction[],
+  variableDescriptorMap: Map<string, VariableDescriptor>
+): string[] {
+  const lines: string[] = []
+
+  for (let index = 0; index < actions.length; index += 1) {
+    const action = actions[index]!
+    const nextAction = actions[index + 1]
+    const variableDescriptor = variableDescriptorMap.get(action.id)
+
+    if (action.kind === "click" && nextAction?.kind === "fileUpload") {
+      const names = fileChooserVariableNames(index)
+      lines.push(`const ${names.promise} = page.waitForEvent("filechooser");`)
+      lines.push(generateActionLine(action, variableDescriptor))
+      lines.push(`const ${names.chooser} = await ${names.promise};`)
+      lines.push(
+        `await ${names.chooser}.setFiles(${formatFileUploadPaths(
+          nextAction,
+          variableDescriptorMap.get(nextAction.id)
+        )});`
+      )
+      index += 1
+      continue
+    }
+
+    lines.push(generateActionLine(action, variableDescriptor))
+  }
+
+  return lines
 }
 
 export function extractAiRecordingVariableNames(script: string): string[] {
@@ -515,11 +665,9 @@ export function generateAiRecordingScript(
     options.variableActionNames
   )
   const variableDeclarations = Array.from(variableDescriptorMap.values())
-    .map((descriptor) => `const ${descriptor.identifier} = ""; // ${descriptor.displayName}`)
+    .map((descriptor) => descriptor.declaration)
     .join("\n")
-  const lines = actions.map((action) =>
-    generateActionLine(action, variableDescriptorMap.get(action.id))
-  )
+  const lines = generateAiRecordingActionLines(actions, variableDescriptorMap)
   const body =
     lines.length > 0
       ? lines.map((line) => `  ${line}`).join("\n")

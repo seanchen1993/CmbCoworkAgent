@@ -131,7 +131,9 @@ export function BrowserAiRecordingControls({
   const startAiRecordingSession = useCallback(async () => {
     setIsAiRecordingBusy(true)
     try {
-      const nextSession = await window.api.browser.startAiRecording()
+      const nextSession = await window.api.browser.startAiRecording({
+        threadId: threadId ?? undefined
+      })
       setAiRecording(nextSession)
       setHasPendingUnsavedAiRecording(false)
       toast.success("AI 录制已开始。让 Agent 在任意会话中操作页面即可。")
@@ -143,7 +145,7 @@ export function BrowserAiRecordingControls({
     } finally {
       setIsAiRecordingBusy(false)
     }
-  }, [])
+  }, [threadId])
 
   const stopAiRecordingSession = useCallback(async () => {
     setIsAiRecordingBusy(true)

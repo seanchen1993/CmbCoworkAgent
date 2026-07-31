@@ -46,6 +46,8 @@ function describeAiRecordedAction(action: AiRecordedBrowserAction): string {
         : `填写 ${action.target || "输入框"} = ${action.value || "(空值)"}`
     case "selectOption":
       return `在 ${action.target || "下拉框"} 中选择 ${action.values.join(", ") || "(空值)"}`
+    case "fileUpload":
+      return action.paths.length > 0 ? `上传文件 ${action.paths.join(", ")}` : "取消文件选择"
     case "press":
       return action.target ? `在 ${action.target} 上按下 ${action.key}` : `按下 ${action.key}`
   }
@@ -61,6 +63,8 @@ function describeAiRecordedActionKind(kind: AiRecordedBrowserAction["kind"]): st
       return "输入"
     case "selectOption":
       return "选择"
+    case "fileUpload":
+      return "上传"
     case "press":
       return "按键"
   }
@@ -76,8 +80,30 @@ function getAiRecordedActionTone(kind: AiRecordedBrowserAction["kind"]): string 
       return "border-status-warning/25 bg-status-warning/10 text-status-warning"
     case "selectOption":
       return "border-status-nominal/25 bg-status-nominal/10 text-status-nominal"
+    case "fileUpload":
+      return "border-status-info/25 bg-status-info/10 text-status-info"
     case "press":
       return "border-border/70 bg-background/80 text-muted-foreground"
+  }
+}
+
+function canAiRecordedActionUseVariable(action: AiRecordedBrowserAction): boolean {
+  switch (action.kind) {
+    case "fill":
+    case "selectOption":
+    case "fileUpload":
+      return true
+    case "click":
+      return Boolean(
+        action.locator?.textContent ??
+        action.locator?.accessibleName ??
+        action.locator?.label ??
+        action.locator?.placeholder ??
+        action.locator?.target ??
+        action.target
+      )
+    default:
+      return false
   }
 }
 
@@ -167,7 +193,8 @@ export function BrowserAiRecordingResultDialog({
             <div className="border-b border-border/70 px-4 py-3">
               <p className="text-sm font-medium text-foreground">步骤列表</p>
               <p className="mt-1 text-[11px] text-muted-foreground">
-                共 {aiRecordingActionCount} 步，默认全选；输入步骤可标记为变量，并手动填写变量名。
+                共 {aiRecordingActionCount}{" "}
+                步，默认全选；输入、选择、上传和点击文本步骤可标记为变量，并手动填写变量名。
               </p>
             </div>
             <div className="max-h-[58vh] space-y-2.5 overflow-auto px-3 py-3">
@@ -177,12 +204,12 @@ export function BrowserAiRecordingResultDialog({
                     <Sparkles className="size-4" strokeWidth={1.8} />
                   </div>
                   还没有采集到可生成脚本的操作。先开始录制，再让 Agent
-                  导航、点击、输入或选择页面元素。
+                  导航、点击、输入、选择或上传文件。
                 </div>
               ) : (
                 aiRecording.actions.map((action, index) => {
                   const isSelected = selectedActionIds.includes(action.id)
-                  const canUseVariable = action.kind === "fill"
+                  const canUseVariable = canAiRecordedActionUseVariable(action)
                   const isVariable = variableActionIds.includes(action.id)
                   const variableName = variableActionNames[action.id] ?? ""
                   const hasVariableName = variableName.trim().length > 0
@@ -220,7 +247,7 @@ export function BrowserAiRecordingResultDialog({
                             </p>
                           </div>
                           <span className={"flex items-center space-x-2 w-[50px]"}>
-                            <span className={"text-xs"}>使用</span>
+                            <span className={"text-xs inline-block w-[30px]"}>使用</span>
                             <input
                               type="checkbox"
                               checked={isSelected}
@@ -260,7 +287,7 @@ export function BrowserAiRecordingResultDialog({
                                   onChange={(e) =>
                                     onVariableActionNameChange(action.id, e.target.value)
                                   }
-                                  placeholder="变量名，例如：用户名"
+                                  placeholder="变量名，例如：用户名 / 分支名 / 流水线名称"
                                   className="h-8 rounded-lg border-border/80 bg-background text-xs shadow-none"
                                 />
                                 {!hasVariableName ? (

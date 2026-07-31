@@ -210,6 +210,7 @@ export async function invokeMcpToolWithPlaywrightInAppBrowserSupport(options: {
     recordSuccessfulAiBrowserToolCall({
       toolName: options.tool.toolName,
       args: options.args ?? {},
+      resultText: result.text,
       threadId: options.threadId
     })
   }

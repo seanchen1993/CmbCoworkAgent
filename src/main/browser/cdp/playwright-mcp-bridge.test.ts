@@ -54,6 +54,13 @@ const inAppBrowserTabsTool: McpCapabilityTool = {
   toolName: "browser_tabs"
 }
 
+const inAppBrowserFileUploadTool: McpCapabilityTool = {
+  ...inAppBrowserTool,
+  capabilityId: "connector:inAppBrowser:browser_file_upload",
+  toolId: "mcp__inAppBrowser__browser_file_upload",
+  toolName: "browser_file_upload"
+}
+
 function browserState(visible: boolean, created = true): BrowserState {
   return {
     sessionId: BROWSER_SESSION_ID,
@@ -342,6 +349,30 @@ describe("Playwright MCP in-app browser bridge", () => {
       expect.objectContaining({
         kind: "navigate",
         url: "https://example.com/dashboard"
+      })
+    ])
+  })
+
+  it("records successful in-app browser file uploads for the active AI recording session", async () => {
+    startAiRecording({ threadId: "thread-1" })
+    const getState = vi.fn().mockReturnValue(browserState(true))
+    const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
+    const requestPanel = vi.fn()
+    const invoke = vi.fn().mockResolvedValue(mcpResult("uploaded"))
+
+    await invokeMcpToolWithPlaywrightInAppBrowserSupport({
+      tool: inAppBrowserFileUploadTool,
+      workspacePath: "/workspace",
+      threadId: "thread-1",
+      args: { paths: ["/tmp/fixtures/report.csv"] },
+      invoke,
+      browserService: { getState, prepareTarget, requestPanel }
+    })
+
+    expect(getAiRecording().actions).toEqual([
+      expect.objectContaining({
+        kind: "fileUpload",
+        paths: ["/tmp/fixtures/report.csv"]
       })
     ])
   })

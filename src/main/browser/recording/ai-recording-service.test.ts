@@ -9,6 +9,27 @@ import {
 } from "./ai-recording-service"
 import { extractAiRecordingVariableNames } from "../../../shared/browser-ai-recording-script"
 
+const LOGIN_SNAPSHOT_RESULT = `### Snapshot
+\`\`\`yaml
+- generic [ref=e5]:
+  - generic [ref=e24]:
+    - generic [ref=e25]: 用户名
+    - combobox "用户名 (支持自动补全)" [ref=e27]:
+      - /placeholder: 输入你的用户名
+    - generic [ref=e29]: 邮箱
+    - textbox "邮箱" [ref=e31]:
+      - /placeholder: you@example.com
+\`\`\``
+
+const BRANCH_SNAPSHOT_RESULT = `### Snapshot
+\`\`\`yaml
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]: 分支
+    - combobox "分支" [ref=e10]:
+      - option "release" [ref=e11]
+\`\`\``
+
 describe("AI recording service", () => {
   beforeEach(() => {
     resetAiRecordingForTests()
@@ -232,6 +253,144 @@ describe("AI recording service", () => {
     )
   })
 
+  it("resolves snapshot refs into semantic locators for AI-recorded fills", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_snapshot",
+      threadId: "thread-1",
+      args: {},
+      resultText: LOGIN_SNAPSHOT_RESULT
+    })
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_type",
+      threadId: "thread-1",
+      args: { target: "e27", text: "mktui" },
+      resultText: `### Ran Playwright code
+\`\`\`js
+await page.getByRole('combobox', { name: '用户名 (支持自动补全)' }).fill('mktui');
+\`\`\``
+    })
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_type",
+      threadId: "thread-1",
+      args: { target: "e31", text: "test@qq.com" },
+      resultText: `### Ran Playwright code
+\`\`\`js
+await page.getByRole('textbox', { name: '邮箱' }).fill('test@qq.com');
+\`\`\``
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.actions[0]).toMatchObject({
+      kind: "fill",
+      target: "用户名 (支持自动补全)",
+      locator: expect.objectContaining({
+        role: "combobox",
+        accessibleName: "用户名 (支持自动补全)"
+      })
+    })
+    expect(session.script).toContain(
+      'await page.getByRole("combobox", { name: "用户名 (支持自动补全)" }).fill("mktui");'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "邮箱" }).fill("test@qq.com");'
+    )
+    expect(session.script).not.toContain("TODO_SELECTOR")
+  })
+
+  it("uses semantic role locators for clicked dropdown options", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_snapshot",
+      threadId: "thread-1",
+      args: {},
+      resultText: BRANCH_SNAPSHOT_RESULT
+    })
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_click",
+      threadId: "thread-1",
+      args: { target: "e11", element: "分支选项 release" },
+      resultText: `### Ran Playwright code
+\`\`\`js
+await page.getByText('分支选项 release', { exact: true }).click();
+\`\`\``
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.actions).toHaveLength(1)
+    expect(session.actions[0]).toMatchObject({
+      kind: "click",
+      target: "release",
+      locator: expect.objectContaining({
+        role: "option",
+        accessibleName: "release"
+      })
+    })
+    expect(session.script).toContain('await page.getByRole("option", { name: "release" }).click();')
+  })
+
+  it("records file chooser uploads and replays them after the triggering click", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_click",
+      threadId: "thread-1",
+      args: { element: "Upload document button" }
+    })
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_file_upload",
+      threadId: "thread-1",
+      args: { paths: ["/tmp/fixtures/contract.pdf"] },
+      resultText: `### Ran Playwright code
+\`\`\`js
+await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
+\`\`\``
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.actions).toHaveLength(2)
+    expect(session.actions[1]).toMatchObject({
+      kind: "fileUpload",
+      paths: ["/tmp/fixtures/contract.pdf"]
+    })
+    expect(session.script).toContain(
+      'const fileChooserPromise1 = page.waitForEvent("filechooser");'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("button", { name: "Upload document" }).click();'
+    )
+    expect(session.script).toContain("const fileChooser1 = await fileChooserPromise1;")
+    expect(session.script).toContain('await fileChooser1.setFiles("/tmp/fixtures/contract.pdf");')
+    expect(session.script).not.toContain("TODO_FILE_INPUT_SELECTOR")
+  })
+
+  it("supports a variable for recorded file upload paths", () => {
+    const script = generateAiRecordingScript(
+      [
+        {
+          id: "upload-report",
+          timestamp: "2026-07-31T00:00:00.000Z",
+          kind: "fileUpload" as const,
+          paths: ["/tmp/fixtures/report.csv"]
+        }
+      ],
+      {
+        variableActionIds: ["upload-report"],
+        variableActionNames: { "upload-report": "上传文件路径" }
+      }
+    )
+
+    expect(script).toContain('const 变量_上传文件路径 = ""; // 变量-上传文件路径')
+    expect(script).toContain(
+      'await page.locator("input[type=\\"file\\"]").setInputFiles(变量_上传文件路径);'
+    )
+  })
+
   it("ignores an immediately repeated browser_fill_form batch", () => {
     startAiRecording({ threadId: "thread-1" })
 
@@ -303,5 +462,46 @@ describe("AI recording service", () => {
     )
     expect(script).not.toContain("recorded@example.com")
     expect(extractAiRecordingVariableNames(script)).toEqual(["变量-用户名", "变量-密码"])
+  })
+
+  it("replaces click target text and clicked dropdown options with semantic variables", () => {
+    const actions = [
+      {
+        id: "click-pipeline",
+        timestamp: "2026-07-31T00:00:00.000Z",
+        kind: "click" as const,
+        target: "流水线 PL616946LF39.05_bcpcmktui_UAT_GCH（市场PC国产）",
+        doubleClick: false,
+        locator: {
+          textContent: "流水线 PL616946LF39.05_bcpcmktui_UAT_GCH（市场PC国产）",
+          textExact: true
+        }
+      },
+      {
+        id: "click-branch",
+        timestamp: "2026-07-31T00:00:01.000Z",
+        kind: "click" as const,
+        target: "release",
+        doubleClick: false,
+        locator: {
+          role: "option",
+          accessibleName: "release"
+        }
+      }
+    ]
+
+    const script = generateAiRecordingScript(actions, {
+      variableActionIds: ["click-pipeline", "click-branch"],
+      variableActionNames: {
+        "click-pipeline": "流水线名称",
+        "click-branch": "分支名"
+      }
+    })
+
+    expect(script).toContain('const 变量_流水线名称 = ""; // 变量-流水线名称')
+    expect(script).toContain('const 变量_分支名 = ""; // 变量-分支名')
+    expect(script).toContain("await page.getByText(变量_流水线名称, { exact: true }).click();")
+    expect(script).toContain('await page.getByRole("option", { name: 变量_分支名 }).click();')
+    expect(extractAiRecordingVariableNames(script)).toEqual(["变量-流水线名称", "变量-分支名"])
   })
 })

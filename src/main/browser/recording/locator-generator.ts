@@ -22,6 +22,8 @@ export interface LocatorSource {
   tagName?: string
   inputType?: string
   framePath?: string[]
+  matchCount?: number
+  nth?: number
 }
 
 export interface LocatorBuildOptions {
@@ -176,7 +178,7 @@ function buildRoleCandidate(
 
 function buildLabelCandidate(root: string, label: string | undefined): LocatorCandidate | null {
   if (!label) return null
-  return buildCandidate("label", `${root}.getByLabel(${quote(label)})`, 96, true, "explicit label")
+  return buildCandidate("label", `${root}.getByLabel(${quote(label)})`, 90, true, "explicit label")
 }
 
 function buildPlaceholderCandidate(
@@ -246,6 +248,18 @@ function buildFallbackCandidate(root: string): LocatorCandidate {
   return buildCandidate("fallback", `${root}.locator("TODO_SELECTOR")`, 0, false, "missing locator metadata")
 }
 
+function applyOccurrenceHint(locator: string, source: LocatorSource): string {
+  if (typeof source.nth === "number" && Number.isInteger(source.nth) && source.nth >= 0) {
+    return `${locator}.nth(${source.nth})`
+  }
+
+  if (typeof source.matchCount === "number" && source.matchCount > 1) {
+    return `${locator}.first()`
+  }
+
+  return locator
+}
+
 function compareCandidates(left: LocatorCandidate, right: LocatorCandidate): number {
   if (left.score !== right.score) return right.score - left.score
   if (left.assumedUnique !== right.assumedUnique) {
@@ -254,9 +268,9 @@ function compareCandidates(left: LocatorCandidate, right: LocatorCandidate): num
 
   const order: Record<LocatorCandidateKind, number> = {
     testId: 0,
-    label: 1,
+    role: 1,
     placeholder: 2,
-    role: 3,
+    label: 3,
     selector: 4,
     text: 5,
     css: 6,
@@ -299,7 +313,7 @@ export function resolvePlaywrightLocator(
       role,
       roleName,
       source.role ? "explicit role metadata" : derivedTarget.inferredRole ? "inferred role from target" : "default role",
-      source.role ? 90 : derivedTarget.inferredRole ? 85 : 80
+      source.role ? 96 : derivedTarget.inferredRole ? 86 : 82
     )
   )
   pushCandidate(candidates, buildSelectorCandidate(root, normalizedSelector))
@@ -311,8 +325,12 @@ export function resolvePlaywrightLocator(
   }
 
   candidates.sort(compareCandidates)
+  const best = candidates[0]!
   return {
-    best: candidates[0]!,
+    best: {
+      ...best,
+      locator: applyOccurrenceHint(best.locator, source)
+    },
     candidates
   }
 }

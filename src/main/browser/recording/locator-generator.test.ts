@@ -11,17 +11,19 @@ describe("locator generator", () => {
     })
 
     expect(result.best.locator).toBe('page.getByTestId("login-submit")')
-    expect(result.candidates[1]?.locator).toBe('page.getByLabel("登录")')
+    expect(result.candidates[1]?.locator).toBe(
+      'page.getByRole("button", { name: "登录" })'
+    )
   })
 
-  it("uses label before role inference for form fields", () => {
+  it("prefers an explicit role and accessible name before a label", () => {
     const result = resolvePlaywrightLocator({
       target: "Email input",
       role: "textbox",
       label: "邮箱地址"
     })
 
-    expect(result.best.locator).toBe('page.getByLabel("邮箱地址")')
+    expect(result.best.locator).toBe('page.getByRole("textbox", { name: "邮箱地址" })')
   })
 
   it("builds frameLocator roots when frame metadata is present", () => {
