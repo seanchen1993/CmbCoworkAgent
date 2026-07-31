@@ -794,17 +794,16 @@ export function BrowserPanel({
         setBrowserProfileImportSkippedWebsites([])
         if (result.cancelled) return
         if (result.errorCode === "native_host_not_registered") {
-          toast.error(result.error || "Chrome Native Messaging Host 尚未注册，请重启应用", {
+          toast.error(result.error || "请重启应用", {
             duration: 15_000
           })
         } else if (result.errorCode === "extension_not_connected") {
-          const extensionIdHint = result.extensionId ? `；预期扩展 ID：${result.extensionId}` : ""
           toast.error(
-            `Chrome 扩展未连接，请确认扩展已安装并启用，且 Chrome 正在运行${extensionIdHint}`,
+            `Chrome插件未连接！`,
             { duration: 15_000 }
           )
         } else if (result.errorCode === "permission_required") {
-          toast.error("请在 CmbCoworkAgent Chrome 扩展中授权网站 Cookie 访问", {
+          toast.error("Chrome插件未授权！", {
             duration: 15_000
           })
         } else {
