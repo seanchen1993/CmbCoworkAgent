@@ -72,6 +72,10 @@ function readEnabledHarnessFeatureContext(threadId: string): HarnessFeatureConte
   return binding?.autoMode ? feature : null
 }
 
+export function isHarnessFeatureAutoMode(threadId: string): boolean {
+  return readEnabledHarnessFeatureContext(threadId) !== null
+}
+
 function publishAutoModeStateChanged(event: AutoModeStateChangedEvent): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (window.isDestroyed() || window.webContents.isDestroyed()) continue

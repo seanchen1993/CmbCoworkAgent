@@ -125,7 +125,8 @@ describe("buildAutoResolvedUserInputResponse", () => {
     vi.useFakeTimers()
     const responsePromise = requestUserInput({
       threadId: "default-timeout",
-      questions: [question()]
+      questions: [question()],
+      autoMode: true
     })
     const request = requestedPayload()
     expect(request.autoResolutionMs).toBe(DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS)
@@ -169,6 +170,32 @@ describe("buildAutoResolvedUserInputResponse", () => {
     expect(settled).toBe(false)
 
     expect(cancelUserInputsForThread("manual-timeout", "test cleanup")).toBe(1)
+    await expect(responsePromise).rejects.toThrow("test cleanup")
+  })
+
+  it("waits indefinitely by default outside Auto Mode", async () => {
+    vi.useFakeTimers()
+    const responsePromise = requestUserInput({
+      threadId: "normal-default-timeout",
+      questions: [question()]
+    })
+    const request = requestedPayload()
+    expect(request.autoResolutionMs).toBeUndefined()
+    expect(acknowledgeUserInputRequest(request.requestId, "normal-default-timeout")).toBe(true)
+
+    let settled = false
+    void responsePromise.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      }
+    )
+    await vi.advanceTimersByTimeAsync(DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS)
+    expect(settled).toBe(false)
+
+    expect(cancelUserInputsForThread("normal-default-timeout", "test cleanup")).toBe(1)
     await expect(responsePromise).rejects.toThrow("test cleanup")
   })
 })

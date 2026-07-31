@@ -25,6 +25,7 @@ interface RequestUserInputParams {
   threadId: string
   questions: UserInputQuestion[]
   autoResolutionMs?: number | null
+  autoMode?: boolean
   abortSignal?: AbortSignal
 }
 
@@ -114,7 +115,7 @@ export function buildAutoResolvedUserInputResponse(
 }
 
 export function requestUserInput(params: RequestUserInputParams): Promise<UserInputResult> {
-  const { threadId, questions, autoResolutionMs, abortSignal } = params
+  const { threadId, questions, autoResolutionMs, autoMode, abortSignal } = params
   if (abortSignal?.aborted) {
     return Promise.reject(new Error("User input request was cancelled before it was shown."))
   }
@@ -142,7 +143,8 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
   const effectiveAutoResolutionMs =
     autoResolutionMs === null
       ? undefined
-      : (autoResolutionMs ?? DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS)
+      : (autoResolutionMs ??
+        (autoMode ? DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS : undefined))
 
   const request: UserInputRequest = {
     requestId: randomUUID(),

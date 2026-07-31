@@ -294,7 +294,8 @@ import {
 } from "../harness-board/service"
 import {
   handleAutoModeAgentCancelled,
-  handleAutoModeAgentTurnEnd
+  handleAutoModeAgentTurnEnd,
+  isHarnessFeatureAutoMode
 } from "../harness-board/auto-mode-controller"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
@@ -5392,12 +5393,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         streamRequestId,
         userMessageId,
         agentMode: requestedAgentMode,
+        autoMode: requestedAutoMode,
         coordinatorInternalNotification
       }: AgentInvokeParams,
       delivery
     ) => {
       const baseChannel = `agent:stream:${threadId}`
       const window = delivery.window
+      const autoMode = requestedAutoMode === true || isHarnessFeatureAutoMode(threadId)
 
       console.log("[Agent] Received invoke request:", {
         threadId,
@@ -7047,6 +7050,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
+              autoMode,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
               traceContext: runtimeTraceContext,
@@ -7899,6 +7903,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             coordinatorWorkerTurnPlanning,
             abortSignal: abortController.signal,
             enableRequestUserInput: true,
+            autoMode,
             noSkillEvolutionTool: true,
             agentMode: effectiveAgentMode,
             traceContext: runtimeTraceContext,
@@ -8038,6 +8043,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
+              autoMode,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
               traceContext: runtimeTraceContext,
@@ -9163,6 +9169,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // Get workspace path from thread metadata
       const thread = getThread(threadId)
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+      const autoMode = isHarnessFeatureAutoMode(threadId)
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = metadata.workspacePath as string | undefined
       const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
@@ -9714,6 +9721,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
+              autoMode,
               noSkillEvolutionTool: true,
               agentMode: resumeAgentMode,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -9957,6 +9965,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning: resumeCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
+              autoMode,
               noSkillEvolutionTool: true,
               agentMode: resumeAgentMode,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -10292,6 +10301,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     // Get workspace path from thread metadata - REQUIRED
     const thread = getThread(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+    const autoMode = isHarnessFeatureAutoMode(threadId)
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
@@ -10778,6 +10788,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
+              autoMode,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
               retryHooks: buildModelRetryHooks(window, channel, () =>
@@ -11014,6 +11025,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning: interruptCoordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
+              autoMode,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
               retryHooks: buildModelRetryHooks(window, channel, () =>

@@ -3795,6 +3795,8 @@ export interface CreateAgentRuntimeOptions {
   noSkillEvolutionTool?: boolean
   /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
   enableRequestUserInput?: boolean
+  /** Mark the run as Auto Mode so omitted user-input timeouts use the default. */
+  autoMode?: boolean
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
   /** Project-mode plugin switch for the inline task tool. Undefined keeps legacy env behavior. */
@@ -4645,6 +4647,7 @@ The workspace root is: ${workspacePath}`
     extraTools.push(
       createRequestUserInputTool({
         threadId: options.threadId,
+        autoMode: options.autoMode,
         abortSignal: options.abortSignal
       })
     )

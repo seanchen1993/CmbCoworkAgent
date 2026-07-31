@@ -33,6 +33,8 @@ export interface AgentInvokeParams {
   message: string
   modelId?: string
   agentMode?: "normal" | "coordinator" | "workflow"
+  /** Auto Mode runs enable the default user-input timeout. */
+  autoMode?: boolean
   coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string

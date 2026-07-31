@@ -30,7 +30,7 @@ const questionSchema = z.object({
 
 const requestUserInputSchema = z.object({
   autoResolutionMs: z.number().int().min(30_000).max(DEFAULT_USER_INPUT_AUTO_RESOLUTION_MS).nullable().optional().describe(
-    "By default, the recommended options are automatically submitted after 300,000 milliseconds when the user does not respond. Set a shorter 30,000-300,000 millisecond timeout when appropriate; set null only when explicit user input is required and the request must wait indefinitely."
+    "In Auto Mode, recommended options are automatically submitted after 300,000 milliseconds when the user does not respond. Normal runs wait indefinitely unless a timeout is explicitly provided. Set a shorter 30,000-300,000 millisecond timeout when appropriate; set null when explicit user input is required and the request must wait indefinitely."
   ),
   questions: z.array(questionSchema).min(1).max(10).describe(
     "Questions to show the user. Prefer 1 and do not exceed 10."
@@ -51,6 +51,7 @@ const requestUserInputSchema = z.object({
 
 interface RequestUserInputToolContext {
   threadId: string
+  autoMode?: boolean
   abortSignal?: AbortSignal
 }
 
@@ -62,6 +63,7 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
           threadId: context.threadId,
           questions: input.questions,
           autoResolutionMs: input.autoResolutionMs,
+          autoMode: context.autoMode,
           abortSignal: context.abortSignal
         })
         if ("autoResolved" in response) {
@@ -107,7 +109,7 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
     {
       name: "request_user_input",
       description:
-        "Request user input for one to ten short questions. By default, recommended options are submitted after five minutes when the user does not respond.",
+        "Request user input for one to ten short questions. In Auto Mode, recommended options are submitted after five minutes when the user does not respond; normal runs wait indefinitely unless a timeout is explicitly provided.",
       schema: requestUserInputSchema
     }
   )

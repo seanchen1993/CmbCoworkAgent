@@ -178,6 +178,7 @@ function buildManagedAgentRunRequest(
     streamRequestId: `managed-${uuid()}`,
     message: message.modelMessage,
     userMessageId: message.userMessageId,
+    autoMode: true,
     ...(modelId ? { modelId } : {}),
     ...(agentMode ? { agentMode } : {})
   }
