@@ -104,6 +104,7 @@ import type {
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
   BrowserScreenshotResult,
+  ManualRecordingStartOptions,
   BrowserScriptLibraryEntry,
   BrowserScriptLibraryListOptions,
   BrowserScriptLibraryReadInput,
@@ -1567,6 +1568,9 @@ interface CustomAPI {
     startAiRecording: (options?: AiRecordingStartOptions) => Promise<AiRecordingSession>
     stopAiRecording: () => Promise<AiRecordingSession>
     getAiRecording: () => Promise<AiRecordingSession>
+    startManualRecording: (options?: ManualRecordingStartOptions) => Promise<AiRecordingSession>
+    stopManualRecording: () => Promise<AiRecordingSession>
+    getManualRecording: () => Promise<AiRecordingSession>
     saveScriptLibraryEntry: (
       input: BrowserScriptLibrarySaveInput
     ) => Promise<BrowserScriptLibraryEntry>

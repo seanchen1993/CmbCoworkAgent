@@ -1,4 +1,4 @@
-import type { AiRecordedBrowserAction } from "./browser-types"
+import type { AiRecordedBrowserAction, BrowserRecordingSource } from "./browser-types"
 
 export type LocatorRole =
   | "button"
@@ -37,6 +37,7 @@ interface LocatorBuildOptions {
 export interface AiRecordingScriptOptions {
   variableActionIds?: Iterable<string>
   variableActionNames?: Record<string, string>
+  source?: BrowserRecordingSource
 }
 
 interface VariableDescriptor {
@@ -672,12 +673,14 @@ export function generateAiRecordingScript(
     lines.length > 0
       ? lines.map((line) => `  ${line}`).join("\n")
       : "  // No supported Playwright browser actions were recorded."
+  const source = options.source ?? actions[0]?.source ?? "ai"
+  const testName = source === "manual" ? "manual recorded flow" : "AI recorded flow"
 
   return `import { test } from "@playwright/test";
 
 ${variableDeclarations ? `${variableDeclarations}\n` : ""}
 
-test("AI recorded flow", async ({ page }) => {
+test(${quote(testName)}, async ({ page }) => {
   // Review generated locators before committing this test.
 ${body}
 });

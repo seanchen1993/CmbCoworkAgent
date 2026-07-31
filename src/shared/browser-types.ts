@@ -61,9 +61,12 @@ export interface BrowserLocatorMetadata {
   nth?: number
 }
 
+export type BrowserRecordingSource = "ai" | "manual"
+
 interface AiRecordedBrowserActionBase {
   id: string
   timestamp: string
+  source?: BrowserRecordingSource
   threadId?: string
   locator?: BrowserLocatorMetadata
 }
@@ -125,8 +128,16 @@ export interface AiRecordingStartOptions {
   threadId?: string
 }
 
+export interface ManualRecordingStartOptions {
+  /** The task that started the manual recording session. */
+  threadId?: string
+  /** Seed the generated script with the current page when available. */
+  currentUrl?: string | null
+}
+
 export interface AiRecordingSession {
   id?: string
+  source: BrowserRecordingSource
   status: AiRecordingStatus
   threadId?: string
   startedAt?: string
@@ -135,11 +146,16 @@ export interface AiRecordingSession {
   script: string
 }
 
+export type BrowserRecordedAction = AiRecordedBrowserAction
+export type BrowserRecordingStatus = AiRecordingStatus
+export type BrowserRecordingSession = AiRecordingSession
+
 export interface BrowserScriptLibraryEntry {
   createdAt: string
   description: string
   displayName: string
   fileName: string
+  recordingSource: BrowserRecordingSource
   threadId: string
   workspacePath: string
 }
@@ -159,6 +175,7 @@ export interface BrowserScriptLibraryReadInput {
 export interface BrowserScriptLibrarySaveInput {
   description?: string | null
   displayName: string
+  recordingSource: BrowserRecordingSource
   script: string
   threadId?: string | null
   workspacePath: string

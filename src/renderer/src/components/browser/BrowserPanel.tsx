@@ -1028,6 +1028,7 @@ export function BrowserPanel({
         <div className="shrink-0 border-t border-border bg-background px-2 py-1">
           <BrowserAiRecordingControls
             browserCreated={state.created}
+            currentUrl={state.url}
             threadId={threadId}
             workspacePath={workspacePath}
           />
@@ -1084,16 +1085,16 @@ export function BrowserPanel({
             disabled={isCapturing || !state.created}
             onClick={captureScreenshot}
           />
+          <IconPopoverButton
+            className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+            side="left"
+            icon={<Video className="size-4" strokeWidth={1.8} />}
+            popoverContent="录制自动化脚本"
+            aria-label="录制自动化脚本"
+            aria-pressed={aiRecordingBoxOpen}
+            onClick={() => setAiRecordingBoxOpen((open) => !open)}
+          />
         </div>
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          side="left"
-          icon={<Video className="size-4" strokeWidth={1.8} />}
-          popoverContent="AI 录制自动化脚本"
-          aria-label="AI 录制自动化脚本"
-          aria-pressed={aiRecordingBoxOpen}
-          onClick={() => setAiRecordingBoxOpen((open) => !open)}
-        />
       </div>
 
       {consoleOpen && (

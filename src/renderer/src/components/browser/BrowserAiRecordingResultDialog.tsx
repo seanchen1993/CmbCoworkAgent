@@ -10,12 +10,18 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import type { AiRecordedBrowserAction, AiRecordingSession } from "../../../../shared/browser-types"
+import type {
+  AiRecordedBrowserAction,
+  AiRecordingSession,
+  BrowserRecordingSource
+} from "../../../../shared/browser-types"
 
 interface BrowserAiRecordingResultDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   aiRecording: AiRecordingSession
+  recordingSource: BrowserRecordingSource
+  recordingLabel: string
   selectedActionIds: string[]
   onToggleActionSelection: (actionId: string) => void
   variableActionIds: string[]
@@ -111,6 +117,8 @@ export function BrowserAiRecordingResultDialog({
   open,
   onOpenChange,
   aiRecording,
+  recordingSource,
+  recordingLabel,
   selectedActionIds,
   onToggleActionSelection,
   variableActionIds,
@@ -165,8 +173,10 @@ export function BrowserAiRecordingResultDialog({
                   <DialogTitle className="text-base">自动化脚本录制结果</DialogTitle>
                   <DialogDescription className="mt-1 text-[12px] leading-5">
                     {aiRecording.status === "recording"
-                      ? "Agent 对内置浏览器的成功操作会实时沉淀为 Playwright 草稿。"
-                      : "下面是最近一次 AI 录制生成的步骤和 Playwright 脚本初稿。"}
+                      ? recordingSource === "manual"
+                        ? "你在内置浏览器里的真实操作会实时沉淀为 Playwright 草稿。"
+                        : "Agent 对内置浏览器的成功操作会实时沉淀为 Playwright 草稿。"
+                      : `下面是最近一次${recordingLabel}生成的步骤和 Playwright 脚本初稿。`}
                   </DialogDescription>
                 </div>
               </div>
@@ -203,8 +213,9 @@ export function BrowserAiRecordingResultDialog({
                   <div className="mb-3 flex size-9 items-center justify-center rounded-lg border border-border/70 bg-muted/40 text-muted-foreground">
                     <Sparkles className="size-4" strokeWidth={1.8} />
                   </div>
-                  还没有采集到可生成脚本的操作。先开始录制，再让 Agent
-                  导航、点击、输入、选择或上传文件。
+                  {recordingSource === "manual"
+                    ? "还没有采集到可生成脚本的操作。先开始人工录制，再在内置浏览器里手动导航、点击、输入或选择。"
+                    : "还没有采集到可生成脚本的操作。先开始 AI 录制，再让 Agent 导航、点击、输入、选择或上传文件。"}
                 </div>
               ) : (
                 aiRecording.actions.map((action, index) => {
@@ -318,7 +329,7 @@ export function BrowserAiRecordingResultDialog({
                     <div>
                       <p className="text-sm font-medium text-foreground">Playwright 脚本</p>
                       <p className="mt-1 text-[11px] text-muted-foreground">
-                        草稿支持直接编辑，保存时会以当前编辑内容为准。
+                        {recordingLabel}草稿支持直接编辑，保存时会以当前编辑内容为准。
                       </p>
                     </div>
                   </div>

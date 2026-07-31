@@ -35,7 +35,6 @@ export function configureBrowserCdpEndpoint(
   const port = resolveBrowserCdpPort(config)
   activeBrowserCdpPort = port
   if (port === null) return null
-
   commandLine.appendSwitch(REMOTE_DEBUGGING_PORT_SWITCH, String(port))
   return port
 }

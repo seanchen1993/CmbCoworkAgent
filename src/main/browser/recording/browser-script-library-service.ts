@@ -59,6 +59,10 @@ function normalizeEntry(value: unknown): BrowserScriptLibraryEntry | null {
   const displayName = normalizeText(typeof value.displayName === "string" ? value.displayName : "")
   const description = normalizeText(typeof value.description === "string" ? value.description : "")
   const createdAt = normalizeText(typeof value.createdAt === "string" ? value.createdAt : "")
+  const recordingSource =
+    value.recordingSource === "manual" || value.recordingSource === "ai"
+      ? value.recordingSource
+      : "ai"
 
   if (!fileName || !workspacePath || !displayName || !createdAt) return null
 
@@ -67,6 +71,7 @@ function normalizeEntry(value: unknown): BrowserScriptLibraryEntry | null {
     description,
     displayName,
     fileName,
+    recordingSource,
     threadId,
     workspacePath: resolve(workspacePath)
   }
@@ -163,6 +168,7 @@ export async function saveBrowserScriptLibraryEntry(
   const workspacePath = ensureWorkspacePath(input.workspacePath)
   const displayName = normalizeText(input.displayName)
   const description = normalizeText(input.description)
+  const recordingSource = input.recordingSource === "manual" ? "manual" : "ai"
   const script = typeof input.script === "string" ? input.script : ""
   const threadId = normalizeText(input.threadId)
 
@@ -181,6 +187,7 @@ export async function saveBrowserScriptLibraryEntry(
       description,
       displayName,
       fileName,
+      recordingSource,
       threadId,
       workspacePath
     }

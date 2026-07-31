@@ -8,6 +8,12 @@ import {
   stopAiRecording
 } from "../browser/recording/ai-recording-service"
 import {
+  getManualRecording,
+  installManualRecorderForSubtree,
+  startManualRecording,
+  stopManualRecording
+} from "../browser/recording/manual-recording-service"
+import {
   deleteBrowserScriptLibraryEntry,
   listBrowserScriptLibraryEntries,
   readBrowserScriptLibraryScript,
@@ -28,6 +34,7 @@ import type {
   AiRecordingSession,
   BrowserBounds,
   BrowserCdpConfig,
+  ManualRecordingStartOptions,
   BrowserNavigateOptions
 } from "../../shared/browser-types"
 
@@ -95,6 +102,22 @@ export function registerBrowserHandlers(
   ipcMain.handle("browser:stopAiRecording", (): AiRecordingSession => stopAiRecording())
 
   ipcMain.handle("browser:getAiRecording", (): AiRecordingSession => getAiRecording())
+
+  ipcMain.handle(
+    "browser:startManualRecording",
+    async (_event, options?: ManualRecordingStartOptions): Promise<AiRecordingSession> => {
+      const session = startManualRecording(options)
+      const webContents = browserService.getWebContents()
+      if (webContents) {
+        await installManualRecorderForSubtree(webContents.mainFrame)
+      }
+      return session
+    }
+  )
+
+  ipcMain.handle("browser:stopManualRecording", (): AiRecordingSession => stopManualRecording())
+
+  ipcMain.handle("browser:getManualRecording", (): AiRecordingSession => getManualRecording())
 
   ipcMain.handle(
     "browser:saveScriptLibraryEntry",

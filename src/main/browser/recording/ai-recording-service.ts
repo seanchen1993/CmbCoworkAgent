@@ -388,6 +388,7 @@ function makeAction(
   nextActionNumber += 1
   return {
     ...action,
+    source: "ai",
     ...(threadId ? { threadId } : {}),
     id: `ai-action-${nextActionNumber}`,
     timestamp: now()
@@ -679,16 +680,17 @@ function cloneAction(action: AiRecordedBrowserAction): AiRecordedBrowserAction {
 function toView(session: AiRecordingSession | null): AiRecordingSession {
   if (!session) {
     return {
+      source: "ai",
       status: "idle",
       actions: [],
-      script: generateAiRecordingScript([])
+      script: generateAiRecordingScript([], { source: "ai" })
     }
   }
 
   return {
     ...session,
     actions: session.actions.map(cloneAction),
-    script: generateAiRecordingScript(session.actions)
+    script: generateAiRecordingScript(session.actions, { source: "ai" })
   }
 }
 
@@ -700,6 +702,7 @@ export function startAiRecording(options: AiRecordingStartOptions = {}): AiRecor
   nextSessionNumber += 1
   activeSession = {
     id: `ai-recording-${Date.now()}-${nextSessionNumber}`,
+    source: "ai",
     status: "recording",
     threadId: readString(options.threadId),
     startedAt: now(),

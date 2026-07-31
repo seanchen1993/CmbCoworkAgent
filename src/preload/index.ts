@@ -106,6 +106,7 @@ import type {
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
   BrowserScreenshotResult,
+  ManualRecordingStartOptions,
   BrowserScriptLibraryEntry,
   BrowserScriptLibraryListOptions,
   BrowserScriptLibraryReadInput,
@@ -2016,6 +2017,12 @@ const api = {
       ipcRenderer.invoke("browser:stopAiRecording") as Promise<AiRecordingSession>,
     getAiRecording: (): Promise<AiRecordingSession> =>
       ipcRenderer.invoke("browser:getAiRecording") as Promise<AiRecordingSession>,
+    startManualRecording: (options?: ManualRecordingStartOptions): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:startManualRecording", options) as Promise<AiRecordingSession>,
+    stopManualRecording: (): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:stopManualRecording") as Promise<AiRecordingSession>,
+    getManualRecording: (): Promise<AiRecordingSession> =>
+      ipcRenderer.invoke("browser:getManualRecording") as Promise<AiRecordingSession>,
     saveScriptLibraryEntry: (
       input: BrowserScriptLibrarySaveInput
     ): Promise<BrowserScriptLibraryEntry> =>

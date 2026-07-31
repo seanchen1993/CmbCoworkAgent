@@ -14,6 +14,12 @@ import {
   BROWSER_PANEL_REQUEST_CHANNEL,
   BROWSER_SESSION_ID
 } from "../../../shared/browser-types"
+import {
+  getManualRecording,
+  installManualRecorderForSubtree,
+  recordManualRecorderConsoleMessage,
+  recordManualNavigation
+} from "../recording/manual-recording-service"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
@@ -560,6 +566,13 @@ export class BrowserService {
     }
   }
 
+  getWebContents(): WebContents | null {
+    const session = this.getActiveSession()
+    if (!session) return null
+    const webContents = session.view.webContents
+    return webContents.isDestroyed() ? null : webContents
+  }
+
   disposeAll(): string | null {
     const disposedSessionId = this.disposeActiveSession()
     if (disposedSessionId) this.emitState(disposedSessionId)
@@ -629,6 +642,10 @@ export class BrowserService {
   private bindWebContentsEvents(session: BrowserSession): void {
     const webContents = session.view.webContents
     const emit = (): void => this.emitState(session.id)
+    const ensureManualRecorder = (): void => {
+      if (getManualRecording().status !== "recording") return
+      void installManualRecorderForSubtree(webContents.mainFrame)
+    }
 
     webContents.on("did-start-loading", () => {
       session.error = undefined
@@ -637,13 +654,23 @@ export class BrowserService {
     })
     webContents.on("did-stop-loading", () => {
       this.invalidateSession(session)
+      ensureManualRecorder()
       emit()
       console.info(`${BROWSER_SERVICE_LOG_PREFIX} Loaded Browser session ${session.id}.`)
+    })
+    webContents.on("dom-ready", () => {
+      ensureManualRecorder()
+    })
+    webContents.on("frame-created", (_event, details) => {
+      if (!details.frame) return
+      if (getManualRecording().status !== "recording") return
+      void installManualRecorderForSubtree(details.frame)
     })
     webContents.on("page-title-updated", () => {
       emit()
     })
-    webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    webContents.on("console-message", (details, level, message, line, sourceId) => {
+      recordManualRecorderConsoleMessage(details.frame, details.message)
       session.consoleEntries = appendBrowserConsoleEntry(session.consoleEntries, {
         id: `${session.id}:${session.nextConsoleEntryId++}`,
         timestamp: new Date().toISOString(),
@@ -660,11 +687,16 @@ export class BrowserService {
       if (permissionError) {
         session.error = permissionError
       }
+      recordManualNavigation(url)
+      ensureManualRecorder()
       emit()
       console.info(`${BROWSER_SERVICE_LOG_PREFIX} Browser session ${session.id} reached ${url}.`)
     })
     webContents.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
-      if (isMainFrame) emit()
+      if (isMainFrame) {
+        recordManualNavigation(webContents.getURL())
+        emit()
+      }
     })
     webContents.on("will-navigate", (event, url, _isInPlace, isMainFrame) => {
       if (!isMainFrame) return
