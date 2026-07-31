@@ -540,6 +540,7 @@ export interface AgentTurnEndEvent extends AutoModeEventBase {
     inputTokens: number
     maxTokens: number
   }
+  sessionWorkspacePath?: string
 }
 
 export type AutoNextStepEvent = AgentTurnEndEvent

@@ -50,6 +50,21 @@ function readHarnessFeatureContext(threadId: string): HarnessFeatureContext | nu
   }
 }
 
+function readThreadWorkspacePath(threadId: string): string | undefined {
+  const thread = getThread(threadId)
+  if (!thread?.metadata) return undefined
+  try {
+    const metadata = JSON.parse(thread.metadata) as unknown
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined
+    const workspacePath = (metadata as Record<string, unknown>).workspacePath
+    return typeof workspacePath === "string" && workspacePath.trim()
+      ? workspacePath.trim()
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function readEnabledHarnessFeatureContext(threadId: string): HarnessFeatureContext | null {
   const feature = readHarnessFeatureContext(threadId)
   if (!feature) return null
@@ -77,6 +92,7 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
   const feature = readEnabledHarnessFeatureContext(input.threadId)
   if (!feature) return
 
+  const sessionWorkspacePath = readThreadWorkspacePath(input.threadId)
   const event: AgentTurnEndEvent = {
     eventId: uuid(),
     eventType: "agent_turn_end",
@@ -84,7 +100,8 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
     threadId: input.threadId,
     outcome: input.outcome,
     endReason: input.endReason,
-    ...(input.contextUsage ? { contextUsage: input.contextUsage } : {})
+    ...(input.contextUsage ? { contextUsage: input.contextUsage } : {}),
+    ...(sessionWorkspacePath ? { sessionWorkspacePath } : {})
   }
 
   if (input.outcome === "error") {
