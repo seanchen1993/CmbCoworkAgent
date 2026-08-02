@@ -1922,6 +1922,12 @@ function groupAdaptersByUseScenario(registry: HarnessAdapterRegistryItem[]): Ada
   return Array.from(groups.entries())
     .map(([useScenario, adapters]) => ({ useScenario, adapters }))
     .sort((left, right) => {
+      const leftIsApplicationDevelopment = left.useScenario.includes("应用类研发")
+      const rightIsApplicationDevelopment = right.useScenario.includes("应用类研发")
+      if (leftIsApplicationDevelopment !== rightIsApplicationDevelopment) {
+        return leftIsApplicationDevelopment ? -1 : 1
+      }
+
       const leftIsOther = left.useScenario === OTHER_ADAPTER_SCENARIO
       const rightIsOther = right.useScenario === OTHER_ADAPTER_SCENARIO
       if (leftIsOther && rightIsOther) return 0
