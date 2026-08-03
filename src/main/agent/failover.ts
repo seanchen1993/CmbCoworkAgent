@@ -1,4 +1,4 @@
-import { getCustomModelConfigs } from "../storage"
+import { getModelConfigByRef, getModelConfigs, toModelRef } from "../models/registry"
 
 // ─── PR-12 / PR-17 — minimal API error classifier ─────────────────────────────
 // Reuses the status-code + message-pattern primitives already powering
@@ -33,11 +33,19 @@ interface StatusInfo {
 const STATUS_CODE_INFO: Record<number, StatusInfo> = {
   400: { category: "invalid_request", label: "请求错误", hint: "请检查请求内容" },
   401: { category: "authentication_failed", label: "认证失败", hint: "请检查设置中的 API Key" },
-  403: { category: "authentication_failed", label: "认证失败 / 无权限", hint: "请检查 API Key 与权限" },
+  403: {
+    category: "authentication_failed",
+    label: "认证失败 / 无权限",
+    hint: "请检查 API Key 与权限"
+  },
   404: { category: "invalid_request", label: "路径错误", hint: "请检查接口地址 / 模型配置" },
   405: { category: "invalid_request", label: "请求方式错误", hint: "请求方法不正确，请联系支持" },
   429: { category: "rate_limit", label: "请求速率限制", hint: "请稍后重试" },
-  432: { category: "rate_limit", label: "输入 Token 数限流", hint: "输入过长，请减少输入或稍后重试" },
+  432: {
+    category: "rate_limit",
+    label: "输入 Token 数限流",
+    hint: "输入过长，请减少输入或稍后重试"
+  },
   433: { category: "rate_limit", label: "输出 Token 数限流", hint: "请稍后重试" },
   480: { category: "invalid_request", label: "请求参数异常", hint: "请检查请求参数" },
   481: { category: "invalid_request", label: "目标模型不存在", hint: "请检查模型名称是否正确" },
@@ -71,12 +79,81 @@ const NETWORK_CODES = new Set([
   "EPIPE",
   "EAI_AGAIN"
 ])
-const NETWORK_MESSAGE_TOKENS = [
-  "fetch failed",
-  "socket hang up",
-  "network error",
-  "timeout"
-]
+const NETWORK_MESSAGE_TOKENS = ["fetch failed", "socket hang up", "network error", "timeout"]
+
+const STREAM_DISCONNECT_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT"
+])
+const STREAM_DISCONNECT_MESSAGE_RE =
+  /\bterminated\b|\bstream\b.*\b(closed|disconnected|terminated|reset)\b|\b(premature close|body stream|other side closed|socket hang up|connection reset)\b/i
+
+type ErrorLike = {
+  name?: unknown
+  message?: unknown
+  code?: unknown
+  cause?: unknown
+}
+
+function asErrorLike(value: unknown): ErrorLike | null {
+  if (!value || (typeof value !== "object" && typeof value !== "function")) return null
+  return value as ErrorLike
+}
+
+function isAbortLikeError(error: unknown): boolean {
+  const detail = asErrorLike(error)
+  if (!detail) return false
+  const name = typeof detail.name === "string" ? detail.name : ""
+  const code = typeof detail.code === "string" ? detail.code : ""
+  const message = typeof detail.message === "string" ? detail.message.toLowerCase() : ""
+  return (
+    name === "AbortError" ||
+    code === "ABORT_ERR" ||
+    message.includes("aborted") ||
+    message.includes("user abort") ||
+    message.includes("controller is already closed")
+  )
+}
+
+/**
+ * Match errors emitted while an established response body/SSE stream is being
+ * consumed. Generic API classification also sees arbitrary tool output, so a
+ * bare string such as "terminated" must not become a network error.
+ */
+export function isStreamDisconnectLikeError(error: unknown): boolean {
+  const visited = new Set<object>()
+  const chain: ErrorLike[] = []
+  let current: unknown = error
+  while (true) {
+    const detail = asErrorLike(current)
+    if (!detail || visited.has(detail as object)) break
+    visited.add(detail as object)
+    chain.push(detail)
+    current = detail.cause
+  }
+
+  // A provider may wrap an AbortError in TypeError("terminated"). Cancellation
+  // wins over every disconnect-looking wrapper in the chain.
+  if (chain.some((detail) => isAbortLikeError(detail))) return false
+
+  for (const detail of chain) {
+    const code = typeof detail.code === "string" ? detail.code : ""
+    if (STREAM_DISCONNECT_CODES.has(code)) return true
+
+    // classifyApiError also receives plain tool-result objects. Only real Error
+    // instances may opt into message-based stream matching; plain objects still
+    // need an explicit network code.
+    const message = typeof detail.message === "string" ? detail.message : ""
+    if (detail instanceof Error && STREAM_DISCONNECT_MESSAGE_RE.test(message)) return true
+  }
+
+  return false
+}
 
 /**
  * Map an arbitrary error value to one of six coarse buckets. Order matters:
@@ -102,6 +179,7 @@ export function classifyApiError(error: unknown): ApiErrorCode {
 
   const code = (error as { code?: unknown }).code
   if (typeof code === "string" && NETWORK_CODES.has(code)) return "network_error"
+  if (isStreamDisconnectLikeError(error)) return "network_error"
 
   const msg = (error instanceof Error ? error.message : String(error)).toLowerCase()
   if (RATE_LIMIT_MESSAGE_TOKENS.some((t) => msg.includes(t))) return "rate_limit"
@@ -125,11 +203,14 @@ const RETRYABLE_NETWORK_CODES = new Set([
   "EAI_AGAIN"
 ])
 
+// NOTE: no "terminated"/"disconnected" here on purpose. Stream-disconnect text is
+// matched earlier by isStreamDisconnectLikeError, which walks the cause chain and
+// lets cancellation win — a provider wrapping an AbortError in
+// TypeError("terminated") must stay non-retryable. A blunt substring match here
+// would re-mark those as retryable after that check already rejected them.
 const RETRYABLE_MESSAGE_PATTERNS = [
   "timeout",
   "fetch failed",
-  "terminated",
-  "disconnected",
   "rate limit",
   "network error",
   "socket hang up",
@@ -164,15 +245,9 @@ export function isRetryableApiError(error: unknown): boolean {
   if (!error) return false
 
   // AbortError — user cancelled, not retryable
-  if (error instanceof Error) {
-    if (
-      error.name === "AbortError" ||
-      error.message.includes("aborted") ||
-      error.message.includes("Controller is already closed")
-    ) {
-      return false
-    }
-  }
+  if (isAbortLikeError(error)) return false
+
+  if (isStreamDisconnectLikeError(error)) return true
 
   // Check HTTP status code (may be on error.status, error.response?.status, etc.)
   const status = getStatusCode(error)
@@ -338,8 +413,7 @@ function getRequestId(error: unknown): string | undefined {
 }
 
 function cleanProviderMessage(error: unknown): string | undefined {
-  const raw =
-    error instanceof Error ? error.message : typeof error === "string" ? error : undefined
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : undefined
   if (!raw) return undefined
   const cleaned = raw
     .replace(/\n\nTroubleshooting URL: https:\/\/docs\.langchain\.com\S*/g, "")
@@ -359,7 +433,8 @@ export function extractErrorDetail(
   const status = fetchDetail?.status ?? getStatusCode(error) ?? statusFromMessage(error)
   const info = getStatusInfo(status)
   const code =
-    info?.category ?? (typeof status === "number" ? classifyApiError({ status }) : classifyApiError(error))
+    info?.category ??
+    (typeof status === "number" ? classifyApiError({ status }) : classifyApiError(error))
   const requestId = fetchDetail?.requestId ?? getRequestId(error)
   const providerMessage = cleanProviderMessage(error)
   // Prefer the fetch-layer raw body (schema-independent), then the SDK's parsed
@@ -405,7 +480,7 @@ export function buildOrderedChain(
   primaryTier: "premium" | "economy",
   allowFailover = true
 ): string[] {
-  const configs = getCustomModelConfigs()
+  const configs = getModelConfigs()
   const chain: string[] = []
   const seen = new Set<string>()
 
@@ -427,14 +502,14 @@ export function buildOrderedChain(
     // Premium fails → only other premium models
     for (const c of configs) {
       if ((c.tier ?? "premium") === "premium" && c.apiKey) {
-        add(`custom:${c.id}`)
+        add(toModelRef(c))
       }
     }
   } else {
     // Economy fails → skip other economy, go straight to premium
     for (const c of configs) {
       if ((c.tier ?? "premium") === "premium" && c.apiKey) {
-        add(`custom:${c.id}`)
+        add(toModelRef(c))
       }
     }
   }
@@ -442,8 +517,7 @@ export function buildOrderedChain(
   // If fallbackChain provided, append any remaining eligible models
   if (fallbackChain) {
     for (const id of fallbackChain) {
-      const cfgId = id.startsWith("custom:") ? id.slice("custom:".length) : id
-      const cfg = configs.find((c) => c.id === cfgId)
+      const cfg = getModelConfigByRef(id)
       if (!cfg) continue
       const tier = cfg.tier ?? "premium"
       // Only add if not downgrading

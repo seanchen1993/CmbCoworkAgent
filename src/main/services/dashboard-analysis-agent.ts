@@ -1,13 +1,15 @@
-import Store from "electron-store"
 import { tool } from "langchain"
 import { ChatOpenAI } from "@langchain/openai"
-import { AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages"
-import { z } from "zod"
 import {
-  getCustomModelConfigs,
-  getOpenworkDir,
-  type CustomModelConfig
-} from "../storage"
+  AIMessage,
+  BaseMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage
+} from "@langchain/core/messages"
+import { z } from "zod"
+import type { CustomModelConfig } from "../storage"
+import { getDefaultModelConfig, toModelRef, type ResolvedModelConfig } from "../models/registry"
 import type {
   DashboardEsIndexAlias,
   DashboardEsQueryInput,
@@ -62,11 +64,6 @@ export interface DashboardAnalysisAgentOptions {
   executeQuery: DashboardAnalysisQueryExecutor
 }
 
-const settingsStore = new Store({
-  name: "settings",
-  cwd: getOpenworkDir()
-})
-
 const dashboardEsQuerySchema = z.object({
   indexAlias: z.enum(["event", "trace"]).describe(
     "Allowed dashboard ES index alias. Use event for devclaw_event telemetry, trace for devclaw_trace agent traces."
@@ -85,7 +82,9 @@ const dashboardEsQuerySchema = z.object({
       featureSlug: z.string().nullable().optional()
     })
     .optional()
-    .describe("Optional extra dashboard context. The current panel context is enforced by the backend.")
+    .describe(
+      "Optional extra dashboard context. The current panel context is enforced by the backend."
+    )
 })
 
 type DashboardEsQueryToolArgs = z.infer<typeof dashboardEsQuerySchema>
@@ -94,30 +93,8 @@ const MAX_HISTORY_MESSAGES = 8
 const MAX_TOOL_ROUNDS = 5
 const MAX_TOOL_OUTPUT_CHARS = 80_000
 
-function normalizeConfiguredModelId(modelId: string, configs: CustomModelConfig[]): string {
-  const trimmed = modelId.trim()
-  if (!trimmed) return ""
-  const normalizedId = trimmed.startsWith("custom:") ? trimmed.slice("custom:".length) : trimmed
-
-  const matchedById = configs.find((config) => config.id === normalizedId)
-  if (matchedById) return matchedById.id
-
-  const matchedByModel = configs.find(
-    (config) => config.model === trimmed || config.model === normalizedId
-  )
-  return matchedByModel?.id ?? ""
-}
-
-export function resolveDashboardAnalysisModelConfig(): CustomModelConfig | null {
-  const configs = getCustomModelConfigs()
-  if (configs.length === 0) return null
-
-  const stored = String(settingsStore.get("defaultModel", "") || "")
-  const normalizedId = normalizeConfiguredModelId(stored, configs)
-  if (normalizedId) {
-    return configs.find((config) => config.id === normalizedId) ?? configs[0] ?? null
-  }
-  return configs[0] ?? null
+export function resolveDashboardAnalysisModelConfig(): ResolvedModelConfig | null {
+  return getDefaultModelConfig()
 }
 
 function createDashboardAnalysisModel(config: CustomModelConfig): ChatOpenAI {
@@ -198,8 +175,8 @@ export function buildDashboardToolRetryMessage(error: unknown): string {
     "Please retry with corrected tool arguments.",
     "Requirements:",
     "- The tool arguments must be a strict JSON object.",
-    "- indexAlias must be \"event\" or \"trace\".",
-    "- operation must be one of \"search\", \"msearch\", \"count\", \"mapping\", \"field_caps\".",
+    '- indexAlias must be "event" or "trace".',
+    '- operation must be one of "search", "msearch", "count", "mapping", "field_caps".',
     "- body must be a JSON object, not a string, Markdown code block, JavaScript object literal, or JSON with comments/trailing commas.",
     "- Do not include URL, HTTP method, credentials, or index names."
   ].join("\n")
@@ -254,19 +231,21 @@ function buildSystemPrompt(context?: DashboardAnalysisContext): string {
     "- 已Commit采纳率 = adoptedLines / effectiveGeneratedLines。",
     "- 含未提交采纳率 = adoptedLines / (effectiveGeneratedLines + unmeasuredGeneratedLines)。",
     "- 已Push采纳率 = pushedAdoptedLines / pushedEffectiveGeneratedLines。",
-    "- generatedLines 来自 code_gen.properties.lineCount；deletedLines 来自 code_gen.properties.deletedLineCount。",
+    "- generatedLines 来自 code_gen.properties.lineCount；deletedLines 来自 code_gen.properties.deletedLineCount。标准 test/tests/__tests__ 路径及 test 命名文件会单独上报为 code_test_gen，不进入代码采纳率。spec/specs 仍属于 code_gen。",
     "- measuredGeneratedLines/effectiveGeneratedLines/adoptedLines 来自 code_adopt.properties.generatedLineCount/effectiveGeneratedLineCount/adoptedLineCount，且 adoptedLineCount/generatedLineCount/effectiveGeneratedLineCount 必须存在才算已测量。",
     "- pushed 口径是在 code_adopt 已测量过滤上追加 properties.pushed=true；pushedCommitCount 通常按 properties.commitSha cardinality。",
     "- effectiveGeneratedLines 会剔除被 Agent 后续改写覆盖的中间稿；unmeasuredGeneratedLines 通常来自 code_gen 已产生但没有对应 code_adopt 测量的生成量。",
     "- 项目运营概览的 skillCodeStats 表示由 Skill 生成的代码整体采纳明细，过滤条件是 code 事件带非空 properties.usedSkills；按 Skill 维度排行可能因为一段代码关联多个 skill 而出现归因加总大于整体的情况。",
     "",
     "ES 约定：",
-    "- event alias 对应事件数据，常用事件包括 code_gen 和 code_adopt。",
+    "- event alias 对应事件数据，常用事件包括 code_gen、code_adopt 和独立测试生成事件 code_test_gen。",
     "- trace alias 对应 Agent trace 汇总数据。",
     "- trace 常用字段：traceId、threadId、startedAt、durationMs、sapId、ystId、userName、orgName、upperOrgLv0、upperOrgLv1、modelName/modelId、usedSkills、toolNames、totalToolCalls、totalInputTokens、totalOutputTokens、totalTokens、outcome、harnessProjectId、harnessFeatureSlug、harnessAdapterName、harnessAdapterVersion。",
     "- event 顶层常用字段：eventName、eventTime、sapId、ystId、userName、orgName、upperOrgLv0、upperOrgLv1。",
     "- code_gen properties 常用字段：eventId/genEventId、lineCount、deletedLineCount、usedSkills、modelId/modelName、threadId、harnessProjectId、harnessFeatureSlug、harnessAdapterName、harnessAdapterVersion。",
+    "- code_test_gen properties 与 code_gen 基本一致，并额外带 testMatchRule=directory/filename；它只能用于测试代码生成量分析，不得混入现有采纳率分子或分母。",
     "- code_adopt properties 常用字段：genEventId、generatedAt、commitSha、pushed、generatedLineCount、effectiveGeneratedLineCount、adoptedLineCount、verdict、usedSkills、threadId、harnessProjectId、harnessFeatureSlug、harnessAdapterName、harnessAdapterVersion。",
+    "- harness.project.snapshot 是项目当前状态快照；properties.systemConstraintEverLoadedSuccessfully 表示项目是否至少有一次会话完整加载系统约束。",
     "- 分析生成漏斗时优先按生成时间过滤：code_gen 使用 eventTime；code_adopt 使用 properties.generatedAt。",
     "- 项目模式字段：event index 使用 properties.harnessProjectId/properties.harnessFeatureSlug；trace index 使用顶层 harnessProjectId/harnessFeatureSlug。",
     "- 不确定字段是否存在时，先用 mapping 或 field_caps 查询；不要编造字段。",
@@ -341,7 +320,8 @@ export async function runDashboardAnalysisAgent(
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const response = (await model.invoke(messages)) as AIMessage
     const calls = Array.isArray(response.tool_calls) ? response.tool_calls : []
-    const invalidToolCallRetryMessage = calls.length === 0 ? getInvalidToolCallRetryMessage(response) : null
+    const invalidToolCallRetryMessage =
+      calls.length === 0 ? getInvalidToolCallRetryMessage(response) : null
     if (invalidToolCallRetryMessage) {
       messages.push(
         new HumanMessage(
@@ -357,7 +337,7 @@ export async function runDashboardAnalysisAgent(
       const content = contentToText(response.content).trim()
       return {
         content: content || "没有生成有效分析结果，请换个问题重试。",
-        modelId: `custom:${config.id}`,
+        modelId: toModelRef(config),
         modelName: config.model,
         toolCallCount: toolCalls.length,
         toolCalls
@@ -395,7 +375,7 @@ export async function runDashboardAnalysisAgent(
 
   return {
     content: "分析过程超过工具调用上限。请缩小问题范围，或指定要看的指标、人员、组织或时间段。",
-    modelId: `custom:${config.id}`,
+    modelId: toModelRef(config),
     modelName: config.model,
     toolCallCount: toolCalls.length,
     toolCalls

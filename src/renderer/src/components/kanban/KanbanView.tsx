@@ -1,6 +1,6 @@
 import { useMemo } from "react"
 import { useAppStore } from "@/lib/store"
-import { isHarnessFeatureThread } from "@/lib/thread-classification"
+import { isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { useAllThreadStates, useAllStreamLoadingStates } from "@/lib/thread-context"
 import { KanbanColumn } from "./KanbanColumn"
 import { KanbanHeader } from "./KanbanHeader"
@@ -42,7 +42,7 @@ export function KanbanView(): React.JSX.Element {
   }
 
   const chatThreads = useMemo(
-    () => threads.filter((thread) => !isHarnessFeatureThread(thread)),
+    () => threads.filter((thread) => !isHarnessProjectModeThread(thread)),
     [threads]
   )
 

@@ -8,34 +8,61 @@ import {
   deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
+  getHarnessKnowledgePreview,
+  getHarnessLocalAgentmdDeployUnitMappings,
+  getHarnessProjectPublicAgentmdDeployUnits,
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
+  listHarnessDeployUnitMappings,
+  getHarnessLeanTokenConfig,
+  saveHarnessDeployUnitMappings,
+  saveHarnessLeanTokenConfig,
   skipHarnessRunNode,
+  syncHarnessProjectConstraints,
+  updateHarnessFeatureDeployUnits,
   updateHarnessProjectMetadata
 } from "../harness-board/service"
 import {
   getEnterpriseProjectDetails,
+  getProjectReviews,
+  queryPipelineLabels,
+  queryPipelines,
+  searchDeployUnits,
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
-  HarnessDynamicWorkflowConfig
+  HarnessDynamicWorkflowConfig,
+  HarnessKnowledgePreviewResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
@@ -52,6 +79,42 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("harnessBoard:listProjects", async (): Promise<HarnessProjectListItem[]> => {
     return listHarnessProjects()
   })
+
+  ipcMain.handle("harnessBoard:getDeployUnitMappings", async (): Promise<HarnessDeployUnitMapping[]> => {
+    return listHarnessDeployUnitMappings()
+  })
+
+  ipcMain.handle("harnessBoard:getLeanTokenConfig", async (): Promise<HarnessLeanTokenConfig> => {
+    return getHarnessLeanTokenConfig()
+  })
+
+  ipcMain.handle(
+    "harnessBoard:saveDeployUnitMappings",
+    async (_event, mappings: HarnessDeployUnitMapping[]): Promise<HarnessDeployUnitMapping[]> => {
+      return saveHarnessDeployUnitMappings(mappings)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:saveLeanTokenConfig",
+    async (_event, input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> => {
+      return saveHarnessLeanTokenConfig(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:syncProjectConstraints",
+    async (_event, adapterId: string): Promise<HarnessProjectConstraintSyncResult> => {
+      return syncHarnessProjectConstraints(adapterId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getKnowledgePreview",
+    async (_event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
+      return getHarnessKnowledgePreview(adapterId)
+    }
+  )
 
   ipcMain.handle(
     "harnessBoard:createProject",
@@ -75,12 +138,46 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:searchDeployUnits",
+    async (
+      _event,
+      input: HarnessDeployUnitSearchInput
+    ): Promise<HarnessDeployUnitSearchResult> => {
+      return searchDeployUnits(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:queryPipelines",
+    async (_event, input: HarnessPipelineQueryInput): Promise<HarnessPipelineQueryResult> => {
+      return queryPipelines(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:queryPipelineLabels",
+    async (
+      _event,
+      input: HarnessPipelineLabelQueryInput
+    ): Promise<HarnessPipelineLabelQueryResult> => {
+      return queryPipelineLabels(input)
+    }
+  )
+
+  ipcMain.handle(
     "harnessBoard:getEnterpriseProjectDetails",
     async (
       _event,
       input: HarnessEnterpriseProjectDetailInput
     ): Promise<HarnessEnterpriseProjectDetailResult> => {
       return getEnterpriseProjectDetails(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getProjectReviews",
+    async (_event, input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> => {
+      return getProjectReviews(input)
     }
   )
 
@@ -95,9 +192,33 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:updateFeatureDeployUnits",
+    async (
+      _event,
+      input: HarnessFeatureDeployUnitUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> => {
+      return updateHarnessFeatureDeployUnits(input)
+    }
+  )
+
+  ipcMain.handle(
     "harnessBoard:getDynamicWorkflowConfig",
     async (_event, projectId: string): Promise<HarnessDynamicWorkflowConfig | null> => {
       return getHarnessDynamicWorkflowConfig(projectId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getPublicAgentmdDeployUnits",
+    async (_event, projectId: string): Promise<string[]> => {
+      return getHarnessProjectPublicAgentmdDeployUnits(projectId)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getLocalAgentmdDeployUnitMappings",
+    async (_event, mappings: HarnessDeployUnitMapping[]): Promise<string[]> => {
+      return getHarnessLocalAgentmdDeployUnitMappings(mappings)
     }
   )
 

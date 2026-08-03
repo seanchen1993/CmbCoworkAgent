@@ -38,6 +38,10 @@ import fg from "fast-glob"
 import * as iconv from "iconv-lite"
 import * as chardet from "jschardet"
 import micromatch from "micromatch"
+import {
+  isSameMarkdownDocumentPath,
+  renderPluginSkillMarkdownPlaceholders
+} from "./markdown-placeholders"
 import { replace } from "./replace"
 import type { ToolOrchestrator } from "./tool-orchestrator"
 import {
@@ -329,6 +333,10 @@ export interface LocalSandboxOptions {
   harnessAdapterName?: string
   /** Optional bound adapter version exposed to child processes as HARNESS_ADAPTER_VERSION. */
   harnessAdapterVersion?: string
+  /** Optional current harness workflow node/stage name exposed as HARNESS_NODE_NAME. */
+  harnessNodeName?: string
+  /** Optional current harness workflow node/stage status exposed as HARNESS_NODE_STATUS. */
+  harnessNodeStatus?: string
   /** Optional harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Optional harness project directory exposed to child processes as PROJECT_DIR. */
@@ -434,6 +442,8 @@ export class LocalSandbox
   private readonly harnessProjectId?: string
   private readonly harnessAdapterName?: string
   private readonly harnessAdapterVersion?: string
+  private readonly harnessNodeName?: string
+  private readonly harnessNodeStatus?: string
   private readonly projectCode?: string
   private readonly projectDir?: string
   private readonly codexExePath: string
@@ -1718,6 +1728,10 @@ export class LocalSandbox
     if (harnessAdapterName) baseEnv.HARNESS_ADAPTER_NAME = harnessAdapterName
     const harnessAdapterVersion = options.harnessAdapterVersion?.trim()
     if (harnessAdapterVersion) baseEnv.HARNESS_ADAPTER_VERSION = harnessAdapterVersion
+    const harnessNodeName = options.harnessNodeName?.trim()
+    if (harnessNodeName) baseEnv.HARNESS_NODE_NAME = harnessNodeName
+    const harnessNodeStatus = options.harnessNodeStatus?.trim()
+    if (harnessNodeStatus) baseEnv.HARNESS_NODE_STATUS = harnessNodeStatus
     const projectCode = options.projectCode?.trim()
     if (projectCode) baseEnv.PROJECT_CODE = projectCode
     const projectDir = options.projectDir?.trim()
@@ -1739,6 +1753,8 @@ export class LocalSandbox
     this.harnessProjectId = harnessProjectId || undefined
     this.harnessAdapterName = harnessAdapterName || undefined
     this.harnessAdapterVersion = harnessAdapterVersion || undefined
+    this.harnessNodeName = harnessNodeName || undefined
+    this.harnessNodeStatus = harnessNodeStatus || undefined
     this.projectCode = projectCode || undefined
     this.projectDir = projectDir || undefined
     this.codexExePath = options.codexExePath ?? "codex"
@@ -2456,6 +2472,12 @@ export class LocalSandbox
         : {}),
       ...(this.harnessAdapterVersion && !context.harnessAdapterVersion
         ? { harnessAdapterVersion: this.harnessAdapterVersion }
+        : {}),
+      ...(this.harnessNodeName && !context.harnessNodeName
+        ? { harnessNodeName: this.harnessNodeName }
+        : {}),
+      ...(this.harnessNodeStatus && !context.harnessNodeStatus
+        ? { harnessNodeStatus: this.harnessNodeStatus }
         : {}),
       ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
       ...(this.projectDir && !context.projectDir ? { projectDir: this.projectDir } : {}),
@@ -3771,6 +3793,15 @@ export class LocalSandbox
           formatted
       }
 
+      if (skillMatch && isSameMarkdownDocumentPath(resolvedPath, skillMatch.path)) {
+        result = renderPluginSkillMarkdownPlaceholders(result, skillMatch, {
+          pluginWorkspace: this.pluginWorkspace,
+          projectDir: this.projectDir,
+          featureId: this.featureId,
+          systemId: this.systemId
+        })
+      }
+
       if (fireSkillHooks && skillMatch) {
         this._hookScope?.activateSkill(skillMatch.name, skillMatch.pluginId, skillMatch.rootDir)
         this._hookScope?.activatePersistentHooks(
@@ -4854,6 +4885,10 @@ export class LocalSandbox
 
   /** Track all active child processes for cleanup on app quit. */
   private static readonly activeProcesses = new Set<ChildProcess>()
+
+  static hasActiveProcesses(): boolean {
+    return LocalSandbox.activeProcesses.size > 0
+  }
 
   /** Kill all active child processes. Call from app 'will-quit' hook. */
   static killAll(): void {

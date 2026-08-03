@@ -26,9 +26,11 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   const [customDialogOpen, setCustomDialogOpen] = useState(false)
   const [dialogModelId, setDialogModelId] = useState<string | undefined>(undefined)
   const [routingMode, setRoutingMode] = useState<"auto" | "pinned">("pinned")
+  const [defaultModelId, setDefaultModelId] = useState("")
 
   const { models, loadModels, loadProviders } = useAppStore()
-  const { currentModel, setCurrentModel, routingResult } = useCurrentThread(threadId)
+  const { currentModel, restoreCurrentModel, setCurrentModel, routingResult } =
+    useCurrentThread(threadId)
 
   // Load global routing mode on mount
   useEffect(() => {
@@ -36,8 +38,15 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   }, [])
 
   useEffect(() => {
-    loadModels()
-    loadProviders()
+    const reloadModels = (): void => {
+      void loadModels()
+      void loadProviders()
+      void window.api.models.getDefault().then(setDefaultModelId)
+    }
+    reloadModels()
+    return window.api.models.onChanged(() => {
+      reloadModels()
+    })
   }, [loadModels, loadProviders])
 
   const selectedModel = models.find((m) => m.id === currentModel)
@@ -50,7 +59,8 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
 
   // Resolve display name for the auto-routed model
   const routedModelName = routingResult
-    ? (models.find((m) => m.id === routingResult.resolvedModelId || `custom:${m.id}` === routingResult.resolvedModelId)?.name ?? routingResult.resolvedModelId.replace("custom:", ""))
+    ? (models.find((m) => m.id === routingResult.resolvedModelId)?.name ??
+      routingResult.resolvedModelId.replace(/^(?:custom|builtin):/, ""))
     : null
   const routedTierLabel = routingResult?.resolvedTier === "economy" ? "经济" : routingResult?.resolvedTier === "premium" ? "强力" : null
 
@@ -63,17 +73,19 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
       const metadata = thread?.metadata || {}
       // Prefer routing-resolved model (smart routing) over user's pinned selection,
       // so that the context window indicator reflects the actually-used model.
-      const routingState = metadata.routingState as
-        | { lastResolvedModelId?: string }
-        | undefined
+      const routingState = metadata.routingState as { lastResolvedModelId?: string } | undefined
       const effectiveModel = routingState?.lastResolvedModelId || (metadata.model as string) || ""
       if (effectiveModel) {
-        setCurrentModel(effectiveModel)
+        // Hydration only restores the model used by the current view. Persisting here
+        // would turn a read-only session open into an updated_at change.
+        restoreCurrentModel(effectiveModel)
       }
       setMetadataLoaded(true)
     })
-    return () => { cancelled = true }
-  }, [threadId, setCurrentModel])
+    return () => {
+      cancelled = true
+    }
+  }, [threadId, restoreCurrentModel])
 
   useEffect(() => {
     if (models.length === 0 || !metadataLoaded) return
@@ -89,10 +101,12 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
     }
 
     if (!hasValidSelection) {
-      const preferred = models.find((m) => m.available) || models[0]
-      setCurrentModel(preferred.id)
+      const preferred =
+        models.find((model) => model.id === defaultModelId && model.available) ??
+        models.find((model) => model.available)
+      if (preferred) setCurrentModel(preferred.id)
     }
-  }, [models, currentModel, setCurrentModel, metadataLoaded])
+  }, [models, currentModel, defaultModelId, setCurrentModel, metadataLoaded])
 
   function handleModelSelect(modelId: string): void {
     setCurrentModel(modelId)
@@ -137,15 +151,26 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
           {/* Auto routing toggle */}
           <div className="flex items-center justify-between px-2 py-1.5 mb-1 border-b border-border">
             <div className="flex items-center gap-1.5">
-              <Zap className={cn("size-3.5", canEnableRouting ? "text-amber-500" : "text-muted-foreground/40")} />
-              <span className={cn("text-xs font-medium", !canEnableRouting && "text-muted-foreground/60")}>智能路由</span>
+              <Zap
+                className={cn(
+                  "size-3.5",
+                  canEnableRouting ? "text-amber-500" : "text-muted-foreground/40"
+                )}
+              />
+              <span
+                className={cn(
+                  "text-xs font-medium",
+                  !canEnableRouting && "text-muted-foreground/60"
+                )}
+              >
+                智能路由
+              </span>
               <div className="group relative shrink-0">
                 <Info className="size-3.5 text-muted-foreground/40 hover:text-muted-foreground/70 cursor-default transition-colors" />
                 <div className="pointer-events-none absolute bottom-full left-0 mb-2 w-64 rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-5 text-muted-foreground shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-50">
                   {canEnableRouting
                     ? "开启后根据任务复杂度自动选择模型：强力档处理复杂任务（代码、分析），经济档处理简单任务（问答、翻译）"
-                    : "需要同时配置强力和经济两个档位的模型，才能开启智能路由。"
-                  }
+                    : "需要同时配置强力和经济两个档位的模型，才能开启智能路由。"}
                 </div>
               </div>
             </div>
@@ -200,6 +225,9 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                     {model.name}
                     {!model.available ? "（未配置密钥）" : ""}
                   </span>
+                  <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
+                    {model.source === "builtin" ? "内置" : "自定义"}
+                  </span>
                   {currentModel === model.id && (
                     <Check className="size-3.5 shrink-0 text-foreground" />
                   )}
@@ -221,9 +249,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
           ) : (
             <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
               <Key className="size-6 text-muted-foreground mb-2" />
-              <p className="text-xs text-muted-foreground mb-3">
-                尚未配置模型
-              </p>
+              <p className="text-xs text-muted-foreground mb-3">尚未配置模型</p>
               <Button
                 size="sm"
                 onClick={() => {

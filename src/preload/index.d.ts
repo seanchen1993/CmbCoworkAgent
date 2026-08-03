@@ -1,5 +1,7 @@
+import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
   Thread,
+  Message,
   ModelConfig,
   Provider,
   StreamEvent,
@@ -37,7 +39,14 @@ import type {
   ConfigurePreferredIdeResult,
   IdeSettings,
   OpenIdeRequest,
-  PreferredIde
+  PreferredIde,
+  ForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams,
+  ThreadForkParams,
+  ThreadForkResponse,
+  SubagentTranscriptPage,
+  SubagentTranscriptBlobExportResult,
+  SubagentTranscriptBlobField
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -51,18 +60,32 @@ import type {
 } from "../main/ipc/code-exec-tools"
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -81,6 +104,12 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
+import type {
+  CloseToTrayPromptAction,
+  CloseToTrayPromptEvent,
+  WindowCloseBehavior
+} from "../shared/close-to-tray"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -88,6 +117,15 @@ interface ElectronAPI {
   closeLoginWindow: () => void
   openLoginPage: () => void
   closeLoginPage: () => void
+  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptEvent) => void) => () => void
+  respondCloseToTrayPrompt: (
+    requestId: number,
+    action: CloseToTrayPromptAction,
+    rememberChoice?: boolean
+  ) => void
+  getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
+  setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
+  onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
@@ -164,6 +202,33 @@ interface DashboardTraceDetail {
   userIp?: string
   modelId?: string
   modelName?: string
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number
@@ -306,23 +371,6 @@ interface DashboardCommitAdoptionEvents {
     sumAdopted: number
     rate: number | null
   }
-}
-
-interface LocalAdoptionLine {
-  lineNumber: number
-  text: string
-  adopted: boolean
-}
-
-interface LocalGenAdoptionLines {
-  genEventId: string
-  available: boolean
-  reason?: string
-  relPath?: string
-  generatedLineCount?: number
-  matchedLineCount?: number
-  truncated?: boolean
-  lines?: LocalAdoptionLine[]
 }
 
 interface DashboardSkillEvalOptions {
@@ -510,10 +558,14 @@ interface DashboardProjectModeFeature {
 interface DashboardProjectModeSkillCount {
   skill: string
   count: number
+  isPlugin?: boolean
+  pluginName?: string
 }
 
 interface DashboardProjectModeSkillAdoption extends DashboardCodeStats {
   skill: string
+  isPlugin?: boolean
+  pluginName?: string
   commitCount: number
 }
 
@@ -567,10 +619,13 @@ interface DashboardProjectModeProject {
   creatorUpperOrgLv0?: string
   creatorUpperOrgLv1?: string
   lifecycleStatus?: string
+  lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
+  systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  devStageConversationCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
@@ -591,6 +646,7 @@ interface DashboardProjectModeProjectCounts {
 
 type DashboardProjectModeProjectSortKey =
   | "featureCount"
+  | "createdAt"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -774,6 +830,22 @@ interface CustomAPI {
       }
     }>
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
+    queueCurrentRunMessage: (
+      threadId: string,
+      message: { id: string; content: string; displayContent?: string }
+    ) => Promise<{ queued: boolean; reason?: string; message?: string }>
+    deleteCurrentRunQueuedMessage: (threadId: string, messageId: string) => Promise<void>
+    reconcileCurrentRunQueuedMessages: (
+      threadId: string,
+      messageIds: string[]
+    ) => Promise<{ pendingIds: string[]; injectedIds: string[]; durableIds: string[] }>
+    onQueuedMessagesInjected: (
+      threadId: string,
+      callback: (payload: {
+        messages: Array<{ id: string; content: string }>
+        assistantIdAlias?: { sourceId: string; id: string }
+      }) => void
+    ) => () => void
     getCoordinatorWorkers: (
       threadId: string,
       options?: { subscribeUpdates?: boolean }
@@ -800,6 +872,10 @@ interface CustomAPI {
       }
     ) => Promise<void>
     isCoordinatorModeForced: () => Promise<boolean>
+    canPreviewSystemPrompt: () => Promise<boolean>
+    getSystemPromptPreview: (
+      threadId: string
+    ) => Promise<{ prompt: string | null; updatedAt: number | null }>
   }
   workflows: {
     listRuns: (threadId: string) => Promise<unknown[]>
@@ -830,10 +906,41 @@ interface CustomAPI {
   threads: {
     list: () => Promise<Thread[]>
     get: (threadId: string) => Promise<Thread | null>
+    getProjectSubagentsAvailable: (threadId: string) => Promise<boolean>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
+    fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
+    listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
+    resolveForkCheckpointForMessage: (
+      params: ThreadForkCheckpointForMessageParams
+    ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
+    getSubagentTranscripts: (threadId: string) => Promise<Record<string, unknown>>
+    getSubagentTranscript: (
+      threadId: string,
+      subagentId: string,
+      before?: number
+    ) => Promise<SubagentTranscriptPage>
+    exportSubagentTranscriptBlob: (
+      threadId: string,
+      subagentId: string,
+      messageIndex: number,
+      expectedMessageId: string,
+      field: SubagentTranscriptBlobField
+    ) => Promise<SubagentTranscriptBlobExportResult>
+    persistSubagentTranscripts: (
+      threadId: string,
+      transcripts: Record<string, unknown>
+    ) => Promise<Record<string, unknown>>
     delete: (threadId: string) => Promise<void>
+    getMessages: (threadId: string) => Promise<Message[]>
+    appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
+    replaceMessageId: (
+      threadId: string,
+      fromId: string,
+      toId: string,
+      role?: Message["role"]
+    ) => Promise<{ replaced: boolean }>
     exportSession: (
       threadId: string
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
@@ -928,6 +1035,9 @@ interface CustomAPI {
         topP: number
         topK: number
         interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       }>
     >
@@ -943,8 +1053,52 @@ interface CustomAPI {
       topP: number
       topK: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null>
+    getBuiltinConfigs: () => Promise<
+      Array<{
+        id: string
+        ref: `builtin:${string}`
+        source: "builtin"
+        origin: "remote" | "fallback"
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+      }>
+    >
+    updateBuiltinConfig: (
+      id: string,
+      config: {
+        name?: string
+        maxTokens?: number
+        maxOutputTokens?: number
+        temperature?: number
+        topP?: number
+        topK?: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+      }
+    ) => Promise<void>
+    resetBuiltinConfig: (id: string) => Promise<void>
+    onChanged: (callback: () => void) => () => void
     setCustomConfig: (config: {
       id: string
       name: string
@@ -957,6 +1111,9 @@ interface CustomAPI {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<void>
     // Backward-compatible alias, prefer upsertCustomConfig in new code.
@@ -972,6 +1129,9 @@ interface CustomAPI {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }) => Promise<{ id: string }>
     upsertUserInfo: (config: UserInfoConfig) => Promise<{ id: string }>
@@ -986,6 +1146,9 @@ interface CustomAPI {
       temperature?: number
       topP?: number
       topK?: number
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
     }) => Promise<{ success: boolean; error?: string; latencyMs?: number }>
   }
   ide: {
@@ -1037,18 +1200,24 @@ interface CustomAPI {
       modified_at?: string
       error?: string
     }>
-    readExternalFile: (filePath: string) => Promise<{
+    readExternalFile: (token: string) => Promise<{
       success: boolean
       content?: string
       size?: number
       modified_at?: string
       error?: string
     }>
-    readExternalBinaryFile: (filePath: string) => Promise<{
+    readExternalBinaryFile: (token: string) => Promise<{
       success: boolean
       content?: string
       size?: number
       modified_at?: string
+      error?: string
+    }>
+    requestExternalFileRead: (filePath: string) => Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
       error?: string
     }>
     clearWorktreeContext: (threadId: string) => Promise<void>
@@ -1197,7 +1366,7 @@ interface CustomAPI {
       gitRoot: string
     ) => Promise<Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>>
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ) => Promise<{
       success: boolean
@@ -1262,22 +1431,23 @@ interface CustomAPI {
       error?: string
     }>
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string }) => void
+      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
     ) => () => void
   }
   pet: {
     // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
     list: () => Promise<PetManifest[]>
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    ) => Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }>
     // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
     setState: (state: PetState) => void
     // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
     clearCompletedTasks: () => void
     getSettings: () => Promise<PetSettings>
     updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
+    onSettingsChanged: (callback: (settings: PetSettings) => void) => () => void
     uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
@@ -1438,6 +1608,7 @@ interface CustomAPI {
       }
     ) => Promise<void>
     getEnabled: () => Promise<boolean>
+    getProjectModeEnabled: () => Promise<boolean>
     setEnabled: (enabled: boolean) => Promise<void>
     getDreamEnabled: () => Promise<boolean>
     setDreamEnabled: (enabled: boolean) => Promise<void>
@@ -1486,6 +1657,10 @@ interface CustomAPI {
       workspacePath: string,
       cardNumber?: string
     ) => Promise<AgentAutoCommitWorkspaceCard>
+  }
+  expertAgents: {
+    list: () => Promise<import("../shared/expert-agent-types").ExpertAgentEntry[]>
+    setEnabled: (name: string, enabled: boolean) => Promise<string[]>
   }
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
@@ -1573,6 +1748,7 @@ interface CustomAPI {
       claudeModelId?: string
       syncSkills?: boolean
       syncMemory?: boolean
+      launchSource?: "select_dir" | "restart"
     }) => Promise<string>
     write: (id: string, data: string) => void
     resize: (id: string, cols: number, rows: number) => void
@@ -1927,6 +2103,29 @@ interface CustomAPI {
       Array<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         durationMs: number
         userMessage: string
@@ -1946,6 +2145,29 @@ interface CustomAPI {
     getTraceDetail: (traceId: string) => Promise<{
       traceId: string
       threadId: string
+      observabilitySchemaVersion?: number
+      traceKind?: string
+      executionMode?: string
+      rootTraceId?: string
+      rootThreadId?: string
+      parentTraceId?: string
+      parentThreadId?: string
+      parentSpanId?: string
+      linkType?: string
+      subagentKind?: string
+      subagentRunId?: string
+      subagentThreadId?: string
+      handoffAction?: string
+      handoffSourceAgent?: string
+      handoffTargetAgent?: string
+      coordinatorWorkerId?: string
+      coordinatorWorkerTurn?: number
+      coordinatorWorkerRole?: string
+      coordinatorWorkerWorkload?: string
+      workflowRunId?: string
+      workflowAgentIndex?: number
+      workflowPhase?: string
+      workflowAgentLabel?: string
       startedAt: string
       endedAt: string
       durationMs: number
@@ -2352,15 +2574,36 @@ interface CustomAPI {
   harnessBoard: {
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
+    getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
+    getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
+    saveDeployUnitMappings: (
+      mappings: HarnessDeployUnitMapping[]
+    ) => Promise<HarnessDeployUnitMapping[]>
+    saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
+    syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
+    getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
     ) => Promise<HarnessEnterpriseProjectSearchResult>
+    searchDeployUnits: (
+      input: HarnessDeployUnitSearchInput
+    ) => Promise<HarnessDeployUnitSearchResult>
+    queryPipelines: (input: HarnessPipelineQueryInput) => Promise<HarnessPipelineQueryResult>
+    queryPipelineLabels: (
+      input: HarnessPipelineLabelQueryInput
+    ) => Promise<HarnessPipelineLabelQueryResult>
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
+    getProjectReviews: (input: HarnessProjectReviewInput) => Promise<HarnessProjectReviewResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
+    updateFeatureDeployUnits: (
+      input: HarnessFeatureDeployUnitUpdateInput
+    ) => Promise<HarnessFeatureDeployUnitBinding>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
+    getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
+    getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -2379,10 +2622,11 @@ interface CustomAPI {
   }
   update: {
     check: () => Promise<
-      | { hasUpdate: false }
+      | { hasUpdate: false; source?: UpdateSourceInfo | null }
       | {
           hasUpdate: true
           version: string
+          targetVersion: string
           updateType: string
           releaseNotes: string
           size: number
@@ -2397,6 +2641,7 @@ interface CustomAPI {
             message: string
           } | null
           currentError?: string | null
+          source?: UpdateSourceInfo | null
         }
     >
     download: () => Promise<{ success: boolean }>
@@ -2407,6 +2652,7 @@ interface CustomAPI {
       status: string
       update: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
@@ -2422,16 +2668,19 @@ interface CustomAPI {
       } | null
       errorMessage: string | null
       canRollback: boolean
+      source: UpdateSourceInfo | null
     }>
     getStartupResult: () => Promise<{ updatedFrom?: string; updatedTo?: string }>
     onAvailable: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
         mandatory: boolean
         autoDownloading?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => () => void
     onProgress: (
@@ -2447,10 +2696,12 @@ interface CustomAPI {
     onDownloaded: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes?: string
         size?: number
         mandatory?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => () => void
     onError: (callback: (err: { message: string; silent?: boolean }) => void) => () => void

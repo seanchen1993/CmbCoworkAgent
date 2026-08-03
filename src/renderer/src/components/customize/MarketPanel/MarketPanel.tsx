@@ -13,10 +13,10 @@ import {
   Star,
   User,
   Edit,
-  FileText,
   X,
   BarChart3,
   Check,
+  Calendar,
   ChevronDown, ArrowLeft
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -30,6 +30,7 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { Switch } from "@/components/ui/switch"
 import { useAppStore } from "@/lib/store"
 import {
   Dialog,
@@ -103,6 +104,23 @@ import {
 // Local storage helper functions for tracking user uploads
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
 const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
+const MARKET_ALL_USER_CACHE_KEY = "market_panel_query_all_user_cache_v1"
+const MARKET_FRONTEND_PAGE_SIZE = 10
+
+interface MarketPanelAllUserItem {
+  sapId: string
+  userName: string
+  orgName: string
+  upperOrgLv0?: string
+  upperOrgLv1?: string
+}
+
+interface MarketPanelAllUserCachePayload {
+  cachedAt: string
+  users: MarketPanelAllUserItem[]
+}
+
+let marketAllUserRefreshPromise: Promise<MarketPanelAllUserItem[]> | null = null
 
 function normalizeSkillName(value?: string): string {
   return String(value || "")
@@ -214,6 +232,115 @@ function readLocalUploadedSkillPathSetFromStorage(): Set<string> {
   }
 }
 
+function normalizeMarketPanelAllUserItem(value: unknown): MarketPanelAllUserItem | null {
+  if (!value || typeof value !== "object") return null
+
+  const record = value as Record<string, unknown>
+  const sapId = String(record.sapId || "").trim()
+  if (!sapId) return null
+
+  const userName = String(record.userName || "").trim()
+  const orgName = String(record.orgName || "").trim()
+  const upperOrgLv0 = String(record.upperOrgLv0 || "").trim()
+  const upperOrgLv1 = String(record.upperOrgLv1 || "").trim()
+
+  return {
+    sapId,
+    userName,
+    orgName,
+    upperOrgLv0: upperOrgLv0 || undefined,
+    upperOrgLv1: upperOrgLv1 || undefined
+  }
+}
+
+function normalizeMarketPanelAllUsers(value: unknown): MarketPanelAllUserItem[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => normalizeMarketPanelAllUserItem(item))
+    .filter((item): item is MarketPanelAllUserItem => item !== null)
+}
+
+function readMarketPanelAllUsersFromStorage(): MarketPanelAllUserItem[] | null {
+  try {
+    const raw = localStorage.getItem(MARKET_ALL_USER_CACHE_KEY)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw) as unknown
+    if (Array.isArray(parsed)) {
+      const users = normalizeMarketPanelAllUsers(parsed)
+      return users.length > 0 ? users : null
+    }
+
+    const payload =
+      parsed && typeof parsed === "object" ? (parsed as MarketPanelAllUserCachePayload) : null
+    const users = normalizeMarketPanelAllUsers(payload?.users)
+    return users.length > 0 ? users : null
+  } catch (error) {
+    console.warn("[MarketPanel] Failed to read cached all-user list:", error)
+    return null
+  }
+}
+
+function writeMarketPanelAllUsersToStorage(users: MarketPanelAllUserItem[]): void {
+  try {
+    const payload: MarketPanelAllUserCachePayload = {
+      cachedAt: new Date().toISOString(),
+      users: normalizeMarketPanelAllUsers(users)
+    }
+    localStorage.setItem(MARKET_ALL_USER_CACHE_KEY, JSON.stringify(payload))
+  } catch (error) {
+    console.warn("[MarketPanel] Failed to write cached all-user list:", error)
+  }
+}
+
+async function refreshMarketPanelAllUsers(): Promise<MarketPanelAllUserItem[]> {
+  if (marketAllUserRefreshPromise) return marketAllUserRefreshPromise
+
+  marketAllUserRefreshPromise = (async () => {
+    if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+      throw new Error("queryAllUser API unavailable")
+    }
+
+    const response = await window.api.dashboard.queryAllUser()
+    if (!response.success || !response.data) {
+      throw new Error(response.error || "获取全量用户信息失败")
+    }
+
+    const users = normalizeMarketPanelAllUsers(response.data)
+    writeMarketPanelAllUsersToStorage(users)
+    return users
+  })()
+
+  try {
+    return await marketAllUserRefreshPromise
+  } finally {
+    marketAllUserRefreshPromise = null
+  }
+}
+
+async function loadMarketPanelAllUsersPreferCache(options?: {
+  onCacheHit?: (users: MarketPanelAllUserItem[]) => void
+  onFreshData?: (users: MarketPanelAllUserItem[]) => void
+  onRefreshError?: (error: unknown) => void
+}): Promise<MarketPanelAllUserItem[]> {
+  const cachedUsers = readMarketPanelAllUsersFromStorage()
+  if (cachedUsers) {
+    options?.onCacheHit?.(cachedUsers)
+    void refreshMarketPanelAllUsers()
+      .then((freshUsers) => {
+        options?.onFreshData?.(freshUsers)
+      })
+      .catch((error) => {
+        options?.onRefreshError?.(error)
+      })
+    return cachedUsers
+  }
+
+  const freshUsers = await refreshMarketPanelAllUsers()
+  options?.onFreshData?.(freshUsers)
+  return freshUsers
+}
+
 interface SkillUserUsage {
   sapId: string
   userName: string
@@ -256,6 +383,151 @@ interface UserInfoLite {
   sapId?: string
   ystId?: string
   pathName?: string
+}
+
+type MarketExtraJson = {
+  skills?: string[]
+  grayUserIds?: string[]
+  grayOrgs?: string[]
+  updated_at?: string
+}
+
+function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
+  if (!extraJson?.trim()) return {}
+  try {
+    const parsed = JSON.parse(extraJson) as MarketExtraJson
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  if (!Array.isArray(parsed.grayUserIds)) return []
+  return Array.from(
+    new Set(
+      parsed.grayUserIds
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function getGrayOrgsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  if (!Array.isArray(parsed.grayOrgs)) return []
+  return Array.from(
+    new Set(
+      parsed.grayOrgs
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function getMarketUpdatedAt(item: Pick<MarketItem, "created_at" | "updated_at" | "extra_json">): string {
+  return parseMarketExtraJson(item.extra_json).updated_at || item.updated_at || item.created_at
+}
+
+function matchesMarketSearchQuery(item: Pick<MarketItem, "name" | "chinese_name" | "description" | "user_id">, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase()
+  if (!normalizedQuery) return true
+
+  return Boolean(
+    item.chinese_name?.toLowerCase().includes(normalizedQuery) ||
+      item.name.toLowerCase().includes(normalizedQuery) ||
+      item.description?.toLowerCase().includes(normalizedQuery) ||
+      item.user_id?.toLowerCase().includes(normalizedQuery)
+  )
+}
+
+function formatMarketListDateTime(value?: string): string {
+  if (!value) return ""
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const year = String(date.getFullYear())
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${year}/${month}/${day}`
+}
+
+function splitEnvIds(value: string | undefined): Set<string> {
+  return new Set(
+    String(value || "")
+      .split(/[,\n;\s]+/)
+      .map((id) => id.trim())
+      .filter(Boolean)
+  )
+}
+
+function getMarketAdminYstIds(): Set<string> {
+  return splitEnvIds(import.meta.env.VITE_ADMIN_YST_IDS)
+}
+
+const MARKET_ADMIN_YST_IDS = getMarketAdminYstIds()
+
+function canCurrentUserEditOrDeleteMarketItem(
+  item: Pick<MarketItem, "canDelete" | "ip">,
+  localIp?: string | null,
+  isCurrentUserMarketAdmin = false
+): boolean {
+  return Boolean(
+    isCurrentUserMarketAdmin || item.canDelete || (item.ip && localIp && item.ip === localIp)
+  )
+}
+
+function doesMarketUserIdMatchCurrentUser(
+  rawUserId: string | null | undefined,
+  currentUserIdCandidates: Iterable<string>,
+  currentUserSapId?: string | null | undefined
+): boolean {
+  const normalizedCurrentIds = Array.from(
+    new Set([
+      ...Array.from(currentUserIdCandidates, (value) => String(value || "").trim()).filter(Boolean),
+      ...buildUploaderIdCandidates(currentUserSapId || undefined)
+    ])
+  )
+  if (!rawUserId || normalizedCurrentIds.length === 0) return false
+
+  const targetCandidates = getUploaderIdCandidates(rawUserId)
+  return targetCandidates.some((candidate) =>
+    normalizedCurrentIds.some(
+      (currentId) =>
+        currentId === candidate || currentId.includes(candidate) || candidate.includes(currentId)
+    )
+  )
+}
+
+function canCurrentUserViewMarketItem(
+  item: MarketItem,
+  currentUserSapId: string | null | undefined,
+  currentUserIdCandidates: Iterable<string>,
+  currentUserPathName?: string | null | undefined
+): boolean {
+  if (doesMarketUserIdMatchCurrentUser(item.user_id, currentUserIdCandidates, currentUserSapId)) {
+    return true
+  }
+  const grayUserIds = getGrayUserIdsFromExtraJson(item.extra_json)
+  const grayOrgs = getGrayOrgsFromExtraJson(item.extra_json)
+  
+  if (grayUserIds.length === 0 && grayOrgs.length === 0) return true
+  
+  if (grayUserIds.length > 0 && grayUserIds.some((userId) =>
+    doesMarketUserIdMatchCurrentUser(userId, currentUserIdCandidates, currentUserSapId)
+  )) {
+    return true
+  }
+  
+  if (grayOrgs.length > 0 && currentUserPathName && grayOrgs.some((org) =>
+    currentUserPathName.includes(org)
+  )) {
+    return true
+  }
+  
+  return false
 }
 
 type UploadFilterMode = "mine" | "installed" | "featured" | "certified"
@@ -391,6 +663,7 @@ function MarketItemCard({
   const itemTag = item.tag?.trim()
   const isSkillCard = skillCallCount !== null || skillUserCount !== null
   const installActionDisabled = !!installDisabledReason
+  const uploadTimeLabel = formatMarketListDateTime(item.created_at)
 
   const installDisabledTooltip = (
     <TooltipContent side="top" className="max-w-72 text-xs leading-relaxed">
@@ -498,10 +771,12 @@ function MarketItemCard({
       {/* Footer: metadata + actions */}
       <div className="mt-auto flex items-center justify-between flex-wrap gap-2 pt-3 border-t border-[#f0eee6]">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
-          {/*<div className="flex items-center gap-1">*/}
-          {/*  <Calendar className="size-3 shrink-0" />*/}
-          {/*  <span>{new Date(item.created_at).toLocaleDateString("zh-CN")}</span>*/}
-          {/*</div>*/}
+          {uploadTimeLabel ? (
+            <div className="flex items-center gap-1">
+              <Calendar className="size-3 shrink-0" />
+              <span>上传于 {uploadTimeLabel}</span>
+            </div>
+          ) : null}
           {/*{item.version && (*/}
           {/*  <div className="flex items-center gap-1">*/}
           {/*    <GitBranch className="size-3 shrink-0" />*/}
@@ -530,15 +805,6 @@ function MarketItemCard({
             <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
           ) : (
             <>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-3 gap-1 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] hover:border-[#d1cfc5] shadow-[#e8e6dc_0px_0px_0px_0px,#d1cfc5_0px_0px_0px_1px] cursor-pointer rounded-lg"
-                onClick={() => onOpenDetail(item)}
-              >
-                <FileText className="size-3" />
-                详情
-              </Button>
               {isInstalled ? (
                 isFeatured ? (
                   <span className="text-[11px] bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1 rounded-lg inline-flex items-center gap-1">
@@ -557,7 +823,7 @@ function MarketItemCard({
                             disabled
                             aria-disabled="true"
                           >
-                            <Zap className="size-3" />
+                            <Plus className="size-3" />
                             无需安装
                           </Button>
                         </span>
@@ -577,7 +843,7 @@ function MarketItemCard({
                       className="market-update-bounce h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0]"
                       onClick={handleUpdateInstall}
                     >
-                      <Zap className="size-3" />
+                      <Plus className="size-3" />
                       更新
                     </Button>
                   </UpdateVersionTooltip>
@@ -588,7 +854,7 @@ function MarketItemCard({
                     className="h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc]"
                     onClick={handleUpdateInstall}
                   >
-                    <Zap className="size-3" />
+                    <Plus className="size-3" />
                     重装
                   </Button>
                 )
@@ -604,7 +870,7 @@ function MarketItemCard({
                             disabled
                             aria-disabled="true"
                           >
-                            <Zap className="size-3" />
+                            <Plus className="size-3" />
                             无需安装
                           </Button>
                         </span>
@@ -618,7 +884,7 @@ function MarketItemCard({
                     className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] cursor-pointer rounded-lg"
                     onClick={handleInstallDownload}
                   >
-                    <Zap className="size-3" />
+                    <Plus className="size-3" />
                     安装
                   </Button>
                 )
@@ -635,7 +901,7 @@ function MarketItemCard({
                   卸载
                 </Button>
               )}
-              {(item.canDelete || (item.ip && ip && item.ip === ip)) && (
+              {canCurrentUserEditOrDeleteMarketItem(item, ip) && (
                 <>
                   <Button
                     variant="outline"
@@ -715,6 +981,12 @@ export function MarketPanel(): React.JSX.Element {
     mcp: "",
     plugin: ""
   })
+  const [marketPageNums, setMarketPageNums] = useState<Record<MarketItemType, number>>({
+    skill: 1,
+    orgSkill: 1,
+    mcp: 1,
+    plugin: 1
+  })
   const [uploadFilterModes, setUploadFilterModes] = useState<UploadFilterMode[]>([])
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [pendingInitialCategoryFilter, setPendingInitialCategoryFilter] = useState<string | null>(
@@ -756,6 +1028,7 @@ export function MarketPanel(): React.JSX.Element {
   const [mcpDetailConnector, setMcpDetailConnector] = useState<McpConnectorConfig | null>(null)
   const [pluginDetailPlugin, setPluginDetailPlugin] = useState<PluginMetadata | null>(null)
   const [pluginDetailData, setPluginDetailData] = useState<PluginDetailData | null>(null)
+  const pluginDetailFileBlobRef = useRef<Blob | null>(null)
   const [skillUsageSummary, setSkillUsageSummary] = useState<
     Record<string, SkillUsageSummaryMetric>
   >({})
@@ -769,6 +1042,10 @@ export function MarketPanel(): React.JSX.Element {
   const [canViewSkillUserDetail, setCanViewSkillUserDetail] = useState(false)
   const [uploaderProfiles, setUploaderProfiles] = useState<Record<string, UploaderProfile>>({})
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
+  const [currentUserSapId, setCurrentUserSapId] = useState<string | null>(null)
+  const [currentUserPathName, setCurrentUserPathName] = useState<string | null>(null)
+  const [isCurrentUserMarketAdmin, setIsCurrentUserMarketAdmin] = useState(false)
+  const [adminModeEnabled, setAdminModeEnabled] = useState(false)
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
     readUploadedSkillNamesFromStorage()
   )
@@ -785,12 +1062,15 @@ export function MarketPanel(): React.JSX.Element {
   const installedMcpsRef = useRef<string[]>([])
   const installedPluginsRef = useRef<string[]>([])
   const updateNoticeShownRef = useRef<Set<string>>(new Set())
+  const uploaderProfilesRequestIdRef = useRef(0)
   const openItemDetailRef = useRef<(item: MarketItem) => Promise<void>>(async () => {})
   const previousActiveTabRef = useRef<MarketItemType>(activeTab)
   const currentUserCandidateSet = useMemo(
     () => new Set(currentUserUploadCandidates),
     [currentUserUploadCandidates]
   )
+  const currentLocalIp = localStorage.getItem("localIp")
+  const isAdminModeActive = isCurrentUserMarketAdmin && adminModeEnabled
   const uploadedSkillDisabledReason = "这个技能已经存在于“我上传的技能”里，无需重复安装。"
   const uploadedSkillNameSetRef = useRef<Set<string>>(uploadedSkillNames)
 
@@ -813,12 +1093,12 @@ export function MarketPanel(): React.JSX.Element {
           : "Plugins"
   const getMarketSearchPlaceholder = (type: MarketItemType) =>
     type === "skill"
-      ? "搜索技能…"
+      ? "搜索技能名、描述或 user_id…"
       : type === "orgSkill"
         ? "搜索组织级技能…"
         : type === "mcp"
-          ? "搜索 MCP 连接器…"
-          : "搜索插件…"
+          ? "搜索 MCP、描述或 user_id…"
+          : "搜索插件名、描述或 user_id…"
   const tabIntros: Record<MarketItemType, { title: string; description: string }> = {
     skill: {
       title: "Skills 是可直接调用的专项能力",
@@ -839,9 +1119,35 @@ export function MarketPanel(): React.JSX.Element {
   const activeTabIntro = tabIntros[activeTab]
   const activeSearchQuery = searchQueries[activeTab] ?? ""
 
-  const setSearchQueryForTab = useCallback((tab: MarketItemType, query: string) => {
-    setSearchQueries((prev) => (prev[tab] === query ? prev : { ...prev, [tab]: query }))
+  const setMarketPageForTab = useCallback((tab: MarketItemType, pageNum: number) => {
+    const numericPageNum = Number.isFinite(pageNum) ? Math.floor(pageNum) : 1
+    const nextPageNum = Math.max(1, numericPageNum)
+    setMarketPageNums((prev) =>
+      prev[tab] === nextPageNum ? prev : { ...prev, [tab]: nextPageNum }
+    )
   }, [])
+
+  const resetMarketPageForTab = useCallback((tab: MarketItemType) => {
+    setMarketPageNums((prev) => (prev[tab] === 1 ? prev : { ...prev, [tab]: 1 }))
+  }, [])
+
+  const setActiveMarketPage = useCallback(
+    (pageNum: number) => {
+      setMarketPageForTab(activeTab, pageNum)
+      if (activeTab !== ORG_SKILL_MARKET_TYPE) {
+        listCardContainerRef.current?.scrollTo({ top: 0 })
+      }
+    },
+    [activeTab, setMarketPageForTab]
+  )
+
+  const setSearchQueryForTab = useCallback(
+    (tab: MarketItemType, query: string) => {
+      setSearchQueries((prev) => (prev[tab] === query ? prev : { ...prev, [tab]: query }))
+      resetMarketPageForTab(tab)
+    },
+    [resetMarketPageForTab]
+  )
 
   const getScrollAreaViewport = useCallback((root: HTMLDivElement | null): HTMLDivElement | null => {
     if (!root) return null
@@ -878,6 +1184,7 @@ export function MarketPanel(): React.JSX.Element {
     setMcpDetailConnector(null)
     setPluginDetailPlugin(null)
     setPluginDetailData(null)
+    pluginDetailFileBlobRef.current = null
     setSelectedSkillUsage(null)
     setSelectedSkillTraces([])
     setSkillTracesLoading(false)
@@ -1026,9 +1333,18 @@ export function MarketPanel(): React.JSX.Element {
     try {
       if (typeof window.api?.models?.getUserInfo !== "function") {
         setCurrentUserUploadCandidates([])
+        setCurrentUserSapId(null)
+        setIsCurrentUserMarketAdmin(false)
+        setAdminModeEnabled(false)
         return
       }
       const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
+      setCurrentUserSapId(userInfo?.sapId?.trim() || null)
+      setCurrentUserPathName(userInfo?.pathName?.trim() || null)
+      const currentYstId = userInfo?.ystId?.trim() || ""
+      const isAdmin = Boolean(currentYstId && MARKET_ADMIN_YST_IDS.has(currentYstId))
+      setIsCurrentUserMarketAdmin(isAdmin)
+      if (!isAdmin) setAdminModeEnabled(false)
       const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
         .map((value) => String(value || "").trim())
         .filter(Boolean)
@@ -1039,49 +1355,56 @@ export function MarketPanel(): React.JSX.Element {
     } catch (err) {
       console.warn("[MarketPanel] Failed to load current user upload candidates:", err)
       setCurrentUserUploadCandidates([])
+      setCurrentUserSapId(null)
+      setCurrentUserPathName(null)
+      setIsCurrentUserMarketAdmin(false)
+      setAdminModeEnabled(false)
     }
   }, [])
 
   const loadUploaderProfiles = useCallback(async (sapIds: string[]) => {
+    const requestId = ++uploaderProfilesRequestIdRef.current
     const rawUserIds = Array.from(new Set(sapIds.map((id) => id.trim()).filter(Boolean)))
     if (rawUserIds.length === 0) {
       setUploaderProfiles({})
       return
     }
 
-    if (typeof window.api?.dashboard?.queryAllUser !== "function") {
-      setUploaderProfiles({})
-      return
-    }
-
     try {
-      const response = await window.api.dashboard.queryAllUser()
-      if (!response.success || !response.data) {
-        throw new Error(response.error || "获取全量用户信息失败")
+      const applyProfiles = (allUsers: MarketPanelAllUserItem[]) => {
+        if (requestId !== uploaderProfilesRequestIdRef.current) return
+
+        const nextMap: Record<string, UploaderProfile> = {}
+        for (const rawUserId of rawUserIds) {
+          const lookupIds = buildUploaderIdCandidates(rawUserId)
+          const target = allUsers.find((user) =>
+            lookupIds.some((lookupId) => user.sapId.includes(lookupId))
+          )
+          if (!target) continue
+          nextMap[rawUserId] = {
+            sapId: target.sapId,
+            userName: target.userName,
+            orgName: formatTopUserOrgName(
+              target.orgName || "",
+              target.upperOrgLv1 || "",
+              target.upperOrgLv0 || ""
+            ),
+            upperOrgLv0: target.upperOrgLv0,
+            upperOrgLv1: target.upperOrgLv1
+          }
+        }
+        setUploaderProfiles(nextMap)
       }
 
-      const allUsers = response.data.filter((user) => user.sapId?.trim())
-      const nextMap: Record<string, UploaderProfile> = {}
-      for (const rawUserId of rawUserIds) {
-        const lookupIds = buildUploaderIdCandidates(rawUserId)
-        const target = allUsers.find((user) =>
-          lookupIds.some((lookupId) => user.sapId.includes(lookupId))
-        )
-        if (!target) continue
-        nextMap[rawUserId] = {
-          sapId: target.sapId,
-          userName: target.userName,
-          orgName: formatTopUserOrgName(
-            target.orgName || "",
-            target.upperOrgLv1 || "",
-            target.upperOrgLv0 || ""
-          ),
-          upperOrgLv0: target.upperOrgLv0,
-          upperOrgLv1: target.upperOrgLv1
+      await loadMarketPanelAllUsersPreferCache({
+        onCacheHit: applyProfiles,
+        onFreshData: applyProfiles,
+        onRefreshError: (error) => {
+          console.warn("[MarketPanel] Failed to refresh uploader profiles cache:", error)
         }
-      }
-      setUploaderProfiles(nextMap)
+      })
     } catch (err) {
+      if (requestId !== uploaderProfilesRequestIdRef.current) return
       console.warn("[MarketPanel] Failed to load uploader profiles:", err)
       setUploaderProfiles({})
     }
@@ -1519,6 +1842,11 @@ export function MarketPanel(): React.JSX.Element {
     setCategoryFilter(null)
   }, [activeTab])
 
+  useEffect(() => {
+    if (detailMode === "detail") return
+    setAdminModeEnabled(false)
+  }, [detailMode])
+
   const getCurrentData = () => {
     switch (activeTab) {
       case "skill":
@@ -1693,11 +2021,12 @@ export function MarketPanel(): React.JSX.Element {
           enabled: false,
           lazyLoad: false,
           createdAt: item.created_at,
-          updatedAt: item.created_at
+          updatedAt: getMarketUpdatedAt(item)
         })
       } else if (activeTab === "plugin") {
         // The zip is already downloaded above; parse it (without installing) to
         // surface real Skill/MCP/Hook counts instead of hardcoded zeros.
+        pluginDetailFileBlobRef.current = installFile.blob
         const buffer = await installFile.blob.arrayBuffer()
         const detail = await window.api.plugins.inspectZip(buffer)
         setPluginDetailPlugin({
@@ -1712,7 +2041,7 @@ export function MarketPanel(): React.JSX.Element {
           mcpServerCount: detail.mcpServers.length,
           hookCount: detail.hookCount,
           createdAt: item.created_at,
-          updatedAt: item.created_at
+          updatedAt: getMarketUpdatedAt(item)
         })
         setPluginDetailData({
           ...detail,
@@ -1735,10 +2064,9 @@ export function MarketPanel(): React.JSX.Element {
   const isMineUploadedItem = useCallback(
     (item: MarketItem): boolean => {
       if (localStorageHelper.canDeleteItem(item.name, activeTab)) return true
-      if (!item.user_id || currentUserCandidateSet.size === 0) return false
-      return getUploaderIdCandidates(item.user_id).some((id) => currentUserCandidateSet.has(id))
+      return doesMarketUserIdMatchCurrentUser(item.user_id, currentUserCandidateSet, currentUserSapId)
     },
-    [activeTab, currentUserCandidateSet]
+    [activeTab, currentUserCandidateSet, currentUserSapId]
   )
 
   const toggleUploadFilterMode = useCallback((mode: UploadFilterMode) => {
@@ -1758,11 +2086,13 @@ export function MarketPanel(): React.JSX.Element {
   const filteredData = useMemo(
     () =>
       currentData.filter((item) => {
-        const query = activeSearchQuery.trim().toLowerCase()
-        const matchesSearch =
-          item.chinese_name?.toLowerCase().includes(query) ||
-          item.name.toLowerCase().includes(query) ||
-          item.description?.toLowerCase().includes(query)
+        if (
+          activeTab !== ORG_SKILL_MARKET_TYPE &&
+          !canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet, currentUserPathName)
+        ) {
+          return false
+        }
+        const matchesSearch = matchesMarketSearchQuery(item, activeSearchQuery)
         if (!matchesSearch) return false
         if (
           uploadFilterModes.length > 0 &&
@@ -1780,7 +2110,16 @@ export function MarketPanel(): React.JSX.Element {
         if (!categoryFilter) return true
         return getCategoryFilterName(item.category) === categoryFilter
       }),
-    [activeSearchQuery, categoryFilter, currentData, isMineUploadedItem, uploadFilterModes]
+    [
+      activeSearchQuery,
+      activeTab,
+      categoryFilter,
+      currentData,
+      currentUserCandidateSet,
+      currentUserSapId,
+      isMineUploadedItem,
+      uploadFilterModes
+    ]
   )
 
   const sortedSkillData = useMemo(() => {
@@ -1789,6 +2128,16 @@ export function MarketPanel(): React.JSX.Element {
     return sortSkillItemsByUsage(filteredData, skillUsageSummary, skillSortMode)
   }, [activeTab, filteredData, skillSortMode, skillUsageSummary])
   const visibleMarketData = activeTab === "skill" ? sortedSkillData : filteredData
+  const activeMarketPageNum = marketPageNums[activeTab] ?? 1
+  const marketTotalItems = visibleMarketData.length
+  const marketTotalPages = Math.max(1, Math.ceil(marketTotalItems / MARKET_FRONTEND_PAGE_SIZE))
+  const safeMarketPageNum = Math.min(Math.max(1, activeMarketPageNum), marketTotalPages)
+  const paginatedMarketData = useMemo(() => {
+    const startIndex = (safeMarketPageNum - 1) * MARKET_FRONTEND_PAGE_SIZE
+    return visibleMarketData.slice(startIndex, startIndex + MARKET_FRONTEND_PAGE_SIZE)
+  }, [safeMarketPageNum, visibleMarketData])
+  const hasPreviousMarketPage = safeMarketPageNum > 1
+  const hasNextMarketPage = safeMarketPageNum < marketTotalPages
   const emptyResultMessage = activeSearchQuery.trim()
     ? "未找到匹配的项目"
     : uploadFilterModes.length > 1
@@ -1802,6 +2151,24 @@ export function MarketPanel(): React.JSX.Element {
             : uploadFilterModes[0] === "certified"
               ? "未找到认证项目"
               : "暂无可用项目"
+
+  useEffect(() => {
+    if (activeTab === ORG_SKILL_MARKET_TYPE) return
+    resetMarketPageForTab(activeTab)
+  }, [
+    activeSearchQuery,
+    activeTab,
+    categoryFilter,
+    resetMarketPageForTab,
+    skillSortMode,
+    uploadFilterModes
+  ])
+
+  useEffect(() => {
+    if (activeTab === ORG_SKILL_MARKET_TYPE) return
+    if (activeMarketPageNum === safeMarketPageNum) return
+    setMarketPageForTab(activeTab, safeMarketPageNum)
+  }, [activeMarketPageNum, activeTab, safeMarketPageNum, setMarketPageForTab])
 
   const marketCategoryStats = useMemo(() => {
     const categoryCounter = new Map<string, { primary: string; count: number }>()
@@ -1870,7 +2237,11 @@ export function MarketPanel(): React.JSX.Element {
   useEffect(() => {
     const detailName = marketInitialSkillDetailName?.trim()
     if (!detailName || activeTab !== "skill" || loading) return
-    const targetItem = skillsData.find((item) => item.name === detailName)
+    const targetItem = skillsData.find(
+      (item) =>
+        item.name === detailName &&
+        canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet, currentUserPathName)
+    )
     if (!targetItem) {
       if (skillsData.length > 0) setMarketInitialSkillDetailName(null)
       return
@@ -1880,8 +2251,10 @@ export function MarketPanel(): React.JSX.Element {
     void openItemDetailRef.current(targetItem)
   }, [
     activeTab,
+    currentUserCandidateSet,
     loading,
     marketInitialSkillDetailName,
+    currentUserSapId,
     setMarketInitialSkillDetailName,
     skillsData
   ])
@@ -2119,7 +2492,8 @@ export function MarketPanel(): React.JSX.Element {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string
   ) => {
     try {
       if (!file) {
@@ -2138,7 +2512,8 @@ export function MarketPanel(): React.JSX.Element {
         version,
         guidance,
         chineseName,
-        userId
+        userId,
+        extraJson
       )
 
       // If upload is successful, record it in localStorage
@@ -2165,7 +2540,9 @@ export function MarketPanel(): React.JSX.Element {
     version: string,
     guidance?: string,
     chineseName?: string,
-    userId?: string
+    userId?: string,
+    extraJson?: string,
+    ip?: string
   ) => {
     try {
       // 更新时允许文件为空，这样可以只更新元数据
@@ -2185,7 +2562,9 @@ export function MarketPanel(): React.JSX.Element {
         version,
         guidance,
         chineseName,
-        userId
+        userId,
+        extraJson,
+        ip
       )
 
       // Update is successful, no need to update localStorage since item already exists
@@ -2304,47 +2683,85 @@ export function MarketPanel(): React.JSX.Element {
     }
   }
 
+  const loadPluginSkillsForUpdateDialog = useCallback(async (): Promise<string[]> => {
+    const targetItem = updateDialog.item
+    if (activeTab !== "plugin" || detailMode !== "detail" || !targetItem) return []
+
+    if (selectedItem?.name !== targetItem.name) return []
+
+    if (pluginDetailFileBlobRef.current) {
+      const buffer = await pluginDetailFileBlobRef.current.arrayBuffer()
+      const detail = await window.api.plugins.inspectZip(buffer)
+      const skills = Array.from(new Set(detail.skills.map((skill) => skill.trim()).filter(Boolean)))
+      console.log("[MarketPanel] Refreshed plugin skills from detail file:", skills)
+      return skills
+    }
+
+    const fallbackSkills = Array.from(
+      new Set((pluginDetailData?.skills || []).map((skill) => skill.trim()).filter(Boolean))
+    )
+    console.log("[MarketPanel] Refreshed plugin skills from cached detail data:", fallbackSkills)
+    return fallbackSkills
+  }, [activeTab, detailMode, pluginDetailData, selectedItem?.name, updateDialog.item])
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-[#f5f4ed]">
       {/* Header */}
-      <div className="px-5 py-4 border-b border-[#e8e6dc] bg-[#faf9f5]">
-        <div className="flex items-center justify-between mb-3">
-          <div className="w-full flex items-center gap-2.5">
-            <div className="size-8 rounded-xl bg-[#fdf3e7] border border-[#f5d9c4] flex items-center justify-center">
-              <ShoppingBag className="size-4 text-[#c4956a]" />
-            </div>
-            <div className={'w-full '}>
-              <div className={'w-full flex justify-between items-center'}>
-                <h2 className="font-medium text-[15px] leading-tight text-[#141413]">
-                  {detailMode === "detail" && selectedItem
-                    ? selectedItem.chinese_name || selectedItem.name
-                    : "应用市场"}
-                </h2>
-               <span>
-                    {detailMode === "detail" && selectedItem && (<Button
-                      variant="outline"
-                      size="sm"
-                      onClick={backToList}
-                      className="h-8 px-3.5 gap-1.5 text-xs font-medium text-[#8b5e34] border-[#f2c99d] bg-[linear-gradient(135deg,#fff4e7_0%,#fde7cf_100%)] hover:bg-[linear-gradient(135deg,#ffedd8_0%,#f9d9b8_100%)] shadow-[0_6px_18px_rgba(196,149,106,0.22)] rounded-lg cursor-pointer"
-                    >
-                      <ArrowLeft className="size-3.5" />
-                      返回列表
-                    </Button>)}
-               </span>
+      {detailMode === "detail" && selectedItem  && (
+        <div className="px-5 py-4 border-b border-[#e8e6dc] bg-[#faf9f5]">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-full flex items-center gap-2.5">
+              <div className="size-8 rounded-xl bg-[#fdf3e7] border border-[#f5d9c4] flex items-center justify-center">
+                <ShoppingBag className="size-4 text-[#c4956a]" />
               </div>
-              {detailMode === "list" && (
-                <p className="text-[11px] text-[#87867f] leading-tight mt-0.5">
-                  发现并安装社区共享的工具资源
-                </p>
-              )}
+              <div className={"w-full "}>
+                <div className={"w-full flex justify-between items-center"}>
+                  <h2 className="font-medium text-[15px] leading-tight text-[#141413]">
+                    {detailMode === "detail" && selectedItem
+                      ? selectedItem.chinese_name || selectedItem.name
+                      : "应用市场"}
+                  </h2>
+                  <span className="flex items-center gap-2">
+                    {detailMode === "detail" &&
+                    selectedItem &&
+                    activeTab !== ORG_SKILL_MARKET_TYPE &&
+                    isCurrentUserMarketAdmin ? (
+                      <label className="inline-flex items-center gap-2 rounded-lg border border-[#e8e6dc] bg-white px-2.5 py-1.5 text-[11px] text-[#5e5d59]">
+                        <span>管理员模式</span>
+                        <Switch
+                          checked={adminModeEnabled}
+                          onCheckedChange={setAdminModeEnabled}
+                          aria-label="切换管理员模式"
+                        />
+                      </label>
+                    ) : null}
+                    {detailMode === "detail" && selectedItem ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={backToList}
+                        className="h-8 px-3.5 gap-1.5 text-xs font-medium text-[#8b5e34] border-[#f2c99d] bg-[linear-gradient(135deg,#fff4e7_0%,#fde7cf_100%)] hover:bg-[linear-gradient(135deg,#ffedd8_0%,#f9d9b8_100%)] shadow-[0_6px_18px_rgba(196,149,106,0.22)] rounded-lg cursor-pointer"
+                      >
+                        <ArrowLeft className="size-3.5" />
+                        返回列表
+                      </Button>
+                    ) : null}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      )}
       {detailMode === "detail" && selectedItem ? (
         <MarketDetailView
           activeTab={activeTab}
           selectedItem={selectedItem}
+          canManageSelectedItem={canCurrentUserEditOrDeleteMarketItem(
+            selectedItem,
+            currentLocalIp,
+            isAdminModeActive
+          )}
           detailFilePanel={renderDetailFilePanel()}
           canViewSkillUserDetail={canViewSkillUserDetail}
           selectedSkillCallCount={selectedSkillCallCount}
@@ -2533,7 +2950,6 @@ export function MarketPanel(): React.JSX.Element {
                       reloadToken={reloadToken}
                       downloadingItems={downloadingItems}
                       onOpenDetail={openItemDetail}
-                      onDownload={handleDownload}
                       onUninstall={handleUninstall}
                       initialDetailName={pendingOrgSkillDetailName}
                       onInitialDetailReady={(item) => {
@@ -2621,25 +3037,56 @@ export function MarketPanel(): React.JSX.Element {
 
                       <div
                         key={
-                          filteredData.length === 0 ? "market-results-empty" : "market-results-list"
+                          visibleMarketData.length === 0
+                            ? "market-results-empty"
+                            : "market-results-list"
                         }
                         className="space-y-3 min-w-0"
                       >
-                        <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
-                          <span>
-                            {categoryFilter
-                              ? `当前分类：${categoryFilter}`
-                              : `全部 ${getMarketTypePluralLabel(activeTab)}`}
-                            {` · 筛选结果 ${filteredData.length} 个`}
-                          </span>
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#87867f] px-1">
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <span>
+                              {categoryFilter
+                                ? `当前分类：${categoryFilter}`
+                                : `全部 ${getMarketTypePluralLabel(activeTab)}`}
+                              {` · 筛选结果 ${visibleMarketData.length} 个 · 当前页 ${paginatedMarketData.length} 个`}
+                            </span>
+                            {visibleMarketData.length > 0 ? (
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <span className="tabular-nums">
+                                  第 {safeMarketPageNum} / {marketTotalPages} 页
+                                </span>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+                                  aria-label="上一页"
+                                  onClick={() => setActiveMarketPage(safeMarketPageNum - 1)}
+                                  disabled={!hasPreviousMarketPage}
+                                >
+                                  上一页
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+                                  aria-label="下一页"
+                                  onClick={() => setActiveMarketPage(safeMarketPageNum + 1)}
+                                  disabled={!hasNextMarketPage}
+                                >
+                                  下一页
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
                           {activeTab === "skill" ? (
                             <div className="flex items-center gap-2">
-                              <div className="inline-block w-10">排序</div>
+                              <div className="inline-block w-[30px]">排序</div>
                               <Select
                                 value={skillSortMode}
                                 onValueChange={(value) => setSkillSortMode(value as SkillSortMode)}
                               >
-                                <SelectTrigger className="h-7 min-w-[132px] rounded-lg border-[#e8e6dc] bg-white px-2 text-[11px] text-[#5e5d59]">
+                                <SelectTrigger className="h-7 w-[100px] rounded-lg border-[#e8e6dc] bg-white px-2 text-[11px] text-[#5e5d59]">
                                   <SelectValue placeholder="默认" />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -2653,7 +3100,7 @@ export function MarketPanel(): React.JSX.Element {
                             </div>
                           ) : null}
                         </div>
-                        {filteredData.length === 0 ? (
+                        {visibleMarketData.length === 0 ? (
                           <div
                             key="market-empty-results"
                             className="flex flex-col items-center justify-center py-16 text-[#87867f]"
@@ -2669,7 +3116,7 @@ export function MarketPanel(): React.JSX.Element {
                             ref={listCardContainerRef}
                             className="grid max-h-[calc(100vh-330px)] grid-cols-1 gap-3 overflow-y-auto pr-1 2xl:grid-cols-2"
                           >
-                            {visibleMarketData.map((item) => (
+                            {paginatedMarketData.map((item) => (
                               <MarketItemCard
                                 key={getItemKey(item)}
                                 item={item}
@@ -2799,8 +3246,19 @@ export function MarketPanel(): React.JSX.Element {
                     version: updateDialog.item.version,
                     guidance: updateDialog.item.guidance,
                     chinese_name: updateDialog.item.chinese_name,
-                    user_id: updateDialog.item.user_id
+                    user_id: updateDialog.item.user_id,
+                    extra_json: updateDialog.item.extra_json,
+                    ip: updateDialog.item.ip
                   }
+                : undefined
+            }
+            isAdminModeActive={isAdminModeActive}
+            loadPluginSkills={
+              activeTab === "plugin" &&
+              detailMode === "detail" &&
+              !!selectedItem &&
+              selectedItem.name === updateDialog.item?.name
+                ? loadPluginSkillsForUpdateDialog
                 : undefined
             }
           />

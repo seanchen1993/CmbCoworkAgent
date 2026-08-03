@@ -1,17 +1,33 @@
 import { getUserInfo } from "../storage"
 import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchItem,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailItem,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
-  HarnessEnterpriseProjectSearchResult
+  HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelItem,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryItem,
+  HarnessPipelineQueryResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewItem,
+  HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
+import { getHarnessLeanTokenConfig } from "./service"
 
 const ENTERPRISE_PROJECT_SEARCH_PAGE_SIZE = 15
+const DEPLOY_UNIT_SEARCH_PAGE_SIZE = 20
+const DEPLOY_UNIT_FALLBACK_ORG_ID = "991175"
 const ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS = 10000
 const ENTERPRISE_PROJECT_SUCCESS_CODE = "SUC0000"
+const LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS = 30000
 
 interface EnterpriseProjectQueryResponse {
   returnCode?: string
@@ -25,6 +41,43 @@ interface EnterpriseProjectQueryResponse {
         data?: unknown[]
       }
     | unknown[]
+}
+
+interface DeployUnitQueryResponse {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: {
+    records?: unknown[]
+    total?: number
+    pages?: number
+    current?: number
+  }
+}
+
+interface PipelineQueryResponse {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: {
+    records?: unknown[]
+    total?: number
+    size?: number
+    current?: number
+    pages?: number
+  }
+}
+
+interface PipelineLabelQueryResponse {
+  returnCode?: string
+  errorMsg?: string | null
+  body?: unknown[]
+}
+
+interface LeanstarReviewSummaryResponse {
+  reviewSummaries?: unknown[]
+}
+
+interface LeanstarReviewTypeResponse {
+  data?: unknown[]
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -65,8 +118,63 @@ function getEnterpriseProjectListUrl(): string {
   return (import.meta.env.VITE_ENTERPRISE_PROJECT_LIST as string | undefined)?.trim() || ""
 }
 
+function getDeployUnitQueryUrl(): string {
+  return (import.meta.env.VITE_DEPLOY_UNIT_QUERY_URL as string | undefined)?.trim() || ""
+}
+
+function getPipelineQueryUrl(): string {
+  return (import.meta.env.VITE_PIPELINE_QUERY_URL as string | undefined)?.trim() || ""
+}
+
+function getPipelineLabelQueryUrl(): string {
+  return (import.meta.env.VITE_PIPELINE_LABEL_QUERY_URL as string | undefined)?.trim() || ""
+}
+
+function getLeanstarReviewGatewayUrl(): string {
+  return (import.meta.env.VITE_LEANSTAR_REVIEW_GATEWAY_URL as string | undefined)?.trim() || ""
+}
+
+function resolveDeployUnitOrgId(originPathId?: string): string {
+  try {
+    const parts =
+      typeof originPathId === "string"
+        ? originPathId
+            .split("/")
+            .map((part) => part.trim())
+            .filter(Boolean)
+        : []
+    const orgId =
+      parts.length === 6 || parts.length === 7
+        ? parts[4]
+        : parts.length <= 5
+          ? parts[parts.length - 1]
+          : ""
+    return normalizeText(orgId) || DEPLOY_UNIT_FALLBACK_ORG_ID
+  } catch {
+    return DEPLOY_UNIT_FALLBACK_ORG_ID
+  }
+}
+
+function logHarnessHttpRequest(configKey: string, method: string, url: string, detail?: string): void {
+  console.log(`[HarnessBoard] [${configKey}] Running${detail ? ` (${detail})` : ""}: ${method} ${url}`)
+}
+
 function isEnterpriseProjectQueryMockEnabled(): boolean {
   const value = (import.meta.env.VITE_ENTERPRISE_PROJECT_QUERY_MOCK as string | undefined)
+    ?.trim()
+    .toLowerCase()
+  return value === "1" || value === "true" || value === "yes" || value === "on"
+}
+
+function isKnowledgeMockEnabled(): boolean {
+  const value = (import.meta.env.VITE_KNOWLEDGE_MOCK as string | undefined)
+    ?.trim()
+    .toLowerCase()
+  return value === "1" || value === "true" || value === "yes" || value === "on"
+}
+
+function isProjectReviewEmptyMockEnabled(): boolean {
+  const value = (import.meta.env.VITE_ENTERPRISE_PROJECT_REVIEW_MOCK_EMPTY as string | undefined)
     ?.trim()
     .toLowerCase()
   return value === "1" || value === "true" || value === "yes" || value === "on"
@@ -114,6 +222,99 @@ function normalizeEnterpriseProjectDetailItem(value: unknown): HarnessEnterprise
   }
 }
 
+function normalizeDeployUnitSearchItem(value: unknown): HarnessDeployUnitSearchItem | null {
+  if (!isObject(value)) return null
+
+  const deployUnit = normalizeText(value.deployUnit)
+  if (!deployUnit) return null
+
+  return {
+    deployUnit,
+    deployUnitName: normalizeText(value.deployUnitName),
+    ownerId: normalizeText(value.ownerId),
+    ownerName: normalizeText(value.ownerName)
+  }
+}
+
+function normalizePipelineQueryItem(value: unknown): HarnessPipelineQueryItem | null {
+  if (!isObject(value)) return null
+
+  const pipeline = normalizeText(value.pipeline)
+  if (!pipeline) return null
+
+  return {
+    pipeline,
+    pipelineAlias: normalizeText(value.pipelineAlias),
+    env: normalizeText(value.env),
+    branch: normalizeText(value.branch),
+    latestBuildStatus: normalizeText(value.latestBuildStatus),
+    latestCompletedTime: normalizeText(value.latestCompletedTime)
+  }
+}
+
+function normalizePipelineLabelItem(value: unknown): HarnessPipelineLabelItem | null {
+  if (!isObject(value)) return null
+
+  const pipelineName = normalizeText(value.pipelineName)
+  if (!pipelineName) return null
+
+  return {
+    pipelineName,
+    pipelineNumber: numberValue(value.pipelineNumber),
+    status: normalizeText(value.status),
+    startDate: normalizeText(value.startDate),
+    label: normalizeText(value.label),
+    triggerUser: normalizeText(value.triggerUser)
+  }
+}
+
+function buildLeanstarReviewTypeMap(reviewTypes: unknown[]): Map<string, string> {
+  const typeMap = new Map<string, string>()
+
+  const traverse = (types: unknown[], parentDesc = ""): void => {
+    for (const item of types) {
+      if (!isObject(item)) continue
+      const typeCode = normalizeText(item.type)
+      const description = normalizeText(item.description)
+      const subTypes = Array.isArray(item.subTypes) ? item.subTypes : []
+      if (typeCode) {
+        typeMap.set(typeCode, parentDesc ? `${parentDesc} - ${description}` : description)
+      }
+      if (subTypes.length > 0) {
+        traverse(subTypes, description)
+      }
+    }
+  }
+
+  traverse(reviewTypes)
+  return typeMap
+}
+
+function normalizeLeanstarReviewItem(
+  value: unknown,
+  typeMap: Map<string, string>
+): HarnessProjectReviewItem | null {
+  if (!isObject(value)) return null
+
+  const title = normalizeText(value.title)
+  const typeCode = normalizeText(value.type)
+  const creator = normalizeText(value.creator)
+  const creatorName = normalizeText(value.creatorName)
+  const reviewMembers = Array.isArray(value.reviewMembers) ? value.reviewMembers : []
+  const memberNames = reviewMembers
+    .map((member) => isObject(member) ? normalizeText(member.name) : "")
+    .filter(Boolean)
+
+  return {
+    title,
+    type: typeMap.get(typeCode) || "其他",
+    start_time: normalizeText(value.startTime),
+    end_time: normalizeText(value.endTime),
+    creator: `${creator} (${creatorName})`,
+    members: memberNames.join(", ")
+  }
+}
+
 function normalizeSearchResponse(
   response: EnterpriseProjectQueryResponse
 ): HarnessEnterpriseProjectSearchResult {
@@ -150,6 +351,69 @@ function normalizeDetailResponse(
     .filter((item): item is HarnessEnterpriseProjectDetailItem => item !== null)
 
   return { projects }
+}
+
+function normalizeDeployUnitSearchResponse(
+  response: DeployUnitQueryResponse
+): HarnessDeployUnitSearchResult {
+  if (response.returnCode !== ENTERPRISE_PROJECT_SUCCESS_CODE) {
+    throw new Error(response.errorMsg || "发布单元查询失败")
+  }
+
+  const records = Array.isArray(response.body?.records) ? response.body.records : []
+  const deployUnits = records
+    .map((item) => normalizeDeployUnitSearchItem(item))
+    .filter((item): item is HarnessDeployUnitSearchItem => item !== null)
+  const total = numberValue(response.body?.total)
+  const current = numberValue(response.body?.current) || 1
+  const pages = numberValue(response.body?.pages)
+
+  return {
+    deployUnits,
+    total,
+    hasMore: total > deployUnits.length || pages > current
+  }
+}
+
+function normalizePipelineQueryResponse(
+  response: PipelineQueryResponse
+): HarnessPipelineQueryResult {
+  if (response.returnCode !== ENTERPRISE_PROJECT_SUCCESS_CODE) {
+    throw new Error(response.errorMsg || "流水线查询失败")
+  }
+
+  const records = Array.isArray(response.body?.records) ? response.body.records : []
+  const pipelines = records
+    .map((item) => normalizePipelineQueryItem(item))
+    .filter((item): item is HarnessPipelineQueryItem => item !== null)
+  const total = numberValue(response.body?.total)
+  const size = numberValue(response.body?.size)
+  const current = numberValue(response.body?.current)
+  const pages = numberValue(response.body?.pages)
+
+  return {
+    pipelines,
+    total,
+    size,
+    current,
+    pages,
+    hasMore: pages > current
+  }
+}
+
+function normalizePipelineLabelQueryResponse(
+  response: PipelineLabelQueryResponse
+): HarnessPipelineLabelQueryResult {
+  if (response.returnCode !== ENTERPRISE_PROJECT_SUCCESS_CODE) {
+    throw new Error(response.errorMsg || "流水线标签查询失败")
+  }
+
+  const records = Array.isArray(response.body) ? response.body : []
+  const labels = records
+    .map((item) => normalizePipelineLabelItem(item))
+    .filter((item): item is HarnessPipelineLabelItem => item !== null)
+
+  return { labels }
 }
 
 function makeMockEnterpriseProjectSearchResult(): HarnessEnterpriseProjectSearchResult {
@@ -213,6 +477,136 @@ function makeMockEnterpriseProjectDetailResult(
   }
 }
 
+function makeMockDeployUnitSearchResult(): HarnessDeployUnitSearchResult {
+  return {
+    total: 3,
+    hasMore: false,
+    deployUnits: [
+      {
+        deployUnit: "LF39.18_WealthBoxApi",
+        deployUnitName: "财富管理服务接口",
+        ownerId: "80280631",
+        ownerName: "陈强"
+      },
+      {
+        deployUnit: "LF39.18_WealthBoxWeb",
+        deployUnitName: "财富管理服务前端",
+        ownerId: "80280631",
+        ownerName: "陈强"
+      },
+      {
+        deployUnit: "LF39.18_WealthBoxJob",
+        deployUnitName: "财富管理服务批处理",
+        ownerId: "80280632",
+        ownerName: "李敏"
+      }
+    ]
+  }
+}
+
+function makeMockPipelineQueryResult(): HarnessPipelineQueryResult {
+  return {
+    total: 3,
+    size: 20,
+    current: 1,
+    pages: 1,
+    hasMore: false,
+    pipelines: [
+      {
+        pipeline: "p-wealth-box-api-build",
+        pipelineAlias: "财富盒子API构建流水线",
+        env: "UAT",
+        branch: "master",
+        latestBuildStatus: "SUCCESS",
+        latestCompletedTime: "2026-07-20 16:30:00"
+      },
+      {
+        pipeline: "p-wealth-box-web-build",
+        pipelineAlias: "财富盒子前端构建流水线",
+        env: "UAT",
+        branch: "release/1.0",
+        latestBuildStatus: "SUCCESS",
+        latestCompletedTime: "2026-07-20 15:00:00"
+      },
+      {
+        pipeline: "p-wealth-box-job-build",
+        pipelineAlias: "财富盒子批处理构建流水线",
+        env: "UAT",
+        branch: "develop",
+        latestBuildStatus: "FAILED",
+        latestCompletedTime: "2026-07-19 10:00:00"
+      }
+    ]
+  }
+}
+
+function makeMockPipelineLabelQueryResult(): HarnessPipelineLabelQueryResult {
+  return {
+    labels: [
+      {
+        pipelineName: "mock-pipeline",
+        pipelineNumber: 1001,
+        status: "SUCCESS",
+        startDate: "2026-07-20 10:00:00",
+        label: "v1.2.0",
+        triggerUser: "zhangsan"
+      },
+      {
+        pipelineName: "mock-pipeline",
+        pipelineNumber: 1000,
+        status: "SUCCESS",
+        startDate: "2026-07-19 10:00:00",
+        label: "v1.1.0",
+        triggerUser: "lisi"
+      },
+      {
+        pipelineName: "mock-pipeline",
+        pipelineNumber: 999,
+        status: "FAILED",
+        startDate: "2026-07-18 10:00:00",
+        label: "v1.0.0",
+        triggerUser: "wangwu"
+      }
+    ]
+  }
+}
+
+function makeMockProjectReviewResult(projectCode: string): HarnessProjectReviewResult {
+  if (!projectCode) {
+    return { tokenConfigured: true, reviews: [] }
+  }
+
+  return {
+    tokenConfigured: true,
+    reviews: [
+      {
+        title: `${projectCode} 需求方案评审`,
+        type: "需求评审 - 方案评审",
+        start_time: "2026-07-06 09:30:00",
+        end_time: "2026-07-06 10:30:00",
+        creator: "zhangming (张明)",
+        members: "李娜, 王磊, 陈晨"
+      },
+      {
+        title: `${projectCode} 技术设计评审`,
+        type: "技术评审 - 详细设计评审",
+        start_time: "2026-07-07 14:00:00",
+        end_time: "2026-07-07 15:30:00",
+        creator: "lina (李娜)",
+        members: "张明, 王磊"
+      },
+      {
+        title: `${projectCode} 投产准备评审`,
+        type: "上线评审 - 投产准备评审",
+        start_time: "2026-07-08 16:00:00",
+        end_time: "2026-07-08 17:00:00",
+        creator: "wanglei (王磊)",
+        members: "张明, 李娜, 陈晨"
+      }
+    ]
+  }
+}
+
 export async function searchEnterpriseProjects(
   input: HarnessEnterpriseProjectSearchInput
 ): Promise<HarnessEnterpriseProjectSearchResult> {
@@ -238,6 +632,12 @@ export async function searchEnterpriseProjects(
   const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
 
   try {
+    logHarnessHttpRequest(
+      "enterprise_project_search",
+      "POST",
+      queryUrl,
+      `${keywordField}=${keyword}, pageNum=1, pageSize=${ENTERPRISE_PROJECT_SEARCH_PAGE_SIZE}`
+    )
     const response = await fetch(queryUrl, {
       method: "POST",
       headers: {
@@ -269,6 +669,186 @@ export async function searchEnterpriseProjects(
   }
 }
 
+export async function searchDeployUnits(
+  input: HarnessDeployUnitSearchInput
+): Promise<HarnessDeployUnitSearchResult> {
+  const deployUnit = normalizeText(input.keyword)
+  if (!deployUnit) {
+    return { deployUnits: [], total: 0, hasMore: false }
+  }
+
+  if (isKnowledgeMockEnabled()) {
+    return makeMockDeployUnitSearchResult()
+  }
+
+  const userInfo = getUserInfo()
+  const orgId = resolveDeployUnitOrgId(userInfo?.originPathId)
+  const queryUrl = getDeployUnitQueryUrl()
+  if (!queryUrl) {
+    throw new Error("未配置发布单元查询地址")
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+  const requestPayload = {
+    deployUnit,
+    orgId,
+    pageNumber: 1,
+    pageSize: DEPLOY_UNIT_SEARCH_PAGE_SIZE
+  }
+  let requestSucceeded = false
+
+  try {
+    logHarnessHttpRequest(
+      "deploy_unit_search",
+      "POST",
+      queryUrl,
+      `input=${JSON.stringify(requestPayload)}`
+    )
+    const response = await fetch(queryUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(requestPayload),
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      throw new Error("发布单元查询失败")
+    }
+
+    const json = (await response.json()) as DeployUnitQueryResponse
+    const result = normalizeDeployUnitSearchResponse(json)
+    requestSucceeded = true
+    console.log(`[HarnessBoard] [deploy_unit_search] response: ${JSON.stringify(result)}`)
+    return result
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("发布单元查询超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+    console.log(`[HarnessBoard] [deploy_unit_search] ${requestSucceeded ? "success" : "failed"}`)
+  }
+}
+
+export async function queryPipelines(
+  input: HarnessPipelineQueryInput
+): Promise<HarnessPipelineQueryResult> {
+  if (isKnowledgeMockEnabled()) {
+    console.log(`[HarnessBoard] [pipeline_query] mock input=${JSON.stringify(input)}`)
+    return makeMockPipelineQueryResult()
+  }
+
+  const queryUrl = getPipelineQueryUrl()
+  if (!queryUrl) {
+    throw new Error("未配置流水线查询地址")
+  }
+
+  const userInfo = getUserInfo()
+  const orgId = resolveDeployUnitOrgId(userInfo?.originPathId)
+
+  const requestPayload: HarnessPipelineQueryInput = {
+    deployUnit: normalizeText(input.deployUnit),
+    env: normalizeText(input.env),
+    orgId,
+    pageNumber: 1,
+    pageSize: DEPLOY_UNIT_SEARCH_PAGE_SIZE,
+    pipelineTerm: "",
+    productTerm: ""
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+
+  try {
+    logHarnessHttpRequest(
+      "pipeline_query",
+      "POST",
+      queryUrl,
+      `input=${JSON.stringify(requestPayload)}`
+    )
+    const response = await fetch(queryUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(requestPayload),
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      throw new Error("流水线查询失败")
+    }
+
+    const json = (await response.json()) as PipelineQueryResponse
+    const result = normalizePipelineQueryResponse(json)
+    console.log(`[HarnessBoard] [pipeline_query] response: ${JSON.stringify(result)}`)
+    return result
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("流水线查询超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+export async function queryPipelineLabels(
+  input: HarnessPipelineLabelQueryInput
+): Promise<HarnessPipelineLabelQueryResult> {
+  if (isKnowledgeMockEnabled()) {
+    console.log(`[HarnessBoard] [pipeline_label_query] mock input=${JSON.stringify(input)}`)
+    return makeMockPipelineLabelQueryResult()
+  }
+
+  const pipelineName = normalizeText(input.pipelineName)
+  if (!pipelineName) {
+    return { labels: [] }
+  }
+
+  const queryUrl = getPipelineLabelQueryUrl()
+  if (!queryUrl) {
+    throw new Error("未配置流水线标签查询地址")
+  }
+
+  const requestUrl = new URL(queryUrl)
+  requestUrl.searchParams.set("pipelineName", pipelineName)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+
+  try {
+    logHarnessHttpRequest(
+      "pipeline_label_query",
+      "GET",
+      requestUrl.toString(),
+      `pipelineName=${pipelineName}`
+    )
+    const response = await fetch(requestUrl, {
+      method: "GET",
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      throw new Error("流水线标签查询失败")
+    }
+
+    const json = (await response.json()) as PipelineLabelQueryResponse
+    const result = normalizePipelineLabelQueryResponse(json)
+    console.log(`[HarnessBoard] [pipeline_label_query] response: ${JSON.stringify(result)}`)
+    return result
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("流水线标签查询超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export async function getEnterpriseProjectDetails(
   input: HarnessEnterpriseProjectDetailInput
 ): Promise<HarnessEnterpriseProjectDetailResult> {
@@ -292,6 +872,12 @@ export async function getEnterpriseProjectDetails(
   const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
 
   try {
+    logHarnessHttpRequest(
+      "enterprise_project_detail",
+      "POST",
+      queryUrl,
+      `prjCodeList=${prjCodeList.join(",")}`
+    )
     const response = await fetch(queryUrl, {
       method: "POST",
       headers: {
@@ -310,6 +896,89 @@ export async function getEnterpriseProjectDetails(
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("项目查询超时")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+export async function getProjectReviews(
+  input: HarnessProjectReviewInput
+): Promise<HarnessProjectReviewResult> {
+  const projectCode = normalizeText(input.projectCode)
+  if (!projectCode) {
+    return { tokenConfigured: true, reviews: [] }
+  }
+
+  if (isEnterpriseProjectQueryMockEnabled()) {
+    if (isProjectReviewEmptyMockEnabled()) {
+      return { tokenConfigured: true, reviews: [] }
+    }
+    return makeMockProjectReviewResult(projectCode)
+  }
+
+  const token = getHarnessLeanTokenConfig().leanToken.trim()
+  if (!token) {
+    return { tokenConfigured: false, reviews: [] }
+  }
+
+  const headers = {
+    "Ls-Access-Token": token,
+    "Content-Type": "application/json"
+  }
+  const reviewGatewayUrl = getLeanstarReviewGatewayUrl()
+  const summaryUrl = `${reviewGatewayUrl}/api/review/summary/${encodeURIComponent(projectCode)}`
+  const reviewTypesUrl = `${reviewGatewayUrl}/api/review/review-types`
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS)
+
+  try {
+    const summarySearchParams = new URLSearchParams({ size: "999", page: "0" })
+    logHarnessHttpRequest(
+      "review_summary",
+      "GET",
+      `${summaryUrl}?${summarySearchParams.toString()}`,
+      `projectCode=${projectCode}`
+    )
+    const summaryResponse = await fetch(`${summaryUrl}?${summarySearchParams.toString()}`, {
+      method: "GET",
+      headers,
+      signal: controller.signal
+    })
+    if (summaryResponse.status === 401) {
+      throw new Error("精益平台 token 认证失败")
+    }
+    if (!summaryResponse.ok) {
+      throw new Error("项目评审查询失败")
+    }
+
+    logHarnessHttpRequest("review_types", "GET", reviewTypesUrl)
+    const reviewTypesResponse = await fetch(reviewTypesUrl, {
+      method: "GET",
+      headers,
+      signal: controller.signal
+    })
+    if (reviewTypesResponse.status === 401) {
+      throw new Error("精益平台 token 认证失败")
+    }
+    if (!reviewTypesResponse.ok) {
+      throw new Error("评审类型查询失败")
+    }
+
+    const summaryJson = (await summaryResponse.json()) as LeanstarReviewSummaryResponse
+    const reviewTypesJson = (await reviewTypesResponse.json()) as LeanstarReviewTypeResponse
+    const typeMap = buildLeanstarReviewTypeMap(
+      Array.isArray(reviewTypesJson.data) ? reviewTypesJson.data : []
+    )
+    const reviews = (Array.isArray(summaryJson.reviewSummaries) ? summaryJson.reviewSummaries : [])
+      .map((review) => normalizeLeanstarReviewItem(review, typeMap))
+      .filter((review): review is HarnessProjectReviewItem => review !== null)
+
+    return { tokenConfigured: true, reviews }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("项目评审查询超时")
     }
     throw error
   } finally {

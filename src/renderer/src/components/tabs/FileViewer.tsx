@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from "react"
 import { Loader2, AlertCircle, FileCode } from "lucide-react"
-import { useCurrentThread } from "@/lib/thread-context"
+import { useThreadState } from "@/lib/thread-context"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
 import { CodeViewer } from "./CodeViewer"
 import { ImageViewer } from "./ImageViewer"
@@ -15,9 +15,64 @@ import {
   useVisualEditAnnotations
 } from "@/components/visual-edit/visual-edit-store"
 
+// Visual edit needs a live thread to submit into, so its hooks live in a child
+// that is only mounted when threadId is present. FileViewer itself is also used
+// without a thread (external knowledge-base previews), where visual edit is off.
+function HtmlPreviewWithVisualEdit({
+  threadId,
+  content,
+  displayPath,
+  fillHeight,
+  viewMode,
+  readDependencyFile
+}: {
+  threadId: string
+  content: string
+  displayPath: string
+  fillHeight: boolean
+  viewMode?: "preview" | "source"
+  readDependencyFile: (resolvedPath: string) => Promise<string | null>
+}): React.JSX.Element {
+  const { submitVisualFeedback, canSubmitVisualFeedback, submitDisabledReason } =
+    useVisualEditSubmit(threadId)
+  const visualEditStoreKey = useMemo(
+    () =>
+      getVisualEditStoreKey({
+        threadId,
+        targetKind: "html-preview",
+        targetPath: displayPath
+      }),
+    [displayPath, threadId]
+  )
+  const { annotations: visualEditAnnotations, setAnnotations: setVisualEditAnnotations } =
+    useVisualEditAnnotations(visualEditStoreKey)
+
+  return (
+    <HtmlPreview
+      content={content}
+      path={displayPath}
+      fillHeight={fillHeight}
+      showHeader={false}
+      showModeToggle={false}
+      viewMode={viewMode}
+      readDependencyFile={readDependencyFile}
+      visualEdit={{
+        threadId,
+        targetKind: "html-preview",
+        targetPath: displayPath,
+        submitDisabled: !canSubmitVisualFeedback,
+        submitDisabledReason,
+        annotations: visualEditAnnotations,
+        onAnnotationsChange: setVisualEditAnnotations,
+        onSubmit: submitVisualFeedback
+      }}
+    />
+  )
+}
+
 interface FileViewerProps {
   filePath: string
-  threadId: string
+  threadId?: string
   externalFullPath?: string
   htmlFillHeight?: boolean
   reloadToken?: number
@@ -65,26 +120,17 @@ export function FileViewer({
   reloadToken,
   previewMode
 }: FileViewerProps): React.JSX.Element | null {
-  const { fileContents, setFileContents } = useCurrentThread(threadId)
+  const threadState = useThreadState(threadId ?? null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [binaryContent, setBinaryContent] = useState<string | null>(null)
+  const [externalTextContent, setExternalTextContent] = useState<string | undefined>()
   const [fileSize, setFileSize] = useState<number | undefined>()
   const cacheKey = externalFullPath || filePath
   const displayPath = externalFullPath || filePath
-  const { submitVisualFeedback, canSubmitVisualFeedback, submitDisabledReason } =
-    useVisualEditSubmit(threadId)
-  const visualEditStoreKey = useMemo(
-    () =>
-      getVisualEditStoreKey({
-        threadId,
-        targetKind: "html-preview",
-        targetPath: displayPath
-      }),
-    [displayPath, threadId]
-  )
-  const { annotations: visualEditAnnotations, setAnnotations: setVisualEditAnnotations } =
-    useVisualEditAnnotations(visualEditStoreKey)
+  const fileContents = threadState?.fileContents ?? {}
+  const setThreadFileContents = threadState?.setFileContents
+  const content = externalFullPath ? externalTextContent : fileContents[cacheKey]
 
   // Get file type info
   const fileName = displayPath.split("/").pop() || displayPath
@@ -98,11 +144,23 @@ export function FileViewer({
   const readHtmlDependencyFile = useCallback(
     async (resolvedPath: string): Promise<string | null> => {
       // HTML 依赖读取统一走 preload 暴露的 API，避免 file:// 直链受限。
-      const result = externalFullPath
-        ? await window.api.workspace.readExternalFile(resolvedPath)
-        : await window.api.workspace.readFile(threadId, resolvedPath)
+      if (externalFullPath) {
+        const tokenRes = await window.api.workspace.requestExternalFileRead(resolvedPath)
+        if (!tokenRes.success || !tokenRes.token) {
+          return null
+        }
+        const result = await window.api.workspace.readExternalFile(tokenRes.token)
+        if (result?.success && typeof result.content === "string") {
+          return result.content
+        }
+        return null
+      }
 
-      if (result.success && typeof result.content === "string") {
+      const result = threadId
+        ? await window.api.workspace.readFile(threadId, resolvedPath)
+        : null
+
+      if (result?.success && typeof result.content === "string") {
         return result.content
       }
 
@@ -111,13 +169,11 @@ export function FileViewer({
     [externalFullPath, threadId]
   )
 
-  // Get cached content or load it
-  const content = fileContents[cacheKey]
-
   // Reset state when filePath changes
   useEffect(() => {
     setError(null)
     setBinaryContent(null)
+    setExternalTextContent(undefined)
     setFileSize(undefined)
   }, [cacheKey, reloadToken])
 
@@ -136,29 +192,66 @@ export function FileViewer({
       setError(null)
 
       try {
+        if (!externalFullPath && !threadId) {
+          setError("Missing thread id for workspace file preview")
+          return
+        }
+
         if (isBinary) {
           // Read as binary file (base64)
-          const result = externalFullPath
-            ? await window.api.workspace.readExternalBinaryFile(externalFullPath)
-            : await window.api.workspace.readBinaryFile(threadId, filePath)
-          if (result.success && result.content !== undefined) {
-            setBinaryContent(result.content)
-            setFileSize(result.size)
-            lastLoadedReloadTokenRef.current = reloadToken
+          if (externalFullPath) {
+            const tokenRes = await window.api.workspace.requestExternalFileRead(externalFullPath)
+            if (!tokenRes.success || !tokenRes.token) {
+              setError(tokenRes.error || "Failed to request file read token")
+              return
+            }
+            const result = await window.api.workspace.readExternalBinaryFile(tokenRes.token)
+            if (result.success && result.content !== undefined) {
+              setBinaryContent(result.content)
+              setFileSize(result.size)
+              lastLoadedReloadTokenRef.current = reloadToken
+            } else {
+              setError(result.error || "Failed to read file")
+            }
           } else {
-            setError(result.error || "Failed to read file")
+            const result = threadId
+              ? await window.api.workspace.readBinaryFile(threadId, filePath)
+              : { success: false, error: "Missing thread id for workspace file preview" }
+            if (result.success && result.content !== undefined) {
+              setBinaryContent(result.content)
+              setFileSize(result.size)
+              lastLoadedReloadTokenRef.current = reloadToken
+            } else {
+              setError(result.error || "Failed to read file")
+            }
           }
         } else {
           // Read as text file
-          const result = externalFullPath
-            ? await window.api.workspace.readExternalFile(externalFullPath)
-            : await window.api.workspace.readFile(threadId, filePath)
-          if (result.success && result.content !== undefined) {
-            setFileContents(cacheKey, result.content)
-            setFileSize(result.size)
-            lastLoadedReloadTokenRef.current = reloadToken
+          if (externalFullPath) {
+            const tokenRes = await window.api.workspace.requestExternalFileRead(externalFullPath)
+            if (!tokenRes.success || !tokenRes.token) {
+              setError(tokenRes.error || "Failed to request file read token")
+              return
+            }
+            const result = await window.api.workspace.readExternalFile(tokenRes.token)
+            if (result.success && result.content !== undefined) {
+              setExternalTextContent(result.content)
+              setFileSize(result.size)
+              lastLoadedReloadTokenRef.current = reloadToken
+            } else {
+              setError(result.error || "Failed to read file")
+            }
           } else {
-            setError(result.error || "Failed to read file")
+            const result = threadId
+              ? await window.api.workspace.readFile(threadId, filePath)
+              : { success: false, error: "Missing thread id for workspace file preview" }
+            if (result.success && result.content !== undefined) {
+              setThreadFileContents?.(cacheKey, result.content)
+              setFileSize(result.size)
+              lastLoadedReloadTokenRef.current = reloadToken
+            } else {
+              setError(result.error || "Failed to read file")
+            }
           }
         }
       } catch (e) {
@@ -174,7 +267,7 @@ export function FileViewer({
     filePath,
     content,
     binaryContent,
-    setFileContents,
+    setThreadFileContents,
     isBinary,
     externalFullPath,
     cacheKey,
@@ -288,25 +381,27 @@ export function FileViewer({
   }
 
   if (htmlLike && content !== undefined) {
+    if (!threadId) {
+      return (
+        <HtmlPreview
+          content={content}
+          path={displayPath}
+          fillHeight={htmlFillHeight}
+          showHeader={false}
+          showModeToggle={false}
+          viewMode={previewMode}
+          readDependencyFile={readHtmlDependencyFile}
+        />
+      )
+    }
     return (
-      <HtmlPreview
+      <HtmlPreviewWithVisualEdit
+        threadId={threadId}
         content={content}
-        path={displayPath}
+        displayPath={displayPath}
         fillHeight={htmlFillHeight}
-        showHeader={false}
-        showModeToggle={false}
         viewMode={previewMode}
         readDependencyFile={readHtmlDependencyFile}
-        visualEdit={{
-          threadId,
-          targetKind: "html-preview",
-          targetPath: displayPath,
-          submitDisabled: !canSubmitVisualFeedback,
-          submitDisabledReason,
-          annotations: visualEditAnnotations,
-          onAnnotationsChange: setVisualEditAnnotations,
-          onSubmit: submitVisualFeedback
-        }}
       />
     )
   }

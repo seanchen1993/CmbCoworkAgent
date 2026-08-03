@@ -9,6 +9,7 @@ import {
   createWorkerValuesSnapshotContext,
   extractTextFromUnknownContent,
   extractWorkerFinalText,
+  extractWorkerVisibleReasoning,
   extractWorkerTranscriptLine,
   extractWorkerUsage,
   isWorkerFinalTextDelta,
@@ -103,6 +104,30 @@ async function testFinalTextExtraction(): Promise<void> {
       aiMessage([{ type: "text", text: " final " }, { content: "answer" }])
     ]) === "final answer",
     "messages mode should extract final AI text"
+  )
+  assert(
+    extractWorkerVisibleReasoning("messages", [
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: { content: "", reasoning_content: "visible worker reasoning" }
+      }
+    ])?.text === "visible worker reasoning",
+    "messages mode should extract provider-visible worker reasoning"
+  )
+  assert(
+    extractWorkerVisibleReasoning("values", {
+      messages: [
+        aiMessage("older answer"),
+        {
+          id: ["langchain_core", "messages", "AIMessage"],
+          kwargs: {
+            content: "final answer",
+            additional_kwargs: { reasoning_content: "final reasoning summary" }
+          }
+        }
+      ]
+    })?.text === "final reasoning summary",
+    "values mode should use the latest provider-visible reasoning"
   )
 
   assert(

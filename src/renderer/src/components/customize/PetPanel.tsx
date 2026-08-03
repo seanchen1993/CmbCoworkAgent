@@ -37,6 +37,8 @@ const DEFAULT_PET_ROWS = 9
 // 设置页只画第一帧预览，仍需限制解码后像素与单帧尺寸，避免异常自定义资源撑爆 renderer。
 const MAX_PREVIEW_FRAME_SIZE = 1024
 const MAX_PREVIEW_SPRITE_PIXELS = 16 * 1024 * 1024
+const PREVIEW_CANVAS_WIDTH = 96
+const PREVIEW_CANVAS_HEIGHT = 104
 
 function getPetName(pet: PetItem): string {
   return pet.displayName || pet.name || pet.id || pet.directoryId
@@ -48,28 +50,132 @@ function getPetDescription(pet: PetItem): string {
 
 function PetSpritePreview(props: {
   pet: PetItem
-  spriteUrl?: string
-  onVisible: () => void
+  queueSpritePreview: (load: () => Promise<void>) => void
 }): React.JSX.Element {
-  const { pet, spriteUrl, onVisible } = props
+  const { pet, queueSpritePreview } = props
+  const { columns, directoryId, frameHeight, frameWidth, rows, source } = pet
   const previewRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const requestedRef = useRef(false)
+  const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
-    if (spriteUrl || requestedRef.current) return
+    if (requestedRef.current) return
     const preview = previewRef.current
     if (!preview) return
+    let disposed = false
+    let activeImage: HTMLImageElement | null = null
+    let activeObjectUrl: string | null = null
+    let finishActiveLoad: (() => void) | null = null
+
+    const releaseImage = (): void => {
+      if (activeImage) {
+        activeImage.onload = null
+        activeImage.onerror = null
+        activeImage.src = ""
+        activeImage = null
+      }
+      if (activeObjectUrl) {
+        URL.revokeObjectURL(activeObjectUrl)
+        activeObjectUrl = null
+      }
+      const finish = finishActiveLoad
+      finishActiveLoad = null
+      finish?.()
+    }
 
     const requestSprite = (): void => {
       if (requestedRef.current) return
       requestedRef.current = true
-      onVisible()
+      queueSpritePreview(async () => {
+        if (disposed) return
+        try {
+          const result = await window.api.pet.getSpriteBytes(directoryId, source)
+          if (disposed || !result.success || !result.bytes || !result.mimeType) return
+
+          const bytes = new Uint8Array(result.bytes)
+          activeObjectUrl = URL.createObjectURL(new Blob([bytes.buffer], { type: result.mimeType }))
+          const image = new Image()
+          activeImage = image
+          await new Promise<void>((resolve) => {
+            finishActiveLoad = resolve
+            image.onload = (): void => {
+              if (disposed) {
+                releaseImage()
+                return
+              }
+              // 先检查整图解码后的像素数，再创建 canvas，防止小体积高分辨率图片造成内存尖峰。
+              if (
+                image.naturalWidth < 1 ||
+                image.naturalHeight < 1 ||
+                image.naturalWidth * image.naturalHeight > MAX_PREVIEW_SPRITE_PIXELS
+              ) {
+                releaseImage()
+                return
+              }
+
+              const columnCount = columns || DEFAULT_PET_COLUMNS
+              const rowCount = rows || DEFAULT_PET_ROWS
+              const sourceFrameWidth = frameWidth || Math.floor(image.naturalWidth / columnCount)
+              const sourceFrameHeight = frameHeight || Math.floor(image.naturalHeight / rowCount)
+              if (
+                sourceFrameWidth < 1 ||
+                sourceFrameHeight < 1 ||
+                sourceFrameWidth > MAX_PREVIEW_FRAME_SIZE ||
+                sourceFrameHeight > MAX_PREVIEW_FRAME_SIZE
+              ) {
+                releaseImage()
+                return
+              }
+
+              const canvas = canvasRef.current
+              const context = canvas?.getContext("2d")
+              if (!canvas || !context) {
+                releaseImage()
+                return
+              }
+
+              canvas.width = PREVIEW_CANVAS_WIDTH
+              canvas.height = PREVIEW_CANVAS_HEIGHT
+              context.imageSmoothingEnabled = false
+              context.clearRect(0, 0, PREVIEW_CANVAS_WIDTH, PREVIEW_CANVAS_HEIGHT)
+              const previewScale = Math.min(
+                PREVIEW_CANVAS_WIDTH / sourceFrameWidth,
+                PREVIEW_CANVAS_HEIGHT / sourceFrameHeight
+              )
+              const previewWidth = Math.max(1, Math.round(sourceFrameWidth * previewScale))
+              const previewHeight = Math.max(1, Math.round(sourceFrameHeight * previewScale))
+              context.drawImage(
+                image,
+                0,
+                0,
+                sourceFrameWidth,
+                sourceFrameHeight,
+                Math.round((PREVIEW_CANVAS_WIDTH - previewWidth) / 2),
+                Math.round((PREVIEW_CANVAS_HEIGHT - previewHeight) / 2),
+                previewWidth,
+                previewHeight
+              )
+              setLoaded(true)
+              releaseImage()
+            }
+            image.onerror = releaseImage
+            image.src = activeObjectUrl!
+          })
+        } catch (error) {
+          console.warn("[PetPanel] Failed to load pet sprite:", error)
+          releaseImage()
+        }
+      })
     }
 
     if (typeof IntersectionObserver === "undefined") {
       requestSprite()
-      return
+      return () => {
+        disposed = true
+        requestedRef.current = false
+        releaseImage()
+      }
     }
 
     // 预览图按进入视口懒加载，避免打开宠物页时一次性把所有 spritesheet 通过 IPC 拉进来。
@@ -84,74 +190,33 @@ function PetSpritePreview(props: {
     )
     observer.observe(preview)
 
-    return () => observer.disconnect()
-  }, [onVisible, spriteUrl])
-
-  useEffect(() => {
-    if (!spriteUrl || !canvasRef.current) return
-
-    const image = new Image()
-    image.onload = (): void => {
-      // 先检查整图解码后的像素数，再创建 canvas，防止小体积高分辨率图片造成内存尖峰。
-      if (
-        image.naturalWidth < 1 ||
-        image.naturalHeight < 1 ||
-        image.naturalWidth * image.naturalHeight > MAX_PREVIEW_SPRITE_PIXELS
-      ) {
-        return
-      }
-
-      const columns = pet.columns || DEFAULT_PET_COLUMNS
-      const rows = pet.rows || DEFAULT_PET_ROWS
-      const frameWidth = pet.frameWidth || Math.floor(image.naturalWidth / columns)
-      const frameHeight = pet.frameHeight || Math.floor(image.naturalHeight / rows)
-      // 只需要缩略预览第一帧，异常帧尺寸直接跳过，保留占位图即可。
-      if (
-        frameWidth < 1 ||
-        frameHeight < 1 ||
-        frameWidth > MAX_PREVIEW_FRAME_SIZE ||
-        frameHeight > MAX_PREVIEW_FRAME_SIZE
-      ) {
-        return
-      }
-
-      const canvas = canvasRef.current
-      const context = canvas?.getContext("2d")
-      if (!canvas || !context || !frameWidth || !frameHeight) return
-
-      canvas.width = frameWidth
-      canvas.height = frameHeight
-      context.imageSmoothingEnabled = false
-      context.clearRect(0, 0, frameWidth, frameHeight)
-      context.drawImage(image, 0, 0, frameWidth, frameHeight, 0, 0, frameWidth, frameHeight)
+    return () => {
+      disposed = true
+      requestedRef.current = false
+      observer.disconnect()
+      releaseImage()
     }
-    image.src = spriteUrl
-  }, [pet.columns, pet.frameHeight, pet.frameWidth, pet.rows, spriteUrl])
-
-  if (!spriteUrl) {
-    return (
-      <div ref={previewRef} className="flex size-full items-center justify-center">
-        <ImageIcon className="size-6 text-muted-foreground" />
-      </div>
-    )
-  }
+  }, [columns, directoryId, frameHeight, frameWidth, queueSpritePreview, rows, source])
 
   return (
-    <canvas
-      ref={canvasRef}
-      aria-label={getPetName(pet)}
-      className="max-h-full max-w-full [image-rendering:pixelated]"
-    />
+    <div ref={previewRef} className="flex size-full items-center justify-center">
+      <canvas
+        ref={canvasRef}
+        aria-label={getPetName(pet)}
+        className={cn("max-h-full max-w-full [image-rendering:pixelated]", !loaded && "hidden")}
+      />
+      {!loaded && <ImageIcon className="size-6 text-muted-foreground" />}
+    </div>
   )
 }
 
 export function PetPanel(): React.JSX.Element {
   const [pets, setPets] = useState<PetItem[]>([])
   const [settings, setSettings] = useState<PetSettings>(DEFAULT_SETTINGS)
-  const [spriteUrls, setSpriteUrls] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
+  const spriteLoadQueueRef = useRef<Promise<void>>(Promise.resolve())
 
   const builtinPets = useMemo(() => pets.filter((pet) => pet.source === "builtin"), [pets])
   const customPets = useMemo(() => pets.filter((pet) => pet.source === "custom"), [pets])
@@ -166,10 +231,6 @@ export function PetPanel(): React.JSX.Element {
       ])
       setPets(nextPets)
       setSettings(nextSettings)
-      setSpriteUrls((prev) => {
-        const nextKeys = new Set(nextPets.map((pet) => pet.key))
-        return Object.fromEntries(Object.entries(prev).filter(([key]) => nextKeys.has(key)))
-      })
     } catch (error) {
       console.error("[PetPanel] Failed to load pets:", error)
       toast.error("宠物列表加载失败")
@@ -178,15 +239,11 @@ export function PetPanel(): React.JSX.Element {
     }
   }, [])
 
-  const loadSpriteUrl = useCallback(async (pet: PetItem) => {
-    try {
-      const result = await window.api.pet.getSpriteDataUrl(pet.directoryId, pet.source)
-      if (result.success && result.dataUrl) {
-        setSpriteUrls((prev) => (prev[pet.key] ? prev : { ...prev, [pet.key]: result.dataUrl! }))
-      }
-    } catch (error) {
-      console.warn("[PetPanel] Failed to load pet sprite:", error)
-    }
+  const queueSpritePreview = useCallback((load: () => Promise<void>): void => {
+    const request = spriteLoadQueueRef.current.then(load)
+    spriteLoadQueueRef.current = request.catch((error) => {
+      console.warn("[PetPanel] Failed to process pet sprite preview:", error)
+    })
   }, [])
 
   useEffect(() => {
@@ -253,7 +310,6 @@ export function PetPanel(): React.JSX.Element {
 
   const renderPetCard = (pet: PetItem): React.JSX.Element => {
     const selected = selectedPetKey === pet.key
-    const spriteUrl = spriteUrls[pet.key]
 
     return (
       <Card
@@ -269,11 +325,7 @@ export function PetPanel(): React.JSX.Element {
             onClick={() => handleSelectPet(pet)}
             aria-label={`选择${getPetName(pet)}`}
           >
-            <PetSpritePreview
-              pet={pet}
-              spriteUrl={spriteUrl}
-              onVisible={() => void loadSpriteUrl(pet)}
-            />
+            <PetSpritePreview pet={pet} queueSpritePreview={queueSpritePreview} />
           </button>
           <div className="min-w-0 flex-1">
             <div className="flex items-start gap-2">

@@ -18,6 +18,8 @@ import {
   Cpu,
   CircleUser,
   PawPrint,
+  Settings2,
+  Users,
   Webhook,
   Wrench,
   type LucideIcon
@@ -27,6 +29,7 @@ import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
+const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
 const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
 const ScheduledPanel = lazy(() =>
   import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
@@ -52,8 +55,12 @@ const CodeExecToolsPanel = lazy(() =>
   import("./CodeExecToolsPanel").then((m) => ({ default: m.CodeExecToolsPanel }))
 )
 const PetPanel = lazy(() => import("./PetPanel").then((m) => ({ default: m.PetPanel })))
+const ExpertTeamPanel = lazy(() =>
+  import("./ExpertTeamPanel").then((m) => ({ default: m.ExpertTeamPanel }))
+)
 
 type CustomizeTab =
+  | "general"
   | "skills"
   | "connectors"
   | "plugins"
@@ -70,6 +77,7 @@ type CustomizeTab =
   | "hooks"
   | "lsp"
   | "codeExecTools"
+  | "expertTeam"
 
 type MenuGroupId = "basic" | "advanced" | "profile"
 
@@ -92,6 +100,7 @@ const MENU_GROUPS: MenuGroup[] = [
     id: "basic",
     label: "基础功能",
     items: [
+      { tab: "general", label: "通用", icon: Settings2 },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
@@ -104,6 +113,7 @@ const MENU_GROUPS: MenuGroup[] = [
     id: "advanced",
     label: "高级特性",
     items: [
+      { tab: "expertTeam", label: "专家团", icon: Users },
       { tab: "heartbeat", label: "心跳监控", icon: HeartPulse },
       { tab: "memory", label: "记忆管理", icon: Brain },
       { tab: "taskMmd", label: "任务画布", icon: Network, beta: true },
@@ -265,7 +275,9 @@ export function CustomizeView(): React.JSX.Element {
       </div>
 
       <Suspense fallback={<CustomizePanelFallback />}>
-        {activeTab === "skills" ? (
+        {activeTab === "general" ? (
+          <GeneralPanel />
+        ) : activeTab === "skills" ? (
           <SkillsPanel />
         ) : activeTab === "connectors" ? (
           <McpPanel />
@@ -301,6 +313,8 @@ export function CustomizeView(): React.JSX.Element {
           </div>
         ) : activeTab === "pet" ? (
           <PetPanel />
+        ) : activeTab === "expertTeam" ? (
+          <ExpertTeamPanel />
         ) : null}
       </Suspense>
     </div>

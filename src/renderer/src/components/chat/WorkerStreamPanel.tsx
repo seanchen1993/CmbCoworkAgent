@@ -7,37 +7,33 @@ import { Button } from "@/components/ui/button"
 import { useThreadContext, useThreadState, type HookLogBucket } from "@/lib/thread-context"
 import { useAppStore } from "@/lib/store"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
-import { getWorkerToolResultKey } from "@/lib/worker-tool-result-key"
+import {
+  buildVisibleMessageLayout,
+  messageRendersNothing,
+  messageVisibleReasoningLength
+} from "@/lib/message-display-visibility"
+import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
+import {
+  buildWorkerCheckpointHistory,
+  checkpointHistoryMessageMatchesSparseLive,
+  isExplicitWorkerOccurrenceAfter,
+  isCompleteWorkerSnapshotCoveringHistory,
+  mergeWorkerCheckpointSparseContent,
+  normalizeWorkerMessagesAfterHistory,
+  MAX_WORKER_HISTORY_MESSAGES
+} from "@/lib/worker-checkpoint-history"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
+import {
+  getMessageProviderSourceId,
+  MESSAGE_SAME_ROLE_DUPLICATE_MARKER,
+  normalizeAppendedMessageIds,
+  normalizeCompleteMessageIds,
+  normalizeMessageRoleCollisionIds
+} from "../../../../shared/message-role-collision"
 
 const MAX_WORKER_SIGNATURE_CHARS = 512
-const MAX_WORKER_HISTORY_MESSAGES = 500
 const EMPTY_WORKER_HOOK_LOG_BUCKETS: HookLogBucket[] = []
-
-type SerializedCheckpointMessage = {
-  id?: string | string[]
-  _getType?: () => string
-  type?: string
-  content?: Message["content"]
-  tool_calls?: Message["tool_calls"]
-  tool_call_id?: string
-  name?: string
-  status?: string
-  is_error?: boolean
-  additional_kwargs?: Record<string, unknown>
-  kwargs?: {
-    id?: string
-    type?: string
-    content?: Message["content"]
-    tool_calls?: Message["tool_calls"]
-    tool_call_id?: string
-    name?: string
-    status?: string
-    is_error?: boolean
-    additional_kwargs?: Record<string, unknown>
-  }
-}
 
 type ThreadHistoryEntry = {
   checkpoint?: {
@@ -47,12 +43,83 @@ type ThreadHistoryEntry = {
   }
 }
 
-function createWorkerSnapshotFallbackMessageId(index: number): string {
-  return `worker-snapshot-${index}`
+function isWorkerSnapshotMessageId(id: string): boolean {
+  const scopeIndex = id.lastIndexOf("::")
+  const unscopedId = scopeIndex >= 0 ? id.slice(scopeIndex + 2) : id
+  return unscopedId.startsWith("worker-snapshot-")
 }
 
-function isWorkerSnapshotMessageId(id: string): boolean {
-  return id.startsWith("worker-snapshot-")
+function parseWorkerTurnScopedId(id: string): { rawId: string; turn: number } | undefined {
+  const match = /^worker-turn-.*-(\d+)::(.+)$/.exec(id)
+  if (!match) return undefined
+  return { rawId: match[2], turn: Number(match[1]) }
+}
+
+function workerTransportSourceId(message: Message): string {
+  const scoped = parseWorkerTurnScopedId(message.id)
+  return getMessageProviderSourceId({
+    ...message,
+    id: scoped?.rawId ?? message.id,
+    provider_source_id: message.provider_source_id
+      ? (parseWorkerTurnScopedId(message.provider_source_id)?.rawId ?? message.provider_source_id)
+      : undefined
+  })
+}
+
+function workerTransportRenderId(message: Message): string {
+  return parseWorkerTurnScopedId(message.id)?.rawId ?? message.id
+}
+
+function workerTransportIdentityKey(message: Message, turnKey: string): string {
+  return [turnKey, message.role, workerTransportSourceId(message)].join("\u001f")
+}
+
+function repeatedWorkerTransportIdentityKeys(
+  messages: readonly Message[],
+  turnKeys: readonly string[]
+): Set<string> {
+  const renderIdsByKey = new Map<string, Set<string>>()
+  messages.forEach((message, index) => {
+    if (message.role !== "assistant" && message.role !== "tool") return
+    const key = workerTransportIdentityKey(message, turnKeys[index])
+    const renderIds = renderIdsByKey.get(key) ?? new Set<string>()
+    renderIds.add(workerTransportRenderId(message))
+    renderIdsByKey.set(key, renderIds)
+  })
+  return new Set(
+    [...renderIdsByKey].filter(([, renderIds]) => renderIds.size > 1).map(([key]) => key)
+  )
+}
+
+function findSameWorkerTransportIdentityIndex(
+  messages: readonly Message[],
+  message: Message,
+  turnKeys: readonly string[],
+  turnKey: string
+): number | undefined {
+  const renderId = workerTransportRenderId(message)
+  const exactIndex = messages.findIndex(
+    (candidate, candidateIndex) =>
+      turnKeys[candidateIndex] === turnKey &&
+      candidate.role === message.role &&
+      workerTransportRenderId(candidate) === renderId
+  )
+  if (exactIndex >= 0) return exactIndex
+
+  if (renderId.includes(MESSAGE_SAME_ROLE_DUPLICATE_MARKER)) return undefined
+
+  const sourceId = workerTransportSourceId(message)
+  const providerMatches = messages.flatMap((candidate, candidateIndex) =>
+    turnKeys[candidateIndex] === turnKey &&
+    candidate.role === message.role &&
+    workerTransportSourceId(candidate) === sourceId &&
+    (parseWorkerTurnScopedId(candidate.id) !== undefined ||
+      parseWorkerTurnScopedId(message.id) !== undefined)
+      ? [candidateIndex]
+      : []
+  )
+  if (providerMatches.length === 1) return providerMatches[0]
+  return undefined
 }
 
 function isWorkerNonSnapshotMessageId(id: string): boolean {
@@ -77,9 +144,159 @@ function isSameWorkerAssistantText(a: Message, b: Message): boolean {
   return first.includes(second) || second.includes(first)
 }
 
-function findSameWorkerAssistantTextIndex(messages: Message[], message: Message): number | undefined {
-  const index = messages.findIndex((item) => isSameWorkerAssistantText(item, message))
+function areWorkerContentsCompatible(
+  a: Message["content"] | undefined,
+  b: Message["content"] | undefined
+): boolean {
+  const first = contentSignatureKey(a).trim()
+  const second = contentSignatureKey(b).trim()
+  if (!first || !second) return true
+  return first === second || first.includes(second) || second.includes(first)
+}
+
+type WorkerToolCall = NonNullable<Message["tool_calls"]>[number]
+
+function hasWorkerToolArgs(args: WorkerToolCall["args"] | undefined): boolean {
+  return !!args && Object.keys(args).length > 0
+}
+
+function isSameWorkerToolCallIdentity(
+  left: WorkerToolCall,
+  right: WorkerToolCall,
+  index: number
+): boolean {
+  if (left.id || right.id) return !!left.id && left.id === right.id
+  return left.name === right.name && index >= 0
+}
+
+function findWorkerToolCallMatch(
+  toolCalls: WorkerToolCall[],
+  target: WorkerToolCall,
+  fallbackIndex: number,
+  usedIndexes?: Set<number>
+): { call: WorkerToolCall; index: number } | undefined {
+  if (target.id) {
+    const index = toolCalls.findIndex(
+      (toolCall, candidateIndex) =>
+        !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
+    )
+    return index >= 0 ? { call: toolCalls[index], index } : undefined
+  }
+
+  if (
+    fallbackIndex >= 0 &&
+    fallbackIndex < toolCalls.length &&
+    !usedIndexes?.has(fallbackIndex) &&
+    isSameWorkerToolCallIdentity(toolCalls[fallbackIndex], target, fallbackIndex)
+  ) {
+    return { call: toolCalls[fallbackIndex], index: fallbackIndex }
+  }
+
+  const index = toolCalls.findIndex(
+    (toolCall, candidateIndex) =>
+      !usedIndexes?.has(candidateIndex) &&
+      !toolCall.id &&
+      toolCall.name === target.name
+  )
+  return index >= 0 ? { call: toolCalls[index], index } : undefined
+}
+
+function areWorkerToolCallsCompatible(
+  left: Message["tool_calls"] | undefined,
+  right: Message["tool_calls"] | undefined
+): boolean {
+  if (!left?.length || !right?.length || left.length !== right.length) return false
+  const usedIndexes = new Set<number>()
+  for (let index = 0; index < right.length; index += 1) {
+    const match = findWorkerToolCallMatch(left, right[index], index, usedIndexes)
+    if (!match) return false
+    usedIndexes.add(match.index)
+  }
+  return true
+}
+
+function isCompatibleWorkerAssistantToolReplay(a: Message, b: Message): boolean {
+  if (a.role !== "assistant" || b.role !== "assistant") return false
+  if (!isWorkerSnapshotPair(a, b)) return false
+  if (!areWorkerToolCallsCompatible(a.tool_calls, b.tool_calls)) return false
+  return areWorkerContentsCompatible(a.content, b.content)
+}
+
+function isCompatibleWorkerToolResultReplay(a: Message, b: Message): boolean {
+  if (a.role !== "tool" || b.role !== "tool") return false
+  if (!isWorkerSnapshotPair(a, b)) return false
+  if (!a.tool_call_id || a.tool_call_id !== b.tool_call_id) return false
+  if (a.name && b.name && a.name !== b.name) return false
+  return areWorkerContentsCompatible(a.content, b.content)
+}
+
+function findCompatibleWorkerReplayIndex(
+  messages: Message[],
+  message: Message,
+  turnKeys?: readonly string[],
+  turnKey?: string
+): number | undefined {
+  const index = messages.findIndex(
+    (item, candidateIndex) =>
+      (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
+      (isCompatibleWorkerAssistantToolReplay(item, message) ||
+        isCompatibleWorkerToolResultReplay(item, message))
+  )
   return index >= 0 ? index : undefined
+}
+
+function findSameWorkerAssistantTextIndex(
+  messages: Message[],
+  message: Message,
+  turnKeys?: readonly string[],
+  turnKey?: string
+): number | undefined {
+  const index = messages.findIndex(
+    (item, candidateIndex) =>
+      (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
+      isSameWorkerAssistantText(item, message)
+  )
+  return index >= 0 ? index : undefined
+}
+
+const WORKER_PRE_USER_TURN_KEY = "__cmb-worker-before-user__"
+
+function latestWorkerTurnKey(messages: readonly Message[]): string {
+  return workerTurnKeys(messages).at(-1) ?? WORKER_PRE_USER_TURN_KEY
+}
+
+function workerTurnKeys(
+  messages: readonly Message[],
+  initialTurnKey: string = WORKER_PRE_USER_TURN_KEY
+): string[] {
+  let currentTurnKey = initialTurnKey
+  const initialTurnMatch = /^__cmb-worker-turn-(\d+)__$/.exec(initialTurnKey)
+  let lastUserTurn = initialTurnMatch ? Number(initialTurnMatch[1]) : 0
+  return messages.map((message) => {
+    const scopedTurn = parseWorkerTurnScopedId(message.id)?.turn
+    if (message.role === "user") {
+      lastUserTurn = scopedTurn ?? lastUserTurn + 1
+      currentTurnKey = `__cmb-worker-turn-${lastUserTurn}__`
+    } else if (scopedTurn !== undefined) {
+      lastUserTurn = Math.max(lastUserTurn, scopedTurn)
+      currentTurnKey = `__cmb-worker-turn-${scopedTurn}__`
+    }
+    return currentTurnKey
+  })
+}
+
+function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number): string[] {
+  let currentTurn = turnOffset
+  return messages.map((message) => {
+    if (message.role === "user") currentTurn += 1
+    return currentTurn > 0
+      ? `__cmb-worker-turn-${currentTurn}__`
+      : WORKER_PRE_USER_TURN_KEY
+  })
+}
+
+function workerTurnSignatureKey(turnKey: string, signature: string | undefined): string | undefined {
+  return signature ? `${turnKey}\u0000${signature}` : undefined
 }
 
 function incrementSignatureCount(map: Map<string, number>, signature: string | undefined): void {
@@ -138,91 +355,120 @@ const WORKER_THINKING_MESSAGES = [
   "就快好了..."
 ]
 
-function messageRoleFromCheckpoint(message: SerializedCheckpointMessage): Message["role"] {
-  if (typeof message._getType === "function") {
-    const type = message._getType()
-    if (type === "human") return "user"
-    if (type === "tool") return "tool"
-    if (type === "system") return "system"
-    return "assistant"
-  }
-
-  const classId = Array.isArray(message.id) ? message.id : []
-  const className = classId[classId.length - 1] || ""
-  if (className.includes("HumanMessage")) return "user"
-  if (className.includes("ToolMessage")) return "tool"
-  if (className.includes("SystemMessage")) return "system"
-  if (className.includes("AIMessage")) return "assistant"
-
-  const type = message.type ?? message.kwargs?.type
-  if (type === "human") return "user"
-  if (type === "user") return "user"
-  if (type === "tool") return "tool"
-  if (type === "system") return "system"
-  if (type === "ai" || type === "assistant") return "assistant"
-  return "assistant"
-}
-
-function messageFromCheckpoint(
-  message: SerializedCheckpointMessage,
-  index: number
-): Message | null {
-  const additionalKwargs = message.additional_kwargs ?? message.kwargs?.additional_kwargs
-  if (additionalKwargs?.cmb_internal_coordinator_notification === true) return null
-
-  const role = messageRoleFromCheckpoint(message)
-  if (role === "system") return null
-
-  const rawContent = message.content ?? message.kwargs?.content
-  const content: Message["content"] =
-    typeof rawContent === "string" || Array.isArray(rawContent) ? rawContent : ""
-  const toolCalls = message.tool_calls ?? message.kwargs?.tool_calls
-  const toolCallId = message.tool_call_id ?? message.kwargs?.tool_call_id
-  const toolName = message.name ?? message.kwargs?.name
-  const toolStatus = message.status ?? message.kwargs?.status
-  const isToolError =
-    message.is_error === true ||
-    message.kwargs?.is_error === true ||
-    additionalKwargs?.is_error === true ||
-    toolStatus === "error"
-  const messageId =
-    message.kwargs?.id ??
-    (typeof message.id === "string" ? message.id : createWorkerSnapshotFallbackMessageId(index))
-
+function mergeCheckpointAlignedWorkerMessage(
+  historyMessage: Message,
+  liveMessage: Message,
+  id: string
+): Message {
   return {
-    id: messageId,
-    role,
-    content,
-    tool_calls: toolCalls,
-    ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
-    ...(role === "tool" && toolName && { name: toolName }),
-    ...(role === "tool" && toolStatus && { status: toolStatus }),
-    ...(role === "tool" && isToolError && { is_error: true }),
-    created_at: new Date()
+    ...historyMessage,
+    ...liveMessage,
+    id,
+    content: mergeWorkerCheckpointSparseContent(historyMessage, liveMessage),
+    reasoning: liveMessage.reasoning ?? historyMessage.reasoning,
+    tool_calls: mergeSparseWorkerToolCalls(
+      historyMessage.tool_calls,
+      liveMessage.tool_calls
+    ),
+    tool_call_id: liveMessage.tool_call_id ?? historyMessage.tool_call_id,
+    name: liveMessage.name ?? historyMessage.name,
+    status: liveMessage.status ?? historyMessage.status,
+    is_error: liveMessage.is_error ?? historyMessage.is_error
   }
 }
 
 function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Message[] {
-  if (baseMessages.length === 0) return liveMessages
-  if (liveMessages.length === 0) return baseMessages
+  if (isCompleteWorkerSnapshotCoveringHistory(baseMessages, liveMessages)) {
+    const normalizedLiveMessages = normalizeCompleteMessageIds(liveMessages)
+    const historyOffset = normalizedLiveMessages.length - baseMessages.length
+    return normalizedLiveMessages.map((liveMessage, index) => {
+      if (index < historyOffset) return liveMessage
+      const historyMessage = baseMessages[index - historyOffset]
+      return mergeCheckpointAlignedWorkerMessage(
+        historyMessage,
+        liveMessage,
+        liveMessage.id
+      )
+    })
+  }
+  const replayPrefixLength = findWorkerHistorySuffixReplayPrefixLength(
+    baseMessages,
+    liveMessages
+  )
+  if (replayPrefixLength > 0) {
+    const historyOffset = baseMessages.length - replayPrefixLength
+    const normalizedBaseMessages = normalizeCompleteMessageIds(baseMessages)
+    const alignedMessages = normalizedBaseMessages.map((historyMessage, index) => {
+      if (index < historyOffset) return historyMessage
+      return mergeCheckpointAlignedWorkerMessage(
+        historyMessage,
+        liveMessages[index - historyOffset],
+        historyMessage.id
+      )
+    })
+    const appendedTail = normalizeWorkerMessagesAfterHistory(
+      alignedMessages,
+      liveMessages.slice(replayPrefixLength)
+    )
+    return appendedTail.length > 0
+      ? mergeMessages(alignedMessages, appendedTail)
+      : alignedMessages
+  }
+  const normalizedBaseMessages = normalizeCompleteMessageIds(baseMessages)
+  const normalizedLiveMessages = normalizeAppendedMessageIds(
+    normalizedBaseMessages,
+    normalizeCompleteMessageIds(
+      normalizeMessageRoleCollisionIds(normalizedBaseMessages, liveMessages)
+    ),
+    { splitAssistantAfterTool: true }
+  )
+  if (normalizedBaseMessages.length === 0) return normalizedLiveMessages
+  if (normalizedLiveMessages.length === 0) return normalizedBaseMessages
 
-  const merged: Message[] = [...baseMessages]
+  const merged: Message[] = [...normalizedBaseMessages]
+  const baseUserCount = normalizedBaseMessages.filter(
+    (message) => message.role === "user"
+  ).length
+  const liveUserCount = normalizedLiveMessages.filter(
+    (message) => message.role === "user"
+  ).length
+  const alignUserWindows = baseUserCount > 0 && liveUserCount > 0
+  const alignedTurnCount = Math.max(baseUserCount, liveUserCount)
+  const mergedTurnKeys = alignUserWindows
+    ? relativeWorkerTurnKeys(merged, alignedTurnCount - baseUserCount)
+    : workerTurnKeys(merged)
+  const liveTurnKeys = alignUserWindows
+    ? relativeWorkerTurnKeys(normalizedLiveMessages, alignedTurnCount - liveUserCount)
+    : workerTurnKeys(
+        normalizedLiveMessages,
+        latestWorkerTurnKey(normalizedBaseMessages)
+      )
   const indexById = new Map(merged.map((message, index) => [message.id, index]))
   const snapshotIndexesBySignature = new Map<string, number[]>()
   const liveIndexesBySignature = new Map<string, number[]>()
   const incomingLiveCountsBySignature = new Map<string, number>()
   const incomingSnapshotCountsBySignature = new Map<string, number>()
-  for (const message of liveMessages) {
-    const signature = workerFocusMessageSignature(message)
+  const repeatedLiveTransportIdentities = repeatedWorkerTransportIdentityKeys(
+    normalizedLiveMessages,
+    liveTurnKeys
+  )
+  normalizedLiveMessages.forEach((message, index) => {
+    const signature = workerTurnSignatureKey(
+      liveTurnKeys[index],
+      workerFocusMessageSignature(message)
+    )
     if (isWorkerNonSnapshotMessageId(message.id)) {
       incrementSignatureCount(incomingLiveCountsBySignature, signature)
     }
     if (isWorkerSnapshotMessageId(message.id)) {
       incrementSignatureCount(incomingSnapshotCountsBySignature, signature)
     }
-  }
+  })
   merged.forEach((message, index) => {
-    const signature = workerFocusMessageSignature(message)
+    const signature = workerTurnSignatureKey(
+      mergedTurnKeys[index],
+      workerFocusMessageSignature(message)
+    )
     if (signature && isWorkerSnapshotMessageId(message.id)) {
       const indexes = snapshotIndexesBySignature.get(signature) ?? []
       indexes.push(index)
@@ -235,10 +481,15 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
     }
   })
 
-  for (const live of liveMessages) {
-    const signature = workerFocusMessageSignature(live)
+  normalizedLiveMessages.forEach((live, liveIndex) => {
+    const turnKey = liveTurnKeys[liveIndex]
+    const signature = workerTurnSignatureKey(
+      turnKey,
+      workerFocusMessageSignature(live)
+    )
     const index =
       indexById.get(live.id) ??
+      findSameWorkerTransportIdentityIndex(merged, live, mergedTurnKeys, turnKey) ??
       (signature && isWorkerNonSnapshotMessageId(live.id)
         ? takeWindowedSignatureMatch(
             snapshotIndexesBySignature.get(signature),
@@ -253,7 +504,8 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
             signature
           )
         : undefined) ??
-      findSameWorkerAssistantTextIndex(merged, live)
+      findCompatibleWorkerReplayIndex(merged, live, mergedTurnKeys, turnKey) ??
+      findSameWorkerAssistantTextIndex(merged, live, mergedTurnKeys, turnKey)
     if (index === undefined) {
       indexById.set(live.id, merged.length)
       if (signature && isWorkerSnapshotMessageId(live.id)) {
@@ -267,43 +519,141 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
         liveIndexesBySignature.set(signature, indexes)
       }
       merged.push(live)
-      continue
+      mergedTurnKeys.push(turnKey)
+      return
     }
 
     const existing = merged[index]
     const id = existing.id
+    const incomingDefinesRepeatedOccurrence = repeatedLiveTransportIdentities.has(
+      workerTransportIdentityKey(live, turnKey)
+    )
     merged[index] = {
       ...existing,
       ...live,
       id,
-      content: resolveWorkerPanelContent(existing, live),
-      tool_calls:
-        live.tool_calls && live.tool_calls.length > 0 ? live.tool_calls : existing.tool_calls,
-      status: live.status ?? existing.status,
-      is_error: live.is_error ?? existing.is_error
+      content: resolveWorkerPanelContent(
+        existing,
+        live,
+        incomingDefinesRepeatedOccurrence
+      ),
+      reasoning: incomingDefinesRepeatedOccurrence
+        ? live.reasoning
+        : (live.reasoning ?? existing.reasoning),
+      tool_calls: incomingDefinesRepeatedOccurrence
+        ? live.tool_calls
+          ? mergeWorkerToolCalls(existing.tool_calls, live.tool_calls)
+          : undefined
+        : mergeWorkerToolCalls(existing.tool_calls, live.tool_calls),
+      tool_call_id: incomingDefinesRepeatedOccurrence
+        ? live.tool_call_id
+        : (live.tool_call_id ?? existing.tool_call_id),
+      name: incomingDefinesRepeatedOccurrence ? live.name : (live.name ?? existing.name),
+      status: incomingDefinesRepeatedOccurrence
+        ? live.status
+        : (live.status ?? existing.status),
+      is_error: incomingDefinesRepeatedOccurrence
+        ? live.is_error
+        : (live.is_error ?? existing.is_error)
     }
     indexById.set(id, index)
     indexById.set(live.id, index)
-  }
+  })
 
   return merged
 }
 
-function buildToolResults(
-  messages: Message[]
-): Map<string, { content: string | unknown; is_error?: boolean }> {
-  const results = new Map<string, { content: string | unknown; is_error?: boolean }>()
-  for (const message of messages) {
-    if (message.role === "tool" && message.tool_call_id) {
-      const resultKey = getWorkerToolResultKey(message.id, message.tool_call_id)
-      if (!resultKey) continue
-      results.set(resultKey, {
-        content: message.content,
-        is_error: message.is_error === true || message.status === "error"
+function findWorkerHistorySuffixReplayPrefixLength(
+  historyMessages: readonly Message[],
+  liveMessages: readonly Message[]
+): number {
+  const normalizedHistoryMessages = normalizeCompleteMessageIds(historyMessages)
+  const maxLength = Math.min(historyMessages.length, liveMessages.length)
+  for (let length = maxLength; length > 0; length -= 1) {
+    const historyOffset = historyMessages.length - length
+    const matches = liveMessages
+      .slice(0, length)
+      .every((liveMessage, index) => {
+        const historyIndex = historyOffset + index
+        const historyMessage = historyMessages[historyIndex]
+        const normalizedHistoryMessage = normalizedHistoryMessages[historyIndex]
+        if (isExplicitWorkerOccurrenceAfter(normalizedHistoryMessage, liveMessage)) {
+          return false
+        }
+        return checkpointHistoryMessageMatchesSparseLive(
+          historyMessage,
+          liveMessage
+        )
       })
+    if (matches) return length
+  }
+  return 0
+}
+
+function mergeSparseWorkerToolCalls(
+  history: Message["tool_calls"] | undefined,
+  live: Message["tool_calls"] | undefined
+): Message["tool_calls"] | undefined {
+  if (!live?.length) return history
+  if (!history?.length) return live
+
+  if (history.length === live.length) {
+    const usedIndexes = new Set<number>()
+    return live.map((liveToolCall, index) => {
+      const match = findWorkerToolCallMatch(history, liveToolCall, index, usedIndexes)
+      if (match) usedIndexes.add(match.index)
+      return {
+        ...(match?.call ?? liveToolCall),
+        ...liveToolCall,
+        args: hasWorkerToolArgs(liveToolCall.args)
+          ? liveToolCall.args
+          : (match?.call.args ?? liveToolCall.args)
+      }
+    })
+  }
+
+  const merged = history.map((toolCall) => ({ ...toolCall }))
+  const usedIndexes = new Set<number>()
+  for (let index = 0; index < live.length; index += 1) {
+    const liveToolCall = live[index]
+    const match = findWorkerToolCallMatch(merged, liveToolCall, index, usedIndexes)
+    if (!match) {
+      merged.push(liveToolCall)
+      continue
+    }
+    usedIndexes.add(match.index)
+    merged[match.index] = {
+      ...match.call,
+      ...liveToolCall,
+      args: hasWorkerToolArgs(liveToolCall.args)
+        ? liveToolCall.args
+        : (match.call.args ?? liveToolCall.args)
     }
   }
-  return results
+  return merged
+}
+
+function mergeWorkerToolCalls(
+  existing: Message["tool_calls"] | undefined,
+  incoming: Message["tool_calls"] | undefined
+): Message["tool_calls"] | undefined {
+  if (!incoming?.length) return existing
+  if (!existing?.length) return incoming
+  if (!areWorkerToolCallsCompatible(existing, incoming)) return incoming
+
+  const usedIndexes = new Set<number>()
+  return incoming.map((incomingToolCall, index) => {
+    const match = findWorkerToolCallMatch(existing, incomingToolCall, index, usedIndexes)
+    if (match) usedIndexes.add(match.index)
+    const existingToolCall = match?.call
+    return {
+      ...(existingToolCall ?? incomingToolCall),
+      ...incomingToolCall,
+      args: hasWorkerToolArgs(incomingToolCall.args)
+        ? incomingToolCall.args
+        : (existingToolCall?.args ?? incomingToolCall.args)
+    }
+  })
 }
 
 function workerMessagePreview(message: Message): string {
@@ -491,10 +841,13 @@ function preferIncomingContent(
 
 function resolveWorkerPanelContent(
   existingMessage: Message,
-  incomingMessage: Message
+  incomingMessage: Message,
+  incomingDefinesRepeatedOccurrence: boolean = false
 ): Message["content"] {
+  if (incomingDefinesRepeatedOccurrence) return incomingMessage.content ?? ""
+
   if (isWorkerNonSnapshotMessageId(existingMessage.id) && existingMessage.id === incomingMessage.id) {
-    return incomingMessage.content ?? existingMessage.content ?? ""
+    return preferIncomingContent(existingMessage.content, incomingMessage.content)
   }
 
   if (isWorkerSnapshotMessageId(incomingMessage.id)) {
@@ -577,18 +930,9 @@ export function WorkerStreamPanel(): React.JSX.Element {
           return
         }
 
-        const startIndex = Math.max(0, rawMessages.length - MAX_WORKER_HISTORY_MESSAGES)
-        const recentRawMessages =
-          startIndex > 0 ? rawMessages.slice(startIndex) : rawMessages
-
-        setTruncatedHistoryCount(startIndex)
-        setHistoryMessages(
-          recentRawMessages
-            .map((message, index) =>
-              messageFromCheckpoint(message as SerializedCheckpointMessage, startIndex + index)
-            )
-            .filter((message): message is Message => message !== null)
-        )
+        const history = buildWorkerCheckpointHistory(rawMessages, workerThreadId)
+        setTruncatedHistoryCount(history.truncatedCount)
+        setHistoryMessages(history.messages)
       } catch (error) {
         console.error("[WorkerStreamPanel] Failed to load worker checkpoint:", error)
         if (!cancelled) {
@@ -621,27 +965,56 @@ export function WorkerStreamPanel(): React.JSX.Element {
   const openHookLogBucket = openHookLogBucketId
     ? (workerHookLogs.bucketById.get(openHookLogBucketId) ?? null)
     : null
+  const visibleMessageLayout = useMemo(
+    () =>
+      buildVisibleMessageLayout(messages, (message) => {
+        if (!messageRendersNothing(message)) return true
+        if (message.role !== "user") return false
+        return Boolean(workerHookLogs.bucketByMessageId.get(message.id)?.entries.length)
+      }),
+    [messages, workerHookLogs.bucketByMessageId]
+  )
   const showAssistantMetaByIndex = useMemo(() => {
     const result = new Array<boolean>(messages.length)
-    let nextNonToolMessage: Message | null = null
+    let nextVisibleMessage: Message | null = null
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index]
+      const hasHookLogChip =
+        message.role === "user" &&
+        Boolean(workerHookLogs.bucketByMessageId.get(message.id)?.entries.length)
+      if (messageRendersNothing(message) && !hasHookLogChip) {
+        result[index] = false
+        continue
+      }
       result[index] =
         message.role !== "assistant" ||
-        !nextNonToolMessage ||
-        nextNonToolMessage.role !== "assistant"
-      if (message.role !== "tool") {
-        nextNonToolMessage = message
+        !nextVisibleMessage ||
+        nextVisibleMessage.role !== "assistant"
+      nextVisibleMessage = message
+    }
+    return result
+  }, [messages, workerHookLogs.bucketByMessageId])
+  const hasUserAfterHeadByIndex = useMemo(() => {
+    const result = new Array<boolean>(messages.length)
+    let hasUserAfterHead = false
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      result[index] = hasUserAfterHead
+      const hasHookLogChip =
+        message.role === "user" &&
+        Boolean(workerHookLogs.bucketByMessageId.get(message.id)?.entries.length)
+      if (message.role === "user" && (!messageRendersNothing(message) || hasHookLogChip)) {
+        hasUserAfterHead = true
       }
     }
     return result
-  }, [messages])
+  }, [messages, workerHookLogs.bucketByMessageId])
 
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
     () => buildMessageBubbleTimingMeta(messages),
     [messages]
   )
-  const toolResults = useMemo(() => buildToolResults(messages), [messages])
+  const toolResults = useMemo(() => buildToolResultAssociations(messages), [messages])
   const getScrollViewport = useCallback((): HTMLDivElement | null => {
     const root = scrollRef.current
     if (!root) return null
@@ -678,12 +1051,13 @@ export function WorkerStreamPanel(): React.JSX.Element {
     isAtBottomRef.current = bottomDistance < 50
   }, [getScrollViewport])
   const scrollSignature = useMemo(() => {
-    const lastMessage = messages[messages.length - 1]
+    const lastMessage = messages[visibleMessageLayout.lastVisibleMessageIndex]
     return [
       messages.length,
       lastMessage?.id ?? "",
       lastMessage?.role ?? "",
       messageContentLength(lastMessage?.content),
+      messageVisibleReasoningLength(lastMessage),
       lastMessage?.tool_calls?.length ?? 0,
       toolResults.size,
       workerFocusMessages.length,
@@ -695,7 +1069,8 @@ export function WorkerStreamPanel(): React.JSX.Element {
     toolResults.size,
     workerFocusMessages.length,
     workerHookLogs.totalEntryCount,
-    isRunning
+    isRunning,
+    visibleMessageLayout.lastVisibleMessageIndex
   ])
 
   useEffect(() => {
@@ -835,12 +1210,13 @@ export function WorkerStreamPanel(): React.JSX.Element {
               </div>
             )}
             {messages.map((message, index) => {
-              if (message.role === "tool") return null
-              const previousMessage = index > 0 ? messages[index - 1] : null
-              const isLastMessage = index === messages.length - 1
-              const hasUserAfterHead = messages.slice(index + 1).some((m) => m.role === "user")
               const hookLogBucketForTurn =
                 message.role === "user" ? workerHookLogs.bucketByMessageId.get(message.id) : null
+              if (messageRendersNothing(message) && !hookLogBucketForTurn?.entries.length) {
+                return null
+              }
+              const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
+              const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
 
               return (
                 <div key={message.id}>
@@ -852,7 +1228,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
                     toolResults={toolResults}
                     threadId={workerFocusView.threadId}
                     isLoading={isRunning}
-                    hasUserAfterHead={hasUserAfterHead}
+                    hasUserAfterHead={hasUserAfterHeadByIndex[index] ?? false}
                     assistantDurationMs={assistantDurationMsById.get(message.id)}
                     userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
                   />

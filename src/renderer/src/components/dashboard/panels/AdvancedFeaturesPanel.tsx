@@ -7,7 +7,7 @@ import {
   Bot,
   Webhook,
   Terminal,
-  GitCommit,
+  Command,
   type LucideIcon
 } from "lucide-react"
 import type {
@@ -25,7 +25,7 @@ const CARD_ICON: Record<string, LucideIcon> = {
   chatx: Bot,
   hooks: Webhook,
   programmatic: Terminal,
-  autoCommit: GitCommit
+  claudeCode: Command
 }
 
 const CARD_ICON_COLOR: Record<string, string> = {
@@ -37,7 +37,7 @@ const CARD_ICON_COLOR: Record<string, string> = {
   chatx: "bg-sky-500",
   hooks: "bg-indigo-500",
   programmatic: "bg-emerald-500",
-  autoCommit: "bg-orange-500"
+  claudeCode: "bg-stone-800"
 }
 
 const TONE_CLASS: Record<AdvancedFeatureTone, string> = {

@@ -47,6 +47,7 @@ import {
 } from "../src/main/agent/workflow/run-store.ts"
 import {
   buildWorkflowNotificationMessage,
+  isWorkflowNotificationTurnMessage,
   WORKFLOW_NOTIFICATION_TURN_PROMPT
 } from "../src/main/agent/workflow/notification.ts"
 import {
@@ -73,6 +74,7 @@ import {
 import {
   consumeValuesStream,
   createRuntimeWithModelFallback,
+  extractWorkflowTraceToolDetails,
   isModelUnavailableError,
   type WorkflowSubagentDeps
 } from "../src/main/agent/workflow/subagent.ts"
@@ -119,6 +121,32 @@ function testRendererNotificationFullMatch(): void {
     isWorkflowNotificationPrompt("[[CMB_WORKFLOW_NOTIFICATION_V1:wf_abc123]] result"),
     "expanded notification marker (runId suffix) stays a prefix match"
   )
+}
+
+function testWorkflowNotificationTurnMessageFullMatch(): void {
+  // The main-process goal-preempt guard (agent.ts) exempts the workflow completion
+  // notification turn via isWorkflowNotificationTurnMessage — WITHOUT it, a goal
+  // that launched a workflow is paused ("user message preempted active goal") the
+  // instant its result arrives and never resumes. Must FULL-match so a genuine
+  // notification is always exempted, while a user pasting text that merely STARTS
+  // with the trigger still counts as a real user message.
+  assert(
+    isWorkflowNotificationTurnMessage(WORKFLOW_NOTIFICATION_TURN_PROMPT),
+    "exact turn prompt is recognized as internal workflow plumbing"
+  )
+  assert(
+    isWorkflowNotificationTurnMessage(`  ${WORKFLOW_NOTIFICATION_TURN_PROMPT}  `),
+    "surrounding whitespace is trimmed before matching"
+  )
+  assert(
+    !isWorkflowNotificationTurnMessage("[[CMB_WORKFLOW_NOTIFICATION_TURN]] a user-pasted log line"),
+    "text merely starting with the trigger is NOT internal plumbing (would still preempt)"
+  )
+  assert(
+    !isWorkflowNotificationTurnMessage("请帮我修复登录 bug"),
+    "an ordinary user message is not internal plumbing"
+  )
+  assert(!isWorkflowNotificationTurnMessage(""), "empty message is not internal plumbing")
 }
 
 function testByNewestRunTieBreak(): void {
@@ -610,6 +638,66 @@ async function testConsumeValuesStreamTapIsolation(): Promise<void> {
   assert(
     JSON.stringify(withThrowingTap) === JSON.stringify(withoutTap),
     "a throwing onValues tap must be swallowed and not change the returned snapshot"
+  )
+}
+
+function testWorkflowTraceToolDetails(): void {
+  const details = extractWorkflowTraceToolDetails({
+    messages: [
+      {
+        _getType: () => "ai",
+        tool_calls: [{ id: "call-read", name: "read_file", args: { path: "src/app.ts" } }]
+      },
+      {
+        id: ["langchain_core", "messages", "AIMessage"],
+        kwargs: {
+          tool_calls: [
+            { id: "call-execute", name: "execute", args: { command: "npm run typecheck" } }
+          ]
+        }
+      },
+      {
+        _getType: () => "tool",
+        tool_call_id: "call-read",
+        content: "export const app = true",
+        status: "success"
+      },
+      {
+        id: ["langchain_core", "messages", "ToolMessage"],
+        kwargs: {
+          tool_call_id: "call-execute",
+          content: "typecheck failed",
+          status: "error"
+        }
+      },
+      {
+        // Cumulative snapshots may repeat a provider call id; trace detail must not duplicate it.
+        _getType: () => "ai",
+        tool_calls: [{ id: "call-read", name: "read_file", args: { path: "src/app.ts" } }]
+      },
+      {
+        // Malformed/raw artifacts are not executable calls and must stay out of trace details.
+        _getType: () => "ai",
+        tool_calls: [],
+        invalid_tool_calls: [{ id: "call-invalid", name: "write_file", args: "{" }]
+      }
+    ]
+  })
+
+  assert(details.length === 2, `two executed tools should be recovered, got ${details.length}`)
+  assert(
+    details[0]?.name === "read_file" &&
+      JSON.stringify(details[0]?.input) === JSON.stringify({ path: "src/app.ts" }) &&
+      details[0]?.output === "export const app = true" &&
+      details[0]?.status === "success",
+    `read_file detail should retain args/result/status: ${JSON.stringify(details[0])}`
+  )
+  assert(
+    details[1]?.name === "execute" &&
+      JSON.stringify(details[1]?.input) === JSON.stringify({ command: "npm run typecheck" }) &&
+      details[1]?.output === "typecheck failed" &&
+      details[1]?.status === "error",
+    `execute detail should retain args/result/error status: ${JSON.stringify(details[1])}`
   )
 }
 
@@ -1787,7 +1875,7 @@ async function testUndeliveredScanEligibilityPredicate(): Promise<void> {
 
     const unfiltered = findUndeliveredTerminalRun(ws, threadId)
     assert(unfiltered?.runId === newer, "without a predicate the newest undelivered wins")
-    const filtered = findUndeliveredTerminalRun(ws, threadId, (runId) => runId !== newer)
+    const filtered = findUndeliveredTerminalRun(ws, threadId, (run) => run.runId !== newer)
     assert(
       filtered?.runId === older,
       "an ineligible newest candidate must not hide the older deliverable run (guard blind spot)"
@@ -1959,6 +2047,102 @@ async function testPendingNotificationBacklogDrain(workspace: string): Promise<v
   // an extra kick can never resurrect a reported run.
   const reAck = await markWorkflowRunNotified(workspace, threadId, runB)
   assert(reAck === true, "re-acking an already-delivered run returns true (no resurrect)")
+}
+
+async function testResumeAckInstanceFence(workspace: string): Promise<void> {
+  // A resume REUSES the runId, and the error notification is what TELLS the model to
+  // resume — so the resume is launched INSIDE the very turn that will later ack that
+  // error notification. A sub-second resumed run reaches terminal BEFORE the stale ack
+  // lands, so the `status !== "running"` guard alone lets it through and it marks the
+  // NEW instance delivered, permanently swallowing that instance's own completion
+  // notification. `startedAt` is minted fresh on every launch → it identifies the run
+  // INSTANCE the notification was built from, and fences the ack to it.
+  //
+  // This is a BEHAVIOURAL test on purpose: the fence is a silent race guard (when it
+  // breaks, a notification just vanishes — no throw, no log), and a source-regex guard
+  // stays green if `!==` is ever typo'd to `===`.
+  const threadId = "thread-resume-fence"
+  const runId = generateWorkflowRunId()
+  const persistInstance = async (startedAt: string, status: "error" | "completed") => {
+    const store = createWorkflowRunStore({
+      workspacePath: workspace,
+      threadId,
+      initial: {
+        version: 1,
+        runId, // resume reuses the id — the SECOND call overwrites the first's record
+        threadId,
+        workflowName: "fence",
+        script: "x",
+        scriptSha256: "s",
+        status,
+        phases: [],
+        currentPhase: null,
+        agents: [],
+        logs: [],
+        journal: [],
+        stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+        startedAt,
+        updatedAt: startedAt
+      }
+    })
+    assert((await store.flush()) === true, `instance ${startedAt} must persist`)
+  }
+
+  const firstStartedAt = new Date(Date.now() - 60_000).toISOString()
+  const resumedStartedAt = new Date().toISOString()
+  assert(firstStartedAt !== resumedStartedAt, "the two instances must be distinguishable")
+
+  // Instance 1 fails; its notification is built from THIS snapshot (startedAt=first).
+  await persistInstance(firstStartedAt, "error")
+  // The model resumes inside that notification's turn: same runId, fresh startedAt,
+  // and it completes in milliseconds — the record on disk is now instance 2.
+  await persistInstance(resumedStartedAt, "completed")
+  const onDisk = loadWorkflowRun(workspace, threadId, runId)!
+  assert(onDisk.startedAt === resumedStartedAt, "disk must hold the RESUMED instance")
+  assert(onDisk.status === "completed", "resumed instance is terminal")
+
+  // …and only NOW does instance 1's ack land. It must be a no-op.
+  const staleAck = await markWorkflowRunNotified(workspace, threadId, runId, firstStartedAt)
+  assert(staleAck === true, "a stale ack reports settled (nothing to persist, no retry)")
+  const afterStale = loadWorkflowRun(workspace, threadId, runId)!
+  assert(
+    !afterStale.notificationDelivered,
+    "REGRESSION: stale ack marked the RESUMED instance delivered — its completion " +
+      "notification would be swallowed forever"
+  )
+  const stillPending = findUndeliveredTerminalRun(workspace, threadId)
+  assert(
+    stillPending?.runId === runId,
+    "the resumed instance must still surface as pending after the stale ack"
+  )
+
+  // The resumed instance's OWN ack (matching startedAt) settles it for real.
+  const liveAck = await markWorkflowRunNotified(workspace, threadId, runId, resumedStartedAt)
+  assert(liveAck === true, "the matching ack persists delivered")
+  assert(
+    loadWorkflowRun(workspace, threadId, runId)!.notificationDelivered === true,
+    "matching ack must mark the run delivered"
+  )
+  assert(
+    findUndeliveredTerminalRun(workspace, threadId) === null,
+    "backlog drains once the resumed instance is genuinely reported"
+  )
+
+  // Back-compat: the cancel path acks WITHOUT an instance (the run being marked IS the
+  // one being cancelled), so an omitted fence must still write through.
+  await rollbackWorkflowRunNotified(workspace, threadId, runId)
+  assert(
+    !loadWorkflowRun(workspace, threadId, runId)!.notificationDelivered,
+    "rollback clears the flag"
+  )
+  assert(
+    (await markWorkflowRunNotified(workspace, threadId, runId)) === true,
+    "an unfenced ack (cancel path) still persists delivered"
+  )
+  assert(
+    loadWorkflowRun(workspace, threadId, runId)!.notificationDelivered === true,
+    "unfenced ack must mark delivered"
+  )
 }
 
 async function testPipelineConcurrentResume(workspace: string): Promise<void> {
@@ -4095,6 +4279,7 @@ async function main(): Promise<void> {
     await testModelFallbackNotJournaled(workspace)
     await testFullResultSidecarForOversizedReturn(workspace)
     await testConsumeValuesStreamTapIsolation()
+    testWorkflowTraceToolDetails()
     await testWorkflowAgentSnapshotBounding()
     await testAgentToolStreamStaleSidecarKilled()
     await testClearAllAgentToolStreamsSweepsRunIdSidecars()
@@ -4120,6 +4305,7 @@ async function main(): Promise<void> {
     await testInitialStatePersistedImmediately(workspace)
     await testInitialPersistFailureReported()
     await testPendingNotificationBacklogDrain(workspace)
+    await testResumeAckInstanceFence(workspace)
     await testGuestReadFileRejectsNonRegular()
     await testListWorkflowRunsSummarySidecar(workspace)
     await testJournalSidecarSplit(workspace)
@@ -4137,11 +4323,12 @@ async function main(): Promise<void> {
     await testModelFallbackOnlyOnUnavailable()
     testNotificationTurnPromptInSync()
     testRendererNotificationFullMatch()
+    testWorkflowNotificationTurnMessageFullMatch()
     testByNewestRunTieBreak()
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (71 tests)")
+    console.log("PASS workflow-engine (83 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome

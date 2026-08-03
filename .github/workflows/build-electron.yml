@@ -556,6 +556,10 @@ jobs:
         with:
           name: CMBDevClaw-linux-unpacked-${{ steps.pkg.outputs.version }}
           path: CMBDevClaw-linux-unpacked-${{ steps.pkg.outputs.version }}.tar.gz
+          # tar.gz is already compressed. Avoid spending CI time and CPU trying
+          # to deflate it again; browser downloads still arrive as the standard
+          # GitHub artifact zip, which the updater can consume directly.
+          compression-level: 0
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')

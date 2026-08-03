@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { PenLine } from "lucide-react"
-import ReactMarkdown from "react-markdown"
-import rehypeHighlight from "rehype-highlight"
+import { CodeViewer } from "@/components/tabs/CodeViewer"
 import { inlineHtmlSiblingAssets } from "@/lib/html-srcdoc"
 import { VisualEditLayer } from "@/components/visual-edit/VisualEditLayer"
 import type {
@@ -9,8 +8,6 @@ import type {
   ClawVisualFeedbackContext,
   ClawVisualTargetKind
 } from "@/components/visual-edit/visual-edit-types"
-
-import "highlight.js/styles/github.css"
 
 interface HtmlPreviewProps {
   content: string
@@ -39,15 +36,6 @@ function getFileName(path: string): string {
   return path.split("/").pop() || path
 }
 
-function getFencedCodeBlock(source: string, language: string): string {
-  const backtickMatches = source.match(/`+/g)
-  const maxBackticks = backtickMatches
-    ? backtickMatches.reduce((max, current) => Math.max(max, current.length), 0)
-    : 0
-  const fence = "`".repeat(Math.max(3, maxBackticks + 1))
-  return `${fence}${language}\n${source}\n${fence}`
-}
-
 export function HtmlPreview({
   content,
   path,
@@ -64,7 +52,6 @@ export function HtmlPreview({
   const [srcDocContent, setSrcDocContent] = useState(content)
   const [visualEditActive, setVisualEditActive] = useState(false)
   const currentViewMode = viewMode ?? internalViewMode
-  const highlightedSourceMarkdown = useMemo(() => getFencedCodeBlock(content, "html"), [content])
   const canUseVisualEdit = Boolean(visualEdit && currentViewMode === "preview")
 
   useEffect(() => {
@@ -222,12 +209,8 @@ export function HtmlPreview({
             )}
           </div>
         ) : (
-          <div className={fillHeight ? "min-h-full" : ""}>
-            <div className="prose prose-sm max-w-none dark:prose-invert p-3">
-              <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
-                {highlightedSourceMarkdown}
-              </ReactMarkdown>
-            </div>
+          <div className={fillHeight ? "flex h-full min-h-0" : "h-[80vh]"}>
+            <CodeViewer filePath={path ?? "preview.html"} content={content} />
           </div>
         )}
       </div>

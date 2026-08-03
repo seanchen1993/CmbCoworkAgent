@@ -20,6 +20,7 @@ export function isSameStagingPayload(
     next.channel === "staging" &&
     prev.channel === "staging" &&
     next.version === prev.version &&
+    next.targetVersion === prev.targetVersion &&
     next.updateType === prev.updateType &&
     next.downloadFile === prev.downloadFile &&
     next.downloadSha256 === prev.downloadSha256 &&

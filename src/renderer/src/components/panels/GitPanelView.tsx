@@ -22,6 +22,7 @@ import {
 import { cn } from "@/lib/utils"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { OpenInIdeButton } from "@/components/ui/open-in-ide-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -99,8 +100,6 @@ type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied
 type GitPanelDiffFile = GitPanelDiffState["files"][number]
 type GitPanelTreeDiffFile = GitPanelDiffFile & GitPanelTreeFile
 
-// 同时按需拉取的文件 diff 上限，避免刷新后一次性为大量已展开文件并发拉取 diff 拖垮主进程。
-const MAX_CONCURRENT_FILE_DIFF_LOADS = 3
 const GIT_REJECT_DIALOG_FILE_LIMIT = 10_000
 const ALL_REPOSITORIES_VALUE = "__all__"
 const WORKSPACE_REPOSITORY_KEY = "__workspace__"
@@ -268,6 +267,20 @@ function createInitialMetaState(
   }
 }
 
+function formatGitPanelErrorMessage(message: string): string {
+  const normalized = message.toLowerCase()
+  if (
+    normalized.includes("cannot pull with rebase") &&
+    normalized.includes("unstaged changes")
+  ) {
+    const repositoryMatch = message.match(/(?:^|\n)([^:\n]+):\s*error:\s*cannot pull with rebase/i)
+    const repositoryName = repositoryMatch?.[1]?.trim()
+    const target = repositoryName && repositoryName !== "error" ? `「${repositoryName}」` : "当前仓库"
+    return `${target}存在未提交的本地改动，无法拉取远端代码。请先提交改动，或手动暂存（stash）后再 Pull。`
+  }
+  return message
+}
+
 export function GitPanelView({
   threadId,
   workspacePath,
@@ -305,15 +318,19 @@ export function GitPanelView({
   const [commitType, setCommitType] = useState<CommitType>("fix")
   const [commitMessage, setCommitMessage] = useState("")
   const [commitHistory, setCommitHistory] = useState<GitCommitHistoryRecord[]>([])
-  const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
+  const [expandedFilePath, setExpandedFilePath] = useState<string | null>(null)
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set())
   const [collapsedRepositoryPaths, setCollapsedRepositoryPaths] = useState<Set<string>>(new Set())
   const [collapsedDirectoryPaths, setCollapsedDirectoryPaths] = useState<Set<string>>(new Set())
   const [activeRepositoryPath, setActiveRepositoryPath] = useState(ALL_REPOSITORIES_VALUE)
   const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false)
-  const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
-  const [fileDiffErrors, setFileDiffErrors] = useState<Record<string, string>>({})
+  // 单文件 diff 缓存：只保留当前展开文件的 diff 内容，展开新文件时清除旧缓存
+  const [currentFileDiff, setCurrentFileDiff] = useState<string | null>(null)
+  const [diffLoadingPath, setDiffLoadingPath] = useState<string | null>(null)
+  const [diffFileError, setDiffFileError] = useState<string | null>(null)
+  const loadedDiffPathRef = useRef<string | null>(null)
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
+  const [pendingRevertFile, setPendingRevertFile] = useState<GitPanelDiffFile | null>(null)
   const [pulling, setPulling] = useState(false)
   const selectionScopeRef = useRef(ALL_REPOSITORIES_VALUE)
   const initialMetaState = useMemo(
@@ -345,25 +362,29 @@ export function GitPanelView({
     rejectInFlightRef.current = false
     suppressFileChangeRefreshUntilRef.current = 0
     setCommitHistory([])
-    setExpandedFilePaths(new Set())
+    setExpandedFilePath(null)
     setSelectedFilePaths(new Set())
     setCollapsedRepositoryPaths(new Set())
     setCollapsedDirectoryPaths(new Set())
     setActiveRepositoryPath(ALL_REPOSITORIES_VALUE)
     setRepositoryPickerOpen(false)
     selectionScopeRef.current = ALL_REPOSITORIES_VALUE
-    setFileDiffLoadingPaths(new Set())
-    setFileDiffErrors({})
+    setCurrentFileDiff(null)
+    setDiffLoadingPath(null)
+    setDiffFileError(null)
+    loadedDiffPathRef.current = null
+    setPendingRevertFile(null)
     setPushMetaState(null)
     setPushMetaLoading(false)
   }, [threadId, initialMetaState])
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
+    const displayText = variant === "error" ? formatGitPanelErrorMessage(text) : text
     if (variant === "success") {
-      toast.success(text)
+      toast.success(displayText)
       return
     }
-    toast.error(text)
+    toast.error(displayText)
   }, [])
 
   const refresh = useCallback(
@@ -422,8 +443,10 @@ export function GitPanelView({
               })
               if (requestId !== diffRequestIdRef.current) return
               setDiffState(nextDiff)
-              setFileDiffLoadingPaths(new Set())
-              setFileDiffErrors({})
+              setCurrentFileDiff(null)
+              setDiffLoadingPath(null)
+              setDiffFileError(null)
+              loadedDiffPathRef.current = null
             } catch (e) {
               if (requestId !== diffRequestIdRef.current) return
               reportRefreshError(e instanceof Error ? e.message : "加载 Git 文件变更失败")
@@ -584,11 +607,15 @@ export function GitPanelView({
 
   useEffect(() => {
     const files = visibleDiffFiles
-    setExpandedFilePaths((prev) => {
-      if (files.length === 0) return new Set()
-      return new Set([...prev].filter((path) => files.some((f) => f.path === path)))
-    })
-  }, [visibleDiffFiles])
+    if (files.length === 0) {
+      setExpandedFilePath(null)
+      return
+    }
+    // 如果当前展开的文件不在新列表中，清除
+    if (expandedFilePath && !files.some((f) => f.path === expandedFilePath)) {
+      setExpandedFilePath(null)
+    }
+  }, [visibleDiffFiles, expandedFilePath])
 
   useEffect(() => {
     const files = visibleDiffFiles
@@ -642,18 +669,14 @@ export function GitPanelView({
 
   const loadFileDiff = useCallback(
     async (filePath: string): Promise<void> => {
-      if (!threadId) return
-      const currentFile = diffState?.files.find((file) => file.path === filePath)
-      if (!currentFile || currentFile.diffLoaded || fileDiffLoadingPaths.has(filePath)) return
+      if (!threadId || !filePath || diffLoadingPath === filePath) return
       const requestDiffId = diffRequestIdRef.current
       const requestThreadId = threadId
 
-      setFileDiffLoadingPaths((prev) => new Set(prev).add(filePath))
-      setFileDiffErrors((prev) => {
-        const next = { ...prev }
-        delete next[filePath]
-        return next
-      })
+      // 清除旧缓存，开始加载新文件
+      setCurrentFileDiff(null)
+      setDiffFileError(null)
+      setDiffLoadingPath(filePath)
 
       try {
         const repo = getFileRepository(filePath, repositories)
@@ -667,86 +690,33 @@ export function GitPanelView({
         if (!result.success || !result.file) {
           throw new Error(result.error || "加载文件 diff 失败")
         }
-
-        setDiffState((prev) => {
-          if (!prev) return prev
-          if (requestDiffId !== diffRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return prev
-          const files = prev.files.map((file) => {
-            if (file.path !== filePath) return file
-            return {
-              ...file,
-              diff: result.file?.diff ?? "",
-              diffLoaded: true,
-              additions: result.file?.additions ?? file.additions,
-              deletions: result.file?.deletions ?? file.deletions
-            }
-          })
-          // 懒加载下文件级行数可能在展开后才精确化（尤其是未跟踪新文件），
-          // 这里同步重算全局 totals，避免顶部汇总与逐文件 +/- 长期对不上。
-          const totals = files.reduce(
-            (acc, file) => {
-              acc.additions += file.additions
-              acc.deletions += file.deletions
-              return acc
-            },
-            { additions: 0, deletions: 0 }
-          )
-          return {
-            ...prev,
-            files,
-            totals: { ...prev.totals, additions: totals.additions, deletions: totals.deletions }
-          }
-        })
+        if (requestDiffId === diffRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
+          setCurrentFileDiff(result.file.diff ?? "")
+          loadedDiffPathRef.current = filePath
+        }
       } catch (e) {
         if (requestDiffId !== diffRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return
-        const message = e instanceof Error ? e.message : "加载文件 diff 失败"
-        setFileDiffErrors((prev) => ({ ...prev, [filePath]: message }))
+        setDiffFileError(e instanceof Error ? e.message : "加载文件 diff 失败")
       } finally {
         if (requestDiffId === diffRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
-          setFileDiffLoadingPaths((prev) => {
-            const next = new Set(prev)
-            next.delete(filePath)
-            return next
-          })
+          setDiffLoadingPath(null)
         }
       }
     },
-    [threadId, diffState?.files, fileDiffLoadingPaths, repositories]
+    [threadId, diffLoadingPath, repositories]
   )
 
   const toggleFileExpanded = useCallback((filePath: string): void => {
-    const shouldExpand = !expandedFilePaths.has(filePath)
-    setExpandedFilePaths((prev) => {
-      const next = new Set(prev)
-      if (next.has(filePath)) {
-        next.delete(filePath)
-      } else {
-        next.add(filePath)
-      }
-      return next
-    })
-    if (shouldExpand) {
-      void loadFileDiff(filePath)
-    }
-  }, [expandedFilePaths, loadFileDiff])
+    const isCurrentlyExpanded = expandedFilePath === filePath
+    setExpandedFilePath(isCurrentlyExpanded ? null : filePath)
+  }, [expandedFilePath])
 
   useEffect(() => {
-    // 刷新会把已展开文件的 diffLoaded 重置，若一次性为所有展开文件并发拉取 diff，
-    // 每个文件会触发多个 git 子进程，展开数较多时主进程 CPU 会瞬时飙升。
-    // 这里用并发预算自时钟节流：单个 loadFileDiff 完成后会更新 loading 集合并重跑本 effect，
-    // 从而按 MAX_CONCURRENT_FILE_DIFF_LOADS 排队补齐剩余文件。
-    let budget = MAX_CONCURRENT_FILE_DIFF_LOADS - fileDiffLoadingPaths.size
-    if (budget <= 0) return
-    for (const filePath of expandedFilePaths) {
-      if (budget <= 0) break
-      const file = visibleDiffFiles.find((item) => item.path === filePath)
-      if (!file || file.diffLoaded || fileDiffLoadingPaths.has(filePath) || fileDiffErrors[filePath]) {
-        continue
-      }
-      void loadFileDiff(filePath)
-      budget -= 1
-    }
-  }, [expandedFilePaths, fileDiffErrors, fileDiffLoadingPaths, loadFileDiff, visibleDiffFiles])
+    // 刷新后只有当前展开文件需要重新加载，且仅当未缓存过或文件列表已更新时
+    if (!expandedFilePath) return
+    if (loadedDiffPathRef.current === expandedFilePath && !diffFileError) return
+    void loadFileDiff(expandedFilePath)
+  }, [expandedFilePath, loadFileDiff, diffFileError])
 
   const toggleFileSelected = useCallback((filePath: string): void => {
     setSelectedFilePaths((prev) => {
@@ -808,8 +778,9 @@ export function GitPanelView({
         return
       }
       if (refreshTimer) clearTimeout(refreshTimer)
+      const isMetaChange = data.changeType === "meta"
       refreshTimer = setTimeout(() => {
-        void refresh({ meta: false, diff: true })
+        void refresh({ meta: isMetaChange, diff: true })
       }, 120)
     })
     return () => {
@@ -830,6 +801,7 @@ export function GitPanelView({
       return
     }
     const requestFilePaths = toRepositoryRelativePaths(filePaths, actionRepository)
+
     setRunning("reject")
     setError(null)
     rejectInFlightRef.current = true
@@ -960,6 +932,9 @@ export function GitPanelView({
           ? `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
           : undefined
 
+      if (action === "commit") {
+        suppressFileChangeRefreshUntilRef.current = Number.POSITIVE_INFINITY
+      }
       setRunning(action)
       setError(null)
       try {
@@ -994,13 +969,20 @@ export function GitPanelView({
         if (action === "push") {
           void refresh({ meta: true, diff: true })
         } else {
-          await refresh({ meta: true, diff: true })
+          suppressFileChangeRefreshUntilRef.current = Date.now() + 1200
+          void refresh({ meta: true, diff: true })
         }
       } catch (e) {
         const err = e instanceof Error ? e.message : "操作失败"
         setError(err)
         showToast(err, "error")
       } finally {
+        if (
+          action === "commit" &&
+          suppressFileChangeRefreshUntilRef.current === Number.POSITIVE_INFINITY
+        ) {
+          suppressFileChangeRefreshUntilRef.current = Date.now() + 1200
+        }
         setRunning(null)
       }
     },
@@ -1023,18 +1005,23 @@ export function GitPanelView({
   )
 
   const handleRevertFile = useCallback(
-    async (filePath: string) => {
+    async (file: GitPanelDiffFile) => {
       if (!threadId) return
+      const filePath = file.path
+      setPendingRevertFile(null)
       setRevertingFilePath(filePath)
       setError(null)
       try {
         const actionRepository = getFileRepository(filePath, repositories)
-        const requestFilePath = actionRepository
-          ? stripRepositoryPrefix(filePath, actionRepository)
-          : filePath
-        const result = await window.api.workspace.rejectWorktreeFile(
+        const requestFilePaths = [
+          ...(file.previousPath ? [file.previousPath] : []),
+          filePath
+        ].map((path) =>
+          actionRepository ? stripRepositoryPrefix(path, actionRepository) : path
+        )
+        const result = await window.api.workspace.rejectWorktreeChanges(
           threadId,
-          requestFilePath,
+          requestFilePaths,
           actionRepository ? { worktreePath: actionRepository.path } : undefined
         )
         if (!result.success) throw new Error(result.error || "文件回退失败")
@@ -1050,6 +1037,11 @@ export function GitPanelView({
     },
     [threadId, refresh, repositories, showToast]
   )
+
+  const confirmPendingRevertFile = useCallback(() => {
+    if (!pendingRevertFile || revertingFilePath) return
+    void handleRevertFile(pendingRevertFile)
+  }, [handleRevertFile, pendingRevertFile, revertingFilePath])
 
   const runPull = useCallback(async () => {
     if (!threadId) return
@@ -1147,15 +1139,13 @@ export function GitPanelView({
     repo?: GitRepositoryInfo | null,
     treeRow?: GitPanelFileTreeRow<GitPanelTreeDiffFile>
   ): React.JSX.Element => {
-    const diff = file.diff
-    const isExpanded = expandedFilePaths.has(file.path)
+    const diff = currentFileDiff
+    const isExpanded = expandedFilePath === file.path
     const isSelected = selectedFilePaths.has(file.path)
-    const isFileDiffLoading = fileDiffLoadingPaths.has(file.path)
-    const fileDiffError = fileDiffErrors[file.path]
+    const isFileDiffLoading = diffLoadingPath === file.path
+    const fileDiffErr = diffFileError
     const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
     const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
-    const revertHint =
-      revertingFilePath === file.path ? "回退中..." : "回退（大模型改动的上一个版本）"
     const fullDisplayPath = getRepositoryFileDisplayPath(file.path, repo)
     const displayPath = treeRow?.name ?? fullDisplayPath
     const previousDisplayPath = file.previousPath
@@ -1236,25 +1226,105 @@ export function GitPanelView({
               stopPropagation
               onClick={() => onOpenFileFolder?.(file.path)}
             />
-            <IconPopoverButton
-              icon={
-                <Undo2
-                  className={cn(
-                    "size-3",
-                    revertingFilePath === file.path && "animate-spin"
-                  )}
-                />
-              }
-              popoverContent={revertHint}
-              disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
-              aria-label={revertHint}
-              align="end"
-              stopPropagation
-              className={cn(revertingFilePath === file.path && "opacity-80")}
-              onClick={() => {
-                if (!revertingFilePath) void handleRevertFile(file.path)
+            <Popover
+              open={pendingRevertFile?.path === file.path}
+              onOpenChange={(open) => {
+                if (revertingFilePath) return
+                setPendingRevertFile(open ? file : null)
               }}
-            />
+            >
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
+                  aria-label={revertingFilePath === file.path ? "回退中" : "回退文件"}
+                  className={cn(
+                    "cursor-pointer inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    revertingFilePath === file.path && "opacity-80",
+                    revertingFilePath &&
+                      revertingFilePath !== file.path &&
+                      "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground"
+                  )}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                  }}
+                >
+                  <Undo2
+                    className={cn(
+                      "size-3",
+                      revertingFilePath === file.path && "animate-spin"
+                    )}
+                  />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="end"
+                sideOffset={6}
+                className="w-72 p-3"
+                onClick={(event) => event.stopPropagation()}
+                onOpenAutoFocus={(event) => event.preventDefault()}
+                onCloseAutoFocus={(event) => event.preventDefault()}
+              >
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold text-foreground">确认回退文件</div>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      回退会回退全部变更，不会回退到大模型的上一次修改，请确认是否回退。
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-border/70 bg-muted/20 px-2.5 py-2 text-[11px]">
+                    <div className="mb-1 text-muted-foreground">目标文件</div>
+                    <div className="truncate font-mono text-foreground" title={fullDisplayPath}>
+                      {fullDisplayPath}
+                    </div>
+                    {previousDisplayPath && (
+                      <div
+                        className="mt-1 truncate font-mono text-muted-foreground"
+                        title={previousDisplayPath}
+                      >
+                        {previousDisplayPath}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={Boolean(revertingFilePath)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setPendingRevertFile(null)
+                      }}
+                    >
+                      取消
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={Boolean(revertingFilePath)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        confirmPendingRevertFile()
+                      }}
+                    >
+                      {revertingFilePath === file.path ? (
+                        <>
+                          <Loader2 className="size-3.5 animate-spin" />
+                          回退中...
+                        </>
+                      ) : (
+                        <>
+                          <Undo2 className="size-3.5" />
+                          确认回退
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </PopoverContent>
+            </Popover>
           </span>
         </div>
         {isExpanded && (
@@ -1310,11 +1380,11 @@ export function GitPanelView({
                 <Loader2 className="size-3.5 animate-spin text-blue-600 dark:text-blue-400" />
                 正在加载该文件 diff...
               </div>
-            ) : fileDiffError ? (
+            ) : fileDiffErr ? (
               <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {fileDiffError}
+                {fileDiffErr}
               </div>
-            ) : !file.diffLoaded ? (
+            ) : !isExpanded ? (
               <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                 展开后将按需加载该文件 diff。
               </div>

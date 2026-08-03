@@ -3,10 +3,11 @@ import { ToolCallRenderer } from "./ToolCallRenderer"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getToolLabel } from "@/lib/tool-labels"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
-import React, { useEffect, useMemo, useState } from "react"
+import React, { useEffect, useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Eye,
   Wrench,
   Copy,
@@ -18,7 +19,9 @@ import {
   Frown,
   Info,
   Flag,
-  PlayCircle
+  PlayCircle,
+  GitFork,
+  Loader2
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -30,10 +33,11 @@ import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
 } from "@/lib/coordinator-worker-tool-args"
-import { getWorkerToolResultKey, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
+import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
 import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
+import { normalizeVisibleReasoningText } from "@/lib/message-display-visibility"
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -145,6 +149,13 @@ function normalizeToolCallForDisplay<T extends { name: string; args?: Record<str
     ...toolCall,
     args: normalizeCoordinatorWorkerToolArgsForDisplay(toolCall.name, toolCall.args)
   }
+}
+
+function stripThinkBlocksForDisplay(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>\s*/gi, "")
+    .replace(/^\s*<think>[\s\S]*$/i, "")
+    .replace(/^[\s\S]*?<\/think>\s*/i, "")
 }
 
 // 获取工具调用的简要描述
@@ -542,6 +553,7 @@ interface MessageBubbleProps {
   showAssistantMeta?: boolean
   toolResults?: Map<string, ToolResultInfo>
   toolCallStates?: Map<string, ToolCallState>
+  pendingApprovalToolCallKeys?: Set<string>
   pendingApproval?: HITLRequest | null
   autoApproveGitPush?: boolean
   onApprovalDecision?: (
@@ -549,12 +561,17 @@ interface MessageBubbleProps {
   ) => void
   onEditUserMessage?: (message: Message) => void
   onSetGoalFromMessage?: (text: string) => void
+  onForkFromMessage?: (message: Message) => void
+  forkingMessageId?: string | null
   threadId: string
   isLoading: boolean
   hasUserAfterHead?: boolean
   assistantDurationMs?: number
   userSendTimeLabel?: string | null
 }
+
+/** 用户消息折叠阈值:收起态最大高度(px)。超过才出现"显示更多"。 */
+const USER_MESSAGE_COLLAPSED_MAX_PX = 260
 
 function MessageBubbleImpl({
   message,
@@ -563,11 +580,14 @@ function MessageBubbleImpl({
   showAssistantMeta = true,
   toolResults,
   toolCallStates,
+  pendingApprovalToolCallKeys,
   pendingApproval,
   autoApproveGitPush = false,
   onApprovalDecision,
   onEditUserMessage,
   onSetGoalFromMessage,
+  onForkFromMessage,
+  forkingMessageId = null,
   threadId,
   isLoading,
   hasUserAfterHead = false,
@@ -581,9 +601,34 @@ function MessageBubbleImpl({
   const [likedMessageId, setLikedMessageId] = useState<string | null>(null)
   const [dislikedMessageId, setDislikedMessageId] = useState<string | null>(null)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
+  const [reasoningOpen, setReasoningOpen] = useState(false)
+  // 超长用户消息折叠:默认收起,测量到内容超过阈值才显示"显示更多/收起"。
+  const [userContentExpanded, setUserContentExpanded] = useState(false)
+  const [userContentOverflow, setUserContentOverflow] = useState(false)
+  const userContentRef = useRef<HTMLDivElement>(null)
+  const autoOpenedReasoningForMessageRef = useRef<string | null>(null)
+  const autoCollapsedReasoningForMessageRef = useRef<string | null>(null)
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
+  const isForkingThisMessage = forkingMessageId === message.id
+  const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
+  const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
+  const reasoningText = !isUser ? normalizeVisibleReasoningText(message.reasoning) : ""
+  const visibleAssistantContentText = useMemo(() => {
+    if (isUser) return ""
+    if (typeof message.content === "string") {
+      return reasoningText ? stripThinkBlocksForDisplay(message.content) : message.content
+    }
+    if (!Array.isArray(message.content)) return ""
+    return message.content
+      .map((block) => {
+        if (block.type !== "text" || !block.text) return ""
+        return reasoningText ? stripThinkBlocksForDisplay(block.text) : block.text
+      })
+      .join("\n")
+  }, [isUser, message.content, reasoningText])
+  const hasVisibleAssistantContent = visibleAssistantContentText.trim().length > 0
 
   useEffect(() => {
     if (
@@ -594,6 +639,38 @@ function MessageBubbleImpl({
       console.log(message, "message///")
     }
   }, [message])
+
+  // 测量用户消息内容高度,超过阈值才启用折叠。气泡宽度是 max-w-[80%],会随窗口/
+  // 侧栏开合变化,因此除内容变化外还用 ResizeObserver 在宽度变化时重测——否则窄时
+  // 测得溢出、变宽后内容已放得下,遮罩/按钮仍会残留。scrollHeight 始终是完整内容高度
+  // (不受 maxHeight 截断影响),且 setState 幂等,不会造成观察循环。
+  useEffect(() => {
+    if (message.role !== "user") return
+    const el = userContentRef.current
+    if (!el) return
+    const measure = (): void => {
+      setUserContentOverflow(el.scrollHeight > USER_MESSAGE_COLLAPSED_MAX_PX + 8)
+    }
+    measure()
+    if (typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(() => measure())
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [message.role, message.content])
+
+  useEffect(() => {
+    if (!isStreaming || !reasoningText) return
+    if (autoOpenedReasoningForMessageRef.current === message.id) return
+    autoOpenedReasoningForMessageRef.current = message.id
+    setReasoningOpen(true)
+  }, [isStreaming, message.id, reasoningText])
+
+  useEffect(() => {
+    if (!isStreaming || !reasoningText || !hasVisibleAssistantContent) return
+    if (autoCollapsedReasoningForMessageRef.current === message.id) return
+    autoCollapsedReasoningForMessageRef.current = message.id
+    setReasoningOpen(false)
+  }, [hasVisibleAssistantContent, isStreaming, message.id, reasoningText])
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
   const shouldShowMessageHead =
@@ -716,8 +793,10 @@ function MessageBubbleImpl({
     }
 
     if (typeof message.content === "string") {
+      const displayContent =
+        !isUser && reasoningText ? stripThinkBlocksForDisplay(message.content) : message.content
       // Empty content (after potentially stripping the trailing skill-use block below)
-      if (!message.content.trim()) {
+      if (!displayContent.trim()) {
         return null
       }
 
@@ -726,7 +805,7 @@ function MessageBubbleImpl({
         // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
-        const { visibleText, skillName } = parseUserVisibleSkillContent(message.content)
+        const { visibleText, skillName } = parseUserVisibleSkillContent(displayContent)
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
             {skillName && <SkillChip label={skillName} compact className="mr-2" />}
@@ -734,16 +813,19 @@ function MessageBubbleImpl({
           </div>
         )
       }
-      return <StreamingMarkdown isStreaming={isStreaming}>{message.content}</StreamingMarkdown>
+      return <StreamingMarkdown isStreaming={isStreaming}>{displayContent}</StreamingMarkdown>
     }
 
     // Handle content blocks
     const renderedBlocks = message.content
       .map((block, index) => {
         if (block.type === "text" && block.text) {
+          const displayText =
+            !isUser && reasoningText ? stripThinkBlocksForDisplay(block.text) : block.text
+          if (!displayText.trim()) return null
           // Use streaming markdown for assistant text blocks
           if (isUser) {
-            const { visibleText, skillName } = parseUserVisibleSkillContent(block.text)
+            const { visibleText, skillName } = parseUserVisibleSkillContent(displayText)
             return (
               <div
                 key={index}
@@ -756,7 +838,7 @@ function MessageBubbleImpl({
           }
           return (
             <StreamingMarkdown key={index} isStreaming={isStreaming}>
-              {block.text}
+              {displayText}
             </StreamingMarkdown>
           )
         }
@@ -770,6 +852,8 @@ function MessageBubbleImpl({
   const content = renderContent()
   const displayToolCalls = message.tool_calls?.map(normalizeToolCallForDisplay)
   const hasToolCalls = displayToolCalls && displayToolCalls.length > 0
+  const shouldShowAssistantActions =
+    showAssistantMeta && !isLoading && Boolean(content || hasToolCalls)
   const canSetGoalFromMessage =
     isUser && Boolean(onSetGoalFromMessage) && !plainTextForCopy.trim().startsWith("/goal")
 
@@ -845,7 +929,7 @@ function MessageBubbleImpl({
   }
 
   // Don't render if there's no content and no tool calls
-  if (!content && !hasToolCalls) {
+  if (!content && !hasToolCalls && !reasoningText) {
     return null
   }
 
@@ -861,7 +945,40 @@ function MessageBubbleImpl({
                 : "bg-primary/10"
             )}
           >
-            {content}
+            <div
+              ref={userContentRef}
+              className={cn(
+                "relative min-w-0 max-w-full overflow-hidden",
+                userContentOverflow && !userContentExpanded && "[mask-image:linear-gradient(to_bottom,black_60%,transparent)]"
+              )}
+              style={
+                userContentOverflow && !userContentExpanded
+                  ? { maxHeight: USER_MESSAGE_COLLAPSED_MAX_PX }
+                  : undefined
+              }
+            >
+              {content}
+            </div>
+            {userContentOverflow && (
+              <button
+                type="button"
+                onClick={() => setUserContentExpanded((prev) => !prev)}
+                className="mt-1.5 inline-flex items-center gap-1 text-xs text-muted-foreground/80 transition-colors hover:text-foreground"
+                aria-expanded={userContentExpanded}
+              >
+                {userContentExpanded ? (
+                  <>
+                    <ChevronUp className="size-3.5" />
+                    收起
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="size-3.5" />
+                    显示更多
+                  </>
+                )}
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             {userSendTimeLabel && (
@@ -942,85 +1059,51 @@ function MessageBubbleImpl({
         </div>
       )}
       <div className="flex-1 min-w-0 space-y-2 overflow-hidden">
+        {reasoningText && (
+          <div className="px-3">
+            <button
+              type="button"
+              onClick={() => setReasoningOpen((open) => !open)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-muted/35 px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+              aria-expanded={reasoningOpen}
+            >
+              {reasoningOpen ? (
+                <ChevronDown className="size-3.5" />
+              ) : (
+                <ChevronRight className="size-3.5" />
+              )}
+              <span>思考</span>
+            </button>
+            {reasoningOpen && (
+              <div className="mt-2 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-sm text-muted-foreground">
+                <StreamingMarkdown isStreaming={Boolean(isStreaming)}>
+                  {reasoningText}
+                </StreamingMarkdown>
+              </div>
+            )}
+          </div>
+        )}
         {content && (
           <div className="min-w-0 max-w-full overflow-hidden break-words rounded-lg px-3 [overflow-wrap:anywhere]">
             {content}
-          </div>
-        )}
-        {content && !hasToolCalls && showAssistantMeta && !isLoading && (
-          <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
-            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
-            <button
-              type="button"
-              onClick={handleCopyMessage}
-              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-              title="复制消息"
-              aria-label="复制消息"
-            >
-              {copySuccess ? (
-                <Check className="size-3 text-status-nominal" />
-              ) : (
-                <Copy className="size-3" />
-              )}
-            </button>
-            {/* 点赞按钮 */}
-            <button
-              type="button"
-              onClick={() => {
-                setLikedMessageId(message.id)
-                setDislikedMessageId(null)
-                handleFeedbackSubmit("like")
-              }}
-              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
-                likedMessageId === message.id
-                  ? "text-green-500"
-                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
-              }`}
-              title="点赞"
-              aria-label="点赞"
-            >
-              {likedMessageId === message.id ? (
-                <Smile className="size-3" />
-              ) : (
-                <ThumbsUp className="size-3" />
-              )}
-            </button>
-            {/* 点踩按钮 */}
-            <button
-              type="button"
-              onClick={() => {
-                handleOpenFeedbackDialog("dislike")
-              }}
-              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
-                dislikedMessageId === message.id
-                  ? "text-red-500"
-                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
-              }`}
-              title="点踩"
-              aria-label="点踩"
-            >
-              {dislikedMessageId === message.id ? (
-                <Frown className="size-3" />
-              ) : (
-                <ThumbsDown className="size-3" />
-              )}
-            </button>
           </div>
         )}
         {hasToolCalls && (
           <div className="space-y-2 overflow-hidden">
             {displayToolCalls!.map((toolCall, index) => {
               const toolId = getWorkerToolUiKey(message.id, toolCall.id, index)
-              const toolState = toolCallStates?.get(toolCall.id)
+              const toolState = toolCallStates?.get(toolId)
               const resolvedToolCall = hydrateToolCall(toolCall, toolState)
-              const resultKey = getWorkerToolResultKey(message.id, toolCall.id) ?? toolCall.id
-              const result = resultKey ? toolResults?.get(resultKey) : undefined
+              const result = toolResults?.get(toolId)
               const pendingIds = pendingApproval?.pendingToolCallIds
-              const needsApproval = Boolean(
-                pendingIds?.length
-                  ? pendingIds.includes(toolCall.id)
-                  : pendingApproval?.tool_call?.id && pendingApproval.tool_call.id === toolCall.id
-              )
+              const needsApproval = pendingApprovalToolCallKeys
+                ? pendingApprovalToolCallKeys.has(toolId)
+                : Boolean(
+                    pendingIds?.length
+                      ? pendingIds.includes(toolCall.id)
+                      : pendingApproval?.tool_call?.id &&
+                          pendingApproval.tool_call.id === toolCall.id
+                  )
               const inferredStatus: ToolCallStatus =
                 toolState?.status ||
                 (needsApproval
@@ -1188,6 +1271,87 @@ function MessageBubbleImpl({
                   </div>
                 </div>
               )}
+          </div>
+        )}
+        {shouldShowAssistantActions && (
+          <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
+            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
+            <button
+              type="button"
+              onClick={handleCopyMessage}
+              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+              title="复制消息"
+              aria-label="复制消息"
+            >
+              {copySuccess ? (
+                <Check className="size-3 text-status-nominal" />
+              ) : (
+                <Copy className="size-3" />
+              )}
+            </button>
+            {canForkFromMessage ? (
+              <button
+                type="button"
+                onClick={() => onForkFromMessage?.(message)}
+                disabled={forkFromMessageDisabled}
+                className={cn(
+                  "inline-flex items-center justify-center rounded p-1 transition-all transform active:scale-95",
+                  forkFromMessageDisabled
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : "text-muted-foreground hover:text-foreground hover:bg-background-interactive hover:scale-110"
+                )}
+                title={isLoading ? "运行中，无法 fork" : "从这里 fork"}
+                aria-label="从这里 fork"
+              >
+                {isForkingThisMessage ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <GitFork className="size-3" />
+                )}
+              </button>
+            ) : null}
+            {/* 点赞按钮 */}
+            <button
+              type="button"
+              onClick={() => {
+                setLikedMessageId(message.id)
+                setDislikedMessageId(null)
+                handleFeedbackSubmit("like")
+              }}
+              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
+                likedMessageId === message.id
+                  ? "text-green-500"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
+              }`}
+              title="点赞"
+              aria-label="点赞"
+            >
+              {likedMessageId === message.id ? (
+                <Smile className="size-3" />
+              ) : (
+                <ThumbsUp className="size-3" />
+              )}
+            </button>
+            {/* 点踩按钮 */}
+            <button
+              type="button"
+              onClick={() => {
+                handleOpenFeedbackDialog("dislike")
+              }}
+              className={`inline-flex items-center justify-center rounded p-1 transition-all transform hover:scale-110 active:scale-95 ${
+                dislikedMessageId === message.id
+                  ? "text-red-500"
+                  : "text-muted-foreground hover:text-foreground hover:bg-background-interactive"
+              }`}
+              title="点踩"
+              aria-label="点踩"
+            >
+              {dislikedMessageId === message.id ? (
+                <Frown className="size-3" />
+              ) : (
+                <ThumbsDown className="size-3" />
+              )}
+            </button>
           </div>
         )}
       </div>

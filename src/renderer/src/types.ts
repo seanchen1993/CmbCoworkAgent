@@ -1,5 +1,16 @@
 // Re-export types from electron for use in renderer
 
+import type {
+  ForkableCheckpoint as SharedForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
+  ThreadForkOverrides as SharedThreadForkOverrides,
+  ThreadForkParams as SharedThreadForkParams,
+  ThreadForkResponse as SharedThreadForkResponse
+} from "../../shared/checkpoint-forkability"
+import type { SubagentTranscriptBlobRef } from "../../shared/subagent-transcript-storage"
+
+export type { ForkBoundarySource, ForkUnstableReason } from "../../shared/checkpoint-forkability"
+
 export interface FileAttachment {
   filename: string
   filePath: string // full path for display
@@ -21,6 +32,12 @@ export interface Thread {
   title?: string
 }
 
+export type ThreadForkOverrides = SharedThreadForkOverrides
+export type ThreadForkParams = SharedThreadForkParams
+export type ThreadForkResponse = SharedThreadForkResponse<Thread>
+export type ThreadForkCheckpointForMessageParams = SharedThreadForkCheckpointForMessageParams
+export type ForkableCheckpoint = SharedForkableCheckpoint
+
 export type RunStatus = "pending" | "running" | "error" | "success" | "interrupted"
 
 export interface Run {
@@ -34,7 +51,7 @@ export interface Run {
 }
 
 // Provider configuration
-export type ProviderId = "custom"
+export type ProviderId = "builtin" | "custom"
 
 export interface Provider {
   id: ProviderId
@@ -49,6 +66,9 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  source: ProviderId
+  origin?: "remote" | "fallback"
+  maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
 }
@@ -101,9 +121,18 @@ import type {
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailItem,
   HarnessEnterpriseProjectDetailResult,
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchItem,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelItem,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryItem,
+  HarnessPipelineQueryResult,
   HarnessArtifact,
   HarnessArtifactStatus,
   HarnessArtifactType,
@@ -112,8 +141,16 @@ import type {
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewFile,
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewItem,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitUpdateInput,
+  HarnessFeatureDeployUnitBinding,
   HarnessDynamicWorkflowConfig,
   HarnessDynamicWorkflowNode,
   HarnessDynamicWorkflowTemplate,
@@ -122,6 +159,8 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessRunNode,
@@ -179,9 +218,18 @@ export type {
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailItem,
   HarnessEnterpriseProjectDetailResult,
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchItem,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchItem,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelItem,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryItem,
+  HarnessPipelineQueryResult,
   HarnessArtifact,
   HarnessArtifactStatus,
   HarnessArtifactType,
@@ -190,8 +238,15 @@ export type {
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewFile,
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewItem,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessDynamicWorkflowConfig,
   HarnessDynamicWorkflowNode,
   HarnessDynamicWorkflowTemplate,
@@ -200,6 +255,9 @@ export type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessFeatureDeployUnitBinding,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessRunNode,
@@ -227,9 +285,42 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  provider_source_id?: string
+  provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  content_priority?: number
+  // A bounded in-flight projection keeps the stream responsive while retaining
+  // enough identity to reconcile it with a later lossless snapshot.
+  content_is_projection?: boolean
+  content_full_length?: number
+  // Large transcript fields are persisted out-of-line. The renderer keeps the
+  // hydrated value for display and the reference for compact subsequent saves.
+  content_ref?: SubagentTranscriptBlobRef
+  // Internal transcript aliases used to collapse a provisional subagent
+  // assistant row into its stable task-completion row across reloads/replays.
+  replaced_message_ids?: string[]
+  replaced_message_id_prefixes?: string[]
+  compatible_replaced_message_id_prefixes?: string[]
+  // Persisted on the prompt row so fork filtering can distinguish repeated
+  // provider task IDs by their canonical parent assistant invocation.
+  subagent_tool_call_id?: string
+  subagent_invocation_scope?: string
+  subagent_prompt_fingerprint?: string
+  subagent_content_fingerprint?: string
+  subagent_reasoning_fingerprint?: string
+  // Main-process-only startup summaries must never replace their full stored row.
+  subagent_startup_projection?: boolean
+  subagent_startup_tool_calls_projection?: boolean
+  subagent_name?: string
+  subagent_description?: string
+  subagent_type?: string
+  reasoning?: string
+  reasoning_is_projection?: boolean
+  reasoning_full_length?: number
+  reasoning_ref?: SubagentTranscriptBlobRef
   tool_calls?: ToolCall[]
+  tool_calls_ref?: SubagentTranscriptBlobRef
   // For tool messages - links result to its tool call
   tool_call_id?: string
   // For tool messages - the name of the tool
@@ -243,6 +334,30 @@ export interface Message {
   end_at?: Date
   goal_id?: string | null
   active_window_id?: string | null
+}
+
+/**
+ * A user message parked in the per-thread draft queue while a run is active or a
+ * tool approval is pending. It carries the fully-composed payload so it can be
+ * sent verbatim once the run ends (auto-drain) or steered into the running turn:
+ *   - `text`                    the raw user text (what the edit box shows)
+ *   - `attachmentModelBlocks`   <attachment>…</attachment> XML appended for the model
+ *   - `attachmentDisplayPrefix` "📎 name" lines shown in the user's bubble
+ *   - `skillBlock`              trailing slash-command skill block, if any
+ *   - `modelId`                 model selected when the draft was composed
+ *   - `handoffRequestedAt`      set once the message has been steered into the
+ *                               current run (awaiting injection); cleared on run end
+ */
+export interface QueuedMessage {
+  id: string
+  text: string
+  attachmentModelBlocks?: string
+  attachmentDisplayPrefix?: string
+  skillBlock?: string
+  modelId?: string
+  handoffRequestedAt?: Date
+  created_at: Date
+  updated_at: Date
 }
 
 export interface GoalEvent {

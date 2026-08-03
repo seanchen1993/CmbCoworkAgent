@@ -537,8 +537,11 @@ export function findUndeliveredTerminalRun(
   // Busy-guard support: keep scanning past undelivered runs the caller deems
   // ineligible (e.g. renotify-exhausted) instead of stopping at the first —
   // a single-candidate answer has a blind spot when the newest pending is
-  // exhausted but an older one is still perfectly deliverable.
-  isEligible?: (runId: string) => boolean
+  // exhausted but an older one is still perfectly deliverable. Receives the
+  // fully-loaded run (not just the runId) so a caller can fence by instance
+  // identity (runId + startedAt) — a resume REUSES the runId, so runId alone
+  // cannot tell a superseded instance from the current one.
+  isEligible?: (run: PersistedWorkflowRun) => boolean
 ): PersistedWorkflowRun | null {
   try {
     const dir = getWorkflowRunsDir(workspacePath, threadId)
@@ -567,7 +570,7 @@ export function findUndeliveredTerminalRun(
     for (const candidate of candidates) {
       const run = loadWorkflowRun(workspacePath, threadId, candidate.runId)
       if (run && run.status !== "running" && !run.notificationDelivered) {
-        if (isEligible && !isEligible(run.runId)) continue
+        if (isEligible && !isEligible(run)) continue
         return run
       }
     }
@@ -588,7 +591,8 @@ async function setWorkflowRunNotified(
   workspacePath: string,
   threadId: string,
   runId: string,
-  delivered: boolean
+  delivered: boolean,
+  expectedStartedAt?: string
 ): Promise<boolean> {
   // Returns whether the flag is now (durably) in the requested state. Callers use
   // this to gate follow-up work — e.g. only drain the NEXT pending notification
@@ -597,6 +601,16 @@ async function setWorkflowRunNotified(
   try {
     const run = loadWorkflowRun(workspacePath, threadId, runId)
     if (!run || run.status === "running") return false
+    // Instance fence. A resume REUSES the runId, and the error notification itself
+    // tells the model to resume — so the resume is launched INSIDE the very turn
+    // that will later ack that error notification. A sub-second resumed run reaches
+    // terminal before the ack lands, so the status!=="running" guard above lets the
+    // stale ack through and it marks the NEW run delivered, permanently swallowing
+    // that run's own completion notification. `startedAt` is minted fresh on every
+    // launch, so a mismatch proves this ack belongs to a superseded instance whose
+    // record is already overwritten: no-op, and report settled (nothing to persist;
+    // the new run stays undelivered and its notification still fires).
+    if (expectedStartedAt !== undefined && run.startedAt !== expectedStartedAt) return true
     if (Boolean(run.notificationDelivered) === delivered) return true // already in the target state
     run.notificationDelivered = delivered
     run.updatedAt = new Date().toISOString()
@@ -611,13 +625,17 @@ async function setWorkflowRunNotified(
   }
 }
 
-/** Marks a run's completion notification as delivered (at-most-once gate). */
+/** Marks a run's completion notification as delivered (at-most-once gate).
+ * `expectedStartedAt` fences the write to the run INSTANCE the notification was
+ * built from — omit only when no instance is known (cancel path: the run about to
+ * be marked is the one being cancelled). */
 export function markWorkflowRunNotified(
   workspacePath: string,
   threadId: string,
-  runId: string
+  runId: string,
+  expectedStartedAt?: string
 ): Promise<boolean> {
-  return setWorkflowRunNotified(workspacePath, threadId, runId, true)
+  return setWorkflowRunNotified(workspacePath, threadId, runId, true, expectedStartedAt)
 }
 
 /**

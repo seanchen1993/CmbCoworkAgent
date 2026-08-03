@@ -1,10 +1,37 @@
 import { toJsonSafe } from "./engine"
 import {
+  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT
+} from "../../../shared/checkpoint-transcript"
+import {
   WORKFLOW_TOOL_RESULT_MAX_CHARS,
   truncateText,
   type PersistedWorkflowRun,
   type WorkflowRunStats
 } from "./types"
+export {
+  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT,
+  WORKFLOW_NOTIFICATION_TURN_TRIGGER
+} from "../../../shared/checkpoint-transcript"
+
+/**
+ * True when `message` is EXACTLY the internal workflow completion-notification
+ * turn prompt (full match, not prefix). A completed background workflow delivers
+ * its result via an internal notification turn whose message is verbatim
+ * WORKFLOW_NOTIFICATION_TURN_PROMPT; callers use this to exempt that turn from
+ * user-message handling — notably the goal-preempt guard in agent.ts, which must
+ * NOT pause an active goal when a launched workflow's result arrives (otherwise a
+ * goal that spawned a workflow is paused the instant its result comes back and
+ * never resumes). Full-match — mirroring the renderer's isWorkflowNotificationPrompt
+ * and the main-process recognition — so a user pasting text that merely STARTS
+ * with the trigger is not mistaken for internal plumbing. This is a superset of
+ * the delivery recognition (which also requires workflow agent mode), so every
+ * genuine notification turn is covered.
+ */
+export function isWorkflowNotificationTurnMessage(message: string): boolean {
+  return message.trim() === WORKFLOW_NOTIFICATION_TURN_PROMPT
+}
 
 /**
  * Model-facing completion notification for a background workflow run.
@@ -15,23 +42,6 @@ import {
  * <task-notification> shape so mid-tier models treat it exactly like other
  * internal task results.
  */
-
-export const WORKFLOW_NOTIFICATION_MARKER_PREFIX = "[[CMB_WORKFLOW_NOTIFICATION_V1:"
-
-/** Renderer-submitted trigger; the main process expands it into the real notification. */
-export const WORKFLOW_NOTIFICATION_TURN_TRIGGER = "[[CMB_WORKFLOW_NOTIFICATION_TURN]]"
-
-/**
- * The EXACT content the renderer submits for an internal notification turn. The main
- * process treats a message as internal plumbing ONLY when it matches this in FULL —
- * a user can paste the short TRIGGER prefix (e.g. from a log or code sample), but not
- * this whole prompt, so their message won't be wrongly swallowed (#1). MUST stay
- * byte-identical to the renderer's WORKFLOW_NOTIFICATION_TURN_PROMPT
- * (message-display-helpers.ts) — a workflow-engine test pins them equal, because a
- * silent drift would break every workflow completion notification.
- */
-export const WORKFLOW_NOTIFICATION_TURN_PROMPT = `${WORKFLOW_NOTIFICATION_TURN_TRIGGER}
-Process the completed workflow task-notification. This is an internal system turn, not a new user request.`
 
 /**
  * Escapes XML metacharacters so a subagent result containing `</result>`,

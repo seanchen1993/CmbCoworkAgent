@@ -1,11 +1,23 @@
+import { getMessageProviderOccurrenceIdentity } from "../../../shared/message-role-collision"
+
 export type CheckpointMessageTimeMap = Record<string, { start_at?: string; end_at?: string }>
 export type CheckpointMessageTimeEntry = CheckpointMessageTimeMap[string] & { id: string }
 export type CheckpointVisibleMessageTimeTarget = {
   id: string
   role: string
+  provider_source_id?: string
+  provider_occurrence?: number
   created_at: Date
   start_at?: Date
   end_at?: Date
+}
+export type CheckpointPersistedMessageTimeTarget = {
+  id: string
+  role?: string
+  provider_source_id?: string
+  provider_occurrence?: number
+  created_at: Date
+  start_at?: Date
 }
 
 const toDate = (value: string | undefined): Date | undefined => {
@@ -44,13 +56,78 @@ export function restoreRawCheckpointMessageTime(params: {
 
 const offsetDate = (date: Date, offsetMs: number): Date => new Date(date.getTime() + offsetMs)
 
+const validDate = (date: Date | undefined): Date | undefined => {
+  return date && Number.isFinite(date.getTime()) ? date : undefined
+}
+
+export function latestPersistedCheckpointMessageAt(
+  visibleCheckpointMessages: readonly {
+    id: string
+    role?: string
+    renderId?: string
+    provider_source_id?: string
+    provider_occurrence?: number
+  }[],
+  persistedMessages: readonly CheckpointPersistedMessageTimeTarget[]
+): Date | undefined {
+  const checkpointMessageIds = new Set(
+    visibleCheckpointMessages
+      .filter((message) => !message.role)
+      .map((message) => message.renderId || message.id)
+      .filter(Boolean)
+  )
+  const checkpointMessageIdentities = new Set(
+    visibleCheckpointMessages
+      .filter((message) => Boolean(message.role))
+      .map((message) =>
+        getMessageProviderOccurrenceIdentity({ ...message, id: message.renderId || message.id })
+      )
+  )
+  if (checkpointMessageIds.size === 0 && checkpointMessageIdentities.size === 0) return undefined
+
+  let latest: Date | undefined
+  for (const message of persistedMessages) {
+    const matchesCheckpoint =
+      checkpointMessageIds.has(message.id) ||
+      (Boolean(message.role) &&
+        checkpointMessageIdentities.has(getMessageProviderOccurrenceIdentity(message)))
+    if (!matchesCheckpoint) continue
+    const candidate = validDate(message.start_at) ?? validDate(message.created_at)
+    if (candidate && (!latest || candidate > latest)) latest = candidate
+  }
+  return latest
+}
+
 export function restoreVisibleCheckpointMessageTimes<T extends CheckpointVisibleMessageTimeTarget>(
   messages: T[],
   persistedMessageTimes: CheckpointMessageTimeMap,
-  persistedMessageTimeOrder: CheckpointMessageTimeEntry[]
+  persistedMessageTimeOrder: CheckpointMessageTimeEntry[],
+  persistedMessages: readonly CheckpointPersistedMessageTimeTarget[] = []
 ): T[] {
+  const persistedTimeByIdentity = new Map<string, CheckpointMessageTimeMap[string]>()
+  const persistedRoleByRenderId = new Map<string, string>()
+  for (const persistedMessage of persistedMessages) {
+    if (!persistedMessage.role) continue
+    persistedRoleByRenderId.set(persistedMessage.id, persistedMessage.role)
+    const persistedTime = persistedMessageTimes[persistedMessage.id]
+    if (persistedTime) {
+      persistedTimeByIdentity.set(
+        getMessageProviderOccurrenceIdentity(persistedMessage),
+        persistedTime
+      )
+    }
+  }
+
   const idRestored = messages.map((message, index) => {
-    const persistedTime = persistedMessageTimes[message.id]
+    const identityTime = persistedTimeByIdentity.get(
+      getMessageProviderOccurrenceIdentity(message)
+    )
+    const renderIdOwnerRole = persistedRoleByRenderId.get(message.id)
+    const persistedTime =
+      identityTime ??
+      (!renderIdOwnerRole || renderIdOwnerRole === message.role
+        ? persistedMessageTimes[message.id]
+        : undefined)
     const startAt = toDate(persistedTime?.start_at)
     const endAt = toDate(persistedTime?.end_at) ?? startAt
     return {

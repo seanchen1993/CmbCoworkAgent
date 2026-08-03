@@ -2,12 +2,13 @@ import { execFile } from "child_process"
 import { createHash, randomUUID } from "crypto"
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "fs/promises"
 import { homedir } from "os"
-import { dirname, join, resolve as resolvePath } from "path"
+import { dirname, isAbsolute, join, relative, resolve as resolvePath } from "path"
 import { promisify } from "util"
 import { getOpenworkDir } from "../storage"
 import { nowIsoLocal } from "../util/local-time"
 import { parseGitRemoteInfo } from "../utils/git-remote"
 import {
+  getCommitMeasurementStatus,
   hasPendingGenerationsForCommit,
   isCodeFile,
   measureForCommit,
@@ -46,6 +47,7 @@ export type GitHookState =
   | "partial"
   | "outdated"
   | "modified"
+  | "external_hooks_path"
   | "error"
 
 export interface GitHookFileStatus {
@@ -55,7 +57,7 @@ export interface GitHookFileStatus {
   version?: number
   hasUserHook: boolean
   userHookPath?: string
-  state: "missing" | "managed" | "outdated" | "user" | "modified" | "error"
+  state: "missing" | "managed" | "outdated" | "user" | "modified" | "external" | "error"
   error?: string
 }
 
@@ -74,6 +76,7 @@ export interface GitHookStatus {
 interface GitContext {
   gitRoot: string
   hookPaths: Record<HookName, string>
+  hasExternalHookPath: boolean
 }
 
 interface HookSnapshotFile {
@@ -334,18 +337,30 @@ function resolveGitPath(rawPath: string, cwd: string): string {
     : resolvePath(cwd, trimmed)
 }
 
-async function resolveHookPath(gitRoot: string, hook: HookName): Promise<string> {
-  try {
-    const configuredHooksPath = await runGit(gitRoot, ["config", "--get", "core.hooksPath"])
-    if (configuredHooksPath) {
-      return join(resolveGitPath(configuredHooksPath, gitRoot), hook)
-    }
-  } catch {
-    // No core.hooksPath configured; fall back to the repository's default hook path.
-  }
+function isPathInsideOrSame(parent: string, child: string): boolean {
+  const normalizedParent = resolvePath(parent)
+  const normalizedChild = resolvePath(child)
+  if (normalizePathForKey(normalizedParent) === normalizePathForKey(normalizedChild)) return true
+  const rel = relative(normalizedParent, normalizedChild)
+  return !!rel && !rel.startsWith("..") && !isAbsolute(rel)
+}
 
-  const rawPath = await runGit(gitRoot, ["rev-parse", "--git-path", `hooks/${hook}`])
+async function resolveGitCommonDir(gitRoot: string): Promise<string> {
+  const rawPath = await runGit(gitRoot, ["rev-parse", "--git-common-dir"])
   return resolveGitPath(rawPath, gitRoot)
+}
+
+async function resolveHookPath(
+  gitRoot: string,
+  gitCommonDir: string,
+  hook: HookName
+): Promise<{ path: string; isGitInternal: boolean }> {
+  const rawPath = await runGit(gitRoot, ["rev-parse", "--git-path", `hooks/${hook}`])
+  const hookPath = resolveGitPath(rawPath, gitRoot)
+  return {
+    path: hookPath,
+    isGitInternal: isPathInsideOrSame(gitCommonDir, hookPath)
+  }
 }
 
 async function resolveGitContext(workspacePath: string): Promise<GitContext | null> {
@@ -354,11 +369,15 @@ async function resolveGitContext(workspacePath: string): Promise<GitContext | nu
 
   try {
     const gitRoot = await runGit(workspace, ["rev-parse", "--show-toplevel"])
+    const gitCommonDir = await resolveGitCommonDir(gitRoot)
     const hookPaths = {} as Record<HookName, string>
+    let hasExternalHookPath = false
     for (const hook of HOOK_NAMES) {
-      hookPaths[hook] = await resolveHookPath(gitRoot, hook)
+      const resolved = await resolveHookPath(gitRoot, gitCommonDir, hook)
+      hookPaths[hook] = resolved.path
+      if (!resolved.isGitInternal) hasExternalHookPath = true
     }
-    return { gitRoot, hookPaths }
+    return { gitRoot, hookPaths, hasExternalHookPath }
   } catch {
     return null
   }
@@ -481,8 +500,24 @@ async function inspectHookFile(hook: HookName, hookPath: string): Promise<GitHoo
   }
 }
 
+async function inspectExternalHookFile(
+  hook: HookName,
+  hookPath: string
+): Promise<GitHookFileStatus> {
+  const inspected = await inspectHookFile(hook, hookPath)
+  return {
+    ...inspected,
+    installed: false,
+    state: "external",
+    error:
+      inspected.error ??
+      "core.hooksPath points outside the Git metadata directory; skipped to avoid modifying workspace files"
+  }
+}
+
 function summarizeHookState(hooks: GitHookFileStatus[]): GitHookState {
   if (hooks.some((hook) => hook.state === "error")) return "error"
+  if (hooks.some((hook) => hook.state === "external")) return "external_hooks_path"
   if (hooks.some((hook) => hook.state === "modified")) return "modified"
   if (hooks.some((hook) => hook.state === "outdated")) return "outdated"
   const managedCount = hooks.filter((hook) => hook.state === "managed").length
@@ -503,6 +538,8 @@ function hookStateMessage(state: GitHookState): string {
       return "Git Hook 需要升级"
     case "modified":
       return "Git Hook 已被修改，建议修复"
+    case "external_hooks_path":
+      return "Git Hook 路径指向工作区文件，已跳过安装"
     case "not_git":
       return "当前目录不是 Git 仓库"
     default:
@@ -525,13 +562,17 @@ export async function getGitHookStatus(workspacePath: string): Promise<GitHookSt
     }
 
     const hooks = await Promise.all(
-      HOOK_NAMES.map((hook) => inspectHookFile(hook, context.hookPaths[hook]))
+      HOOK_NAMES.map((hook) =>
+        context.hasExternalHookPath
+          ? inspectExternalHookFile(hook, context.hookPaths[hook])
+          : inspectHookFile(hook, context.hookPaths[hook])
+      )
     )
     const state = summarizeHookState(hooks)
     return {
       state,
       installed: state === "installed",
-      canInstall: state !== "error",
+      canInstall: state !== "error" && state !== "external_hooks_path",
       version: CMBDEVCLAW_GIT_HOOK_VERSION,
       gitRoot: context.gitRoot,
       hookDir: dirname(context.hookPaths["pre-commit"]),
@@ -873,6 +914,7 @@ async function installOneHook(hook: HookName, hookPath: string, helperPath: stri
 export async function installGitHooks(workspacePath: string): Promise<GitHookStatus> {
   const context = await resolveGitContext(workspacePath)
   if (!context) return getGitHookStatus(workspacePath)
+  if (context.hasExternalHookPath) return getGitHookStatus(workspacePath)
 
   const helperPath = await ensureHookHelper()
   for (const hook of HOOK_NAMES) {
@@ -883,13 +925,15 @@ export async function installGitHooks(workspacePath: string): Promise<GitHookSta
 
 async function uninstallOneHook(hookPath: string): Promise<void> {
   const userHookPath = getUserHookPath(hookPath)
+  let removedManagedHook = false
   if (await pathExists(hookPath)) {
     const content = await readFile(hookPath, "utf-8").catch(() => "")
     if (isManagedHook(content)) {
       await rm(hookPath, { force: true })
+      removedManagedHook = true
     }
   }
-  if (await pathExists(userHookPath)) {
+  if (removedManagedHook && (await pathExists(userHookPath))) {
     await rename(userHookPath, hookPath)
     await chmod(hookPath, 0o755).catch(() => undefined)
   }
@@ -926,6 +970,7 @@ async function autoInstallGitHooksForRoot(gitRoot: string): Promise<void> {
     // the reconciler's coverage set would silently re-depend on hook installation.
     if (status.state !== "not_git") {
       await registerGitHookRepo(normalizedRoot)
+      scheduleGitHookEventSync(normalizedRoot, 100)
     }
 
     if (status.installed) {
@@ -992,6 +1037,72 @@ async function getProcessedCommitSet(repoDir: string): Promise<Set<string>> {
 async function saveProcessedCommitSet(repoDir: string, commits: Set<string>): Promise<void> {
   const values = Array.from(commits).slice(-5000)
   await writeFile(join(repoDir, "processed-commits.json"), JSON.stringify(values, null, 2), "utf-8")
+}
+
+// In-memory overlay over processed-commits.json for commits reported by the
+// in-app paths. The sync sweeps load the file set once per pass and do
+// per-commit read-modify-write saves, so a commit landing mid-sweep could race
+// the marker's file write (stale in-memory set, or the sweep's save clobbering
+// the marker's). Marker and sweeps run in the same process, so this overlay
+// makes the dedup deterministic regardless of file-write interleaving.
+const inAppProcessedOverlay = new Map<string, Set<string>>()
+const IN_APP_OVERLAY_MAX_PER_REPO = 200
+
+function rememberInAppCommit(gitRoot: string, sha: string): void {
+  const key = normalizePathForKey(gitRoot)
+  let set = inAppProcessedOverlay.get(key)
+  if (!set) {
+    set = new Set()
+    inAppProcessedOverlay.set(key, set)
+  }
+  set.add(sha)
+  for (const value of set) {
+    if (set.size <= IN_APP_OVERLAY_MAX_PER_REPO) break
+    set.delete(value)
+  }
+}
+
+function isInAppProcessedCommit(gitRoot: string, sha: string): boolean {
+  return inAppProcessedOverlay.get(normalizePathForKey(gitRoot))?.has(sha) ?? false
+}
+
+/**
+ * Record an in-app commit (git panel / agent auto-commit) as already reported.
+ *
+ * Those paths emit their own `git.commit.created` and measure adoption at
+ * commit time, which leaves a durable commit job behind. The hook/reconcile
+ * backstop treats an existing job as "recovered adoption commit that still
+ * needs its event" (see processReadyCommitSnapshot / reconcileOneCommit), so
+ * without this marker every in-app commit with adoption measurements would be
+ * re-emitted by the backstop as a duplicate `git.commit.created` — carrying
+ * `repoPath` = resolved git root instead of the worktree, which in monorepos
+ * also surfaces as a different repository name in the dashboard.
+ *
+ * Must be called AFTER the in-app `measureForCommit` attempt: a pending
+ * measurement is retried by the adoption tracker's own commit-job queue, but a
+ * commit marked here before any job exists would never be measured at all.
+ *
+ * Best-effort: a failure only degrades back to the duplicate event.
+ */
+export async function markInAppCommitProcessed(
+  worktreePath: string,
+  commitSha: string | null | undefined
+): Promise<void> {
+  const sha = commitSha?.trim().toLowerCase()
+  if (!sha || !/^[0-9a-f]{7,64}$/.test(sha)) return
+  try {
+    const gitRoot = await resolveGitRoot(worktreePath)
+    if (!gitRoot) return
+    rememberInAppCommit(gitRoot, sha)
+    const repoDir = getRepoEventsDir(gitRoot)
+    await ensureDir(repoDir)
+    const processed = await getProcessedCommitSet(repoDir)
+    if (processed.has(sha)) return
+    processed.add(sha)
+    await saveProcessedCommitSet(repoDir, processed)
+  } catch (e) {
+    console.warn("[GitHook] failed to record in-app commit as processed:", e)
+  }
 }
 
 async function getCommitStats(gitRoot: string, commitSha: string): Promise<{ fileCount: number; additions: number; deletions: number }> {
@@ -1066,6 +1177,14 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     await moveEventDir(snapshotDir, join(repoDir, "processed"), name)
     return
   }
+  // In-app commit whose marker write raced this sweep's file read — treat as
+  // processed and repair the on-disk set.
+  if (isInAppProcessedCommit(meta.gitRoot, meta.commitSha)) {
+    processed.add(meta.commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
+    await moveEventDir(snapshotDir, join(repoDir, "processed"), name)
+    return
+  }
 
   const snapshots: StagedSnapshot[] = []
   for (const file of meta.files) {
@@ -1093,7 +1212,11 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     (await getCommitTimeMs(meta.gitRoot, meta.commitSha)) ??
     (Number.isFinite(committedAtMs) ? committedAtMs : undefined)
 
-  if (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots, commitTimeMs)) {
+  const existingJobStatus = await getCommitMeasurementStatus(meta.gitRoot, meta.commitSha)
+  if (
+    !existingJobStatus &&
+    (snapshots.length === 0 || !hasPendingGenerationsForCommit(snapshots, commitTimeMs))
+  ) {
     console.log(
       `[GitHook] skip commit snapshot without pending code_gen: commitSha=${meta.commitSha} files=${snapshots.length}`
     )
@@ -1103,7 +1226,18 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
     return
   }
 
-  measureForCommit(snapshots, meta.commitSha, commitTimeMs)
+  const measurementCompleted = await measureForCommit(
+    snapshots,
+    meta.commitSha,
+    commitTimeMs,
+    meta.gitRoot
+  )
+  if (!measurementCompleted) {
+    console.warn(
+      `[GitHook] adoption measurement not durable yet; keeping ready snapshot: commitSha=${meta.commitSha}`
+    )
+    return
+  }
 
   const gitRoot = meta.gitRoot
   const [stats, branch, remoteUrl] = await Promise.all([
@@ -1453,6 +1587,13 @@ async function reconcileOneCommit(
   processed: Set<string>
 ): Promise<void> {
   if (processed.has(commitSha)) return
+  // In-app commit whose marker write raced this sweep's file read — treat as
+  // processed and repair the on-disk set.
+  if (isInAppProcessedCommit(gitRoot, commitSha)) {
+    processed.add(commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
+    return
+  }
 
   let rawNameStatus = ""
   try {
@@ -1486,13 +1627,23 @@ async function reconcileOneCommit(
     stagedContent: null
   }))
   // Upper bound on eligible gen rows = this commit's creation time. Without it,
-  // re-measuring an in-app/agent commit (which never recorded itself in
-  // processed-commits.json) would sweep newer uncommitted gens for the same
-  // files into this old commit — inflating its denominator and double-emitting
-  // git.commit.created. With the bound, such commits correctly gate to "no
-  // pending gens" and are skipped here.
+  // re-measuring an already-measured commit would sweep newer uncommitted gens
+  // for the same files into this old commit — inflating its denominator and
+  // double-emitting git.commit.created. With the bound, such commits correctly
+  // gate to "no pending gens" and are skipped here.
+  //
+  // existingJobStatus keeps backstop *retries* alive (measurement durable but
+  // event not yet emitted → gens already consumed, so the pending-gen gate
+  // alone would drop the commit forever). In-app commits ALSO leave a durable
+  // job behind but already emitted their own git.commit.created — they are
+  // excluded from this bypass via markInAppCommitProcessed(), which puts their
+  // sha into processed-commits.json (checked at the top of this function).
   const commitTimeMs = await getCommitTimeMs(gitRoot, commitSha)
-  if (probe.length === 0 || !hasPendingGenerationsForCommit(probe, commitTimeMs)) {
+  const existingJobStatus = await getCommitMeasurementStatus(gitRoot, commitSha)
+  if (
+    !existingJobStatus &&
+    (probe.length === 0 || !hasPendingGenerationsForCommit(probe, commitTimeMs))
+  ) {
     processed.add(commitSha)
     await saveProcessedCommitSet(repoDir, processed)
     return
@@ -1515,13 +1666,14 @@ async function reconcileOneCommit(
     }
   }
 
-  if (snapshots.length === 0) {
+  if (snapshots.length === 0 && !existingJobStatus) {
     processed.add(commitSha)
     await saveProcessedCommitSet(repoDir, processed)
     return
   }
 
-  measureForCommit(snapshots, commitSha, commitTimeMs)
+  const measurementCompleted = await measureForCommit(snapshots, commitSha, commitTimeMs, gitRoot)
+  if (!measurementCompleted) return
 
   const [stats, branch, remoteUrl] = await Promise.all([
     getCommitStats(gitRoot, commitSha),

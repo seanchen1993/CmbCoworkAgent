@@ -39,6 +39,14 @@ export type HarnessFeatureStatus =
 
 export type HarnessAdapterType = "plugin"
 
+/** Project-mode Solo subagent selection supplied by the bound plugin at runtime. */
+export interface HarnessProjectModeSubagentConfig {
+  /** App-bundled subagents to hide. An empty list means all bundled subagents are available. */
+  disabledBuiltinSubagents: string[]
+  /** Absolute paths to user-format subagent Markdown files to load for this project session. */
+  customSubagentFiles: string[]
+}
+
 export type HarnessBoardCompatibilityStatus =
   | "compatible"
   | "missing-plugin"
@@ -70,7 +78,96 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   developerName?: string
   developerSapId?: string
   organizationName?: string
+  pullKnowledgeAvailable?: boolean
   boardCompatibility: HarnessBoardCompatibility
+}
+
+export interface HarnessProjectConstraintSyncResult {
+  adapterId: string
+  adapterName: string
+  message?: string
+  path?: string
+}
+
+export interface HarnessKnowledgePreviewFile {
+  path: string
+  is_dir: boolean
+  size?: number
+  modified_at?: string
+}
+
+export interface HarnessKnowledgePreviewResult {
+  adapterId: string
+  adapterName: string
+  configured: boolean
+  exists: boolean
+  path?: string
+  files: HarnessKnowledgePreviewFile[]
+  error?: string
+}
+
+export interface HarnessDeployUnitMapping {
+  deployUnitIdMapping: string
+  deployUnitId: string
+  localRepoPath: string
+  description?: string
+}
+
+export interface HarnessLeanTokenConfig {
+  leanToken: string
+}
+
+export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
+
+export interface HarnessAgentmdLoadStatusItem {
+  deployUnitId: string
+  path: string
+  loaded: boolean
+  source: string
+  message: string
+}
+
+/** A session succeeds only when it reported at least one constraint and all reported constraints loaded. */
+export function didHarnessSystemConstraintsLoadSuccessfully(
+  items: readonly HarnessAgentmdLoadStatusItem[]
+): boolean {
+  return items.length > 0 && items.every((item) => item.loaded)
+}
+
+export interface HarnessFeatureDeployUnitBinding {
+  projectId: string
+  featureId: string
+  selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+  sessionContextInjectionSource: HarnessSessionContextInjectionSource
+}
+
+function normalizeHarnessText(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+function isHarnessPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+}
+
+export function normalizeHarnessAgentmdLoadStatus(
+  value: unknown
+): HarnessAgentmdLoadStatusItem[] {
+  if (!Array.isArray(value)) return []
+  const status: HarnessAgentmdLoadStatusItem[] = []
+  for (const item of value) {
+    if (!isHarnessPlainObject(item)) continue
+    const deployUnitId = normalizeHarnessText(item.deployUnitId).trim()
+    const path = normalizeHarnessText(item.path).trim()
+    if (!deployUnitId && !path) continue
+    status.push({
+      deployUnitId: deployUnitId || "(unknown)",
+      path,
+      loaded: item.loaded === true,
+      source: normalizeHarnessText(item.source).trim(),
+      message: normalizeHarnessText(item.message).trim()
+    })
+  }
+  return status
 }
 
 export interface HarnessProjectCreatorMetadata {
@@ -94,6 +191,8 @@ export interface HarnessProjectMetadata {
   systemName: string
   workspacePath: string
   sessionWorkspacePath?: string
+  /** First feature-session run whose complete system-constraint set loaded successfully. */
+  systemConstraintFirstLoadedAt?: string
   "harness-adapter": HarnessAdapterSnapshot
   creator?: HarnessProjectCreatorMetadata
   lifecycle: {
@@ -136,6 +235,68 @@ export interface HarnessEnterpriseProjectSearchResult {
   hasMore: boolean
 }
 
+export interface HarnessDeployUnitSearchInput {
+  keyword: string
+}
+
+export interface HarnessDeployUnitSearchItem {
+  deployUnit: string
+  deployUnitName: string
+  ownerId: string
+  ownerName: string
+}
+
+export interface HarnessDeployUnitSearchResult {
+  deployUnits: HarnessDeployUnitSearchItem[]
+  total: number
+  hasMore: boolean
+}
+
+export interface HarnessPipelineQueryInput {
+  deployUnit: string
+  env: string
+  orgId: string
+  pageNumber: number
+  pageSize: number
+  pipelineTerm: string
+  productTerm: string
+}
+
+export interface HarnessPipelineQueryItem {
+  pipeline: string
+  pipelineAlias: string
+  env: string
+  branch: string
+  latestBuildStatus: string
+  latestCompletedTime: string
+}
+
+export interface HarnessPipelineQueryResult {
+  pipelines: HarnessPipelineQueryItem[]
+  total: number
+  size: number
+  current: number
+  pages: number
+  hasMore: boolean
+}
+
+export interface HarnessPipelineLabelQueryInput {
+  pipelineName: string
+}
+
+export interface HarnessPipelineLabelItem {
+  pipelineName: string
+  pipelineNumber: number
+  status: string
+  startDate: string
+  label: string
+  triggerUser: string
+}
+
+export interface HarnessPipelineLabelQueryResult {
+  labels: HarnessPipelineLabelItem[]
+}
+
 export interface HarnessEnterpriseProjectDetailInput {
   prjCodeList: string[]
 }
@@ -150,9 +311,29 @@ export interface HarnessEnterpriseProjectDetailResult {
   projects: HarnessEnterpriseProjectDetailItem[]
 }
 
+export interface HarnessProjectReviewInput {
+  projectCode: string
+}
+
+export interface HarnessProjectReviewItem {
+  title: string
+  type: string
+  start_time: string
+  end_time: string
+  creator: string
+  members: string
+}
+
+export interface HarnessProjectReviewResult {
+  tokenConfigured: boolean
+  reviews: HarnessProjectReviewItem[]
+}
+
 export interface HarnessFeatureCreateInput {
   projectId: string
   feature: string
+  selectedDeployUnits?: HarnessDeployUnitMapping[]
+  sessionContextInjectionSource?: HarnessSessionContextInjectionSource
   workflowTemplate?: string
   workflowNodes?: string[]
   workflowConfig?: HarnessDynamicWorkflowConfig
@@ -163,6 +344,12 @@ export interface HarnessFeatureCreateResult {
   slug: string
   title: string
   workspacePath: string
+}
+
+export interface HarnessFeatureDeployUnitUpdateInput {
+  projectId: string
+  featureId: string
+  selectedDeployUnits: HarnessDeployUnitMapping[]
 }
 
 export interface HarnessSkipNodeInput {
@@ -202,6 +389,7 @@ export interface HarnessProjectListItem {
   systemName: string
   workspacePath: string
   sessionWorkspacePath?: string
+  systemConstraintFirstLoadedAt?: string
   harnessAdapter: {
     id: string
     name: string
@@ -209,8 +397,11 @@ export interface HarnessProjectListItem {
   }
   creator?: HarnessProjectCreatorMetadata
   boardCompatibility: HarnessBoardCompatibility
+  supportsDeployUnits: boolean
+  supportsSessionContextInjection: boolean
   lifecycle: {
     status: "active" | "archived"
+    createAt: string
     /** Last lifecycle/metadata change (set on metadata edit and on archive). */
     updateAt?: string
   }
@@ -281,6 +472,11 @@ export interface HarnessProjectDetailViewModel {
   projectState?: HarnessStatus
   workflow: HarnessWorkflow
   runs: HarnessFeatureSummary[]
+  systemConstraintUpdate?: {
+    syncType: "invoke_session"
+    nextAction: HarnessWorkflowNextAction
+    knowledgePath?: string
+  }
   watchRefs: HarnessWatchRef[]
   loading: boolean
   error: string | null
@@ -311,6 +507,10 @@ export interface HarnessWorkflowNextAction {
   slashSkill?: string
   userMessage?: string
   dialogTips?: string
+  preferredPlugin?: {
+    id?: string
+    name?: string
+  }
 }
 
 export interface HarnessWorkflowStateDefinition {
@@ -442,6 +642,7 @@ export interface HarnessRunDetailViewModel {
     featureStatusLabel?: string
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
+    selectedDeployUnits: HarnessDeployUnitMapping[]
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]

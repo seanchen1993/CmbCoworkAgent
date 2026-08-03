@@ -9,7 +9,8 @@ import { executeHttpHook } from "./http-runner"
 import type { PluginHookMetadata, SkillHookMetadata } from "../types"
 import { joinHookText } from "./text"
 import { mergeUpdatedInput } from "./updated-input"
-import { getCustomModelConfigs, getHookLoggingConfig, getUserInfo } from "../storage"
+import { getHookLoggingConfig, getUserInfo } from "../storage"
+import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { persistHookResultRecord } from "./log-record"
 import { trackEvent } from "../services/event-reporter"
 
@@ -110,6 +111,13 @@ export interface HookContext {
    */
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  /**
+   * Harness workflow node name/status current at turn start. Exposed to hooks as
+   * `HARNESS_NODE_NAME` / `HARNESS_NODE_STATUS` env and `harness_node_name` /
+   * `harness_node_status` in stdin JSON.
+   */
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   /** Harness project code exposed to hooks as PROJECT_CODE. */
   projectCode?: string
   /** Harness project directory exposed to hooks as PROJECT_DIR. */
@@ -377,6 +385,8 @@ function buildHookEnv(
   if (context.harnessProjectId) env.HARNESS_PROJECT_ID = context.harnessProjectId
   if (context.harnessAdapterName) env.HARNESS_ADAPTER_NAME = context.harnessAdapterName
   if (context.harnessAdapterVersion) env.HARNESS_ADAPTER_VERSION = context.harnessAdapterVersion
+  if (context.harnessNodeName) env.HARNESS_NODE_NAME = context.harnessNodeName
+  if (context.harnessNodeStatus) env.HARNESS_NODE_STATUS = context.harnessNodeStatus
   if (context.projectCode) env.PROJECT_CODE = context.projectCode
   if (context.projectDir) env.PROJECT_DIR = context.projectDir
   if (context.sessionId) env.SESSION_ID = context.sessionId
@@ -416,6 +426,8 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.harnessProjectId) payload.harness_project_id = context.harnessProjectId
   if (context.harnessAdapterName) payload.harness_adapter_name = context.harnessAdapterName
   if (context.harnessAdapterVersion) payload.harness_adapter_version = context.harnessAdapterVersion
+  if (context.harnessNodeName) payload.harness_node_name = context.harnessNodeName
+  if (context.harnessNodeStatus) payload.harness_node_status = context.harnessNodeStatus
   if (context.projectCode) payload.project_code = context.projectCode
   if (context.projectDir) payload.project_dir = context.projectDir
   if (context.toolResult !== undefined) {
@@ -768,17 +780,14 @@ function extractFirstJson(text: string): string | null {
 
 /**
  * Get a lightweight ChatOpenAI instance for prompt-hook evaluation.
- * Prefers the modelId specified on the hook; falls back to the first configured model.
+ * Prefers the modelId specified on the hook; falls back to the saved/default available model.
  */
 function getPromptHookModel(modelId: string | undefined, timeout: number): ChatOpenAI | null {
-  const configs = getCustomModelConfigs()
-  if (configs.length === 0) return null
-
   const config = modelId
-    ? (configs.find((c) => c.id === modelId || c.model === modelId) ?? configs[0])
-    : configs[0]
+    ? (getModelConfigByRef(modelId) ?? getAvailableModelConfigOrDefault())
+    : getAvailableModelConfigOrDefault()
 
-  if (!config.apiKey) return null
+  if (!config?.apiKey) return null
 
   return new ChatOpenAI({
     model: config.model,
@@ -1373,7 +1382,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(
@@ -1449,7 +1464,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(
@@ -1491,7 +1512,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(
@@ -1557,7 +1584,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(
@@ -1624,7 +1657,13 @@ export async function runHooks(
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
-        await executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult),
+        await executeHook(
+          hook,
+          buildHookEnv(event, hookContext, hook),
+          hookContext,
+          event,
+          onHookResult
+        ),
         hook
       )
       console.log(

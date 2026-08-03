@@ -1,15 +1,7 @@
 import { ipcMain } from "electron"
-import { execSync, execFile } from "child_process"
+import { execFile } from "child_process"
 import { platform } from "os"
-import type { Dirent } from "fs"
-import { readdir, rm, stat } from "fs/promises"
 import path from "path"
-import {
-  captureStagedSnapshotsForCommit as captureAdoptionStagedSnapshots,
-  measureForCommit,
-  type StagedSnapshot
-} from "../services/adoption-tracker"
-import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
 import { discoverWorkspaceGitRepositories } from "../services/git-repository-discovery"
 import { promisify } from "util"
 
@@ -37,89 +29,14 @@ interface ExecCommandError extends Error {
 const execFileAsync = promisify(execFile)
 const DEFAULT_MAX_BUFFER = 20 * 1024 * 1024
 const MAX_GIT_COMMAND_CONCURRENCY = 1
-const GIT_LOCK_STALE_THRESHOLD_MS = 2 * 60 * 1000
-const MAX_GIT_LOCK_FILES_TO_CLEAN = 50
 // 这里采用短 TTL（1s）做“瞬时缓存”，主要为了吸收 UI 高频轮询带来的重复 rev-parse。
 // 目标不是跨场景长期缓存，而是在不引入陈旧状态风险的前提下减少 Git 子进程数。
 const WORKING_DIRECTORY_CACHE_TTL_MS = 1000
-const ALLOWED_GIT_SUBCOMMANDS = new Set([
-  "add",
-  "commit",
-  "push",
-  "pull",
-  "status",
-  "diff",
-  "log",
-  "branch",
-  "checkout",
-  "merge",
-  "reset",
-  "stash",
-  "remote",
-  "rev-list",
-  "rev-parse",
-  "ls-files"
-])
 const GIT_UNAVAILABLE_MESSAGE = "未检测到 Git 命令，请检查 Git 是否已安装并配置到 PATH。"
 
 type WorkingDirectoryCacheEntry = {
   value: string
   expiresAt: number
-}
-
-function isCommitCommand(command: string): boolean {
-  return /^git(\s+-C\s+"[^"]*")?\s+commit(\s|$)/.test(command.trim())
-}
-
-interface StagedCapture {
-  workingDir: string
-  snapshots: StagedSnapshot[]
-  /**
-   * Wall-clock time of the staged capture (epoch ms). The capture runs before
-   * `git commit`, so it is an exact upper bound on which generations can be part
-   * of the commit — passed to adoption measurement to keep later (post-capture)
-   * generations from being attributed to this commit.
-   */
-  captureTimeMs: number
-}
-
-async function captureStagedSnapshotsForCommand(command: string): Promise<StagedCapture | null> {
-  try {
-    const parsed = parseGitCommand(command)
-    const workingDir = parsed.workingDirFromFlag || (await getCurrentWorkingDirectory())
-    const captureTimeMs = Date.now()
-    return {
-      workingDir,
-      captureTimeMs,
-      snapshots: await captureAdoptionStagedSnapshots(workingDir)
-    }
-  } catch (e) {
-    console.warn("[Git] adoption pre-commit capture skipped:", e)
-    return null
-  }
-}
-
-/**
- * Extract a commit SHA from a successful `git commit` stdout. Best-effort:
- * git prints e.g. "[main abc1234] subject" on success. Returns null when the
- * pattern is absent so callers can still emit the adoption event with no SHA.
- */
-function extractCommitSha(commitOutput: string, workingDir: string): string | null {
-  const match = commitOutput.match(/\[[^\s\]]+\s+([0-9a-f]{7,40})\]/i)
-  if (match) return match[1]
-  // Fallback: ask git for HEAD's SHA.
-  try {
-    const sha = execSync("git rev-parse HEAD", {
-      encoding: "utf-8",
-      cwd: workingDir,
-      timeout: 5000,
-      windowsHide: true,
-      shell: platform() === "win32" ? "cmd.exe" : "/bin/bash"
-    }).trim()
-    return sha || null
-  } catch {
-    return null
-  }
 }
 
 type PorcelainStatusEntry = {
@@ -170,56 +87,6 @@ type RunCommandOptions = {
   timeout?: number
   env?: NodeJS.ProcessEnv
   trimOutput?: boolean
-}
-
-type ParsedRawCommand = {
-  executable: string
-  args: string[]
-}
-
-type ParsedGitCommand = {
-  args: string[]
-  subcommand: string
-  workingDirFromFlag?: string
-}
-
-const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
-  "-C",
-  "-c",
-  "--exec-path",
-  "--git-dir",
-  "--namespace",
-  "--super-prefix",
-  "--work-tree",
-  "--config-env"
-])
-
-function isPushCommand(subcommand: string): boolean {
-  return subcommand === "push"
-}
-
-/**
- * pull/fetch 通常涉及网络，耗时明显高于本地命令。
- * 这里单独识别出来，用于给超时策略加长容忍时间。
- */
-function isPullLikeCommand(subcommand: string): boolean {
-  return subcommand === "pull" || subcommand === "fetch"
-}
-
-/**
- * 根据命令类型返回超时时间（毫秒）。
- * 设计目标：既避免命令长期挂起，又尽量减少正常慢命令被误杀。
- */
-function getGitCommandTimeout(subcommand: string): number {
-  if (isPushCommand(subcommand)) {
-    return 3 * 60 * 1000
-  }
-
-  if (isPullLikeCommand(subcommand)) {
-    return 2 * 60 * 1000
-  }
-
-  return 30 * 1000
 }
 
 /**
@@ -296,188 +163,22 @@ function parsePorcelainStatus(output: string): PorcelainStatusEntry[] {
   return entries
 }
 
-/**
- * 轻量命令分词器：
- * - 支持单引号/双引号包裹；
- * - 不支持 shell 扩展（变量、命令替换、管道等），所有字符都按字面量处理。
- */
-function tokenizeCommand(command: string): string[] {
-  const tokens: string[] = []
-  let current = ""
-  let quote: '"' | "'" | null = null
-
-  for (let i = 0; i < command.length; i += 1) {
-    const ch = command[i]
-    if (!ch) continue
-
-    if (!quote) {
-      if (ch === "\\") {
-        const next = command[i + 1]
-        if (next && (/\s/.test(next) || next === '"' || next === "'" || next === "\\")) {
-          current += next
-          i += 1
-          continue
-        }
-        current += ch
-        continue
-      }
-      if (ch === '"' || ch === "'") {
-        quote = ch
-        continue
-      }
-      if (/\s/.test(ch)) {
-        if (current) {
-          tokens.push(current)
-          current = ""
-        }
-        continue
-      }
-      current += ch
-      continue
-    }
-
-    // 仅在双引号中支持 \" 和 \\ 两种最常见转义。
-    if (quote === '"' && ch === "\\") {
-      const next = command[i + 1]
-      if (next === '"' || next === "\\") {
-        current += next
-        i += 1
-        continue
-      }
-    }
-
-    if (ch === quote) {
-      quote = null
-      continue
-    }
-
-    current += ch
-  }
-
-  if (quote) {
-    throw new Error("命令解析失败：引号未闭合")
-  }
-
-  if (current) {
-    tokens.push(current)
-  }
-
-  return tokens
-}
-
-function parseCommand(command: string): ParsedRawCommand {
-  const trimmed = command.trim()
-  if (!trimmed) {
-    throw new Error("命令不能为空")
-  }
-
-  const tokens = tokenizeCommand(trimmed)
-  if (tokens.length === 0) {
-    throw new Error("命令不能为空")
-  }
-
-  const [executable, ...args] = tokens
-  if (!executable) {
-    throw new Error("命令不能为空")
-  }
-  return { executable, args }
-}
-
-function isGitExecutable(executable: string): boolean {
-  const normalized = path.basename(executable).toLowerCase()
-  return normalized === "git" || normalized === "git.exe"
-}
-
-function parseGitCommand(command: string): ParsedGitCommand {
-  const parsed = parseCommand(command)
-  if (!isGitExecutable(parsed.executable)) {
-    throw new Error(`仅允许执行 git 命令，当前命令: ${parsed.executable}`)
-  }
-
-  let workingDirFromFlag: string | undefined
-  let subcommand: string | undefined
-  let i = 0
-  while (i < parsed.args.length) {
-    const token = parsed.args[i]
-    if (!token) break
-
-    if (!token.startsWith("-")) {
-      subcommand = token.toLowerCase()
-      break
-    }
-
-    if (token === "-C") {
-      const next = parsed.args[i + 1]
-      if (!next) {
-        throw new Error("git -C 缺少目录参数")
-      }
-      workingDirFromFlag = next
-      i += 2
-      continue
-    }
-
-    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(token)) {
-      if (!parsed.args[i + 1]) {
-        throw new Error(`git 全局选项 ${token} 缺少参数`)
-      }
-      i += 2
-      continue
-    }
-
-    // --opt=value 形式的全局选项。
-    if (/^--[a-zA-Z-]+=/.test(token)) {
-      i += 1
-      continue
-    }
-
-    // 不带值的全局选项，例如 --no-pager。
-    i += 1
-  }
-
-  if (!subcommand) {
-    throw new Error("无法识别 git 子命令")
-  }
-
-  return {
-    args: parsed.args,
-    subcommand,
-    workingDirFromFlag
-  }
-}
-
-async function runCommand(
-  executable: string,
-  args: string[],
-  options?: RunCommandOptions
-): Promise<string> {
-  const { stdout } = await execFileAsync(executable, args, {
-    encoding: "utf-8",
-    cwd: options?.cwd,
-    timeout: options?.timeout,
-    env: options?.env,
-    windowsHide: true,
-    maxBuffer: DEFAULT_MAX_BUFFER
-  })
-
-  // 默认 trim，保证大多数调用点拿到“命令结果文本”而不是原始尾换行；
-  // 仅在需要精确保留分隔符（如 `status -z`）时通过 trimOutput=false 关闭。
-  const text = normalizeExecOutput(stdout)
-  return options?.trimOutput === false ? text : text.trim()
-}
-
-/**
- * 通用 shell 异步执行器（不做 Git 限流）。
- * 说明：
- * - execute-command 这种“任意命令”场景走这个入口。
- * - Git 相关命令应使用 runGitArgs，以进入队列限流。
- */
-async function runShellCommand(command: string, options?: RunCommandOptions): Promise<string> {
-  const parsed = parseCommand(command)
-  return runCommand(parsed.executable, parsed.args, options)
-}
-
 async function runGitArgs(args: string[], options?: RunCommandOptions): Promise<string> {
-  return await withGitCommandQueue(() => runCommand("git", args, options))
+  return await withGitCommandQueue(async () => {
+    const { stdout } = await execFileAsync("git", args, {
+      encoding: "utf-8",
+      cwd: options?.cwd,
+      timeout: options?.timeout,
+      env: options?.env,
+      windowsHide: true,
+      maxBuffer: DEFAULT_MAX_BUFFER
+    })
+
+    // 默认 trim，保证大多数调用点拿到“命令结果文本”而不是原始尾换行；
+    // 仅在需要精确保留分隔符（如 `status -z`）时通过 trimOutput=false 关闭。
+    const text = normalizeExecOutput(stdout)
+    return options?.trimOutput === false ? text : text.trim()
+  })
 }
 
 function normalizeGitDirPath(rawGitDir: string, workingDir: string): string {
@@ -494,136 +195,6 @@ function normalizeGitDirPath(rawGitDir: string, workingDir: string): string {
   return path.isAbsolute(trimmed) ? trimmed : path.resolve(workingDir, trimmed)
 }
 
-/**
- * 给定一条 Git 命令，反查其 `.git` 目录真实路径。
- * 用途：当命令超时/锁冲突时，定位锁文件并尝试清理。
- */
-async function resolveGitDir(workingDir: string): Promise<string | null> {
-  try {
-    const gitDir = await runGitArgs(["rev-parse", "--git-dir"], {
-      cwd: workingDir
-    })
-
-    return normalizeGitDirPath(gitDir, workingDir)
-  } catch {
-    return null
-  }
-}
-
-/**
- * 递归扫描 `.git` 目录下的 `*.lock` 文件。
- * 保持“尽力而为”策略：单个目录读失败不影响整体扫描。
- */
-async function collectGitLockFiles(gitDir: string): Promise<string[]> {
-  const stack = [gitDir]
-  const lockFiles: string[] = []
-  const now = Date.now()
-
-  while (stack.length > 0 && lockFiles.length < MAX_GIT_LOCK_FILES_TO_CLEAN) {
-    const current = stack.pop()
-    if (!current) {
-      continue
-    }
-
-    let entries: Dirent[]
-    try {
-      entries = await readdir(current, { withFileTypes: true })
-    } catch {
-      continue
-    }
-
-    for (const entry of entries) {
-      if (lockFiles.length >= MAX_GIT_LOCK_FILES_TO_CLEAN) {
-        break
-      }
-      const fullPath = path.join(current, entry.name)
-      if (entry.isDirectory()) {
-        // `objects/` 目录体量可能很大，且不会出现 lock 文件，跳过可显著降低扫描开销。
-        if (entry.name.toLowerCase() !== "objects") {
-          stack.push(fullPath)
-        }
-        continue
-      }
-
-      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".lock")) {
-        continue
-      }
-
-      try {
-        const lockStat = await stat(fullPath)
-        const ageMs = now - lockStat.mtimeMs
-        if (ageMs < GIT_LOCK_STALE_THRESHOLD_MS) {
-          continue
-        }
-        lockFiles.push(fullPath)
-      } catch {
-        // Ignore stale-check failure for single lock file and continue.
-      }
-    }
-  }
-
-  return lockFiles
-}
-
-/**
- * 清理 Git 锁文件：
- * - 仅在锁冲突场景触发；
- * - 仅清理“超过阈值时间”的疑似陈旧锁，避免误删活跃 git 进程锁；
- * - 删除失败不抛出，保证主流程可继续返回更有价值的错误信息。
- */
-async function cleanupGitLockFiles(workingDir: string): Promise<string[]> {
-  const gitDir = await resolveGitDir(workingDir)
-  if (!gitDir) {
-    return []
-  }
-
-  const lockFiles = await collectGitLockFiles(gitDir)
-  const removed: string[] = []
-
-  for (const lockFile of lockFiles) {
-    try {
-      await rm(lockFile, { force: true })
-      removed.push(lockFile)
-    } catch {
-      // Ignore single file cleanup errors and continue
-    }
-  }
-
-  return removed
-}
-
-/**
- * 识别“超时类”错误，覆盖 code/signal/文案三种来源。
- */
-function isTimeoutError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false
-  }
-
-  const message = error.message.toLowerCase()
-  const withCode = error as Error & { code?: string; signal?: string }
-  return (
-    withCode.code === "ETIMEDOUT" ||
-    withCode.signal === "SIGTERM" ||
-    message.includes("timed out") ||
-    message.includes("timeout")
-  )
-}
-
-/**
- * 基于 stderr 文案判断是否属于锁文件冲突。
- * 这里采用宽松匹配，兼容不同 Git 版本/平台输出差异。
- */
-function isLockFileErrorText(text: string): boolean {
-  const normalized = text.toLowerCase()
-  return (
-    normalized.includes(".lock") &&
-    (normalized.includes("file exists") ||
-      normalized.includes("unable to create") ||
-      normalized.includes("another git process"))
-  )
-}
-
 function isNotGitRepoErrorText(text: string): boolean {
   const normalized = text.toLowerCase()
   return (
@@ -636,32 +207,8 @@ function isGitUnavailableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   const err = error as ExecCommandError
   return (
-    err.code === "ENOENT" &&
-    (err.path === "git" || err.message.toLowerCase().includes("spawn git"))
+    err.code === "ENOENT" && (err.path === "git" || err.message.toLowerCase().includes("spawn git"))
   )
-}
-
-/**
- * 检测 Git 版本，并给出对 LFS 兼容性的粗略判断。
- * 说明：这里是“提示性”能力，不作为硬阻断条件。
- */
-async function checkGitVersion(): Promise<{ version: string; supportsLFS: boolean }> {
-  try {
-    const versionOutput = await runGitArgs(["--version"])
-
-    const versionMatch = versionOutput.match(/git version (\d+\.\d+\.\d+)/)
-    const version = versionMatch ? versionMatch[1] : "unknown"
-
-    // LFS 兼容性阈值来自历史经验，主要用于错误提示文案。
-    const [major, minor, patch] = version.split(".").map(Number)
-    const supportsLFS =
-      major > 1 || (major === 1 && minor > 8) || (major === 1 && minor === 8 && patch >= 2)
-
-    return { version, supportsLFS }
-  } catch (error) {
-    console.warn("Failed to check Git version:", error)
-    return { version: "unknown", supportsLFS: false }
-  }
 }
 
 /**
@@ -694,82 +241,6 @@ async function getCurrentWorkingDirectory(): Promise<string> {
       expiresAt: now + WORKING_DIRECTORY_CACHE_TTL_MS
     }
     return cwd
-  }
-}
-
-/**
- * 执行 Git 命令（统一错误治理入口）：
- * 1. 动态超时策略；
- * 2. Git LFS/推送/路径等常见错误转义为更易懂提示；
- * 3. 锁冲突时仅清理疑似陈旧锁文件并重试一次。
- */
-async function executeGitCommand(command: string, cwd?: string): Promise<string> {
-  const parsed = parseGitCommand(command)
-  const workingDir = cwd || parsed.workingDirFromFlag || (await getCurrentWorkingDirectory())
-  const timeout = getGitCommandTimeout(parsed.subcommand)
-  const options: RunCommandOptions = {
-    cwd: workingDir,
-    timeout,
-    env: {
-      ...process.env,
-      // Disable Git LFS for operations that don't need it
-      GIT_LFS_SKIP_SMUDGE: "1",
-      [CMBDEVCLAW_INTERNAL_GIT_ENV]: "1"
-    }
-  }
-
-  try {
-    return await runGitArgs(parsed.args, options)
-  } catch (rawError: unknown) {
-    const error = rawError as ExecCommandError
-    // 统一把底层异常转成业务可读的错误信息
-    let errorMessage = error.message
-    const stderr = normalizeExecOutput(error.stderr).trim()
-    const lockError = isLockFileErrorText(`${stderr}\n${error.message || ""}`)
-
-    if (stderr) {
-      // Git LFS 版本兼容提示
-      if (stderr.includes("git version >= 1.8.2 is required for Git LFS")) {
-        const gitInfo = await checkGitVersion()
-        errorMessage = `Git LFS error: Current Git version ${gitInfo.version} may not support LFS. Consider updating Git or disabling LFS for this operation.`
-      }
-      // Push 常见失败提示（引导先 pull）
-      else if (stderr.includes("failed to push some refs")) {
-        errorMessage = `Push failed: ${stderr}. Try pulling the latest changes first with 'git pull' before pushing.`
-      }
-      // 工作目录不是仓库时的友好提示
-      else if (stderr.includes("does not appear to be a git repository")) {
-        errorMessage = `Repository error: ${stderr}. Ensure you're in a valid Git repository directory.`
-      } else {
-        errorMessage = stderr
-      }
-    } else if (error.stdout) {
-      return normalizeExecOutput(error.stdout).trim()
-    }
-
-    if (lockError) {
-      const removedLocks = await cleanupGitLockFiles(workingDir)
-      if (removedLocks.length > 0) {
-        console.warn("[Git] cleaned stale lock files:", removedLocks)
-      }
-
-      // 锁冲突场景：仅在清理过陈旧锁后重试一次，避免重复失败时形成无限重试。
-      if (removedLocks.length > 0) {
-        try {
-          return await runGitArgs(parsed.args, options)
-        } catch (retryRawError: unknown) {
-          const retryError = retryRawError as ExecCommandError
-          const retryStderr = normalizeExecOutput(retryError.stderr).trim()
-          const retryMsg =
-            retryStderr || retryError.message || "Git command retry failed after lock cleanup"
-          throw new Error(retryMsg)
-        }
-      }
-    } else if (isTimeoutError(error)) {
-      errorMessage = `${errorMessage}\n命令执行超时，请稍后重试。`
-    }
-
-    throw new Error(errorMessage)
   }
 }
 
@@ -1147,84 +618,6 @@ export function registerGitHandlers(): void {
     }
   })
 
-  // 执行 Git 命令（受白名单保护）
-  ipcMain.handle("execute-git-command", async (_, command: string): Promise<string> => {
-    try {
-      console.log("[IPC] 执行Git命令:", command)
-
-      // 白名单防护：解析后按“子命令”做精确校验，避免前缀正则被拼接命令绕过。
-      const parsed = parseGitCommand(command)
-      if (!ALLOWED_GIT_SUBCOMMANDS.has(parsed.subcommand)) {
-        throw new Error(`不允许执行的 git 子命令: ${parsed.subcommand}`)
-      }
-
-      // Capture staged blob snapshots BEFORE commit — the index is wiped once
-      // the commit runs. If the commit then fails, we simply discard the capture
-      // without emitting any adoption event.
-      let stagedCapture: StagedCapture | null = null
-      if (isCommitCommand(command)) {
-        console.log("[Git] commit detected — capturing staged snapshots for adoption")
-        stagedCapture = await captureStagedSnapshotsForCommand(command)
-        if (stagedCapture) {
-          console.log(
-            `[Git] staged capture done: snapshots=${stagedCapture.snapshots.length} workingDir=${stagedCapture.workingDir}`
-          )
-        }
-      }
-
-      // 这里最终会走 executeGitCommand -> runGitArgs -> 队列限流。
-      const result = await executeGitCommand(command)
-      console.log("[IPC] Git命令执行成功:", command, "结果:", result)
-
-      // Only emit adoption measurement once the commit actually succeeded.
-      if (stagedCapture && stagedCapture.snapshots.length > 0) {
-        try {
-          const sha = extractCommitSha(result, stagedCapture.workingDir) ?? undefined
-          console.log(
-            `[Git] triggering post-commit measurement: commitSha=${sha ?? "unknown"} snapshots=${stagedCapture.snapshots.length}`
-          )
-          measureForCommit(stagedCapture.snapshots, sha, stagedCapture.captureTimeMs)
-        } catch (e) {
-          console.warn("[Git] adoption post-commit measurement skipped:", e)
-        }
-      } else if (isCommitCommand(command)) {
-        console.log(
-          `[Git] post-commit measurement skipped: stagedCapture=${stagedCapture ? "present" : "null"} snapshots=${stagedCapture?.snapshots.length ?? 0}`
-        )
-      }
-
-      return result
-    } catch (error) {
-      console.error("[IPC] execute-git-command error:", error)
-      throw error
-    }
-  })
-
-  // 执行任意命令（保留原能力；此入口不走 Git 专用队列）
-  ipcMain.handle("execute-command", async (_, command: string): Promise<string> => {
-    try {
-      console.log("[IPC] 执行命令:", command)
-
-      const result = await runShellCommand(command, {
-        cwd: await getCurrentWorkingDirectory(),
-        timeout: 30000 // 30秒超时
-      })
-
-      console.log("[IPC] 命令执行成功:", command, "结果:", result)
-      return result
-    } catch (rawError: unknown) {
-      const error = rawError as ExecCommandError
-      console.error("[IPC] execute-command error:", error)
-      if (error.stderr) {
-        throw new Error(normalizeExecOutput(error.stderr).trim())
-      } else if (error.stdout) {
-        return normalizeExecOutput(error.stdout).trim()
-      } else {
-        throw new Error(`命令执行失败: ${error.message}`)
-      }
-    }
-  })
-
   // 获取当前分支
   ipcMain.handle(
     "git:currentBranch",
@@ -1259,7 +652,10 @@ export function registerGitHandlers(): void {
           if (repositories.length > 0) {
             return {
               isGitRepo: true,
-              branch: repositories.length > 1 ? `${repositories.length} 个仓库` : repositories[0].displayPath,
+              branch:
+                repositories.length > 1
+                  ? `${repositories.length} 个仓库`
+                  : repositories[0].displayPath,
               isWorktree: false,
               isMultiRepo: true,
               repositories: repositories.map((repo) => ({

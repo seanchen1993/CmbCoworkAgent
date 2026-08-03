@@ -6,9 +6,11 @@
  */
 
 import {
+  latestPersistedCheckpointMessageAt,
   restoreRawCheckpointMessageTime,
   restoreVisibleCheckpointMessageTimes
 } from "../src/renderer/src/lib/checkpoint-message-times.ts"
+import { buildMessageRoleCollisionId } from "../src/shared/message-role-collision.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
@@ -350,6 +352,115 @@ function testFinalTranscriptMixedIdRestoreKeepsAssistantExactTime(): void {
   )
 }
 
+function testPersistedCheckpointMessageLatestIgnoresMessagesOutsideCheckpoint(): void {
+  const latest = latestPersistedCheckpointMessageAt(
+    [{ id: "user-1" }, { id: "assistant-1" }],
+    [
+      {
+        id: "assistant-1",
+        created_at: new Date("2026-05-22T10:00:04.000Z"),
+        start_at: new Date("2026-05-22T10:00:05.000Z")
+      },
+      {
+        id: "post-checkpoint-user",
+        created_at: new Date("2026-05-22T10:10:00.000Z"),
+        start_at: new Date("2026-05-22T10:10:00.000Z")
+      }
+    ]
+  )
+
+  assertEqual(
+    latest?.toISOString(),
+    "2026-05-22T10:00:05.000Z",
+    "pending approval restore gating should ignore persisted messages outside the checkpoint"
+  )
+}
+
+function testPersistedCheckpointLatestMatchesOppositeRoleCollisionKeepers(): void {
+  const sharedId = "checkpoint-time-role-collision"
+  const latest = latestPersistedCheckpointMessageAt(
+    [
+      { id: buildMessageRoleCollisionId(sharedId, "assistant"), role: "assistant" },
+      { id: sharedId, role: "system" }
+    ],
+    [
+      {
+        id: sharedId,
+        role: "assistant",
+        created_at: new Date("2026-05-22T10:00:01.000Z")
+      },
+      {
+        id: buildMessageRoleCollisionId(sharedId, "system"),
+        role: "system",
+        created_at: new Date("2026-05-22T10:00:03.000Z")
+      }
+    ]
+  )
+
+  assertEqual(
+    latest?.toISOString(),
+    "2026-05-22T10:00:03.000Z",
+    "approval gating should use the latest role identity when raw-id keepers differ"
+  )
+}
+
+function testVisibleRestoreMatchesOppositeRoleCollisionKeepers(): void {
+  const sharedId = "visible-time-role-collision"
+  const oldUserId = buildMessageRoleCollisionId(sharedId, "user")
+  const restoredAssistantId = buildMessageRoleCollisionId(sharedId, "assistant")
+  const fallback = new Date("2026-05-22T12:00:00.000Z")
+  const restored = restoreVisibleCheckpointMessageTimes(
+    [
+      { id: sharedId, role: "user", created_at: fallback },
+      { id: restoredAssistantId, role: "assistant", created_at: fallback }
+    ],
+    {
+      [oldUserId]: { start_at: "2026-05-22T10:00:01.000Z" },
+      [sharedId]: { start_at: "2026-05-22T10:00:10.000Z" }
+    },
+    [],
+    [
+      { id: sharedId, role: "assistant", created_at: fallback },
+      { id: oldUserId, role: "user", created_at: fallback }
+    ]
+  )
+
+  assertEqual(
+    restored[0].start_at?.toISOString(),
+    "2026-05-22T10:00:01.000Z",
+    "user time should follow source id plus role when the raw-id keeper changes"
+  )
+  assertEqual(
+    restored[1].start_at?.toISOString(),
+    "2026-05-22T10:00:10.000Z",
+    "assistant time should follow source id plus role instead of being inferred after the user"
+  )
+
+  const canonicalId = "visible-time-canonical"
+  const canonicalProviderId = "visible-time-provider"
+  const canonicalRestored = restoreVisibleCheckpointMessageTimes(
+    [{ id: canonicalProviderId, role: "assistant", created_at: fallback }],
+    {
+      [canonicalId]: { start_at: "2026-05-22T10:00:20.000Z" }
+    },
+    [],
+    [
+      {
+        id: canonicalId,
+        provider_source_id: canonicalProviderId,
+        provider_occurrence: 1,
+        role: "assistant",
+        created_at: fallback
+      }
+    ]
+  )
+  assertEqual(
+    canonicalRestored[0].start_at?.toISOString(),
+    "2026-05-22T10:00:20.000Z",
+    "checkpoint time restore must match canonical and raw ids for one provider occurrence"
+  )
+}
+
 function run(): void {
   testInternalGoalPromptUsesInternalTimeById()
   testInternalGoalPromptUsesInternalOrderFallback()
@@ -359,6 +470,9 @@ function run(): void {
   testVisibleInferredTimeDoesNotReuseCurrentFallbackEndTime()
   testFinalTranscriptOrderFallbackKeepsGoalUserSlot()
   testFinalTranscriptMixedIdRestoreKeepsAssistantExactTime()
+  testPersistedCheckpointMessageLatestIgnoresMessagesOutsideCheckpoint()
+  testPersistedCheckpointLatestMatchesOppositeRoleCollisionKeepers()
+  testVisibleRestoreMatchesOppositeRoleCollisionKeepers()
   console.log("checkpoint-message-times tests passed")
 }
 

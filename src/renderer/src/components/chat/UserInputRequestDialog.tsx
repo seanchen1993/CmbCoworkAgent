@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { CheckCircle2, ChevronLeft, ChevronRight, Circle, MessageSquareText } from "lucide-react"
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Circle,
+  MessageSquareText
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { UserInputAnswer, UserInputRequest, UserInputResponse } from "@/types"
@@ -28,10 +36,12 @@ export function UserInputRequestDialog({
   const dialogRef = useRef<HTMLDivElement>(null)
   const [draftAnswers, setDraftAnswers] = useState<Record<string, DraftAnswer>>({})
   const [activeIndex, setActiveIndex] = useState(0)
+  const [collapsed, setCollapsed] = useState(false)
 
   useEffect(() => {
     setDraftAnswers({})
     setActiveIndex(0)
+    setCollapsed(false)
   }, [request?.requestId])
 
   const handleIgnore = useCallback((): void => {
@@ -94,7 +104,7 @@ export function UserInputRequestDialog({
       resizeObserver?.disconnect()
       window.removeEventListener("resize", updateLayout)
     }
-  }, [activeIndex, onLayoutChange, request])
+  }, [activeIndex, collapsed, onLayoutChange, request])
 
   const canSubmit = useMemo(() => {
     if (!request) return false
@@ -165,15 +175,28 @@ export function UserInputRequestDialog({
   return (
     <div
       ref={dialogRef}
-      className="absolute -inset-x-px -bottom-px z-30 flex min-h-[320px] max-h-[520px] items-stretch overflow-hidden rounded-[calc(1.5rem+1px)] border border-primary/25 bg-background shadow-[0_-12px_30px_rgba(15,23,42,0.08)]"
+      className={cn(
+        "absolute z-30 flex items-stretch overflow-hidden rounded-[calc(1.5rem+1px)] border border-primary/25 bg-background shadow-[0_-12px_30px_rgba(15,23,42,0.08)] transition-[inset,min-height,max-height] duration-200",
+        collapsed
+          ? "-inset-px"
+          : "-inset-x-px -bottom-px min-h-[320px] max-h-[520px]"
+      )}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="user-input-dialog-title"
-        className="flex min-h-0 w-full flex-col overflow-hidden rounded-[inherit]"
+        className={cn(
+          "flex min-h-0 w-full flex-col overflow-hidden rounded-[inherit]",
+          collapsed && "h-full"
+        )}
       >
-        <div className="flex items-center gap-3 border-b border-border px-4 py-3">
+        <div
+          className={cn(
+            "flex items-center gap-3 px-4",
+            collapsed ? "h-full py-0" : "border-b border-border py-3"
+          )}
+        >
           <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
             <MessageSquareText className="size-3.5" />
           </div>
@@ -190,140 +213,155 @@ export function UserInputRequestDialog({
               {activeIndex + 1}/{request.questions.length}
             </div>
           )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="size-7 shrink-0"
+            aria-label={collapsed ? "展开用户输入面板" : "折叠用户输入面板"}
+            title={collapsed ? "展开" : "折叠"}
+            onClick={() => setCollapsed((value) => !value)}
+          >
+            {collapsed ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
+          </Button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-          <section className="space-y-3">
-            <div className="flex items-start gap-3">
-              <span className="mt-0.5 shrink-0 rounded-sm bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">
-                {activeQuestion.header || `Q${activeIndex + 1}`}
-              </span>
-              <div className="min-w-0">
-                <div className="break-words text-sm font-medium leading-5">
-                  {activeQuestion.question}
+        {!collapsed && (
+          <>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              <section className="space-y-3">
+                <div className="flex items-start gap-3">
+                  <span className="mt-0.5 shrink-0 rounded-sm bg-muted px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                    {activeQuestion.header || `Q${activeIndex + 1}`}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="break-words text-sm font-medium leading-5">
+                      {activeQuestion.question}
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                      {activeQuestion.id}
+                    </div>
+                  </div>
                 </div>
-                <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                  {activeQuestion.id}
-                </div>
-              </div>
-            </div>
 
-            <div className="space-y-2" role="radiogroup" aria-label={activeQuestion.question}>
-              {activeQuestion.options.map((option, optionIndex) => {
-                const selected =
-                  activeDraft?.type === "option" && activeDraft.optionIndex === optionIndex
-                return (
-                  <button
-                    key={`${activeQuestion.id}-${optionIndex}`}
-                    type="button"
-                    role="radio"
-                    aria-checked={selected}
+                <div className="space-y-2" role="radiogroup" aria-label={activeQuestion.question}>
+                  {activeQuestion.options.map((option, optionIndex) => {
+                    const selected =
+                      activeDraft?.type === "option" && activeDraft.optionIndex === optionIndex
+                    return (
+                      <button
+                        key={`${activeQuestion.id}-${optionIndex}`}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        className={cn(
+                          "flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left transition-colors",
+                          selected
+                            ? "border-primary bg-primary/10"
+                            : "border-border bg-background hover:bg-background-interactive"
+                        )}
+                        onClick={() => selectOption(activeQuestion.id, optionIndex)}
+                      >
+                        {selected ? (
+                          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
+                        ) : (
+                          <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="min-w-0">
+                          <span className="block break-words text-sm font-medium">
+                            {option.label}
+                          </span>
+                          <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
+                            {option.description}
+                          </span>
+                        </span>
+                      </button>
+                    )
+                  })}
+
+                  <div
                     className={cn(
-                      "flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left transition-colors",
-                      selected
+                      "rounded-md border transition-colors",
+                      otherSelected
                         ? "border-primary bg-primary/10"
                         : "border-border bg-background hover:bg-background-interactive"
                     )}
-                    onClick={() => selectOption(activeQuestion.id, optionIndex)}
                   >
-                    {selected ? (
-                      <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
-                    ) : (
-                      <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                    )}
-                    <span className="min-w-0">
-                      <span className="block break-words text-sm font-medium">
-                        {option.label}
-                      </span>
-                      <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
-                        {option.description}
-                      </span>
-                    </span>
-                  </button>
-                )
-              })}
-
-              <div
-                className={cn(
-                  "rounded-md border transition-colors",
-                  otherSelected
-                    ? "border-primary bg-primary/10"
-                    : "border-border bg-background hover:bg-background-interactive"
-                )}
-              >
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={otherSelected}
-                  className="flex w-full items-start gap-3 px-3 py-2 text-left"
-                  onClick={() =>
-                    updateDraft(activeQuestion.id, {
-                      type: "other",
-                      text: activeDraft?.type === "other" ? activeDraft.text : ""
-                    })
-                  }
-                >
-                  {otherSelected ? (
-                    <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
-                  ) : (
-                    <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                  )}
-                  <span className="block min-w-0 text-sm font-medium">其他</span>
-                </button>
-                {otherSelected && (
-                  <div className="px-3 pb-3 pl-10">
-                    <textarea
-                      className="min-h-16 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-                      value={activeDraft.type === "other" ? activeDraft.text : ""}
-                      onChange={(event) =>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={otherSelected}
+                      className="flex w-full items-start gap-3 px-3 py-2 text-left"
+                      onClick={() =>
                         updateDraft(activeQuestion.id, {
                           type: "other",
-                          text: event.target.value
+                          text: activeDraft?.type === "other" ? activeDraft.text : ""
                         })
                       }
-                      autoFocus
-                    />
+                    >
+                      {otherSelected ? (
+                        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
+                      ) : (
+                        <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                      )}
+                      <span className="block min-w-0 text-sm font-medium">其他</span>
+                    </button>
+                    {otherSelected && (
+                      <div className="px-3 pb-3 pl-10">
+                        <textarea
+                          className="min-h-16 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                          value={activeDraft.type === "other" ? activeDraft.text : ""}
+                          onChange={(event) =>
+                            updateDraft(activeQuestion.id, {
+                              type: "other",
+                              text: event.target.value
+                            })
+                          }
+                          autoFocus
+                        />
+                      </div>
+                    )}
                   </div>
-                )}
+                </div>
+              </section>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-3">
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  disabled={activeIndex === 0}
+                  onClick={() => setActiveIndex((prev) => Math.max(0, prev - 1))}
+                  aria-label="上一题"
+                >
+                  <ChevronLeft className="size-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  disabled={activeIndex >= request.questions.length - 1}
+                  onClick={() =>
+                    setActiveIndex((prev) => Math.min(request.questions.length - 1, prev + 1))
+                  }
+                  aria-label="下一题"
+                >
+                  <ChevronRight className="size-4" />
+                </Button>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={handleIgnore}>
+                  忽略
+                </Button>
+                <Button type="button" size="sm" onClick={handleSubmit} disabled={!canSubmit}>
+                  提交
+                </Button>
               </div>
             </div>
-          </section>
-        </div>
-
-        <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-3">
-          <div className="flex items-center gap-1">
-            <Button
-              type="button"
-              variant="outline"
-              size="icon-sm"
-              disabled={activeIndex === 0}
-              onClick={() => setActiveIndex((prev) => Math.max(0, prev - 1))}
-              aria-label="上一题"
-            >
-              <ChevronLeft className="size-4" />
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon-sm"
-              disabled={activeIndex >= request.questions.length - 1}
-              onClick={() =>
-                setActiveIndex((prev) => Math.min(request.questions.length - 1, prev + 1))
-              }
-              aria-label="下一题"
-            >
-              <ChevronRight className="size-4" />
-            </Button>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={handleIgnore}>
-              忽略
-            </Button>
-            <Button type="button" size="sm" onClick={handleSubmit} disabled={!canSubmit}>
-              提交
-            </Button>
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </div>
   )

@@ -37,11 +37,15 @@ import {
   normalizePluginRelativePath,
   readPluginManifest
 } from "../plugins/manifest"
+import {
+  normalizePluginVersion,
+  resolvePluginInstallVersion
+} from "../../shared/plugin-version"
 
 interface ParsedPlugin {
   manifest: PluginManifest | null
   manifestRelPath: string | null
-  skillDirs: string[]
+  skillNames: string[]
   mcpConfigs: Record<string, PluginMcpServerConfig>
   mcpServerDetails: PluginMcpServerDetail[]
   hookCount: number
@@ -50,21 +54,7 @@ interface ParsedPlugin {
 }
 
 const GENERATED_PLUGIN_MANIFEST_REL_PATH = ".codex-plugin/plugin.json"
-
-export function normalizePluginVersion(version?: string | null): string | undefined {
-  const trimmed = String(version || "").trim()
-  if (!trimmed) return undefined
-  return trimmed.replace(/^v(?=\d)/i, "")
-}
-
-export function resolvePluginInstallVersion(
-  manifestVersion?: string | null,
-  overrideVersion?: string | null
-): string {
-  return (
-    normalizePluginVersion(overrideVersion) ?? normalizePluginVersion(manifestVersion) ?? "1.0.0"
-  )
-}
+export { normalizePluginVersion, resolvePluginInstallVersion } from "../../shared/plugin-version"
 
 async function readJsonObjectFile(filePath: string): Promise<Record<string, unknown> | null> {
   try {
@@ -180,7 +170,7 @@ async function addDirToZip(zip: AdmZip, dirPath: string, rootDir: string): Promi
 
 async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<ParsedPlugin> {
   let manifest: PluginManifest | null = null
-  const skillDirs: string[] = []
+  const skillNames: string[] = []
   let mcpConfigs: Record<string, PluginMcpServerConfig> = {}
   let name = fallbackName?.trim() || path.basename(dirPath)
 
@@ -197,7 +187,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
         const key = skill.rootDir.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
         if (seenSkillDirs.has(key)) continue
         seenSkillDirs.add(key)
-        skillDirs.push(skill.relativePath || ".")
+        skillNames.push(skill.name)
       }
     } catch {
       console.warn("[Plugins] Failed to scan skills in", source.sourceDir)
@@ -260,7 +250,7 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
   return {
     manifest,
     manifestRelPath,
-    skillDirs,
+    skillNames,
     mcpConfigs,
     mcpServerDetails,
     hookCount,
@@ -284,7 +274,7 @@ async function installPluginFromDir(
   try {
     const parsed = await parsePluginDir(dirPath, fallbackName)
     if (
-      parsed.skillDirs.length === 0 &&
+      parsed.skillNames.length === 0 &&
       Object.keys(parsed.mcpConfigs).length === 0 &&
       parsed.hookCount === 0
     ) {
@@ -380,7 +370,7 @@ async function installPluginFromDir(
       author: formatAuthor(parsed.manifest?.author),
       path: destDir,
       enabled: true,
-      skillCount: parsed.skillDirs.length,
+      skillCount: parsed.skillNames.length,
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
       hookCount: parsed.hookCount,
       hookPath: parsed.hookPath,
@@ -437,7 +427,7 @@ async function selectExtractedPluginRoot(tempDir: string): Promise<string> {
   for (const candidate of candidates) {
     const parsed = await parsePluginDir(candidate)
     if (
-      parsed.skillDirs.length > 0 ||
+      parsed.skillNames.length > 0 ||
       Object.keys(parsed.mcpConfigs).length > 0 ||
       parsed.hookCount > 0
     ) {
@@ -599,7 +589,7 @@ export async function inspectPluginZip(buffer: ArrayBuffer): Promise<PluginDetai
     tempDir = extracted.tempDir
     const parsed = await parsePluginDir(extracted.pluginRoot)
     return {
-      skills: parsed.skillDirs,
+      skills: parsed.skillNames,
       mcpServers: Object.keys(parsed.mcpConfigs),
       mcpServerDetails: parsed.mcpServerDetails,
       hookCount: parsed.hookCount,
@@ -868,7 +858,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       }
       const parsed = await parsePluginDir(plugin.path)
       return {
-        skills: parsed.skillDirs,
+        skills: parsed.skillNames,
         mcpServers: Object.keys(parsed.mcpConfigs),
         mcpServerDetails: parsed.mcpServerDetails,
         hookCount: parsed.hookCount,

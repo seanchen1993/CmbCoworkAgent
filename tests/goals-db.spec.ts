@@ -72,11 +72,7 @@ async function testSqlGoalStorePersistsAcrossDatabaseReopen(): Promise<void> {
   assert(reloaded, "goal should reload after closing and reopening the database")
   assertEqual(reloaded?.objective, "finish persistent goal", "objective should persist")
   assertEqual(reloaded?.turnsUsed, 1, "turn count should persist")
-  assertEqual(
-    reloaded?.context.explicitSkill?.name,
-    "docs",
-    "explicit skill name should persist"
-  )
+  assertEqual(reloaded?.context.explicitSkill?.name, "docs", "explicit skill name should persist")
   assertEqual(
     reloaded?.context.explicitSkill?.path,
     "/tmp/SKILL.md",
@@ -347,13 +343,10 @@ async function testResettingActiveSqlGoalRefreshesCreatedAtBaseline(): Promise<v
   try {
     manager.set("thread-active-resume-baseline", "orphaned active resume should refresh baseline")
     now = 2_000
-    manager.recordJudgeDecision(
-      "thread-active-resume-baseline",
-      {
-        verdict: "continue",
-        reason: "first turn incomplete"
-      }
-    )
+    manager.recordJudgeDecision("thread-active-resume-baseline", {
+      verdict: "continue",
+      reason: "first turn incomplete"
+    })
     now = 5_000
     const resumed = manager.resume("thread-active-resume-baseline", {
       resetActiveWindow: true
@@ -373,8 +366,16 @@ async function testResettingActiveSqlGoalRefreshesCreatedAtBaseline(): Promise<v
   const reloaded = new SqlGoalStore().get("thread-active-resume-baseline")
   assertEqual(reloaded?.status, "active", "reloaded reset active goal should stay active")
   assertEqual(reloaded?.turnsUsed, 0, "reloaded reset active goal should keep cleared turns")
-  assertEqual(reloaded?.createdAt, 5_000, "reloaded reset active goal should keep refreshed baseline")
-  assertEqual(reloaded?.updatedAt, 5_000, "reloaded reset active goal should keep refreshed update time")
+  assertEqual(
+    reloaded?.createdAt,
+    5_000,
+    "reloaded reset active goal should keep refreshed baseline"
+  )
+  assertEqual(
+    reloaded?.updatedAt,
+    5_000,
+    "reloaded reset active goal should keep refreshed update time"
+  )
 
   await db.closeDatabase()
 }
@@ -382,9 +383,8 @@ async function testResettingActiveSqlGoalRefreshesCreatedAtBaseline(): Promise<v
 async function testSqlGoalStorePausesRestoredActiveGoals(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
   const { SqlGoalStore } = await import("../src/main/agent/goals/goal-store.ts")
-  const { displayGoalPausedReason, GoalManager } = await import(
-    "../src/main/agent/goals/goal-manager.ts"
-  )
+  const { displayGoalPausedReason, GoalManager } =
+    await import("../src/main/agent/goals/goal-manager.ts")
 
   await db.initializeDatabase()
   db.createThread("thread-runtime-restore", { title: "Runtime restore regression" })
@@ -496,6 +496,28 @@ async function testAppDbFlushRemainsReusable(): Promise<void> {
   await db.closeDatabase()
 }
 
+async function testAppDbStrictFlushSerializesConcurrentCallers(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  await db.initializeDatabase()
+  db.createThread("thread-strict-flush-a", { title: "strict flush A" })
+
+  const firstFlush = db.flushStrict()
+  db.createThread("thread-strict-flush-b", { title: "strict flush B" })
+  await Promise.all([firstFlush, db.flushStrict()])
+  await db.closeDatabase()
+
+  await db.initializeDatabase()
+  assert(
+    db.getThread("thread-strict-flush-a"),
+    "first strict flush thread should survive concurrent strict flushes"
+  )
+  assert(
+    db.getThread("thread-strict-flush-b"),
+    "second strict flush thread should survive concurrent strict flushes"
+  )
+  await db.closeDatabase()
+}
+
 async function testGoalJudgeModelSettings(): Promise<void> {
   const storage = await import("../src/main/storage.ts")
   const evaluator = await import("../src/main/agent/goals/evaluator.ts")
@@ -601,6 +623,22 @@ async function testGoalJudgeModelSettings(): Promise<void> {
     "shared-judge-with-key",
     "current-model fallback should choose a same-model config with an API key"
   )
+
+  storage.upsertCustomModelConfig({
+    id: "minimax-m2p5-229b-w8a8",
+    name: "Custom Collision Model",
+    baseUrl: "https://custom.example.com/v1",
+    model: "custom-collision-model",
+    apiKey: "custom-collision-key",
+    maxTokens: 128_000,
+    maxOutputTokens: 8_192,
+    temperature: 0.1
+  })
+  assertEqual(
+    evaluator.resolveEvaluatorConfig("custom:minimax-m2p5-229b-w8a8")?.model,
+    "custom-collision-model",
+    "explicit custom evaluator refs should not resolve to a same-ID builtin model"
+  )
 }
 
 async function main(): Promise<void> {
@@ -616,6 +654,7 @@ async function main(): Promise<void> {
     testSqlGoalStorePausesRestoredActiveGoals,
     testLegacyBudgetLimitedStatusNormalizesToPaused,
     testAppDbFlushRemainsReusable,
+    testAppDbStrictFlushSerializesConcurrentCallers,
     testGoalJudgeModelSettings
   ]
   await withTempHome(async () => {

@@ -1,13 +1,8 @@
 import { IpcMain } from "electron"
 import { existsSync, readdirSync, readFileSync, unlinkSync, statSync } from "fs"
 import { join, basename } from "path"
-import {
-  isDreamEnabled,
-  isMemoryEnabled,
-  setDreamEnabled,
-  setMemoryEnabled,
-  getCustomModelConfigs
-} from "../storage"
+import { isDreamEnabled, isMemoryEnabled, setDreamEnabled, setMemoryEnabled } from "../storage"
+import { getDefaultModelConfig } from "../models/registry"
 import { getMemoryStore } from "../memory/store"
 import { removeEntryFromManifest, parseFrontmatter, type MemoryType } from "../memory/manifest"
 import { notifyMemoryChanged } from "../memory/events"
@@ -20,6 +15,7 @@ import {
   type MemoryNamespace,
   type MemoryScope
 } from "../memory/paths"
+import { isProjectModeMemoryEnabled } from "../project-mode-memory"
 
 const DREAM_STATE_FILE = ".dream_state.json"
 
@@ -286,6 +282,10 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
     return isMemoryEnabled()
   })
 
+  ipcMain.handle("memory:getProjectModeEnabled", async (): Promise<boolean> => {
+    return isProjectModeMemoryEnabled()
+  })
+
   ipcMain.handle("memory:setEnabled", async (_, enabled: boolean): Promise<void> => {
     setMemoryEnabled(enabled)
     notifyMemoryChanged()
@@ -313,8 +313,7 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
       if (!isMemoryEnabled() || !isDreamEnabled()) {
         return { archived: 0, merged: 0, created: 0, skipped: 0 }
       }
-      const allConfigs = getCustomModelConfigs()
-      const config = allConfigs[0]
+      const config = getDefaultModelConfig()
       if (!config?.apiKey) {
         return { archived: 0, merged: 0, created: 0, skipped: 0 }
       }

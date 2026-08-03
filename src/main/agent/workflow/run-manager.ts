@@ -317,6 +317,7 @@ function workspaceKey(p: string): string {
 
 class WorkflowRunManager {
   private readonly active = new Map<string, ActiveWorkflowRun>()
+  private shuttingDown = false
   /** Per-run count of auto re-reports after a failed notification turn (E). */
   private readonly renotifyAttempts = new Map<string, number>()
   /**
@@ -351,6 +352,10 @@ class WorkflowRunManager {
 
   isActive(threadId: string): boolean {
     return this.active.has(threadId)
+  }
+
+  hasActiveRuns(): boolean {
+    return this.active.size > 0
   }
 
   activeRunId(threadId: string): string | undefined {
@@ -412,25 +417,63 @@ class WorkflowRunManager {
    * Deliverable = not delivered AND renotify not exhausted; an in-flight one
    * COUNTS as busy (it stays undelivered until its ack lands). */
   hasDeliverablePendingNotification(workspacePath: string, threadId: string): boolean {
+    return this.hasDeliverablePendingNotificationExcept(workspacePath, threadId, undefined)
+  }
+
+  /** Like hasDeliverablePendingNotification, but ignores the run instance a
+   * delivery turn is CURRENTLY reporting. Runs support a pending BACKLOG (only
+   * one notification is delivered per turn; the next is kicked after ack), so a
+   * caller that runs DURING a delivery turn (the goal defer check, which happens
+   * BEFORE the settlement markNotified()s the current run) must exclude that
+   * in-flight run — otherwise it would see its own delivery as "still pending"
+   * and self-defer — yet still detect an OTHER already-completed run whose result
+   * has not entered the conversation, so the goal doesn't evaluate on partial
+   * evidence. Pass undefined (the plain method) when there is no current delivery
+   * to exclude (e.g. auto-commit, which runs AFTER settlement).
+   *
+   * Excludes by INSTANCE identity (runId + startedAt), not runId alone: a resume
+   * REUSES the runId (see setWorkflowRunNotified's identical fence), so if the
+   * model resumes the just-delivered run inside its own notification turn and
+   * that resumed instance completes, excluding by runId would also hide the
+   * resumed instance's pending notification — the exact partial-evidence bug this
+   * guard exists to prevent. startedAt is minted fresh per launch, so only the
+   * true current-delivery instance is excluded. */
+  hasDeliverablePendingNotificationExcept(
+    workspacePath: string,
+    threadId: string,
+    except: { runId: string; startedAt: string } | undefined
+  ): boolean {
+    const isCurrentDelivery = (runId: string, startedAt: string): boolean =>
+      except !== undefined && runId === except.runId && startedAt === except.startedAt
     // In-flight explicitly counts as busy even for an exhausted run: a
     // hydrate/kick can re-report an exhausted run, and exiting workflow mode
     // mid-report would strand that delivery.
-    const deliverable = (runId: string): boolean =>
+    const deliverableByRunId = (runId: string): boolean =>
       this.inFlightNotifications.has(runId) || !this.isRenotifyExhausted(runId)
     for (const snapshot of this.flushFailedRuns.values()) {
       if (
         snapshot.threadId === threadId &&
         !snapshot.notificationDelivered &&
-        deliverable(snapshot.runId)
+        !isCurrentDelivery(snapshot.runId, snapshot.startedAt) &&
+        deliverableByRunId(snapshot.runId)
       ) {
         return true
       }
     }
-    return findUndeliveredTerminalRun(workspacePath, threadId, deliverable) !== null
+    return (
+      findUndeliveredTerminalRun(
+        workspacePath,
+        threadId,
+        (run) => !isCurrentDelivery(run.runId, run.startedAt) && deliverableByRunId(run.runId)
+      ) !== null
+    )
   }
 
   /** Launches a run in the background. Throws synchronously on invalid state. */
   launch(request: WorkflowLaunchRequest): WorkflowLaunchResult {
+    if (this.shuttingDown) {
+      throw new Error("The application is quitting; a workflow can no longer be launched.")
+    }
     if (this.active.has(request.threadId)) {
       throw new Error(
         `A dynamic workflow (${this.active.get(request.threadId)!.runId}) is already running in this thread. Wait for its task-notification or cancel it from the workflow panel.`
@@ -555,6 +598,7 @@ class WorkflowRunManager {
               model: subRequest.model,
               agentIndex: subRequest.agentIndex,
               label: subRequest.label,
+              phase: subRequest.phase,
               runId: request.runId,
               signal: subRequest.signal,
               roleSystemPrompt: subRequest.roleSystemPrompt,
@@ -714,6 +758,31 @@ class WorkflowRunManager {
     ])
   }
 
+  /** Cancel every background workflow and give its terminal state a bounded
+   * opportunity to flush before the application exits. */
+  async cancelAllAndWait(timeoutMs = 5_000): Promise<void> {
+    this.shuttingDown = true
+    const entries = Array.from(this.active.values())
+    if (entries.length === 0) return
+
+    for (const entry of entries) {
+      entry.userCancelled = true
+      entry.controller.abort()
+    }
+
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.allSettled(entries.map((entry) => entry.settled)).then(() => undefined),
+        new Promise<void>((resolve) => {
+          timeoutTimer = setTimeout(resolve, Math.max(0, timeoutMs))
+        })
+      ])
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+    }
+  }
+
   /**
    * The newest terminal run whose completion has not yet been folded into a
    * model turn. Delegates to a lean disk scan (stat-then-parse-newest-few) so
@@ -821,15 +890,75 @@ class WorkflowRunManager {
    * hydrate / resume stop reading the stale copy. Marks the snapshot delivered first
    * so it can't be re-reported; keeps it (for a later retry) only if the write-back
    * still fails — otherwise drops it.
+   *
+   * `expectedStartedAt` is the startedAt of the run snapshot the ack's notification
+   * reported — the same fence as markNotified: an old notification's ack must not
+   * settle a NEWER instance's flush-failed snapshot (same runId via resume), or that
+   * instance's completion would be marked delivered without ever being reported. On
+   * mismatch we still retry plain persistence (disk may have recovered) but leave
+   * `notificationDelivered` untouched — the new instance's own ack owns that flag.
+   *
+   * @returns whether the ack path should KICK THE PENDING DRAIN — deliberately NOT
+   * "did the write-back land". The two diverge exactly when the disk is still faulty,
+   * and that is the case that matters: findPendingNotification reads flushFailedRuns
+   * BEFORE the disk, so a snapshot stranded in memory is still perfectly reportable.
+   * Gating the kick on disk success stalls it until the next hydrate/reload. A kick can
+   * never re-report the run we just acked: on a match the snapshot is marked delivered
+   * (memory scan skips it) and its disk copy is still the pre-terminal "running" record
+   * (disk scan skips it too); on a mismatch the snapshot IS a never-reported new
+   * instance, so serving it is the whole point. When no snapshot exists this run never
+   * flush-failed — say nothing and let markNotified's `delivered` govern the kick, which
+   * is what guards the ordinary double-report case.
    */
   async recoverFlushFailedRun(
+    workspacePath: string,
+    threadId: string,
+    runId: string,
+    expectedStartedAt?: string
+  ): Promise<boolean> {
+    const snapshot = this.flushFailedRuns.get(runId)
+    if (!snapshot) return false
+    if (expectedStartedAt !== undefined && snapshot.startedAt !== expectedStartedAt) {
+      // Stale ack: never claim the NEW instance's delivered flag — that belongs to its
+      // own ack. Best-effort write-back for disk consistency, then kick regardless: an
+      // unreported instance exists under this runId, and markNotified already returned
+      // false for it (a flush-failed run's disk copy is still "running", and that check
+      // precedes markNotified's own fence), so this is its ONLY kick signal.
+      await this.retryPersistFlushFailedRun(workspacePath, threadId, runId)
+      return true
+    }
+    snapshot.notificationDelivered = true
+    if (
+      await persistRecoveredRun(
+        workspacePath,
+        threadId,
+        snapshot,
+        this.flushFailedEpochs.get(runId)
+      )
+    ) {
+      this.dropFlushFailedRun(runId)
+    }
+    // Kick even when the write-back failed: this run is settled either way (delivered in
+    // memory, drop deferred to a later retry), and the BACKLOG behind it — other
+    // flush-failed snapshots, other terminal runs — must not wait for a hydrate.
+    return true
+  }
+
+  /**
+   * Retry write-back of a flush-failed snapshot from a READ path (get-run / hydrate):
+   * the disk may have recovered since the ack-time write-back failed, so this is a
+   * real retry entry point instead of leaving it stranded in memory until restart
+   * (#3). Does NOT touch notificationDelivered (the ack owns that) — just persists the
+   * current snapshot and drops it on success. Read-path callers fire-and-forget; the
+   * stale-ack path uses the boolean to decide whether the pending drain is worth a kick.
+   */
+  async retryPersistFlushFailedRun(
     workspacePath: string,
     threadId: string,
     runId: string
   ): Promise<boolean> {
     const snapshot = this.flushFailedRuns.get(runId)
     if (!snapshot) return false
-    snapshot.notificationDelivered = true
     if (
       await persistRecoveredRun(
         workspacePath,
@@ -844,36 +973,18 @@ class WorkflowRunManager {
     return false
   }
 
-  /**
-   * Retry write-back of a flush-failed snapshot from a READ path (get-run / hydrate):
-   * the disk may have recovered since the ack-time write-back failed, so this is a
-   * real retry entry point instead of leaving it stranded in memory until restart
-   * (#3). Does NOT touch notificationDelivered (the ack owns that) — just persists the
-   * current snapshot and drops it on success. Callers fire-and-forget.
-   */
-  async retryPersistFlushFailedRun(
+  /** Persists delivered=true. Called ONLY after the notification turn SUCCEEDS, so
+   * a crash mid-turn leaves it false on disk and the run is re-reported.
+   * `expectedStartedAt` must be the startedAt of the run snapshot the notification
+   * was built from: a resume reuses the runId, so without it a late ack can mark a
+   * NEWER instance delivered and swallow that instance's own notification. */
+  markNotified(
     workspacePath: string,
     threadId: string,
-    runId: string
-  ): Promise<void> {
-    const snapshot = this.flushFailedRuns.get(runId)
-    if (!snapshot) return
-    if (
-      await persistRecoveredRun(
-        workspacePath,
-        threadId,
-        snapshot,
-        this.flushFailedEpochs.get(runId)
-      )
-    ) {
-      this.dropFlushFailedRun(runId)
-    }
-  }
-
-  /** Persists delivered=true. Called ONLY after the notification turn SUCCEEDS, so
-   * a crash mid-turn leaves it false on disk and the run is re-reported. */
-  markNotified(workspacePath: string, threadId: string, runId: string): Promise<boolean> {
-    return markWorkflowRunNotified(workspacePath, threadId, runId)
+    runId: string,
+    expectedStartedAt?: string
+  ): Promise<boolean> {
+    return markWorkflowRunNotified(workspacePath, threadId, runId, expectedStartedAt)
   }
 
   /**

@@ -1,6 +1,15 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
+import { randomUUID } from "node:crypto"
+import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import {
+  isWindowCloseBehavior,
+  type CloseToTrayPromptAction,
+  type CloseToTrayPromptEvent,
+  type WindowCloseBehavior
+} from "../shared/close-to-tray"
 import type {
   Thread,
+  Message,
   ModelConfig,
   Provider,
   StreamEvent,
@@ -38,8 +47,19 @@ import type {
   ConfigurePreferredIdeResult,
   IdeSettings,
   OpenIdeRequest,
-  PreferredIde
+  PreferredIde,
+  ForkableCheckpoint,
+  ThreadForkCheckpointForMessageParams,
+  ThreadForkParams,
+  ThreadForkResponse,
+  SubagentTranscriptPage,
+  SubagentTranscriptBlobExportResult,
+  SubagentTranscriptBlobField
 } from "../main/types"
+import {
+  classifyAgentStreamDelivery,
+  resolveAgentStreamRequestChannel
+} from "../shared/agent-stream-channel"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -51,18 +71,32 @@ import type {
   SavedCodeExecToolUpdatePayload
 } from "../main/ipc/code-exec-tools"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
+  HarnessProjectConstraintSyncResult,
+  HarnessKnowledgePreviewResult,
+  HarnessProjectReviewInput,
+  HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessDeployUnitMapping,
+  HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
@@ -81,6 +115,7 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
   APP_ATTENTION_CHANNEL,
   getAgentStreamAttentionKind,
@@ -134,6 +169,13 @@ type PetState =
   | "interaction"
   | "hover"
 
+const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
+const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
+
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
 }
@@ -161,6 +203,35 @@ const electronAPI = {
   closeLoginWindow: () => ipcRenderer.invoke("close-login-window"),
   openLoginPage: () => ipcRenderer.invoke("open-login-page"),
   closeLoginPage: () => ipcRenderer.invoke("close-login-page"),
+  onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptEvent) => void) => {
+    const handler = (_event: unknown, payload: CloseToTrayPromptEvent): void => {
+      callback(payload)
+    }
+    ipcRenderer.on(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(CLOSE_TO_TRAY_PROMPT_CHANNEL, handler)
+  },
+  respondCloseToTrayPrompt: (
+    requestId: number,
+    action: CloseToTrayPromptAction,
+    rememberChoice = false
+  ): void => {
+    ipcRenderer.send(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, {
+      requestId,
+      action,
+      rememberChoice
+    })
+  },
+  getWindowCloseBehavior: (): Promise<WindowCloseBehavior> =>
+    ipcRenderer.invoke(WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL) as Promise<WindowCloseBehavior>,
+  setWindowCloseBehavior: (behavior: WindowCloseBehavior): Promise<WindowCloseBehavior> =>
+    ipcRenderer.invoke(WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL, behavior) as Promise<WindowCloseBehavior>,
+  onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => {
+    const handler = (_event: unknown, behavior: unknown): void => {
+      if (isWindowCloseBehavior(behavior)) callback(behavior)
+    }
+    ipcRenderer.on(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
+  },
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
       callback(data)
@@ -184,6 +255,44 @@ const electronAPI = {
   }
 }
 
+function listenForAgentStreamRequest(
+  ambientChannel: string,
+  requestChannel: string,
+  threadId: string,
+  onEvent: (event: StreamEvent) => void,
+  notifyUser: boolean
+): () => void {
+  let listening = true
+  const cleanup = (): void => {
+    if (!listening) return
+    listening = false
+    ipcRenderer.removeListener(requestChannel, requestHandler)
+    if (requestChannel !== ambientChannel) {
+      ipcRenderer.removeListener(ambientChannel, ambientHandler)
+    }
+  }
+  const deliver = (data: StreamEvent): void => {
+    onEvent(data)
+    if (notifyUser) notifyForAgentStreamEvent(data, threadId)
+  }
+  const requestHandler = (_: unknown, data: StreamEvent): void => {
+    const decision = classifyAgentStreamDelivery("request", data.type)
+    deliver(data)
+    if (decision === "deliver-and-close") cleanup()
+  }
+  const ambientHandler = (_: unknown, data: StreamEvent): void => {
+    // Thread-scoped broadcasts carry asynchronous worker, hook, and message-id
+    // events. A terminal event always belongs to a concrete request and must not
+    // detach another request that is queued behind the replacement lock.
+    if (classifyAgentStreamDelivery("ambient", data.type) === "ignore") return
+    deliver(data)
+  }
+
+  ipcRenderer.on(requestChannel, requestHandler)
+  if (requestChannel !== ambientChannel) ipcRenderer.on(ambientChannel, ambientHandler)
+  return cleanup
+}
+
 // Custom APIs for renderer
 const api = {
   agent: {
@@ -197,23 +306,21 @@ const api = {
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
-      const channel = coordinatorInternalNotification
+      const ambientChannel = coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
         : `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent(data)
-        if (!coordinatorInternalNotification) {
-          notifyForAgentStreamEvent(data, threadId)
-        }
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        onEvent,
+        !coordinatorInternalNotification
+      )
       ipcRenderer.send("agent:invoke", {
         threadId,
+        streamRequestId,
         message,
         modelId,
         agentMode,
@@ -221,9 +328,7 @@ const api = {
         userMessageId
       })
 
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      return cleanup
     },
     streamAgent: (
       threadId: string,
@@ -235,27 +340,33 @@ const api = {
       coordinatorInternalNotification?: boolean,
       userMessageId?: string
     ): (() => void) => {
-      const channel = coordinatorInternalNotification
+      const ambientChannel = command
+        ? `agent:stream:${threadId}`
+        : coordinatorInternalNotification
         ? `agent:stream:${threadId}:coordinator-internal`
         : `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent(data)
-        if (!coordinatorInternalNotification) {
-          notifyForAgentStreamEvent(data, threadId)
-        }
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        onEvent,
+        !coordinatorInternalNotification
+      )
 
       if (command) {
-        ipcRenderer.send("agent:resume", { threadId, command, modelId, agentMode })
+        ipcRenderer.send("agent:resume", {
+          threadId,
+          streamRequestId,
+          command,
+          modelId,
+          agentMode
+        })
       } else {
         ipcRenderer.send("agent:invoke", {
           threadId,
+          streamRequestId,
           message,
           modelId,
           agentMode,
@@ -264,32 +375,25 @@ const api = {
         })
       }
 
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      return cleanup
     },
     interrupt: (
       threadId: string,
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
     ): (() => void) => {
-      const channel = `agent:stream:${threadId}`
-
-      const handler = (_: unknown, data: StreamEvent): void => {
-        onEvent?.(data)
-        notifyForAgentStreamEvent(data, threadId)
-        if (data.type === "done" || data.type === "error") {
-          ipcRenderer.removeListener(channel, handler)
-        }
-      }
-
-      ipcRenderer.on(channel, handler)
-      ipcRenderer.send("agent:interrupt", { threadId, decision })
-
-      // Return cleanup function
-      return () => {
-        ipcRenderer.removeListener(channel, handler)
-      }
+      const ambientChannel = `agent:stream:${threadId}`
+      const streamRequestId = randomUUID()
+      const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
+      const cleanup = listenForAgentStreamRequest(
+        ambientChannel,
+        requestChannel,
+        threadId,
+        (data) => onEvent?.(data),
+        true
+      )
+      ipcRenderer.send("agent:interrupt", { threadId, streamRequestId, decision })
+      return cleanup
     },
     goalControl: (
       threadId: string,
@@ -337,6 +441,56 @@ const api = {
           cancelledAgentAttentionThreads.delete(threadId)
           throw error
         })
+    },
+    // Steer a queued draft into the running turn on this thread. Resolves with
+    // { queued:false, reason } when there is no active foreground run.
+    queueCurrentRunMessage: (
+      threadId: string,
+      message: { id: string; content: string; displayContent?: string }
+    ): Promise<{ queued: boolean; reason?: string; message?: string }> => {
+      return ipcRenderer.invoke("agent:queueCurrentRunMessage", { threadId, message }) as Promise<{
+        queued: boolean
+        reason?: string
+        message?: string
+      }>
+    },
+    // Un-steer a message that hasn't been injected yet.
+    deleteCurrentRunQueuedMessage: (threadId: string, messageId: string): Promise<void> => {
+      return ipcRenderer.invoke("agent:deleteCurrentRunQueuedMessage", { threadId, messageId })
+    },
+    reconcileCurrentRunQueuedMessages: (
+      threadId: string,
+      messageIds: string[]
+    ): Promise<{ pendingIds: string[]; injectedIds: string[]; durableIds: string[] }> => {
+      return ipcRenderer.invoke("agent:reconcileCurrentRunQueuedMessages", {
+        threadId,
+        messageIds
+      })
+    },
+    // Subscribe to injection notifications for a thread. The main process fires
+    // this when steered messages are drained into the model loop, so the renderer
+    // can drop them from its draft queue and render them as committed user turns.
+    onQueuedMessagesInjected: (
+      threadId: string,
+      callback: (payload: {
+        messages: Array<{ id: string; content: string }>
+        assistantIdAlias?: { sourceId: string; id: string }
+      }) => void
+    ): (() => void) => {
+      const channel = `agent:queueInjected:${threadId}`
+      const handler = (
+        _event: unknown,
+        payload: {
+          messages: Array<{ id: string; content: string }>
+          assistantIdAlias?: { sourceId: string; id: string }
+        }
+      ): void => {
+        callback(payload)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     },
     getCoordinatorWorkers: (
       threadId: string,
@@ -417,6 +571,17 @@ const api = {
     },
     isCoordinatorModeForced: (): Promise<boolean> => {
       return ipcRenderer.invoke("agent:coordinator-mode-forced") as Promise<boolean>
+    },
+    canPreviewSystemPrompt: (): Promise<boolean> => {
+      return ipcRenderer.invoke("agent:system-prompt-preview-access") as Promise<boolean>
+    },
+    getSystemPromptPreview: (
+      threadId: string
+    ): Promise<{ prompt: string | null; updatedAt: number | null }> => {
+      return ipcRenderer.invoke("agent:system-prompt-preview", { threadId }) as Promise<{
+        prompt: string | null
+        updatedAt: number | null
+      }>
     }
   },
   workflows: {
@@ -495,8 +660,22 @@ const api = {
     get: (threadId: string): Promise<Thread | null> => {
       return ipcRenderer.invoke("threads:get", threadId)
     },
+    getProjectSubagentsAvailable: (threadId: string): Promise<boolean> => {
+      return ipcRenderer.invoke("threads:getProjectSubagentsAvailable", threadId)
+    },
     create: (metadata?: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:create", metadata)
+    },
+    fork: (params: ThreadForkParams): Promise<ThreadForkResponse> => {
+      return ipcRenderer.invoke("threads:fork", params)
+    },
+    listForkableCheckpoints: (threadId: string): Promise<ForkableCheckpoint[]> => {
+      return ipcRenderer.invoke("threads:list-forkable-checkpoints", threadId)
+    },
+    resolveForkCheckpointForMessage: (
+      params: ThreadForkCheckpointForMessageParams
+    ): Promise<ForkableCheckpoint | null> => {
+      return ipcRenderer.invoke("threads:resolve-fork-checkpoint-for-message", params)
     },
     update: (threadId: string, updates: Partial<Thread>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:update", { threadId, updates })
@@ -504,8 +683,56 @@ const api = {
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:mergeThreadValues", { threadId, patch })
     },
+    getSubagentTranscripts: (threadId: string): Promise<Record<string, unknown>> => {
+      return ipcRenderer.invoke("threads:getSubagentTranscripts", threadId)
+    },
+    getSubagentTranscript: (
+      threadId: string,
+      subagentId: string,
+      before?: number
+    ): Promise<SubagentTranscriptPage> => {
+      return ipcRenderer.invoke("threads:getSubagentTranscript", { threadId, subagentId, before })
+    },
+    exportSubagentTranscriptBlob: (
+      threadId: string,
+      subagentId: string,
+      messageIndex: number,
+      expectedMessageId: string,
+      field: SubagentTranscriptBlobField
+    ): Promise<SubagentTranscriptBlobExportResult> => {
+      return ipcRenderer.invoke("threads:exportSubagentTranscriptBlob", {
+        threadId,
+        subagentId,
+        messageIndex,
+        expectedMessageId,
+        field
+      })
+    },
+    persistSubagentTranscripts: (
+      threadId: string,
+      transcripts: Record<string, unknown>
+    ): Promise<Record<string, unknown>> => {
+      return ipcRenderer.invoke("threads:persistSubagentTranscripts", {
+        threadId,
+        transcripts
+      })
+    },
     delete: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("threads:delete", threadId)
+    },
+    getMessages: (threadId: string): Promise<Message[]> => {
+      return ipcRenderer.invoke("threads:messages", threadId)
+    },
+    appendMessages: (threadId: string, messages: Message[]): Promise<{ count: number }> => {
+      return ipcRenderer.invoke("threads:appendMessages", { threadId, messages })
+    },
+    replaceMessageId: (
+      threadId: string,
+      fromId: string,
+      toId: string,
+      role?: Message["role"]
+    ): Promise<{ replaced: boolean }> => {
+      return ipcRenderer.invoke("threads:replaceMessageId", { threadId, fromId, toId, role })
     },
     exportSession: (
       threadId: string
@@ -692,6 +919,9 @@ const api = {
         topP: number
         topK: number
         interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       }>
     > => {
@@ -708,6 +938,9 @@ const api = {
           topP: number
           topK: number
           interleavedThinking?: boolean
+          enableThinking?: boolean
+          enableThinkingEffort?: boolean
+          thinkingEffort?: "high" | "max"
           tier?: "premium" | "economy"
         }>
       >
@@ -726,6 +959,9 @@ const api = {
       topP: number
       topK: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null> => {
       return ipcRenderer.invoke("models:getCustomConfig", id) as Promise<{
@@ -740,8 +976,62 @@ const api = {
         topP: number
         topK: number
         interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
         tier?: "premium" | "economy"
       } | null>
+    },
+    getBuiltinConfigs: (): Promise<
+      Array<{
+        id: string
+        ref: `builtin:${string}`
+        source: "builtin"
+        origin: "remote" | "fallback"
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+      }>
+    > => {
+      return ipcRenderer.invoke("models:getBuiltinConfigs")
+    },
+    updateBuiltinConfig: (
+      id: string,
+      config: {
+        name?: string
+        maxTokens?: number
+        maxOutputTokens?: number
+        temperature?: number
+        topP?: number
+        topK?: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+      }
+    ): Promise<void> => {
+      return ipcRenderer.invoke("models:updateBuiltinConfig", id, config)
+    },
+    resetBuiltinConfig: (id: string): Promise<void> => {
+      return ipcRenderer.invoke("models:resetBuiltinConfig", id)
+    },
+    onChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on("models:changed", handler)
+      return () => ipcRenderer.removeListener("models:changed", handler)
     },
     setCustomConfig: (config: {
       id: string
@@ -755,6 +1045,9 @@ const api = {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }): Promise<void> => {
       return ipcRenderer.invoke("models:setCustomConfig", config) as Promise<void>
@@ -771,6 +1064,9 @@ const api = {
       topP?: number
       topK?: number
       interleavedThinking?: boolean
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     }): Promise<{ id: string }> => {
       return ipcRenderer.invoke("models:upsertCustomConfig", config) as Promise<{ id: string }>
@@ -793,6 +1089,9 @@ const api = {
       temperature?: number
       topP?: number
       topK?: number
+      enableThinking?: boolean
+      enableThinkingEffort?: boolean
+      thinkingEffort?: "high" | "max"
     }): Promise<{ success: boolean; error?: string; latencyMs?: number }> => {
       return ipcRenderer.invoke("models:testConnection", params) as Promise<{
         success: boolean
@@ -889,7 +1188,7 @@ const api = {
       return ipcRenderer.invoke("workspace:readBinaryFile", { threadId, filePath })
     },
     readExternalFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -897,10 +1196,10 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalFile", { token })
     },
     readExternalBinaryFile: (
-      filePath: string
+      token: string
     ): Promise<{
       success: boolean
       content?: string
@@ -908,7 +1207,17 @@ const api = {
       modified_at?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:readExternalBinaryFile", filePath)
+      return ipcRenderer.invoke("workspace:readExternalBinaryFile", { token })
+    },
+    requestExternalFileRead: (
+      filePath: string
+    ): Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
+      error?: string
+    }> => {
+      return ipcRenderer.invoke("workspace:requestExternalFileRead", filePath)
     },
     clearWorktreeContext: (threadId: string): Promise<void> => {
       return ipcRenderer.invoke("workspace:clearWorktreeContext", threadId) as Promise<void>
@@ -1203,11 +1512,11 @@ const api = {
       >
     },
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:removeWorktree", {
-        gitRoot,
+        threadId,
         worktreePath
       }) as Promise<{ success: boolean; error?: string }>
     },
@@ -1312,9 +1621,9 @@ const api = {
     },
     // Listen for file changes in the workspace
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string }) => void
+      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
     ): (() => void) => {
-      const handler = (_: unknown, data: { threadId: string; workspacePath: string }): void => {
+      const handler = (_: unknown, data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }): void => {
         callback(data)
       }
       ipcRenderer.on("workspace:files-changed", handler)
@@ -1329,13 +1638,14 @@ const api = {
     list: (): Promise<PetManifest[]> => {
       return ipcRenderer.invoke("pet:list") as Promise<PetManifest[]>
     },
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ): Promise<{ success: boolean; dataUrl?: string; error?: string }> => {
-      return ipcRenderer.invoke("pet:getSpriteDataUrl", directoryId, source) as Promise<{
+    ): Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }> => {
+      return ipcRenderer.invoke("pet:getSpriteBytes", directoryId, source) as Promise<{
         success: boolean
-        dataUrl?: string
+        bytes?: Uint8Array
+        mimeType?: string
         error?: string
       }>
     },
@@ -1352,6 +1662,11 @@ const api = {
     },
     updateSettings: (settings: Partial<PetSettings>): Promise<PetSettings> => {
       return ipcRenderer.invoke("pet:updateSettings", settings) as Promise<PetSettings>
+    },
+    onSettingsChanged: (callback: (settings: PetSettings) => void): (() => void) => {
+      const handler = (_event: unknown, settings: PetSettings): void => callback(settings)
+      ipcRenderer.on(PET_SETTINGS_CHANGED_CHANNEL, handler)
+      return () => ipcRenderer.removeListener(PET_SETTINGS_CHANGED_CHANNEL, handler)
     },
     uploadCustomFolder: (): Promise<{ success: boolean; pet?: PetManifest; error?: string }> => {
       return ipcRenderer.invoke("pet:uploadCustomFolder") as Promise<{
@@ -1685,6 +2000,7 @@ const api = {
       claudeModelId?: string
       syncSkills?: boolean
       syncMemory?: boolean
+      launchSource?: "select_dir" | "restart"
     }): Promise<string> => ipcRenderer.invoke("terminal:create", opts),
     write: (id: string, data: string): void => ipcRenderer.send("terminal:write", { id, data }),
     resize: (id: string, cols: number, rows: number): void =>
@@ -1800,6 +2116,8 @@ const api = {
       }
     ): Promise<void> => ipcRenderer.invoke("memory:deleteFile", name, request),
     getEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getEnabled"),
+    getProjectModeEnabled: (): Promise<boolean> =>
+      ipcRenderer.invoke("memory:getProjectModeEnabled"),
     setEnabled: (enabled: boolean): Promise<void> =>
       ipcRenderer.invoke("memory:setEnabled", enabled),
     getDreamEnabled: (): Promise<boolean> => ipcRenderer.invoke("memory:getDreamEnabled"),
@@ -1885,6 +2203,12 @@ const api = {
         workspacePath,
         cardNumber
       }) as Promise<AgentAutoCommitWorkspaceCard>
+  },
+  expertAgents: {
+    list: (): Promise<ExpertAgentEntry[]> =>
+      ipcRenderer.invoke("expertAgents:list") as Promise<ExpertAgentEntry[]>,
+    setEnabled: (name: string, enabled: boolean): Promise<string[]> =>
+      ipcRenderer.invoke("expertAgents:setEnabled", { name, enabled }) as Promise<string[]>
   },
   taskCards: {
     list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>
@@ -2414,6 +2738,29 @@ const api = {
       Array<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         durationMs: number
         userMessage: string
@@ -2431,6 +2778,29 @@ const api = {
         Array<{
           traceId: string
           threadId: string
+          observabilitySchemaVersion?: number
+          traceKind?: string
+          executionMode?: string
+          rootTraceId?: string
+          rootThreadId?: string
+          parentTraceId?: string
+          parentThreadId?: string
+          parentSpanId?: string
+          linkType?: string
+          subagentKind?: string
+          subagentRunId?: string
+          subagentThreadId?: string
+          handoffAction?: string
+          handoffSourceAgent?: string
+          handoffTargetAgent?: string
+          coordinatorWorkerId?: string
+          coordinatorWorkerTurn?: number
+          coordinatorWorkerRole?: string
+          coordinatorWorkerWorkload?: string
+          workflowRunId?: string
+          workflowAgentIndex?: number
+          workflowPhase?: string
+          workflowAgentLabel?: string
           startedAt: string
           durationMs: number
           userMessage: string
@@ -2459,6 +2829,29 @@ const api = {
     ): Promise<{
       traceId: string
       threadId: string
+      observabilitySchemaVersion?: number
+      traceKind?: string
+      executionMode?: string
+      rootTraceId?: string
+      rootThreadId?: string
+      parentTraceId?: string
+      parentThreadId?: string
+      parentSpanId?: string
+      linkType?: string
+      subagentKind?: string
+      subagentRunId?: string
+      subagentThreadId?: string
+      handoffAction?: string
+      handoffSourceAgent?: string
+      handoffTargetAgent?: string
+      coordinatorWorkerId?: string
+      coordinatorWorkerTurn?: number
+      coordinatorWorkerRole?: string
+      coordinatorWorkerWorkload?: string
+      workflowRunId?: string
+      workflowAgentIndex?: number
+      workflowPhase?: string
+      workflowAgentLabel?: string
       startedAt: string
       endedAt: string
       durationMs: number
@@ -2526,6 +2919,29 @@ const api = {
       ipcRenderer.invoke("optimizer:traceDetail", { traceId }) as Promise<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         endedAt: string
         durationMs: number
@@ -3093,6 +3509,33 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
+    getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
+      ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
+        HarnessDeployUnitMapping[]
+      >,
+    getLeanTokenConfig: (): Promise<HarnessLeanTokenConfig> =>
+      ipcRenderer.invoke("harnessBoard:getLeanTokenConfig") as Promise<HarnessLeanTokenConfig>,
+    saveDeployUnitMappings: (
+      mappings: HarnessDeployUnitMapping[]
+    ): Promise<HarnessDeployUnitMapping[]> =>
+      ipcRenderer.invoke("harnessBoard:saveDeployUnitMappings", mappings) as Promise<
+        HarnessDeployUnitMapping[]
+      >,
+    saveLeanTokenConfig: (input: HarnessLeanTokenConfig): Promise<HarnessLeanTokenConfig> =>
+      ipcRenderer.invoke(
+        "harnessBoard:saveLeanTokenConfig",
+        input
+      ) as Promise<HarnessLeanTokenConfig>,
+    syncProjectConstraints: (adapterId: string): Promise<HarnessProjectConstraintSyncResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:syncProjectConstraints",
+        adapterId
+      ) as Promise<HarnessProjectConstraintSyncResult>,
+    getKnowledgePreview: (adapterId: string): Promise<HarnessKnowledgePreviewResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getKnowledgePreview",
+        adapterId
+      ) as Promise<HarnessKnowledgePreviewResult>,
     createProject: (input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> =>
       ipcRenderer.invoke("harnessBoard:createProject", input) as Promise<HarnessProjectMetadata>,
     searchEnterpriseProjects: (
@@ -3102,6 +3545,25 @@ const api = {
         "harnessBoard:searchEnterpriseProjects",
         input
       ) as Promise<HarnessEnterpriseProjectSearchResult>,
+    searchDeployUnits: (
+      input: HarnessDeployUnitSearchInput
+    ): Promise<HarnessDeployUnitSearchResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:searchDeployUnits",
+        input
+      ) as Promise<HarnessDeployUnitSearchResult>,
+    queryPipelines: (input: HarnessPipelineQueryInput): Promise<HarnessPipelineQueryResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:queryPipelines",
+        input
+      ) as Promise<HarnessPipelineQueryResult>,
+    queryPipelineLabels: (
+      input: HarnessPipelineLabelQueryInput
+    ): Promise<HarnessPipelineLabelQueryResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:queryPipelineLabels",
+        input
+      ) as Promise<HarnessPipelineLabelQueryResult>,
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ): Promise<HarnessEnterpriseProjectDetailResult> =>
@@ -3109,16 +3571,36 @@ const api = {
         "harnessBoard:getEnterpriseProjectDetails",
         input
       ) as Promise<HarnessEnterpriseProjectDetailResult>,
+    getProjectReviews: (input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:getProjectReviews",
+        input
+      ) as Promise<HarnessProjectReviewResult>,
     createFeature: (input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> =>
       ipcRenderer.invoke(
         "harnessBoard:createFeature",
         input
       ) as Promise<HarnessFeatureCreateResult>,
+    updateFeatureDeployUnits: (
+      input: HarnessFeatureDeployUnitUpdateInput
+    ): Promise<HarnessFeatureDeployUnitBinding> =>
+      ipcRenderer.invoke(
+        "harnessBoard:updateFeatureDeployUnits",
+        input
+      ) as Promise<HarnessFeatureDeployUnitBinding>,
     getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
       ipcRenderer.invoke(
         "harnessBoard:getDynamicWorkflowConfig",
         projectId
       ) as Promise<HarnessDynamicWorkflowConfig | null>,
+    getPublicAgentmdDeployUnits: (projectId: string): Promise<string[]> =>
+      ipcRenderer.invoke("harnessBoard:getPublicAgentmdDeployUnits", projectId) as Promise<
+        string[]
+      >,
+    getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]): Promise<string[]> =>
+      ipcRenderer.invoke("harnessBoard:getLocalAgentmdDeployUnitMappings", mappings) as Promise<
+        string[]
+      >,
     updateProject: (
       projectId: string,
       input: HarnessProjectMetadataUpdateInput
@@ -3407,10 +3889,11 @@ const api = {
   },
   update: {
     check: (): Promise<
-      | { hasUpdate: false }
+      | { hasUpdate: false; source?: UpdateSourceInfo | null }
       | {
           hasUpdate: true
           version: string
+          targetVersion: string
           updateType: string
           releaseNotes: string
           size: number
@@ -3425,6 +3908,7 @@ const api = {
             message: string
           } | null
           currentError?: string | null
+          source?: UpdateSourceInfo | null
         }
     > => ipcRenderer.invoke("update:check"),
     download: (): Promise<{ success: boolean }> => ipcRenderer.invoke("update:download"),
@@ -3435,6 +3919,7 @@ const api = {
       status: string
       update: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
@@ -3450,17 +3935,20 @@ const api = {
       } | null
       errorMessage: string | null
       canRollback: boolean
+      source: UpdateSourceInfo | null
     }> => ipcRenderer.invoke("update:get-status"),
     getStartupResult: (): Promise<{ updatedFrom?: string; updatedTo?: string }> =>
       ipcRenderer.invoke("update:get-startup-result"),
     onAvailable: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes: string
         size: number
         mandatory: boolean
         autoDownloading?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => {
       const wrapper = (_event: unknown, info: Parameters<typeof callback>[0]): void =>
@@ -3486,10 +3974,12 @@ const api = {
     onDownloaded: (
       callback: (info: {
         version: string
+        targetVersion: string
         updateType: string
         releaseNotes?: string
         size?: number
         mandatory?: boolean
+        source?: UpdateSourceInfo | null
       }) => void
     ) => {
       const wrapper = (_event: unknown, info: Parameters<typeof callback>[0]): void =>

@@ -98,6 +98,61 @@ function buildPluginConsoleInfo(
   }
 }
 
+type MarketExtraJson = {
+  skills?: string[]
+  grayUserIds?: string[]
+  [key: string]: unknown
+}
+
+function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
+  if (!extraJson?.trim()) return {}
+  try {
+    const parsed = JSON.parse(extraJson) as MarketExtraJson
+    return parsed && typeof parsed === "object" ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function sanitizeStringArray(values: string[]): string[] {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function parseSkillsFromMarketExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  if (!Array.isArray(parsed.skills)) return []
+  return sanitizeStringArray(
+    parsed.skills.filter((skill): skill is string => typeof skill === "string")
+  )
+}
+
+function buildPluginSkillsExtraJson(skills: string[], existingExtraJson?: string): string | undefined {
+  const normalizedSkills = sanitizeStringArray(skills)
+  const existing = parseMarketExtraJson(existingExtraJson)
+  const normalizedUserIds = Array.isArray(existing.grayUserIds)
+    ? sanitizeStringArray(
+        existing.grayUserIds.filter((userId): userId is string => typeof userId === "string")
+      )
+    : []
+  const payload: MarketExtraJson = { ...existing }
+
+  if (normalizedSkills.length > 0) {
+    payload.skills = normalizedSkills
+  }
+  if (normalizedUserIds.length > 0) {
+    payload.grayUserIds = normalizedUserIds
+  }
+
+  if (Object.keys(payload).length === 0) return undefined
+  return JSON.stringify(payload)
+}
+
 function readLocalUploadedPluginNamesFromStorage(): Set<string> {
   try {
     const raw = localStorage.getItem(LOCAL_UPLOADED_PLUGIN_NAMES_KEY)
@@ -660,17 +715,27 @@ export function PluginsPanel(): React.JSX.Element {
     (plugin: PluginMetadata) => {
       const key = plugin.name.trim().toLowerCase()
       const hasMarketRecord = Boolean(marketPluginMap[key])
+      const localSkills =
+        selectedPlugin?.id === plugin.id && detail ? detail.skills : []
+      const fallbackSkills = parseSkillsFromMarketExtraJson(marketPluginMap[key]?.extra_json)
+      const extraJson = buildPluginSkillsExtraJson(
+        localSkills.length > 0 ? localSkills : fallbackSkills,
+        marketPluginMap[key]?.extra_json
+      )
       setPublishMode(uploadedPluginNames.has(key) && hasMarketRecord ? "update" : "upload")
       setPublishTarget({
         type: "plugin",
         name: plugin.name,
         description: plugin.description,
+        version: plugin.version,
         category: marketPluginMap[key]?.category,
-        chineseName: marketPluginMap[key]?.chinese_name
+        chineseName: marketPluginMap[key]?.chinese_name,
+        guidance: marketPluginMap[key]?.guidance,
+        extraJson
       })
       setPublishDialogOpen(true)
     },
-    [marketPluginMap, uploadedPluginNames]
+    [detail, marketPluginMap, selectedPlugin, uploadedPluginNames]
   )
 
   const buildPluginMarketFile = useCallback(

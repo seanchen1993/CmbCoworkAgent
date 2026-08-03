@@ -309,6 +309,8 @@ export interface HookEnv {
   HARNESS_PROJECT_ID?: string // harness project stable id (= properties.harnessProjectId on events)
   HARNESS_ADAPTER_NAME?: string // bound adapter name (= properties.harnessAdapterName on events)
   HARNESS_ADAPTER_VERSION?: string // bound adapter version (= properties.harnessAdapterVersion on events)
+  HARNESS_NODE_NAME?: string // current project-mode workflow node/stage name
+  HARNESS_NODE_STATUS?: string // current project-mode workflow node/stage status label
   PROJECT_CODE?: string
   PROJECT_DIR?: string
   USER_PROMPT?: string // UserPromptSubmit event

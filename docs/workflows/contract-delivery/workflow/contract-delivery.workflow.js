@@ -1,11 +1,11 @@
 export const meta = {
-  name: "契约驱动端到端交付",
+  name: "端到端需求交付(验收标准驱动)",
   description:
     "把需求固化为逐条可核查的验收合同，多轮自主实现-验证-对抗复核，直到每条标准都有证据；交付逐条对照的证据矩阵。",
   whenToUse:
-    "端到端交付开发需求时使用，简单/中等/复杂需求同一入口：成契时自动评定复杂度档位，simple 档跳过规划代理与多视角探索（低开销直通），standard/complex 档走完整多轮收敛。需求先成契（每条验收标准带 ID 和核查方式），执行按轮次收敛（每轮只做未证实的标准）。运行中断后可用引擎的 resumeFromRunId 重放已完成的 agent 调用。可选 args：contract（预先协商好的合同对象）、complexity（simple|standard|complex 覆盖自动档位）、artifactDir、outputPath、maxRounds、maxFixRounds。",
+    "端到端交付开发需求时使用，简单/中等/复杂需求同一入口：确定验收标准时自动评定复杂度档位，simple 档跳过规划代理与多视角探索（低开销直通），standard/complex 档走完整多轮收敛。需求先确定验收标准（每条验收标准带 ID 和核查方式），执行按轮次收敛（每轮只做未证实的标准）。运行中断后可用引擎的 resumeFromRunId 重放已完成的 agent 调用。可选 args：contract（预先协商好的合同对象）、complexity（simple|standard|complex 覆盖自动档位）、artifactDir、outputPath、maxRounds、maxFixRounds。",
   phases: [
-    { title: "成契" },
+    { title: "确定验收标准" },
     { title: "项目探索" },
     { title: "交付循环" },
     { title: "终审" },
@@ -16,7 +16,14 @@ export const meta = {
 const WORKFLOW_VERSION = 1
 const DEFAULT_ARTIFACT_ROOT = ".cmbdevclaw/契约交付"
 const MAX_MANIFESTS = 16
-const MAX_SOURCE_FILES = 500
+// 探索输入的相关性优先设计:候选文件按"合同标识符命中"排序取头部,而不是按 glob 顺序硬
+// 截断——顺序截断在多语言 monorepo 上会被无关目录吃光配额(实测:前端几百个 .vue 挤掉
+// 全部后端 Java,manifest 预览选中 3 个前端 package.json 而漏掉要改的模块 pom)。
+// manifest 只内联根级头部作项目类型/构建体系锚点;其余一律给路径,Explore 代理自己读。
+const MAX_ROOT_MANIFEST_PREVIEW = 2
+const MANIFEST_INLINE_CHARS = 1200
+const MAX_MATCHED_FILES = 40
+const MAX_SAMPLED_FILES = 40
 const MAX_ROUNDS = 3
 const MAX_PACKAGES_PER_ROUND = 8
 const MAX_FIX_ROUNDS = 2
@@ -24,35 +31,43 @@ const MAX_CHANGED_FILES = 120
 
 // ---------- 结构化输出 schema ----------
 
+// schema 的 maxLength/maxItems 一律是"灾难兜底"(≈渲染层 clip 值的 2-3 倍),不是日常
+// 约束:引擎对 schema 违规是校验失败→重试→fresh session 重跑,弱模型又不可靠遵守紧
+// 上限,收紧只会放大结构化输出本就存在的截断/重试故障面。日常瘦身靠渲染层 clip/take。
 const CONTRACT_SCHEMA = {
   type: "object",
   properties: {
-    title: { type: "string", minLength: 1 },
-    problem: { type: "string", minLength: 1 },
-    goal: { type: "string", minLength: 1 },
+    title: { type: "string", minLength: 1, maxLength: 300 },
+    problem: { type: "string", minLength: 1, maxLength: 2000 },
+    goal: { type: "string", minLength: 1, maxLength: 2000 },
     complexity: { type: "string", enum: ["simple", "standard", "complex"] },
-    nonGoals: { type: "array", items: { type: "string" } },
-    constraints: { type: "array", items: { type: "string" } },
-    conventions: { type: "array", items: { type: "string" } },
+    nonGoals: { type: "array", maxItems: 24, items: { type: "string", maxLength: 600 } },
+    constraints: { type: "array", maxItems: 24, items: { type: "string", maxLength: 600 } },
+    conventions: { type: "array", maxItems: 24, items: { type: "string", maxLength: 600 } },
     criteria: {
       type: "array",
       minItems: 1,
+      maxItems: 40,
       items: {
         type: "object",
         properties: {
           id: { type: "string" },
-          text: { type: "string", minLength: 1 },
+          text: { type: "string", minLength: 1, maxLength: 1200 },
           verify: { type: "string", enum: ["command", "code", "test", "e2e"] },
-          hint: { type: "string" }
+          hint: { type: "string", maxLength: 500 }
         },
         required: ["id", "text", "verify", "hint"],
         additionalProperties: false
       }
     },
-    globalValidationCommands: { type: "array", items: { type: "string" } },
-    openQuestions: { type: "array", items: { type: "string" } },
+    globalValidationCommands: {
+      type: "array",
+      maxItems: 16,
+      items: { type: "string", maxLength: 300 }
+    },
+    openQuestions: { type: "array", maxItems: 16, items: { type: "string", maxLength: 400 } },
     canProceed: { type: "boolean" },
-    proceedReason: { type: "string" }
+    proceedReason: { type: "string", maxLength: 1000 }
   },
   required: [
     "title",
@@ -74,23 +89,24 @@ const CONTRACT_SCHEMA = {
 const EXPLORE_SCHEMA = {
   type: "object",
   properties: {
-    summary: { type: "string" },
+    summary: { type: "string", maxLength: 4000 },
     relevantFiles: {
       type: "array",
+      maxItems: 80,
       items: {
         type: "object",
         properties: {
-          path: { type: "string" },
-          reason: { type: "string" },
-          suggestedUse: { type: "string" }
+          path: { type: "string", maxLength: 500 },
+          reason: { type: "string", maxLength: 400 },
+          suggestedUse: { type: "string", maxLength: 300 }
         },
         required: ["path", "reason", "suggestedUse"],
         additionalProperties: false
       }
     },
-    testCommands: { type: "array", items: { type: "string" } },
-    buildCommands: { type: "array", items: { type: "string" } },
-    risks: { type: "array", items: { type: "string" } }
+    testCommands: { type: "array", maxItems: 16, items: { type: "string", maxLength: 300 } },
+    buildCommands: { type: "array", maxItems: 16, items: { type: "string", maxLength: 300 } },
+    risks: { type: "array", maxItems: 20, items: { type: "string", maxLength: 800 } }
   },
   required: ["summary", "relevantFiles", "testCommands", "buildCommands", "risks"],
   additionalProperties: false
@@ -99,20 +115,20 @@ const EXPLORE_SCHEMA = {
 const ROUND_PLAN_SCHEMA = {
   type: "object",
   properties: {
-    strategy: { type: "string" },
-    conventionsBrief: { type: "string", minLength: 1 },
+    strategy: { type: "string", maxLength: 2000 },
+    conventionsBrief: { type: "string", minLength: 1, maxLength: 5000 },
     packages: {
       type: "array",
       minItems: 1,
       items: {
         type: "object",
         properties: {
-          id: { type: "string", minLength: 1 },
-          title: { type: "string", minLength: 1 },
-          objective: { type: "string", minLength: 1 },
+          id: { type: "string", minLength: 1, maxLength: 100 },
+          title: { type: "string", minLength: 1, maxLength: 200 },
+          objective: { type: "string", minLength: 1, maxLength: 1500 },
           acIds: { type: "array", items: { type: "string" }, minItems: 1 },
-          targetFiles: { type: "array", items: { type: "string" } },
-          validationCommands: { type: "array", items: { type: "string" } },
+          targetFiles: { type: "array", items: { type: "string", maxLength: 500 } },
+          validationCommands: { type: "array", items: { type: "string", maxLength: 300 } },
           dependencies: { type: "array", items: { type: "string" } },
           riskLevel: { type: "string", enum: ["low", "medium", "high"] }
         },
@@ -140,11 +156,11 @@ const IMPLEMENTATION_SCHEMA = {
   type: "object",
   properties: {
     status: { type: "string", enum: ["changed", "no_change_needed", "blocked"] },
-    summary: { type: "string" },
-    changedFiles: { type: "array", items: { type: "string" } },
-    commandsRun: { type: "array", items: { type: "string" } },
-    blockers: { type: "array", items: { type: "string" } },
-    notes: { type: "array", items: { type: "string" } }
+    summary: { type: "string", maxLength: 3000 },
+    changedFiles: { type: "array", items: { type: "string", maxLength: 500 } },
+    commandsRun: { type: "array", maxItems: 40, items: { type: "string", maxLength: 300 } },
+    blockers: { type: "array", maxItems: 24, items: { type: "string", maxLength: 600 } },
+    notes: { type: "array", maxItems: 24, items: { type: "string", maxLength: 800 } }
   },
   required: ["status", "summary", "changedFiles", "commandsRun", "blockers", "notes"],
   additionalProperties: false
@@ -154,7 +170,7 @@ const PACKAGE_VERIFY_SCHEMA = {
   type: "object",
   properties: {
     status: { type: "string", enum: ["pass", "fail", "blocked"] },
-    summary: { type: "string" },
+    summary: { type: "string", maxLength: 2000 },
     perAc: {
       type: "array",
       items: {
@@ -162,7 +178,7 @@ const PACKAGE_VERIFY_SCHEMA = {
         properties: {
           id: { type: "string" },
           result: { type: "string", enum: ["pass", "fail", "unclear"] },
-          evidence: { type: "string" }
+          evidence: { type: "string", maxLength: 1500 }
         },
         required: ["id", "result", "evidence"],
         additionalProperties: false
@@ -173,16 +189,16 @@ const PACKAGE_VERIFY_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          command: { type: "string" },
+          command: { type: "string", maxLength: 300 },
           result: { type: "string", enum: ["pass", "fail", "not_run"] },
-          evidence: { type: "string" }
+          evidence: { type: "string", maxLength: 1500 }
         },
         required: ["command", "result", "evidence"],
         additionalProperties: false
       }
     },
-    issues: { type: "array", items: { type: "string" } },
-    recommendedFixes: { type: "array", items: { type: "string" } }
+    issues: { type: "array", maxItems: 16, items: { type: "string", maxLength: 600 } },
+    recommendedFixes: { type: "array", maxItems: 16, items: { type: "string", maxLength: 600 } }
   },
   required: ["status", "summary", "perAc", "commandChecks", "issues", "recommendedFixes"],
   additionalProperties: false
@@ -215,15 +231,16 @@ const AUDIT_SCHEMA = {
 const RUNNER_SCHEMA = {
   type: "object",
   properties: {
-    summary: { type: "string" },
+    summary: { type: "string", maxLength: 2000 },
     commands: {
       type: "array",
+      maxItems: 24,
       items: {
         type: "object",
         properties: {
-          command: { type: "string" },
+          command: { type: "string", maxLength: 300 },
           passed: { type: "boolean" },
-          evidence: { type: "string" }
+          evidence: { type: "string", maxLength: 2000 }
         },
         required: ["command", "passed", "evidence"],
         additionalProperties: false
@@ -289,6 +306,183 @@ function numberInRange(value, fallback, min, max) {
 function lines(items) {
   if (!items || items.length === 0) return "- 无"
   return items.map((item) => `- ${item}`).join("\n")
+}
+
+// ---- agent prompt 紧凑渲染 ----
+// 统一原则:喂给 agent 的不是 pretty-JSON 全对象(缩进/引号/字段名 + status/evidence/round
+// 等工作流内部记账字段都是纯噪音),而是"决策真正需要的信息"的紧凑文本;可无限增长的自由
+// 文本(实现小结/公约)按需截断,长列表(变更文件)加帽。目的:单个 agent 的输入不随项目
+// 规模膨胀吃满上下文窗口。效果不降——被截断的都是冗余/可从代码与产物文件复得的内容。
+function clip(text, max) {
+  const s = String(text == null ? "" : text)
+  if (s.length <= max) return s
+  return s.slice(0, max) + `…〔已截断 ${s.length - max} 字〕`
+}
+// 工作包验收标准:只保留 agent 需要的 id/核查方式/文本/实现提示/上一轮备注,
+// 丢弃 status/evidence/round 等内部记账字段。
+function renderWorkCriteria(criteria) {
+  return (
+    (criteria || [])
+      .map((c) => {
+        let line = `- ${c.id}（${c.verify}）：${clip(c.text, 500)}`
+        if (c.hint) line += `\n  · 提示：${clip(c.hint, 200)}`
+        if (c.note) line += `\n  · 上一轮：${clip(c.note, 400)}`
+        return line
+      })
+      .join("\n") || "- 无"
+  )
+}
+// 实现/修复结果:状态 + 截断的小结 + 加帽的变更文件/命令清单(schema 无正文/diff,
+// 但 changedFiles 无上限,复杂包可能上百条)。
+function renderImplResult(impl) {
+  const r = impl || {}
+  return [
+    `状态：${r.status}`,
+    `小结：${clip(r.summary, 1200)}`,
+    `变更文件：\n${lines(take(r.changedFiles || [], 50))}`,
+    `执行命令：\n${lines(take(r.commandsRun || [], 20))}`,
+    r.blockers && r.blockers.length
+      ? `阻塞：\n${lines(take(r.blockers, 12).map((b) => clip(b, 300)))}`
+      : "",
+    r.notes && r.notes.length ? `备注：\n${lines(take(r.notes, 12).map((n) => clip(n, 300)))}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n")
+}
+// 逐条裁决结论:id/结果/截断的证据。
+function renderPerAc(perAc) {
+  return (
+    (perAc || []).map((p) => `- ${p.id}：${p.result} — ${clip(p.evidence, 500)}`).join("\n") ||
+    "- 无"
+  )
+}
+// 工作包紧凑渲染:去掉 pretty-JSON 开销与 dependencies(编排层字段,分发前已按拓扑序
+// 解析,执行代理用不上)。targetFiles 默认只给实现代理——验证/修复/复验的定位依据是
+// 实现结果里的 changedFiles,monorepo 长路径清单对它们是纯噪音;但当 changedFiles 为空
+// (no_change_needed / 漏填)时,规划的 targetFiles 是它们仅剩的定位线索,调用方按此条件
+// 回带 withTargets。首行"覆盖标准：AC-N、AC-M"是稳定的机器可读锚点(dryrun mock 按它
+// 解析认领标准),改措辞必须同步改测试。
+function renderPackage(pkg, opts) {
+  const parts = [
+    `覆盖标准：${(pkg.acIds || []).join("、")}`,
+    `编号：${pkg.id}｜标题：${pkg.title}｜风险级：${pkg.riskLevel}`,
+    `目标：${clip(pkg.objective, 600)}`,
+    `验证命令（声明即门禁，须逐条执行）：\n${lines(pkg.validationCommands)}`
+  ]
+  if (opts && opts.withTargets && pkg.targetFiles && pkg.targetFiles.length) {
+    parts.push(`目标文件（定位提示，可自行修正）：\n${lines(pkg.targetFiles)}`)
+  }
+  return parts.join("\n")
+}
+
+// ---- 合同关键词驱动的相关性选择 ----
+// 从合同文本里抽出"代码标识符样式"的词(类名/接口路径段/字段名,如 WE_OutService、
+// creatorBranchId、xsmf),用它们给候选文件/manifest 打分排序:命中越多越靠前。纯中文
+// 合同抽不出标识符时命中为空,自然回退到各模式轮流抽样——行为不劣化,只会更公平。
+const COMMON_TOKEN_STOPWORDS = Object.assign(Object.create(null), {
+  http: 1,
+  https: 1,
+  post: 1,
+  get: 1,
+  put: 1,
+  delete: 1,
+  json: 1,
+  xml: 1,
+  html: 1,
+  null: 1,
+  true: 1,
+  false: 1,
+  list: 1,
+  status: 1,
+  update: 1,
+  create: 1,
+  query: 1,
+  header: 1,
+  token: 1,
+  string: 1,
+  number: 1,
+  count: 1,
+  time: 1,
+  date: 1,
+  page: 1,
+  size: 1,
+  code: 1,
+  data: 1,
+  info: 1,
+  type: 1,
+  name: 1,
+  test: 1,
+  tests: 1,
+  main: 1,
+  java: 1,
+  node: 1,
+  src: 1,
+  com: 1,
+  org: 1,
+  www: 1,
+  item: 1,
+  file: 1,
+  path: 1,
+  begin: 1,
+  end: 1,
+  with: 1,
+  from: 1,
+  that: 1,
+  this: 1,
+  must: 1,
+  when: 1,
+  then: 1
+})
+function contractIdentifierTokens(contract, criteria) {
+  const text = [
+    contract.title,
+    contract.goal,
+    ...(contract.constraints || []),
+    ...(contract.conventions || []),
+    ...(criteria || []).map((c) => `${c.text} ${c.hint || ""}`)
+  ].join(" ")
+  const seen = Object.create(null)
+  const out = []
+  for (const raw of text.match(/[A-Za-z][A-Za-z0-9_]{3,}/g) || []) {
+    const token = raw.toLowerCase()
+    if (COMMON_TOKEN_STOPWORDS[token] || seen[token]) continue
+    seen[token] = true
+    out.push(token)
+  }
+  return out.slice(0, 40)
+}
+function rankPathsByTokens(paths, tokens, limit) {
+  if (!tokens.length) return []
+  const scored = []
+  for (const p of paths) {
+    const lower = p.toLowerCase()
+    let score = 0
+    for (const t of tokens) if (lower.includes(t)) score += 1
+    if (score > 0) scored.push({ p, score })
+  }
+  // 同分按路径字典序,保证同一输入的排序稳定(缓存身份可复现)。
+  scored.sort((a, b) => b.score - a.score || (a.p < b.p ? -1 : a.p > b.p ? 1 : 0))
+  return scored.slice(0, limit).map((s) => s.p)
+}
+// 各 glob 模式轮流抽样:多语言仓里每种模式都有代表,单一模式(如前端 .vue)吃不光配额。
+function interleaveUnique(lists, limit, exclude) {
+  const seen = Object.create(null)
+  for (const p of exclude || []) seen[p] = true
+  const out = []
+  for (let i = 0; out.length < limit; i++) {
+    let any = false
+    for (const list of lists) {
+      if (i >= list.length) continue
+      any = true
+      const p = list[i]
+      if (seen[p]) continue
+      seen[p] = true
+      out.push(p)
+      if (out.length >= limit) break
+    }
+    if (!any) break
+  }
+  return out
 }
 
 function uniq(items) {
@@ -449,7 +643,9 @@ function normalizePackages(rawPackages, criteria) {
         droppedAcRefs.push(`${id} -> ${ref}`)
       }
     }
-    packages.push({ ...raw, id, acIds })
+    // targetFiles 是给实现代理的定位提示(信息性,可自行补充),加帽防规划代理倾倒长清单;
+    // validationCommands 是被逐条交叉核对的门禁,绝不截——截掉等于放松验收。
+    packages.push({ ...raw, id, acIds, targetFiles: take(raw.targetFiles || [], 40) })
   }
   const remapped = packages.map((pkg) => {
     const dependencies = []
@@ -512,6 +708,24 @@ function fallbackVerification(summary, acIds) {
     issues: [summary],
     recommendedFixes: []
   }
+}
+
+// 验证类代理故障恢复:agent() 返回 null(引擎级重试已耗尽的结构化输出彻底失败)时先
+// 原样重验一次;仍失败才落 fallback,并打 agentFailure 标记——带此标记的结果不允许
+// 触发修复轮:拿"代理没返回结果"当假失败证据去修不存在的缺陷,最坏烧两轮修复+复验、
+// 还可能改坏本来正确的代码。对应标准保持 unproven 并在账本留痕(与对抗复核 null 的
+// auditGaps 有声降级同构对齐)。
+async function verifyPackage(promptText, opts, pkg, failureReason) {
+  let raw = await agent(promptText, opts)
+  if (!raw) {
+    log(`${opts.label}：验证代理未返回结构化结果，重验一次。`)
+    raw = await agent(promptText, { ...opts, label: `${opts.label}(重验)` })
+  }
+  if (!raw) {
+    log(`${opts.label}：重验仍未返回结构化结果，本包标准保持未证实（不进入修复轮）。`)
+    return Object.assign(fallbackVerification(failureReason, pkg.acIds), { agentFailure: true })
+  }
+  return enforcePerAcCompleteness(raw, pkg)
 }
 
 // 验证结论的完整性由代码强制：包内每条 AC 必须有裁决；漏核 = fail，pass 无证据 = fail。
@@ -788,7 +1002,7 @@ ${lines(verification.issues)}
 function renderDeliveryReport(context, verdict, runnerResult, verdictReason) {
   const criteria = context.criteria
   const proven = criteria.filter((c) => c.status === "proven")
-  return `# 契约交付报告
+  return `# 需求交付报告
 
 ## 总体结论
 
@@ -888,7 +1102,7 @@ const hasExplicitContract =
   Array.isArray(options.contract.criteria)
 if (options.contract && !hasExplicitContract) {
   // contract 是公开参数:传了但形状不合法(criteria 缺失/拼错/非数组)时,
-  // 静默当没传会让本次退化成 agent 自动成契、悄悄改变行为——必须显式报错。
+  // 静默当没传会让本次退化成 agent 自动确定验收标准、悄悄改变行为——必须显式报错。
   throw new Error("options.contract 形状不合法:必须是携带 criteria 数组的对象(请检查字段拼写)。")
 }
 
@@ -916,10 +1130,53 @@ const context = {
   auditGaps: []
 }
 
-// ---- 成契 ----
-phase("成契")
+// 候选文件的 glob 模式(现状勘察与项目探索共用)。同时扫根目录与一级子目录:
+// 前后端同仓(frontend/ + backend/)时两侧清单都要被发现。
+const manifestPatterns = [
+  "AGENTS.md",
+  "README.md",
+  "package.json",
+  "*/package.json",
+  "pom.xml",
+  "*/pom.xml",
+  "build.gradle",
+  "*/build.gradle",
+  "build.gradle.kts",
+  "go.mod",
+  "*/go.mod",
+  "Cargo.toml",
+  "pyproject.toml",
+  "*/pyproject.toml",
+  "requirements.txt",
+  "*/requirements.txt",
+  "Makefile"
+]
+const sourcePatterns = [
+  "src/**/*.ts",
+  "src/**/*.tsx",
+  "src/**/*.js",
+  "src/**/*.jsx",
+  "src/**/*.java",
+  "src/**/*.go",
+  "src/**/*.py",
+  "src/**/*.rs",
+  "src/**/*.vue",
+  "app/**/*.ts",
+  "app/**/*.tsx",
+  "*/src/**/*.ts",
+  "*/src/**/*.tsx",
+  "*/src/**/*.vue",
+  "*/src/**/*.java",
+  "*/src/**/*.py",
+  "test/**/*",
+  "tests/**/*",
+  "__tests__/**/*"
+]
+
+// ---- 确定验收标准 ----
+phase("确定验收标准")
 if (hasExplicitContract) {
-  // 支持在聊天里人机协商好合同后直接注入（成契前置到对话，是人工投入价值最高的一段）。
+  // 支持在聊天里人机协商好合同后直接注入（确定验收标准前置到对话，是人工投入价值最高的一段）。
   const provided = options.contract
   context.criteria = explicitCriteria
   context.contract = {
@@ -939,6 +1196,91 @@ if (hasExplicitContract) {
   }
   log(`使用外部注入合同：${context.criteria.length} 条验收标准。`)
 } else {
+  // 现状勘察:合同定稿前先让一个探索代理找出"需求没点名、但会与之交互的既有代码"
+  // (已有同类能力/会受影响的特性/与需求冲突的现状)。"定稿前核实引用事实"的指令只能
+  // 防引用失实,防不了未被引用的交互代码被无视——真实 run 已击穿过一次(登录锁定
+  // 合同无视了既有的账户禁用与登录审计打点)。候选文件用需求文本抽 token 排序,
+  // 勘察不盲扫;代理故障时降级继续(合同代理仍有自行核实的指令兜底)。
+  let recon = null
+  {
+    const manifestLists = await parallel(manifestPatterns.map((p) => () => safeGlob(p)))
+    const sourceLists = await parallel(sourcePatterns.map((p) => () => safeGlob(p)))
+    throwIfGlobOverflow()
+    const reconTokens = contractIdentifierTokens(
+      { title: "", goal: requirement, constraints: [], conventions: [] },
+      []
+    )
+    const reconManifests = take(uniq(manifestLists.flat()), MAX_MANIFESTS)
+    const reconMatched = rankPathsByTokens(uniq(sourceLists.flat()), reconTokens, 30)
+    const reconSampled = interleaveUnique(sourceLists, 30, reconMatched)
+    // 多模块仓(manifest 多=monorepo 信号)单个勘察代理覆盖不过来,拆三视角并行;
+    // 小仓一个足够(dryrun 的 glob mock 返回空,恒走单视角,label 保持精确不变)。
+    const reconViews =
+      reconManifests.length > 4
+        ? [
+            { suffix: "·同类能力", ask: "已存在的同类/相邻能力与可复用实现" },
+            {
+              suffix: "·入口链路",
+              ask: "需求会触碰的入口（端点/控制器/服务方法）及其调用链上的既有行为（校验/审计/状态分支/互斥逻辑）"
+            },
+            { suffix: "·冲突约束", ask: "与需求冲突或使其假设不成立的现状、实现必须遵守的既有约束" }
+          ]
+        : [{ suffix: "", ask: "同类/相邻能力、入口调用链上的既有行为、以及与需求冲突的现状" }]
+    const reconParts = (
+      await parallel(
+        reconViews.map(
+          (view) => () =>
+            agent(
+              `请只读勘察项目现状，不要修改文件。一份开发需求即将被固化为验收合同，你的任务是找出"需求没有点名、但实现时必然与之交互的既有代码与行为"，防止合同带盲区出厂。
+本视角侧重：${view.ask}。
+
+开发需求：
+${requirement}
+
+项目 manifest 路径清单：
+${lines(reconManifests) || "- 未找到"}
+
+与需求关键词匹配的候选文件（按命中度排序，仅是起点）：
+${lines(reconMatched) || "- 无命中"}
+
+其他源码抽样（各类型轮流抽取，仅示意项目结构，绝非全量）：
+${lines(reconSampled)}
+
+勘察方法（关键）：交互代码往往与需求没有任何共同关键词（如"修改密码"需求与登录锁定存储零关键词交集），靠上面的清单找不到它们。正确做法：先用 grep 定位需求会触碰的入口（端点/控制器/服务方法），通读入口及其调用链——既有的校验、审计、状态分支、互斥逻辑全挂在同一条流上，逐个记下来；清单里没有 ≠ 代码里没有。
+
+重点回答三件事，写进返回结果：
+1. 已存在的同类/相邻能力（relevantFiles 给路径，reason 说明它与需求的关系，suggestedUse 标注"交互：<会怎样相互影响>"或"可复用：<符号名>"）；
+2. 需求实现会触碰的既有行为（同一方法/接口上已有的校验、审计、状态分支——它们与新功能的先后/互斥关系是合同必须定义的）；
+3. 与需求冲突或使需求假设不成立的现状（写进 risks）。`,
+              {
+                label: `探索：需求现状勘察${view.suffix}`,
+                phase: "确定验收标准",
+                agentType: "Explore",
+                schema: EXPLORE_SCHEMA
+              }
+            )
+        )
+      )
+    ).filter(Boolean)
+    if (reconParts.length > 0) {
+      const seenReconFiles = Object.create(null)
+      const reconFiles = []
+      for (const part of reconParts) {
+        for (const file of part.relevantFiles || []) {
+          if (!file || !file.path || seenReconFiles[file.path]) continue
+          seenReconFiles[file.path] = true
+          reconFiles.push(file)
+        }
+      }
+      recon = {
+        summary: reconParts.map((p) => p.summary).filter(Boolean).join("\n"),
+        relevantFiles: take(reconFiles, 40),
+        risks: take(uniq(reconParts.flatMap((p) => p.risks || [])), 12)
+      }
+    } else {
+      log("需求现状勘察未返回结构化结果，合同代理将自行核实现状（降级继续）。")
+    }
+  }
   const contract = await agent(
     `请把下面的开发需求固化为一份"交付合同"。合同的核心是验收标准清单（criteria）：
 - 把需求里每个可独立核查的承诺拆成一条标准，粒度以"对应一段独立实现或一条独立证据"为准：
@@ -949,19 +1291,36 @@ if (hasExplicitContract) {
 - 每条标准给出核查方式 verify：command（跑命令看结果）、code（读代码给文件:行号证据）、test（对应测试必须存在且通过）、e2e（启动应用用浏览器自动化实测——前端页面、交互、视觉类标准必须用 e2e，不允许用 code 代替）。
 - 评定复杂度 complexity：simple（1-3 条标准、单模块小改动）、standard（跨少数模块）、complex（跨多模块、需要多轮实现验证）。
 - conventions 写跨任务公约：统一入口、命名、错误码风格等，防止多个实现代理各写各的。
+- globalValidationCommands 必须是可在 shell 里原样执行的完整命令：含通配符等特殊字符时必须加引号（如 -Dtest='*Test' 而不是 -Dtest=*Test，后者会被 shell 展开导致命令失真、验证空跑）。
+- 定稿前必须用 read/glob/grep 核实需求引用的代码事实（接口/类/字段/模块/测试是否真实存在、现有行为是否与需求冲突）；与代码不符的引用不得照抄进标准——列入 openQuestions 并将 canProceed 设为 false。
+- 下方"代码现状简报"列出的既有交互行为不得无视：新功能与它们的先后/互斥/叠加关系，要么固化为标准或约束，要么按下一条的门槛列入 openQuestions——沉默跳过等于合同带盲区出厂。
+- openQuestions 门槛（阻塞是最后手段）：只留给"没有合理默认、且不同选择会实质改变交付范围或安全边界"的决策。凡你已能给出合理默认的（按需求原文执行、保持现状、不扩大范围），直接采用默认继续成契——把所采默认写进对应标准或非目标/约束（用户会在合同文档里复核，不同意可推翻重跑），并在 proceedReason 里逐条汇总"已采默认"。严禁用"请确认是否优化/是否对齐"这类自带答案的问题阻塞交付。
 - 如果缺少关键业务规则或安全边界，将 canProceed 设为 false 并列出 openQuestions，不要编造。
-
+${
+  recon
+    ? `
+代码现状简报（勘察代理产出；引用的事实仍须自行核实）：
+概况：${clip(recon.summary, 1200)}
+相关现状（路径 — 与需求的关系）：
+${take(recon.relevantFiles || [], 30)
+  .map((f) => `- ${f.path}：${clip(f.reason, 160)}${f.suggestedUse ? `（${clip(f.suggestedUse, 120)}）` : ""}`)
+  .join("\n") || "- 无"}
+潜在冲突/风险：
+${lines(take(recon.risks || [], 10).map((r) => clip(r, 300)))}
+`
+    : ""
+}
 需求内容：
 ${requirement}`,
     {
-      label: "需求成契",
-      phase: "成契",
+      label: "确定验收标准",
+      phase: "确定验收标准",
       agentType: "Plan",
       schema: CONTRACT_SCHEMA
     }
   )
   if (!contract || !contract.canProceed) {
-    const report = `# 契约交付已阻塞
+    const report = `# 需求交付已阻塞
 
 ## 原始需求
 
@@ -969,24 +1328,24 @@ ${requirement}
 
 ## 阻塞原因
 
-${contract ? contract.proceedReason : "成契代理没有返回结构化结果。"}
+${contract ? contract.proceedReason : "确定验收标准代理没有返回结构化结果。"}
 
 ## 待确认项
 
-${contract ? lines(contract.openQuestions) : "- 成契失败"}
+${contract ? lines(contract.openQuestions) : "- 确定验收标准失败"}
 `
     await writeFile(outputPath, report)
     context.contract = contract
     await writeState(
       context,
       "contract_blocked",
-      contract ? contract.proceedReason : "成契失败",
-      contract ? contract.openQuestions : ["成契失败"]
+      contract ? contract.proceedReason : "确定验收标准失败",
+      contract ? contract.openQuestions : ["确定验收标准失败"]
     )
     return {
       状态: "已阻塞",
       报告路径: outputPath,
-      待确认项: contract ? contract.openQuestions : ["成契失败"]
+      待确认项: contract ? contract.openQuestions : ["确定验收标准失败"]
     }
   }
   context.contract = contract
@@ -994,7 +1353,9 @@ ${contract ? lines(contract.openQuestions) : "- 成契失败"}
   if (context.criteria.length === 0) {
     // schema 的 minLength:1 拦不住纯空白文本;normalize 剔除后为 0 条时必须硬性
     // 失败,否则 every() 空真会直接"可交付 0/0"。与外部合同路径的防线对齐。
-    throw new Error("成契产出的合同没有任何有效验收标准（全部为空白文本），请重试或补充需求。")
+    throw new Error(
+      "确定验收标准产出的合同没有任何有效验收标准（全部为空白文本），请重试或补充需求。"
+    )
   }
   log(`合同成立：${context.criteria.length} 条验收标准。`)
 }
@@ -1030,56 +1391,31 @@ await writeState(context, "contract_done", "合同已成立。", [])
 // 子代理自己会按需调用相关 SKILL.md，脚本重复注入只会浪费上下文。
 phase("项目探索")
 {
-  // 同时扫根目录与一级子目录：前后端同仓（frontend/ + backend/）时两侧清单都要被发现。
-  const manifestPatterns = [
-    "AGENTS.md",
-    "README.md",
-    "package.json",
-    "*/package.json",
-    "pom.xml",
-    "*/pom.xml",
-    "build.gradle",
-    "*/build.gradle",
-    "build.gradle.kts",
-    "go.mod",
-    "*/go.mod",
-    "Cargo.toml",
-    "pyproject.toml",
-    "*/pyproject.toml",
-    "requirements.txt",
-    "*/requirements.txt",
-    "Makefile"
-  ]
-  const sourcePatterns = [
-    "src/**/*.ts",
-    "src/**/*.tsx",
-    "src/**/*.js",
-    "src/**/*.jsx",
-    "src/**/*.java",
-    "src/**/*.go",
-    "src/**/*.py",
-    "src/**/*.rs",
-    "src/**/*.vue",
-    "app/**/*.ts",
-    "app/**/*.tsx",
-    "*/src/**/*.ts",
-    "*/src/**/*.tsx",
-    "*/src/**/*.vue",
-    "*/src/**/*.java",
-    "*/src/**/*.py",
-    "test/**/*",
-    "tests/**/*",
-    "__tests__/**/*"
-  ]
-  const manifests = uniq((await parallel(manifestPatterns.map((p) => () => safeGlob(p)))).flat())
-  const sourceFiles = uniq((await parallel(sourcePatterns.map((p) => () => safeGlob(p)))).flat())
+  const manifestLists = await parallel(manifestPatterns.map((p) => () => safeGlob(p)))
+  const sourceLists = await parallel(sourcePatterns.map((p) => () => safeGlob(p)))
   throwIfGlobOverflow()
+  const manifests = uniq(manifestLists.flat())
+  const sourceFiles = uniq(sourceLists.flat())
+  const contractTokens = contractIdentifierTokens(context.contract, context.criteria)
+  // manifest 清单:根级在前(项目类型/构建体系),其余按合同命中排序,无命中的按原序补足。
+  // 这样"要改的模块的 pom/package.json"必然进清单头部,不会被无关模块挤出。
+  const rootManifests = manifests.filter((f) => !f.includes("/"))
+  const manifestList = uniq([
+    ...rootManifests,
+    ...rankPathsByTokens(manifests, contractTokens, MAX_MANIFESTS),
+    ...manifests
+  ]).slice(0, MAX_MANIFESTS)
+  // 只内联根级 manifest 头部(识别项目类型/构建体系);模块级一律给路径让 Explore 自读全文。
   const manifestSnippets = []
-  for (const file of take(manifests, MAX_MANIFESTS)) {
+  for (const file of rootManifests.slice(0, MAX_ROOT_MANIFEST_PREVIEW)) {
     const content = await safeRead(file)
-    if (content) manifestSnippets.push(`--- ${file} ---\n${content.slice(0, 6000)}`)
+    if (content)
+      manifestSnippets.push(`--- ${file} ---\n${content.slice(0, MANIFEST_INLINE_CHARS)}`)
   }
-  const inventory = take(sourceFiles, MAX_SOURCE_FILES)
+  // 候选文件两段式:合同命中的排最前(信号),再各模式轮流抽样补结构感(公平)。总量硬帽,
+  // 项目再大也不膨胀;真正的全量定位靠 Explore 自己 grep/glob。
+  const matchedFiles = rankPathsByTokens(sourceFiles, contractTokens, MAX_MATCHED_FILES)
+  const sampledFiles = interleaveUnique(sourceLists, MAX_SAMPLED_FILES, matchedFiles)
   // 档位分级探索:每加一个探索 agent 都要有"单 agent 覆盖不了"的理由(harness 原则:
   // 基线够就别加 agent)。simple/standard 一个 agent 一遍即可覆盖"相关文件+命令+风险";
   // 只有 complex(跨多模块)才值得拆成架构/验证/风险三视角各自深挖。
@@ -1098,7 +1434,10 @@ phase("项目探索")
               label: "架构",
               prompt: "识别项目类型、关键模块、合同标准最可能触及的文件，以及实现入口。"
             },
-            { label: "验证", prompt: "识别可用构建/测试/lint 命令、测试目录、现有验证习惯和风险。" },
+            {
+              label: "验证",
+              prompt: "识别可用构建/测试/lint 命令、测试目录、现有验证习惯和风险。"
+            },
             { label: "风险", prompt: "识别兼容性、安全、数据、配置、发布和回滚风险。" }
           ]
         : [
@@ -1118,16 +1457,27 @@ phase("项目探索")
 探索视角：${item.label}
 ${item.prompt}
 
-交付合同：
-${stringify(context.contract)}
+交付合同（摘要，供定位相关文件/命令/风险；每条标准的核查方式与提示、非目标/约定等留给后续实现与验证阶段，此处不展开）：
+标题：${context.contract.title}
+目标：${context.contract.goal}
+约束：${lines(context.contract.constraints)}
+验收标准：
+${context.criteria.map((c) => `- ${c.id}：${clip(c.text, 500)}`).join("\n")}
 
-配置/说明文件片段：
+项目 manifest（配置/构建文件）路径清单（根级与合同相关的在前；需要任何模块的完整依赖/配置，直接读文件）：
+${lines(manifestList) || "- 未找到"}
+
+根级 manifest 头部预览（仅头部，供识别项目类型与构建体系）：
 ${manifestSnippets.join("\n\n") || "未找到"}
 
-候选源码/测试文件列表（已截断）：
-${lines(inventory)}
+与合同关键词匹配的候选文件（按命中度排序，这是定位起点，不是全集）：
+${lines(matchedFiles) || "- 无命中（合同未含代码标识符，请直接用 grep/glob 检索）"}
 
-请返回相关文件、命令和风险。`,
+其他源码/测试文件抽样（各类型轮流抽取，仅示意项目结构，绝非全量）：
+${lines(sampledFiles)}
+
+请返回相关文件、命令和风险。定位"合同标准最可能触及的文件"时，必须用 grep 按验收标准里的关键词（接口名/类名/字段名等）实际检索核实——上面清单只是起点，grep 命中的才是可靠依据；若合同提到的模块在清单/根 manifest 的 modules 里不存在，这本身就是要上报的风险。
+主动识别可直接复用的现有函数/工具/模式（项目里已有合适实现，后续就不该新写），在对应 relevantFiles 的 suggestedUse 里标注"可复用：<类名/方法名>"。`,
             {
               label: "探索：" + item.label,
               phase: "项目探索",
@@ -1155,12 +1505,14 @@ ${lines(inventory)}
     for (const c of part.buildCommands || []) buildCommands.push(c)
     for (const r of part.risks || []) risks.push(r)
   }
+  // 合并即封顶:探索是三个 agent 的并集,数量无 schema 上限,这里统一加帽,下游所有
+  // prompt(规划/实现/修复)天然有界。截掉的是排序靠后的溢出项,核心定位信息在头部。
   context.exploration = {
     summary: summaries.join("\n\n") || "没有获得项目探索摘要。",
-    relevantFiles,
-    testCommands: uniq(testCommands),
-    buildCommands: uniq(buildCommands),
-    risks: uniq(risks)
+    relevantFiles: take(relevantFiles, 80),
+    testCommands: take(uniq(testCommands), 10),
+    buildCommands: take(uniq(buildCommands), 10),
+    risks: take(uniq(risks), 20)
   }
   context.explorationComplexity = complexity
 }
@@ -1203,27 +1555,36 @@ while (roundsThisRun < maxRounds) {
     log(`第 ${round} 轮（simple 档）：跳过规划代理，单工作包直通实现。`)
   } else {
     plan = await agent(
-      `这是契约交付的第 ${round} 轮。请只为下面"待证实标准"规划工作包（package），已证实的标准不要碰。
+      `这是需求交付的第 ${round} 轮。请只为下面"待证实标准"规划工作包（package），已证实的标准不要碰。
 
 交付合同摘要（验收标准以下方"待证实标准"为唯一依据）：
-${stringify({
-  title: context.contract.title,
-  goal: context.contract.goal,
-  nonGoals: context.contract.nonGoals,
-  constraints: context.contract.constraints,
-  conventions: context.contract.conventions,
-  globalValidationCommands: context.contract.globalValidationCommands
-})}
+标题：${context.contract.title}
+目标：${context.contract.goal}
+非目标：${lines(context.contract.nonGoals)}
+约束：${lines(context.contract.constraints)}
+公约：${lines(context.contract.conventions)}
+全局验证命令：${lines(context.contract.globalValidationCommands)}
 
-项目画像：
-${stringify(context.exploration)}
+项目画像（概述/命令/风险见下；相关文件给了路径与简述，每个文件的完整用途见画像文件 ${context.artifacts.profile}，规划 targetFiles 时按需读取）：
+概述：${clip(context.exploration.summary, 1500)}
+构建命令：${lines(context.exploration.buildCommands)}
+测试命令：${lines(context.exploration.testCommands)}
+风险：${lines(context.exploration.risks.map((r) => clip(r, 300)))}
+相关文件（路径 — 简述；完整清单与用途见画像文件）：
+${
+  take(context.exploration.relevantFiles || [], 40)
+    .map((f) => `- ${f.path}：${clip(f.reason, 160)}`)
+    .join("\n") || "- 无"
+}
 
-待证实标准（含上一轮失败/驳回原因，规划必须针对性回应）：
-${stringify(pending)}
+${round > 1 && context.changedFiles.length > 0 ? `前几轮已改动的文件（规划 targetFiles 时参考——失败标准的修复大概率发生在这些文件附近，避免重复探索；需要细节直接读文件）：\n${lines(take(context.changedFiles, 50))}\n\n` : ""}待证实标准（含上一轮失败/驳回原因，规划必须针对性回应）：
+${pending.map((c) => `- ${c.id}（${c.verify}）：${clip(c.text, 500)}${c.note ? `\n  · 上一轮：${clip(c.note, 400)}` : ""}`).join("\n")}
 
-${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）：\n${context.conventionsBrief}\n` : ""}
+${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）：\n${clip(context.conventionsBrief, 2000)}\n` : ""}
 要求：
 - 每个工作包声明它负责证实哪些标准（acIds），粒度小到一个 agent 可以安全完成。
+- 工作包宁少勿碎：同一模块/同一条调用链上的标准合并为一个工作包（工作包串行执行，每个包固定消耗实现+验证+可能的修复代理，碎包成倍拖慢交付）；只有标准分属互不相干的模块时才拆包。
+- 优先复用项目画像中标注"可复用"的现有函数/工具（确无可复用才规划新建），在工作包 objective 里写明要复用的实现及其文件路径。
 - 每条待证实标准必须被至少一个工作包认领；确实无法认领的，在 blockers 里说明原因。
 - conventionsBrief 写一页跨包公约（统一入口/命名/风格），所有实现代理都会收到它。
 - 工作包之间如有依赖写 dependencies（用工作包 id）。
@@ -1318,28 +1679,31 @@ ${context.conventionsBrief ? `上一轮公约简报（沿用并按需修订）�
         `请实现当前工作包。只做这个工作包，不要扩大范围。
 
 交付合同摘要（标题/目标/非目标/约束）：
-${stringify({
-  title: context.contract.title,
-  goal: context.contract.goal,
-  nonGoals: context.contract.nonGoals,
-  constraints: context.contract.constraints
-})}
+标题：${context.contract.title}
+目标：${context.contract.goal}
+非目标：${lines(context.contract.nonGoals)}
+约束：${lines(context.contract.constraints)}
 
 公约简报（必须遵守，防止与其他工作包风格漂移）：
-${context.conventionsBrief}
+${clip(context.conventionsBrief, 2000)}
 
-项目画像：
-${stringify(context.exploration)}
+项目画像（概述与命令；本工作包的目标文件见下方"当前工作包"，需要项目其它文件定位时读取完整画像文件 ${context.artifacts.profile}）：
+概述：${clip(context.exploration.summary, 1500)}
+构建命令：${lines(context.exploration.buildCommands)}
+测试命令：${lines(context.exploration.testCommands)}
+风险：${lines(context.exploration.risks.map((r) => clip(r, 300)))}
 
 当前工作包：
-${stringify(pkg)}
+${renderPackage(pkg, { withTargets: true })}
 （提示：如果你的可用技能里有与本工作包领域相关的技能，优先遵循其指引。）
 
 你要证实的验收标准（实现必须逐条对得上，注意每条的核查方式和失败备注）：
-${stringify(pkgCriteria)}
+${renderWorkCriteria(pkgCriteria)}
 
 执行要求：
 - 做最小且正确的修改；变更后尽量运行工作包的验证命令。
+- 动手前先找现成：项目里已有合适的函数/工具/模式就直接复用，禁止重复实现已存在的能力。
+- 对 verify=test 的标准：先写出（或先运行确认）会失败的测试，再实现使其通过——严禁实现完成后补测试充数。
 - 如果标准带有上一轮的失败/驳回备注，必须针对性修复。
 - 如果无法安全完成，返回 status=blocked 并列出阻塞项。`,
         {
@@ -1352,41 +1716,38 @@ ${stringify(pkgCriteria)}
     let verification =
       implementation.status === "blocked"
         ? fallbackVerification("实现阶段已阻塞，未运行验证。", pkg.acIds)
-        : enforcePerAcCompleteness(
-            (await agent(
-              `请独立验证当前工作包，逐条裁决验收标准。不要修改文件。
+        : await verifyPackage(
+            `请独立验证当前工作包，逐条裁决验收标准。不要修改文件。
 
 当前工作包：
-${stringify(pkg)}
+${renderPackage(pkg, { withTargets: !(implementation.changedFiles && implementation.changedFiles.length) })}
 
-逐条验收标准（perAc 必须覆盖每一条 id，pass 必须给证据：文件:行号或命令输出摘录）：
-${stringify(pkgCriteria)}
+逐条验收标准（perAc 必须覆盖每一条 id，pass 必须给证据：文件:符号名（方法/测试/类名）+行号，或命令输出摘录；行号会随同轮其他改动漂移，证据锚点以符号名为准）：
+${renderWorkCriteria(pkgCriteria)}
 
-实现结果：
-${stringify(implementation)}
-
-建议验证命令：
-${lines(pkg.validationCommands)}
+实现结果（定位改动看 changedFiles，需要细节直接读这些文件）：
+${renderImplResult(implementation)}
 
 请实际运行可用命令，对每条标准按其核查方式取证，并至少尝试一个边界/反例。
 工作包声明的验证命令必须逐条执行,commandChecks.command 原样填写声明的命令字符串。
 特别注意 verify=e2e 的标准：必须实际启动应用，用浏览器自动化工具导航/点击/截图取证；
 如果当前没有可用的浏览器自动化工具，如实返回 unclear 并在证据里说明——严禁用"代码看起来正确"充当 e2e 证据。`,
-              {
-                label: `验证R${round}：${pkg.title}`,
-                phase: "交付循环",
-                // 全部核验类角色(验证/复验/终审/对抗复核)统一用默认 agent:不用 verification
-                // 角色那套报告式系统提示——它偏长篇输出、尾部结构化调用在弱模型上易截断。各处
-                // prompt 已写明"不要修改文件",约束从物理强制降为提示约束(已知取舍)。
-                schema: PACKAGE_VERIFY_SCHEMA
-              }
-            )) || fallbackVerification("验证代理没有返回结构化结果。", pkg.acIds),
-            pkg
+            {
+              label: `验证R${round}：${pkg.title}`,
+              phase: "交付循环",
+              // 全部核验类角色(验证/复验/终审/对抗复核)统一用默认 agent:不用 verification
+              // 角色那套报告式系统提示——它偏长篇输出、尾部结构化调用在弱模型上易截断。各处
+              // prompt 已写明"不要修改文件",约束从物理强制降为提示约束(已知取舍)。
+              schema: PACKAGE_VERIFY_SCHEMA
+            },
+            pkg,
+            "验证代理故障（重验仍未返回结构化结果），标准未获裁决。"
           )
 
     let fix = null
     let fixRound = 0
     while (
+      !verification.agentFailure &&
       verification.perAc.some((p) => p.result !== "pass") &&
       implementation.status !== "blocked" &&
       fixRound < maxFixRounds
@@ -1399,16 +1760,16 @@ ${lines(pkg.validationCommands)}
           `第 ${fixRound} 轮聚焦修复。只修复未通过的标准，不要扩大范围。
 
 公约简报：
-${context.conventionsBrief}
+${clip(context.conventionsBrief, 2000)}
 
 当前工作包：
-${stringify(pkg)}
+${renderPackage(pkg, { withTargets: !((implementation.changedFiles && implementation.changedFiles.length) || (previousFix && previousFix.changedFiles && previousFix.changedFiles.length)) })}
 
 首轮实现：
-${stringify(implementation)}
-${previousFix ? `\n上一轮修复（当前代码已包含这些修改）：\n${stringify(previousFix)}\n` : ""}
+${renderImplResult(implementation)}
+${previousFix && previousFix.changedFiles && previousFix.changedFiles.length ? `\n上一轮修复已改动的文件（当前代码已包含这些修改，需要细节请直接读取这些文件）：\n${lines(take(previousFix.changedFiles, 50))}\n` : ""}
 未通过的标准及证据：
-${stringify(failing)}
+${renderPerAc(failing)}
 
 如果无法安全修复，返回 status=blocked。`,
           {
@@ -1418,32 +1779,32 @@ ${stringify(failing)}
           }
         )) || fallbackImplementation("修复代理没有返回结构化结果。")
       if (fix.status === "blocked") break
-      verification = enforcePerAcCompleteness(
-        (await agent(
-          `修复后复验，逐条裁决验收标准。不要修改文件。
+      verification = await verifyPackage(
+        `修复后复验，逐条裁决验收标准。不要修改文件。
 
 当前工作包：
-${stringify(pkg)}
+${renderPackage(pkg, { withTargets: !(fix.changedFiles && fix.changedFiles.length) })}
 
 逐条验收标准：
-${stringify(pkgCriteria)}
+${renderWorkCriteria(pkgCriteria)}
 
-修复结果：
-${stringify(fix)}
+修复结果（定位改动看 changedFiles，需要细节直接读这些文件）：
+${renderImplResult(fix)}
 
 上一次逐条结论：
-${stringify(verification.perAc)}
+${renderPerAc(verification.perAc)}
 
 perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报会被判失败);
+pass 证据用 文件:符号名（方法/测试/类名）+行号 锚定,行号漂移以符号名为准;
 工作包声明的验证命令必须逐条执行,commandChecks.command 原样填写声明的命令字符串。
 复验重点放在之前未通过的标准上。`,
-          {
-            label: `复验R${round}：${pkg.title} #${fixRound}`,
-            phase: "交付循环",
-            schema: PACKAGE_VERIFY_SCHEMA
-          }
-        )) || fallbackVerification("复验代理没有返回结构化结果。", pkg.acIds),
-        pkg
+        {
+          label: `复验R${round}：${pkg.title} #${fixRound}`,
+          phase: "交付循环",
+          schema: PACKAGE_VERIFY_SCHEMA
+        },
+        pkg,
+        "复验代理故障（重验仍未返回结构化结果），标准未获裁决。"
       )
     }
 
@@ -1457,7 +1818,11 @@ perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报
         entry.round = round
       } else {
         entry.status = "unproven"
-        entry.note = `第 ${round} 轮验证未通过：${per.evidence}`
+        // 代理故障≠代码失败:留痕措辞必须区分,否则下一轮规划会把"验证代理挂了"
+        // 当成实现缺陷去针对性"修复"。
+        entry.note = verification.agentFailure
+          ? `第 ${round} 轮${per.evidence}`
+          : `第 ${round} 轮验证未通过：${per.evidence}`
       }
     }
     context.changedFiles = uniq([
@@ -1488,11 +1853,18 @@ perAc 必须逐条覆盖工作包的每一条标准(含之前已通过的,漏报
   if (newlyProven.length > 0) {
     const audit = await agent(
       `你是对抗复核代理。你的唯一任务是推翻下面这些"已证实"的验收标准——逐条检查证据是否真实、充分、与标准语义一致（证据可以在代码库里核实，必要时运行只读命令）。
-宁可错杀不可放过：证据模糊、以偏概全、文件行号对不上的，一律驳回。确实无懈可击的才放行。不要修改文件。
+宁可错杀不可放过：证据模糊、以偏概全、符号名对不上或无从核实的，一律驳回。确实无懈可击的才放行。不要修改文件。
 职责边界：只核对证据与代码本身（读文件、grep、行号比对），必要时最多运行轻量只读命令；不要重跑完整构建或测试套件——那是终审命令核对的职责，重复执行只会拖慢并增加故障面。
-
+判例校准（先对齐尺度再逐条裁决）：
+- 该驳回：证据引用的方法/测试/类名在代码库中不存在，或存在但语义与标准对不上；证据只给行号、没有符号名可重定位、且行号与代码事实对不上；声称"运行时验证/测试通过"但代码库里不存在对应测试或输出无从核对；证据只是"代码看起来正确"的复述而没有指向具体代码事实。
+- 该放行：证据引用的符号名在代码中真实存在且语义与标准一致，仅行号漂移（同轮其他工作包改动同一文件所致）——按符号名重定位核实后放行，不得以行号差为唯一驳回理由；措辞简略但每个论断都能在代码里逐点核实；引用了合同已声明的全局验证命令但本阶段未实际执行（终审负责真实执行，不得以此驳回）。
+${
+  context.contract.globalValidationCommands && context.contract.globalValidationCommands.length
+    ? `\n本合同声明的全局验证命令（下列命令是合法声明的，终审阶段会真实执行并核对）：\n${lines(context.contract.globalValidationCommands)}\n注意：证据若引用了上列已声明的命令，不得以"命令不在合同里/无此命令/无据编造"为由驳回；这类命令的实际执行由终审阶段负责，不要求在本阶段已经跑过——只判证据与标准语义、代码事实是否一致。真正凭空捏造（引用一条未声明、代码里也不存在的命令或结果）才驳回。\n`
+    : ""
+}
 本轮新证实的标准与证据：
-${stringify(newlyProven.map((c) => ({ id: c.id, text: c.text, verify: c.verify, evidence: c.evidence })))}
+${newlyProven.map((c) => `- ${c.id}（${c.verify}）：${clip(c.text, 400)}\n  · 证据：${clip(c.evidence, 600)}`).join("\n")}
 
 对每条要驳回的标准，给出 id 和具体驳回理由。
 重要：核查完成后直接提交结构化结果（structured_output），不要先写长篇分析再提交——你的裁决只以结构化结果为准，正文分析不会被读取。`,
