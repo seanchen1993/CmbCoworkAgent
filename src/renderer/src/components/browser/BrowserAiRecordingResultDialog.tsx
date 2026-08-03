@@ -1,4 +1,4 @@
-import { Download, FileCode2, Loader2, Sparkles } from "lucide-react"
+import { Download, FileCode2, Loader2, Save, Sparkles } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -30,6 +30,10 @@ interface BrowserAiRecordingResultDialogProps {
   onVariableActionNameChange: (actionId: string, value: string) => void
   draftScript: string
   onDraftScriptChange: (value: string) => void
+  isDraftDirty: boolean
+  canSaveDraft: boolean
+  isDraftSaveSubmitting: boolean
+  onSaveDraft: () => void
   saveDisplayName: string
   onSaveDisplayNameChange: (value: string) => void
   isSaveSubmitting: boolean
@@ -127,6 +131,10 @@ export function BrowserAiRecordingResultDialog({
   onVariableActionNameChange,
   draftScript,
   onDraftScriptChange,
+  isDraftDirty,
+  canSaveDraft,
+  isDraftSaveSubmitting,
+  onSaveDraft,
   saveDisplayName,
   onSaveDisplayNameChange,
   isSaveSubmitting,
@@ -137,27 +145,33 @@ export function BrowserAiRecordingResultDialog({
   const aiRecordingActionCount = aiRecording.actions.length
   const aiRecordingScriptReady = draftScript.trim().length > 0
   const aiRecordingScriptLineCount = aiRecordingScriptReady ? draftScript.split(/\r?\n/).length : 0
-  const saveDisabled =
-    !saveDisplayName.trim() ||
-    !hasWorkspace ||
-    !aiRecordingScriptReady ||
-    isSaveSubmitting ||
-    hasUnnamedVariableActions
+  const showDraftSaveControls = aiRecording.status === "paused"
+  const showExistingLibraryUpdateControls =
+    aiRecording.status === "completed" && Boolean(aiRecording.libraryFileName?.trim())
+  const showLibrarySaveControls =
+    aiRecording.status === "completed" && !showExistingLibraryUpdateControls
+  const baseSaveDisabled = !aiRecordingScriptReady || isSaveSubmitting || hasUnnamedVariableActions
+  const saveDisabled = !saveDisplayName.trim() || !hasWorkspace || baseSaveDisabled
   const aiRecordingStatusBadge =
     aiRecording.status === "recording"
       ? {
           label: "录制中",
           variant: "info" as const
         }
-      : aiRecordingActionCount > 0 || aiRecordingScriptReady
+      : aiRecording.status === "paused"
         ? {
-            label: "已生成",
-            variant: "nominal" as const
+            label: "已暂停",
+            variant: "warning" as const
           }
-        : {
-            label: "就绪",
-            variant: "outline" as const
-          }
+        : aiRecordingActionCount > 0 || aiRecordingScriptReady
+          ? {
+              label: "已生成",
+              variant: "nominal" as const
+            }
+          : {
+              label: "就绪",
+              variant: "outline" as const
+            }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -176,7 +190,9 @@ export function BrowserAiRecordingResultDialog({
                       ? recordingSource === "manual"
                         ? "你在内置浏览器里的真实操作会实时沉淀为 Playwright 草稿。"
                         : "Agent 对内置浏览器的成功操作会实时沉淀为 Playwright 草稿。"
-                      : `下面是最近一次${recordingLabel}生成的步骤和 Playwright 脚本初稿。`}
+                      : aiRecording.status === "paused"
+                        ? "当前录制已暂停，你可以继续录制、终止录制，或先检查当前脚本草稿。"
+                        : `下面是最近一次${recordingLabel}生成的步骤和 Playwright 脚本初稿。`}
                   </DialogDescription>
                 </div>
               </div>
@@ -321,65 +337,142 @@ export function BrowserAiRecordingResultDialog({
           <div className="flex min-h-0 flex-col">
             <div className="border-b border-border/70 px-4 py-3">
               <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                <div>
+                <div className={"flex-1"}>
                   <div className="flex items-center gap-2">
                     <div className="flex size-8 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-900 text-slate-200">
                       <FileCode2 className="size-4" strokeWidth={1.8} />
                     </div>
                     <div>
                       <p className="text-sm font-medium text-foreground">Playwright 脚本</p>
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        {recordingLabel}草稿支持直接编辑，保存时会以当前编辑内容为准。
+                      <p className="mt-1 text-[11px] text-muted-foreground max-w-[200px]">
+                        {showDraftSaveControls
+                          ? `${recordingLabel}草稿支持直接编辑；暂停时可先保存草稿，后续继续录制会沿用当前内容。`
+                          : showExistingLibraryUpdateControls
+                            ? `${recordingLabel}终止后会直接保存到当前继续录制所基于的原脚本。`
+                            : `${recordingLabel}草稿支持直接编辑；终止后可填写文件中文名并保存到录制列表。`}
                       </p>
                     </div>
                   </div>
                 </div>
 
-                <div className="flex flex-1  gap-2 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[360px]">
-                  <Input
-                    autoFocus
-                    type="text"
-                    value={saveDisplayName}
-                    onChange={(e) => onSaveDisplayNameChange(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") onConfirmSave()
-                    }}
-                    placeholder="文件中文名（必填）"
-                    className="h-9 rounded-lg border-border/80 bg-background text-xs shadow-none placeholder:text-muted-foreground/80"
-                  />
-                  <div className="flex items-center justify-between gap-3">
-                    {/*<p className="text-[11px] leading-5 text-muted-foreground">*/}
-                    {/*  保存到 <code className="font-mono">~/.cmbcoworkagent/browser</code>。*/}
-                    {/*</p>*/}
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="h-9 shrink-0 rounded-lg"
-                      disabled={saveDisabled}
-                      onClick={onConfirmSave}
-                    >
-                      {isSaveSubmitting ? (
-                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                      ) : (
-                        <Download className="size-3.5" strokeWidth={1.8} />
-                      )}
-                      保存
-                    </Button>
+                {showExistingLibraryUpdateControls ? (
+                  <div className="flex flex-1 items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[420px]">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-foreground">保存到原脚本</p>
+                      <p className="mt-1 break-all text-[11px] text-muted-foreground">
+                        {aiRecording.libraryDisplayName?.trim() || "原脚本"}
+                      </p>
+                      <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground/90">
+                        {aiRecording.libraryFileName}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center justify-between gap-3">
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-9 shrink-0 rounded-lg"
+                        disabled={baseSaveDisabled}
+                        onClick={onConfirmSave}
+                      >
+                        {isSaveSubmitting ? (
+                          <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                        ) : (
+                          <Save className="size-3.5" strokeWidth={1.8} />
+                        )}
+                        保存
+                      </Button>
+                    </div>
                   </div>
-                  {!hasWorkspace ? (
-                    <p className="text-[11px] text-status-warning">
-                      当前会话还没有选择工作区，暂时无法保存。
-                    </p>
-                  ) : hasUnnamedVariableActions ? (
-                    <p className="text-[11px] text-status-warning">
-                      已勾选变量的步骤需要先填写变量名。
-                    </p>
-                  ) : null}
-                </div>
+                ) : null}
+
+                {showLibrarySaveControls ? (
+                  <div className="flex flex-1 gap-2 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[360px]">
+                    <Input
+                      autoFocus
+                      type="text"
+                      value={saveDisplayName}
+                      onChange={(e) => onSaveDisplayNameChange(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") onConfirmSave()
+                      }}
+                      placeholder="文件中文名（必填）"
+                      className="h-9 rounded-lg border-border/80 bg-background text-xs shadow-none placeholder:text-muted-foreground/80"
+                    />
+                    <div className="flex items-center justify-between gap-3">
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-9 shrink-0 rounded-lg"
+                        disabled={saveDisabled}
+                        onClick={onConfirmSave}
+                      >
+                        {isSaveSubmitting ? (
+                          <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                        ) : (
+                          <Download className="size-3.5" strokeWidth={1.8} />
+                        )}
+                        保存
+                      </Button>
+                    </div>
+                    {!hasWorkspace ? (
+                      <p className="text-[11px] text-status-warning">
+                        当前会话还没有选择工作区，暂时无法保存。
+                      </p>
+                    ) : hasUnnamedVariableActions ? (
+                      <p className="text-[11px] text-status-warning">
+                        已勾选变量的步骤需要先填写变量名。
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {showDraftSaveControls ? (
+                  <div className="flex flex-1 items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/25 p-3 xl:max-w-[360px]">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-foreground">当前草稿</p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        {isDraftDirty
+                          ? "你修改过当前脚本，保存后继续录制会沿用这份内容。"
+                          : "当前草稿已经保存，继续录制会沿用这份内容。"}
+                      </p>
+                    </div>
+                    {canSaveDraft ? (
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span
+                          className={cn(
+                            "rounded-full border px-2 py-0.5 text-[10px]",
+                            isDraftDirty
+                              ? "border-status-warning/40 bg-status-warning/10 text-status-warning"
+                              : "border-status-nominal/30 bg-status-nominal/10 text-status-nominal"
+                          )}
+                        >
+                          {isDraftDirty ? "未保存" : "已保存"}
+                        </span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          className="h-9 rounded-lg px-3 shadow-none"
+                          disabled={
+                            !isDraftDirty || !aiRecordingScriptReady || isDraftSaveSubmitting
+                          }
+                          onClick={onSaveDraft}
+                        >
+                          {isDraftSaveSubmitting ? (
+                            <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                          ) : (
+                            <Save className="size-3.5" strokeWidth={1.8} />
+                          )}
+                          保存草稿
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 p-4 pt-3">
+            <div className="min-h-0 flex-1 p-4 pt-3  ">
               <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-900/80 bg-[#0b0f14] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                 <div className="flex items-center justify-between border-b border-white/10 bg-[#11161d] px-4 py-2 text-[11px] text-slate-400">
                   <div className="flex items-center gap-2">
@@ -390,7 +483,7 @@ export function BrowserAiRecordingResultDialog({
                     {aiRecordingScriptReady ? `${aiRecordingScriptLineCount} lines` : "waiting"}
                   </span>
                 </div>
-                <div className="h-[300px] flex-1 overflow-auto px-4 py-4 font-mono text-[12px] leading-6 text-slate-100">
+                <div className="h-[300px] flex-1  px-4 py-4 font-mono text-[12px] leading-6 text-slate-100">
                   <textarea
                     aria-label="Playwright 脚本草稿编辑器"
                     spellCheck={false}

@@ -7,7 +7,8 @@ import type {
   BrowserScriptLibraryEntry,
   BrowserScriptLibraryListOptions,
   BrowserScriptLibraryReadInput,
-  BrowserScriptLibrarySaveInput
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput
 } from "../../../shared/browser-types"
 
 const BROWSER_LIBRARY_LOG_PREFIX = "[内置浏览器][BrowserScriptLibrary]"
@@ -238,6 +239,36 @@ export async function readBrowserScriptLibraryScript(
     console.warn(`${BROWSER_LIBRARY_LOG_PREFIX} Failed to read script ${input.fileName}:`, error)
     throw new Error("读取脚本内容失败，请稍后重试")
   }
+}
+
+export async function updateBrowserScriptLibraryEntry(
+  input: BrowserScriptLibraryUpdateInput
+): Promise<void> {
+  const fileName = assertSafeFileName(input.fileName)
+  const script = typeof input.script === "string" ? input.script : ""
+
+  if (!script.trim()) {
+    throw new Error("脚本内容不能为空")
+  }
+
+  return runSerializedMutation(async () => {
+    const manifest = await readManifest()
+    const entryExists = manifest.entries.some((entry) => entry.fileName === fileName)
+    if (!entryExists) {
+      throw new Error("脚本文件不存在，可能已被删除")
+    }
+
+    try {
+      await writeFile(getScriptPath(fileName), script, "utf8")
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === "ENOENT") {
+        throw new Error("脚本文件不存在，可能已被删除")
+      }
+      console.warn(`${BROWSER_LIBRARY_LOG_PREFIX} Failed to update script ${fileName}:`, error)
+      throw new Error("保存脚本内容失败，请稍后重试")
+    }
+  })
 }
 
 export async function deleteBrowserScriptLibraryEntry(

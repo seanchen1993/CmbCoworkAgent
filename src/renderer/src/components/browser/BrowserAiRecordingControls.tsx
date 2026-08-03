@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { FileCode2, FolderOpen, Loader2, MousePointerClick, Pause, Video } from "lucide-react"
+import {
+  FileCode2,
+  FolderOpen,
+  Loader2,
+  MousePointerClick,
+  Pause,
+  Play,
+  Square,
+  Video
+} from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -55,14 +64,21 @@ function getRecordingStatusText(
   if (session.status === "recording") {
     return `${label}进行中，已捕获 ${session.actions.length} 步`
   }
+  if (session.status === "paused") {
+    return `${label}已暂停，当前保留 ${session.actions.length} 步`
+  }
   if (hasOutput) {
     return `最近一次${label}生成了 ${session.actions.length} 步`
   }
   return "可开始 AI录制 或 人工录制"
 }
 
+function isSessionActive(session: AiRecordingSession): boolean {
+  return session.status === "recording" || session.status === "paused"
+}
+
 function sessionHasOutput(session: AiRecordingSession): boolean {
-  return session.status === "recording" || session.actions.length > 0 || session.script.trim().length > 0
+  return session.status !== "idle" || session.actions.length > 0 || session.script.trim().length > 0
 }
 
 export function BrowserAiRecordingControls({
@@ -88,6 +104,7 @@ export function BrowserAiRecordingControls({
   const [selectionSyncKey, setSelectionSyncKey] = useState("")
   const [busySource, setBusySource] = useState<BrowserRecordingSource | null>(null)
   const [aiRecordingDialogOpen, setAiRecordingDialogOpen] = useState(false)
+  const [isDraftSaveSubmitting, setIsDraftSaveSubmitting] = useState(false)
   const [isSaveSubmitting, setIsSaveSubmitting] = useState(false)
   const [saveDisplayName, setSaveDisplayName] = useState("")
   const [scriptLibraryOpen, setScriptLibraryOpen] = useState(false)
@@ -96,7 +113,7 @@ export function BrowserAiRecordingControls({
   const [scriptLibraryError, setScriptLibraryError] = useState<string | null>(null)
   const [loadingLibraryFileName, setLoadingLibraryFileName] = useState<string | null>(null)
   const [loadingLibraryAction, setLoadingLibraryAction] = useState<
-    "detail" | "execution" | "delete" | null
+    "detail" | "execution" | "save" | "continue" | "delete" | null
   >(null)
   const hasWorkspace = Boolean(workspacePath?.trim())
 
@@ -104,9 +121,10 @@ export function BrowserAiRecordingControls({
     setSaveDisplayName("")
   }, [])
 
-  const currentRecording =
-    recordingDialogSource === "manual" ? manualRecording : aiRecording
+  const currentRecording = recordingDialogSource === "manual" ? manualRecording : aiRecording
   const currentRecordingLabel = getRecordingLabel(recordingDialogSource)
+  const aiSessionIsActive = isSessionActive(aiRecording)
+  const manualSessionIsActive = isSessionActive(manualRecording)
 
   const buildDraftScript = useCallback(
     (
@@ -156,6 +174,27 @@ export function BrowserAiRecordingControls({
     await Promise.all([refreshAiRecording(), refreshManualRecording()])
   }, [refreshAiRecording, refreshManualRecording])
 
+  const syncRecordingEditorState = useCallback(
+    (source: BrowserRecordingSource, session: AiRecordingSession) => {
+      const nextSelectionSyncKey = [
+        source,
+        session.id ?? "idle",
+        session.status,
+        session.actions.length,
+        session.stoppedAt ?? session.startedAt ?? ""
+      ].join(":")
+
+      setRecordingDialogSource(source)
+      setSelectedActionIds(session.actions.map((action) => action.id))
+      setVariableActionIds(session.variableActionIds ?? [])
+      setVariableActionNames(session.variableActionNames ?? {})
+      setDraftScript(session.script)
+      setIsDraftScriptDirty(false)
+      setSelectionSyncKey(nextSelectionSyncKey)
+    },
+    []
+  )
+
   useEffect(() => {
     void refreshAllRecordings()
   }, [refreshAllRecordings])
@@ -182,11 +221,18 @@ export function BrowserAiRecordingControls({
     if (selectionSyncKey === nextSelectionSyncKey) return
 
     const nextSelectedActionIds = currentRecording.actions.map((action) => action.id)
+    const nextVariableActionIds = currentRecording.variableActionIds ?? []
+    const nextVariableActionNames = currentRecording.variableActionNames ?? {}
     setSelectedActionIds(nextSelectedActionIds)
-    setVariableActionIds([])
-    setVariableActionNames({})
+    setVariableActionIds(nextVariableActionIds)
+    setVariableActionNames(nextVariableActionNames)
     setDraftScript(
-      generateAiRecordingScript(currentRecording.actions, { source: recordingDialogSource })
+      currentRecording.script ||
+        generateAiRecordingScript(currentRecording.actions, {
+          source: recordingDialogSource,
+          variableActionIds: nextVariableActionIds,
+          variableActionNames: nextVariableActionNames
+        })
     )
     setIsDraftScriptDirty(false)
     setSelectionSyncKey(nextSelectionSyncKey)
@@ -207,9 +253,68 @@ export function BrowserAiRecordingControls({
     setAiRecordingDialogOpen(true)
   }, [])
 
+  const persistRecordingDraft = useCallback(
+    async (
+      source: BrowserRecordingSource,
+      options?: {
+        silent?: boolean
+      }
+    ): Promise<AiRecordingSession> => {
+      if (!draftScript.trim()) {
+        throw new Error("当前没有可保存的脚本内容")
+      }
+
+      setIsDraftSaveSubmitting(true)
+      try {
+        const nextSession =
+          source === "manual"
+            ? await window.api.browser.updateManualRecordingDraft({
+                script: draftScript
+              })
+            : await window.api.browser.updateAiRecordingDraft({
+                script: draftScript
+              })
+
+        if (source === "manual") {
+          setManualRecording(nextSession)
+        } else {
+          setAiRecording(nextSession)
+        }
+        syncRecordingEditorState(source, nextSession)
+
+        if (!options?.silent) {
+          toast.success("草稿已保存，继续录制时会沿用当前内容。")
+        }
+        return nextSession
+      } catch (error) {
+        console.error(
+          `[BrowserAiRecordingControls] Failed to save ${source} recording draft: ${formatError(error)}`
+        )
+        toast.error(formatError(error) || "保存草稿失败")
+        throw error
+      } finally {
+        setIsDraftSaveSubmitting(false)
+      }
+    },
+    [draftScript, syncRecordingEditorState]
+  )
+
+  const persistActiveDraftIfNeeded = useCallback(
+    async (source: BrowserRecordingSource): Promise<boolean> => {
+      if (!isDraftScriptDirty || recordingDialogSource !== source) return true
+      try {
+        await persistRecordingDraft(source, { silent: true })
+        return true
+      } catch {
+        return false
+      }
+    },
+    [isDraftScriptDirty, persistRecordingDraft, recordingDialogSource]
+  )
+
   const startAiRecordingSession = useCallback(async () => {
-    if (manualRecording.status === "recording") {
-      toast.error("人工录制进行中，请先停止后再开始 AI录制")
+    if (manualSessionIsActive) {
+      toast.error("人工录制正在占用当前会话，请先终止后再开始 AI录制")
       return
     }
 
@@ -230,11 +335,11 @@ export function BrowserAiRecordingControls({
     } finally {
       setBusySource(null)
     }
-  }, [manualRecording.status, setPendingUnsavedForSource, threadId])
+  }, [manualSessionIsActive, setPendingUnsavedForSource, threadId])
 
   const startManualRecordingSession = useCallback(async () => {
-    if (aiRecording.status === "recording") {
-      toast.error("AI录制进行中，请先停止后再开始人工录制")
+    if (aiSessionIsActive) {
+      toast.error("AI录制正在占用当前会话，请先终止后再开始人工录制")
       return
     }
 
@@ -256,11 +361,47 @@ export function BrowserAiRecordingControls({
     } finally {
       setBusySource(null)
     }
-  }, [aiRecording.status, currentUrl, setPendingUnsavedForSource, threadId])
+  }, [aiSessionIsActive, currentUrl, setPendingUnsavedForSource, threadId])
+
+  const pauseAiRecordingSession = useCallback(async () => {
+    setBusySource("ai")
+    try {
+      const nextSession = await window.api.browser.pauseAiRecording()
+      setAiRecording(nextSession)
+      setRecordingDialogSource("ai")
+      setAiRecordingDialogOpen(true)
+      toast.success("AI录制已暂停")
+    } catch (error) {
+      console.error(
+        `[BrowserAiRecordingControls] Failed to pause AI recording: ${formatError(error)}`
+      )
+      toast.error(formatError(error) || "暂停 AI录制失败")
+    } finally {
+      setBusySource(null)
+    }
+  }, [])
+
+  const resumeAiRecordingSession = useCallback(async () => {
+    setBusySource("ai")
+    try {
+      if (!(await persistActiveDraftIfNeeded("ai"))) return
+      const nextSession = await window.api.browser.resumeAiRecording()
+      setAiRecording(nextSession)
+      toast.success("AI录制已继续")
+    } catch (error) {
+      console.error(
+        `[BrowserAiRecordingControls] Failed to resume AI recording: ${formatError(error)}`
+      )
+      toast.error(formatError(error) || "继续 AI录制失败")
+    } finally {
+      setBusySource(null)
+    }
+  }, [persistActiveDraftIfNeeded])
 
   const stopAiRecordingSession = useCallback(async () => {
     setBusySource("ai")
     try {
+      if (!(await persistActiveDraftIfNeeded("ai"))) return
       const nextSession = await window.api.browser.stopAiRecording()
       setAiRecording(nextSession)
       setRecordingDialogSource("ai")
@@ -279,11 +420,12 @@ export function BrowserAiRecordingControls({
     } finally {
       setBusySource(null)
     }
-  }, [setPendingUnsavedForSource])
+  }, [persistActiveDraftIfNeeded, setPendingUnsavedForSource])
 
   const stopManualRecordingSession = useCallback(async () => {
     setBusySource("manual")
     try {
+      if (!(await persistActiveDraftIfNeeded("manual"))) return
       const nextSession = await window.api.browser.stopManualRecording()
       setManualRecording(nextSession)
       setRecordingDialogSource("manual")
@@ -302,7 +444,42 @@ export function BrowserAiRecordingControls({
     } finally {
       setBusySource(null)
     }
-  }, [setPendingUnsavedForSource])
+  }, [persistActiveDraftIfNeeded, setPendingUnsavedForSource])
+
+  const pauseManualRecordingSession = useCallback(async () => {
+    setBusySource("manual")
+    try {
+      const nextSession = await window.api.browser.pauseManualRecording()
+      setManualRecording(nextSession)
+      setRecordingDialogSource("manual")
+      setAiRecordingDialogOpen(true)
+      toast.success("人工录制已暂停")
+    } catch (error) {
+      console.error(
+        `[BrowserAiRecordingControls] Failed to pause manual recording: ${formatError(error)}`
+      )
+      toast.error(formatError(error) || "暂停人工录制失败")
+    } finally {
+      setBusySource(null)
+    }
+  }, [])
+
+  const resumeManualRecordingSession = useCallback(async () => {
+    setBusySource("manual")
+    try {
+      if (!(await persistActiveDraftIfNeeded("manual"))) return
+      const nextSession = await window.api.browser.resumeManualRecording()
+      setManualRecording(nextSession)
+      toast.success("人工录制已继续")
+    } catch (error) {
+      console.error(
+        `[BrowserAiRecordingControls] Failed to resume manual recording: ${formatError(error)}`
+      )
+      toast.error(formatError(error) || "继续人工录制失败")
+    } finally {
+      setBusySource(null)
+    }
+  }, [persistActiveDraftIfNeeded])
 
   const loadScriptLibraryEntries = useCallback(async () => {
     if (!workspacePath?.trim()) {
@@ -335,16 +512,15 @@ export function BrowserAiRecordingControls({
     (actionId) => !variableActionNames[actionId]?.trim()
   )
 
+  const currentRecordingLibraryTarget = currentRecording.libraryFileName?.trim()
+    ? {
+        fileName: currentRecording.libraryFileName.trim(),
+        displayName:
+          currentRecording.libraryDisplayName?.trim() || currentRecording.libraryFileName.trim()
+      }
+    : null
+
   const confirmSaveToLibrary = useCallback(async () => {
-    const displayName = saveDisplayName.trim()
-    if (!displayName) {
-      toast.error("请输入文件中文名")
-      return
-    }
-    if (!workspacePath?.trim()) {
-      toast.error("当前会话还没有选择工作区")
-      return
-    }
     if (!draftScript.trim()) {
       toast.error("当前没有可保存的脚本内容")
       return
@@ -354,21 +530,46 @@ export function BrowserAiRecordingControls({
       return
     }
 
+    const displayName = saveDisplayName.trim()
+    const trimmedWorkspacePath = workspacePath?.trim() ?? ""
+    if (!currentRecordingLibraryTarget) {
+      if (!displayName) {
+        toast.error("请输入文件中文名")
+        return
+      }
+      if (!trimmedWorkspacePath) {
+        toast.error("当前会话还没有选择工作区")
+        return
+      }
+    }
+
     setIsSaveSubmitting(true)
     try {
-      await window.api.browser.saveScriptLibraryEntry({
-        displayName,
-        recordingSource: recordingDialogSource,
-        script: draftScript,
-        threadId,
-        workspacePath
-      })
-      toast.success("脚本已保存")
+      if (currentRecordingLibraryTarget) {
+        await window.api.browser.updateScriptLibraryEntry({
+          fileName: currentRecordingLibraryTarget.fileName,
+          script: draftScript
+        })
+        toast.success(`已保存到原脚本：${currentRecordingLibraryTarget.displayName}`)
+      } else {
+        await window.api.browser.saveScriptLibraryEntry({
+          displayName,
+          recordingSource: recordingDialogSource,
+          script: draftScript,
+          threadId,
+          workspacePath: trimmedWorkspacePath
+        })
+        toast.success("脚本已保存")
+      }
       setPendingUnsavedForSource(recordingDialogSource, false)
       setAiRecordingDialogOpen(false)
-      setScriptLibraryOpen(true)
       resetSaveForm()
-      void loadScriptLibraryEntries()
+      if (trimmedWorkspacePath) {
+        void loadScriptLibraryEntries()
+      }
+      if (!currentRecordingLibraryTarget) {
+        setScriptLibraryOpen(true)
+      }
     } catch (error) {
       console.error(
         `[BrowserAiRecordingControls] Failed to save browser script library entry: ${formatError(error)}`
@@ -381,6 +582,7 @@ export function BrowserAiRecordingControls({
     draftScript,
     hasUnnamedVariableActions,
     loadScriptLibraryEntries,
+    currentRecordingLibraryTarget,
     recordingDialogSource,
     resetSaveForm,
     saveDisplayName,
@@ -452,6 +654,85 @@ export function BrowserAiRecordingControls({
       setLoadingLibraryAction(null)
     }
   }, [])
+
+  const updateLibraryScript = useCallback(
+    async (entry: BrowserScriptLibraryEntry, script: string) => {
+      setLoadingLibraryFileName(entry.fileName)
+      setLoadingLibraryAction("save")
+      try {
+        await window.api.browser.updateScriptLibraryEntry({
+          fileName: entry.fileName,
+          script
+        })
+        toast.success("脚本内容已保存")
+      } catch (error) {
+        console.error(
+          `[BrowserAiRecordingControls] Failed to update library script ${entry.fileName}: ${formatError(error)}`
+        )
+        toast.error(formatError(error) || "保存脚本失败")
+        throw error
+      } finally {
+        setLoadingLibraryFileName(null)
+        setLoadingLibraryAction(null)
+      }
+    },
+    []
+  )
+
+  const continueRecordingFromLibrary = useCallback(
+    async (entry: BrowserScriptLibraryEntry, script: string) => {
+      if (!script.trim()) {
+        toast.error("当前脚本内容为空，请先编辑脚本后再继续录制")
+        return
+      }
+      if (aiSessionIsActive || manualSessionIsActive) {
+        toast.error("已有录制会话正在进行，请先终止当前录制")
+        return
+      }
+
+      setLoadingLibraryFileName(entry.fileName)
+      setLoadingLibraryAction("continue")
+      setBusySource(entry.recordingSource)
+      try {
+        const nextSession =
+          entry.recordingSource === "manual"
+            ? await window.api.browser.startManualRecording({
+                threadId: threadId ?? undefined,
+                seedScript: script,
+                libraryFileName: entry.fileName,
+                libraryDisplayName: entry.displayName
+              })
+            : await window.api.browser.startAiRecording({
+                threadId: threadId ?? undefined,
+                seedScript: script,
+                libraryFileName: entry.fileName,
+                libraryDisplayName: entry.displayName
+              })
+
+        if (entry.recordingSource === "manual") {
+          setManualRecording(nextSession)
+        } else {
+          setAiRecording(nextSession)
+        }
+        setRecordingDialogSource(entry.recordingSource)
+        setPendingUnsavedForSource(entry.recordingSource, false)
+        setScriptLibraryOpen(false)
+        setAiRecordingDialogOpen(false)
+        toast.success(`${getRecordingLabel(entry.recordingSource)}已从当前脚本继续`)
+      } catch (error) {
+        console.error(
+          `[BrowserAiRecordingControls] Failed to continue library script ${entry.fileName}: ${formatError(error)}`
+        )
+        toast.error(formatError(error) || "继续录制失败")
+        throw error
+      } finally {
+        setBusySource(null)
+        setLoadingLibraryFileName(null)
+        setLoadingLibraryAction(null)
+      }
+    },
+    [aiSessionIsActive, manualSessionIsActive, setPendingUnsavedForSource, threadId]
+  )
 
   const toggleActionSelection = useCallback(
     (actionId: string) => {
@@ -545,54 +826,62 @@ export function BrowserAiRecordingControls({
   )
 
   const currentRecordingHasOutput = sessionHasOutput(currentRecording)
+  const canSaveCurrentDraft = currentRecording.status === "paused"
   const resultSources = RECORDING_SOURCES.filter((source) => {
     const session = source === "manual" ? manualRecording : aiRecording
-    return session.status === "completed" && sessionHasOutput(session) && pendingUnsavedBySource[source]
+    return (
+      session.status === "completed" && sessionHasOutput(session) && pendingUnsavedBySource[source]
+    )
   })
 
+  const activeRecordingSource = aiSessionIsActive ? "ai" : manualSessionIsActive ? "manual" : null
   const statusSource =
-    aiRecording.status === "recording"
-      ? "ai"
-      : manualRecording.status === "recording"
+    activeRecordingSource ??
+    (currentRecordingHasOutput
+      ? recordingDialogSource
+      : sessionHasOutput(manualRecording)
         ? "manual"
-        : currentRecordingHasOutput
-          ? recordingDialogSource
-          : sessionHasOutput(manualRecording)
-            ? "manual"
-            : "ai"
+        : "ai")
   const statusSession = statusSource === "manual" ? manualRecording : aiRecording
   const statusHasOutput = sessionHasOutput(statusSession)
   const statusText = getRecordingStatusText(statusSource, statusSession, statusHasOutput)
   const statusDotClassName =
     statusSession.status === "recording"
       ? "bg-status-info animate-tactical-pulse"
-      : statusHasOutput
-        ? "bg-status-nominal"
-        : browserCreated
-          ? "bg-primary"
-          : "bg-muted-foreground/60"
+      : statusSession.status === "paused"
+        ? "bg-status-warning"
+        : statusHasOutput
+          ? "bg-status-nominal"
+          : browserCreated
+            ? "bg-primary"
+            : "bg-muted-foreground/60"
 
-  const aiButtonIsRecording = aiRecording.status === "recording"
-  const manualButtonIsRecording = manualRecording.status === "recording"
   const aiButtonDisabledReason = useMemo(() => {
     if (!browserCreated) return "浏览器尚未就绪，请等待页面加载完成"
     if (busySource) return "正在处理中，请稍候"
-    if (!aiButtonIsRecording && manualButtonIsRecording) {
-      return "人工录制进行中，请先停止后再开始 AI录制"
+    if (manualSessionIsActive) {
+      return "人工录制进行中，请先终止当前录制"
     }
     return null
-  }, [aiButtonIsRecording, browserCreated, busySource, manualButtonIsRecording])
+  }, [browserCreated, busySource, manualSessionIsActive])
   const manualButtonDisabledReason = useMemo(() => {
     if (!browserCreated) return "浏览器尚未就绪，请等待页面加载完成"
     if (busySource) return "正在处理中，请稍候"
-    if (!manualButtonIsRecording && aiButtonIsRecording) {
-      return "AI录制进行中，请先停止后再开始人工录制"
+    if (aiSessionIsActive) {
+      return "AI录制进行中，请先终止当前录制"
     }
     return null
-  }, [aiButtonIsRecording, browserCreated, busySource, manualButtonIsRecording])
+  }, [aiSessionIsActive, browserCreated, busySource])
 
   const aiButtonDisabled = aiButtonDisabledReason !== null
   const manualButtonDisabled = manualButtonDisabledReason !== null
+  const activeSession =
+    activeRecordingSource === "manual"
+      ? manualRecording
+      : activeRecordingSource === "ai"
+        ? aiRecording
+        : null
+  const activeRecordingIsBusy = activeRecordingSource ? busySource === activeRecordingSource : false
 
   return (
     <>
@@ -633,126 +922,152 @@ export function BrowserAiRecordingControls({
           onClick={openScriptLibrary}
         >
           <FolderOpen className="size-3.5" strokeWidth={1.8} />
-          录制列表
+          列表
         </Button>
 
-        <TooltipProvider delayDuration={300}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              {aiButtonDisabled ? (
-                <span className="inline-flex cursor-not-allowed">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={aiButtonIsRecording ? "warning" : "info"}
-                    disabled
-                    aria-pressed={aiButtonIsRecording}
-                    className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
-                  >
-                    {busySource === "ai" ? (
-                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                    ) : aiButtonIsRecording ? (
-                      <Pause className="size-3.5" strokeWidth={1.8} />
-                    ) : (
-                      <Video className="size-3.5" strokeWidth={1.8} />
-                    )}
-                    {busySource === "ai" ? "处理中..." : aiButtonIsRecording ? "停止 AI" : "AI录制"}
-                  </Button>
-                </span>
-              ) : (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={aiButtonIsRecording ? "warning" : "info"}
-                  aria-pressed={aiButtonIsRecording}
-                  className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
-                  onClick={() =>
-                    void (aiButtonIsRecording ? stopAiRecordingSession() : startAiRecordingSession())
-                  }
-                >
-                  {busySource === "ai" ? (
-                    <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                  ) : aiButtonIsRecording ? (
-                    <Pause className="size-3.5" strokeWidth={1.8} />
-                  ) : (
-                    <Video className="size-3.5" strokeWidth={1.8} />
-                  )}
-                  {busySource === "ai" ? "处理中..." : aiButtonIsRecording ? "停止 AI" : "AI录制"}
-                </Button>
-              )}
-            </TooltipTrigger>
-            {aiButtonDisabledReason ? (
-              <TooltipContent side="top">
-                <p>{aiButtonDisabledReason}</p>
-              </TooltipContent>
+        {activeRecordingSource && activeSession ? (
+          <>
+            {activeSession.status === "paused" ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={activeRecordingIsBusy}
+                className="h-8 rounded-md px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={() => openRecordingDialog(activeRecordingSource)}
+              >
+                <FileCode2 className="size-3.5" strokeWidth={1.8} />
+                详情
+              </Button>
             ) : null}
-          </Tooltip>
-        </TooltipProvider>
 
-        <TooltipProvider delayDuration={300}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              {manualButtonDisabled ? (
-                <span className="inline-flex cursor-not-allowed">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={manualButtonIsRecording ? "warning" : "secondary"}
-                    disabled
-                    aria-pressed={manualButtonIsRecording}
-                    className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
-                  >
-                    {busySource === "manual" ? (
-                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                    ) : manualButtonIsRecording ? (
-                      <Pause className="size-3.5" strokeWidth={1.8} />
-                    ) : (
-                      <MousePointerClick className="size-3.5" strokeWidth={1.8} />
-                    )}
-                    {busySource === "manual"
-                      ? "处理中..."
-                      : manualButtonIsRecording
-                        ? "停止人工"
-                        : "人工录制"}
-                  </Button>
-                </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={activeRecordingIsBusy}
+              className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
+              onClick={() =>
+                void (activeRecordingSource === "manual"
+                  ? stopManualRecordingSession()
+                  : stopAiRecordingSession())
+              }
+            >
+              {activeRecordingIsBusy ? (
+                <Loader2 className="size-3 animate-spin" strokeWidth={1.8} />
               ) : (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={manualButtonIsRecording ? "warning" : "secondary"}
-                  aria-pressed={manualButtonIsRecording}
-                  className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
-                  onClick={() =>
-                    void (
-                      manualButtonIsRecording
-                        ? stopManualRecordingSession()
-                        : startManualRecordingSession()
-                    )
-                  }
-                >
-                  {busySource === "manual" ? (
-                    <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                  ) : manualButtonIsRecording ? (
-                    <Pause className="size-3.5" strokeWidth={1.8} />
-                  ) : (
-                    <MousePointerClick className="size-3.5" strokeWidth={1.8} />
-                  )}
-                  {busySource === "manual"
-                    ? "处理中..."
-                    : manualButtonIsRecording
-                      ? "停止人工"
-                      : "人工录制"}
-                </Button>
+                <Square className="size-3 text-red-500" strokeWidth={1.8} />
               )}
-            </TooltipTrigger>
-            {manualButtonDisabledReason ? (
-              <TooltipContent side="top">
-                <p>{manualButtonDisabledReason}</p>
-              </TooltipContent>
-            ) : null}
-          </Tooltip>
-        </TooltipProvider>
+              {activeRecordingIsBusy ? "处理中..." : "终止"}
+            </Button>
+
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={activeRecordingIsBusy}
+              className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
+              onClick={() =>
+                void (activeRecordingSource === "manual"
+                  ? activeSession.status === "paused"
+                    ? resumeManualRecordingSession()
+                    : pauseManualRecordingSession()
+                  : activeSession.status === "paused"
+                    ? resumeAiRecordingSession()
+                    : pauseAiRecordingSession())
+              }
+            >
+              {activeRecordingIsBusy ? (
+                <Loader2 className="size-3 animate-spin" strokeWidth={1.8} />
+              ) : activeSession.status === "paused" ? (
+                <Play className="size-3 text-green-600" strokeWidth={1.8} />
+              ) : (
+                <Pause className="size-3" strokeWidth={1.8} />
+              )}
+              {activeRecordingIsBusy
+                ? "处理中..."
+                : activeSession.status === "paused"
+                  ? "继续"
+                  : "暂停"}
+            </Button>
+          </>
+        ) : (
+          <>
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  {aiButtonDisabled ? (
+                    <span className="inline-flex cursor-not-allowed">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="info"
+                        disabled
+                        className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
+                      >
+                        <Video className="size-3.5" strokeWidth={1.8} />
+                        AI录制
+                      </Button>
+                    </span>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="info"
+                      className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
+                      onClick={() => void startAiRecordingSession()}
+                    >
+                      <Video className="size-3.5" strokeWidth={1.8} />
+                      AI录制
+                    </Button>
+                  )}
+                </TooltipTrigger>
+                {aiButtonDisabledReason ? (
+                  <TooltipContent side="top">
+                    <p>{aiButtonDisabledReason}</p>
+                  </TooltipContent>
+                ) : null}
+              </Tooltip>
+            </TooltipProvider>
+
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  {manualButtonDisabled ? (
+                    <span className="inline-flex cursor-not-allowed">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled
+                        className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
+                      >
+                        <MousePointerClick className="size-3.5" strokeWidth={1.8} />
+                        人工录制
+                      </Button>
+                    </span>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
+                      onClick={() => void startManualRecordingSession()}
+                    >
+                      <MousePointerClick className="size-3.5" strokeWidth={1.8} />
+                      人工录制
+                    </Button>
+                  )}
+                </TooltipTrigger>
+                {manualButtonDisabledReason ? (
+                  <TooltipContent side="top">
+                    <p>{manualButtonDisabledReason}</p>
+                  </TooltipContent>
+                ) : null}
+              </Tooltip>
+            </TooltipProvider>
+          </>
+        )}
       </div>
 
       <BrowserAiRecordingResultDialog
@@ -777,6 +1092,10 @@ export function BrowserAiRecordingControls({
           setDraftScript(value)
           setIsDraftScriptDirty(true)
         }}
+        isDraftDirty={isDraftScriptDirty}
+        canSaveDraft={canSaveCurrentDraft}
+        isDraftSaveSubmitting={isDraftSaveSubmitting}
+        onSaveDraft={() => void persistRecordingDraft(recordingDialogSource)}
         saveDisplayName={saveDisplayName}
         onSaveDisplayNameChange={setSaveDisplayName}
         isSaveSubmitting={isSaveSubmitting}
@@ -797,6 +1116,8 @@ export function BrowserAiRecordingControls({
         loadingAction={loadingLibraryAction}
         onRefresh={() => void loadScriptLibraryEntries()}
         onReadScript={readLibraryScript}
+        onSaveScript={updateLibraryScript}
+        onContinueRecording={continueRecordingFromLibrary}
         onCopyExecution={copyLibraryExecutionPrompt}
         onDelete={deleteLibraryEntry}
       />

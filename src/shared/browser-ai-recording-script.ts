@@ -1,4 +1,8 @@
-import type { AiRecordedBrowserAction, BrowserRecordingSource } from "./browser-types"
+import type {
+  AiRecordedBrowserAction,
+  BrowserLocatorMetadata,
+  BrowserRecordingSource
+} from "./browser-types"
 
 export type LocatorRole =
   | "button"
@@ -46,6 +50,25 @@ interface VariableDescriptor {
   declaration: string
 }
 
+type ParsedRecordedActionInput =
+  | { kind: "navigate"; url: string }
+  | { kind: "click"; target?: string; doubleClick: boolean; locator?: BrowserLocatorMetadata }
+  | {
+      kind: "fill"
+      target?: string
+      value: string
+      sensitive: boolean
+      locator?: BrowserLocatorMetadata
+    }
+  | {
+      kind: "selectOption"
+      target?: string
+      values: string[]
+      locator?: BrowserLocatorMetadata
+    }
+  | { kind: "fileUpload"; paths: string[] }
+  | { kind: "press"; key: string; target?: string; locator?: BrowserLocatorMetadata }
+
 type LocatorCandidateKind =
   | "testId"
   | "label"
@@ -82,6 +105,10 @@ const ROLE_PATTERNS: Array<{ pattern: RegExp; role: LocatorRole }> = [
 
 function quote(value: unknown): string {
   return JSON.stringify(value)
+}
+
+function now(): string {
+  return new Date().toISOString()
 }
 
 function normalizeText(value: string): string {
@@ -486,8 +513,8 @@ function buildVariableDescriptorMap(
 ): Map<string, VariableDescriptor> {
   const variableIds = new Set(variableActionIds)
   const variableDescriptors = new Map<string, VariableDescriptor>()
+  const descriptorsByDisplayName = new Map<string, VariableDescriptor>()
   const usedIdentifiers = new Set<string>()
-  const usedPromptNames = new Set<string>()
 
   for (const action of actions) {
     if (!variableIds.has(action.id) || !supportsVariablePlaceholder(action)) continue
@@ -498,32 +525,455 @@ function buildVariableDescriptorMap(
     const displayNameBase = requestedDisplayName || fallbackDisplayName
     if (!displayNameBase) continue
 
+    const existingDescriptor = descriptorsByDisplayName.get(displayNameBase)
+    if (existingDescriptor) {
+      variableDescriptors.set(action.id, existingDescriptor)
+      continue
+    }
+
     const baseName = toSafeVariableStem(displayNameBase)
     let suffix = 0
     let identifier = ""
-    let promptName = ""
 
     do {
       suffix += 1
       const identifierSuffix = suffix === 1 ? "" : `_${suffix}`
-      const promptSuffix = suffix === 1 ? "" : `${suffix}`
       identifier = `变量_${baseName}${identifierSuffix}`
-      promptName = `变量-${displayNameBase}${promptSuffix}`
-    } while (usedIdentifiers.has(identifier) || usedPromptNames.has(promptName))
+    } while (usedIdentifiers.has(identifier))
 
     usedIdentifiers.add(identifier)
-    usedPromptNames.add(promptName)
-    variableDescriptors.set(action.id, {
+    const promptName = `变量-${displayNameBase}`
+    const descriptor: VariableDescriptor = {
       displayName: promptName,
       identifier,
       declaration:
         action.kind === "fileUpload" && action.paths.length > 1
           ? `const ${identifier}: string[] = []; // ${promptName}`
           : `const ${identifier} = ""; // ${promptName}`
-    })
+    }
+    descriptorsByDisplayName.set(displayNameBase, descriptor)
+    variableDescriptors.set(action.id, descriptor)
   }
 
   return variableDescriptors
+}
+
+function parseScriptQuotedValue(value: string, start = 0): { value: string; end: number } | null {
+  const quote = value[start]
+  if (quote !== "'" && quote !== '"') return null
+
+  let result = ""
+  for (let index = start + 1; index < value.length; index += 1) {
+    const character = value[index]
+    if (character === "\\") {
+      const next = value[index + 1]
+      if (next === undefined) break
+      result += next
+      index += 1
+      continue
+    }
+    if (character === quote) {
+      return { value: result, end: index + 1 }
+    }
+    result += character
+  }
+
+  return null
+}
+
+function parseScriptStringArray(value: string): string[] | null {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null
+
+  const values: string[] = []
+  let index = 1
+  while (index < trimmed.length - 1) {
+    while (/[\s,]/u.test(trimmed[index] ?? "")) index += 1
+    if (index >= trimmed.length - 1) break
+
+    const parsed = parseScriptQuotedValue(trimmed, index)
+    if (!parsed) return null
+    values.push(parsed.value)
+    index = parsed.end
+  }
+
+  return values
+}
+
+type ParsedScriptLiteral =
+  | { kind: "string"; value: string }
+  | { kind: "identifier"; identifier: string }
+  | { kind: "stringArray"; values: string[] }
+  | { kind: "password" }
+  | { kind: "unknown" }
+
+function parseScriptLiteralExpression(value: string): ParsedScriptLiteral {
+  const trimmed = value.trim()
+  if (!trimmed) return { kind: "unknown" }
+  if (trimmed === 'process.env.PLAYWRIGHT_TEST_PASSWORD ?? ""') {
+    return { kind: "password" }
+  }
+
+  const arrayValues = parseScriptStringArray(trimmed)
+  if (arrayValues) return { kind: "stringArray", values: arrayValues }
+
+  const quoted = parseScriptQuotedValue(trimmed)
+  if (quoted && quoted.end === trimmed.length) {
+    return { kind: "string", value: quoted.value }
+  }
+
+  if (/^变量_[\p{L}\p{N}_]+$/u.test(trimmed)) {
+    return { kind: "identifier", identifier: trimmed }
+  }
+
+  return { kind: "unknown" }
+}
+
+function parseVariableDeclarationLine(
+  line: string
+): { identifier: string; displayName: string } | null {
+  const match =
+    /^const\s+(变量_[\p{L}\p{N}_]+)\s*(?::\s*string\[\])?\s*=\s*(?:\[\]|"")\s*;\s*\/\/\s*(.+)$/u.exec(
+      line
+    )
+  if (!match) return null
+
+  const displayName = normalizeVariableDisplayName(match[2]!.replace(/^变量[-_]/u, ""))
+  if (!displayName) return null
+  return {
+    identifier: match[1]!,
+    displayName
+  }
+}
+
+function parseLocatorExpressionValue(rawValue: string | undefined): string | undefined {
+  if (!rawValue) return undefined
+  const parsed = parseScriptLiteralExpression(rawValue)
+  if (parsed.kind === "string") return parsed.value
+  if (parsed.kind === "identifier") return parsed.identifier
+  return undefined
+}
+
+function parseScriptStringValue(expression: string): string | undefined {
+  const parsed = parseScriptLiteralExpression(expression)
+  if (parsed.kind === "string") return parsed.value
+  if (parsed.kind === "identifier") return parsed.identifier
+  return undefined
+}
+
+function parseScriptActionValue(expression: string): {
+  value?: string
+  identifier?: string
+  isPassword?: boolean
+  values?: string[]
+} {
+  const parsed = parseScriptLiteralExpression(expression)
+  switch (parsed.kind) {
+    case "string":
+      return { value: parsed.value }
+    case "identifier":
+      return { identifier: parsed.identifier }
+    case "stringArray":
+      return { values: parsed.values }
+    case "password":
+      return { isPassword: true }
+    default:
+      return {}
+  }
+}
+
+function extractVariableIdentifierFromExpression(expression: string): string | undefined {
+  return expression.match(/变量_[\p{L}\p{N}_]+/u)?.[0]
+}
+
+function parseLocatorRole(value: string | undefined): BrowserLocatorMetadata["role"] {
+  const normalized = value?.trim().toLowerCase()
+  switch (normalized) {
+    case "button":
+    case "checkbox":
+    case "combobox":
+    case "link":
+    case "menuitem":
+    case "option":
+    case "radio":
+    case "switch":
+    case "tab":
+    case "textbox":
+      return normalized
+    default:
+      return undefined
+  }
+}
+
+function parseLocatorExpression(expression: string): BrowserLocatorMetadata {
+  const locatorExpression = expression.trim()
+  const framePath = Array.from(
+    locatorExpression.matchAll(/frameLocator\(\s*(['"])(.*?)\1\s*\)/gu)
+  ).map((match) => match[2]!)
+  const nthMatch = /\.nth\(\s*(\d+)\s*\)/u.exec(locatorExpression)
+  const hasFirstHint = /\.first\(\s*\)/u.test(locatorExpression)
+  const metadata: BrowserLocatorMetadata = {
+    framePath: framePath.length > 0 ? framePath : undefined,
+    nth: nthMatch ? Number(nthMatch[1]) : undefined,
+    matchCount: hasFirstHint ? 2 : undefined
+  }
+
+  const roleQuotedMatch =
+    /getByRole\(\s*(['"])(.*?)\1\s*,\s*\{\s*name\s*:\s*((['"])(?:\\.|.)*?\4)\s*\}\s*\)/u.exec(
+      locatorExpression
+    )
+  if (roleQuotedMatch) {
+    metadata.role = parseLocatorRole(roleQuotedMatch[2])
+    metadata.accessibleName = parseLocatorExpressionValue(roleQuotedMatch[3])
+    return metadata
+  }
+
+  const roleVariableMatch =
+    /getByRole\(\s*(['"])(.*?)\1\s*,\s*\{\s*name\s*:\s*(变量_[\p{L}\p{N}_]+)\s*\}\s*\)/u.exec(
+      locatorExpression
+    )
+  if (roleVariableMatch) {
+    metadata.role = parseLocatorRole(roleVariableMatch[2])
+    metadata.accessibleName = roleVariableMatch[3]
+    return metadata
+  }
+
+  const builders: Array<{
+    name: "label" | "placeholder" | "testId" | "textContent"
+    pattern: RegExp
+  }> = [
+    { name: "label", pattern: /getByLabel\(\s*((?:['"])(?:\\.|.)*?['"])\s*\)/u },
+    { name: "placeholder", pattern: /getByPlaceholder\(\s*((?:['"])(?:\\.|.)*?['"])\s*\)/u },
+    { name: "testId", pattern: /getByTestId\(\s*((?:['"])(?:\\.|.)*?['"])\s*\)/u },
+    {
+      name: "textContent",
+      pattern:
+        /getByText\(\s*(((?:['"])(?:\\.|.)*?['"])|变量_[\p{L}\p{N}_]+)\s*(?:,\s*\{[\s\S]*?\})?\)/u
+    }
+  ]
+  for (const builder of builders) {
+    const match = builder.pattern.exec(locatorExpression)
+    if (!match) continue
+    metadata[builder.name] = parseLocatorExpressionValue(match[1])
+    if (builder.name === "textContent") {
+      metadata.textExact = /exact\s*:\s*true/u.test(locatorExpression)
+    }
+    return metadata
+  }
+
+  const selectorMatch = /locator\(\s*(['"])(.*?)\1\s*\)/u.exec(locatorExpression)
+  if (selectorMatch) metadata.selector = selectorMatch[2]
+  if (!selectorMatch) metadata.playwrightLocator = locatorExpression
+  return metadata
+}
+
+function parseRecordedScriptActions(
+  script: string,
+  source: BrowserRecordingSource
+): {
+  actions: AiRecordedBrowserAction[]
+  variableActionIds: string[]
+  variableActionNames: Record<string, string>
+} {
+  const variableDeclarations = new Map<string, string>()
+  const lines = script.split(/\r?\n/u).map((line) => line.trim())
+
+  for (const line of lines) {
+    const declaration = parseVariableDeclarationLine(line)
+    if (!declaration) continue
+    variableDeclarations.set(declaration.identifier, declaration.displayName)
+  }
+
+  const actions: AiRecordedBrowserAction[] = []
+  const variableActionIds: string[] = []
+  const variableActionNames: Record<string, string> = {}
+  let parsedActionNumber = 0
+
+  const pushAction = (action: ParsedRecordedActionInput, variableIdentifier?: string): void => {
+    parsedActionNumber += 1
+    const id = `${source}-seed-action-${parsedActionNumber}`
+    const recordedAction: AiRecordedBrowserAction = {
+      ...action,
+      id,
+      source,
+      timestamp: now()
+    } as AiRecordedBrowserAction
+    if (variableIdentifier) {
+      const displayName = variableDeclarations.get(variableIdentifier) ?? variableIdentifier
+      variableActionIds.push(id)
+      variableActionNames[id] = displayName
+      if ("target" in recordedAction && !recordedAction.target) {
+        recordedAction.target = displayName
+      }
+      if (
+        recordedAction.kind === "fill" &&
+        recordedAction.locator &&
+        !recordedAction.locator.target
+      ) {
+        recordedAction.locator.target = displayName
+      }
+      if (
+        recordedAction.kind === "click" &&
+        recordedAction.locator &&
+        !recordedAction.locator.accessibleName &&
+        !recordedAction.locator.textContent
+      ) {
+        recordedAction.locator.accessibleName = displayName
+      }
+    }
+    actions.push(recordedAction)
+  }
+
+  for (const line of lines) {
+    if (
+      !line ||
+      line.startsWith("import ") ||
+      line.startsWith("const ") ||
+      line.startsWith("test(")
+    ) {
+      continue
+    }
+    if (line === "});" || line === "// Review generated locators before committing this test.") {
+      continue
+    }
+
+    const navigateMatch = /^await\s+page\.goto\(\s*(.+)\s*\);$/u.exec(line)
+    if (navigateMatch) {
+      const url = parseScriptStringValue(navigateMatch[1]!)
+      if (url) pushAction({ kind: "navigate", url })
+      continue
+    }
+
+    const keyboardPressMatch = /^await\s+page\.keyboard\.press\(\s*(.+)\s*\);$/u.exec(line)
+    if (keyboardPressMatch) {
+      const key = parseScriptStringValue(keyboardPressMatch[1]!)
+      if (key) pushAction({ kind: "press", key })
+      continue
+    }
+
+    if (/^const\s+fileChooserPromise\d+\s*=\s*page\.waitForEvent\("filechooser"\);$/u.test(line)) {
+      continue
+    }
+
+    const fileChooserSetFilesMatch = /^await\s+fileChooser\d+\.setFiles\(\s*(.+)\s*\);$/u.exec(line)
+    if (fileChooserSetFilesMatch) {
+      const value = parseScriptActionValue(fileChooserSetFilesMatch[1]!)
+      const paths = value.values ?? (value.value ? [value.value] : [])
+      if (paths.length > 0 || value.identifier) {
+        pushAction(
+          {
+            kind: "fileUpload",
+            paths: paths.length > 0 ? paths : value.identifier ? [value.identifier] : []
+          },
+          value.identifier
+        )
+      }
+      continue
+    }
+
+    const setInputFilesMatch = /^await\s+(.+)\.setInputFiles\(\s*(.+)\s*\);$/u.exec(line)
+    if (setInputFilesMatch) {
+      const value = parseScriptActionValue(setInputFilesMatch[2]!)
+      const paths = value.values ?? (value.value ? [value.value] : [])
+      if (paths.length > 0 || value.identifier) {
+        pushAction(
+          {
+            kind: "fileUpload",
+            paths: paths.length > 0 ? paths : value.identifier ? [value.identifier] : []
+          },
+          value.identifier
+        )
+      }
+      continue
+    }
+
+    const actionMatch =
+      /^await\s+(.+)\.(dblclick|click|fill|selectOption|press)\(\s*(.*)\s*\);$/u.exec(line)
+    if (!actionMatch) continue
+
+    const locatorExpression = actionMatch[1]!
+    const method = actionMatch[2] as "dblclick" | "click" | "fill" | "selectOption" | "press"
+    const locator = parseLocatorExpression(locatorExpression)
+    const variableIdentifier =
+      extractVariableIdentifierFromExpression(locatorExpression) ??
+      (method === "fill" || method === "selectOption" || method === "press"
+        ? extractVariableIdentifierFromExpression(actionMatch[3]!)
+        : undefined)
+    const actionTarget = variableIdentifier
+      ? (variableDeclarations.get(variableIdentifier) ?? variableIdentifier)
+      : (locator.accessibleName ??
+        locator.label ??
+        locator.placeholder ??
+        locator.target ??
+        locator.textContent)
+
+    switch (method) {
+      case "dblclick":
+      case "click":
+        pushAction(
+          {
+            kind: "click",
+            target: actionTarget,
+            doubleClick: method === "dblclick",
+            locator
+          },
+          variableIdentifier
+        )
+        break
+      case "fill": {
+        const value = parseScriptActionValue(actionMatch[3]!)
+        pushAction(
+          {
+            kind: "fill",
+            target: actionTarget,
+            value: value.value ?? "",
+            sensitive:
+              value.isPassword === true ||
+              (actionTarget
+                ? /pass(word|code)?|secret|token|密码|口令/iu.test(actionTarget)
+                : false),
+            locator
+          },
+          value.identifier ?? variableIdentifier
+        )
+        break
+      }
+      case "selectOption": {
+        const value = parseScriptActionValue(actionMatch[3]!)
+        pushAction(
+          {
+            kind: "selectOption",
+            target: actionTarget,
+            values: value.values ?? (value.value ? [value.value] : []),
+            locator
+          },
+          value.identifier ?? variableIdentifier
+        )
+        break
+      }
+      case "press": {
+        const value = parseScriptActionValue(actionMatch[3]!)
+        const key = value.value ?? value.identifier
+        if (!key) break
+        pushAction(
+          {
+            kind: "press",
+            key,
+            target: actionTarget,
+            locator
+          },
+          value.identifier ?? variableIdentifier
+        )
+        break
+      }
+    }
+  }
+
+  return {
+    actions,
+    variableActionIds,
+    variableActionNames
+  }
 }
 
 function buildVariableizedClickLocator(
@@ -641,7 +1091,7 @@ export function extractAiRecordingVariableNames(script: string): string[] {
   const variableNames = new Set<string>()
 
   for (const match of script.matchAll(
-    /const\s+变量_[^\s=]+\s*=\s*"";\s*\/\/\s*(变量-[^\n\r]+)/gu
+    /const\s+变量_[^\s=]+\s*(?::\s*string\[\])?\s*=\s*(?:\[\]|"")\s*;\s*\/\/\s*(变量-[^\n\r]+)/gu
   )) {
     variableNames.add(match[1]!.trim())
   }
@@ -656,24 +1106,43 @@ export function extractAiRecordingVariableNames(script: string): string[] {
   return Array.from(variableNames)
 }
 
+export function parseAiRecordingScript(
+  script: string,
+  source: BrowserRecordingSource = "ai"
+): {
+  actions: AiRecordedBrowserAction[]
+  variableActionIds: string[]
+  variableActionNames: Record<string, string>
+} {
+  return parseRecordedScriptActions(script, source)
+}
+
 export function generateAiRecordingScript(
   actions: AiRecordedBrowserAction[],
   options: AiRecordingScriptOptions = {}
 ): string {
+  const source = options.source ?? actions[0]?.source ?? "ai"
+  const scriptedActions = actions
   const variableDescriptorMap = buildVariableDescriptorMap(
-    actions,
+    scriptedActions,
     options.variableActionIds,
     options.variableActionNames
   )
-  const variableDeclarations = Array.from(variableDescriptorMap.values())
+  const variableDeclarations = Array.from(
+    new Map(
+      Array.from(variableDescriptorMap.values()).map((descriptor) => [
+        descriptor.identifier,
+        descriptor
+      ])
+    ).values()
+  )
     .map((descriptor) => descriptor.declaration)
     .join("\n")
-  const lines = generateAiRecordingActionLines(actions, variableDescriptorMap)
+  const lines = generateAiRecordingActionLines(scriptedActions, variableDescriptorMap)
   const body =
     lines.length > 0
       ? lines.map((line) => `  ${line}`).join("\n")
       : "  // No supported Playwright browser actions were recorded."
-  const source = options.source ?? actions[0]?.source ?? "ai"
   const testName = source === "manual" ? "manual recorded flow" : "AI recorded flow"
 
   return `import { test } from "@playwright/test";

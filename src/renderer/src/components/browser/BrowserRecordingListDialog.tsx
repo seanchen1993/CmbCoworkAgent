@@ -1,5 +1,15 @@
-import { useEffect, useState } from "react"
-import { Check, Copy, FileCode2, FolderOpen, Loader2, RotateCcw, Trash2 } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import {
+  Check,
+  Copy,
+  FileCode2,
+  FolderOpen,
+  Loader2,
+  Play,
+  RotateCcw,
+  Save,
+  Trash2
+} from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
@@ -9,7 +19,10 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
-import type { BrowserRecordingSource, BrowserScriptLibraryEntry } from "../../../../shared/browser-types"
+import type {
+  BrowserRecordingSource,
+  BrowserScriptLibraryEntry
+} from "../../../../shared/browser-types"
 
 interface BrowserRecordingListDialogProps {
   open: boolean
@@ -20,9 +33,11 @@ interface BrowserRecordingListDialogProps {
   entries: BrowserScriptLibraryEntry[]
   currentThreadId?: string | null
   loadingFileName: string | null
-  loadingAction: "detail" | "execution" | "delete" | null
+  loadingAction: "detail" | "execution" | "save" | "continue" | "delete" | null
   onRefresh: () => void
   onReadScript: (entry: BrowserScriptLibraryEntry) => Promise<string>
+  onSaveScript: (entry: BrowserScriptLibraryEntry, script: string) => Promise<void>
+  onContinueRecording: (entry: BrowserScriptLibraryEntry, script: string) => Promise<void>
   onCopyExecution: (entry: BrowserScriptLibraryEntry) => void
   onDelete: (entry: BrowserScriptLibraryEntry) => void
 }
@@ -49,6 +64,11 @@ function formatRecordingTime(createdAt: string): string {
 
 const PAGE_SIZE = 10
 
+interface DetailDraftState {
+  initialScript: string
+  script: string
+}
+
 export function BrowserRecordingListDialog({
   open,
   onOpenChange,
@@ -61,14 +81,31 @@ export function BrowserRecordingListDialog({
   loadingAction,
   onRefresh,
   onReadScript,
+  onSaveScript,
+  onContinueRecording,
   onCopyExecution,
   onDelete
 }: BrowserRecordingListDialogProps): React.JSX.Element {
   const [selectedFileName, setSelectedFileName] = useState<string | null>(null)
   const [detailScript, setDetailScript] = useState("")
+  const [detailInitialScript, setDetailInitialScript] = useState("")
   const [detailCopied, setDetailCopied] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
+  const detailDraftsRef = useRef<Record<string, DetailDraftState>>({})
+
+  const saveDetailDraft = useCallback(
+    (fileName: string, script: string, initialScript: string): void => {
+      detailDraftsRef.current = {
+        ...detailDraftsRef.current,
+        [fileName]: {
+          initialScript,
+          script
+        }
+      }
+    },
+    []
+  )
 
   const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE))
   const currentPageSafe = Math.min(currentPage, totalPages)
@@ -89,6 +126,7 @@ export function BrowserRecordingListDialog({
     if (!open || !hasWorkspace || error || isLoading || entries.length === 0) {
       setSelectedFileName(null)
       setDetailScript("")
+      setDetailInitialScript("")
       setDetailCopied(false)
       setDetailLoading(false)
       return
@@ -107,6 +145,16 @@ export function BrowserRecordingListDialog({
     const selectedEntry = entries.find((entry) => entry.fileName === selectedFileName) ?? null
     if (!selectedEntry) {
       setDetailScript("")
+      setDetailInitialScript("")
+      setDetailCopied(false)
+      setDetailLoading(false)
+      return
+    }
+
+    const cachedDraft = detailDraftsRef.current[selectedEntry.fileName]
+    if (cachedDraft) {
+      setDetailScript(cachedDraft.script)
+      setDetailInitialScript(cachedDraft.initialScript)
       setDetailCopied(false)
       setDetailLoading(false)
       return
@@ -119,6 +167,8 @@ export function BrowserRecordingListDialog({
       .then((script) => {
         if (cancelled) return
         setDetailScript(script)
+        setDetailInitialScript(script)
+        saveDetailDraft(selectedEntry.fileName, script, script)
       })
       .catch(() => {
         // parent callback already reports the failure
@@ -130,7 +180,7 @@ export function BrowserRecordingListDialog({
     return () => {
       cancelled = true
     }
-  }, [entries, onReadScript, selectedFileName])
+  }, [entries, onReadScript, saveDetailDraft, selectedFileName])
 
   const handleCopyDetailScript = async (): Promise<void> => {
     if (!detailScript.trim()) return
@@ -145,6 +195,27 @@ export function BrowserRecordingListDialog({
   }
 
   const selectedEntry = entries.find((entry) => entry.fileName === selectedFileName) ?? null
+  const detailDirty = detailScript !== detailInitialScript
+  const isSaveLoading =
+    Boolean(selectedEntry) &&
+    loadingFileName === selectedEntry?.fileName &&
+    loadingAction === "save"
+  const isContinueLoading =
+    Boolean(selectedEntry) &&
+    loadingFileName === selectedEntry?.fileName &&
+    loadingAction === "continue"
+
+  const handleSaveDetailScript = async (): Promise<void> => {
+    if (!selectedEntry || !detailDirty) return
+    await onSaveScript(selectedEntry, detailScript)
+    setDetailInitialScript(detailScript)
+    saveDetailDraft(selectedEntry.fileName, detailScript, detailScript)
+  }
+
+  const handleContinueRecording = async (): Promise<void> => {
+    if (!selectedEntry || !detailScript.trim()) return
+    await onContinueRecording(selectedEntry, detailScript)
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -183,7 +254,7 @@ export function BrowserRecordingListDialog({
         </DialogHeader>
 
         <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-          <div className="flex min-h-0 flex-1 flex-col border-b border-border/70 lg:border-b-0 lg:border-r">
+          <div className="flex-1 flex min-h-0 flex-1 flex-col border-b border-border/70 lg:border-b-0 lg:border-r">
             <div className="min-h-0 flex-1 overflow-auto p-5">
               {!hasWorkspace ? (
                 <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
@@ -205,7 +276,7 @@ export function BrowserRecordingListDialog({
               ) : (
                 <div className="space-y-3">
                   <div className="overflow-x-auto rounded-xl border border-border/70">
-                    <table className="w-full min-w-[920px] border-collapse text-left text-[12px]">
+                    <table className="w-full  border-collapse text-left text-[12px]">
                       <thead className="bg-muted/45 text-[11px] font-medium text-muted-foreground">
                         <tr>
                           <th className="border-b border-border/70 px-3 py-2.5">是否本会话</th>
@@ -372,63 +443,103 @@ export function BrowserRecordingListDialog({
             </div>
           </div>
 
-          <div className="flex min-h-0 w-full flex-col lg:w-[40%]">
+          <div className="flex-1 flex min-h-0 w-full flex-col">
             <div className="border-b border-border/70 px-5 py-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex-1 min-w-0">
                   <DialogTitle className="text-base">{selectedEntry?.displayName}</DialogTitle>
                   <DialogDescription className="mt-1 text-[12px] leading-5">
-                    {selectedEntry ? "左侧列表选中项的脚本内容。" : "请选择一条录制查看脚本。"}
+                    {selectedEntry
+                      ? "左侧列表选中项的脚本内容，可直接编辑、保存或基于当前版本继续录制。"
+                      : "请选择一条录制查看脚本。"}
                   </DialogDescription>
                 </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-8 rounded-lg text-[11px]"
-                  disabled={!detailScript.trim() || detailLoading}
-                  onClick={() => void handleCopyDetailScript()}
-                >
-                  {detailCopied ? (
-                    <Check className="size-3.5" strokeWidth={1.8} />
-                  ) : (
-                    <Copy className="size-3.5" strokeWidth={1.8} />
-                  )}
-                  {detailCopied ? "已复制" : "复制内容"}
-                </Button>
-              </div>
-
-              <div className="mt-4 grid gap-2 text-[11px] text-muted-foreground sm:grid-cols-2">
-                <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
-                  <div>录制类型</div>
-                  <div className="mt-1 font-medium text-foreground">
-                    {selectedEntry
-                      ? formatRecordingSource(selectedEntry.recordingSource)
-                      : "未选择"}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
-                  <div>时间</div>
-                  <div className="mt-1 font-medium text-foreground">
-                    {selectedEntry ? formatRecordingTime(selectedEntry.createdAt) : "—"}
-                  </div>
+                <div className="gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 rounded-lg text-[11px]"
+                    disabled={
+                      !detailScript.trim() || detailLoading || isSaveLoading || isContinueLoading
+                    }
+                    onClick={() => void handleCopyDetailScript()}
+                  >
+                    {detailCopied ? (
+                      <Check className="size-3.5" strokeWidth={1.8} />
+                    ) : (
+                      <Copy className="size-3.5" strokeWidth={1.8} />
+                    )}
+                    {detailCopied ? "已复制" : "复制内容"}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 rounded-lg text-[11px]"
+                    disabled={!selectedEntry || !detailDirty || detailLoading || isContinueLoading}
+                    onClick={() => void handleSaveDetailScript()}
+                  >
+                    {isSaveLoading ? (
+                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Save className="size-3.5" strokeWidth={1.8} />
+                    )}
+                    保存修改
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-8 rounded-lg text-[11px]"
+                    disabled={
+                      !selectedEntry || !detailScript.trim() || detailLoading || isSaveLoading
+                    }
+                    onClick={() => void handleContinueRecording()}
+                  >
+                    {isContinueLoading ? (
+                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Play className="size-3.5" strokeWidth={1.8} />
+                    )}
+                    继续录制
+                  </Button>
                 </div>
               </div>
             </div>
-
             <div className="min-h-0 flex-1 p-4">
               <div className="flex h-[60vh] min-h-0 flex-col overflow-hidden rounded-xl border border-slate-900/80 bg-[#0b0f14] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                 <div className="flex items-center justify-between border-b border-white/10 bg-[#11161d] px-4 py-2 text-[11px] text-slate-400">
-                  <span className="truncate font-mono">
-                    {selectedEntry?.fileName ?? "playwright.spec.ts"}
-                  </span>
-                  {detailLoading ? (
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate font-mono">
+                      {selectedEntry?.fileName ?? "playwright.spec.ts"}
+                    </span>
+                    {detailDirty ? (
+                      <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-200">
+                        未保存
+                      </span>
+                    ) : null}
+                  </div>
+                  {detailLoading || isSaveLoading || isContinueLoading ? (
                     <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
                   ) : null}
                 </div>
-                <pre className="h-full overflow-auto whitespace-pre-wrap break-all px-4 py-4 font-mono text-[12px] leading-6 text-slate-100">
-                  {detailLoading ? "正在读取脚本内容..." : detailScript}
-                </pre>
+                <div className="h-full  px-4 py-4 font-mono text-[12px] leading-6 text-slate-100">
+                  <textarea
+                    aria-label="录制脚本编辑器"
+                    spellCheck={false}
+                    value={detailScript}
+                    disabled={detailLoading}
+                    onChange={(event) => {
+                      const nextScript = event.target.value
+                      setDetailScript(nextScript)
+                      if (selectedEntry) {
+                        saveDetailDraft(selectedEntry.fileName, nextScript, detailInitialScript)
+                      }
+                    }}
+                    className="h-full min-h-[52vh] w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500 disabled:cursor-wait"
+                    placeholder={detailLoading ? "正在读取脚本内容..." : "// Script content"}
+                  />
+                </div>
               </div>
             </div>
           </div>

@@ -2,11 +2,15 @@ import { beforeEach, describe, expect, it } from "vitest"
 import type { WebFrameMain } from "electron"
 import {
   getManualRecording,
+  markNextManualNavigationExplicit,
+  pauseManualRecording,
   recordManualNavigation,
   recordManualRecorderConsoleMessage,
   resetManualRecordingForTests,
+  resumeManualRecording,
   startManualRecording,
-  stopManualRecording
+  stopManualRecording,
+  updateManualRecordingDraft
 } from "./manual-recording-service"
 
 function createFrame(input: {
@@ -103,6 +107,198 @@ describe("manual recording service", () => {
     expect(session.script).toContain('await page.getByRole("button", { name: "登录" }).click();')
   })
 
+  it("keeps alternating fill and enter actions in the generated script", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/search" })
+
+    emitRecorderMessage(frame, {
+      type: "fill",
+      locator: {
+        role: "textbox",
+        label: "Search",
+        target: "Search"
+      },
+      value: "你好"
+    })
+    emitRecorderMessage(frame, {
+      type: "press",
+      locator: {
+        role: "textbox",
+        label: "Search",
+        target: "Search"
+      },
+      key: "Enter"
+    })
+    emitRecorderMessage(frame, {
+      type: "fill",
+      locator: {
+        role: "textbox",
+        label: "Search",
+        target: "Search"
+      },
+      value: "哈哈"
+    })
+    emitRecorderMessage(frame, {
+      type: "press",
+      locator: {
+        role: "textbox",
+        label: "Search",
+        target: "Search"
+      },
+      key: "Enter"
+    })
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "Search" }).fill("你好");'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "Search" }).fill("哈哈");'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "Search" }).press("Enter");'
+    )
+    expect(session.script.indexOf('.fill("你好")')).toBeLessThan(
+      session.script.indexOf('.press("Enter")')
+    )
+    expect(session.script.indexOf('.press("Enter")')).toBeLessThan(
+      session.script.lastIndexOf('.press("Enter")')
+    )
+  })
+
+  it("records typed text between focusing a textbox and pressing Enter", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://demo.playwright.dev/todomvc/#/" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "textbox",
+        accessibleName: "What needs to be done?",
+        target: "What needs to be done?"
+      }
+    })
+    emitRecorderMessage(frame, {
+      type: "fill",
+      locator: {
+        role: "textbox",
+        accessibleName: "What needs to be done?",
+        target: "What needs to be done?"
+      },
+      value: "buy milk"
+    })
+    emitRecorderMessage(frame, {
+      type: "press",
+      locator: {
+        role: "textbox",
+        accessibleName: "What needs to be done?",
+        target: "What needs to be done?"
+      },
+      key: "Enter"
+    })
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "What needs to be done?" }).click();'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "What needs to be done?" }).fill("buy milk");'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "What needs to be done?" }).press("Enter");'
+    )
+  })
+
+  it("persists paused draft edits before continuing recording", () => {
+    startManualRecording({ threadId: "thread-1" })
+    pauseManualRecording()
+
+    const editedScript = `import { test } from "@playwright/test";
+
+test("manual recorded flow", async ({ page }) => {
+  // Review generated locators before committing this test.
+  await page.goto("https://demo.playwright.dev/todomvc/#/");
+  await page.getByRole("textbox", { name: "What needs to be done?" }).fill("保存后的内容");
+});
+`
+
+    const pausedSession = updateManualRecordingDraft({
+      script: editedScript
+    })
+    expect(pausedSession.script).toBe(editedScript)
+
+    resumeManualRecording()
+    const frame = createFrame({ url: "https://demo.playwright.dev/todomvc/#/" })
+    emitRecorderMessage(frame, {
+      type: "press",
+      locator: {
+        role: "textbox",
+        accessibleName: "What needs to be done?",
+        target: "What needs to be done?"
+      },
+      key: "Enter"
+    })
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "What needs to be done?" }).fill("保存后的内容");'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "What needs to be done?" }).press("Enter");'
+    )
+    expect(session.script.indexOf('fill("保存后的内容")')).toBeLessThan(
+      session.script.indexOf('press("Enter")')
+    )
+  })
+
+  it("does not record implicit navigation after link clicks", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/list" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "link",
+        accessibleName: "Open detail",
+        target: "Open detail"
+      }
+    })
+    emitRecorderMessage(frame, {
+      type: "navigate",
+      url: "https://example.com/detail"
+    })
+
+    const session = stopManualRecording()
+    expect(session.actions).toHaveLength(1)
+    expect(session.script).toContain(
+      'await page.getByRole("link", { name: "Open detail" }).click();'
+    )
+    expect(session.script).not.toContain('await page.goto("https://example.com/detail");')
+  })
+
+  it("does not record implicit navigation after tab clicks", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://todomvc.com/" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "tab",
+        accessibleName: "Reposts",
+        target: "Reposts"
+      }
+    })
+    emitRecorderMessage(frame, {
+      type: "navigate",
+      url: "https://medium.com/@tastejs/reposts"
+    })
+
+    const session = stopManualRecording()
+    expect(session.actions).toHaveLength(1)
+    expect(session.script).toContain('await page.getByRole("tab", { name: "Reposts" }).click();')
+    expect(session.script).not.toContain('await page.goto("https://medium.com/@tastejs/reposts");')
+  })
+
   it("builds frame locators for manually recorded iframe actions", () => {
     startManualRecording({ threadId: "thread-1" })
     const topFrame = createFrame({ url: "https://example.com/checkout" })
@@ -183,5 +379,34 @@ describe("manual recording service", () => {
         url: "https://example.com/second"
       })
     ])
+  })
+
+  it("records implicit navigation only after an explicit navigation mark", () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    recordManualNavigation("https://should-not-record.test", "implicit")
+    markNextManualNavigationExplicit("https://example.com/dashboard")
+    recordManualNavigation("https://example.com/dashboard", "implicit")
+
+    const session = stopManualRecording()
+    expect(session.actions).toHaveLength(1)
+    expect(session.actions[0]).toMatchObject({
+      kind: "navigate",
+      url: "https://example.com/dashboard"
+    })
+  })
+
+  it("records implicit navigation after an untargeted explicit navigation mark", () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    markNextManualNavigationExplicit()
+    recordManualNavigation("https://example.com/history-entry", "implicit")
+
+    const session = stopManualRecording()
+    expect(session.actions).toHaveLength(1)
+    expect(session.actions[0]).toMatchObject({
+      kind: "navigate",
+      url: "https://example.com/history-entry"
+    })
   })
 })

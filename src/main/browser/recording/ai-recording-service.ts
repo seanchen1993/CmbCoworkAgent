@@ -2,9 +2,11 @@ import type {
   AiRecordedBrowserAction,
   BrowserLocatorMetadata,
   AiRecordingSession,
-  AiRecordingStartOptions
+  AiRecordingStartOptions,
+  BrowserRecordingDraftUpdateInput
 } from "../../../shared/browser-types"
 import {
+  parseAiRecordingScript,
   generateAiRecordingScript,
   type LocatorRole
 } from "../../../shared/browser-ai-recording-script"
@@ -690,14 +692,36 @@ function toView(session: AiRecordingSession | null): AiRecordingSession {
   return {
     ...session,
     actions: session.actions.map(cloneAction),
-    script: generateAiRecordingScript(session.actions, { source: "ai" })
+    variableActionIds: session.variableActionIds ? [...session.variableActionIds] : undefined,
+    variableActionNames: session.variableActionNames
+      ? { ...session.variableActionNames }
+      : undefined,
+    script:
+      session.scriptPrefix &&
+      session.scriptPrefixActionCount === session.actions.length &&
+      session.scriptPrefix.trim().length > 0
+        ? session.scriptPrefix
+        : generateAiRecordingScript(session.actions, {
+            source: "ai",
+            variableActionIds: session.variableActionIds,
+            variableActionNames: session.variableActionNames
+          })
   }
 }
 
 export function startAiRecording(options: AiRecordingStartOptions = {}): AiRecordingSession {
-  if (activeSession?.status === "recording") {
+  if (activeSession && activeSession.status !== "completed") {
     return toView(activeSession)
   }
+
+  const seedScript = typeof options.seedScript === "string" ? options.seedScript.trim() : ""
+  const seededRecording = seedScript
+    ? parseAiRecordingScript(seedScript, "ai")
+    : {
+        actions: [] as AiRecordedBrowserAction[],
+        variableActionIds: [] as string[],
+        variableActionNames: {} as Record<string, string>
+      }
 
   nextSessionNumber += 1
   activeSession = {
@@ -706,11 +730,52 @@ export function startAiRecording(options: AiRecordingStartOptions = {}): AiRecor
     status: "recording",
     threadId: readString(options.threadId),
     startedAt: now(),
-    actions: [],
+    scriptPrefix: seedScript || undefined,
+    scriptPrefixActionCount: seedScript ? seededRecording.actions.length : undefined,
+    libraryFileName: readString(options.libraryFileName),
+    libraryDisplayName: readString(options.libraryDisplayName),
+    actions: seededRecording.actions,
+    variableActionIds: seededRecording.variableActionIds,
+    variableActionNames: seededRecording.variableActionNames,
     script: ""
   }
   snapshotsByThread.clear()
   lastSession = null
+  return toView(activeSession)
+}
+
+export function pauseAiRecording(): AiRecordingSession {
+  if (!activeSession || activeSession.status !== "recording")
+    return toView(activeSession ?? lastSession)
+  activeSession.status = "paused"
+  return toView(activeSession)
+}
+
+export function updateAiRecordingDraft(
+  input: BrowserRecordingDraftUpdateInput
+): AiRecordingSession {
+  if (!activeSession || activeSession.status === "completed") {
+    throw new Error("当前没有可保存的录制会话")
+  }
+
+  const script = typeof input.script === "string" ? input.script : ""
+  if (!script.trim()) {
+    throw new Error("当前没有可保存的脚本内容")
+  }
+
+  const parsed = parseAiRecordingScript(script, "ai")
+  activeSession.actions = parsed.actions
+  activeSession.variableActionIds = parsed.variableActionIds
+  activeSession.variableActionNames = parsed.variableActionNames
+  activeSession.scriptPrefix = script
+  activeSession.scriptPrefixActionCount = parsed.actions.length
+  return toView(activeSession)
+}
+
+export function resumeAiRecording(): AiRecordingSession {
+  if (!activeSession || activeSession.status !== "paused")
+    return toView(activeSession ?? lastSession)
+  activeSession.status = "recording"
   return toView(activeSession)
 }
 

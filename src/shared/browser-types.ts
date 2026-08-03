@@ -61,6 +61,8 @@ export interface BrowserLocatorMetadata {
   nth?: number
 }
 
+export type BrowserNavigationSource = "explicit" | "implicit"
+
 export type BrowserRecordingSource = "ai" | "manual"
 
 interface AiRecordedBrowserActionBase {
@@ -94,6 +96,7 @@ export type AiRecordedBrowserAction =
   | (AiRecordedBrowserActionBase & {
       kind: "navigate"
       url: string
+      navigationSource?: BrowserNavigationSource
     })
   | (AiRecordedBrowserActionBase & {
       kind: "click"
@@ -121,11 +124,16 @@ export type AiRecordedBrowserAction =
       target?: string
     })
 
-export type AiRecordingStatus = "idle" | "recording" | "completed"
+export type AiRecordingStatus = "idle" | "recording" | "paused" | "completed"
 
 export interface AiRecordingStartOptions {
   /** The task that started the global recording session. */
   threadId?: string
+  /** Seed the recording from an existing Playwright script. */
+  seedScript?: string | null
+  /** Continue recording from an existing browser script file. */
+  libraryFileName?: string | null
+  libraryDisplayName?: string | null
 }
 
 export interface ManualRecordingStartOptions {
@@ -133,6 +141,11 @@ export interface ManualRecordingStartOptions {
   threadId?: string
   /** Seed the generated script with the current page when available. */
   currentUrl?: string | null
+  /** Seed the recording from an existing Playwright script. */
+  seedScript?: string | null
+  /** Continue recording from an existing browser script file. */
+  libraryFileName?: string | null
+  libraryDisplayName?: string | null
 }
 
 export interface AiRecordingSession {
@@ -142,6 +155,12 @@ export interface AiRecordingSession {
   threadId?: string
   startedAt?: string
   stoppedAt?: string
+  scriptPrefix?: string
+  scriptPrefixActionCount?: number
+  libraryFileName?: string
+  libraryDisplayName?: string
+  variableActionIds?: string[]
+  variableActionNames?: Record<string, string>
   actions: AiRecordedBrowserAction[]
   script: string
 }
@@ -166,6 +185,15 @@ export interface BrowserScriptLibraryListOptions {
 
 export interface BrowserScriptLibraryDeleteInput {
   fileName: string
+}
+
+export interface BrowserScriptLibraryUpdateInput {
+  fileName: string
+  script: string
+}
+
+export interface BrowserRecordingDraftUpdateInput {
+  script: string
 }
 
 export interface BrowserScriptLibraryReadInput {

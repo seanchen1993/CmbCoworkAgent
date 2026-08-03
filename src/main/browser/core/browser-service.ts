@@ -17,6 +17,7 @@ import {
 import {
   getManualRecording,
   installManualRecorderForSubtree,
+  markNextManualNavigationExplicit,
   recordManualRecorderConsoleMessage,
   recordManualNavigation
 } from "../recording/manual-recording-service"
@@ -82,7 +83,9 @@ function formatSessionSnapshot(session: BrowserSession | null): string {
   return `id=${session.id} attached=${session.isAttached} visible=${session.view.getVisible()} bounds=${formatBounds(session.view.getBounds())} destroyed=${destroyed} url=${url}`
 }
 
-function sameSiteForElectron(value: BrowserSessionCookie["sameSite"]): CookiesSetDetails["sameSite"] {
+function sameSiteForElectron(
+  value: BrowserSessionCookie["sameSite"]
+): CookiesSetDetails["sameSite"] {
   switch ((value ?? "").toLowerCase()) {
     case "strict":
       return "strict"
@@ -333,7 +336,9 @@ export class BrowserService {
     }
 
     const state = this.getState()
-    console.info(`${BROWSER_SERVICE_LOG_PREFIX} Attached Browser session ${sessionId} visible=${state.visible}.`)
+    console.info(
+      `${BROWSER_SERVICE_LOG_PREFIX} Attached Browser session ${sessionId} visible=${state.visible}.`
+    )
     return state
   }
 
@@ -361,7 +366,9 @@ export class BrowserService {
     const sessionId = BROWSER_SESSION_ID
     const session = this.getActiveSession()
     if (!session) {
-      console.warn(`${BROWSER_SERVICE_LOG_PREFIX} Ignored bounds for inactive Browser session ${sessionId}.`)
+      console.warn(
+        `${BROWSER_SERVICE_LOG_PREFIX} Ignored bounds for inactive Browser session ${sessionId}.`
+      )
       return this.getState()
     }
 
@@ -389,7 +396,9 @@ export class BrowserService {
     }
     this.emitState(sessionId)
     const state = this.getState()
-    console.info(`${BROWSER_SERVICE_LOG_PREFIX} Updated Browser bounds for ${sessionId} to ${formatBounds(nextBounds)} visible=${nextVisible}.`)
+    console.info(
+      `${BROWSER_SERVICE_LOG_PREFIX} Updated Browser bounds for ${sessionId} to ${formatBounds(nextBounds)} visible=${nextVisible}.`
+    )
     return state
   }
 
@@ -397,7 +406,9 @@ export class BrowserService {
     const sessionId = BROWSER_SESSION_ID
     const session = this.getActiveSession()
     if (!session) {
-      console.warn(`${BROWSER_SERVICE_LOG_PREFIX} Ignored navigation for inactive Browser session ${sessionId}.`)
+      console.warn(
+        `${BROWSER_SERVICE_LOG_PREFIX} Ignored navigation for inactive Browser session ${sessionId}.`
+      )
       return this.getState()
     }
 
@@ -409,13 +420,16 @@ export class BrowserService {
     const permissionError = getUrlPermissionError(url, session.workspacePath)
     if (permissionError) {
       session.error = permissionError
-      console.warn(`${BROWSER_SERVICE_LOG_PREFIX} Navigation blocked for ${sessionId}: ${permissionError}.`)
+      console.warn(
+        `${BROWSER_SERVICE_LOG_PREFIX} Navigation blocked for ${sessionId}: ${permissionError}.`
+      )
       this.emitState(sessionId)
       return this.getState()
     }
 
     try {
       session.error = undefined
+      markNextManualNavigationExplicit(url)
       await session.view.webContents.loadURL(url)
     } catch (error) {
       const message = formatError(error)
@@ -432,6 +446,7 @@ export class BrowserService {
   goBack(): BrowserState {
     const session = this.getActiveSession()
     if (session?.view.webContents.canGoBack()) {
+      markNextManualNavigationExplicit()
       session.view.webContents.goBack()
     }
     return this.getState()
@@ -440,6 +455,7 @@ export class BrowserService {
   goForward(): BrowserState {
     const session = this.getActiveSession()
     if (session?.view.webContents.canGoForward()) {
+      markNextManualNavigationExplicit()
       session.view.webContents.goForward()
     }
     return this.getState()
@@ -448,6 +464,7 @@ export class BrowserService {
   reload(): BrowserState {
     const session = this.getActiveSession()
     if (session) {
+      markNextManualNavigationExplicit()
       session.view.webContents.reload()
     }
     return this.getState()
@@ -687,14 +704,14 @@ export class BrowserService {
       if (permissionError) {
         session.error = permissionError
       }
-      recordManualNavigation(url)
+      recordManualNavigation(url, "implicit")
       ensureManualRecorder()
       emit()
       console.info(`${BROWSER_SERVICE_LOG_PREFIX} Browser session ${session.id} reached ${url}.`)
     })
     webContents.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
       if (isMainFrame) {
-        recordManualNavigation(webContents.getURL())
+        recordManualNavigation(webContents.getURL(), "implicit")
         emit()
       }
     })
@@ -712,11 +729,15 @@ export class BrowserService {
         if (!isMainFrame || errorCode === -3) return
         session.error = `${errorDescription}${validatedURL ? `: ${validatedURL}` : ""}`
         emit()
-        console.error(`${BROWSER_SERVICE_LOG_PREFIX} Browser load failed for ${session.id}: ${session.error}.`)
+        console.error(
+          `${BROWSER_SERVICE_LOG_PREFIX} Browser load failed for ${session.id}: ${session.error}.`
+        )
       }
     )
     webContents.on("render-process-gone", (_event, details) => {
-      console.error(`${BROWSER_SERVICE_LOG_PREFIX} Browser renderer ended for ${session.id}: ${details.reason}.`)
+      console.error(
+        `${BROWSER_SERVICE_LOG_PREFIX} Browser renderer ended for ${session.id}: ${details.reason}.`
+      )
     })
     webContents.on("destroyed", () => {
       console.info(`${BROWSER_SERVICE_LOG_PREFIX} Browser webContents destroyed for ${session.id}.`)
@@ -770,7 +791,9 @@ export class BrowserService {
     try {
       webContents.invalidate()
     } catch (error) {
-      console.warn(`${BROWSER_SERVICE_LOG_PREFIX} Browser invalidate failed for ${session.id}: ${formatError(error)}.`)
+      console.warn(
+        `${BROWSER_SERVICE_LOG_PREFIX} Browser invalidate failed for ${session.id}: ${formatError(error)}.`
+      )
     }
   }
 
@@ -791,7 +814,9 @@ export class BrowserService {
         session.isAttached = false
         console.info(`${BROWSER_SERVICE_LOG_PREFIX} removeChildView completed for ${session.id}.`)
       } catch (error) {
-        console.warn(`${BROWSER_SERVICE_LOG_PREFIX} Browser view detach failed for ${session.id}: ${formatError(error)}.`)
+        console.warn(
+          `${BROWSER_SERVICE_LOG_PREFIX} Browser view detach failed for ${session.id}: ${formatError(error)}.`
+        )
       }
     }
 
@@ -801,7 +826,9 @@ export class BrowserService {
         session.view.webContents.close({ waitForBeforeUnload: false })
       }
     } catch (error) {
-      console.warn(`${BROWSER_SERVICE_LOG_PREFIX} Browser close failed for ${session.id}: ${formatError(error)}.`)
+      console.warn(
+        `${BROWSER_SERVICE_LOG_PREFIX} Browser close failed for ${session.id}: ${formatError(error)}.`
+      )
     }
 
     console.info(`${BROWSER_SERVICE_LOG_PREFIX} Disposed Browser session ${session.id}.`)

@@ -3,9 +3,14 @@ import type {
   AiRecordedBrowserAction,
   AiRecordingSession,
   BrowserLocatorMetadata,
-  ManualRecordingStartOptions
+  BrowserNavigationSource,
+  ManualRecordingStartOptions,
+  BrowserRecordingDraftUpdateInput
 } from "../../../shared/browser-types"
-import { generateAiRecordingScript } from "../../../shared/browser-ai-recording-script"
+import {
+  generateAiRecordingScript,
+  parseAiRecordingScript
+} from "../../../shared/browser-ai-recording-script"
 
 const MANUAL_RECORDER_EVENT_PREFIX = "[ManualRecorder]"
 const MANUAL_RECORDER_INJECTION_FLAG = "__cmbManualRecorderInstalled"
@@ -14,6 +19,9 @@ let activeSession: AiRecordingSession | null = null
 let lastSession: AiRecordingSession | null = null
 let nextSessionNumber = 0
 let nextActionNumber = 0
+let pendingExplicitNavigation: { expiresAt: number; url?: string } | null = null
+
+const EXPLICIT_NAVIGATION_TTL_MS = 10_000
 
 interface ManualRecorderEventBase {
   type: string
@@ -157,14 +165,14 @@ function normalizeLocatorPayload(
 function isSensitiveTarget(locator: BrowserLocatorMetadata | undefined): boolean {
   return Boolean(
     locator &&
-      [
-        locator.target,
-        locator.label,
-        locator.placeholder,
-        locator.accessibleName,
-        locator.testId,
-        locator.inputType
-      ].some((value) => value && SENSITIVE_TARGET_PATTERN.test(value))
+    [
+      locator.target,
+      locator.label,
+      locator.placeholder,
+      locator.accessibleName,
+      locator.testId,
+      locator.inputType
+    ].some((value) => value && SENSITIVE_TARGET_PATTERN.test(value))
   )
 }
 
@@ -189,6 +197,39 @@ function actionTargetKey(action: AiRecordedBrowserAction): string {
         }
       : null
   })
+}
+
+function normalizeNavigationUrl(value: string): string {
+  try {
+    return new URL(value).href
+  } catch {
+    return value.trim()
+  }
+}
+
+function setPendingExplicitNavigation(url?: string): void {
+  pendingExplicitNavigation = {
+    expiresAt: Date.now() + EXPLICIT_NAVIGATION_TTL_MS,
+    url: url ? normalizeNavigationUrl(url) : undefined
+  }
+}
+
+function takePendingExplicitNavigation(url: string): boolean {
+  if (!pendingExplicitNavigation) return false
+  if (Date.now() > pendingExplicitNavigation.expiresAt) {
+    pendingExplicitNavigation = null
+    return false
+  }
+
+  if (
+    pendingExplicitNavigation.url &&
+    pendingExplicitNavigation.url !== normalizeNavigationUrl(url)
+  ) {
+    return false
+  }
+
+  pendingExplicitNavigation = null
+  return true
 }
 
 function appendAction(session: AiRecordingSession, action: AiRecordedBrowserAction): void {
@@ -287,7 +328,20 @@ function toView(session: AiRecordingSession | null): AiRecordingSession {
   return {
     ...session,
     actions: session.actions.map(cloneAction),
-    script: generateAiRecordingScript(session.actions, { source: "manual" })
+    variableActionIds: session.variableActionIds ? [...session.variableActionIds] : undefined,
+    variableActionNames: session.variableActionNames
+      ? { ...session.variableActionNames }
+      : undefined,
+    script:
+      session.scriptPrefix &&
+      session.scriptPrefixActionCount === session.actions.length &&
+      session.scriptPrefix.trim().length > 0
+        ? session.scriptPrefix
+        : generateAiRecordingScript(session.actions, {
+            source: "manual",
+            variableActionIds: session.variableActionIds,
+            variableActionNames: session.variableActionNames
+          })
   }
 }
 
@@ -308,12 +362,20 @@ function buildFramePath(frame: WebFrameMain): string[] {
 }
 
 function buildNavigationAction(url: string): AiRecordedBrowserAction {
+  return buildNavigationActionWithSource(url, "explicit")
+}
+
+function buildNavigationActionWithSource(
+  url: string,
+  navigationSource: BrowserNavigationSource
+): AiRecordedBrowserAction {
   return {
     id: nextActionId(),
     kind: "navigate",
     source: "manual",
     timestamp: now(),
-    url
+    url,
+    navigationSource
   }
 }
 
@@ -326,13 +388,7 @@ function normalizeManualEvent(
     case "navigate": {
       const url = readString(event.url ?? event.frameHref)
       if (!url) return null
-      return {
-        id: nextActionId(),
-        kind: "navigate",
-        source: "manual",
-        timestamp,
-        url
-      }
+      return buildNavigationActionWithSource(url, "implicit")
     }
     case "click": {
       const locator = normalizeLocatorPayload(event.locator, framePath)
@@ -355,7 +411,7 @@ function normalizeManualEvent(
         source: "manual",
         timestamp,
         target: locator?.target,
-        value: sensitive ? "" : readString(event.value) ?? "",
+        value: sensitive ? "" : (readString(event.value) ?? ""),
         sensitive,
         locator
       }
@@ -407,7 +463,16 @@ function normalizeManualEvent(
 export function startManualRecording(
   options: ManualRecordingStartOptions = {}
 ): AiRecordingSession {
-  if (activeSession?.status === "recording") return toView(activeSession)
+  if (activeSession && activeSession.status !== "completed") return toView(activeSession)
+
+  const seedScript = typeof options.seedScript === "string" ? options.seedScript.trim() : ""
+  const seededRecording = seedScript
+    ? parseAiRecordingScript(seedScript, "manual")
+    : {
+        actions: [] as AiRecordedBrowserAction[],
+        variableActionIds: [] as string[],
+        variableActionNames: {} as Record<string, string>
+      }
 
   nextSessionNumber += 1
   activeSession = {
@@ -416,16 +481,61 @@ export function startManualRecording(
     status: "recording",
     threadId: readString(options.threadId),
     startedAt: now(),
-    actions: [],
+    scriptPrefix: seedScript || undefined,
+    scriptPrefixActionCount: seedScript ? seededRecording.actions.length : undefined,
+    libraryFileName: readString(options.libraryFileName),
+    libraryDisplayName: readString(options.libraryDisplayName),
+    actions: seededRecording.actions,
+    variableActionIds: seededRecording.variableActionIds,
+    variableActionNames: seededRecording.variableActionNames,
     script: ""
   }
 
   const currentUrl = readString(options.currentUrl ?? undefined)
-  if (currentUrl && currentUrl !== "about:blank") {
+  if (!seedScript && currentUrl && currentUrl !== "about:blank") {
     appendAction(activeSession, buildNavigationAction(currentUrl))
   }
 
+  pendingExplicitNavigation = null
   lastSession = null
+  return toView(activeSession)
+}
+
+export function pauseManualRecording(): AiRecordingSession {
+  if (!activeSession || activeSession.status !== "recording")
+    return toView(activeSession ?? lastSession)
+  activeSession.status = "paused"
+  pendingExplicitNavigation = null
+  return toView(activeSession)
+}
+
+export function updateManualRecordingDraft(
+  input: BrowserRecordingDraftUpdateInput
+): AiRecordingSession {
+  if (!activeSession || activeSession.status === "completed") {
+    throw new Error("当前没有可保存的录制会话")
+  }
+
+  const script = typeof input.script === "string" ? input.script : ""
+  if (!script.trim()) {
+    throw new Error("当前没有可保存的脚本内容")
+  }
+
+  const parsed = parseAiRecordingScript(script, "manual")
+  activeSession.actions = parsed.actions
+  activeSession.variableActionIds = parsed.variableActionIds
+  activeSession.variableActionNames = parsed.variableActionNames
+  activeSession.scriptPrefix = script
+  activeSession.scriptPrefixActionCount = parsed.actions.length
+  pendingExplicitNavigation = null
+  return toView(activeSession)
+}
+
+export function resumeManualRecording(): AiRecordingSession {
+  if (!activeSession || activeSession.status !== "paused")
+    return toView(activeSession ?? lastSession)
+  activeSession.status = "recording"
+  pendingExplicitNavigation = null
   return toView(activeSession)
 }
 
@@ -434,6 +544,7 @@ export function stopManualRecording(): AiRecordingSession {
 
   activeSession.status = "completed"
   activeSession.stoppedAt = now()
+  pendingExplicitNavigation = null
   lastSession = activeSession
   activeSession = null
   return toView(lastSession)
@@ -443,11 +554,21 @@ export function getManualRecording(): AiRecordingSession {
   return toView(activeSession ?? lastSession)
 }
 
-export function recordManualNavigation(url: string): void {
+export function recordManualNavigation(
+  url: string,
+  source: BrowserNavigationSource = "explicit"
+): void {
   if (!activeSession || activeSession.status !== "recording") return
   const nextUrl = readString(url)
   if (!nextUrl || nextUrl === "about:blank") return
+  if (source === "implicit" && !takePendingExplicitNavigation(nextUrl)) return
+  if (source === "explicit") pendingExplicitNavigation = null
   appendAction(activeSession, buildNavigationAction(nextUrl))
+}
+
+export function markNextManualNavigationExplicit(url?: string): void {
+  if (!activeSession || activeSession.status !== "recording") return
+  setPendingExplicitNavigation(url)
 }
 
 export async function installManualRecorder(frame: WebFrameMain): Promise<void> {
@@ -587,9 +708,25 @@ export async function installManualRecorder(frame: WebFrameMain): Promise<void> 
       emit({ type: 'click', locator: locatorForElement(target), doubleClick: event.detail === 2 });
     }, true);
 
+    function emitTextFill(target) {
+      emit({ type: 'fill', locator: locatorForElement(target), value: target.value });
+    }
+
+    document.addEventListener('input', (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+      if (target instanceof HTMLInputElement) {
+        if (target.type === 'file' || target.type === 'checkbox' || target.type === 'radio') {
+          return;
+        }
+      }
+
+      emitTextFill(target);
+    }, true);
+
     document.addEventListener('change', (event) => {
       const target = event.target;
-      if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)) return;
+      if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return;
       if (target instanceof HTMLSelectElement) {
         emit({
           type: 'select',
@@ -619,8 +756,6 @@ export async function installManualRecorder(frame: WebFrameMain): Promise<void> 
       if (target instanceof HTMLInputElement && (target.type === 'checkbox' || target.type === 'radio')) {
         return;
       }
-
-      emit({ type: 'fill', locator: locatorForElement(target), value: target.value });
     }, true);
 
     document.addEventListener('keydown', (event) => {
@@ -659,6 +794,12 @@ export function recordManualRecorderConsoleMessage(frame: WebFrameMain, message:
     return
   }
 
+  if (parsed.type === "navigate") {
+    const url = readString(parsed.url ?? parsed.frameHref)
+    if (url) recordManualNavigation(url, "implicit")
+    return
+  }
+
   const action = normalizeManualEvent(parsed, buildFramePath(frame))
   if (!action) return
   appendAction(activeSession, action)
@@ -669,4 +810,5 @@ export function resetManualRecordingForTests(): void {
   lastSession = null
   nextSessionNumber = 0
   nextActionNumber = 0
+  pendingExplicitNavigation = null
 }

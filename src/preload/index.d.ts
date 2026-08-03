@@ -103,12 +103,14 @@ import type {
   BrowserPanelRequest,
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
+  BrowserRecordingDraftUpdateInput,
   BrowserScreenshotResult,
   ManualRecordingStartOptions,
   BrowserScriptLibraryEntry,
   BrowserScriptLibraryListOptions,
   BrowserScriptLibraryReadInput,
   BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput,
   BrowserState
 } from "../shared/browser-types"
 import type { CloseToTrayPromptAction, CloseToTrayPromptEvent } from "../shared/close-to-tray"
@@ -1566,9 +1568,17 @@ interface CustomAPI {
     clearConsole: () => Promise<BrowserState>
     getState: () => Promise<BrowserState>
     startAiRecording: (options?: AiRecordingStartOptions) => Promise<AiRecordingSession>
+    pauseAiRecording: () => Promise<AiRecordingSession>
+    updateAiRecordingDraft: (input: BrowserRecordingDraftUpdateInput) => Promise<AiRecordingSession>
+    resumeAiRecording: () => Promise<AiRecordingSession>
     stopAiRecording: () => Promise<AiRecordingSession>
     getAiRecording: () => Promise<AiRecordingSession>
     startManualRecording: (options?: ManualRecordingStartOptions) => Promise<AiRecordingSession>
+    pauseManualRecording: () => Promise<AiRecordingSession>
+    updateManualRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ) => Promise<AiRecordingSession>
+    resumeManualRecording: () => Promise<AiRecordingSession>
     stopManualRecording: () => Promise<AiRecordingSession>
     getManualRecording: () => Promise<AiRecordingSession>
     saveScriptLibraryEntry: (
@@ -1578,6 +1588,7 @@ interface CustomAPI {
       options?: BrowserScriptLibraryListOptions
     ) => Promise<BrowserScriptLibraryEntry[]>
     readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
+    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput) => Promise<void>
     deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
     getCdpConfig: () => Promise<BrowserCdpConfig>
     isProfileImportRuntimeEnabled: () => Promise<boolean>
