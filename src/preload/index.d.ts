@@ -2458,6 +2458,19 @@ interface CustomAPI {
       totalTraces: number
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
+    exportUserTraces: (payload: {
+      sapId: string
+      ystId?: string
+      userName: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalItems: number
+      viewMode: DashboardTraceViewMode
+      triggerScope: DashboardTraceTriggerScope
+      projectMode: boolean
+      traces: DashboardTraceDetail[]
+    }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
       sheets: Array<{
         name: string

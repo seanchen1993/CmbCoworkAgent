@@ -790,6 +790,25 @@ interface DashboardTraceExportPayload {
   traces: DashboardTraceDetail[]
 }
 
+interface DashboardUserTraceExportPayload {
+  sapId: string
+  ystId?: string
+  userName: string
+  range: TimeRange
+  page: number
+  pageSize: number
+  totalItems: number
+  viewMode: TraceViewMode
+  triggerScope: TraceTriggerScope
+  projectMode: boolean
+  traces: DashboardTraceDetail[]
+}
+
+interface DashboardThreadTraceExport {
+  threadId: string
+  traces: DashboardTraceDetail[]
+}
+
 interface CommitDetailsOptions {
   page?: number
   pageSize?: number
@@ -1169,6 +1188,78 @@ function stringifyExportValue(value: unknown): string {
   }
 }
 
+function appendTraceExportMarkdown(
+  lines: string[],
+  trace: DashboardTraceDetail,
+  traceHeadingLevel = 2
+): void {
+  const traceHeading = "#".repeat(traceHeadingLevel)
+  const sectionHeading = "#".repeat(traceHeadingLevel + 1)
+  const nodeHeading = "#".repeat(traceHeadingLevel + 2)
+
+  lines.push(`${traceHeading} Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
+  lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
+  lines.push(`- Time: ${trace.startedAt || "-"}`)
+  lines.push(`- Outcome: ${trace.outcome || "-"}`)
+  lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
+  lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
+  lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
+  lines.push(
+    `- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`
+  )
+  if (trace.userName || trace.sapId || trace.ystId) {
+    lines.push(
+      `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
+    )
+  }
+  if (trace.usedSkills.length > 0) {
+    lines.push(
+      `- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`
+    )
+  }
+  lines.push("")
+
+  if (trace.userMessage.trim()) {
+    lines.push(`${sectionHeading} User Message`, "", trace.userMessage.trim(), "")
+  }
+
+  if (trace.nodes && trace.nodes.length > 0) {
+    lines.push(`${sectionHeading} Trace Nodes`, "")
+    for (const node of trace.nodes) {
+      lines.push(
+        `${nodeHeading} ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`,
+        ""
+      )
+      const metadata = [
+        `id: \`${escapeMarkdown(node.id)}\``,
+        node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
+        node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
+        `startedAt: ${node.startedAt}`,
+        node.endedAt ? `endedAt: ${node.endedAt}` : null
+      ].filter(Boolean)
+      lines.push(`_${metadata.join(", ")}_`, "")
+      if (node.input !== undefined) {
+        lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
+      }
+      if (node.output !== undefined) {
+        lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
+      }
+      if (node.metadata && Object.keys(node.metadata).length > 0) {
+        lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
+      }
+    }
+  } else {
+    lines.push(
+      `${sectionHeading} Trace Summary`,
+      "",
+      "```json",
+      stringifyExportValue(trace),
+      "```",
+      ""
+    )
+  }
+}
+
 function formatTraceExportMarkdown(
   payload: DashboardTraceExportPayload,
   exportedAt: string
@@ -1186,59 +1277,60 @@ function formatTraceExportMarkdown(
   ]
 
   for (const trace of payload.traces) {
-    lines.push(`## Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
-    lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
-    lines.push(`- Time: ${trace.startedAt || "-"}`)
-    lines.push(`- Outcome: ${trace.outcome || "-"}`)
-    lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
-    lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
-    lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
-    lines.push(
-      `- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`
-    )
-    if (trace.userName || trace.sapId || trace.ystId) {
-      lines.push(
-        `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
-      )
-    }
-    if (trace.usedSkills.length > 0) {
-      lines.push(
-        `- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`
-      )
-    }
-    lines.push("")
+    appendTraceExportMarkdown(lines, trace)
+  }
 
-    if (trace.userMessage.trim()) {
-      lines.push("### User Message", "", trace.userMessage.trim(), "")
-    }
+  return `${lines.join("\n").trimEnd()}\n`
+}
 
-    if (trace.nodes && trace.nodes.length > 0) {
-      lines.push("### Trace Nodes", "")
-      for (const node of trace.nodes) {
-        lines.push(
-          `#### ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`,
-          ""
-        )
-        const metadata = [
-          `id: \`${escapeMarkdown(node.id)}\``,
-          node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
-          node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
-          `startedAt: ${node.startedAt}`,
-          node.endedAt ? `endedAt: ${node.endedAt}` : null
-        ].filter(Boolean)
-        lines.push(`_${metadata.join(", ")}_`, "")
-        if (node.input !== undefined) {
-          lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
-        }
-        if (node.output !== undefined) {
-          lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
-        }
-        if (node.metadata && Object.keys(node.metadata).length > 0) {
-          lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
-        }
+function traceExportThreadId(trace: DashboardTraceDetail): string {
+  return trace.rootThreadId || trace.threadId || "unknown-thread"
+}
+
+function groupTraceExportThreads(traces: DashboardTraceDetail[]): DashboardThreadTraceExport[] {
+  const grouped = new Map<string, DashboardTraceDetail[]>()
+  for (const trace of traces) {
+    const threadId = traceExportThreadId(trace)
+    const threadTraces = grouped.get(threadId) ?? []
+    threadTraces.push(trace)
+    grouped.set(threadId, threadTraces)
+  }
+  return Array.from(grouped, ([threadId, threadTraces]) => ({ threadId, traces: threadTraces }))
+}
+
+function formatUserTraceExportMarkdown(
+  payload: DashboardUserTraceExportPayload,
+  exportedAt: string
+): string {
+  const viewLabel = payload.viewMode === "thread" ? "Thread" : "Trace"
+  const totalLabel = payload.viewMode === "thread" ? "Threads" : "Traces"
+  const lines: string[] = [
+    `# 用户 ${viewLabel} 历史 · ${escapeMarkdown(payload.userName || payload.sapId)}`,
+    "",
+    `- User: ${escapeMarkdown(payload.userName || "-")}`,
+    `- SAP ID: \`${escapeMarkdown(payload.sapId)}\``,
+    ...(payload.ystId ? [`- YST ID: \`${escapeMarkdown(payload.ystId)}\``] : []),
+    `- Range: ${payload.range.from} 至 ${payload.range.to}`,
+    `- View Mode: ${viewLabel}`,
+    `- Trigger Scope: ${payload.triggerScope}`,
+    `- Project Mode: ${payload.projectMode ? "yes" : "no"}`,
+    `- Page: ${payload.page}`,
+    `- Page Size: ${payload.pageSize}`,
+    `- Total ${totalLabel}: ${payload.totalItems}`,
+    `- Exported: ${exportedAt}`,
+    ""
+  ]
+
+  if (payload.viewMode === "thread") {
+    for (const thread of groupTraceExportThreads(payload.traces)) {
+      lines.push(`## Thread ${escapeMarkdown(thread.threadId)}`, "")
+      for (const trace of thread.traces) {
+        appendTraceExportMarkdown(lines, trace, 3)
       }
-    } else {
-      lines.push("### Trace Summary", "", "```json", stringifyExportValue(trace), "```", "")
+    }
+  } else {
+    for (const trace of payload.traces) {
+      appendTraceExportMarkdown(lines, trace)
     }
   }
 
@@ -1264,6 +1356,39 @@ function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayloa
     page: clampLimit(page, 1, 1000),
     pageSize: clampLimit(pageSize, 10, 50),
     totalTraces: asNumber(payload.totalTraces, traces.length),
+    traces
+  }
+}
+
+function normalizeUserTraceExportPayload(value: unknown): DashboardUserTraceExportPayload {
+  const payload = asRecord(value)
+  const range = asRecord(payload.range)
+  const viewMode = normalizeTraceViewMode(payload.viewMode)
+  const traces = Array.isArray(payload.traces)
+    ? payload.traces.map((trace) => redactTraceDetailForDisplay(trace as DashboardTraceDetail))
+    : []
+
+  return {
+    sapId: asString(payload.sapId).trim(),
+    ystId: asOptionalString(payload.ystId)?.trim() || undefined,
+    userName: asString(payload.userName).trim(),
+    range: {
+      from: asString(range.from),
+      to: asString(range.to)
+    },
+    page: clampLimit(typeof payload.page === "number" ? payload.page : undefined, 1, 1000),
+    pageSize: clampLimit(
+      typeof payload.pageSize === "number" ? payload.pageSize : undefined,
+      10,
+      50
+    ),
+    totalItems: asNumber(
+      payload.totalItems,
+      viewMode === "thread" ? groupTraceExportThreads(traces).length : traces.length
+    ),
+    viewMode,
+    triggerScope: normalizeTraceTriggerScope(payload.triggerScope),
+    projectMode: payload.projectMode === true,
     traces
   }
 }
@@ -14302,6 +14427,62 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       return { success: true, filePath: result.filePath }
     } catch (e) {
       console.error("[Dashboard] exportSkillTraces error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  _ipcMain.handle("dashboard:exportUserTraces", async (event, rawPayload: unknown) => {
+    try {
+      const payload = normalizeUserTraceExportPayload(rawPayload)
+      if (!payload.sapId) return { success: false, error: "sapId is required" }
+      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+
+      const exportedAt = new Date().toISOString()
+      const date = exportedAt.slice(0, 10)
+      const viewLabel = payload.viewMode === "thread" ? "threads" : "traces"
+      const displayName = payload.userName || payload.sapId
+      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+        title: `导出用户 ${payload.viewMode === "thread" ? "Thread" : "Trace"} 历史`,
+        defaultPath: `${safeExportFileName(`${displayName}-${payload.sapId}`)}-${viewLabel}-page-${payload.page}-${date}.zip`,
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+      })
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true }
+      }
+
+      const zip = new AdmZip()
+      zip.addFile(
+        `${viewLabel}.md`,
+        Buffer.from(formatUserTraceExportMarkdown(payload, exportedAt), "utf-8")
+      )
+      const commonPayload = {
+        version: 1,
+        exportedAt,
+        exportType: payload.viewMode,
+        user: {
+          sapId: payload.sapId,
+          ...(payload.ystId ? { ystId: payload.ystId } : {}),
+          userName: payload.userName
+        },
+        range: payload.range,
+        page: payload.page,
+        pageSize: payload.pageSize,
+        totalItems: payload.totalItems,
+        triggerScope: payload.triggerScope,
+        projectMode: payload.projectMode
+      }
+      const data =
+        payload.viewMode === "thread"
+          ? { ...commonPayload, threads: groupTraceExportThreads(payload.traces) }
+          : { ...commonPayload, traces: payload.traces }
+      zip.addFile(`${viewLabel}.json`, Buffer.from(`${stringifyExportValue(data)}\n`, "utf-8"))
+      zip.writeZip(result.filePath)
+
+      return { success: true, filePath: result.filePath }
+    } catch (e) {
+      console.error("[Dashboard] exportUserTraces error:", e)
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   })

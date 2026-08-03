@@ -1595,6 +1595,8 @@ function UserDetailPage({
   onTraceNext,
   onTraceViewModeChange,
   onTraceTriggerScopeChange,
+  onExportPage,
+  exporting,
   loadThreadTraces
 }: {
   data: DashboardUserDetail | null
@@ -1609,6 +1611,8 @@ function UserDetailPage({
   onTraceNext: () => void
   onTraceViewModeChange: (mode: DashboardTraceViewMode) => void
   onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
+  onExportPage: () => void
+  exporting: boolean
   loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
@@ -1753,6 +1757,21 @@ function UserDetailPage({
                     value={traceTriggerScope}
                     onChange={onTraceTriggerScopeChange}
                   />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1"
+                    onClick={onExportPage}
+                    disabled={exporting || loading || data.traces.length === 0}
+                  >
+                    {exporting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Download className="size-3.5" />
+                    )}
+                    导出本页
+                  </Button>
                   <Button
                     type="button"
                     variant="outline"
@@ -2800,6 +2819,7 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardTraceViewMode>("thread")
   const [userDetailTraceTriggerScope, setUserDetailTraceTriggerScope] =
     useState<DashboardTraceTriggerScope>("active")
+  const [userDetailTraceExporting, setUserDetailTraceExporting] = useState(false)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
@@ -3907,6 +3927,33 @@ export function DashboardView(): React.JSX.Element {
     setUserDetailTracePage(1)
   }, [])
 
+  const handleUserTraceExport = useCallback(async () => {
+    if (!userDetail || userDetail.traces.length === 0) return
+    setUserDetailTraceExporting(true)
+    try {
+      const result = await window.api.dashboard.exportUserTraces({
+        sapId: userDetail.sapId,
+        ystId: userDetail.ystId,
+        userName: userDetail.userName,
+        range,
+        page: userDetail.tracePage,
+        pageSize: userDetail.tracePageSize || USER_TRACE_PAGE_SIZE,
+        totalItems: userDetail.total,
+        viewMode: userDetail.traceViewMode ?? userDetailTraceViewMode,
+        triggerScope: userDetail.traceTriggerScope ?? userDetailTraceTriggerScope,
+        projectMode: subPage.kind === "user-detail" && Boolean(subPage.projectMode),
+        traces: userDetail.traces
+      })
+      if (!result.success && !result.canceled) {
+        window.alert(result.error || "导出用户会话记录失败")
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "导出用户会话记录失败")
+    } finally {
+      setUserDetailTraceExporting(false)
+    }
+  }, [range, subPage, userDetail, userDetailTraceTriggerScope, userDetailTraceViewMode])
+
   const handleProjectTracePrevious = useCallback(() => {
     setProjectTracePage((prev) => Math.max(1, prev - 1))
   }, [])
@@ -4882,6 +4929,8 @@ export function DashboardView(): React.JSX.Element {
             onTraceNext={handleUserTraceNext}
             onTraceViewModeChange={handleUserTraceViewModeChange}
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
+            onExportPage={handleUserTraceExport}
+            exporting={userDetailTraceExporting}
             loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
           />
         </ScrollArea>
