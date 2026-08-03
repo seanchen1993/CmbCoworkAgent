@@ -291,22 +291,33 @@ function WorkspacePickerImpl({
   }
 
   async function handleRemoveWorktree(item: WorktreeItem): Promise<void> {
-    if (!gitRoot || item.isMain) return
-    if (workspacePath === item.path) {
-      setWorktreeError("当前正在使用该 Worktree，请先切换到其他路径后再删除。")
+    if (!gitRoot) {
+      toast.error("无法获取 Git 仓库信息，请刷新后重试")
       return
     }
+    if (item.isMain) return
+    if (workspacePath === item.path) {
+      toast.error("当前正在使用该 Worktree，请先切换到其他路径后再删除。")
+      return
+    }
+
+    const confirmed = window.confirm(
+      `确定要删除 Worktree "${item.branch}" 吗？\n\n路径: ${item.path}\n\n此操作不可撤销，Worktree 目录将被删除。`
+    )
+    if (!confirmed) return
+
     setRemovingWorktreePath(item.path)
-    setWorktreeError(null)
     try {
-      const result = await window.api.workspace.removeWorktree(gitRoot, item.path)
+      const result = await window.api.workspace.removeWorktree(threadId, item.path)
       if (!result.success) {
-        setWorktreeError(result.error ?? "删除失败")
+        toast.error(result.error ?? "删除失败")
         return
       }
+      toast.success(`已删除 Worktree: ${item.branch}`)
       await refreshWorktreeList(gitRoot)
     } catch (e) {
-      setWorktreeError(e instanceof Error ? e.message : "删除失败")
+      console.error("[WorkspacePicker] removeWorktree error:", e)
+      toast.error(e instanceof Error ? e.message : "删除失败")
     } finally {
       setRemovingWorktreePath(null)
     }

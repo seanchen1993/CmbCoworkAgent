@@ -10,7 +10,12 @@ import { getThreadMessages } from "../db"
 import { withCheckpointer } from "../agent/runtime"
 import type { Message } from "../types"
 import {
+  MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
+  MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
+} from "../../shared/message-role-collision"
+import {
   checkpointHasInterrupt,
+  type CheckpointTranscriptMessage,
   deriveCheckpointTranscriptIndex,
   findMessagesAfterCheckpointVisibleIds,
   isWorkflowPlumbingTranscriptContent
@@ -44,18 +49,28 @@ export function persistedMessageToRuntimeMessage(message: Message): BaseMessage 
     return new HumanMessage({ id: message.id, content })
   }
   if (message.role === "assistant") {
+    const providerSourceId = message.provider_source_id?.trim()
+    const providerOccurrence = message.provider_occurrence
+    const additionalKwargs = {
+      ...(message.reasoning ? { reasoning: message.reasoning } : {}),
+      ...(providerSourceId &&
+      typeof providerOccurrence === "number" &&
+      Number.isInteger(providerOccurrence) &&
+      providerOccurrence >= 1
+        ? {
+            [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: providerSourceId,
+            [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: providerOccurrence
+          }
+        : {})
+    }
     return new AIMessage({
       id: message.id,
       content,
       ...(message.tool_calls
         ? { tool_calls: message.tool_calls as LangChainToolCall[] }
         : {}),
-      ...(message.reasoning
-        ? {
-            additional_kwargs: {
-              reasoning: message.reasoning
-            }
-          }
+      ...(Object.keys(additionalKwargs).length > 0
+        ? { additional_kwargs: additionalKwargs }
         : {})
     })
   }
@@ -80,11 +95,14 @@ export function persistedMessageToRuntimeMessage(message: Message): BaseMessage 
 
 export function findDurableTailMessagesAfterCheckpoint(
   persistedMessages: readonly Message[],
-  checkpointVisibleMessageIds: readonly string[],
-  options: { excludeMessageIds?: readonly string[] } = {}
+  checkpointVisibleMessages: readonly (string | CheckpointTranscriptMessage)[],
+  options: {
+    excludeMessageIds?: readonly string[]
+    excludeMessages?: readonly Pick<Message, "id" | "role">[]
+  } = {}
 ): Message[] {
   const visibleMessages = persistedMessages.filter(isRuntimeVisiblePersistedMessage)
-  return findMessagesAfterCheckpointVisibleIds(visibleMessages, checkpointVisibleMessageIds, options)
+  return findMessagesAfterCheckpointVisibleIds(visibleMessages, checkpointVisibleMessages, options)
 }
 
 async function getLatestCheckpoint(threadId: string): Promise<unknown | null> {
@@ -104,7 +122,10 @@ async function getLatestCheckpoint(threadId: string): Promise<unknown | null> {
 
 export async function getDurableRuntimeTail(
   threadId: string,
-  options: { excludeMessageIds?: readonly string[] } = {}
+  options: {
+    excludeMessageIds?: readonly string[]
+    excludeMessages?: readonly Pick<Message, "id" | "role">[]
+  } = {}
 ): Promise<DurableRuntimeTail> {
   const checkpoint = await getLatestCheckpoint(threadId)
   if (!checkpoint) {
@@ -114,7 +135,7 @@ export async function getDurableRuntimeTail(
   const transcript = deriveCheckpointTranscriptIndex(checkpoint)
   const persistedTail = findDurableTailMessagesAfterCheckpoint(
     getThreadMessages(threadId),
-    transcript.visibleMessageIds,
+    transcript.visibleMessages,
     options
   )
   return {

@@ -12,6 +12,10 @@ import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
 import { buildTraceTree } from "../agent/trace/tree-builder"
+import {
+  redactTraceDetailForDisplay,
+  redactTraceSkillEvalRecordForDisplay
+} from "../agent/trace/display-redaction"
 import { TRACE_OBSERVABILITY_SCHEMA_VERSION } from "../agent/trace/types"
 import type {
   AgentTrace,
@@ -35,6 +39,7 @@ import {
   type DashboardCodeStats,
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
+import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
   executeDashboardEsQuery,
   type DashboardEsIndexAlias,
@@ -48,7 +53,6 @@ import {
   STAGE_BUCKET_LABELS,
   STAGE_DONE_LABEL,
   STAGE_IN_PROGRESS_LABEL,
-  isHarnessDevStageNodeName,
   type StageBucket
 } from "../../shared/harness-stage-bucket"
 
@@ -786,6 +790,25 @@ interface DashboardTraceExportPayload {
   traces: DashboardTraceDetail[]
 }
 
+interface DashboardUserTraceExportPayload {
+  sapId: string
+  ystId?: string
+  userName: string
+  range: TimeRange
+  page: number
+  pageSize: number
+  totalItems: number
+  viewMode: TraceViewMode
+  triggerScope: TraceTriggerScope
+  projectMode: boolean
+  traces: DashboardTraceDetail[]
+}
+
+interface DashboardThreadTraceExport {
+  threadId: string
+  traces: DashboardTraceDetail[]
+}
+
 interface CommitDetailsOptions {
   page?: number
   pageSize?: number
@@ -849,6 +872,9 @@ const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
 // 评奖辅助看板当前仅开放给这四个 ystId；env 可覆盖，留空则回退到此默认名单，
 // 保证即使未配置环境变量也严格只对这四人可见。
 const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855,231858"
+const DASHBOARD_SKILL_EVAL_IDS_ENV = "VITE_DASHBOARD_SKILL_EVAL_YST_IDS"
+// 技能评估 tab 白名单；env 可覆盖，留空则回退到此默认名单。
+const DASHBOARD_SKILL_EVAL_DEFAULT_IDS = "383331"
 
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
@@ -876,6 +902,13 @@ function getDashboardAwardsAdminIds(): Set<string> {
     (import.meta.env[DASHBOARD_AWARDS_ADMIN_IDS_ENV] as string | undefined) || ""
   ).trim()
   return splitEnvIds(configured || DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS)
+}
+
+function getDashboardSkillEvalAllowedIds(): Set<string> {
+  const configured = String(
+    (import.meta.env[DASHBOARD_SKILL_EVAL_IDS_ENV] as string | undefined) || ""
+  ).trim()
+  return splitEnvIds(configured || DASHBOARD_SKILL_EVAL_DEFAULT_IDS)
 }
 
 function getDashboardAccessContext(): DashboardAccessContext {
@@ -948,6 +981,16 @@ function requireDashboardAwardsAccess(): DashboardAccessContext {
     throw new Error("无评奖辅助看板访问权限")
   }
   return access
+}
+
+// 技能评估 tab 的访问门禁：仅 DASHBOARD_SKILL_EVAL 白名单内的 ystId 可见。
+// DEV 直接放行便于本地预览。
+function isDashboardSkillEvalAllowed(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  if (!access.loggedIn || !access.ystId) return false
+  return getDashboardSkillEvalAllowedIds().has(access.ystId)
 }
 
 function isDashboardAnalysisAgentAllowed(): boolean {
@@ -1165,6 +1208,78 @@ function stringifyExportValue(value: unknown): string {
   }
 }
 
+function appendTraceExportMarkdown(
+  lines: string[],
+  trace: DashboardTraceDetail,
+  traceHeadingLevel = 2
+): void {
+  const traceHeading = "#".repeat(traceHeadingLevel)
+  const sectionHeading = "#".repeat(traceHeadingLevel + 1)
+  const nodeHeading = "#".repeat(traceHeadingLevel + 2)
+
+  lines.push(`${traceHeading} Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
+  lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
+  lines.push(`- Time: ${trace.startedAt || "-"}`)
+  lines.push(`- Outcome: ${trace.outcome || "-"}`)
+  lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
+  lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
+  lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
+  lines.push(
+    `- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`
+  )
+  if (trace.userName || trace.sapId || trace.ystId) {
+    lines.push(
+      `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
+    )
+  }
+  if (trace.usedSkills.length > 0) {
+    lines.push(
+      `- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`
+    )
+  }
+  lines.push("")
+
+  if (trace.userMessage.trim()) {
+    lines.push(`${sectionHeading} User Message`, "", trace.userMessage.trim(), "")
+  }
+
+  if (trace.nodes && trace.nodes.length > 0) {
+    lines.push(`${sectionHeading} Trace Nodes`, "")
+    for (const node of trace.nodes) {
+      lines.push(
+        `${nodeHeading} ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`,
+        ""
+      )
+      const metadata = [
+        `id: \`${escapeMarkdown(node.id)}\``,
+        node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
+        node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
+        `startedAt: ${node.startedAt}`,
+        node.endedAt ? `endedAt: ${node.endedAt}` : null
+      ].filter(Boolean)
+      lines.push(`_${metadata.join(", ")}_`, "")
+      if (node.input !== undefined) {
+        lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
+      }
+      if (node.output !== undefined) {
+        lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
+      }
+      if (node.metadata && Object.keys(node.metadata).length > 0) {
+        lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
+      }
+    }
+  } else {
+    lines.push(
+      `${sectionHeading} Trace Summary`,
+      "",
+      "```json",
+      stringifyExportValue(trace),
+      "```",
+      ""
+    )
+  }
+}
+
 function formatTraceExportMarkdown(
   payload: DashboardTraceExportPayload,
   exportedAt: string
@@ -1182,59 +1297,60 @@ function formatTraceExportMarkdown(
   ]
 
   for (const trace of payload.traces) {
-    lines.push(`## Trace ${escapeMarkdown(trace.traceId || "-")}`, "")
-    lines.push(`- Thread ID: \`${escapeMarkdown(trace.threadId || "-")}\``)
-    lines.push(`- Time: ${trace.startedAt || "-"}`)
-    lines.push(`- Outcome: ${trace.outcome || "-"}`)
-    lines.push(`- Duration: ${Math.round(trace.durationMs || 0)}ms`)
-    lines.push(`- Model: ${escapeMarkdown(trace.modelName || trace.modelId || "-")}`)
-    lines.push(`- Tool Calls: ${trace.totalToolCalls}`)
-    lines.push(
-      `- Tokens: ${trace.totalTokens} (input ${trace.totalInputTokens}, output ${trace.totalOutputTokens})`
-    )
-    if (trace.userName || trace.sapId || trace.ystId) {
-      lines.push(
-        `- User: ${escapeMarkdown(trace.userName || "-")} / ${escapeMarkdown(trace.sapId || "-")} / ${escapeMarkdown(trace.ystId || "-")}`
-      )
-    }
-    if (trace.usedSkills.length > 0) {
-      lines.push(
-        `- Skills: ${trace.usedSkills.map((skill) => `\`${escapeMarkdown(skill)}\``).join(", ")}`
-      )
-    }
-    lines.push("")
+    appendTraceExportMarkdown(lines, trace)
+  }
 
-    if (trace.userMessage.trim()) {
-      lines.push("### User Message", "", trace.userMessage.trim(), "")
-    }
+  return `${lines.join("\n").trimEnd()}\n`
+}
 
-    if (trace.nodes && trace.nodes.length > 0) {
-      lines.push("### Trace Nodes", "")
-      for (const node of trace.nodes) {
-        lines.push(
-          `#### ${escapeMarkdown(node.type)} · ${escapeMarkdown(node.name || node.id)}`,
-          ""
-        )
-        const metadata = [
-          `id: \`${escapeMarkdown(node.id)}\``,
-          node.parentId ? `parent: \`${escapeMarkdown(node.parentId)}\`` : null,
-          node.status ? `status: \`${escapeMarkdown(node.status)}\`` : null,
-          `startedAt: ${node.startedAt}`,
-          node.endedAt ? `endedAt: ${node.endedAt}` : null
-        ].filter(Boolean)
-        lines.push(`_${metadata.join(", ")}_`, "")
-        if (node.input !== undefined) {
-          lines.push("INPUT", "", "```json", stringifyExportValue(node.input), "```", "")
-        }
-        if (node.output !== undefined) {
-          lines.push("OUTPUT", "", "```json", stringifyExportValue(node.output), "```", "")
-        }
-        if (node.metadata && Object.keys(node.metadata).length > 0) {
-          lines.push("METADATA", "", "```json", stringifyExportValue(node.metadata), "```", "")
-        }
+function traceExportThreadId(trace: DashboardTraceDetail): string {
+  return trace.rootThreadId || trace.threadId || "unknown-thread"
+}
+
+function groupTraceExportThreads(traces: DashboardTraceDetail[]): DashboardThreadTraceExport[] {
+  const grouped = new Map<string, DashboardTraceDetail[]>()
+  for (const trace of traces) {
+    const threadId = traceExportThreadId(trace)
+    const threadTraces = grouped.get(threadId) ?? []
+    threadTraces.push(trace)
+    grouped.set(threadId, threadTraces)
+  }
+  return Array.from(grouped, ([threadId, threadTraces]) => ({ threadId, traces: threadTraces }))
+}
+
+function formatUserTraceExportMarkdown(
+  payload: DashboardUserTraceExportPayload,
+  exportedAt: string
+): string {
+  const viewLabel = payload.viewMode === "thread" ? "Thread" : "Trace"
+  const totalLabel = payload.viewMode === "thread" ? "Threads" : "Traces"
+  const lines: string[] = [
+    `# 用户 ${viewLabel} 历史 · ${escapeMarkdown(payload.userName || payload.sapId)}`,
+    "",
+    `- User: ${escapeMarkdown(payload.userName || "-")}`,
+    `- SAP ID: \`${escapeMarkdown(payload.sapId)}\``,
+    ...(payload.ystId ? [`- YST ID: \`${escapeMarkdown(payload.ystId)}\``] : []),
+    `- Range: ${payload.range.from} 至 ${payload.range.to}`,
+    `- View Mode: ${viewLabel}`,
+    `- Trigger Scope: ${payload.triggerScope}`,
+    `- Project Mode: ${payload.projectMode ? "yes" : "no"}`,
+    `- Page: ${payload.page}`,
+    `- Page Size: ${payload.pageSize}`,
+    `- Total ${totalLabel}: ${payload.totalItems}`,
+    `- Exported: ${exportedAt}`,
+    ""
+  ]
+
+  if (payload.viewMode === "thread") {
+    for (const thread of groupTraceExportThreads(payload.traces)) {
+      lines.push(`## Thread ${escapeMarkdown(thread.threadId)}`, "")
+      for (const trace of thread.traces) {
+        appendTraceExportMarkdown(lines, trace, 3)
       }
-    } else {
-      lines.push("### Trace Summary", "", "```json", stringifyExportValue(trace), "```", "")
+    }
+  } else {
+    for (const trace of payload.traces) {
+      appendTraceExportMarkdown(lines, trace)
     }
   }
 
@@ -1246,7 +1362,7 @@ function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayloa
   const skill = asString(payload.skill).trim()
   const range = asRecord(payload.range)
   const traces = Array.isArray(payload.traces)
-    ? payload.traces.map((trace) => trace as DashboardTraceDetail)
+    ? payload.traces.map((trace) => redactTraceDetailForDisplay(trace as DashboardTraceDetail))
     : []
   const page = typeof payload.page === "number" ? payload.page : undefined
   const pageSize = typeof payload.pageSize === "number" ? payload.pageSize : undefined
@@ -1260,6 +1376,39 @@ function normalizeTraceExportPayload(value: unknown): DashboardTraceExportPayloa
     page: clampLimit(page, 1, 1000),
     pageSize: clampLimit(pageSize, 10, 50),
     totalTraces: asNumber(payload.totalTraces, traces.length),
+    traces
+  }
+}
+
+function normalizeUserTraceExportPayload(value: unknown): DashboardUserTraceExportPayload {
+  const payload = asRecord(value)
+  const range = asRecord(payload.range)
+  const viewMode = normalizeTraceViewMode(payload.viewMode)
+  const traces = Array.isArray(payload.traces)
+    ? payload.traces.map((trace) => redactTraceDetailForDisplay(trace as DashboardTraceDetail))
+    : []
+
+  return {
+    sapId: asString(payload.sapId).trim(),
+    ystId: asOptionalString(payload.ystId)?.trim() || undefined,
+    userName: asString(payload.userName).trim(),
+    range: {
+      from: asString(range.from),
+      to: asString(range.to)
+    },
+    page: clampLimit(typeof payload.page === "number" ? payload.page : undefined, 1, 1000),
+    pageSize: clampLimit(
+      typeof payload.pageSize === "number" ? payload.pageSize : undefined,
+      10,
+      50
+    ),
+    totalItems: asNumber(
+      payload.totalItems,
+      viewMode === "thread" ? groupTraceExportThreads(traces).length : traces.length
+    ),
+    viewMode,
+    triggerScope: normalizeTraceTriggerScope(payload.triggerScope),
+    projectMode: payload.projectMode === true,
     traces
   }
 }
@@ -2126,7 +2275,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
     }
 
-    return {
+    return redactTraceDetailForDisplay({
       traceId: trace.traceId || asString(source.traceId, hit._id ?? ""),
       threadId: trace.threadId || asString(source.threadId),
       startedAt: trace.startedAt || asString(source.startedAt),
@@ -2163,12 +2312,12 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
       ...(nodes ? { nodes } : {}),
       rawAvailable: !rawError,
       ...(rawError ? { rawError } : {})
-    }
+    })
   }
 
   const fallbackInputTokens = asNumber(source.totalInputTokens)
   const fallbackOutputTokens = asNumber(source.totalOutputTokens)
-  return {
+  return redactTraceDetailForDisplay({
     traceId: asString(source.traceId, hit._id ?? ""),
     threadId: asString(source.threadId),
     startedAt: asString(source.startedAt),
@@ -2196,7 +2345,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
     triggerSource: normalizeTraceTriggerSource(source.triggerSource),
     rawAvailable: false,
     rawError: parsed.error
-  }
+  })
 }
 
 function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
@@ -2209,7 +2358,7 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     rawError = `解析 trace 树失败：${e instanceof Error ? e.message : String(e)}`
   }
 
-  return {
+  return redactTraceDetailForDisplay({
     traceId: trace.traceId,
     threadId: trace.threadId,
     startedAt: trace.startedAt,
@@ -2233,7 +2382,7 @@ function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
     ...(nodes ? { nodes } : {}),
     rawAvailable: !rawError,
     ...(rawError ? { rawError } : {})
-  }
+  })
 }
 
 function normalizeCommitDetail(hit: EsSearchHit): DashboardCommitDetail {
@@ -4416,7 +4565,7 @@ async function fetchSkillEvalRecordPage(
     ? await fetchTraceDetailsForSkillEvalRecords(pageRecords)
     : undefined
   const pageRuns = aggregateSkillEvalTaskRuns(
-    skillEvalStoredRecordsToDashboardRuns(pageRecords, traceDetails, skillFilter)
+    skillEvalStoredRecordsToDashboardRuns(pageRecords, traceDetails, skillFilter, undefined, true)
   )
     .sort(compareSkillEvalRunsByStartedAtDesc)
     .slice(0, size)
@@ -4605,7 +4754,8 @@ function skillEvalStoredRecordsToDashboardRuns(
   records: TraceSkillEvalRecord[],
   traceDetails?: Map<string, DashboardTraceDetail>,
   skillFilter?: SkillEvalFilter,
-  allowedSkillNames?: Set<string>
+  allowedSkillNames?: Set<string>,
+  redactForDisplay = false
 ): DashboardSkillEvalRun[] {
   return records
     .filter((record) => {
@@ -4614,7 +4764,10 @@ function skillEvalStoredRecordsToDashboardRuns(
       }
       return hasAllowedSkillName(record.skillName, allowedSkillNames)
     })
-    .map((record) => {
+    .map((rawRecord) => {
+      const record = redactForDisplay
+        ? redactTraceSkillEvalRecordForDisplay(rawRecord)
+        : rawRecord
       const fallbackTraceDetail = fallbackTraceDetailFromSkillEvalRecord(record)
       const traceDetail = traceDetails?.get(record.traceId) ?? fallbackTraceDetail
       // Current window semantics keep these arrays equal; the context fallback is for
@@ -7746,7 +7899,8 @@ function makeMockSkillEvalSummary(
     records,
     traceDetails,
     baseFilter,
-    allowedSkillNames
+    allowedSkillNames,
+    true
   )
     .filter((run) => matchesSkillSearch(run.skillName, skillSearch))
     .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
@@ -8259,7 +8413,10 @@ function makeMockStageBuckets(
 function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): DashboardProjectModeData {
   // stageBuckets is derived from each draft's totals after assembly (see below).
   const projectDrafts: Array<
-    Omit<ProjectModeProjectView, "stageBuckets" | "devStageConversationCount">
+    Omit<
+      ProjectModeProjectView,
+      "stageBuckets" | "devStageConversationCount" | "devAssociatedFeatureCount"
+    >
   > = [
     {
       projectId: "proj-cmb-cowork",
@@ -8513,14 +8670,21 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     Object.assign(project, mockCreators[index % mockCreators.length])
   })
   // 由各项目自身的代码/对话总量派生 stage×skill 三桶（DEV 演示用）。
-  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => ({
-    ...project,
-    devStageConversationCount: Math.round(project.conversationCount * 0.4),
-    lifecycleCreatedAt:
-      project.lifecycleCreatedAt ??
-      new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
-    stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
-  }))
+  const allProjects: ProjectModeProjectView[] = projectDrafts.map((project, index) => {
+    const devStageConversationCount = Math.round(project.conversationCount * 0.4)
+    return {
+      ...project,
+      devStageConversationCount,
+      devAssociatedFeatureCount:
+        devStageConversationCount > 0
+          ? Math.min(project.featureCount, Math.max(1, Math.ceil(devStageConversationCount / 10)))
+          : 0,
+      lifecycleCreatedAt:
+        project.lifecycleCreatedAt ??
+        new Date(Date.UTC(2026, 5, Math.max(1, 28 - index), 2, 0, 0)).toISOString(),
+      stageBuckets: makeMockStageBuckets(project.codeStats, project.conversationCount)
+    }
+  })
   // 「室筛选」：按下标分配的室过滤项目列表，使 mock 下切换室也能真实改变数据。
   const selectedOrgs = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
   // DEV：把偶数下标的 mock 项目视为「精益项目」，让「仅精益项目」开关在无 ES 时也能可见地筛选。
@@ -8756,6 +8920,25 @@ function makeMockProjectModeProjects(
   options?: ProjectModeProjectPageOptions
 ): ProjectModeProjectPageData {
   return makeMockProjectModeProjectPage(makeMockProjectMode(range, options).projects, options)
+}
+
+function makeMockProjectModeExportData(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): ProjectModeExportData {
+  const mock = makeMockProjectMode(range, opts)
+  const archivedProjectTotal = mock.projects.filter(
+    (project) => project.lifecycleStatus === "archived"
+  ).length
+  return {
+    users: mock.analytics.topUsers,
+    projects: mock.projects,
+    projectTotal: mock.projects.length,
+    activeProjectTotal: mock.projects.length - archivedProjectTotal,
+    archivedProjectTotal,
+    projectLimit: PROJECT_MODE_EXPORT_PROJECT_LIMIT,
+    projectsTruncated: false
+  }
 }
 
 const MOCK_PROJECT_THREAD_NODE_NAMES = [
@@ -10499,6 +10682,8 @@ interface ProjectModeProjectView {
   conversationCount: number
   /** Conversations whose current workflow node belongs to the Dev group. */
   devStageConversationCount: number
+  /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: ProjectModeFeatureView[]
   topSkills: ProjectModeSkillCount[]
@@ -10553,6 +10738,16 @@ interface ProjectModeProjectPageData {
    * ES from/size + cardinality total, which the cap does not bound).
    */
   truncated: boolean
+}
+
+interface ProjectModeExportData {
+  users: ProjectModeTopUser[]
+  projects: ProjectModeProjectView[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 interface ProjectModeProjectPageOptions extends OrgFilterOptions {
@@ -11145,6 +11340,7 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     featureCount: asNumber(props.featureCount, features.length),
     conversationCount: 0,
     devStageConversationCount: 0,
+    devAssociatedFeatureCount: 0,
     hasError: typeof props.error === "string" && props.error.length > 0,
     features,
     topSkills: [],
@@ -11581,6 +11777,174 @@ const PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES = [
   "properties"
 ]
 
+const PROJECT_MODE_EXPORT_SNAPSHOT_PAGE_SIZE = 500
+const PROJECT_MODE_EXPORT_PROJECT_LIMIT = 2000
+const PROJECT_MODE_EXPORT_PROJECT_ID_PAGE_SIZE = 1000
+
+interface ProjectModeExportSnapshotResult {
+  projects: ProjectModeProjectView[]
+  total: number
+  activeTotal: number
+  archivedTotal: number
+  truncated: boolean
+}
+
+async function fetchProjectModeExportSnapshotGroup(
+  filters: Record<string, unknown>[],
+  archived: boolean,
+  limit: number
+): Promise<{ projects: ProjectModeProjectView[]; total: number }> {
+  const projects = new Map<string, ProjectModeProjectView>()
+  const seenCursors = new Set<string>()
+  let searchAfter: Array<string | number> | undefined
+  let total = 0
+  let firstPage = true
+
+  while (true) {
+    const remaining = Math.max(0, limit - projects.size)
+    const pageSize = Math.min(PROJECT_MODE_EXPORT_SNAPSHOT_PAGE_SIZE, remaining)
+    const body: Record<string, unknown> = {
+      track_total_hits: firstPage,
+      size: pageSize,
+      query: {
+        bool: {
+          filter: [
+            ...filters,
+            archived
+              ? { term: { "properties.lifecycleStatus": "archived" } }
+              : { bool: { must_not: { term: { "properties.lifecycleStatus": "archived" } } } }
+          ]
+        }
+      },
+      sort: [
+        { "properties.lifecycleCreatedAt": { order: "desc", missing: "_last" } },
+        { "properties.projectId": { order: "asc" } }
+      ],
+      _source: { includes: PROJECT_MODE_SNAPSHOT_SOURCE_INCLUDES }
+    }
+    if (searchAfter) body.search_after = searchAfter
+
+    const raw = (await esQuery(getEsIndex("event"), body)) as EsSearchResponse
+    const hits = raw.hits?.hits ?? []
+    if (firstPage) {
+      total = getTotalHits(raw, hits.length)
+      firstPage = false
+    }
+    if (pageSize === 0 || hits.length === 0) break
+
+    for (const hit of hits) {
+      const project = parseProjectModeSnapshotHit(hit)
+      if (project) projects.set(project.projectId, project)
+      if (projects.size >= limit) break
+    }
+    if (projects.size >= limit || hits.length < pageSize) break
+
+    const nextSearchAfter = hits[hits.length - 1]?.sort
+    if (!nextSearchAfter || nextSearchAfter.length === 0) {
+      throw new Error("项目导出分页游标缺失，无法保证数据顺序")
+    }
+    const cursor = JSON.stringify(nextSearchAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目导出分页游标重复，无法保证数据顺序")
+    }
+    seenCursors.add(cursor)
+    searchAfter = nextSearchAfter
+  }
+
+  return { projects: [...projects.values()], total }
+}
+
+/**
+ * Read at most the first 2,000 current project snapshots for export, ordered like
+ * the workbook (non-archived first, then newest creation time). Exact matching
+ * totals are returned separately so a truncated workbook remains explicit.
+ */
+async function fetchProjectModeExportSnapshotProjects(
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<ProjectModeExportSnapshotResult> {
+  const filters = projectModeSnapshotFilters(
+    buildProjectModeOrgFilter(opts, access),
+    opts?.fromLeanOnly === true
+  )
+  const active = await fetchProjectModeExportSnapshotGroup(
+    filters,
+    false,
+    PROJECT_MODE_EXPORT_PROJECT_LIMIT
+  )
+  const archived = await fetchProjectModeExportSnapshotGroup(
+    filters,
+    true,
+    Math.max(0, PROJECT_MODE_EXPORT_PROJECT_LIMIT - active.projects.length)
+  )
+  const projects = [...active.projects, ...archived.projects]
+  const total = active.total + archived.total
+  return {
+    projects,
+    total,
+    activeTotal: active.total,
+    archivedTotal: archived.total,
+    truncated: total > PROJECT_MODE_EXPORT_PROJECT_LIMIT
+  }
+}
+
+/**
+ * Resolve every matching project id only when the lean-project filter needs to
+ * scope the full user analysis. This is intentionally independent from the
+ * 2,000-row project worksheet limit.
+ */
+async function fetchProjectModeExportProjectIds(
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<string[]> {
+  const filters = projectModeSnapshotFilters(
+    buildProjectModeOrgFilter(opts, access),
+    opts?.fromLeanOnly === true
+  )
+  const projectIds: string[] = []
+  const seenCursors = new Set<string>()
+  let after: Record<string, string | number> | undefined
+
+  while (true) {
+    const raw = (await esQuery(getEsIndex("event"), {
+      size: 0,
+      track_total_hits: false,
+      query: { bool: { filter: filters } },
+      aggs: {
+        projects: {
+          composite: {
+            size: PROJECT_MODE_EXPORT_PROJECT_ID_PAGE_SIZE,
+            sources: [{ project_id: { terms: { field: "properties.projectId" } } }],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })) as EsSearchResponse
+    const projectsAgg = asRecord(asRecord(raw.aggregations).projects)
+    const buckets = projectsAgg.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+    for (const bucket of buckets) {
+      const projectId = asString(asRecord(asRecord(bucket).key).project_id)
+      if (projectId) projectIds.push(projectId)
+    }
+
+    const nextAfter = Object.fromEntries(
+      Object.entries(asRecord(projectsAgg.after_key)).filter(
+        ([, value]) => typeof value === "string" || typeof value === "number"
+      )
+    ) as Record<string, string | number>
+    if (Object.keys(nextAfter).length === 0) break
+    const cursor = JSON.stringify(nextAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目用户导出范围分页游标重复，无法保证全量数据")
+    }
+    seenCursors.add(cursor)
+    after = nextAfter
+  }
+
+  return projectIds
+}
+
 /**
  * Resolve the full set of project ids matching the list filters (no
  * pagination). Lightweight — a single `terms` agg returning only the ids, capped
@@ -11747,7 +12111,7 @@ async function fetchProjectModeProjectPageMetricSorted(
  */
 const PROJECT_MODE_PROJECT_ID_LIMIT = 10000
 const PROJECT_MODE_DEFAULT_PROJECT_PAGE_SIZE = 10
-/** Per-project cap on feature buckets returned by the nested feature code-stats agg. */
+/** Per-project cap on feature buckets returned by nested per-feature aggregations. */
 const PROJECT_MODE_FEATURE_SLUG_LIMIT = 200
 
 /** Composite map key pairing a project id with one of its feature slugs. */
@@ -11775,7 +12139,11 @@ function parseProjectModeTopUserBuckets(raw: unknown): ProjectModeTopUser[] {
     const latestHits = asRecord(asRecord(b.latest_user_info).hits).hits
     const latestHit = Array.isArray(latestHits) ? asRecord(latestHits[0]) : {}
     const source = asRecord(latestHit._source)
-    const sapId = asString(b.key, asString(source.sapId))
+    const rawKey = b.key
+    const sapId =
+      typeof rawKey === "string"
+        ? rawKey
+        : asString(asRecord(rawKey).sap_id, asString(source.sapId))
     if (!sapId) continue
     const ystId = asOptionalString(source.ystId)
     const userName = asString(source.userName, sapId)
@@ -11948,14 +12316,86 @@ async function fetchProjectModeUsage(
   }
 }
 
-function countDevStageConversations(rawBuckets: unknown): number {
-  if (!Array.isArray(rawBuckets)) return 0
-  return rawBuckets.reduce((total, bucket) => {
-    const item = asRecord(bucket)
-    return isHarnessDevStageNodeName(asString(item.key))
-      ? total + asNumber(item.doc_count)
-      : total
-  }, 0)
+const PROJECT_MODE_EXPORT_USER_PAGE_SIZE = 1000
+
+/**
+ * All project-mode users for Excel export. Composite pagination avoids the
+ * top-10 terms cap used by the on-screen ranking and keeps daily overview
+ * requests lightweight.
+ */
+async function fetchProjectModeExportUsers(
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext,
+  leanProjectIds?: string[]
+): Promise<ProjectModeTopUser[]> {
+  if (leanProjectIds && leanProjectIds.length === 0) return []
+
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const users: ProjectModeTopUser[] = []
+  const seenCursors = new Set<string>()
+  let after: Record<string, string | number> | undefined
+
+  while (true) {
+    const composite: Record<string, unknown> = {
+      size: PROJECT_MODE_EXPORT_USER_PAGE_SIZE,
+      sources: [{ sap_id: { terms: { field: "sapId" } } }],
+      ...(after ? { after } : {})
+    }
+    const raw = (await esQuery(getEsIndex("trace"), {
+      size: 0,
+      query: {
+        bool: {
+          filter: [
+            ...projectModeTraceFilters(range, orgFilterClause),
+            buildNonEmptySapIdFilter(),
+            ...(leanProjectIds ? [{ terms: { harnessProjectId: leanProjectIds } }] : [])
+          ]
+        }
+      },
+      aggs: {
+        users: {
+          composite,
+          aggs: {
+            latest_user_info: {
+              top_hits: {
+                size: 1,
+                sort: [{ startedAt: { order: "desc" } }],
+                _source: {
+                  includes: ["sapId", "ystId", "userName", "orgName", "upperOrgLv0", "upperOrgLv1"]
+                }
+              }
+            }
+          }
+        }
+      }
+    })) as EsSearchResponse
+
+    const usersAgg = asRecord(asRecord(raw.aggregations).users)
+    const buckets = usersAgg.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+    users.push(...parseProjectModeTopUserBuckets(buckets))
+
+    const nextAfter = Object.fromEntries(
+      Object.entries(asRecord(usersAgg.after_key)).filter(
+        ([, value]) => typeof value === "string" || typeof value === "number"
+      )
+    ) as Record<string, string | number>
+    if (Object.keys(nextAfter).length === 0) break
+    const cursor = JSON.stringify(nextAfter)
+    if (seenCursors.has(cursor)) {
+      throw new Error("项目用户导出分页游标重复，无法保证全量数据")
+    }
+    seenCursors.add(cursor)
+    after = nextAfter
+  }
+
+  return users.sort(
+    (a, b) =>
+      b.count - a.count ||
+      a.userName.localeCompare(b.userName, "zh-CN", { numeric: true }) ||
+      a.sapId.localeCompare(b.sapId)
+  )
 }
 
 async function fetchProjectModePageUsage(
@@ -11966,17 +12406,20 @@ async function fetchProjectModePageUsage(
 ): Promise<{
   perProject: Map<string, number>
   perProjectDevStage: Map<string, number>
+  perProjectDevAssociatedFeatures: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
   perProjectStageConversations: Map<string, Record<StageBucket, number>>
 }> {
   const perProject = new Map<string, number>()
   const perProjectDevStage = new Map<string, number>()
+  const perProjectDevAssociatedFeatures = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
   const perProjectStageConversations = new Map<string, Record<StageBucket, number>>()
   if (projectIds.length === 0) {
     return {
       perProject,
       perProjectDevStage,
+      perProjectDevAssociatedFeatures,
       perProjectSkills,
       perProjectStageConversations
     }
@@ -12000,6 +12443,17 @@ async function fetchProjectModePageUsage(
           skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } },
           by_node: { terms: { field: "harnessNodeName", size: 100 } },
+          by_feature: {
+            terms: {
+              field: "harnessFeatureSlug",
+              size: PROJECT_MODE_FEATURE_SLUG_LIMIT
+            },
+            aggs: {
+              by_node: {
+                terms: { field: "harnessNodeName", size: PROJECT_MODE_FEATURE_SLUG_LIMIT }
+              }
+            }
+          },
           ...stageBucketTraceAggs()
         }
       }
@@ -12011,6 +12465,7 @@ async function fetchProjectModePageUsage(
     return {
       perProject,
       perProjectDevStage,
+      perProjectDevAssociatedFeatures,
       perProjectSkills,
       perProjectStageConversations
     }
@@ -12022,18 +12477,24 @@ async function fetchProjectModePageUsage(
     if (!key) continue
     perProject.set(key, asNumber(b.doc_count))
     perProjectDevStage.set(key, countDevStageConversations(asRecord(b.by_node).buckets))
+    perProjectDevAssociatedFeatures.set(
+      key,
+      countDevAssociatedFeatures(asRecord(b.by_feature).buckets)
+    )
     perProjectSkills.set(
       key,
-      combineSkillCountBuckets(
-        asRecord(b.skills).buckets,
-        asRecord(b.skill_source).buckets,
-        10
-      )
+      combineSkillCountBuckets(asRecord(b.skills).buckets, asRecord(b.skill_source).buckets, 10)
     )
     perProjectStageConversations.set(key, parseStageBucketConversations(b))
   }
 
-  return { perProject, perProjectDevStage, perProjectSkills, perProjectStageConversations }
+  return {
+    perProject,
+    perProjectDevStage,
+    perProjectDevAssociatedFeatures,
+    perProjectSkills,
+    perProjectStageConversations
+  }
 }
 
 /**
@@ -12400,6 +12861,38 @@ async function fetchProjectModeProjectCodeStats(
   return { byProject, byFeature, byProjectStage }
 }
 
+/** Add this-range trace/code metrics to current project snapshots. */
+async function enrichProjectModeProjectViews(
+  projects: ProjectModeProjectView[],
+  range: TimeRange,
+  opts: OrgFilterOptions | undefined,
+  access: DashboardAccessContext
+): Promise<ProjectModeProjectView[]> {
+  const projectIds = projects.map((project) => project.projectId)
+  // Key code stats on the page's project ids (not just those with conversations)
+  // so a project ranked high by 原始生成行数 still shows its adoption columns.
+  const [usage, code] = await Promise.all([
+    fetchProjectModePageUsage(projectIds, range, opts, access),
+    fetchProjectModeProjectCodeStats(projectIds, range, opts, access)
+  ])
+  return projects.map((project) => ({
+    ...project,
+    conversationCount: usage.perProject.get(project.projectId) ?? 0,
+    devStageConversationCount: usage.perProjectDevStage.get(project.projectId) ?? 0,
+    devAssociatedFeatureCount: usage.perProjectDevAssociatedFeatures.get(project.projectId) ?? 0,
+    topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
+    codeStats: code.byProject.get(project.projectId) ?? null,
+    stageBuckets: buildStageBuckets(
+      usage.perProjectStageConversations.get(project.projectId),
+      code.byProjectStage.get(project.projectId)
+    ),
+    features: project.features.map((feature) => ({
+      ...feature,
+      codeStats: code.byFeature.get(projectFeatureKey(project.projectId, feature.slug)) ?? null
+    }))
+  }))
+}
+
 /** One list page: ES-paginated snapshot projects enriched with this-range usage / code. */
 async function fetchProjectModeProjectPage(
   range: TimeRange,
@@ -12415,30 +12908,53 @@ async function fetchProjectModeProjectPage(
   const sliced = metricSort
     ? await fetchProjectModeProjectPageMetricSorted(range, options, access, sortBy, sortOrder)
     : await fetchProjectModeProjectPageHits(options, access)
-  const projectIds = sliced.projects.map((project) => project.projectId)
-  const usage = await fetchProjectModePageUsage(projectIds, range, options, access)
-  // Key code stats on the page's project ids (not just those with conversations)
-  // so a project ranked high by 原始生成行数 still shows its adoption columns.
-  const code = await fetchProjectModeProjectCodeStats(projectIds, range, options, access)
   return {
     ...sliced,
     sortBy,
     sortOrder,
-    projects: sliced.projects.map((project) => ({
-      ...project,
-      conversationCount: usage.perProject.get(project.projectId) ?? 0,
-      devStageConversationCount: usage.perProjectDevStage.get(project.projectId) ?? 0,
-      topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
-      codeStats: code.byProject.get(project.projectId) ?? null,
-      stageBuckets: buildStageBuckets(
-        usage.perProjectStageConversations.get(project.projectId),
-        code.byProjectStage.get(project.projectId)
-      ),
-      features: project.features.map((feature) => ({
-        ...feature,
-        codeStats: code.byFeature.get(projectFeatureKey(project.projectId, feature.slug)) ?? null
-      }))
-    }))
+    projects: await enrichProjectModeProjectViews(sliced.projects, range, options, access)
+  }
+}
+
+const PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE = 100
+
+/** Fetch the full user-analysis and project-list datasets used by Excel export. */
+async function fetchProjectModeExportData(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<ProjectModeExportData> {
+  const access = requireDashboardProjectModeAccess()
+  const snapshotResult = await fetchProjectModeExportSnapshotProjects(opts, access)
+  const snapshots = snapshotResult.projects
+  const leanProjectIds =
+    opts?.fromLeanOnly === true
+      ? snapshotResult.truncated
+        ? await fetchProjectModeExportProjectIds(opts, access)
+        : snapshots.map((project) => project.projectId)
+      : undefined
+  const usersPromise = fetchProjectModeExportUsers(range, opts, access, leanProjectIds)
+  const projectsPromise = (async (): Promise<ProjectModeProjectView[]> => {
+    const projects: ProjectModeProjectView[] = []
+    for (
+      let offset = 0;
+      offset < snapshots.length;
+      offset += PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE
+    ) {
+      const batch = snapshots.slice(offset, offset + PROJECT_MODE_EXPORT_PROJECT_BATCH_SIZE)
+      projects.push(...(await enrichProjectModeProjectViews(batch, range, opts, access)))
+    }
+    return projects
+  })()
+
+  const [users, projects] = await Promise.all([usersPromise, projectsPromise])
+  return {
+    users,
+    projects,
+    projectTotal: snapshotResult.total,
+    activeProjectTotal: snapshotResult.activeTotal,
+    archivedProjectTotal: snapshotResult.archivedTotal,
+    projectLimit: PROJECT_MODE_EXPORT_PROJECT_LIMIT,
+    projectsTruncated: snapshotResult.truncated
   }
 }
 
@@ -13283,6 +13799,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return isDashboardAwardsAdmin()
   })
 
+  _ipcMain.handle("dashboard:isSkillEvalAllowed", async () => {
+    return isDashboardSkillEvalAllowed()
+  })
+
   _ipcMain.handle("dashboard:esQuery", async (_, input: DashboardEsQueryInput) => {
     try {
       const access = requireDashboardAccess()
@@ -13373,6 +13893,22 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProjectModeProjectPage(range, options) }
       } catch (e) {
         console.error("[Dashboard] projectModeProjects error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:projectModeExportData",
+    async (_, range: TimeRange, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectModeExportData(range, opts) }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchProjectModeExportData(range, opts) }
+      } catch (e) {
+        console.error("[Dashboard] projectModeExportData error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -13920,11 +14456,72 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     }
   })
 
+  _ipcMain.handle("dashboard:exportUserTraces", async (event, rawPayload: unknown) => {
+    try {
+      const payload = normalizeUserTraceExportPayload(rawPayload)
+      if (!payload.sapId) return { success: false, error: "sapId is required" }
+      if (payload.traces.length === 0) return { success: false, error: "暂无可导出的会话记录" }
+
+      const exportedAt = new Date().toISOString()
+      const date = exportedAt.slice(0, 10)
+      const viewLabel = payload.viewMode === "thread" ? "threads" : "traces"
+      const displayName = payload.userName || payload.sapId
+      const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+      const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+        title: `导出用户 ${payload.viewMode === "thread" ? "Thread" : "Trace"} 历史`,
+        defaultPath: `${safeExportFileName(`${displayName}-${payload.sapId}`)}-${viewLabel}-page-${payload.page}-${date}.zip`,
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }]
+      })
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, canceled: true }
+      }
+
+      const zip = new AdmZip()
+      zip.addFile(
+        `${viewLabel}.md`,
+        Buffer.from(formatUserTraceExportMarkdown(payload, exportedAt), "utf-8")
+      )
+      const commonPayload = {
+        version: 1,
+        exportedAt,
+        exportType: payload.viewMode,
+        user: {
+          sapId: payload.sapId,
+          ...(payload.ystId ? { ystId: payload.ystId } : {}),
+          userName: payload.userName
+        },
+        range: payload.range,
+        page: payload.page,
+        pageSize: payload.pageSize,
+        totalItems: payload.totalItems,
+        triggerScope: payload.triggerScope,
+        projectMode: payload.projectMode
+      }
+      const data =
+        payload.viewMode === "thread"
+          ? { ...commonPayload, threads: groupTraceExportThreads(payload.traces) }
+          : { ...commonPayload, traces: payload.traces }
+      zip.addFile(`${viewLabel}.json`, Buffer.from(`${stringifyExportValue(data)}\n`, "utf-8"))
+      zip.writeZip(result.filePath)
+
+      return { success: true, filePath: result.filePath }
+    } catch (e) {
+      console.error("[Dashboard] exportUserTraces error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
   _ipcMain.handle(
     "dashboard:exportExcel",
     async (
       _,
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ) => {
       try {
@@ -13933,13 +14530,19 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
         const wb = XLSX.utils.book_new()
         for (const sheet of sheets) {
-          const wsData = [sheet.header, ...sheet.rows]
+          const summaryRows = sheet.summaryRows ?? []
+          const wsData = [
+            ...summaryRows,
+            ...(summaryRows.length > 0 ? [[]] : []),
+            sheet.header,
+            ...sheet.rows
+          ]
           const ws = XLSX.utils.aoa_to_sheet(wsData)
 
           // Auto-size columns based on content
           const colWidths = sheet.header.map((h, i) => {
             let maxLen = h.length
-            for (const row of sheet.rows) {
+            for (const row of [...summaryRows, ...sheet.rows]) {
               const cellLen = String(row[i] ?? "").length
               if (cellLen > maxLen) maxLen = cellLen
             }

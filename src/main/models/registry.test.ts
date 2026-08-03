@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   storedDefault: "",
   sourceBaseUrl: "https://updates.example.com",
   localApiKey: "local-test-key",
+  bundledApiKey: "bundled-test-key",
   fetchGate: null as Promise<void> | null
 }))
 
@@ -30,7 +31,9 @@ vi.mock("../storage", () => ({
   MAX_TOP_K: 1_000,
   DEFAULT_THINKING_EFFORT: "high",
   getBuiltinModelOverrides: () => state.overrides,
-  getBuiltinModelApiKey: () => state.localApiKey || undefined,
+  getBuiltinModelApiKey: (options?: { allowBundledFallback?: boolean }) =>
+    state.localApiKey ||
+    (options?.allowBundledFallback === false ? undefined : state.bundledApiKey || undefined),
   setBuiltinModelOverride: (id: string, value: Record<string, unknown>) => {
     state.overrides[id] = value
   },
@@ -77,6 +80,7 @@ beforeEach(() => {
   state.storedDefault = ""
   state.sourceBaseUrl = "https://updates.example.com"
   state.localApiKey = "local-test-key"
+  state.bundledApiKey = "bundled-test-key"
   state.fetchGate = null
   vi.restoreAllMocks()
 })
@@ -100,14 +104,11 @@ describe("builtin model registry", () => {
     expect(settled).toBe(true)
   })
 
-  it("uses the two local models when the manifest has no catalog", async () => {
+  it("uses MiniMax as the only local fallback when the manifest has no catalog", async () => {
     await refreshBuiltinModelCatalog(true)
     const configs = getBuiltinModelConfigs()
 
-    expect(configs.map((item) => item.ref)).toEqual([
-      "builtin:minimax-m2p5-229b-w8a8",
-      "builtin:deepseek-v4-flash-284b-a13b-w8a8"
-    ])
+    expect(configs.map((item) => item.ref)).toEqual(["builtin:minimax-m2p5-229b-w8a8"])
     expect(configs[0]).toMatchObject({
       temperature: 1,
       enableThinking: true,
@@ -115,13 +116,7 @@ describe("builtin model registry", () => {
       tier: "premium",
       origin: "fallback"
     })
-    expect(configs[1]).toMatchObject({
-      temperature: 0.1,
-      enableThinking: false,
-      tier: "economy",
-      origin: "fallback"
-    })
-    expect(configs.every((item) => Boolean(item.apiKey))).toBe(true)
+    expect(configs[0].apiKey).toBe("local-test-key")
   })
 
   it("fills omitted remote fields from model defaults and the local API key", async () => {
@@ -153,10 +148,42 @@ describe("builtin model registry", () => {
 
   it("does not invent a credential when neither local nor remote key is configured", async () => {
     state.localApiKey = ""
+    state.bundledApiKey = ""
     await refreshBuiltinModelCatalog(true)
 
     expect(getBuiltinModelConfigs().every((config) => config.apiKey === undefined)).toBe(true)
     expect(getBuiltinModelPublicConfigs().every((config) => config.hasApiKey === false)).toBe(true)
+  })
+
+  it("injects the bundled fallback credential into MiniMax only", async () => {
+    state.localApiKey = ""
+    state.manifest = {
+      modelCatalog: {
+        schemaVersion: 1,
+        models: [
+          {
+            id: "minimax-m2p5-229b-w8a8",
+            baseUrl: "http://open-llm.uat.cmbchina.cn/llm/minimax-m2p5-229b-w8a8/v1",
+            model: "minimax-m2p5-229b-w8a8"
+          },
+          {
+            id: "deepseek-v4-flash-284b-a13b-w8a8",
+            baseUrl:
+              "http://open-llm.uat.cmbchina.cn/llm/deepseek-v4-flash-284b-a13b-w8a8/v1",
+            model: "deepseek-v4-flash-284b-a13b-w8a8"
+          }
+        ]
+      }
+    }
+    await refreshBuiltinModelCatalog(true)
+
+    const configs = getBuiltinModelConfigs()
+    expect(configs.find((config) => config.model === "minimax-m2p5-229b-w8a8")?.apiKey).toBe(
+      "bundled-test-key"
+    )
+    expect(
+      configs.find((config) => config.model === "deepseek-v4-flash-284b-a13b-w8a8")?.apiKey
+    ).toBeUndefined()
   })
 
   it("uses remote values when provided and keeps credentials out of public config", async () => {
@@ -356,6 +383,6 @@ describe("builtin model registry", () => {
     state.sourceBaseUrl = ""
     await refreshBuiltinModelCatalog(true)
 
-    expect(getBuiltinModelConfigs().map((item) => item.origin)).toEqual(["fallback", "fallback"])
+    expect(getBuiltinModelConfigs().map((item) => item.origin)).toEqual(["fallback"])
   })
 })

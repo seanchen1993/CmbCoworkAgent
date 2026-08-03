@@ -186,8 +186,11 @@ function testDesktopEntrypointsUseNarrowCompletionSeam(): void {
     "invoke, resume and interrupt each capture their own stream cursor"
   )
   assert.equal(
-    (source.match(/scheduleDesktopTurnCompletion\(threadId, desktopCompletionCursor\)/gu) ?? [])
-      .length,
+    (
+      source.match(
+        /scheduleDesktopTurnCompletion\(threadId, runToken, desktopCompletionCursor\)/gu
+      ) ?? []
+    ).length,
     3,
     "invoke, resume and interrupt share one narrow completion observer"
   )

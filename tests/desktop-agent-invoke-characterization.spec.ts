@@ -138,13 +138,15 @@ function testFreshTurnGoalAndTranscriptSemantics(): void {
   assertSourceOrder(
     invoke,
     [
-      "const turnState = getOrCreateTurnState(",
+      "flushPendingStreamTranscriptMessagesForThread(threadId, { throwOnError: true })",
+      "const leaseClaim = claimDesktopThreadRunLease(threadId, nextInvokeRunToken)",
+      "setCurrentRunMessageQueueOwner(threadId, nextInvokeRunToken)",
+      "const nextTurnState = getOrCreateTurnState(",
       "resetTurnStateForNewInvoke(",
-      "flushPendingStreamTranscriptMessages(threadId)",
-      "const durableRuntimeTail = await getDurableRuntimeTail(threadId",
-      "persistVisibleUserTranscriptMessage(",
-      "const runToken = startTurnStateRun(turnState, nextInvokeRunToken)",
-      "setCurrentRunMessageQueueOwner(threadId, runToken)"
+      "const nextRunToken = startTurnStateRun(nextTurnState, nextInvokeRunToken)",
+      "activeRuns.set(threadId, nextAbortController)",
+      "const durableRuntimeTailSetup = await awaitPhysicalStreamRunSetup({",
+      "persistVisibleUserTranscriptMessage("
     ],
     "new invoke turn setup"
   )
@@ -215,7 +217,6 @@ function testRoutingRuntimeCheckpointAndAutoCommit(): void {
       "const autoCommit = await beginAutoCommitTracking(threadId, workspacePath)",
       "const preparedRouting = await resolveStandardTurnRouting({",
       "const userHumanMessage = isCoordinatorNotificationTurn",
-      "id: userMessageId",
       "configurable: { thread_id: threadId }",
       "const orderedChain = preparedRouting.orderedModelIds",
       "const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({",
@@ -223,6 +224,17 @@ function testRoutingRuntimeCheckpointAndAutoCommit(): void {
       "stream = await agent.stream(input, streamConfig)"
     ],
     "desktop Runtime preparation and checkpoint identity"
+  )
+  const userMessageConstruction = sliceBetween(
+    invoke,
+    "const userHumanMessage = isCoordinatorNotificationTurn",
+    "const humanMessages: BaseMessage[] = [",
+    "desktop user message construction"
+  )
+  assertIncludes(
+    userMessageConstruction,
+    "id: userMessageId",
+    "desktop Runtime preserves the renderer user-message checkpoint identity"
   )
   for (const expected of [
     "currentRunMessageQueueOwnerToken: runToken",
@@ -260,13 +272,15 @@ function testResumeAndInterruptContinueTheSameLogicalTurn(): void {
       handler,
       [
         `const ${runLabel} = uuid()`,
+        "flushPendingStreamTranscriptMessagesForThread(threadId, { throwOnError: true })",
+        `const leaseClaim = claimDesktopThreadRunLease(threadId, ${runLabel})`,
         "invalidateCurrentRunMessagePreparer(threadId)",
+        "const nextTurnState = getOrCreateTurnState(threadId)",
+        `const nextRunToken = startTurnStateRun(nextTurnState, ${runLabel})`,
         `setCurrentRunMessageQueueOwner(threadId, ${runLabel})`,
         "existingController.abort()",
         "await waitForReplacedRunToSettle(threadId)",
         "activeRuns.set(threadId, nextAbortController)",
-        "const turnState = getOrCreateTurnState(threadId)",
-        `const runToken = startTurnStateRun(turnState, ${runLabel})`,
         "pruneTurnStateAtInterrupt(turnState",
         `ensureTurnId(turnState, threadId, "${label}")`,
         "reuseSnapshot: turnState.autoCommitSnapshot !== undefined"
@@ -332,9 +346,10 @@ function testIdentityFencedCleanupAndCancellation(): void {
     [
       "return withThreadRunMutationLock(threadId",
       "const controller = activeRuns.get(threadId)",
+      "const activeRunToken = turnStates.get(threadId)?.runToken",
       "LocalSandbox.cancelBackgroundTasks(threadId)",
-      "controller.abort()",
-      "flushPendingStreamTranscriptMessages(threadId)"
+      "flushPendingStreamTranscriptMessages(threadId, activeRunToken)",
+      "controller.abort()"
     ],
     "desktop cancellation"
   )

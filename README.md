@@ -100,6 +100,8 @@ flowchart LR
 - `chatx-config.json`：机器人配置
 - `sandbox-settings.json` + `approval-rules.json`：沙箱模式与审批规则
 - `memory/`：记忆文件与索引
+- `traces/`：默认使用系统用户密钥加密的 Agent Trace；机制与配置见 [Trace 本地存储安全](docs/trace-local-storage-security.md)
+- `logs/`、`hooks/log/`：统一执行敏感字段脱敏；规则见 [本地日志敏感信息脱敏](docs/log-redaction-security.md)
 
 ## 项目结构
 
@@ -178,6 +180,7 @@ npm run dist
 | `VITE_INTRUCTION_URL` | 使用说明地址（前端展示） |
 | `VITE_APP_DOWNLOAD_URL` | 应用下载地址（前端展示） |
 | `VITE_CONSOLE_LOG_DEFAULT_ON` | DevTools Console 日志默认开关（`true/1/on/yes` 为开启） |
+| `CMB_COWORK_TRACE_STORAGE_MODE` | Trace 本地存储模式：`encrypted`（默认）、`off`、`plaintext`（仅限隔离测试数据） |
 
 ## 安全建议
 
@@ -185,6 +188,7 @@ npm run dist
 2. 对 `git push --force`、删除类命令、脚本下载执行类命令保持人工审批。
 3. 工作区建议使用独立目录，避免将敏感目录直接暴露给 Agent。
 4. 定时任务与远端机器人建议最小权限配置（模型、目录、连接器按需开通）。
+5. 本地日志默认对身份证号、手机号、邮箱、银行卡和凭据字段脱敏，机制与边界见 [本地日志敏感信息脱敏](docs/log-redaction-security.md)。
 
 ## License
 

@@ -13,8 +13,8 @@ import {
 } from "../storage"
 import { trackEvent } from "./event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "./adoption-tracker"
-import { getTracesDir } from "../agent/trace/collector"
-import type { AgentTrace } from "../agent/trace/types"
+import { markInAppCommitProcessed } from "./git-hook-service"
+import { getTracesDir, parseStoredTraceLine } from "../agent/trace/collector"
 import {
   discoverWorkspaceGitRepositories,
   type DiscoveredGitRepository
@@ -667,7 +667,7 @@ async function collectThreadSkillStatsAsync(threadId: string): Promise<string[]>
       for (const line of raw.trim().split("\n")) {
         if (!line.trim()) continue
         try {
-          const trace = JSON.parse(line) as AgentTrace
+          const trace = parseStoredTraceLine(line)
           if (Array.isArray(trace.usedSkills)) {
             for (const skill of trace.usedSkills) skillSet.add(skill)
           }
@@ -682,7 +682,12 @@ async function collectThreadSkillStatsAsync(threadId: string): Promise<string[]>
   }
 }
 
-function trackAutoCommit(threadId: string, workspacePath: string, changedFiles: string[]): void {
+function trackAutoCommit(
+  threadId: string,
+  workspacePath: string,
+  changedFiles: string[],
+  commitSha?: string | null
+): void {
   collectThreadSkillStatsAsync(threadId)
     .then(async (usedSkills) => {
       const [stats, branch] = await Promise.all([
@@ -692,6 +697,7 @@ function trackAutoCommit(threadId: string, workspacePath: string, changedFiles: 
       trackEvent("git.commit.created", "git", {
         repoPath: workspacePath,
         branch: branch || "",
+        commitSha: commitSha ?? "",
         filesChanged: stats.fileCount || changedFiles.length,
         insertions: stats.additions,
         deletions: stats.deletions,
@@ -893,12 +899,16 @@ async function executeRepositoryAutoCommitPlan(params: {
         // best-effort
       }
     }
+    // trackAutoCommit below is this commit's canonical git.commit.created —
+    // mark the sha processed so the hook/reconcile backstop (which treats the
+    // durable commit job as "still needs its event") does not emit a duplicate.
+    await markInAppCommitProcessed(repo.repoPath, commitHash)
 
     notifyWorkspaceFilesChanged(threadId, repo.repoPath)
     if (path.resolve(repo.repoPath) !== path.resolve(workspacePath)) {
       notifyWorkspaceFilesChanged(threadId, workspacePath)
     }
-    trackAutoCommit(threadId, repo.repoPath, candidateFiles)
+    trackAutoCommit(threadId, repo.repoPath, candidateFiles, commitHash)
 
     let pushed: boolean | undefined
     let pushError: string | undefined
@@ -1287,10 +1297,11 @@ export async function maybeAutoCommitAfterAgentRun({
       await runGit(workspacePath, ["add", "--", ...candidateFiles])
       // Measure adoption in-app (like the manual commit paths) BEFORE the commit
       // clears the index. Capture time is the upper bound on eligible gens.
-      // Doing it here marks the gens measured, so the hook/reconciler backstop
-      // gates to "no pending gens" and does NOT emit a second git.commit.created
-      // for this same commit — previously every auto-commit produced a duplicate
-      // commit event (one here, one from the backstop that measured adoption).
+      // Doing it here marks the gens measured; together with
+      // markInAppCommitProcessed below, the hook/reconciler backstop skips this
+      // commit and does NOT emit a second git.commit.created — previously every
+      // auto-commit produced a duplicate commit event (one here, one from the
+      // backstop that measured adoption).
       const adoptionCaptureTimeMs = Date.now()
       let adoptionSnapshots: Awaited<ReturnType<typeof captureStagedSnapshotsForCommit>> = []
       try {
@@ -1317,6 +1328,10 @@ export async function maybeAutoCommitAfterAgentRun({
           // adoption measurement must never affect the commit outcome
         }
       }
+      // trackAutoCommit below is this commit's canonical git.commit.created —
+      // mark the sha processed so the hook/reconcile backstop (which treats the
+      // durable commit job as "still needs its event") does not emit a duplicate.
+      await markInAppCommitProcessed(workspacePath, commitHash)
       // Persist the card actually committed with, so the legacy global card
       // migrates to this workspace and the UI/next run reuse it directly.
       if (workspaceCardNumber?.trim()) {
@@ -1324,7 +1339,7 @@ export async function maybeAutoCommitAfterAgentRun({
       }
       await clearLlmModifiedMetadata(threadId)
       notifyWorkspaceFilesChanged(threadId, workspacePath)
-      trackAutoCommit(threadId, workspacePath, candidateFiles)
+      trackAutoCommit(threadId, workspacePath, candidateFiles, commitHash)
 
       let pushed: boolean | undefined
       let pushError: string | undefined

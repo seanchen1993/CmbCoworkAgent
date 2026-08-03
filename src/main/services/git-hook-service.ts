@@ -1039,6 +1039,72 @@ async function saveProcessedCommitSet(repoDir: string, commits: Set<string>): Pr
   await writeFile(join(repoDir, "processed-commits.json"), JSON.stringify(values, null, 2), "utf-8")
 }
 
+// In-memory overlay over processed-commits.json for commits reported by the
+// in-app paths. The sync sweeps load the file set once per pass and do
+// per-commit read-modify-write saves, so a commit landing mid-sweep could race
+// the marker's file write (stale in-memory set, or the sweep's save clobbering
+// the marker's). Marker and sweeps run in the same process, so this overlay
+// makes the dedup deterministic regardless of file-write interleaving.
+const inAppProcessedOverlay = new Map<string, Set<string>>()
+const IN_APP_OVERLAY_MAX_PER_REPO = 200
+
+function rememberInAppCommit(gitRoot: string, sha: string): void {
+  const key = normalizePathForKey(gitRoot)
+  let set = inAppProcessedOverlay.get(key)
+  if (!set) {
+    set = new Set()
+    inAppProcessedOverlay.set(key, set)
+  }
+  set.add(sha)
+  for (const value of set) {
+    if (set.size <= IN_APP_OVERLAY_MAX_PER_REPO) break
+    set.delete(value)
+  }
+}
+
+function isInAppProcessedCommit(gitRoot: string, sha: string): boolean {
+  return inAppProcessedOverlay.get(normalizePathForKey(gitRoot))?.has(sha) ?? false
+}
+
+/**
+ * Record an in-app commit (git panel / agent auto-commit) as already reported.
+ *
+ * Those paths emit their own `git.commit.created` and measure adoption at
+ * commit time, which leaves a durable commit job behind. The hook/reconcile
+ * backstop treats an existing job as "recovered adoption commit that still
+ * needs its event" (see processReadyCommitSnapshot / reconcileOneCommit), so
+ * without this marker every in-app commit with adoption measurements would be
+ * re-emitted by the backstop as a duplicate `git.commit.created` — carrying
+ * `repoPath` = resolved git root instead of the worktree, which in monorepos
+ * also surfaces as a different repository name in the dashboard.
+ *
+ * Must be called AFTER the in-app `measureForCommit` attempt: a pending
+ * measurement is retried by the adoption tracker's own commit-job queue, but a
+ * commit marked here before any job exists would never be measured at all.
+ *
+ * Best-effort: a failure only degrades back to the duplicate event.
+ */
+export async function markInAppCommitProcessed(
+  worktreePath: string,
+  commitSha: string | null | undefined
+): Promise<void> {
+  const sha = commitSha?.trim().toLowerCase()
+  if (!sha || !/^[0-9a-f]{7,64}$/.test(sha)) return
+  try {
+    const gitRoot = await resolveGitRoot(worktreePath)
+    if (!gitRoot) return
+    rememberInAppCommit(gitRoot, sha)
+    const repoDir = getRepoEventsDir(gitRoot)
+    await ensureDir(repoDir)
+    const processed = await getProcessedCommitSet(repoDir)
+    if (processed.has(sha)) return
+    processed.add(sha)
+    await saveProcessedCommitSet(repoDir, processed)
+  } catch (e) {
+    console.warn("[GitHook] failed to record in-app commit as processed:", e)
+  }
+}
+
 async function getCommitStats(gitRoot: string, commitSha: string): Promise<{ fileCount: number; additions: number; deletions: number }> {
   try {
     const output = await runGit(gitRoot, ["show", "--numstat", "--format=", commitSha], {
@@ -1108,6 +1174,14 @@ async function processReadyCommitSnapshot(repoDir: string, name: string): Promis
 
   const processed = await getProcessedCommitSet(repoDir)
   if (processed.has(meta.commitSha)) {
+    await moveEventDir(snapshotDir, join(repoDir, "processed"), name)
+    return
+  }
+  // In-app commit whose marker write raced this sweep's file read — treat as
+  // processed and repair the on-disk set.
+  if (isInAppProcessedCommit(meta.gitRoot, meta.commitSha)) {
+    processed.add(meta.commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
     await moveEventDir(snapshotDir, join(repoDir, "processed"), name)
     return
   }
@@ -1513,6 +1587,13 @@ async function reconcileOneCommit(
   processed: Set<string>
 ): Promise<void> {
   if (processed.has(commitSha)) return
+  // In-app commit whose marker write raced this sweep's file read — treat as
+  // processed and repair the on-disk set.
+  if (isInAppProcessedCommit(gitRoot, commitSha)) {
+    processed.add(commitSha)
+    await saveProcessedCommitSet(repoDir, processed)
+    return
+  }
 
   let rawNameStatus = ""
   try {
@@ -1546,11 +1627,17 @@ async function reconcileOneCommit(
     stagedContent: null
   }))
   // Upper bound on eligible gen rows = this commit's creation time. Without it,
-  // re-measuring an in-app/agent commit (which never recorded itself in
-  // processed-commits.json) would sweep newer uncommitted gens for the same
-  // files into this old commit — inflating its denominator and double-emitting
-  // git.commit.created. With the bound, such commits correctly gate to "no
-  // pending gens" and are skipped here.
+  // re-measuring an already-measured commit would sweep newer uncommitted gens
+  // for the same files into this old commit — inflating its denominator and
+  // double-emitting git.commit.created. With the bound, such commits correctly
+  // gate to "no pending gens" and are skipped here.
+  //
+  // existingJobStatus keeps backstop *retries* alive (measurement durable but
+  // event not yet emitted → gens already consumed, so the pending-gen gate
+  // alone would drop the commit forever). In-app commits ALSO leave a durable
+  // job behind but already emitted their own git.commit.created — they are
+  // excluded from this bypass via markInAppCommitProcessed(), which puts their
+  // sha into processed-commits.json (checked at the top of this function).
   const commitTimeMs = await getCommitTimeMs(gitRoot, commitSha)
   const existingJobStatus = await getCommitMeasurementStatus(gitRoot, commitSha)
   if (

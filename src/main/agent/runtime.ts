@@ -49,7 +49,8 @@ import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
 import type {
   HarnessAgentmdLoadStatusItem,
-  HarnessDeployUnitMapping
+  HarnessDeployUnitMapping,
+  HarnessProjectModeSubagentConfig
 } from "../../shared/harness-board-types"
 import {
   createAgent,
@@ -94,6 +95,8 @@ import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import {
   flushStrict,
   getThread,
+  getThreadMessages,
+  moveThreadMessagesAfterAnchor,
   moveThreadMessagesAfterLastNonAssistant,
   replaceThreadMessageId,
   upsertThreadMessages
@@ -148,6 +151,10 @@ import { ApprovalStore } from "./approval-store"
 import {
   assertCurrentRunMessagesDurablyPersisted,
   createCurrentRunMessageQueueMiddleware,
+  isCurrentRunMessageQueueOwner,
+  registerCurrentRunCompletedAssistantRoute,
+  resolveCurrentRunCompletedAssistantIdentity,
+  resolveCurrentRunInjectionAnchorId,
   setCurrentRunInjectionNotifier
 } from "./current-run-message-queue"
 // Re-exported so existing importers (ipc/agent.ts) keep resolving these from
@@ -160,14 +167,17 @@ export {
   isCurrentRunMessageWithdrawn,
   peekCurrentRunMessageQueue,
   queueCurrentRunMessage,
+  routeCurrentRunCompletedAssistantMessage,
   setCurrentRunMessageQueueOwner
 } from "./current-run-message-queue"
 export type { CurrentRunQueuedMessage } from "./current-run-message-queue"
 
-let flushTranscriptBeforeCurrentRunInjection: ((threadId: string) => void) | null = null
+let flushTranscriptBeforeCurrentRunInjection:
+  | ((threadId: string, runToken: string) => void)
+  | null = null
 
 export function setCurrentRunTranscriptFlushBeforeInjection(
-  flush: (threadId: string) => void
+  flush: (threadId: string, runToken: string) => void
 ): void {
   flushTranscriptBeforeCurrentRunInjection = flush
 }
@@ -250,6 +260,7 @@ import {
   type CoordinatorWorkerFilesystemAccess
 } from "./coordinator-worker-access"
 import {
+  isGeneralPurposeSubagentEnabled,
   loadAgentProfiles,
   stripBlockedToolDocs,
   stripCustomModelPrefix,
@@ -448,18 +459,9 @@ const SHARED_TOOL_NAMES = new Set([
 ])
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
-const PROJECT_MODE_SUBAGENTS_ENV = "VITE_PROJECT_MODE_SUBAGENTS_ENABLED"
-const PROJECT_MODE_SUBAGENTS_DISABLED_VALUES = new Set(["0", "false", "off", "no", "disabled"])
-
-function isProjectModeSubagentsEnabled(): boolean {
-  const raw = (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined)
-    ?.trim()
-    .toLowerCase()
-  return raw ? !PROJECT_MODE_SUBAGENTS_DISABLED_VALUES.has(raw) : true
-}
 
 function resolveProjectModeTaskToolEnabled(enableTaskTool?: boolean): boolean {
-  return enableTaskTool ?? isProjectModeSubagentsEnabled()
+  return enableTaskTool ?? true
 }
 
 type RuntimePromptToolPolicy = {
@@ -771,17 +773,61 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
   // Streamed assistant/tool chunks use a deferred transcript buffer. Flush that
   // buffer first so the steered user turn receives an ordinal after every model
   // message that preceded it in the active run.
-  flushTranscriptBeforeCurrentRunInjection(threadId)
+  if (!context?.runToken) {
+    throw new Error("Current-run transcript flush is missing its physical run token")
+  }
+  flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)
   // afterModel runs before the outer stream consumer receives the final AI
-  // message. Write that completed reply first so the steer cannot replace it
-  // in the durable transcript. Its priority wins over delayed stream chunks
-  // with the same message id.
+  // message. Resolve and migrate the exact provider occurrence before writing
+  // the completed reply so a reused raw provider id cannot overwrite history.
+  // The completed reply's priority then wins over delayed chunks for that tuple.
   const completedAssistantMessage = context?.completedAssistantMessage
+  const durableMessagesBeforeCompletedAssistant = getThreadMessages(threadId)
+  const durableAnchorMessageId = context.anchorMessage
+    ? resolveCurrentRunInjectionAnchorId(
+        durableMessagesBeforeCompletedAssistant,
+        context.anchorMessage
+      )
+    : undefined
+  if (context.anchorMessage && !durableAnchorMessageId) {
+    throw new Error("Cannot resolve current-run injection predecessor in durable transcript")
+  }
+  const completedAssistantIdentity = completedAssistantMessage
+    ? resolveCurrentRunCompletedAssistantIdentity(
+        durableMessagesBeforeCompletedAssistant,
+        completedAssistantMessage
+      )
+    : undefined
+  const completedAssistantObservedContent = completedAssistantIdentity?.sourceId
+    ? durableMessagesBeforeCompletedAssistant.find(
+        (message) =>
+          message.id === completedAssistantIdentity.sourceId && message.role === "assistant"
+      )?.content
+    : undefined
+  if (
+    completedAssistantMessage &&
+    completedAssistantIdentity?.sourceId &&
+    completedAssistantIdentity.sourceId !== completedAssistantMessage.id &&
+    !replaceThreadMessageId(
+      threadId,
+      completedAssistantIdentity.sourceId,
+      completedAssistantMessage.id,
+      "assistant"
+    )
+  ) {
+    throw new Error("Failed to migrate the completed assistant provider occurrence")
+  }
   const transcriptMessages: Message[] = [
     ...(completedAssistantMessage
       ? [
           {
             id: completedAssistantMessage.id,
+            ...(completedAssistantIdentity?.providerSourceId
+              ? { provider_source_id: completedAssistantIdentity.providerSourceId }
+              : {}),
+            ...(completedAssistantIdentity?.providerOccurrence
+              ? { provider_occurrence: completedAssistantIdentity.providerOccurrence }
+              : {}),
             role: "assistant" as const,
             content: completedAssistantMessage.content,
             content_priority: 1,
@@ -801,31 +847,47 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
   ]
   const persistedCount = upsertThreadMessages(threadId, transcriptMessages)
   assertCurrentRunMessagesDurablyPersisted(transcriptMessages.length, persistedCount)
-  // Coordinator streams can emit the provider's final assistant event after
-  // afterModel has already persisted the stable current-run id above. Record an
-  // alias now so that delayed event updates merge into this row instead of
-  // becoming a second, identical assistant transcript entry.
+  const transcriptMessageIds = transcriptMessages.map((message) => message.id)
+  if (durableAnchorMessageId) {
+    moveThreadMessagesAfterAnchor(threadId, durableAnchorMessageId, transcriptMessageIds)
+  } else {
+    moveThreadMessagesAfterLastNonAssistant(threadId, transcriptMessageIds)
+  }
+  await flushStrict()
+  // Persistence above is still valid if a replacement run took ownership while
+  // fsync was in flight, but old-run stream events are not: they would append the
+  // injected user turn after the replacement's optimistic bubble and reset its
+  // assistant accumulator. The renderer's durable-draft reconciliation will pick
+  // up the already persisted message once the replacement becomes idle.
+  if (!isCurrentRunMessageQueueOwner(threadId, context.runToken)) {
+    const ownershipError = new Error("Current-run injection owner changed during persistence")
+    ownershipError.name = "AbortError"
+    throw ownershipError
+  }
   if (
     completedAssistantMessage?.sourceId &&
-    completedAssistantMessage.sourceId !== completedAssistantMessage.id
+    completedAssistantMessage.sourceId !== completedAssistantMessage.id &&
+    context?.runToken &&
+    completedAssistantIdentity?.providerSourceId &&
+    completedAssistantIdentity.providerOccurrence
   ) {
-    replaceThreadMessageId(
-      threadId,
-      completedAssistantMessage.sourceId,
-      completedAssistantMessage.id,
-      "assistant"
-    )
+    registerCurrentRunCompletedAssistantRoute(threadId, context.runToken, {
+      rawSourceId: completedAssistantMessage.sourceId,
+      stableId: completedAssistantMessage.id,
+      providerSourceId: completedAssistantIdentity.providerSourceId,
+      providerOccurrence: completedAssistantIdentity.providerOccurrence,
+      content: completedAssistantMessage.content,
+      ...(completedAssistantObservedContent !== undefined
+        ? { observedContent: completedAssistantObservedContent }
+        : {})
+    })
   }
-  moveThreadMessagesAfterLastNonAssistant(
-    threadId,
-    transcriptMessages.map((message) => message.id)
-  )
-  await flushStrict()
   const assistantIdAlias =
-    completedAssistantMessage?.sourceId &&
-    completedAssistantMessage.sourceId !== completedAssistantMessage.id
+    completedAssistantMessage &&
+    completedAssistantIdentity?.sourceId &&
+    completedAssistantIdentity.sourceId !== completedAssistantMessage.id
       ? {
-          sourceId: completedAssistantMessage.sourceId,
+          sourceId: completedAssistantIdentity.sourceId,
           id: completedAssistantMessage.id
         }
       : undefined
@@ -854,7 +916,10 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
             type: "message_id_alias",
             fromId: assistantIdAlias.sourceId,
             toId: assistantIdAlias.id,
-            role: "assistant"
+            role: "assistant",
+            currentRunCompleted: true,
+            providerSourceId: completedAssistantIdentity?.providerSourceId,
+            providerOccurrence: completedAssistantIdentity?.providerOccurrence
           }
         })
       }
@@ -865,6 +930,13 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         type: "custom",
         data: {
           type: "current_run_user_injected",
+          ...(completedAssistantMessage
+            ? {
+                completedAssistantId: completedAssistantMessage.id,
+                completedAssistantContent: completedAssistantMessage.content,
+                completedAssistantProviderIdless: !completedAssistantMessage.sourceId
+              }
+            : {}),
           messages: payload.messages
         }
       })
@@ -876,6 +948,9 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
       console.warn("[Runtime] Failed to notify renderer about injected messages:", error)
     }
   }
+  return completedAssistantIdentity
+    ? { completedAssistantIdentity }
+    : undefined
 })
 
 const BASE_PROMPT =
@@ -1747,6 +1822,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     summarizationTruncateArgsSettings,
     onContextCompaction,
     subagentExtraSystemPrompt,
+    subagentExtraSystemPromptForRestrictedRoles = false,
     mainFilesystemEnabled = true,
     mainTodosEnabled = true,
     subagentDefaultTools,
@@ -1764,6 +1840,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
     threadId,
+    onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
     soloTaskTraceManager,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
@@ -1775,6 +1852,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onFailureFuseNotice
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
+    onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
     onToolFailureSignal?: (input: {
       toolName: string | undefined
       toolCallId: string | undefined
@@ -2298,22 +2376,20 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     .map((spec) => {
       const disallowed = spec.disallowedTools ?? []
       const shell: AgentShellAccess = spec.shellAccess ?? "full"
-      // read_only AND none are both restricted roles → omit AGENTS.md + MEMORY.md
-      // (CC omitClaudeMd parity); only write/verify (full) keep them. A no-shell
-      // agent (`none`, e.g. tools: Read) must not get more context than read_only.
+      // read_only AND none are both restricted roles. Outside project mode they
+      // preserve the existing omitClaudeMd-style behavior; project mode may
+      // explicitly share the main agent's already-resolved project context with
+      // every task subagent without changing this role's tools or MEMORY.md policy.
       const restrictedRole = shell === "read_only" || shell === "none"
       // The guard ALWAYS applies to registry agents: even a write-capable custom
       // agent is a subagent and must not get ad-hoc-exec/orchestration meta tools
       // (code_exec/manage_scheduler/manage_skill). It's ordered BEFORE the skills
       // middleware so the guard's systemMessage strip runs first and never touches
       // the injected skill list. Registry agents also see the project skill
-      // catalogue (CC subagents can invoke skills). Both AGENTS.md and MEMORY.md are
-      // injected for write-capable roles and omitted for read_only — this mirrors
-      // CC, where a write-capable subagent inherits the whole claudeMd channel
-      // (CLAUDE.md + auto-MEMORY.md) and CC's omitClaudeMd drops BOTH at once for
-      // read-only Explore/Plan. AGENTS.md is appended to the systemPrompt below
-      // (same as the general-purpose subagent); MEMORY.md rides the memory middleware
-      // here. memory_search/memory_get TOOLS are inherited regardless of role.
+      // catalogue (CC subagents can invoke skills). MEMORY.md keeps the existing
+      // restricted-role policy; project-mode context inheritance is handled only
+      // in the systemPrompt below. memory_search/memory_get TOOLS are inherited
+      // regardless of role.
       const middleware = [
         createAgentToolGuardMiddleware(disallowed, shell, windowsShellKind),
         ...skillsMiddlewareArray,
@@ -2322,11 +2398,12 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       return {
         name: spec.name,
         description: appendRegistrySubagentAccessDescription(spec.description, disallowed, shell),
-        // write/verify (full) get AGENTS.md (project instructions); read_only AND
-        // none omit it (mirrors CC omitClaudeMd dropping the claudeMd channel).
-        // Same `## Project Instructions` format the general-purpose subagent uses.
+        // Preserve the existing non-project restricted-role behavior. In project
+        // mode the caller opts every task subagent into the same resolved context
+        // snapshot as the main agent, without another AGENTS.md read.
         systemPrompt:
-          !restrictedRole && subagentExtraSystemPrompt
+          (!restrictedRole || subagentExtraSystemPromptForRestrictedRoles) &&
+          subagentExtraSystemPrompt
             ? `${spec.systemPrompt}\n\n## Project Instructions\n\n${subagentExtraSystemPrompt}`
             : spec.systemPrompt,
         ...(spec.model ? { model: spec.model } : {}),
@@ -2337,6 +2414,21 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   const availableSubagents = includeGeneralPurposeSubagent
     ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
     : [...processedSubagents, ...registrySubagents]
+
+  if (mainSubagentsEnabled && onTaskSubagentPromptsResolved) {
+    onTaskSubagentPromptsResolved(
+      availableSubagents.flatMap((subagent) =>
+        subagent &&
+        typeof subagent === "object" &&
+        "name" in subagent &&
+        typeof subagent.name === "string" &&
+        "systemPrompt" in subagent &&
+        typeof subagent.systemPrompt === "string"
+          ? [{ name: subagent.name, systemPrompt: subagent.systemPrompt }]
+          : []
+      )
+    )
+  }
 
   // deepagents' fs middleware RE-APPENDS its own `## Execute Tool` section in
   // wrapModelCall whenever the BACKEND supports execution (our LocalSandbox
@@ -3772,6 +3864,8 @@ export interface CreateAgentRuntimeOptions {
   enableAgentsPrompt?: boolean
   /** Project-mode plugin switch for the inline task tool. Undefined keeps legacy env behavior. */
   enableTaskTool?: boolean
+  /** Project-mode Solo selection of bundled and explicit user-format subagents. */
+  subagentConfig?: HarnessProjectModeSubagentConfig
   /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
   harnessAgentsPrompt?: string
   /** Optional Harness project AGENTS.md load status returned by the plugin. */
@@ -3925,6 +4019,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     coordinatorWorkerTurnPlanning,
     enableAgentsPrompt = true,
     enableTaskTool,
+    subagentConfig,
     harnessAgentsPrompt,
     agentmdLoadStatus,
     additionalAgentsWorkspacePaths,
@@ -3987,16 +4082,16 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     memoryEnabled: memoryEnabledForThread,
     enableTaskTool
   })
+  const projectModeSoloSubagentConfig =
+    runtimePolicy.isProjectMode && agentMode === "normal" ? subagentConfig : undefined
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
   console.log("[Runtime] Workspace path:", workspacePath)
   console.log("[Runtime] Agent mode:", agentMode)
   if (runtimePolicy.isProjectMode) {
-    const envValue =
-      (import.meta.env[PROJECT_MODE_SUBAGENTS_ENV] as string | undefined) ?? "<unset>"
     console.log(
-      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"}, ${PROJECT_MODE_SUBAGENTS_ENV}=${envValue})`
+      `[Runtime] Project mode subagents enabled: ${runtimePolicy.includeSubagents} (enable_task_tool=${enableTaskTool ?? "<unset>"})`
     )
     const memoryEnvValue =
       (import.meta.env[PROJECT_MODE_MEMORY_ENV] as string | undefined) ?? "<unset>"
@@ -4069,7 +4164,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
   const registrySubagentSpecs =
     agentMode === "normal" && !disableSubagents
-      ? loadAgentProfiles(workspacePath).map((profile) => ({
+      ? loadAgentProfiles(workspacePath, projectModeSoloSubagentConfig).map((profile) => ({
           name: profile.name,
           description: profile.description,
           systemPrompt: profile.systemPrompt,
@@ -4363,7 +4458,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     options.filesystemAccess?.workload === "read_only"
   let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, {
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
-    includeSubagents: runtimePolicy.includeSubagents,
+    includeSubagents: runtimePolicy.includeSubagents && !disableSubagents,
     includeMemory: runtimePolicy.includeMemory,
     includeCurrentTime: runtimePolicy.includeCurrentTime
   })
@@ -4443,13 +4538,17 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   if (combinedAgentsPrompt) {
     systemPrompt += "\n\n" + combinedAgentsPrompt
   }
-  const combinedAgentsPromptPreview =
+  const resolvedProjectContextPrompt =
     [renderedPluginPromptInject, combinedAgentsPrompt].filter(Boolean).join("\n\n") || undefined
-  if (onAgentsPromptLoadStatus && agentsPromptLoader && agentsPromptLoadStatusItems.length > 0) {
+  if (
+    onAgentsPromptLoadStatus &&
+    agentsPromptLoader &&
+    (agentsPromptLoadStatusItems.length > 0 || resolvedProjectContextPrompt)
+  ) {
     onAgentsPromptLoadStatus({
       items: agentsPromptLoadStatusItems,
       loader: agentsPromptLoader,
-      promptPreview: combinedAgentsPromptPreview
+      promptPreview: resolvedProjectContextPrompt
     })
   }
   if (extraSystemPrompt) {
@@ -4970,15 +5069,17 @@ The workspace root is: ${workspacePath}`
   const coordinatorProjectInstructions = [combinedAgentsPrompt, extraSystemPrompt]
     .filter(Boolean)
     .join("\n\n")
-  const coordinatorWorkerProjectInstructions = [
-    combinedAgentsPrompt,
-    coordinatorPluginPromptInject
-      ? `### Skills Runtime Context\n\n${coordinatorPluginPromptInject}`
-      : "",
-    extraSystemPrompt
-  ]
-    .filter(Boolean)
-    .join("\n\n")
+  const coordinatorWorkerProjectInstructions = runtimePolicy.isProjectMode
+    ? [resolvedProjectContextPrompt, extraSystemPrompt].filter(Boolean).join("\n\n")
+    : [
+        combinedAgentsPrompt,
+        coordinatorPluginPromptInject
+          ? `### Skills Runtime Context\n\n${coordinatorPluginPromptInject}`
+          : "",
+        extraSystemPrompt
+      ]
+        .filter(Boolean)
+        .join("\n\n")
 
   const emitCoordinatorWorkerEvent = (event: CoordinatorWorkerUpdateEvent): void => {
     if (!isCoordinatorMode || !onCoordinatorWorkerEvent) return
@@ -5802,6 +5903,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   // Same memory middleware as a normal main agent — injects content only, no tool changes.
   const mainMemorySources =
     !disableMemoryInjection && memorySources?.length ? memorySources : undefined
+  const projectModeTaskSubagentsInheritFullContext =
+    runtimePolicy.isProjectMode && agentMode === "normal" && !disableSubagents
+  const taskSubagentExtraSystemPrompt = projectModeTaskSubagentsInheritFullContext
+    ? resolvedProjectContextPrompt
+    : combinedAgentsPrompt
 
   const agent = createDeepAgent({
     model,
@@ -5813,7 +5919,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     systemPrompt,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
-    subagentExtraSystemPrompt: combinedAgentsPrompt,
+    subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
+    subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && runtimePolicy.includeSubagents,
@@ -5827,7 +5934,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     windowsShellKind:
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
-    includeGeneralPurposeSubagent: !isCoordinatorMode,
+    includeGeneralPurposeSubagent:
+      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeSoloSubagentConfig),
     skills: mainSkillSources,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO

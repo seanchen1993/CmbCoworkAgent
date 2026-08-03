@@ -40,8 +40,8 @@ resources/lsp-vsix/*.vsix
 .cmbdevclaw/
 AGENTS.md
 claude-code-source-code-main/
-.github/
 EnsoAI-main/
+.github/
 output/
 .playwright-cli/
 git.md

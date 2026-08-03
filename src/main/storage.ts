@@ -82,6 +82,14 @@ export function getCheckpointDbPath(): string {
   return join(getOpenworkDir(), "langgraph.sqlite")
 }
 
+export function getSubagentTranscriptContentDir(): string {
+  const dir = join(getOpenworkDir(), "subagent-transcript-content")
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
+}
+
 export function getLogsDir(): string {
   const dir = join(getOpenworkDir(), "logs")
   if (!existsSync(dir)) {
@@ -255,11 +263,14 @@ function writeEnvFile(env: Record<string, string>): void {
 }
 
 /** Resolve the managed-model credential, keeping runtime values overridable. */
-export function getBuiltinModelApiKey(): string | undefined {
+export function getBuiltinModelApiKey(options?: {
+  allowBundledFallback?: boolean
+}): string | undefined {
   const processValue = process.env[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
   if (processValue) return processValue
   const localValue = parseEnvFile()[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
   if (localValue) return localValue
+  if (options?.allowBundledFallback === false) return undefined
   return getBundledBuiltinModelApiKey()
 }
 
@@ -2781,7 +2792,7 @@ export function resolveHookLogDir(): string {
 export function getHookLogDir(): string {
   getOpenworkDir()
   const dir = resolveHookLogDir()
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
   return dir
 }
 

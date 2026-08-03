@@ -200,7 +200,7 @@ function testRuntimeEntryPointArchitecture(): void {
     [
       "invoke",
       "const replacement = await withThreadRunMutationLock",
-      "const turnState =",
+      'if ("startRejectedDuringShutdown" in replacement)',
       "nextInvokeRunToken"
     ],
     [
@@ -230,8 +230,8 @@ function testRuntimeEntryPointArchitecture(): void {
     )
   }
   assert(
-    count(desktop, 'releaseLocalThreadRunLease(threadId, "desktop", runToken)') === 3,
-    "all desktop physical run finalizers use identity-fenced release"
+    count(desktop, 'releaseLocalThreadRunLease(threadId, "desktop", runToken)') === 6,
+    "all desktop physical run finalizers and abandoned setup guards use identity-fenced release"
   )
   assert(
     count(desktop, "rejectDesktopRunForForeignOwner(threadId, window, channel)") === 3,

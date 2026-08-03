@@ -13,6 +13,14 @@ import {
   STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES
 } from "../../shared/goal-events"
 import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
+import {
+  buildMessageRoleCollisionId,
+  buildMessageSameRoleDuplicateId,
+  getMessageProviderOccurrence,
+  getMessageProviderSourceId,
+  getMessageRoleCollisionSourceId,
+  normalizeCompleteSnapshotMessageIds
+} from "../../shared/message-role-collision"
 import type { Message } from "../types"
 import { ensureImServiceSchema } from "../services/im/schema"
 
@@ -525,6 +533,8 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
     CREATE TABLE IF NOT EXISTS thread_messages (
       thread_id TEXT NOT NULL,
       message_id TEXT NOT NULL,
+      provider_source_id TEXT,
+      provider_occurrence INTEGER,
       role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system', 'tool')),
       content_json TEXT NOT NULL,
       tool_calls_json TEXT,
@@ -647,6 +657,18 @@ export async function initializeDatabase(): Promise<SqlJsDatabase> {
   if (!hasThreadMessageContentPriority) {
     db.run("ALTER TABLE thread_messages ADD COLUMN content_priority INTEGER")
   }
+  const hasThreadMessageProviderSourceId = threadMessageColumns.some(
+    (row) => row[1] === "provider_source_id"
+  )
+  if (!hasThreadMessageProviderSourceId) {
+    db.run("ALTER TABLE thread_messages ADD COLUMN provider_source_id TEXT")
+  }
+  const hasThreadMessageProviderOccurrence = threadMessageColumns.some(
+    (row) => row[1] === "provider_occurrence"
+  )
+  if (!hasThreadMessageProviderOccurrence) {
+    db.run("ALTER TABLE thread_messages ADD COLUMN provider_occurrence INTEGER")
+  }
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at)`)
   db.run(
@@ -696,6 +718,8 @@ export interface ThreadRow {
 interface ThreadMessageRow {
   thread_id: string
   message_id: string
+  provider_source_id: string | null
+  provider_occurrence: number | null
   role: Message["role"]
   content_json: string
   tool_calls_json: string | null
@@ -723,6 +747,14 @@ function isMessageRole(value: unknown): value is Message["role"] {
 function normalizeThreadMessageInput(message: Message, fallbackTime: number): Message | null {
   const id = typeof message.id === "string" ? message.id.trim() : ""
   if (!id || !isMessageRole(message.role)) return null
+  const inferredProviderSourceId = getMessageProviderSourceId({ ...message, id })
+  const providerSourceId =
+    typeof message.provider_source_id === "string" && message.provider_source_id.trim()
+      ? message.provider_source_id.trim()
+      : inferredProviderSourceId !== id
+        ? inferredProviderSourceId
+        : undefined
+  const providerOccurrence = getMessageProviderOccurrence({ ...message, id })
 
   const createdAt = normalizeTimestamp(message.created_at, fallbackTime) ?? fallbackTime
   const startAt = normalizeTimestamp(message.start_at)
@@ -730,6 +762,8 @@ function normalizeThreadMessageInput(message: Message, fallbackTime: number): Me
 
   return {
     id,
+    ...(providerSourceId ? { provider_source_id: providerSourceId } : {}),
+    ...(providerOccurrence ? { provider_occurrence: providerOccurrence } : {}),
     role: message.role,
     content: normalizeMessageContent(message.content),
     ...(Array.isArray(message.tool_calls) ? { tool_calls: clampToolCalls(message.tool_calls) } : {}),
@@ -757,15 +791,21 @@ function coalesceNormalizedThreadMessages(
   fallbackTime: number
 ): Message[] {
   const merged: Message[] = []
-  const indexById = new Map<string, number>()
+  const indexByIdentity = new Map<string, number>()
 
   for (const input of messages) {
     const normalized = normalizeThreadMessageInput(input, fallbackTime)
     if (!normalized) continue
 
-    const existingIndex = indexById.get(normalized.id)
+    const identityKey = [
+      normalized.id,
+      normalized.role,
+      getMessageProviderSourceId(normalized),
+      getMessageProviderOccurrence(normalized) ?? 1
+    ].join("\u0000")
+    const existingIndex = indexByIdentity.get(identityKey)
     if (existingIndex === undefined) {
-      indexById.set(normalized.id, merged.length)
+      indexByIdentity.set(identityKey, merged.length)
       merged.push(normalized)
       continue
     }
@@ -859,6 +899,10 @@ function threadMessageRowToMessage(row: ThreadMessageRow): Message {
 
   return {
     id: row.message_id,
+    ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
+    ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
+      ? { provider_occurrence: row.provider_occurrence }
+      : {}),
     role: row.role,
     content: parseMessageContent(row.content_json),
     ...(toolCalls ? { tool_calls: toolCalls } : {}),
@@ -993,15 +1037,150 @@ export function getThreadMessagesAfterAnyId(
   return messages
 }
 
-export function upsertThreadMessages(
+function getThreadMessageProviderOccurrenceRows(
+  database: SqlJsDatabase,
   threadId: string,
-  messages: readonly Message[],
-  options: UpsertThreadMessagesOptions = {}
-): number {
-  if (messages.length === 0) return 0
-  const database = getDb()
-  if (!getThread(threadId)) return 0
+  messages: readonly Message[]
+): ThreadMessageRow[] {
+  const providerOccurrenceKeys = new Set(
+    messages.flatMap((message) => {
+      const occurrence = getMessageProviderOccurrence(message)
+      return occurrence === undefined
+        ? []
+        : [`${getMessageProviderSourceId(message)}\u0000${message.role}\u0000${occurrence}`]
+    })
+  )
+  if (providerOccurrenceKeys.size === 0) return []
 
+  const rows: ThreadMessageRow[] = []
+  const stmt = database.prepare("SELECT * FROM thread_messages WHERE thread_id = ?")
+  stmt.bind([threadId])
+  try {
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as unknown as ThreadMessageRow
+      const identity = {
+        id: row.message_id,
+        role: row.role,
+        provider_source_id: row.provider_source_id ?? undefined,
+        provider_occurrence: row.provider_occurrence ?? undefined
+      }
+      const key = [
+        getMessageProviderSourceId(identity),
+        row.role,
+        getMessageProviderOccurrence(identity) ?? 1
+      ].join("\u0000")
+      if (providerOccurrenceKeys.has(key)) rows.push(row)
+    }
+  } finally {
+    stmt.free()
+  }
+  return rows
+}
+
+function mergeThreadMessageOrdinalsWithIncomingOrder(
+  database: SqlJsDatabase,
+  threadId: string,
+  baselineMessages: readonly Message[],
+  incomingIds: readonly string[]
+): void {
+  const rows: ThreadMessageRow[] = []
+  const stmt = database.prepare(
+    "SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY ordinal ASC, created_at ASC, message_id ASC"
+  )
+  stmt.bind([threadId])
+  try {
+    while (stmt.step()) rows.push(stmt.getAsObject() as unknown as ThreadMessageRow)
+  } finally {
+    stmt.free()
+  }
+
+  const rowById = new Map(rows.map((row) => [row.message_id, row]))
+  const currentIds = rows.map((row) => row.message_id)
+  const claimedBaselineIds = new Set<string>()
+  const stableBaselineIds = baselineMessages.flatMap((message) => {
+    const exact = rowById.get(message.id)
+    if (exact && !threadMessageRowHasProviderIdentityConflict(exact, message)) {
+      claimedBaselineIds.add(exact.message_id)
+      return [exact.message_id]
+    }
+    const identityMatches = rows.filter(
+      (row) =>
+        !claimedBaselineIds.has(row.message_id) &&
+        !threadMessageRowHasProviderIdentityConflict(row, message)
+    )
+    if (identityMatches.length !== 1) return []
+    claimedBaselineIds.add(identityMatches[0].message_id)
+    return [identityMatches[0].message_id]
+  })
+  const stableBaselineIdSet = new Set(stableBaselineIds)
+  const uniqueIncomingIds = [...new Set(incomingIds)].filter((id) => rowById.has(id))
+  const incomingIdSet = new Set(uniqueIncomingIds)
+  const incomingCoversBaseline = stableBaselineIds.every((id) => incomingIdSet.has(id))
+  const orderedIds: string[] = []
+  const emitted = new Set<string>()
+  const emit = (id: string): void => {
+    if (emitted.has(id) || !rowById.has(id)) return
+    emitted.add(id)
+    orderedIds.push(id)
+  }
+
+  if (incomingCoversBaseline) {
+    uniqueIncomingIds.forEach(emit)
+  } else {
+    stableBaselineIds.forEach(emit)
+    uniqueIncomingIds.forEach((id, incomingIndex) => {
+      if (emitted.has(id)) return
+      const nextAnchorId = uniqueIncomingIds
+        .slice(incomingIndex + 1)
+        .find((candidateId) => stableBaselineIdSet.has(candidateId))
+      if (!nextAnchorId) {
+        emit(id)
+        return
+      }
+      const anchorIndex = orderedIds.indexOf(nextAnchorId)
+      if (anchorIndex < 0) {
+        emit(id)
+        return
+      }
+      emitted.add(id)
+      orderedIds.splice(anchorIndex, 0, id)
+    })
+  }
+  currentIds.forEach(emit)
+  if (orderedIds.every((id, index) => id === currentIds[index])) return
+  orderedIds.forEach((id, ordinal) => {
+    database.run(
+      "UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?",
+      [ordinal, threadId, id]
+    )
+  })
+}
+
+function threadMessageRowHasProviderIdentityConflict(
+  row: ThreadMessageRow,
+  message: Message
+): boolean {
+  if (row.role !== message.role) return true
+  const rowIdentity = {
+    id: row.message_id,
+    role: row.role,
+    provider_source_id: row.provider_source_id ?? undefined,
+    provider_occurrence: row.provider_occurrence ?? undefined
+  }
+  const rowSourceId = getMessageProviderSourceId(rowIdentity)
+  const messageSourceId = getMessageProviderSourceId(message)
+  if (rowSourceId !== messageSourceId) return true
+  return (
+    (getMessageProviderOccurrence(rowIdentity) ?? 1) !==
+    (getMessageProviderOccurrence(message) ?? 1)
+  )
+}
+
+function applyThreadMessageIdAliases(
+  database: SqlJsDatabase,
+  threadId: string,
+  messages: readonly Message[]
+): Message[] {
   const aliasCandidates = messages.map((message) => {
     const messageId = typeof message.id === "string" ? message.id.trim() : ""
     if (!messageId) return { message, messageId, canonicalId: "", aliasRole: undefined }
@@ -1021,7 +1200,8 @@ export function upsertThreadMessages(
       .filter((candidate) => candidate.canonicalId && candidate.canonicalId !== candidate.messageId)
       .map((candidate) => candidate.canonicalId)
   )
-  const aliasedMessages = aliasCandidates.map(({ message, messageId, canonicalId, aliasRole }) => {
+
+  return aliasCandidates.map(({ message, messageId, canonicalId, aliasRole }) => {
     if (!messageId || !canonicalId || canonicalId === messageId) return message
     const target = aliasTargetRows.get(canonicalId)
     const sameBatchTargetRole = incomingRoleById.get(canonicalId)
@@ -1085,9 +1265,90 @@ export function upsertThreadMessages(
       return message
     }
     if (!target && !aliasRole) return message
-    return { ...message, id: canonicalId }
+    const providerSourceId = getMessageProviderSourceId({ ...message, id: messageId })
+    const providerOccurrence = getMessageProviderOccurrence({ ...message, id: messageId })
+    return {
+      ...message,
+      id: canonicalId,
+      provider_source_id: message.provider_source_id ?? providerSourceId,
+      ...(providerOccurrence !== undefined
+        ? { provider_occurrence: message.provider_occurrence ?? providerOccurrence }
+        : {})
+    }
   })
-  const normalizedMessages = coalesceNormalizedThreadMessages(aliasedMessages, Date.now())
+}
+
+export function upsertThreadMessages(
+  threadId: string,
+  messages: readonly Message[],
+  options: UpsertThreadMessagesOptions = {}
+): number {
+  if (messages.length === 0) return 0
+  const database = getDb()
+  if (!getThread(threadId)) return 0
+  const persistedBaselineMessages = getThreadMessages(threadId)
+
+  const aliasedMessages = applyThreadMessageIdAliases(database, threadId, messages)
+  const collisionCandidateMessages = aliasedMessages.map((message) => {
+    const messageId = typeof message.id === "string" ? message.id.trim() : ""
+    return messageId === message.id ? message : { ...message, id: messageId }
+  })
+  const collisionBaselineRows = getThreadMessageRows(
+    database,
+    threadId,
+    collisionCandidateMessages.flatMap((message) => {
+      const sourceId = getMessageRoleCollisionSourceId(message)
+      return [message.id, sourceId, buildMessageRoleCollisionId(sourceId, message.role)]
+    })
+  )
+  const collisionBaselines = [...collisionBaselineRows.values()].flatMap((row) => {
+    const hasRecoverableAliasCollision = collisionCandidateMessages.some((message) => {
+      if (message.id !== row.message_id || message.role === row.role) return false
+      const aliasSourceId = findAliasSourceForCanonicalCollision(
+        threadId,
+        row.message_id,
+        row.role
+      )
+      if (!aliasSourceId) return false
+      return !getThreadMessageRows(database, threadId, [aliasSourceId]).has(aliasSourceId)
+    })
+    return hasRecoverableAliasCollision
+      ? []
+      : [
+          {
+            id: row.message_id,
+            role: row.role,
+            ...(row.provider_source_id
+              ? { provider_source_id: row.provider_source_id }
+              : {}),
+            ...(row.provider_occurrence
+              ? { provider_occurrence: row.provider_occurrence }
+              : {})
+          }
+        ]
+  })
+  const baselineIds = new Set(collisionBaselines.map((message) => message.id))
+  for (const row of getThreadMessageProviderOccurrenceRows(
+    database,
+    threadId,
+    collisionCandidateMessages
+  )) {
+    if (baselineIds.has(row.message_id)) continue
+    baselineIds.add(row.message_id)
+    collisionBaselines.push(threadMessageRowToMessage(row))
+  }
+  const coalescedCollisionCandidates = coalesceNormalizedThreadMessages(
+    collisionCandidateMessages,
+    Date.now()
+  )
+  const collisionNormalizedMessages = normalizeCompleteSnapshotMessageIds(
+    collisionBaselines,
+    coalescedCollisionCandidates
+  )
+  const normalizedMessages = coalesceNormalizedThreadMessages(
+    applyThreadMessageIdAliases(database, threadId, collisionNormalizedMessages),
+    Date.now()
+  )
   if (normalizedMessages.length === 0) return 0
 
   let changed = 0
@@ -1100,7 +1361,9 @@ export function upsertThreadMessages(
 
   database.run("BEGIN")
   try {
-    for (const normalized of normalizedMessages) {
+    const resolvedIncomingIds: string[] = []
+    for (const rawNormalized of normalizedMessages) {
+      let normalized = rawNormalized
       const createdAt = normalizeTimestamp(normalized.created_at, Date.now()) ?? Date.now()
       const startAt = normalizeTimestamp(normalized.start_at)
       const endAt = normalizeTimestamp(normalized.end_at)
@@ -1131,6 +1394,37 @@ export function upsertThreadMessages(
         )
         continue
       }
+      if (existing && threadMessageRowHasProviderIdentityConflict(existing, normalized)) {
+        const sourceId = getMessageProviderSourceId(normalized)
+        const occurrence = getMessageProviderOccurrence(normalized) ?? 1
+        let collisionId =
+          occurrence === 1
+            ? buildMessageRoleCollisionId(sourceId, normalized.role)
+            : buildMessageSameRoleDuplicateId(sourceId, normalized.role, occurrence)
+        let suffix = Math.max(2, occurrence)
+        while (true) {
+          const collisionRow = getThreadMessageRows(database, threadId, [collisionId]).get(
+            collisionId
+          )
+          if (!collisionRow) {
+            existing = undefined
+            break
+          }
+          if (!threadMessageRowHasProviderIdentityConflict(collisionRow, normalized)) {
+            existing = collisionRow
+            break
+          }
+          collisionId = buildMessageRoleCollisionId(sourceId, normalized.role, suffix)
+          suffix += 1
+        }
+        normalized = {
+          ...normalized,
+          id: collisionId,
+          provider_source_id: sourceId,
+          provider_occurrence: occurrence
+        }
+      }
+      resolvedIncomingIds.push(normalized.id)
 
       const existingContent = existing ? parseMessageContent(existing.content_json) : ""
       const existingToolCalls = existing ? parseToolCalls(existing.tool_calls_json) : undefined
@@ -1165,6 +1459,9 @@ export function upsertThreadMessages(
       const toolCallId = normalized.tool_call_id ?? existing?.tool_call_id ?? null
       const name = normalized.name ?? existing?.name ?? null
       const status = normalized.status ?? existing?.status ?? null
+      const providerSourceId = normalized.provider_source_id ?? existing?.provider_source_id ?? null
+      const providerOccurrence =
+        normalized.provider_occurrence ?? existing?.provider_occurrence ?? null
       const goalId = normalized.goal_id ?? existing?.goal_id ?? null
       const activeWindowId = normalized.active_window_id ?? existing?.active_window_id ?? null
       const isError =
@@ -1188,11 +1485,13 @@ export function upsertThreadMessages(
       if (existing) {
         database.run(
           `UPDATE thread_messages
-           SET role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?,
+           SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?,
                name = ?, status = ?, is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?,
                created_at = ?, start_at = ?, end_at = ?
            WHERE thread_id = ? AND message_id = ?`,
           [
+            providerSourceId,
+            providerOccurrence,
             normalized.role,
             contentJson,
             toolCallsJson,
@@ -1214,13 +1513,15 @@ export function upsertThreadMessages(
         maxOrdinal += 1
         database.run(
           `INSERT INTO thread_messages (
-             thread_id, message_id, role, content_json, tool_calls_json, tool_call_id,
+             thread_id, message_id, provider_source_id, provider_occurrence, role, content_json, tool_calls_json, tool_call_id,
              name, status, is_error, content_priority, goal_id, active_window_id, created_at, start_at, end_at,
              ordinal
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             threadId,
             normalized.id,
+            providerSourceId,
+            providerOccurrence,
             normalized.role,
             contentJson,
             toolCallsJson,
@@ -1240,6 +1541,13 @@ export function upsertThreadMessages(
       }
       changed += 1
     }
+
+    mergeThreadMessageOrdinalsWithIncomingOrder(
+      database,
+      threadId,
+      persistedBaselineMessages,
+      resolvedIncomingIds
+    )
 
     if (changed > 0 && options.touchThreadUpdatedAt === true) {
       database.run("UPDATE threads SET updated_at = ? WHERE thread_id = ?", [Date.now(), threadId])
@@ -1331,6 +1639,82 @@ export function moveThreadMessagesAfterLastNonAssistant(
   return true
 }
 
+/**
+ * Move a durable message block directly after its graph-state predecessor.
+ *
+ * Unlike the legacy "last non-assistant" splice, this remains stable when a
+ * replacement user turn is persisted while the previous physical run is still
+ * finishing its afterModel injection acknowledgement.
+ */
+export function moveThreadMessagesAfterAnchor(
+  threadId: string,
+  anchorMessageId: string,
+  messageIds: readonly string[]
+): boolean {
+  const anchorId = anchorMessageId.trim()
+  const orderedIds = Array.from(
+    new Set(messageIds.map((id) => id.trim()).filter((id) => id && id !== anchorId))
+  )
+  if (!anchorId || orderedIds.length === 0) return false
+
+  const database = getDb()
+  const stmt = database.prepare(
+    "SELECT message_id, role, ordinal FROM thread_messages WHERE thread_id = ? ORDER BY ordinal ASC, created_at ASC, message_id ASC"
+  )
+  stmt.bind([threadId])
+  const rows: Array<Pick<ThreadMessageRow, "message_id" | "role" | "ordinal">> = []
+  try {
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject() as Pick<ThreadMessageRow, "message_id" | "role" | "ordinal">)
+    }
+  } finally {
+    stmt.free()
+  }
+
+  const rowById = new Map(rows.map((row) => [row.message_id, row]))
+  if (!rowById.has(anchorId)) {
+    throw new Error(`Cannot order durable messages: anchor ${anchorId} is missing`)
+  }
+  const moved = orderedIds.map((messageId) => rowById.get(messageId))
+  if (moved.some((row) => !row)) {
+    throw new Error("Cannot order durable messages: one or more block messages are missing")
+  }
+
+  const movedIds = new Set(orderedIds)
+  const retained = rows.filter((row) => !movedIds.has(row.message_id))
+  const anchorIndex = retained.findIndex((row) => row.message_id === anchorId)
+  if (anchorIndex < 0) {
+    throw new Error(`Cannot order durable messages: anchor ${anchorId} was removed with the block`)
+  }
+  const reordered = [
+    ...retained.slice(0, anchorIndex + 1),
+    ...(moved as Array<Pick<ThreadMessageRow, "message_id" | "role" | "ordinal">>),
+    ...retained.slice(anchorIndex + 1)
+  ]
+  if (reordered.every((row, index) => row.message_id === rows[index]?.message_id)) return false
+
+  database.run("BEGIN")
+  try {
+    for (const [ordinal, row] of reordered.entries()) {
+      database.run(
+        "UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?",
+        [ordinal, threadId, row.message_id]
+      )
+    }
+    database.run("COMMIT")
+  } catch (error) {
+    try {
+      database.run("ROLLBACK")
+    } catch {
+      // Preserve the original transaction error.
+    }
+    throw error
+  }
+
+  saveToDisk()
+  return true
+}
+
 export function replaceThreadMessageId(
   threadId: string,
   fromMessageId: string,
@@ -1372,6 +1756,61 @@ export function replaceThreadMessageId(
     console.warn(
       `[DB] Refusing to merge message id alias across roles for thread ${threadId}: ` +
         `${fromId} (${source.role}) -> ${toId} (${target.role})`
+    )
+    return false
+  }
+  const storedProviderSourceId = (row: ThreadMessageRow | undefined): string | undefined => {
+    if (!row) return undefined
+    const explicitSourceId = row.provider_source_id?.trim()
+    if (explicitSourceId) return explicitSourceId
+    const inferredSourceId = getMessageProviderSourceId({ id: row.message_id, role: row.role })
+    return inferredSourceId !== row.message_id ? inferredSourceId : undefined
+  }
+  const sourceProviderSourceId = storedProviderSourceId(source)
+  const targetProviderSourceId = storedProviderSourceId(target)
+  const effectiveSourceProviderSourceId =
+    sourceProviderSourceId ??
+    (source && targetProviderSourceId === source.message_id
+      ? source.message_id
+      : undefined)
+  const effectiveTargetProviderSourceId =
+    targetProviderSourceId ??
+    (target && sourceProviderSourceId === target.message_id
+      ? target.message_id
+      : undefined)
+  const sourceProviderOccurrence = source
+    ? getMessageProviderOccurrence({
+        id: source.message_id,
+        provider_occurrence: source.provider_occurrence ?? undefined,
+        role: source.role
+      })
+    : undefined
+  const targetProviderOccurrence = target
+    ? getMessageProviderOccurrence({
+        id: target.message_id,
+        provider_occurrence: target.provider_occurrence ?? undefined,
+        role: target.role
+      })
+    : undefined
+  const effectiveSourceProviderOccurrence =
+    sourceProviderOccurrence ??
+    (source && effectiveSourceProviderSourceId ? 1 : undefined)
+  const effectiveTargetProviderOccurrence =
+    targetProviderOccurrence ??
+    (target && effectiveTargetProviderSourceId ? 1 : undefined)
+  if (
+    source &&
+    target &&
+    ((effectiveSourceProviderSourceId &&
+      effectiveTargetProviderSourceId &&
+      effectiveSourceProviderSourceId !== effectiveTargetProviderSourceId) ||
+      (effectiveSourceProviderOccurrence !== undefined &&
+        effectiveTargetProviderOccurrence !== undefined &&
+        effectiveSourceProviderOccurrence !== effectiveTargetProviderOccurrence))
+  ) {
+    console.warn(
+      `[DB] Refusing to merge different provider message occurrences for thread ${threadId}: ` +
+        `${fromId} -> ${toId}`
     )
     return false
   }
@@ -1421,9 +1860,18 @@ export function replaceThreadMessageId(
   database.run("BEGIN")
   try {
     if (!target) {
+      const providerSourceId =
+        source.provider_source_id ??
+        getMessageProviderSourceId({ id: fromId, role: source.role })
+      const providerOccurrence =
+        source.provider_occurrence ??
+        getMessageProviderOccurrence({ id: fromId, role: source.role }) ??
+        null
       database.run(
-        "UPDATE thread_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
-        [toId, threadId, fromId]
+        `UPDATE thread_messages
+         SET message_id = ?, provider_source_id = ?, provider_occurrence = ?
+         WHERE thread_id = ? AND message_id = ?`,
+        [toId, providerSourceId, providerOccurrence, threadId, fromId]
       )
     } else {
       const targetContent = parseMessageContent(target.content_json)
@@ -1451,6 +1899,20 @@ export function replaceThreadMessageId(
         sourceContentPriority,
         targetContentPriority
       )
+      const inferredSourceProviderId = getMessageProviderSourceId({
+        id: fromId,
+        role: source.role
+      })
+      const sourceInternalProviderId =
+        inferredSourceProviderId !== fromId ? inferredSourceProviderId : undefined
+      const sourceProviderId = source.provider_source_id?.trim() || sourceInternalProviderId
+      const mergedProviderSourceId =
+        sourceProviderId ?? target.provider_source_id ?? inferredSourceProviderId
+      const mergedProviderOccurrence = sourceProviderId
+        ? (source.provider_occurrence ??
+          getMessageProviderOccurrence({ id: fromId, role: source.role }) ??
+          target.provider_occurrence)
+        : (target.provider_occurrence ?? source.provider_occurrence)
 
       database.run("DELETE FROM thread_messages WHERE thread_id = ? AND message_id = ?", [
         threadId,
@@ -1458,11 +1920,13 @@ export function replaceThreadMessageId(
       ])
       database.run(
         `UPDATE thread_messages
-         SET role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
+         SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
              is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
              end_at = ?, ordinal = ?
          WHERE thread_id = ? AND message_id = ?`,
         [
+          mergedProviderSourceId,
+          mergedProviderOccurrence,
           target.role ?? source.role,
           safeJsonStringify(mergedContent),
           Array.isArray(mergedToolCalls) ? safeJsonStringify(mergedToolCalls) : null,

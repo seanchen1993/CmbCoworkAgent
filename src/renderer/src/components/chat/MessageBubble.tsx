@@ -33,10 +33,18 @@ import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
 } from "@/lib/coordinator-worker-tool-args"
-import { getWorkerToolResultKey, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
+import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
 import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
+import {
+  normalizeVisibleReasoningText,
+  shouldAutoCollapseReasoning
+} from "@/lib/message-display-visibility"
+import {
+  areMessageRenderFieldsEqual,
+  areMessageToolRenderInputsEqual
+} from "@/lib/message-render-stability"
 
 /**
  * Strip the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</…>` block when present.
@@ -148,13 +156,6 @@ function normalizeToolCallForDisplay<T extends { name: string; args?: Record<str
     ...toolCall,
     args: normalizeCoordinatorWorkerToolArgsForDisplay(toolCall.name, toolCall.args)
   }
-}
-
-function cleanReasoningText(text: string): string {
-  return text
-    .replace(/^\s*<think>\s*/i, "")
-    .replace(/\s*<\/think>\s*$/i, "")
-    .trim()
 }
 
 function stripThinkBlocksForDisplay(text: string): string {
@@ -559,6 +560,7 @@ interface MessageBubbleProps {
   showAssistantMeta?: boolean
   toolResults?: Map<string, ToolResultInfo>
   toolCallStates?: Map<string, ToolCallState>
+  pendingApprovalToolCallKeys?: Set<string>
   pendingApproval?: HITLRequest | null
   autoApproveGitPush?: boolean
   onApprovalDecision?: (
@@ -585,6 +587,7 @@ function MessageBubbleImpl({
   showAssistantMeta = true,
   toolResults,
   toolCallStates,
+  pendingApprovalToolCallKeys,
   pendingApproval,
   autoApproveGitPush = false,
   onApprovalDecision,
@@ -618,8 +621,7 @@ function MessageBubbleImpl({
   const isForkingThisMessage = forkingMessageId === message.id
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
-  const reasoningText =
-    !isUser && typeof message.reasoning === "string" ? cleanReasoningText(message.reasoning) : ""
+  const reasoningText = !isUser ? normalizeVisibleReasoningText(message.reasoning) : ""
   const visibleAssistantContentText = useMemo(() => {
     if (isUser) return ""
     if (typeof message.content === "string") {
@@ -634,6 +636,7 @@ function MessageBubbleImpl({
       .join("\n")
   }, [isUser, message.content, reasoningText])
   const hasVisibleAssistantContent = visibleAssistantContentText.trim().length > 0
+  const hasToolCalls = Boolean(message.tool_calls?.length)
 
   useEffect(() => {
     if (
@@ -671,11 +674,19 @@ function MessageBubbleImpl({
   }, [isStreaming, message.id, reasoningText])
 
   useEffect(() => {
-    if (!isStreaming || !reasoningText || !hasVisibleAssistantContent) return
+    if (
+      !shouldAutoCollapseReasoning({
+        isStreaming,
+        reasoningText,
+        hasVisibleAssistantContent,
+        hasToolCalls
+      })
+    )
+      return
     if (autoCollapsedReasoningForMessageRef.current === message.id) return
     autoCollapsedReasoningForMessageRef.current = message.id
     setReasoningOpen(false)
-  }, [hasVisibleAssistantContent, isStreaming, message.id, reasoningText])
+  }, [hasToolCalls, hasVisibleAssistantContent, isStreaming, message.id, reasoningText])
 
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
   const shouldShowMessageHead =
@@ -856,7 +867,6 @@ function MessageBubbleImpl({
 
   const content = renderContent()
   const displayToolCalls = message.tool_calls?.map(normalizeToolCallForDisplay)
-  const hasToolCalls = displayToolCalls && displayToolCalls.length > 0
   const shouldShowAssistantActions =
     showAssistantMeta && !isLoading && Boolean(content || hasToolCalls)
   const canSetGoalFromMessage =
@@ -1097,16 +1107,18 @@ function MessageBubbleImpl({
           <div className="space-y-2 overflow-hidden">
             {displayToolCalls!.map((toolCall, index) => {
               const toolId = getWorkerToolUiKey(message.id, toolCall.id, index)
-              const toolState = toolCallStates?.get(toolCall.id)
+              const toolState = toolCallStates?.get(toolId)
               const resolvedToolCall = hydrateToolCall(toolCall, toolState)
-              const resultKey = getWorkerToolResultKey(message.id, toolCall.id) ?? toolCall.id
-              const result = resultKey ? toolResults?.get(resultKey) : undefined
+              const result = toolResults?.get(toolId)
               const pendingIds = pendingApproval?.pendingToolCallIds
-              const needsApproval = Boolean(
-                pendingIds?.length
-                  ? pendingIds.includes(toolCall.id)
-                  : pendingApproval?.tool_call?.id && pendingApproval.tool_call.id === toolCall.id
-              )
+              const needsApproval = pendingApprovalToolCallKeys
+                ? pendingApprovalToolCallKeys.has(toolId)
+                : Boolean(
+                    pendingIds?.length
+                      ? pendingIds.includes(toolCall.id)
+                      : pendingApproval?.tool_call?.id &&
+                          pendingApproval.tool_call.id === toolCall.id
+                  )
               const inferredStatus: ToolCallStatus =
                 toolState?.status ||
                 (needsApproval
@@ -1369,8 +1381,32 @@ function MessageBubbleImpl({
   )
 }
 
-// Memoized so off-screen/unchanged bubbles skip React reconciliation when the
-// parent re-renders (which happens on every streaming token). The container
-// passes stable, memoized props (message, toolResults, toolCallStates and
-// useCallback handlers), so the default shallow comparison is effective.
-export const MessageBubble = React.memo(MessageBubbleImpl)
+function areMessageBubblePropsEqual(
+  previous: Readonly<MessageBubbleProps>,
+  next: Readonly<MessageBubbleProps>
+): boolean {
+  return (
+    areMessageRenderFieldsEqual(previous.message, next.message) &&
+    (previous.previousMessage?.role ?? null) === (next.previousMessage?.role ?? null) &&
+    previous.isStreaming === next.isStreaming &&
+    previous.showAssistantMeta === next.showAssistantMeta &&
+    previous.pendingApproval === next.pendingApproval &&
+    previous.autoApproveGitPush === next.autoApproveGitPush &&
+    previous.onApprovalDecision === next.onApprovalDecision &&
+    previous.onEditUserMessage === next.onEditUserMessage &&
+    previous.onSetGoalFromMessage === next.onSetGoalFromMessage &&
+    previous.onForkFromMessage === next.onForkFromMessage &&
+    previous.forkingMessageId === next.forkingMessageId &&
+    previous.threadId === next.threadId &&
+    previous.isLoading === next.isLoading &&
+    previous.hasUserAfterHead === next.hasUserAfterHead &&
+    previous.assistantDurationMs === next.assistantDurationMs &&
+    previous.userSendTimeLabel === next.userSendTimeLabel &&
+    areMessageToolRenderInputsEqual(previous.message, previous, next)
+  )
+}
+
+// Parent stream updates recreate the transcript array and global tool maps.
+// Compare only fields rendered by this bubble plus this message's own tool
+// entries, so unchanged history can actually stop at the React.memo boundary.
+export const MessageBubble = React.memo(MessageBubbleImpl, areMessageBubblePropsEqual)

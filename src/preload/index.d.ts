@@ -46,7 +46,10 @@ import type {
   ForkableCheckpoint,
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
-  ThreadForkResponse
+  ThreadForkResponse,
+  SubagentTranscriptPage,
+  SubagentTranscriptBlobExportResult,
+  SubagentTranscriptBlobField
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -60,10 +63,16 @@ import type {
 } from "../main/ipc/code-exec-tools"
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
@@ -71,6 +80,8 @@ import type {
   HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -618,11 +629,22 @@ interface DashboardProjectModeProject {
   featureCount: number
   conversationCount: number
   devStageConversationCount: number
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
+}
+
+interface DashboardProjectModeExportData {
+  users: DashboardProjectModeTopUser[]
+  projects: DashboardProjectModeProject[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -898,6 +920,7 @@ interface CustomAPI {
   threads: {
     list: () => Promise<Thread[]>
     get: (threadId: string) => Promise<Thread | null>
+    getProjectSubagentsAvailable: (threadId: string) => Promise<boolean>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
     listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
@@ -906,6 +929,23 @@ interface CustomAPI {
     ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
+    getSubagentTranscripts: (threadId: string) => Promise<Record<string, unknown>>
+    getSubagentTranscript: (
+      threadId: string,
+      subagentId: string,
+      before?: number
+    ) => Promise<SubagentTranscriptPage>
+    exportSubagentTranscriptBlob: (
+      threadId: string,
+      subagentId: string,
+      messageIndex: number,
+      expectedMessageId: string,
+      field: SubagentTranscriptBlobField
+    ) => Promise<SubagentTranscriptBlobExportResult>
+    persistSubagentTranscripts: (
+      threadId: string,
+      transcripts: Record<string, unknown>
+    ) => Promise<Record<string, unknown>>
     delete: (threadId: string) => Promise<void>
     getMessages: (threadId: string) => Promise<Message[]>
     appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
@@ -1174,18 +1214,24 @@ interface CustomAPI {
       modified_at?: string
       error?: string
     }>
-    readExternalFile: (filePath: string) => Promise<{
+    readExternalFile: (token: string) => Promise<{
       success: boolean
       content?: string
       size?: number
       modified_at?: string
       error?: string
     }>
-    readExternalBinaryFile: (filePath: string) => Promise<{
+    readExternalBinaryFile: (token: string) => Promise<{
       success: boolean
       content?: string
       size?: number
       modified_at?: string
+      error?: string
+    }>
+    requestExternalFileRead: (filePath: string) => Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
       error?: string
     }>
     clearWorktreeContext: (threadId: string) => Promise<void>
@@ -1334,7 +1380,7 @@ interface CustomAPI {
       gitRoot: string
     ) => Promise<Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>>
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ) => Promise<{
       success: boolean
@@ -1399,22 +1445,23 @@ interface CustomAPI {
       error?: string
     }>
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string }) => void
+      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
     ) => () => void
   }
   pet: {
     // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
     list: () => Promise<PetManifest[]>
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    ) => Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }>
     // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
     setState: (state: PetState) => void
     // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
     clearCompletedTasks: () => void
     getSettings: () => Promise<PetSettings>
     updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
+    onSettingsChanged: (callback: (settings: PetSettings) => void) => () => void
     uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
@@ -2170,6 +2217,7 @@ interface CustomAPI {
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
     isAwardsAdmin: () => Promise<boolean>
+    isSkillEvalAllowed: () => Promise<boolean>
     awardsSkillContributions: (
       range: { from: string; to: string },
       skillNames: string[]
@@ -2227,6 +2275,10 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
+    projectModeExportData: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },
@@ -2424,8 +2476,26 @@ interface CustomAPI {
       totalTraces: number
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
+    exportUserTraces: (payload: {
+      sapId: string
+      ystId?: string
+      userName: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalItems: number
+      viewMode: DashboardTraceViewMode
+      triggerScope: DashboardTraceTriggerScope
+      projectMode: boolean
+      traces: DashboardTraceDetail[]
+    }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
   }
@@ -2450,11 +2520,21 @@ interface CustomAPI {
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
     ) => Promise<HarnessEnterpriseProjectSearchResult>
+    searchDeployUnits: (
+      input: HarnessDeployUnitSearchInput
+    ) => Promise<HarnessDeployUnitSearchResult>
+    queryPipelines: (input: HarnessPipelineQueryInput) => Promise<HarnessPipelineQueryResult>
+    queryPipelineLabels: (
+      input: HarnessPipelineLabelQueryInput
+    ) => Promise<HarnessPipelineLabelQueryResult>
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
     getProjectReviews: (input: HarnessProjectReviewInput) => Promise<HarnessProjectReviewResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
+    updateFeatureDeployUnits: (
+      input: HarnessFeatureDeployUnitUpdateInput
+    ) => Promise<HarnessFeatureDeployUnitBinding>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
