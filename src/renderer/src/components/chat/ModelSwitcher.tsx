@@ -5,6 +5,10 @@ import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
 import { useCurrentThread } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
+import {
+  resolveHydratedThreadModel,
+  type ModelRoutingMode
+} from "../../../../shared/thread-model-selection"
 import { CustomModelDialog } from "./CustomModelDialog"
 
 function CustomIcon({ className }: { className?: string }): React.JSX.Element {
@@ -25,7 +29,8 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   const [open, setOpen] = useState(false)
   const [customDialogOpen, setCustomDialogOpen] = useState(false)
   const [dialogModelId, setDialogModelId] = useState<string | undefined>(undefined)
-  const [routingMode, setRoutingMode] = useState<"auto" | "pinned">("pinned")
+  const [routingMode, setRoutingMode] = useState<ModelRoutingMode>("pinned")
+  const [routingModeLoaded, setRoutingModeLoaded] = useState(false)
   const [defaultModelId, setDefaultModelId] = useState("")
 
   const { models, loadModels, loadProviders } = useAppStore()
@@ -34,7 +39,21 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
 
   // Load global routing mode on mount
   useEffect(() => {
-    void window.api.routing.getMode().then((mode) => setRoutingMode(mode))
+    let cancelled = false
+    void window.api.routing
+      .getMode()
+      .then((mode) => {
+        if (!cancelled) setRoutingMode(mode)
+      })
+      .catch((error) => {
+        console.warn("[ModelSwitcher] Failed to load routing mode; using pinned:", error)
+      })
+      .finally(() => {
+        if (!cancelled) setRoutingModeLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
@@ -64,31 +83,36 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
     : null
   const routedTierLabel = routingResult?.resolvedTier === "economy" ? "经济" : routingResult?.resolvedTier === "premium" ? "强力" : null
 
-  const [metadataLoaded, setMetadataLoaded] = useState(false)
+  const hydrationKey = routingModeLoaded ? `${threadId}:${routingMode}` : null
+  const [hydratedModelKey, setHydratedModelKey] = useState<string | null>(null)
 
   useEffect(() => {
+    if (!hydrationKey) return
     let cancelled = false
-    window.api.threads.get(threadId).then((thread) => {
-      if (cancelled) return
-      const metadata = thread?.metadata || {}
-      // Prefer routing-resolved model (smart routing) over user's pinned selection,
-      // so that the context window indicator reflects the actually-used model.
-      const routingState = metadata.routingState as { lastResolvedModelId?: string } | undefined
-      const effectiveModel = routingState?.lastResolvedModelId || (metadata.model as string) || ""
-      if (effectiveModel) {
-        // Hydration only restores the model used by the current view. Persisting here
-        // would turn a read-only session open into an updated_at change.
-        restoreCurrentModel(effectiveModel)
-      }
-      setMetadataLoaded(true)
-    })
+    void window.api.threads
+      .get(threadId)
+      .then((thread) => {
+        if (cancelled) return
+        const hydrated = resolveHydratedThreadModel(thread?.metadata, routingMode)
+        if (hydrated.modelId) {
+          // Hydration only restores the model used by the current view. Persisting here
+          // would turn a read-only session open into an updated_at change.
+          restoreCurrentModel(hydrated.modelId)
+        }
+      })
+      .catch((error) => {
+        console.warn(`[ModelSwitcher] Failed to hydrate model for thread ${threadId}:`, error)
+      })
+      .finally(() => {
+        if (!cancelled) setHydratedModelKey(hydrationKey)
+      })
     return () => {
       cancelled = true
     }
-  }, [threadId, restoreCurrentModel])
+  }, [hydrationKey, restoreCurrentModel, routingMode, threadId])
 
   useEffect(() => {
-    if (models.length === 0 || !metadataLoaded) return
+    if (!hydrationKey || hydratedModelKey !== hydrationKey || models.length === 0) return
 
     const hasValidSelection = currentModel && models.some((m) => m.id === currentModel)
     if (!hasValidSelection && currentModel?.startsWith("custom:")) {
@@ -106,7 +130,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
         models.find((model) => model.available)
       if (preferred) setCurrentModel(preferred.id)
     }
-  }, [models, currentModel, defaultModelId, setCurrentModel, metadataLoaded])
+  }, [models, currentModel, defaultModelId, setCurrentModel, hydratedModelKey, hydrationKey])
 
   function handleModelSelect(modelId: string): void {
     setCurrentModel(modelId)
@@ -176,10 +200,10 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
             </div>
             <button
               type="button"
-              disabled={!canEnableRouting}
+              disabled={!canEnableRouting || !routingModeLoaded}
               onClick={() => {
-                if (!canEnableRouting) return
-                const next: "auto" | "pinned" = routingMode === "auto" ? "pinned" : "auto"
+                if (!canEnableRouting || !routingModeLoaded) return
+                const next: ModelRoutingMode = routingMode === "auto" ? "pinned" : "auto"
                 setRoutingMode(next)
                 void window.api.routing.setMode(next)
               }}

@@ -3207,6 +3207,11 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
+    projectModeExportData: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },
@@ -3483,8 +3488,27 @@ const api = {
       traces: unknown[]
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
+    exportUserTraces: (payload: {
+      sapId: string
+      ystId?: string
+      userName: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalItems: number
+      viewMode: "thread" | "trace"
+      triggerScope: "active" | "all"
+      projectMode: boolean
+      traces: unknown[]
+    }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke("dashboard:exportUserTraces", payload),
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportExcel", sheets, options)

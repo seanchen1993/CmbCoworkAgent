@@ -104,6 +104,13 @@ import {
   parseUploaderIdentity,
   type UploaderProfileInfo
 } from "../../lib/skill-data-service"
+import {
+  buildProjectModeProjectExportRows,
+  buildProjectModeProjectExportSummaryRows,
+  buildProjectModeUserExportRows,
+  PROJECT_MODE_PROJECT_EXPORT_HEADER,
+  PROJECT_MODE_USER_EXPORT_HEADER
+} from "./project-mode-export"
 
 type UserInfoLite = {
   sapId?: string
@@ -141,6 +148,7 @@ type DashboardExcelSheet = {
   name: string
   header: string[]
   rows: (string | number)[][]
+  summaryRows?: (string | number)[][]
 }
 
 type DashboardAnalysisScope = "platform" | "project"
@@ -1587,6 +1595,8 @@ function UserDetailPage({
   onTraceNext,
   onTraceViewModeChange,
   onTraceTriggerScopeChange,
+  onExportPage,
+  exporting,
   loadThreadTraces
 }: {
   data: DashboardUserDetail | null
@@ -1601,6 +1611,8 @@ function UserDetailPage({
   onTraceNext: () => void
   onTraceViewModeChange: (mode: DashboardTraceViewMode) => void
   onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
+  onExportPage: () => void
+  exporting: boolean
   loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
@@ -1745,6 +1757,21 @@ function UserDetailPage({
                     value={traceTriggerScope}
                     onChange={onTraceTriggerScopeChange}
                   />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1"
+                    onClick={onExportPage}
+                    disabled={exporting || loading || data.traces.length === 0}
+                  >
+                    {exporting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Download className="size-3.5" />
+                    )}
+                    导出本页
+                  </Button>
                   <Button
                     type="button"
                     variant="outline"
@@ -2792,6 +2819,7 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardTraceViewMode>("thread")
   const [userDetailTraceTriggerScope, setUserDetailTraceTriggerScope] =
     useState<DashboardTraceTriggerScope>("active")
+  const [userDetailTraceExporting, setUserDetailTraceExporting] = useState(false)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
@@ -3899,6 +3927,33 @@ export function DashboardView(): React.JSX.Element {
     setUserDetailTracePage(1)
   }, [])
 
+  const handleUserTraceExport = useCallback(async () => {
+    if (!userDetail || userDetail.traces.length === 0) return
+    setUserDetailTraceExporting(true)
+    try {
+      const result = await window.api.dashboard.exportUserTraces({
+        sapId: userDetail.sapId,
+        ystId: userDetail.ystId,
+        userName: userDetail.userName,
+        range,
+        page: userDetail.tracePage,
+        pageSize: userDetail.tracePageSize || USER_TRACE_PAGE_SIZE,
+        totalItems: userDetail.total,
+        viewMode: userDetail.traceViewMode ?? userDetailTraceViewMode,
+        triggerScope: userDetail.traceTriggerScope ?? userDetailTraceTriggerScope,
+        projectMode: subPage.kind === "user-detail" && Boolean(subPage.projectMode),
+        traces: userDetail.traces
+      })
+      if (!result.success && !result.canceled) {
+        window.alert(result.error || "导出用户会话记录失败")
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "导出用户会话记录失败")
+    } finally {
+      setUserDetailTraceExporting(false)
+    }
+  }, [range, subPage, userDetail, userDetailTraceTriggerScope, userDetailTraceViewMode])
+
   const handleProjectTracePrevious = useCallback(() => {
     setProjectTracePage((prev) => Math.max(1, prev - 1))
   }, [])
@@ -4496,6 +4551,14 @@ export function DashboardView(): React.JSX.Element {
     if (!projectMode) return
     setExporting(true)
     try {
+      const exportDataResult = await window.api.dashboard.projectModeExportData(range, {
+        upperOrgLv1: selectedOrgLv1List,
+        fromLeanOnly: fromLeanProjectsOnly
+      })
+      if (!exportDataResult.success || !exportDataResult.data) {
+        throw new Error(exportDataResult.error ?? "获取项目导出明细失败")
+      }
+      const exportData = exportDataResult.data
       const sheets: DashboardExcelSheet[] = []
       const summary = projectMode.summary
       const codeStats = summary.codeStats
@@ -4527,20 +4590,18 @@ export function DashboardView(): React.JSX.Element {
         })
       }
 
-      if (projectMode.analytics.topUsers.length > 0) {
-        sheets.push({
-          name: "项目用户分析",
-          header: ["排名", "SAP ID", "YST ID", "用户名", "部门", "项目对话数"],
-          rows: projectMode.analytics.topUsers.map((user, index) => [
-            index + 1,
-            user.sapId,
-            user.ystId || "",
-            user.userName,
-            user.orgName || "—",
-            user.count
-          ])
-        })
-      }
+      sheets.push({
+        name: "项目用户分析",
+        header: PROJECT_MODE_USER_EXPORT_HEADER,
+        rows: buildProjectModeUserExportRows(exportData.users)
+      })
+
+      sheets.push({
+        name: "项目列表",
+        header: PROJECT_MODE_PROJECT_EXPORT_HEADER,
+        rows: buildProjectModeProjectExportRows(exportData.projects),
+        summaryRows: buildProjectModeProjectExportSummaryRows(exportData)
+      })
 
       if (projectMode.analytics.byOrg.length > 0) {
         sheets.push({
@@ -4687,10 +4748,20 @@ export function DashboardView(): React.JSX.Element {
       } else if (!result.canceled && result.error) {
         console.error("[Dashboard] Project mode export failed:", result.error)
       }
+    } catch (error) {
+      console.error("[Dashboard] Project mode export failed:", error)
+      window.alert(error instanceof Error ? error.message : "导出项目运营概览失败")
     } finally {
       setExporting(false)
     }
-  }, [projectMode, range, selectedOrgLv1List, marketSkillMap, skillUploaderProfiles])
+  }, [
+    projectMode,
+    range,
+    selectedOrgLv1List,
+    fromLeanProjectsOnly,
+    marketSkillMap,
+    skillUploaderProfiles
+  ])
 
   const projectTraces = projectTraceData?.traces ?? []
   const projectTracePageSize = projectTraceData?.tracePageSize ?? PROJECT_TRACE_PAGE_SIZE
@@ -4858,6 +4929,8 @@ export function DashboardView(): React.JSX.Element {
             onTraceNext={handleUserTraceNext}
             onTraceViewModeChange={handleUserTraceViewModeChange}
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
+            onExportPage={handleUserTraceExport}
+            exporting={userDetailTraceExporting}
             loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
           />
         </ScrollArea>
