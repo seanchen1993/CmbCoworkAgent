@@ -69,7 +69,6 @@ function eventFixture(sequence: number, text: string): RemoteImEventV1 {
     principalId: "principal-1",
     conversationKey: "conversation-1",
     conversationSeq: sequence,
-    deviceEpoch: 1,
     message: { type: "text", text },
     occurredAt: `2026-07-23T08:00:${String(sequence).padStart(2, "0")}.000Z`,
     lease: { id: `lease-${sequence}`, expiresAt: "2026-07-23T09:00:00.000Z" }
@@ -93,8 +92,7 @@ async function createContext() {
   const selections = new ImSelectionContextStore(persistence, () => "selection-token", 60_000)
   await conversations.ensureConversation({
     conversationKey: "conversation-1",
-    principalId: "principal-1",
-    deviceEpoch: 1
+    principalId: "principal-1"
   })
 
   const threads = new Map<string, ThreadRow>()
@@ -218,8 +216,7 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
   })
   const commandInput = {
     conversationKey: "conversation-1",
-    principalId: "principal-1",
-    deviceEpoch: 1
+    principalId: "principal-1"
   }
   try {
     const retired = await router.handle({
@@ -297,8 +294,7 @@ async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
     const grant = await context.access.enableFeature({
       route: {
         conversationKey: "conversation-1",
-        principalId: "principal-1",
-        deviceEpoch: 1
+        principalId: "principal-1"
       },
       projectId: "project-secret-id",
       featureSlug: "feature-pay"
@@ -306,8 +302,7 @@ async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
     const target = await context.access.bindFeatureGrant({
       route: {
         conversationKey: "conversation-1",
-        principalId: "principal-1",
-        deviceEpoch: 1
+        principalId: "principal-1"
       },
       grantId: grant.grantId,
       grantVersion: grant.grantVersion
@@ -318,7 +313,6 @@ async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
       conversationKey: "conversation-1",
       conversationSeq: 1,
       principalId: "principal-1",
-      deviceEpoch: 1,
       leaseId: "lease",
       leaseExpiresAt: context.clock.now + 60_000,
       permitState: "unacquired",
@@ -392,8 +386,7 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
   })
   const route = {
     conversationKey: "conversation-1",
-    principalId: "principal-1",
-    deviceEpoch: 1
+    principalId: "principal-1"
   }
   try {
     const originalMetadata = {
@@ -424,7 +417,6 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
       conversationKey: route.conversationKey,
       conversationSeq: 1,
       principalId: route.principalId,
-      deviceEpoch: route.deviceEpoch,
       leaseId: "lease",
       leaseExpiresAt: context.clock.now + 60_000,
       permitState: "unacquired",
@@ -578,15 +570,13 @@ async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<v
   try {
     const inbox = await context.inbox.ensureInbox({
       conversationKey: "conversation-1",
-      principalId: "principal-1",
-      deviceEpoch: 1
+      principalId: "principal-1"
     })
     const originalRemote = eventFixture(1, "执行一次可能有副作用的任务")
     await context.events.receiveEvent(originalRemote, inbox)
     await context.events.queueEvent(originalRemote.eventId)
     await context.events.recordExecutionPermit({
       eventId: originalRemote.eventId,
-      deviceEpoch: 1,
       leaseId: originalRemote.lease.id,
       expiresAt: "2026-07-23T09:00:00.000Z"
     })

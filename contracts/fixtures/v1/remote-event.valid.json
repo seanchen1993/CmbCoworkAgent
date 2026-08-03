@@ -5,7 +5,6 @@
   "principalId": "principal-opaque-001",
   "conversationKey": "conversation-opaque-001",
   "conversationSeq": 1,
-  "deviceEpoch": 3,
   "message": { "type": "text", "text": "请总结今天的工作" },
   "occurredAt": "2026-07-23T08:00:00.000Z",
   "lease": { "id": "lease-0001", "expiresAt": "2026-07-23T08:01:30.000Z" },

@@ -39,7 +39,6 @@ export type ImTargetSnapshot =
 export interface ImConversationRecord {
   conversationKey: string
   principalId: string
-  deviceEpoch: number
   activeTargetId: string | null
   state: ImConversationState
   lastReceivedSeq: number
@@ -50,7 +49,6 @@ export interface ImConversationRecord {
 interface ImConversationRow {
   conversation_key: string
   principal_id: string
-  device_epoch: number
   active_target_id: string | null
   state: ImConversationState
   last_received_seq: number
@@ -83,7 +81,6 @@ export class ImConversationStateError extends Error {
     readonly code:
       | "CONVERSATION_NOT_FOUND"
       | "PRINCIPAL_MISMATCH"
-      | "DEVICE_EPOCH_MISMATCH"
       | "CONVERSATION_REVOKED"
       | "TARGET_NOT_FOUND"
       | "TARGET_NOT_ACTIVE"
@@ -105,7 +102,6 @@ function hydrateConversation(row: ImConversationRow): ImConversationRecord {
   return {
     conversationKey: row.conversation_key,
     principalId: row.principal_id,
-    deviceEpoch: Number(row.device_epoch),
     activeTargetId: row.active_target_id ?? null,
     state: row.state,
     lastReceivedSeq: Number(row.last_received_seq),
@@ -176,9 +172,9 @@ function sameTarget(row: ImTargetRow, candidate: ImTargetSnapshot): boolean {
           (row.grant_id ?? undefined) === candidate.grantId &&
           (row.grant_version === null ? undefined : Number(row.grant_version)) ===
             candidate.grantVersion &&
-        row.project_id === candidate.projectId &&
-        row.feature_slug === candidate.featureSlug &&
-        (row.project_name ?? undefined) === candidate.projectName &&
+          row.project_id === candidate.projectId &&
+          row.feature_slug === candidate.featureSlug &&
+          (row.project_name ?? undefined) === candidate.projectName &&
           (row.feature_title ?? undefined) === candidate.featureTitle))
   )
 }
@@ -205,13 +201,9 @@ export class ImConversationStateStore {
   async ensureConversation(input: {
     conversationKey: string
     principalId: string
-    deviceEpoch: number
   }): Promise<{ created: boolean; conversation: ImConversationRecord }> {
     const conversationKey = required(input.conversationKey, "conversationKey")
     const principalId = required(input.principalId, "principalId")
-    if (!Number.isSafeInteger(input.deviceEpoch) || input.deviceEpoch < 1) {
-      throw new Error("deviceEpoch must be a positive integer")
-    }
     const database = this.dependencies.getDatabase()
     const existing = readOne<ImConversationRow>(
       database,
@@ -219,7 +211,7 @@ export class ImConversationStateStore {
       [conversationKey]
     )
     if (existing) {
-      this.assertRoute(existing, principalId, input.deviceEpoch)
+      this.assertOwner(existing, principalId)
       await this.dependencies.flushStrict()
       return { created: false, conversation: hydrateConversation(existing) }
     }
@@ -227,10 +219,10 @@ export class ImConversationStateStore {
     const now = this.dependencies.now()
     database.run(
       `INSERT INTO im_conversations (
-         conversation_key, principal_id, device_epoch, active_target_id, state,
+         conversation_key, principal_id, active_target_id, state,
          last_received_seq, created_at, updated_at
-       ) VALUES (?, ?, ?, NULL, 'active', 0, ?, ?)`,
-      [conversationKey, principalId, input.deviceEpoch, now, now]
+       ) VALUES (?, ?, NULL, 'active', 0, ?, ?)`,
+      [conversationKey, principalId, now, now]
     )
     this.dependencies.markDirty()
     await this.dependencies.flushStrict()
@@ -239,7 +231,6 @@ export class ImConversationStateStore {
       conversation: hydrateConversation({
         conversation_key: conversationKey,
         principal_id: principalId,
-        device_epoch: input.deviceEpoch,
         active_target_id: null,
         state: "active",
         last_received_seq: 0,
@@ -249,7 +240,7 @@ export class ImConversationStateStore {
     }
   }
 
-  assertCurrentRoute(conversationKey: string, principalId: string, deviceEpoch: number): void {
+  assertConversationOwner(conversationKey: string, principalId: string): void {
     const row = readOne<ImConversationRow>(
       this.dependencies.getDatabase(),
       "SELECT * FROM im_conversations WHERE conversation_key = ?",
@@ -258,7 +249,7 @@ export class ImConversationStateStore {
     if (!row) {
       throw new ImConversationStateError("CONVERSATION_NOT_FOUND", "Conversation is unknown")
     }
-    this.assertRoute(row, principalId, deviceEpoch)
+    this.assertOwner(row, principalId)
   }
 
   getActiveTarget(conversationKey: string): ImTargetSnapshot | null {
@@ -470,9 +461,11 @@ export class ImConversationStateStore {
       throw new Error("grantVersion must be a positive integer")
     }
     const database = this.dependencies.getDatabase()
-    const existing = readOne<ImTargetRow>(database, "SELECT * FROM im_targets WHERE target_id = ?", [
-      input.targetId
-    ])
+    const existing = readOne<ImTargetRow>(
+      database,
+      "SELECT * FROM im_targets WHERE target_id = ?",
+      [input.targetId]
+    )
     if (!existing) throw new ImConversationStateError("TARGET_NOT_FOUND", "Target is unknown")
     if (existing.kind === "inbox") {
       throw new ImConversationStateError(
@@ -564,50 +557,9 @@ export class ImConversationStateStore {
     await this.dependencies.flushStrict()
   }
 
-  async resetForDeviceTakeover(
-    conversationKey: string,
-    expectedDeviceEpoch: number,
-    nextDeviceEpoch: number
-  ): Promise<void> {
-    if (nextDeviceEpoch <= expectedDeviceEpoch) throw new Error("nextDeviceEpoch must increase")
-    const database = this.dependencies.getDatabase()
-    const now = this.dependencies.now()
-    withImTransaction(database, () => {
-      database.run(
-        `UPDATE im_conversations
-         SET device_epoch = ?, active_target_id = NULL, state = 'active', updated_at = ?
-         WHERE conversation_key = ? AND device_epoch = ?`,
-        [nextDeviceEpoch, now, conversationKey, expectedDeviceEpoch]
-      )
-      if (database.getRowsModified() !== 1) {
-        throw new ImConversationStateError("DEVICE_EPOCH_MISMATCH", "Conversation epoch changed")
-      }
-      database.run(
-        `UPDATE im_targets
-         SET state = 'revoked', suspend_reason = NULL, updated_at = ?
-         WHERE conversation_key = ? AND state != 'revoked'`,
-        [now, conversationKey]
-      )
-      database.run(
-        `UPDATE im_feature_bindings
-         SET state = 'revoked', suspend_reason = NULL, updated_at = ?
-         WHERE conversation_key = ? AND state != 'revoked'`,
-        [now, conversationKey]
-      )
-    })
-    this.dependencies.markDirty()
-    await this.dependencies.flushStrict()
-  }
-
-  private assertRoute(row: ImConversationRow, principalId: string, deviceEpoch: number): void {
+  private assertOwner(row: ImConversationRow, principalId: string): void {
     if (row.principal_id !== principalId) {
       throw new ImConversationStateError("PRINCIPAL_MISMATCH", "Conversation principal differs")
-    }
-    if (Number(row.device_epoch) !== deviceEpoch) {
-      throw new ImConversationStateError(
-        "DEVICE_EPOCH_MISMATCH",
-        "Conversation device epoch differs"
-      )
     }
     if (row.state === "revoked") {
       throw new ImConversationStateError("CONVERSATION_REVOKED", "Conversation is revoked")

@@ -467,7 +467,5 @@ export type {
   BuiltinRobotRouteStatus,
   BuiltinRobotSettings,
   BuiltinRobotStatus,
-  BuiltinRobotTakeoverRequest,
-  BuiltinRobotTakeoverResult,
   BuiltinRobotThreadGrantStatus
 } from "../../main/types"

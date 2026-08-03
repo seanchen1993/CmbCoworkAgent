@@ -39,8 +39,10 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(sidebar.includes('"远程收件箱"'))
   assert(sidebar.includes('"远程 Feature"'))
   assert(sidebar.includes('"远程历史"'))
-  assert(robotPanel.includes('{ state: "waiting_desktop", label: "等待桌面"'))
-  assert(robotPanel.includes('{ state: "outcome_unknown", label: "结果未知"'))
+  assert(robotPanel.includes("每个账号只保留一个活动桌面连接"))
+  assert(robotPanel.includes("企业账号已由网关验证"))
+  assert(!robotPanel.includes("deviceEpoch"))
+  assert(!robotPanel.includes("设备版本"))
 }
 
 testRemoteInboxIsReadOnlyAtRendererAndMainBoundary()

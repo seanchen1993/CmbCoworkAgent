@@ -1,14 +1,13 @@
 import { randomUUID } from "node:crypto"
 import { flushStrict, getDb, saveToDisk } from "../../db"
 import type { ImPersistenceDependencies } from "./persistence"
-import { readAll, readOne, withImTransaction } from "./persistence"
+import { readAll, readOne } from "./persistence"
 
 export type ImRemoteGrantState = "active" | "suspended" | "revoked"
 
 export interface ImGrantRouteIdentity {
   principalId: string
   conversationKey: string
-  deviceEpoch: number
 }
 
 export interface ImThreadGrantRecord extends ImGrantRouteIdentity {
@@ -43,7 +42,6 @@ interface ThreadGrantRow {
   grant_id: string
   principal_id: string
   conversation_key: string
-  device_epoch: number
   thread_id: string
   title_snapshot: string
   state: ImRemoteGrantState
@@ -58,7 +56,6 @@ interface FeatureGrantRow {
   grant_id: string
   principal_id: string
   conversation_key: string
-  device_epoch: number
   project_id: string
   feature_slug: string
   project_name_snapshot: string
@@ -92,13 +89,9 @@ function required(value: string, label: string): string {
 }
 
 function route(input: ImGrantRouteIdentity): ImGrantRouteIdentity {
-  if (!Number.isSafeInteger(input.deviceEpoch) || input.deviceEpoch < 1) {
-    throw new Error("deviceEpoch must be a positive integer")
-  }
   return {
     principalId: required(input.principalId, "principalId"),
-    conversationKey: required(input.conversationKey, "conversationKey"),
-    deviceEpoch: input.deviceEpoch
+    conversationKey: required(input.conversationKey, "conversationKey")
   }
 }
 
@@ -108,7 +101,6 @@ function hydrateThread(row: ThreadGrantRow): ImThreadGrantRecord {
     grantId: row.grant_id,
     principalId: row.principal_id,
     conversationKey: row.conversation_key,
-    deviceEpoch: Number(row.device_epoch),
     threadId: row.thread_id,
     titleSnapshot: row.title_snapshot,
     state: row.state,
@@ -126,7 +118,6 @@ function hydrateFeature(row: FeatureGrantRow): ImFeatureGrantRecord {
     grantId: row.grant_id,
     principalId: row.principal_id,
     conversationKey: row.conversation_key,
-    deviceEpoch: Number(row.device_epoch),
     projectId: row.project_id,
     featureSlug: row.feature_slug,
     projectNameSnapshot: row.project_name_snapshot,
@@ -141,11 +132,7 @@ function hydrateFeature(row: FeatureGrantRow): ImFeatureGrantRecord {
 }
 
 function sameRoute(left: ImGrantRouteIdentity, right: ImGrantRouteIdentity): boolean {
-  return (
-    left.principalId === right.principalId &&
-    left.conversationKey === right.conversationKey &&
-    left.deviceEpoch === right.deviceEpoch
-  )
+  return left.principalId === right.principalId && left.conversationKey === right.conversationKey
 }
 
 export class ImRemoteGrantStore {
@@ -226,35 +213,19 @@ export class ImRemoteGrantStore {
     if (!existing) {
       database.run(
         `INSERT INTO im_thread_grants (
-           grant_id, principal_id, conversation_key, device_epoch, thread_id,
+           grant_id, principal_id, conversation_key, thread_id,
            title_snapshot, state, grant_version, suspend_reason, created_at, updated_at, revoked_at
-         ) VALUES (?, ?, ?, ?, ?, ?, 'active', 1, NULL, ?, ?, NULL)`,
-        [
-          this.createId(),
-          identity.principalId,
-          identity.conversationKey,
-          identity.deviceEpoch,
-          threadId,
-          title,
-          now,
-          now
-        ]
+         ) VALUES (?, ?, ?, ?, ?, 'active', 1, NULL, ?, ?, NULL)`,
+        [this.createId(), identity.principalId, identity.conversationKey, threadId, title, now, now]
       )
     } else {
       database.run(
         `UPDATE im_thread_grants
-         SET principal_id = ?, conversation_key = ?, device_epoch = ?, title_snapshot = ?,
+         SET principal_id = ?, conversation_key = ?, title_snapshot = ?,
              state = 'active', grant_version = grant_version + 1, suspend_reason = NULL,
              updated_at = ?, revoked_at = NULL
          WHERE grant_id = ?`,
-        [
-          identity.principalId,
-          identity.conversationKey,
-          identity.deviceEpoch,
-          title,
-          now,
-          existing.grantId
-        ]
+        [identity.principalId, identity.conversationKey, title, now, existing.grantId]
       )
     }
     this.dependencies.markDirty()
@@ -280,15 +251,14 @@ export class ImRemoteGrantStore {
     if (!existing) {
       database.run(
         `INSERT INTO im_feature_grants (
-           grant_id, principal_id, conversation_key, device_epoch, project_id, feature_slug,
+           grant_id, principal_id, conversation_key, project_id, feature_slug,
            project_name_snapshot, feature_title_snapshot, state, grant_version,
            suspend_reason, created_at, updated_at, revoked_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, NULL, ?, ?, NULL)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, NULL, ?, ?, NULL)`,
         [
           this.createId(),
           identity.principalId,
           identity.conversationKey,
-          identity.deviceEpoch,
           projectId,
           featureSlug,
           projectName,
@@ -300,7 +270,7 @@ export class ImRemoteGrantStore {
     } else {
       database.run(
         `UPDATE im_feature_grants
-         SET principal_id = ?, conversation_key = ?, device_epoch = ?,
+         SET principal_id = ?, conversation_key = ?,
              project_name_snapshot = ?, feature_title_snapshot = ?, state = 'active',
              grant_version = grant_version + 1, suspend_reason = NULL,
              updated_at = ?, revoked_at = NULL
@@ -308,7 +278,6 @@ export class ImRemoteGrantStore {
         [
           identity.principalId,
           identity.conversationKey,
-          identity.deviceEpoch,
           projectName,
           featureTitle,
           now,
@@ -379,31 +348,6 @@ export class ImRemoteGrantStore {
       throw new ImRemoteGrantError("GRANT_ROUTE_MISMATCH", "Feature grant target differs")
     }
     return grant!
-  }
-
-  async suspendRouteGrants(
-    conversationKey: string,
-    expectedDeviceEpoch: number,
-    reasonCode = "ROUTE_TAKEOVER"
-  ): Promise<void> {
-    if (!Number.isSafeInteger(expectedDeviceEpoch) || expectedDeviceEpoch < 1) {
-      throw new Error("expectedDeviceEpoch must be a positive integer")
-    }
-    const database = this.dependencies.getDatabase()
-    const now = this.dependencies.now()
-    withImTransaction(database, () => {
-      for (const table of ["im_thread_grants", "im_feature_grants"]) {
-        database.run(
-          `UPDATE ${table}
-           SET state = 'suspended', grant_version = grant_version + 1,
-               suspend_reason = ?, updated_at = ?, revoked_at = NULL
-           WHERE conversation_key = ? AND device_epoch = ? AND state = 'active'`,
-          [reasonCode, now, required(conversationKey, "conversationKey"), expectedDeviceEpoch]
-        )
-      }
-    })
-    this.dependencies.markDirty()
-    await this.dependencies.flushStrict()
   }
 
   private assertActive(

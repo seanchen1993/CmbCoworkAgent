@@ -99,7 +99,7 @@ export function eventShortCode(eventId: string): string {
 }
 
 export function buildImEventReplies(input: {
-  event: Pick<ImEventRecord, "eventId" | "conversationKey" | "deviceEpoch">
+  event: Pick<ImEventRecord, "eventId" | "conversationKey">
   text: string
   prefix?: string
   deliveryId?: string
@@ -111,7 +111,6 @@ export function buildImEventReplies(input: {
     deliveryId,
     eventId: input.event.eventId,
     conversationKey: input.event.conversationKey,
-    expectedDeviceEpoch: input.event.deviceEpoch,
     idempotencyKey: `${deliveryId}:reply:${index}`,
     segment: { index, count: segments.length },
     message: { type: "text", content }
@@ -121,7 +120,6 @@ export function buildImEventReplies(input: {
 export function buildImProactiveReplies(input: {
   deliveryId: string
   conversationKey: string
-  expectedDeviceEpoch: number
   text: string
   prefix?: string
 }): RemoteImReplyV1[] {
@@ -132,7 +130,6 @@ export function buildImProactiveReplies(input: {
     schemaVersion: IM_GATEWAY_SCHEMA_VERSION,
     deliveryId,
     conversationKey: input.conversationKey,
-    expectedDeviceEpoch: input.expectedDeviceEpoch,
     idempotencyKey: `${deliveryId}:reply:${index}`,
     segment: { index, count: segments.length },
     message: { type: "text", content }

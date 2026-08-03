@@ -30,7 +30,6 @@ export interface ImEventRecord {
   conversationKey: string
   conversationSeq: number
   principalId: string
-  deviceEpoch: number
   leaseId: string
   leaseExpiresAt: number
   permitState: ImPermitState
@@ -56,7 +55,6 @@ export interface ImReplyOutboxRecord {
   deliveryId: string
   eventId: string | null
   conversationKey: string
-  expectedDeviceEpoch: number
   idempotencyKey: string
   segmentIndex: number
   segmentCount: number
@@ -76,7 +74,6 @@ interface ImEventRow {
   conversation_key: string
   conversation_seq: number
   principal_id: string
-  device_epoch: number
   lease_id: string
   lease_expires_at: number
   permit_state: ImPermitState
@@ -102,7 +99,6 @@ interface ImReplyOutboxRow {
   delivery_id: string
   event_id: string | null
   conversation_key: string
-  expected_device_epoch: number
   idempotency_key: string
   segment_index: number
   segment_count: number
@@ -119,7 +115,6 @@ interface ImReplyOutboxRow {
 interface ImConversationRouteRow {
   conversation_key: string
   principal_id: string
-  device_epoch: number
   state: "active" | "suspended" | "revoked"
 }
 
@@ -180,7 +175,6 @@ function hydrateEvent(row: ImEventRow): ImEventRecord {
     conversationKey: row.conversation_key,
     conversationSeq: Number(row.conversation_seq),
     principalId: row.principal_id,
-    deviceEpoch: Number(row.device_epoch),
     leaseId: row.lease_id,
     leaseExpiresAt: Number(row.lease_expires_at),
     permitState: row.permit_state,
@@ -208,7 +202,6 @@ function hydrateOutbox(row: ImReplyOutboxRow): ImReplyOutboxRecord {
     deliveryId: row.delivery_id,
     eventId: row.event_id ?? null,
     conversationKey: row.conversation_key,
-    expectedDeviceEpoch: Number(row.expected_device_epoch),
     idempotencyKey: row.idempotency_key,
     segmentIndex: Number(row.segment_index),
     segmentCount: Number(row.segment_count),
@@ -230,7 +223,6 @@ function sameRemoteEvent(row: ImEventRow, event: RemoteImEventV1): boolean {
     row.conversation_key === event.conversationKey &&
     Number(row.conversation_seq) === event.conversationSeq &&
     row.principal_id === event.principalId &&
-    Number(row.device_epoch) === event.deviceEpoch &&
     row.message_text === event.message.text &&
     Number(row.occurred_at) === Date.parse(event.occurredAt)
   )
@@ -241,7 +233,6 @@ function samePersistedReply(row: ImReplyOutboxRow, reply: RemoteImReplyV1): bool
     row.delivery_id === reply.deliveryId &&
     row.event_id === (reply.eventId ?? null) &&
     row.conversation_key === reply.conversationKey &&
-    Number(row.expected_device_epoch) === reply.expectedDeviceEpoch &&
     row.idempotency_key === reply.idempotencyKey &&
     Number(row.segment_index) === reply.segment.index &&
     Number(row.segment_count) === reply.segment.count &&
@@ -270,8 +261,7 @@ function normalizeReplies(
       reply.segment.count !== count ||
       reply.deliveryId !== first.deliveryId ||
       reply.eventId !== event.eventId ||
-      reply.conversationKey !== event.conversationKey ||
-      reply.expectedDeviceEpoch !== event.deviceEpoch
+      reply.conversationKey !== event.conversationKey
     ) {
       throw new ImEventStoreError(
         "OUTBOX_INCOMPLETE",
@@ -303,8 +293,7 @@ function normalizeProactiveReplies(replies: readonly RemoteImReplyV1[]): RemoteI
       reply.segment.index !== index ||
       reply.segment.count !== ordered.length ||
       reply.deliveryId !== first.deliveryId ||
-      reply.conversationKey !== first.conversationKey ||
-      reply.expectedDeviceEpoch !== first.expectedDeviceEpoch
+      reply.conversationKey !== first.conversationKey
     ) {
       throw new ImEventStoreError(
         "OUTBOX_INCOMPLETE",
@@ -416,7 +405,7 @@ export class ImEventStore {
 
     const route = readOne<ImConversationRouteRow>(
       database,
-      "SELECT conversation_key, principal_id, device_epoch, state FROM im_conversations WHERE conversation_key = ?",
+      "SELECT conversation_key, principal_id, state FROM im_conversations WHERE conversation_key = ?",
       [event.conversationKey]
     )
     if (!route) {
@@ -424,12 +413,6 @@ export class ImEventStore {
     }
     if (route.principal_id !== event.principalId) {
       throw new ImConversationStateError("PRINCIPAL_MISMATCH", "Conversation principal differs")
-    }
-    if (Number(route.device_epoch) !== event.deviceEpoch) {
-      throw new ImConversationStateError(
-        "DEVICE_EPOCH_MISMATCH",
-        "Conversation device epoch differs"
-      )
     }
     if (route.state === "revoked") {
       throw new ImConversationStateError("CONVERSATION_REVOKED", "Conversation is revoked")
@@ -451,11 +434,11 @@ export class ImEventStore {
       database.run(
         `INSERT INTO im_events (
            event_id, platform_message_id, conversation_key, conversation_seq, principal_id,
-           device_epoch, lease_id, lease_expires_at, permit_state, permit_expires_at,
+           lease_id, lease_expires_at, permit_state, permit_expires_at,
            message_text, occurred_at, target_snapshot_json, state, run_id, retry_of_event_id,
            result_text, reason_code, retryable, created_at, updated_at, accepted_at,
            execution_started_at, finished_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unacquired', NULL, ?, ?, ?, 'received', NULL, ?,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unacquired', NULL, ?, ?, ?, 'received', NULL, ?,
                    NULL, NULL, NULL, ?, ?, NULL, NULL, NULL)`,
         [
           event.eventId,
@@ -463,7 +446,6 @@ export class ImEventStore {
           event.conversationKey,
           event.conversationSeq,
           event.principalId,
-          event.deviceEpoch,
           event.lease.id,
           leaseExpiresAt,
           event.message.text,
@@ -499,7 +481,6 @@ export class ImEventStore {
 
   async recordExecutionPermit(input: {
     eventId: string
-    deviceEpoch: number
     leaseId: string
     previousLeaseId?: string
     expiresAt: string | number
@@ -510,9 +491,6 @@ export class ImEventStore {
         "INVALID_EVENT_TRANSITION",
         "Only a queued event can acquire a permit"
       )
-    }
-    if (event.deviceEpoch !== input.deviceEpoch) {
-      throw new ImEventStoreError("LEASE_MISMATCH", "Permit device epoch differs")
     }
     const previousLeaseId = input.previousLeaseId ?? input.leaseId
     if (event.leaseId !== previousLeaseId) {
@@ -528,22 +506,14 @@ export class ImEventStore {
       `UPDATE im_events
        SET lease_id = ?, lease_expires_at = ?, permit_state = 'acquired',
            permit_expires_at = ?, updated_at = ?
-       WHERE event_id = ? AND state = 'queued' AND device_epoch = ? AND lease_id = ?
+       WHERE event_id = ? AND state = 'queued' AND lease_id = ?
          AND EXISTS (
            SELECT 1 FROM im_conversations conversation
            WHERE conversation.conversation_key = im_events.conversation_key
-             AND conversation.device_epoch = im_events.device_epoch
+             AND conversation.principal_id = im_events.principal_id
              AND conversation.state = 'active'
          )`,
-      [
-        input.leaseId,
-        expiresAt,
-        expiresAt,
-        this.dependencies.now(),
-        input.eventId,
-        input.deviceEpoch,
-        previousLeaseId
-      ]
+      [input.leaseId, expiresAt, expiresAt, this.dependencies.now(), input.eventId, previousLeaseId]
     )
     if (database.getRowsModified() !== 1) {
       throw new ImEventStoreError("LEASE_MISMATCH", "Execution permit no longer matches event")
@@ -600,15 +570,15 @@ export class ImEventStore {
     }
     const currentRoute = readOne<ImConversationRouteRow>(
       this.dependencies.getDatabase(),
-      "SELECT conversation_key, principal_id, device_epoch, state FROM im_conversations WHERE conversation_key = ?",
+      "SELECT conversation_key, principal_id, state FROM im_conversations WHERE conversation_key = ?",
       [event.conversationKey]
     )
     if (
       !currentRoute ||
       currentRoute.state !== "active" ||
-      Number(currentRoute.device_epoch) !== event.deviceEpoch
+      currentRoute.principal_id !== event.principalId
     ) {
-      throw new ImEventStoreError("LEASE_MISMATCH", "Event belongs to an old device epoch")
+      throw new ImEventStoreError("LEASE_MISMATCH", "Event conversation ownership changed")
     }
     return this.transitionEvent(eventId, "executing", {
       runId,
@@ -689,16 +659,15 @@ export class ImEventStore {
       for (const reply of normalizedReplies) {
         database.run(
           `INSERT INTO im_reply_outbox (
-             outbox_id, delivery_id, event_id, conversation_key, expected_device_epoch,
+             outbox_id, delivery_id, event_id, conversation_key,
              idempotency_key, segment_index, segment_count, content, state,
              platform_reply_id, attempt_count, next_attempt_at, reason_code, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
           [
             `${reply.deliveryId}:${reply.segment.index}`,
             reply.deliveryId,
             eventId,
             reply.conversationKey,
-            reply.expectedDeviceEpoch,
             reply.idempotencyKey,
             reply.segment.index,
             reply.segment.count,
@@ -767,15 +736,14 @@ export class ImEventStore {
       for (const reply of normalized) {
         database.run(
           `INSERT INTO im_reply_outbox (
-             outbox_id, delivery_id, event_id, conversation_key, expected_device_epoch,
+             outbox_id, delivery_id, event_id, conversation_key,
              idempotency_key, segment_index, segment_count, content, state,
              platform_reply_id, attempt_count, next_attempt_at, reason_code, created_at, updated_at
-           ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
+           ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'pending', NULL, 0, ?, NULL, ?, ?)`,
           [
             `${reply.deliveryId}:${reply.segment.index}`,
             reply.deliveryId,
             reply.conversationKey,
-            reply.expectedDeviceEpoch,
             reply.idempotencyKey,
             reply.segment.index,
             reply.segment.count,
@@ -945,56 +913,6 @@ export class ImEventStore {
       "SELECT COUNT(*) AS count FROM im_reply_outbox WHERE state IN ('pending', 'sending', 'unknown')"
     )
     return { eventCounts, pendingOutboxCount: Number(pending?.count ?? 0) }
-  }
-
-  async applyDeviceTakeover(
-    conversationKey: string,
-    expectedDeviceEpoch: number
-  ): Promise<{ cancelledEventIds: string[]; outcomeUnknownEventIds: string[] }> {
-    const database = this.dependencies.getDatabase()
-    const cancellable = readAll<{ event_id: string }>(
-      database,
-      `SELECT event_id FROM im_events
-       WHERE conversation_key = ? AND device_epoch = ? AND state IN ('received', 'queued')`,
-      [conversationKey, expectedDeviceEpoch]
-    ).map((row) => row.event_id)
-    const uncertain = readAll<{ event_id: string }>(
-      database,
-      `SELECT event_id FROM im_events
-       WHERE conversation_key = ? AND device_epoch = ? AND state IN ('executing', 'waiting_desktop')`,
-      [conversationKey, expectedDeviceEpoch]
-    ).map((row) => row.event_id)
-    const now = this.dependencies.now()
-    withImTransaction(database, () => {
-      database.run(
-        `UPDATE im_events
-         SET state = 'cancelled', permit_state = 'revoked',
-             reason_code = 'DEVICE_TAKEOVER_CANCELLED', retryable = 0,
-             updated_at = ?, finished_at = ?
-         WHERE conversation_key = ? AND device_epoch = ? AND state IN ('received', 'queued')`,
-        [now, now, conversationKey, expectedDeviceEpoch]
-      )
-      database.run(
-        `UPDATE im_events
-         SET state = 'outcome_unknown', permit_state = 'revoked',
-             reason_code = 'EVENT_OUTCOME_UNKNOWN', retryable = 1,
-             updated_at = ?, finished_at = ?
-         WHERE conversation_key = ? AND device_epoch = ?
-           AND state IN ('executing', 'waiting_desktop')`,
-        [now, now, conversationKey, expectedDeviceEpoch]
-      )
-      database.run(
-        `UPDATE im_reply_outbox
-         SET state = CASE WHEN state = 'sending' THEN 'unknown' ELSE 'failed' END,
-             reason_code = 'ROUTE_EPOCH_CONFLICT', next_attempt_at = NULL, updated_at = ?
-         WHERE conversation_key = ? AND expected_device_epoch = ?
-           AND state IN ('pending', 'sending')`,
-        [now, conversationKey, expectedDeviceEpoch]
-      )
-    })
-    this.dependencies.markDirty()
-    await this.dependencies.flushStrict()
-    return { cancelledEventIds: cancellable, outcomeUnknownEventIds: uncertain }
   }
 
   async cleanupExpiredTerminalData(retentionMs = 7 * 24 * 60 * 60 * 1_000): Promise<{

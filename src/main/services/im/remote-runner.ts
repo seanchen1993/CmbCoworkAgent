@@ -242,16 +242,17 @@ export function resolveImInboxDeliveryContextForRuntime(input: {
   const context = delivery as Record<string, unknown>
   if (
     context.provider !== DEFAULT_IM_CHANNEL_ID ||
+    typeof context.principalId !== "string" ||
+    !context.principalId.trim() ||
     typeof context.conversationKey !== "string" ||
-    !Number.isSafeInteger(context.deviceEpoch) ||
-    (context.deviceEpoch as number) <= 0
+    !context.conversationKey.trim()
   ) {
     return undefined
   }
   return {
     provider: DEFAULT_IM_CHANNEL_ID,
+    principalId: context.principalId,
     conversationKey: context.conversationKey,
-    expectedDeviceEpoch: context.deviceEpoch as number,
     inboxThreadId: input.threadId
   }
 }
@@ -608,7 +609,6 @@ export class ImRemoteRunner {
                     buildImProactiveReplies({
                       deliveryId: `${event.eventId}:waiting-desktop`,
                       conversationKey: waiting.conversationKey,
-                      expectedDeviceEpoch: waiting.deviceEpoch,
                       text: "任务正在等待桌面确认或补充输入，请在 10 分钟内到对应远程 Thread 处理。",
                       prefix: this.targetPrefixForEvent(waiting)
                     })
@@ -723,7 +723,7 @@ export class ImRemoteRunner {
           })
         })
         .catch(() => {
-          permitRevokedReason = "DEVICE_OFFLINE"
+          permitRevokedReason = "DESKTOP_OFFLINE"
           executionAbort.abort(new Error("IM execution permit renewal failed"))
         })
         .finally(() => {
@@ -878,7 +878,6 @@ export class ImRemoteRunner {
   ): Promise<void> {
     await this.dependencies.eventStore.recordExecutionPermit({
       eventId: event.eventId,
-      deviceEpoch: event.deviceEpoch,
       previousLeaseId: event.leaseId,
       leaseId: permit.leaseId!,
       expiresAt: permit.expiresAt!

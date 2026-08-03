@@ -1338,7 +1338,6 @@ interface MessageForkDialogTarget {
 interface RemoteThreadDisplayInfo {
   kind: "inbox" | "feature"
   conversationKey: string
-  deviceEpoch: number | null
   historical: boolean
   projectId?: string
   featureSlug?: string
@@ -1359,7 +1358,6 @@ function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayI
     return {
       kind: "inbox",
       conversationKey: context.conversationKey,
-      deviceEpoch: typeof context.deviceEpoch === "number" ? context.deviceEpoch : null,
       historical: metadata.remoteState === "historical"
     }
   }
@@ -1372,7 +1370,6 @@ function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayI
   return {
     kind: "feature",
     conversationKey: context.conversationKey,
-    deviceEpoch: typeof context.deviceEpoch === "number" ? context.deviceEpoch : null,
     historical: metadata.remoteState === "historical",
     projectId: feature.projectId,
     featureSlug: feature.slug
@@ -6580,21 +6577,21 @@ export function ChatContainer({
         ? "接管前历史"
         : remoteLifecycleState === "waiting_desktop"
           ? "等待桌面处理"
-        : remoteLifecycleState === "suspended"
-          ? "绑定已暂停"
-        : remoteLifecycleState === "outcome_unknown"
-          ? "执行结果未知"
-          : remoteLifecycleState === "rejected"
-            ? "远程能力不支持"
-            : remoteLifecycleState === "failed"
-              ? "执行失败"
-          : isLoading
-            ? "任务执行中"
-            : remoteThread?.status === "error"
-              ? "执行失败"
-              : remoteThread?.status === "interrupted"
-                ? "已中止"
-                : "空闲"
+          : remoteLifecycleState === "suspended"
+            ? "绑定已暂停"
+            : remoteLifecycleState === "outcome_unknown"
+              ? "执行结果未知"
+              : remoteLifecycleState === "rejected"
+                ? "远程能力不支持"
+                : remoteLifecycleState === "failed"
+                  ? "执行失败"
+                  : isLoading
+                    ? "任务执行中"
+                    : remoteThread?.status === "error"
+                      ? "执行失败"
+                      : remoteThread?.status === "interrupted"
+                        ? "已中止"
+                        : "空闲"
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -6613,20 +6610,19 @@ export function ChatContainer({
               ) : null}
               <span className="text-muted-foreground">
                 招乎会话 {compactConversationKey(remoteThreadInfo.conversationKey)}
-                {remoteThreadInfo.deviceEpoch ? ` · 设备版本 ${remoteThreadInfo.deviceEpoch}` : ""}
                 {` · ${remoteThreadStatus}`}
               </span>
             </div>
             <p className="text-muted-foreground">
               {remoteThreadInfo.kind === "inbox"
                 ? remoteThreadInfo.historical
-                  ? "此 Thread 属于接管前设备，仅保留历史，不会接收新消息。"
+                  ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
                   : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
                 : remoteThreadInfo.historical
-                  ? "此 Feature Thread 属于接管前设备，仅保留历史；请在新设备重新绑定。"
-                : isLoading
-                  ? "当前任务占用远程运行租约，结束后可在桌面继续。"
-                  : "可在桌面继续处理；桌面发出的本轮结果只保留在本机，不会自动发送到招乎。"}
+                  ? "此 Feature Thread 已停用，仅保留历史；请重新绑定。"
+                  : isLoading
+                    ? "当前任务占用远程运行租约，结束后可在桌面继续。"
+                    : "可在桌面继续处理；桌面发出的本轮结果只保留在本机，不会自动发送到招乎。"}
             </p>
           </div>
         </div>

@@ -369,8 +369,8 @@ export type ScheduledTaskType = "action" | "reminder"
 
 export interface ScheduledTaskImDeliveryContext {
   provider: ImChannelId
+  principalId: string
   conversationKey: string
-  expectedDeviceEpoch: number
   inboxThreadId: string
 }
 
@@ -432,17 +432,13 @@ export interface BuiltinRobotSettings {
 }
 
 export type BuiltinRobotConnectionState = "connecting" | "online" | "offline" | "error"
-export type BuiltinRobotIdentityState = "mapped" | "missing" | "error"
+export type BuiltinRobotIdentityState = "verified" | "verifying" | "missing" | "error"
 
 export interface BuiltinRobotRouteStatus {
   /** Opaque enterprise subject asserted by the authenticated Gateway session. */
   principalId: string
   conversationKey: string
-  deviceEpoch: number
   state: "active" | "suspended" | "revoked"
-  deviceId?: string
-  deviceName?: string
-  ownedByCurrentDevice: boolean
 }
 
 export interface BuiltinRobotFeatureBindingStatus {
@@ -464,7 +460,6 @@ export interface BuiltinRobotThreadGrantStatus {
   state: "active" | "suspended" | "revoked"
   grantVersion: number
   conversationKey: string
-  deviceEpoch: number
   suspendReason: string | null
 }
 
@@ -478,7 +473,6 @@ export interface BuiltinRobotFeatureGrantStatus {
   state: "active" | "suspended" | "revoked"
   grantVersion: number
   conversationKey: string
-  deviceEpoch: number
   suspendReason: string | null
 }
 
@@ -503,8 +497,6 @@ export interface BuiltinRobotStatus {
   settings: BuiltinRobotSettings
   connectionState: BuiltinRobotConnectionState
   identityState: BuiltinRobotIdentityState
-  deviceId: string
-  deviceName: string
   sessionId: string | null
   principalId: string | null
   lastConnectedAt: string | null
@@ -514,22 +506,6 @@ export interface BuiltinRobotStatus {
   featureBindings: BuiltinRobotFeatureBindingStatus[]
   eventCounts: Record<string, number>
   pendingOutboxCount: number
-}
-
-export interface BuiltinRobotTakeoverRequest {
-  conversationKey: string
-  expectedDeviceEpoch: number
-  mode: "normal" | "force"
-}
-
-export interface BuiltinRobotTakeoverResult {
-  success: boolean
-  conversationKey: string
-  principalId?: string
-  previousDeviceEpoch: number
-  deviceEpoch?: number
-  reasonCode?: string
-  message?: string
 }
 
 // Heartbeat types

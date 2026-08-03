@@ -10,7 +10,6 @@ export interface ImRemoteApprovalAuditRecord {
   threadId: string
   principalId: string
   conversationKey: string
-  deviceEpoch: number
   operation: string
   decision: "approve" | "reject"
   summary: string
@@ -24,7 +23,6 @@ interface AuditRow {
   thread_id: string
   principal_id: string
   conversation_key: string
-  device_epoch: number
   operation: string
   decision: "approve" | "reject"
   summary: string
@@ -45,7 +43,6 @@ function hydrate(row: AuditRow): ImRemoteApprovalAuditRecord {
     threadId: row.thread_id,
     principalId: row.principal_id,
     conversationKey: row.conversation_key,
-    deviceEpoch: Number(row.device_epoch),
     operation: row.operation,
     decision: row.decision,
     summary: row.summary,
@@ -103,7 +100,6 @@ export class ImRemoteApprovalAuditStore {
         existing.threadId !== input.threadId ||
         existing.principalId !== input.principalId ||
         existing.conversationKey !== input.conversationKey ||
-        existing.deviceEpoch !== input.deviceEpoch ||
         existing.operation !== input.operation ||
         existing.summary !== input.summary
       ) {
@@ -112,16 +108,13 @@ export class ImRemoteApprovalAuditStore {
       await this.dependencies.flushStrict()
       return existing
     }
-    if (!Number.isSafeInteger(input.deviceEpoch) || input.deviceEpoch < 1) {
-      throw new Error("deviceEpoch must be a positive integer")
-    }
     const auditId = this.createId()
     const createdAt = this.dependencies.now()
     this.dependencies.getDatabase().run(
       `INSERT INTO im_remote_approval_audit (
          audit_id, request_id, tool_call_id, thread_id, principal_id, conversation_key,
-         device_epoch, operation, decision, summary, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         operation, decision, summary, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         auditId,
         required(input.requestId, "requestId"),
@@ -129,7 +122,6 @@ export class ImRemoteApprovalAuditStore {
         required(input.threadId, "threadId"),
         required(input.principalId, "principalId"),
         required(input.conversationKey, "conversationKey"),
-        input.deviceEpoch,
         required(input.operation, "operation"),
         input.decision,
         required(input.summary, "summary"),

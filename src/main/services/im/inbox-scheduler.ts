@@ -61,7 +61,6 @@ function syntheticEvent(input: {
     conversationKey: delivery.conversationKey,
     conversationSeq: 0,
     principalId: input.principalId,
-    deviceEpoch: delivery.expectedDeviceEpoch,
     leaseId: input.eventId,
     leaseExpiresAt: now + 60_000,
     permitState: "unacquired",
@@ -114,7 +113,7 @@ export async function executeImInboxScheduledTask(
   const executeTurn = options.executeTurn ?? executePreparedRemoteStandardTurn
   const now = options.now ?? Date.now
   if (!gateway.isAuthenticated()) {
-    return { status: "deferred", reasonCode: "DEVICE_OFFLINE" }
+    return { status: "deferred", reasonCode: "DESKTOP_OFFLINE" }
   }
 
   const occurrence = options.occurrence ?? occurrenceKey(task)
@@ -135,9 +134,9 @@ export async function executeImInboxScheduledTask(
   if (
     !conversation ||
     conversation.state !== "active" ||
-    conversation.deviceEpoch !== delivery.expectedDeviceEpoch
+    conversation.principalId !== delivery.principalId
   ) {
-    return { status: "deferred", reasonCode: "DEVICE_EPOCH_MISMATCH" }
+    return { status: "deferred", reasonCode: "CONVERSATION_OWNER_MISMATCH" }
   }
   const target = conversationState
     .listTargets(delivery.conversationKey)
@@ -193,7 +192,6 @@ export async function executeImInboxScheduledTask(
       buildImProactiveReplies({
         deliveryId,
         conversationKey: delivery.conversationKey,
-        expectedDeviceEpoch: delivery.expectedDeviceEpoch,
         text
       })
     )

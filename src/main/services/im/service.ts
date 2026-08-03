@@ -84,7 +84,6 @@ export class ImUnifiedBotService {
         buildImProactiveReplies({
           deliveryId: `${event.eventId}:retry-warning`,
           conversationKey: event.conversationKey,
-          expectedDeviceEpoch: event.deviceEpoch,
           text: `已按你的明确指令重试事件 ${code}。原事件结果未知，文件或外部副作用可能重复，请核对。`
         })
       )
@@ -101,8 +100,7 @@ export class ImUnifiedBotService {
         this.commandRouter.handle({
           command,
           conversationKey: event.conversationKey,
-          principalId: event.principalId,
-          deviceEpoch: event.deviceEpoch
+          principalId: event.principalId
         })
       )
     }

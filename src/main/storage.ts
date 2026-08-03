@@ -1,4 +1,4 @@
-import { homedir, hostname } from "os"
+import { homedir } from "os"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
@@ -2704,42 +2704,6 @@ export function deleteLegacyChatXRobotCredentials(confirmed: boolean): boolean {
   if (!existsSync(CHATX_CONFIG_FILE)) return false
   unlinkSync(CHATX_CONFIG_FILE)
   return true
-}
-
-const BUILTIN_ROBOT_DEVICE_FILE = join(OPENWORK_DIR, "builtin-robot-device.json")
-
-export function getBuiltinRobotDeviceIdentity(): { deviceId: string; deviceName: string } {
-  getOpenworkDir()
-  if (existsSync(BUILTIN_ROBOT_DEVICE_FILE)) {
-    try {
-      const value = JSON.parse(readFileSync(BUILTIN_ROBOT_DEVICE_FILE, "utf-8")) as Record<
-        string,
-        unknown
-      >
-      if (
-        typeof value.deviceId === "string" &&
-        value.deviceId.trim() &&
-        typeof value.deviceName === "string" &&
-        value.deviceName.trim()
-      ) {
-        return { deviceId: value.deviceId, deviceName: value.deviceName }
-      }
-    } catch {
-      // Replace an invalid non-secret identity file with a fresh stable id.
-    }
-  }
-  const identity = {
-    deviceId: uuid(),
-    deviceName: hostname().trim() || "CMBDevClaw Desktop"
-  }
-  const tempFile = `${BUILTIN_ROBOT_DEVICE_FILE}.tmp`
-  try {
-    writeFileSync(tempFile, JSON.stringify(identity, null, 2), { encoding: "utf-8", mode: 0o600 })
-    renameSync(tempFile, BUILTIN_ROBOT_DEVICE_FILE)
-  } finally {
-    if (existsSync(tempFile)) unlinkSync(tempFile)
-  }
-  return identity
 }
 
 // ── Hook Logging ──────────────────────────────────────────────────────────────

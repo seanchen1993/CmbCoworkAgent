@@ -90,7 +90,7 @@ function bindingMetadataMatches(
   thread: ThreadRow,
   target: Extract<ImTargetSnapshot, { kind: "feature" }>,
   conversationKey: string,
-  deviceEpoch: number
+  principalId: string
 ): boolean {
   const parsed = parseStandardThreadMetadata(thread.metadata)
   const harness = parsed.metadata.harnessFeature
@@ -111,8 +111,8 @@ function bindingMetadataMatches(
     feature.projectId === target.projectId &&
     feature.slug === target.featureSlug &&
     context.provider === DEFAULT_IM_CHANNEL_ID &&
+    context.principalId === principalId &&
     context.conversationKey === conversationKey &&
-    context.deviceEpoch === deviceEpoch &&
     context.targetId === target.targetId &&
     context.bindingId === target.bindingId &&
     existingDirectory(parsed.workspacePath) === existingDirectory(target.workspacePath)
@@ -281,16 +281,14 @@ export class ImFeatureBindingService {
   async bindFeature(input: {
     conversationKey: string
     principalId: string
-    deviceEpoch: number
     projectId: string
     featureSlug: string
     grantId: string
     grantVersion: number
   }): Promise<Extract<ImTargetSnapshot, { kind: "feature" }>> {
-    this.dependencies.conversationState.assertCurrentRoute(
+    this.dependencies.conversationState.assertConversationOwner(
       input.conversationKey,
-      input.principalId,
-      input.deviceEpoch
+      input.principalId
     )
     const validation = await this.validateFeature(input.projectId, input.featureSlug)
     if (!validation.valid) throw new ImFeatureBindingError(validation.message)
@@ -320,7 +318,7 @@ export class ImFeatureBindingService {
           thread,
           reusable.snapshot,
           input.conversationKey,
-          input.deviceEpoch
+          input.principalId
         ) &&
         existingDirectory(reusable.snapshot.workspacePath) === validation.workspacePath
       ) {
@@ -377,8 +375,8 @@ export class ImFeatureBindingService {
       },
       imDeliveryContext: {
         provider: DEFAULT_IM_CHANNEL_ID,
+        principalId: input.principalId,
         conversationKey: input.conversationKey,
-        deviceEpoch: input.deviceEpoch,
         targetId,
         bindingId
       }

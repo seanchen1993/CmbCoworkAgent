@@ -91,11 +91,7 @@ function targetRouteMatches(
   route: ImGrantRouteIdentity,
   grant: ImThreadGrantRecord | ImFeatureGrantRecord
 ): boolean {
-  return (
-    grant.principalId === route.principalId &&
-    grant.conversationKey === route.conversationKey &&
-    grant.deviceEpoch === route.deviceEpoch
-  )
+  return grant.principalId === route.principalId && grant.conversationKey === route.conversationKey
 }
 
 const goalStore = new SqlGoalStore()
@@ -169,10 +165,9 @@ export class ImRemoteAccessService {
   }
 
   async listAuthorizedTargets(route: ImGrantRouteIdentity): Promise<ImAuthorizedRemoteTarget[]> {
-    this.dependencies.conversations.assertCurrentRoute(
+    this.dependencies.conversations.assertConversationOwner(
       route.conversationKey,
-      route.principalId,
-      route.deviceEpoch
+      route.principalId
     )
     const targets: ImAuthorizedRemoteTarget[] = []
     for (const grant of this.dependencies.grants.listThreadGrants(route.conversationKey)) {
@@ -320,18 +315,6 @@ export class ImRemoteAccessService {
   } {
     const { thread, workspacePath } = this.validateThreadStructure(threadId)
     return { thread, workspacePath }
-  }
-
-  async suspendRoute(
-    conversationKey: string,
-    expectedDeviceEpoch: number,
-    reasonCode = "ROUTE_TAKEOVER"
-  ): Promise<void> {
-    await this.dependencies.grants.suspendRouteGrants(
-      conversationKey,
-      expectedDeviceEpoch,
-      reasonCode
-    )
   }
 
   private validateGrantableThread(threadId: string): {

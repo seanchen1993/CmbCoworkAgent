@@ -27,7 +27,6 @@ export interface RemoteImEventV1 {
   principalId: string
   conversationKey: string
   conversationSeq: number
-  deviceEpoch: number
   message: { type: "text"; text: string }
   occurredAt: string
   lease: { id: string; expiresAt: string }
@@ -54,7 +53,6 @@ export interface RemoteImReplyV1 {
   deliveryId: string
   eventId?: string
   conversationKey: string
-  expectedDeviceEpoch: number
   idempotencyKey: string
   segment: { index: number; count: number }
   message: { type: "text"; content: string }
@@ -69,13 +67,9 @@ export type GatewayReasonCodeV1 =
   | "IDENTITY_NOT_FOUND"
   | "IDENTITY_CONFLICT"
   | "PLATFORM_MESSAGE_UNSUPPORTED"
-  | "DEVICE_REVOKED"
-  | "DEVICE_OFFLINE"
-  | "NO_ONLINE_DEVICE"
+  | "DESKTOP_OFFLINE"
+  | "SESSION_SUPERSEDED"
   | "ROUTE_NOT_FOUND"
-  | "ROUTE_EPOCH_CONFLICT"
-  | "ROUTE_OWNED_BY_OTHER_DEVICE"
-  | "DEVICE_TAKEOVER_CANCELLED"
   | "EVENT_NOT_FOUND"
   | "EVENT_ORDER_BLOCKED"
   | "EVENT_TERMINAL"
@@ -173,7 +167,6 @@ export function assertRemoteImEventV1(value: unknown): asserts value is RemoteIm
       "principalId",
       "conversationKey",
       "conversationSeq",
-      "deviceEpoch",
       "message",
       "occurredAt",
       "lease"
@@ -187,7 +180,6 @@ export function assertRemoteImEventV1(value: unknown): asserts value is RemoteIm
   requireNonEmptyString(event.principalId, "event.principalId")
   requireNonEmptyString(event.conversationKey, "event.conversationKey")
   requirePositiveInteger(event.conversationSeq, "event.conversationSeq")
-  requirePositiveInteger(event.deviceEpoch, "event.deviceEpoch")
   requireIsoInstant(event.occurredAt, "event.occurredAt")
   if (event.redelivered !== undefined && typeof event.redelivered !== "boolean") {
     throw new ImGatewayContractError("INVALID_PAYLOAD", "event.redelivered must be boolean")
@@ -249,22 +241,13 @@ export function assertRemoteImReplyV1(value: unknown): asserts value is RemoteIm
   const reply = requireRecord(value, "reply")
   assertExactKeys(
     reply,
-    [
-      "schemaVersion",
-      "deliveryId",
-      "conversationKey",
-      "expectedDeviceEpoch",
-      "idempotencyKey",
-      "segment",
-      "message"
-    ],
+    ["schemaVersion", "deliveryId", "conversationKey", "idempotencyKey", "segment", "message"],
     ["eventId"],
     "reply"
   )
   assertSchemaVersion(reply.schemaVersion)
   requireNonEmptyString(reply.deliveryId, "reply.deliveryId")
   requireNonEmptyString(reply.conversationKey, "reply.conversationKey")
-  requirePositiveInteger(reply.expectedDeviceEpoch, "reply.expectedDeviceEpoch")
   requireNonEmptyString(reply.idempotencyKey, "reply.idempotencyKey")
   if (reply.eventId !== undefined) requireNonEmptyString(reply.eventId, "reply.eventId")
 

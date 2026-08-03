@@ -52,7 +52,6 @@ function eventFixture(index: number, overrides: Partial<RemoteImEventV1> = {}): 
     principalId: "principal-1",
     conversationKey: "conversation-1",
     conversationSeq: index,
-    deviceEpoch: 1,
     message: { type: "text", text: `message-${index}` },
     occurredAt: `2026-07-23T08:00:${String(index).padStart(2, "0")}.000Z`,
     lease: { id: `lease-${index}`, expiresAt: "2026-07-23T09:00:00.000Z" },
@@ -67,7 +66,6 @@ function repliesFor(event: RemoteImEventV1, contents: string[]): RemoteImReplyV1
     deliveryId,
     eventId: event.eventId,
     conversationKey: event.conversationKey,
-    expectedDeviceEpoch: event.deviceEpoch,
     idempotencyKey: `${deliveryId}:reply:${index}`,
     segment: { index, count: contents.length },
     message: { type: "text", content }
@@ -123,8 +121,7 @@ const featureTarget: ImTargetSnapshot = {
 async function seedConversation(context: TestStoreContext): Promise<void> {
   await context.conversationStore.ensureConversation({
     conversationKey: "conversation-1",
-    principalId: "principal-1",
-    deviceEpoch: 1
+    principalId: "principal-1"
   })
   await context.conversationStore.registerTarget("conversation-1", inboxTarget, {
     activate: true
@@ -249,12 +246,10 @@ async function testSchemaAndTargetLifecycle(): Promise<void> {
       suspendReason: "missing"
     })
     await context.conversationStore.updateTargetState(featureTarget.targetId, "active")
-    await context.conversationStore.resetForDeviceTakeover("conversation-1", 1, 2)
-    assert.equal(context.conversationStore.getActiveTarget("conversation-1"), null)
-    assert(
-      context.conversationStore
-        .listTargets("conversation-1")
-        .every((target) => target.state === "revoked")
+    context.conversationStore.assertConversationOwner("conversation-1", "principal-1")
+    assert.throws(
+      () => context.conversationStore.assertConversationOwner("conversation-1", "principal-2"),
+      { message: "Conversation principal differs" }
     )
   } finally {
     context.database.close()
@@ -334,9 +329,119 @@ async function testRemoteControlSchemaMigrationPreservesV1Rows(): Promise<void> 
     database.run(
       "INSERT INTO im_selection_contexts VALUES ('remote-selection', 'legacy-conversation', 'remote_target', '[]', 3, 2)"
     )
-    assert.equal(
-      database.exec("SELECT COUNT(*) FROM im_selection_contexts")[0]?.values[0]?.[0],
-      2
+    assert.equal(database.exec("SELECT COUNT(*) FROM im_selection_contexts")[0]?.values[0]?.[0], 2)
+  } finally {
+    database.close()
+  }
+}
+
+async function testSingleDesktopSchemaMigrationPreservesLegacyRows(): Promise<void> {
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  try {
+    database.run(`
+      CREATE TABLE im_conversations (
+        conversation_key TEXT, principal_id TEXT, device_epoch INTEGER,
+        active_target_id TEXT, state TEXT, last_received_seq INTEGER,
+        created_at INTEGER, updated_at INTEGER
+      )
+    `)
+    database.run(
+      "INSERT INTO im_conversations VALUES ('conversation-legacy', 'principal-1', 7, NULL, 'active', 1, 10, 11)"
+    )
+    database.run(`
+      CREATE TABLE im_events (
+        event_id TEXT, platform_message_id TEXT, conversation_key TEXT,
+        conversation_seq INTEGER, principal_id TEXT, device_epoch INTEGER,
+        lease_id TEXT, lease_expires_at INTEGER, permit_state TEXT,
+        permit_expires_at INTEGER, message_text TEXT, occurred_at INTEGER,
+        target_snapshot_json TEXT, state TEXT, run_id TEXT, retry_of_event_id TEXT,
+        result_text TEXT, reason_code TEXT, retryable INTEGER, created_at INTEGER,
+        updated_at INTEGER, accepted_at INTEGER, execution_started_at INTEGER,
+        finished_at INTEGER
+      )
+    `)
+    database.run(
+      `INSERT INTO im_events VALUES (
+         'event-legacy', 'platform-legacy', 'conversation-legacy', 1, 'principal-1', 7,
+         'lease-legacy', 1000, 'unacquired', NULL, 'hello', 1, NULL, 'queued',
+         NULL, NULL, NULL, NULL, NULL, 10, 11, 11, NULL, NULL
+       )`
+    )
+    database.run(`
+      CREATE TABLE im_reply_outbox (
+        outbox_id TEXT, delivery_id TEXT, event_id TEXT, conversation_key TEXT,
+        expected_device_epoch INTEGER, idempotency_key TEXT, segment_index INTEGER,
+        segment_count INTEGER, content TEXT, state TEXT, platform_reply_id TEXT,
+        attempt_count INTEGER, next_attempt_at INTEGER, reason_code TEXT,
+        created_at INTEGER, updated_at INTEGER
+      )
+    `)
+    database.run(
+      `INSERT INTO im_reply_outbox VALUES (
+         'outbox-legacy', 'delivery-legacy', 'event-legacy', 'conversation-legacy', 7,
+         'delivery-legacy:reply:0', 0, 1, 'done', 'pending', NULL, 0, NULL, NULL, 10, 11
+       )`
+    )
+    database.run(`
+      CREATE TABLE im_thread_grants (
+        grant_id TEXT, principal_id TEXT, conversation_key TEXT, device_epoch INTEGER,
+        thread_id TEXT, title_snapshot TEXT, state TEXT, grant_version INTEGER,
+        suspend_reason TEXT, created_at INTEGER, updated_at INTEGER, revoked_at INTEGER
+      )
+    `)
+    database.run(
+      "INSERT INTO im_thread_grants VALUES ('thread-grant-legacy', 'principal-1', 'conversation-legacy', 7, 'thread-legacy', '旧会话', 'active', 1, NULL, 10, 11, NULL)"
+    )
+    database.run(`
+      CREATE TABLE im_feature_grants (
+        grant_id TEXT, principal_id TEXT, conversation_key TEXT, device_epoch INTEGER,
+        project_id TEXT, feature_slug TEXT, project_name_snapshot TEXT,
+        feature_title_snapshot TEXT, state TEXT, grant_version INTEGER,
+        suspend_reason TEXT, created_at INTEGER, updated_at INTEGER, revoked_at INTEGER
+      )
+    `)
+    database.run(
+      "INSERT INTO im_feature_grants VALUES ('feature-grant-legacy', 'principal-1', 'conversation-legacy', 7, 'project-1', 'feature-1', '旧项目', '旧功能', 'active', 1, NULL, 10, 11, NULL)"
+    )
+    database.run(`
+      CREATE TABLE im_remote_approval_audit (
+        audit_id TEXT, request_id TEXT, tool_call_id TEXT, thread_id TEXT,
+        principal_id TEXT, conversation_key TEXT, device_epoch INTEGER,
+        operation TEXT, decision TEXT, summary TEXT, created_at INTEGER
+      )
+    `)
+    database.run(
+      "INSERT INTO im_remote_approval_audit VALUES ('audit-legacy', 'request-legacy', 'tool-legacy', 'thread-legacy', 'principal-1', 'conversation-legacy', 7, 'write_file', 'approve', '旧审批', 10)"
+    )
+
+    ensureImServiceSchema(database)
+    ensureImServiceSchema(database)
+
+    const columns = (table: string): string[] =>
+      database
+        .exec(`PRAGMA table_info(${table})`)
+        .flatMap((result) => result.values.map((row) => String(row[1])))
+    for (const [table, legacyColumn] of [
+      ["im_conversations", "device_epoch"],
+      ["im_events", "device_epoch"],
+      ["im_reply_outbox", "expected_device_epoch"],
+      ["im_thread_grants", "device_epoch"],
+      ["im_feature_grants", "device_epoch"],
+      ["im_remote_approval_audit", "device_epoch"]
+    ] as const) {
+      assert(!columns(table).includes(legacyColumn), `${table} must drop ${legacyColumn}`)
+      assert.equal(
+        database.exec(`SELECT COUNT(*) FROM ${table}`)[0]?.values[0]?.[0],
+        1,
+        `${table} must preserve its legacy row`
+      )
+    }
+    assert.deepEqual(
+      database.exec(
+        "SELECT principal_id, state, last_received_seq FROM im_conversations WHERE conversation_key = 'conversation-legacy'"
+      )[0]?.values[0],
+      ["principal-1", "active", 1]
     )
   } finally {
     database.close()
@@ -398,7 +503,6 @@ async function testPermitStateMachineAndAtomicOutbox(): Promise<void> {
     )
     await context.eventStore.recordExecutionPermit({
       eventId: remoteEvent.eventId,
-      deviceEpoch: 1,
       leaseId: "permit-lease-1",
       previousLeaseId: remoteEvent.lease.id,
       expiresAt: "2026-07-23T08:02:00.000Z"
@@ -512,7 +616,6 @@ async function testFlushFailureIsNeverAcknowledgedAsDurable(): Promise<void> {
     await context.eventStore.queueEvent(remoteEvent.eventId)
     await context.eventStore.recordExecutionPermit({
       eventId: remoteEvent.eventId,
-      deviceEpoch: 1,
       leaseId: remoteEvent.lease.id,
       expiresAt: remoteEvent.lease.expiresAt
     })
@@ -560,7 +663,6 @@ async function testRestartRecoveryAndConversationQueue(): Promise<void> {
     await context.eventStore.queueEvent(third.eventId)
     await context.eventStore.recordExecutionPermit({
       eventId: third.eventId,
-      deviceEpoch: 1,
       leaseId: third.lease.id,
       expiresAt: third.lease.expiresAt
     })
@@ -570,7 +672,6 @@ async function testRestartRecoveryAndConversationQueue(): Promise<void> {
         schemaVersion: 1,
         deliveryId: "reply-before-client-crash",
         conversationKey: "conversation-1",
-        expectedDeviceEpoch: 1,
         idempotencyKey: "reply-before-client-crash:reply:0",
         segment: { index: 0, count: 1 },
         message: { type: "text", content: "durable reply" }
@@ -603,10 +704,10 @@ async function testMockGatewayFaultMatrix(): Promise<void> {
     conversationKey: "conversation-1",
     text: "offline"
   })
-  assert.equal(waiting.status, "waiting_device")
-  gateway.connectDevice({ deviceId: "device-a", principalId: "principal-1", preferred: true })
-  const [event] = gateway.takeDeliveries("device-a")
-  assert(event, "waiting event is delivered after a device connects")
+  assert.equal(waiting.status, "waiting_session")
+  gateway.connectSession({ sessionId: "session-a", principalId: "principal-1" })
+  const [event] = gateway.takeDeliveries("session-a")
+  assert(event, "waiting event is delivered after the desktop connects")
 
   gateway.ingestText({
     platformMessageId: "platform-order-2",
@@ -621,92 +722,96 @@ async function testMockGatewayFaultMatrix(): Promise<void> {
     text: "third"
   })
   assert.deepEqual(
-    gateway.takeDeliveries("device-a"),
+    gateway.takeDeliveries("session-a"),
     [],
     "later first delivery waits for received ACK"
   )
-  gateway.acknowledge("device-a", 1, {
+  gateway.acknowledge("session-a", {
     type: "received",
     eventId: event.eventId,
     leaseId: event.lease.id
   })
-  const [second] = gateway.takeDeliveries("device-a")
+  const [second] = gateway.takeDeliveries("session-a")
   assert.equal(second.conversationSeq, 2)
-  gateway.acknowledge("device-a", 1, {
+  gateway.acknowledge("session-a", {
     type: "received",
     eventId: second.eventId,
     leaseId: second.lease.id
   })
-  const [third] = gateway.takeDeliveries("device-a")
+  const [third] = gateway.takeDeliveries("session-a")
   assert.equal(third.conversationSeq, 3)
 
   const redelivered = gateway.redeliver(event.eventId)
   assert.notEqual(redelivered.lease.id, event.lease.id)
-  const lateRedelivery = gateway.takeDeliveries("device-a")[0]
+  const lateRedelivery = gateway.takeDeliveries("session-a")[0]
   assert.equal(lateRedelivery.redelivered, true)
   assert.equal(
     lateRedelivery.conversationSeq,
     1,
     "old redelivery may arrive after later first delivery"
   )
-  gateway.disconnectDevice("device-a")
+  gateway.disconnectSession("session-a")
   assert.equal(
     gateway.acquirePermit({
       eventId: event.eventId,
-      deviceId: "device-a",
-      deviceEpoch: 1,
+      sessionId: "session-a",
       leaseId: redelivered.lease.id
     }).reasonCode,
-    "DEVICE_OFFLINE"
+    "DESKTOP_OFFLINE"
   )
-  gateway.reconnectDevice("device-a")
+  gateway.connectSession({ sessionId: "session-a", principalId: "principal-1" })
+  gateway.takeDeliveries("session-a")
+  const replacement = gateway.connectSession({
+    sessionId: "session-b",
+    principalId: "principal-1"
+  })
+  assert.equal(replacement.supersededSessionId, "session-a")
+  const replacementDelivery = gateway
+    .takeDeliveries("session-b")
+    .find((candidate) => candidate.eventId === event.eventId)
+  assert(replacementDelivery, "an unpermitted event receives a new lease on the active session")
+  assert.notEqual(replacementDelivery.lease.id, redelivered.lease.id)
+  assert.throws(
+    () => gateway.takeDeliveries("session-a"),
+    (error) => error instanceof MockGatewayError && error.reasonCode === "SESSION_SUPERSEDED"
+  )
   const permit = gateway.acquirePermit({
     eventId: event.eventId,
-    deviceId: "device-a",
-    deviceEpoch: 1,
-    leaseId: redelivered.lease.id
+    sessionId: "session-b",
+    leaseId: replacementDelivery.lease.id
   })
   assert.equal(permit.status, "granted")
   gateway.revokeLease(event.eventId)
   assert.equal(
     gateway.renewPermit({
       eventId: event.eventId,
-      deviceId: "device-a",
-      deviceEpoch: 1,
-      leaseId: redelivered.lease.id
+      sessionId: "session-b",
+      leaseId: replacementDelivery.lease.id
     }).reasonCode,
     "LEASE_REVOKED"
   )
 
-  gateway.connectDevice({ deviceId: "device-b", principalId: "principal-1" })
-  const route = gateway.takeover({
-    conversationKey: "conversation-1",
-    expectedEpoch: 1,
-    newDeviceId: "device-b"
-  })
-  assert.equal(route.deviceEpoch, 2)
   const reply: RemoteImReplyV1 = {
     schemaVersion: 1,
     deliveryId: "scheduled-reply",
     conversationKey: event.conversationKey,
-    expectedDeviceEpoch: 2,
     idempotencyKey: "scheduled-reply:reply:0",
     segment: { index: 0, count: 1 },
     message: { type: "text", content: "done" }
   }
   gateway.setNextReplyFault("timeout_after_persist")
   assert.throws(
-    () => gateway.submitReply("device-b", reply),
+    () => gateway.submitReply("session-b", reply),
     (error) => error instanceof MockGatewaySendTimeout && error.persisted
   )
-  assert.equal(gateway.submitReply("device-b", reply).duplicate, true)
+  assert.equal(gateway.submitReply("session-b", reply).duplicate, true)
   const unknownReply = {
     ...reply,
     deliveryId: "unknown-delivery",
     idempotencyKey: "unknown-delivery:reply:0"
   }
   gateway.setNextReplyFault("platform_unknown")
-  assert.equal(gateway.submitReply("device-b", unknownReply).state, "platform_unknown")
+  assert.equal(gateway.submitReply("session-b", unknownReply).state, "platform_unknown")
   const beforePersistReply = {
     ...reply,
     deliveryId: "before-persist-delivery",
@@ -714,71 +819,16 @@ async function testMockGatewayFaultMatrix(): Promise<void> {
   }
   gateway.setNextReplyFault("timeout_before_persist")
   assert.throws(
-    () => gateway.submitReply("device-b", beforePersistReply),
+    () => gateway.submitReply("session-b", beforePersistReply),
     (error) => error instanceof MockGatewaySendTimeout && !error.persisted
   )
-  assert.equal(gateway.submitReply("device-b", beforePersistReply).duplicate, false)
+  assert.equal(gateway.submitReply("session-b", beforePersistReply).duplicate, false)
   assert.throws(
-    () => gateway.submitReply("device-a", { ...reply, expectedDeviceEpoch: 1 }),
-    (error) => error instanceof MockGatewayError && error.reasonCode === "ROUTE_EPOCH_CONFLICT"
+    () => gateway.submitReply("session-a", reply),
+    (error) => error instanceof MockGatewayError && error.reasonCode === "SESSION_SUPERSEDED"
   )
 
   now += 100_000
-}
-
-async function testDeviceTakeoverTerminalizesOldEpoch(): Promise<void> {
-  const context = await createContext()
-  try {
-    await seedConversation(context)
-    const queuedEvent = eventFixture(1)
-    const runningEvent = eventFixture(2)
-    await context.eventStore.receiveEvent(queuedEvent, inboxTarget)
-    await context.eventStore.queueEvent(queuedEvent.eventId)
-    await context.eventStore.receiveEvent(runningEvent, inboxTarget)
-    await context.eventStore.queueEvent(runningEvent.eventId)
-    await context.eventStore.recordExecutionPermit({
-      eventId: runningEvent.eventId,
-      deviceEpoch: 1,
-      leaseId: runningEvent.lease.id,
-      expiresAt: runningEvent.lease.expiresAt
-    })
-    await context.eventStore.beginExecution(runningEvent.eventId, "running-before-takeover")
-    const proactive = (deliveryId: string): RemoteImReplyV1 => ({
-      schemaVersion: 1,
-      deliveryId,
-      conversationKey: "conversation-1",
-      expectedDeviceEpoch: 1,
-      idempotencyKey: `${deliveryId}:reply:0`,
-      segment: { index: 0, count: 1 },
-      message: { type: "text", content: deliveryId }
-    })
-    const [pending] = await context.eventStore.enqueueProactiveReplies([proactive("pending-old")])
-    const [sending] = await context.eventStore.enqueueProactiveReplies([proactive("sending-old")])
-    await context.eventStore.markOutboxSending(sending.outboxId)
-
-    const changed = await context.eventStore.applyDeviceTakeover("conversation-1", 1)
-    assert.deepEqual(changed.cancelledEventIds, [queuedEvent.eventId])
-    assert.deepEqual(changed.outcomeUnknownEventIds, [runningEvent.eventId])
-    assert.equal(context.eventStore.getEvent(queuedEvent.eventId)?.state, "cancelled")
-    assert.equal(context.eventStore.getEvent(runningEvent.eventId)?.state, "outcome_unknown")
-    assert.equal(
-      context.eventStore.listOutbox().find((item) => item.outboxId === pending.outboxId)?.state,
-      "failed"
-    )
-    assert.equal(
-      context.eventStore.listOutbox().find((item) => item.outboxId === sending.outboxId)?.state,
-      "unknown"
-    )
-    await context.conversationStore.resetForDeviceTakeover("conversation-1", 1, 2)
-    assert.equal(context.conversationStore.getConversation("conversation-1")?.deviceEpoch, 2)
-    assert(
-      context.conversationStore
-        .listTargets("conversation-1")
-        .every((item) => item.state === "revoked")
-    )
-  } finally {
-    context.database.close()
-  }
 }
 
 async function testRetentionKeepsLiveAndUncertainDeliveryState(): Promise<void> {
@@ -793,7 +843,6 @@ async function testRetentionKeepsLiveAndUncertainDeliveryState(): Promise<void> 
       await context.eventStore.queueEvent(event.eventId)
       await context.eventStore.recordExecutionPermit({
         eventId: event.eventId,
-        deviceEpoch: 1,
         leaseId: event.lease.id,
         expiresAt: event.lease.expiresAt
       })
@@ -836,12 +885,12 @@ async function main(): Promise<void> {
     testImArchitectureBoundaries,
     testSchemaAndTargetLifecycle,
     testRemoteControlSchemaMigrationPreservesV1Rows,
+    testSingleDesktopSchemaMigrationPreservesLegacyRows,
     testDurableDedupAndImmutableSnapshot,
     testPermitStateMachineAndAtomicOutbox,
     testFlushFailureIsNeverAcknowledgedAsDurable,
     testIngressAckBoundariesAndReplay,
     testRestartRecoveryAndConversationQueue,
-    testDeviceTakeoverTerminalizesOldEpoch,
     testRetentionKeepsLiveAndUncertainDeliveryState,
     testMockGatewayFaultMatrix
   ]) {

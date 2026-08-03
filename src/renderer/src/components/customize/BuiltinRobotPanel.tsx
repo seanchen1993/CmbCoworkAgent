@@ -3,14 +3,11 @@ import {
   Bot,
   CircleAlert,
   FolderKanban,
-  Laptop,
   Loader2,
   MessageSquareText,
-  PlugZap,
   RefreshCw,
   ShieldCheck,
-  Unplug,
-  UsersRound
+  Unplug
 } from "lucide-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
@@ -22,7 +19,6 @@ import type {
   BuiltinRobotConnectionState,
   BuiltinRobotGrantableFeature,
   BuiltinRobotRemoteAccessOverview,
-  BuiltinRobotRouteStatus,
   BuiltinRobotStatus,
   Thread
 } from "@/types"
@@ -33,16 +29,6 @@ const CONNECTION_LABEL: Record<BuiltinRobotConnectionState, string> = {
   offline: "未连接",
   error: "连接异常"
 }
-
-const EVENT_STATUS_ITEMS = [
-  { state: "queued", label: "排队", variant: "info" },
-  { state: "executing", label: "执行中", variant: "info" },
-  { state: "waiting_desktop", label: "等待桌面", variant: "warning" },
-  { state: "completed", label: "已完成", variant: "nominal" },
-  { state: "cancelled", label: "已取消", variant: "outline" },
-  { state: "failed", label: "失败", variant: "critical" },
-  { state: "outcome_unknown", label: "结果未知", variant: "critical" }
-] as const
 
 function formatDate(value: string | null): string {
   if (!value) return "—"
@@ -112,14 +98,6 @@ export function BuiltinRobotPanel(): React.JSX.Element {
     []
   )
 
-  const terminalCount = useMemo(() => {
-    if (!status) return 0
-    return ["completed", "cancelled", "failed", "rejected", "outcome_unknown"].reduce(
-      (total, state) => total + (status.eventCounts[state] ?? 0),
-      0
-    )
-  }, [status])
-
   const grantableThreads = useMemo(
     () =>
       threads
@@ -159,36 +137,6 @@ export function BuiltinRobotPanel(): React.JSX.Element {
     []
   )
 
-  const takeover = useCallback(
-    async (route: BuiltinRobotRouteStatus, mode: "normal" | "force") => {
-      if (
-        mode === "force" &&
-        !window.confirm(
-          "强制接管会撤销旧设备正在执行的许可。已产生的文件或外部副作用可能无法确认，确定继续吗？"
-        )
-      ) {
-        return
-      }
-      const key = `takeover:${route.conversationKey}:${mode}`
-      setBusyAction(key)
-      try {
-        const result = await window.api.builtinRobot.takeover({
-          conversationKey: route.conversationKey,
-          expectedDeviceEpoch: route.deviceEpoch,
-          mode
-        })
-        if (!result.success) throw new Error(result.message || result.reasonCode || "接管失败")
-        await load()
-        toast.success("远程会话已接管；新设备已创建独立收件箱，Feature 需要重新绑定。")
-      } catch (error) {
-        toast.error(errorMessage(error))
-      } finally {
-        setBusyAction(null)
-      }
-    },
-    [load]
-  )
-
   if (!status) {
     return (
       <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -198,7 +146,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
   }
 
   const connected = status.connectionState === "online"
-  const identityMapped = status.identityState === "mapped"
+  const identityVerified = status.identityState === "verified"
 
   return (
     <div className="flex-1 overflow-auto">
@@ -227,7 +175,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 void perform(
                   "enabled",
                   () => window.api.builtinRobot.saveSettings({ enabled }),
-                  enabled ? "统一机器人已启用" : "本设备远程连接已关闭"
+                  enabled ? "统一机器人已启用" : "远程连接已关闭"
                 )
               }
             />
@@ -236,40 +184,30 @@ export function BuiltinRobotPanel(): React.JSX.Element {
 
         <Card>
           <CardHeader>
-            <CardTitle>连接与身份</CardTitle>
-            <CardDescription>机器人会话固定到设备，除非你显式接管。</CardDescription>
+            <CardTitle>远程连接</CardTitle>
+            <CardDescription>
+              使用当前企业账号连接招乎；每个账号只保留一个活动桌面连接。
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-md border bg-muted/20 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  {identityMapped ? (
-                    <ShieldCheck className="size-4 text-emerald-500" />
-                  ) : (
-                    <CircleAlert className="size-4 text-amber-500" />
-                  )}
-                  企业身份
-                </div>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  {identityMapped
-                    ? "已完成企业身份映射"
-                    : status.identityState === "error"
-                      ? "身份信息异常，请重新登录"
-                      : "尚未完成企业身份映射"}
-                </p>
+            <div className="rounded-md border bg-muted/20 p-3">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                {identityVerified ? (
+                  <ShieldCheck className="size-4 text-emerald-500" />
+                ) : (
+                  <CircleAlert className="size-4 text-amber-500" />
+                )}
+                企业账号
               </div>
-              <div className="rounded-md border bg-muted/20 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <Laptop className="size-4" /> 当前设备
-                </div>
-                <p className="mt-2 truncate text-sm">{status.deviceName}</p>
-                <p
-                  className="mt-0.5 font-mono text-xs text-muted-foreground"
-                  title={status.deviceId}
-                >
-                  {shortId(status.deviceId)}
-                </p>
-              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {identityVerified
+                  ? "企业账号已由网关验证"
+                  : status.identityState === "error"
+                    ? "企业账号验证失败，请重新登录"
+                    : status.identityState === "verifying"
+                      ? "登录凭据已就绪，等待网关验证"
+                      : "缺少企业登录凭据，请重新登录"}
+              </p>
             </div>
 
             <div className="grid gap-2 text-sm sm:grid-cols-2">
@@ -310,10 +248,10 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 variant="ghost"
                 disabled={busyAction !== null || !connected}
                 onClick={() =>
-                  void perform("disconnect", window.api.builtinRobot.disconnect, "本设备已断开")
+                  void perform("disconnect", window.api.builtinRobot.disconnect, "远程连接已断开")
                 }
               >
-                <Unplug className="mr-1.5 size-4" /> 断开本设备
+                <Unplug className="mr-1.5 size-4" /> 断开连接
               </Button>
             </div>
           </CardContent>
@@ -444,7 +382,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
 
             <p className="text-xs leading-5 text-muted-foreground">
               招乎只展示会话、项目与 Feature 名称；本地绝对路径、插件路径和工作区配置不会上传。
-              每次执行前都会重新校验授权、设备路由和会话模式。
+              每次执行前都会重新校验企业账号、会话授权和运行模式。
             </p>
 
             <div className="flex items-start justify-between gap-4 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
@@ -468,73 +406,6 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 }
               />
             </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <UsersRound className="size-4" /> 远程会话与设备接管
-            </CardTitle>
-            <CardDescription>
-              已处理终态事件 {terminalCount} 条；接管会创建新收件箱，历史和 Feature 绑定不会迁移。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <div className="flex flex-wrap gap-2 pb-1">
-              {EVENT_STATUS_ITEMS.map((item) => (
-                <Badge key={item.state} variant={item.variant}>
-                  {item.label} {status.eventCounts[item.state] ?? 0}
-                </Badge>
-              ))}
-            </div>
-            {status.routes.length === 0 ? (
-              <p className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
-                暂无已固定的远程会话
-              </p>
-            ) : (
-              status.routes.map((route) => (
-                <div
-                  key={route.conversationKey}
-                  className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-                      <span title={route.conversationKey}>{shortId(route.conversationKey)}</span>
-                      <Badge variant={route.ownedByCurrentDevice ? "nominal" : "warning"}>
-                        {route.ownedByCurrentDevice ? "当前设备" : "其他设备"}
-                      </Badge>
-                      <span className="text-xs font-normal text-muted-foreground">
-                        epoch {route.deviceEpoch}
-                      </span>
-                    </div>
-                    <p className="mt-1 truncate text-xs text-muted-foreground">
-                      {route.deviceName || "未知设备"} · {route.state}
-                    </p>
-                  </div>
-                  {!route.ownedByCurrentDevice && (
-                    <div className="flex shrink-0 gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busyAction !== null || !connected}
-                        onClick={() => void takeover(route, "normal")}
-                      >
-                        <PlugZap className="mr-1.5 size-4" /> 接管
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busyAction !== null || !connected}
-                        onClick={() => void takeover(route, "force")}
-                      >
-                        强制接管
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
           </CardContent>
         </Card>
 

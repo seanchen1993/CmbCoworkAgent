@@ -21,7 +21,6 @@ function toReply(record: ImReplyOutboxRecord): RemoteImReplyV1 {
     deliveryId: record.deliveryId,
     ...(record.eventId ? { eventId: record.eventId } : {}),
     conversationKey: record.conversationKey,
-    expectedDeviceEpoch: record.expectedDeviceEpoch,
     idempotencyKey: record.idempotencyKey,
     segment: { index: record.segmentIndex, count: record.segmentCount },
     message: { type: "text", content: record.content }

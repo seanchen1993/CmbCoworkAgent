@@ -3,9 +3,7 @@ import type {
   BuiltinRobotGrantableFeature,
   BuiltinRobotRemoteAccessOverview,
   BuiltinRobotSettings,
-  BuiltinRobotStatus,
-  BuiltinRobotTakeoverRequest,
-  BuiltinRobotTakeoverResult
+  BuiltinRobotStatus
 } from "../types"
 import { builtinRobotManager } from "../services/im/manager"
 import {
@@ -56,27 +54,6 @@ function settingsPatch(value: unknown): Partial<BuiltinRobotSettings> {
     result.waitingDesktopTtlMinutes = Number(input.waitingDesktopTtlMinutes)
   }
   return result
-}
-
-function takeoverRequest(value: unknown): BuiltinRobotTakeoverRequest {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("接管参数无效")
-  }
-  const input = value as Record<string, unknown>
-  if (
-    typeof input.conversationKey !== "string" ||
-    !input.conversationKey.trim() ||
-    !Number.isSafeInteger(input.expectedDeviceEpoch) ||
-    Number(input.expectedDeviceEpoch) < 1 ||
-    (input.mode !== "normal" && input.mode !== "force")
-  ) {
-    throw new Error("接管参数无效")
-  }
-  return {
-    conversationKey: input.conversationKey.trim(),
-    expectedDeviceEpoch: Number(input.expectedDeviceEpoch),
-    mode: input.mode
-  }
 }
 
 function nonEmptyString(value: unknown, label: string): string {
@@ -161,11 +138,6 @@ export function registerBuiltinRobotHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("builtinRobot:disconnect", (): Promise<BuiltinRobotStatus> => {
     return builtinRobotManager.disconnect()
   })
-  ipcMain.handle(
-    "builtinRobot:takeover",
-    (_event, request: unknown): Promise<BuiltinRobotTakeoverResult> =>
-      builtinRobotManager.takeover(takeoverRequest(request))
-  )
   ipcMain.handle("builtinRobot:cleanupLegacy", (_event, input: unknown): BuiltinRobotStatus => {
     const confirmed =
       Boolean(input) &&

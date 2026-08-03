@@ -15,7 +15,6 @@
         "EXECUTION_PERMIT_ACQUIRE",
         "EXECUTION_PERMIT_RENEW",
         "REMOTE_REPLY",
-        "ROUTE_TAKEOVER_REQUEST",
         "SYNC_REQUEST",
         "WELCOME",
         "REMOTE_EVENT",
@@ -23,7 +22,6 @@
         "LEASE_REVOKED",
         "REPLY_ACCEPTED",
         "REPLY_RESULT",
-        "TAKEOVER_RESULT",
         "SYNC_STATE",
         "ERROR"
       ]
@@ -45,13 +43,11 @@
               "EXECUTION_PERMIT_ACQUIRE",
               "EXECUTION_PERMIT_RENEW",
               "REMOTE_REPLY",
-              "ROUTE_TAKEOVER_REQUEST",
               "SYNC_REQUEST",
               "WELCOME",
               "PERMIT_RESULT",
               "REPLY_ACCEPTED",
               "REPLY_RESULT",
-              "TAKEOVER_RESULT",
               "SYNC_STATE"
             ]
           }
@@ -97,13 +93,6 @@
       }
     },
     {
-      "if": {
-        "properties": { "type": { "const": "ROUTE_TAKEOVER_REQUEST" } },
-        "required": ["type"]
-      },
-      "then": { "properties": { "payload": { "$ref": "#/$defs/takeoverRequest" } } }
-    },
-    {
       "if": { "properties": { "type": { "const": "SYNC_REQUEST" } }, "required": ["type"] },
       "then": { "properties": { "payload": { "$ref": "#/$defs/emptyPayload" } } }
     },
@@ -131,10 +120,6 @@
       "then": { "properties": { "payload": { "$ref": "#/$defs/replyResult" } } }
     },
     {
-      "if": { "properties": { "type": { "const": "TAKEOVER_RESULT" } }, "required": ["type"] },
-      "then": { "properties": { "payload": { "$ref": "#/$defs/takeoverResult" } } }
-    },
-    {
       "if": { "properties": { "type": { "const": "SYNC_STATE" } }, "required": ["type"] },
       "then": { "properties": { "payload": { "$ref": "#/$defs/syncState" } } }
     },
@@ -152,10 +137,8 @@
     "hello": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["deviceId", "deviceName", "appVersion", "capabilities"],
+      "required": ["appVersion", "capabilities"],
       "properties": {
-        "deviceId": { "type": "string", "minLength": 1 },
-        "deviceName": { "type": "string", "minLength": 1, "maxLength": 128 },
         "appVersion": { "type": "string", "minLength": 1 },
         "capabilities": {
           "type": "array",
@@ -167,30 +150,18 @@
     "heartbeat": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["deviceId", "sessionId"],
+      "required": ["sessionId"],
       "properties": {
-        "deviceId": { "type": "string", "minLength": 1 },
         "sessionId": { "type": "string", "minLength": 1 }
       }
     },
     "permitRequest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["eventId", "lastLeaseId", "deviceEpoch"],
+      "required": ["eventId", "lastLeaseId"],
       "properties": {
         "eventId": { "type": "string", "minLength": 1 },
-        "lastLeaseId": { "type": "string", "minLength": 1 },
-        "deviceEpoch": { "type": "integer", "minimum": 1 }
-      }
-    },
-    "takeoverRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["conversationKey", "expectedEpoch", "mode"],
-      "properties": {
-        "conversationKey": { "type": "string", "minLength": 1 },
-        "expectedEpoch": { "type": "integer", "minimum": 1 },
-        "mode": { "enum": ["NORMAL", "FORCE"] }
+        "lastLeaseId": { "type": "string", "minLength": 1 }
       }
     },
     "welcome": {
@@ -271,51 +242,14 @@
         }
       ]
     },
-    "takeoverResult": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "conversationKey",
-            "principalId",
-            "previousDeviceEpoch",
-            "deviceEpoch",
-            "status"
-          ],
-          "properties": {
-            "conversationKey": { "type": "string", "minLength": 1 },
-            "principalId": { "type": "string", "minLength": 1 },
-            "previousDeviceEpoch": { "type": "integer", "minimum": 1 },
-            "deviceEpoch": { "type": "integer", "minimum": 2 },
-            "status": { "const": "SUCCESS" }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["conversationKey", "previousDeviceEpoch", "status", "reasonCode"],
-          "properties": {
-            "conversationKey": { "type": "string", "minLength": 1 },
-            "previousDeviceEpoch": { "type": "integer", "minimum": 1 },
-            "status": { "const": "FAILED" },
-            "reasonCode": { "type": "string", "minLength": 1 },
-            "message": { "type": "string" }
-          }
-        }
-      ]
-    },
     "route": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["principalId", "conversationKey", "deviceEpoch", "state", "deviceId"],
+      "required": ["principalId", "conversationKey", "state"],
       "properties": {
         "principalId": { "type": "string", "minLength": 1 },
         "conversationKey": { "type": "string", "minLength": 1 },
-        "deviceEpoch": { "type": "integer", "minimum": 1 },
-        "state": { "enum": ["active", "suspended", "revoked"] },
-        "deviceId": { "type": "string", "minLength": 1 },
-        "deviceName": { "type": "string", "minLength": 1, "maxLength": 128 }
+        "state": { "enum": ["active", "suspended", "revoked"] }
       }
     },
     "syncState": {
@@ -335,8 +269,7 @@
         "message": { "type": "string" },
         "eventId": { "type": "string", "minLength": 1 },
         "idempotencyKey": { "type": "string", "minLength": 1 },
-        "conversationKey": { "type": "string", "minLength": 1 },
-        "expectedEpoch": { "type": "integer", "minimum": 1 }
+        "conversationKey": { "type": "string", "minLength": 1 }
       }
     }
   }

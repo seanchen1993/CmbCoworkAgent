@@ -18,8 +18,7 @@ import { ensureImServiceSchema } from "../src/main/services/im/schema"
 
 const ROUTE = {
   principalId: "principal-1",
-  conversationKey: "conversation-1",
-  deviceEpoch: 1
+  conversationKey: "conversation-1"
 }
 
 function approvalRequest(input: {
@@ -219,8 +218,7 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
         code: "A1B2C3",
         decision: "approve",
         principalId: "principal-other",
-        conversationKey: ROUTE.conversationKey,
-        deviceEpoch: ROUTE.deviceEpoch
+        conversationKey: ROUTE.conversationKey
       }),
       "该审批短码不属于当前招乎会话。"
     )

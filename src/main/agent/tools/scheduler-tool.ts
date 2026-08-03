@@ -132,8 +132,8 @@ function sameImDeliveryContext(
   if (!left || !right) return left == null && right == null
   return (
     left.provider === right.provider &&
+    left.principalId === right.principalId &&
     left.conversationKey === right.conversationKey &&
-    left.expectedDeviceEpoch === right.expectedDeviceEpoch &&
     left.inboxThreadId === right.inboxThreadId
   )
 }

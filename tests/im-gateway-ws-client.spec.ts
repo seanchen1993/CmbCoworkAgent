@@ -23,8 +23,6 @@ async function main(): Promise<void> {
   const insecureRemoteClient = new ImGatewayWsClient({
     url: () => "ws://10.0.0.8/ws",
     token: () => "token",
-    deviceId: "device-insecure",
-    deviceName: "Insecure",
     appVersion: "test",
     onRemoteEvent: () => undefined
   })
@@ -80,10 +78,7 @@ async function main(): Promise<void> {
                 {
                   principalId: "opaque-principal",
                   conversationKey: "conversation-remote",
-                  deviceEpoch: 3,
-                  state: "active",
-                  deviceId: "other-device",
-                  deviceName: "Other"
+                  state: "active"
                 }
               ]
             }
@@ -121,22 +116,6 @@ async function main(): Promise<void> {
             }
           })
         )
-      } else if (envelope.type === "ROUTE_TAKEOVER_REQUEST") {
-        connected.send(
-          JSON.stringify({
-            schemaVersion: 1,
-            type: "TAKEOVER_RESULT",
-            commandId: envelope.commandId,
-            sentAt: new Date().toISOString(),
-            payload: {
-              conversationKey: envelope.payload.conversationKey,
-              principalId: "opaque-principal",
-              previousDeviceEpoch: envelope.payload.expectedEpoch,
-              deviceEpoch: 4,
-              status: "SUCCESS"
-            }
-          })
-        )
       }
     })
   })
@@ -144,8 +123,6 @@ async function main(): Promise<void> {
   const client = new ImGatewayWsClient({
     url: () => `ws://127.0.0.1:${address.port}/ws`,
     token: () => "identity-token-do-not-log",
-    deviceId: "device-current",
-    deviceName: "Current",
     appVersion: "test",
     onRemoteEvent: (event) => {
       remoteEvents.push(event)
@@ -159,9 +136,9 @@ async function main(): Promise<void> {
   assert.equal(authorization, "Bearer identity-token-do-not-log")
   assert(receivedTypes.includes("HELLO"))
   await waitFor(() => client.getStatus().routes.length === 1, "route sync")
-  assert.equal(client.getStatus().routes[0].ownedByCurrentDevice, false)
   assert.equal(client.getStatus().principalId, "opaque-principal")
   assert.equal(client.getStatus().routes[0].principalId, "opaque-principal")
+  assert.equal(client.getStatus().routes[0].state, "active")
 
   const event: RemoteImEventV1 = {
     schemaVersion: 1,
@@ -170,7 +147,6 @@ async function main(): Promise<void> {
     principalId: "opaque-principal",
     conversationKey: "conversation-remote",
     conversationSeq: 1,
-    deviceEpoch: 3,
     message: { type: "text", text: "hello" },
     occurredAt: new Date().toISOString(),
     lease: { id: "lease-original", expiresAt: new Date(Date.now() + 60_000).toISOString() }
@@ -192,7 +168,6 @@ async function main(): Promise<void> {
     conversationKey: event.conversationKey,
     conversationSeq: event.conversationSeq,
     principalId: event.principalId,
-    deviceEpoch: event.deviceEpoch,
     leaseId: event.lease.id,
     leaseExpiresAt: Date.parse(event.lease.expiresAt),
     permitState: "unacquired",
@@ -221,21 +196,11 @@ async function main(): Promise<void> {
     deliveryId: "delivery-ws-1",
     eventId: event.eventId,
     conversationKey: event.conversationKey,
-    expectedDeviceEpoch: event.deviceEpoch,
     idempotencyKey: "delivery-ws-1:reply:0",
     segment: { index: 0, count: 1 },
     message: { type: "text", content: "done" }
   })
   assert.equal(reply.platformReplyId, "platform-reply-1")
-
-  const takeover = await client.requestTakeover({
-    conversationKey: event.conversationKey,
-    expectedDeviceEpoch: 3,
-    mode: "normal"
-  })
-  assert.equal(takeover.success, true)
-  assert.equal(takeover.principalId, "opaque-principal")
-  assert.equal(client.getStatus().routes[0].ownedByCurrentDevice, true)
 
   socket!.send(
     JSON.stringify({
@@ -243,7 +208,7 @@ async function main(): Promise<void> {
       type: "LEASE_REVOKED",
       messageId: "push-lease-revoked-1",
       sentAt: new Date().toISOString(),
-      payload: { eventId: event.eventId, reasonCode: "ROUTE_TAKEOVER" }
+      payload: { eventId: event.eventId, reasonCode: "LEASE_REVOKED" }
     })
   )
   await waitFor(() => revokedEventIds.length === 1, "lease revocation")
@@ -252,6 +217,29 @@ async function main(): Promise<void> {
   await assert.rejects(
     client.acquireExecutionPermit({ ...persistedEvent, eventId: "event-ws-mismatched-result" }),
     /连接已中断/
+  )
+
+  await waitFor(() => client.isAuthenticated(), "automatic reconnect after transport failure")
+  const helloCountBeforeSupersede = receivedTypes.filter((type) => type === "HELLO").length
+  socket!.send(
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "ERROR",
+      sentAt: new Date().toISOString(),
+      payload: { reasonCode: "SESSION_SUPERSEDED" }
+    })
+  )
+  await waitFor(
+    () =>
+      client.getStatus().connectionState === "error" &&
+      client.getStatus().lastError?.includes("新的桌面连接") === true,
+    "superseded session fence"
+  )
+  await new Promise((resolve) => setTimeout(resolve, 1_200))
+  assert.equal(
+    receivedTypes.filter((type) => type === "HELLO").length,
+    helloCountBeforeSupersede,
+    "superseded desktop must not reconnect automatically"
   )
 
   client.stop()

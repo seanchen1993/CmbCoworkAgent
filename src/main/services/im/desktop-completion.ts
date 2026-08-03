@@ -88,8 +88,7 @@ export class ImDesktopCompletionObserver {
     if (
       !conversation ||
       conversation.state !== "active" ||
-      conversation.principalId !== grant.principalId ||
-      conversation.deviceEpoch !== grant.deviceEpoch
+      conversation.principalId !== grant.principalId
     ) {
       return { status: "skipped", reasonCode: "GRANT_ROUTE_STALE" }
     }
@@ -105,7 +104,6 @@ export class ImDesktopCompletionObserver {
       buildImProactiveReplies({
         deliveryId,
         conversationKey: grant.conversationKey,
-        expectedDeviceEpoch: grant.deviceEpoch,
         text: finalText
       })
     )

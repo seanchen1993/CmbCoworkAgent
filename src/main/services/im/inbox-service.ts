@@ -24,7 +24,6 @@ export interface ImInboxServiceDependencies {
 export interface EnsureImInboxInput {
   conversationKey: string
   principalId: string
-  deviceEpoch: number
 }
 
 function opaqueConversationDirectory(conversationKey: string): string {
@@ -78,10 +77,9 @@ export class ImInboxService {
   ) {}
 
   async ensureInbox(input: EnsureImInboxInput): Promise<ImTargetSnapshot & { kind: "inbox" }> {
-    this.dependencies.conversationState.assertCurrentRoute(
+    this.dependencies.conversationState.assertConversationOwner(
       input.conversationKey,
-      input.principalId,
-      input.deviceEpoch
+      input.principalId
     )
 
     const existing = this.dependencies.conversationState
@@ -123,8 +121,8 @@ export class ImInboxService {
       memoryEnabled: false,
       imDeliveryContext: {
         provider: DEFAULT_IM_CHANNEL_ID,
+        principalId: input.principalId,
         conversationKey: input.conversationKey,
-        deviceEpoch: input.deviceEpoch,
         targetId
       }
     })

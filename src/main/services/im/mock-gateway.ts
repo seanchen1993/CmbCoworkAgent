@@ -8,26 +8,24 @@ import {
   type RemoteImReplyV1
 } from "../../../shared/im-gateway-contract"
 
-interface MockDevice {
-  deviceId: string
+export interface MockDesktopSession {
+  sessionId: string
   principalId: string
+  connectionGeneration: number
   connected: boolean
-  preferred: boolean
-  lastSeenOrder: number
+  superseded: boolean
 }
 
-interface MockRoute {
+interface MockConversation {
   conversationKey: string
   principalId: string
-  deviceId: string
-  deviceEpoch: number
 }
 
 interface MockLease {
   id: string
   eventId: string
-  deviceId: string
-  deviceEpoch: number
+  sessionId: string
+  connectionGeneration: number
   expiresAt: number
   permitAcquired: boolean
   revoked: boolean
@@ -35,7 +33,7 @@ interface MockLease {
 
 interface StoredMockEvent {
   event: RemoteImEventV1
-  deviceId: string
+  principalId: string
   lease: MockLease
   lastAck?: RemoteImAckV1
 }
@@ -89,61 +87,88 @@ export class MockGatewaySendTimeout extends Error {
 
 type MockReplyFault = "timeout_before_persist" | "timeout_after_persist" | "platform_unknown"
 
+/**
+ * Contract harness for the frozen one-principal/one-active-desktop model.
+ * Connection generations fence stale sockets, while conversations, grants and
+ * outbox identities remain stable across ordinary reconnects.
+ */
 export class MockImGateway {
-  private readonly devices = new Map<string, MockDevice>()
-  private readonly routes = new Map<string, MockRoute>()
+  private readonly sessions = new Map<string, MockDesktopSession>()
+  private readonly activeSessionByPrincipal = new Map<string, string>()
+  private readonly generationByPrincipal = new Map<string, number>()
+  private readonly conversations = new Map<string, MockConversation>()
   private readonly sequenceByConversation = new Map<string, number>()
   private readonly deliveryCursorByConversation = new Map<string, number>()
   private readonly firstDeliveredEventIds = new Set<string>()
   private readonly events = new Map<string, StoredMockEvent>()
   private readonly eventIdByPlatformMessage = new Map<string, string>()
-  private readonly pendingDeliveryByDevice = new Map<string, RemoteImEventV1[]>()
+  private readonly pendingDeliveryBySession = new Map<string, RemoteImEventV1[]>()
   private readonly waitingByConversation = new Map<string, WaitingMockEvent[]>()
   private readonly repliesByIdempotencyKey = new Map<string, StoredMockReply>()
   private readonly now: () => number
-  private order = 0
   private nextReplyFault: MockReplyFault | null = null
 
   constructor(options: { now?: () => number } = {}) {
     this.now = options.now ?? Date.now
   }
 
-  connectDevice(input: { deviceId: string; principalId: string; preferred?: boolean }): void {
-    this.order += 1
-    this.devices.set(input.deviceId, {
-      deviceId: input.deviceId,
-      principalId: input.principalId,
+  connectSession(input: { principalId: string; sessionId?: string }): {
+    session: Readonly<MockDesktopSession>
+    supersededSessionId: string | null
+  } {
+    const principalId = input.principalId.trim()
+    if (!principalId) throw new MockGatewayError("IDENTITY_NOT_FOUND", "principalId is required")
+    const sessionId = input.sessionId?.trim() || randomUUID()
+    const previousSessionId = this.activeSessionByPrincipal.get(principalId) ?? null
+    const previous = previousSessionId ? this.sessions.get(previousSessionId) : undefined
+    if (previous && previous.sessionId !== sessionId) {
+      previous.connected = false
+      previous.superseded = true
+    }
+    const connectionGeneration = (this.generationByPrincipal.get(principalId) ?? 0) + 1
+    this.generationByPrincipal.set(principalId, connectionGeneration)
+    const session: MockDesktopSession = {
+      sessionId,
+      principalId,
+      connectionGeneration,
       connected: true,
-      preferred: input.preferred === true,
-      lastSeenOrder: this.order
-    })
+      superseded: false
+    }
+    this.sessions.set(sessionId, session)
+    this.activeSessionByPrincipal.set(principalId, sessionId)
+    this.redeliverUnpermittedEvents(principalId, session)
     for (const [conversationKey, waiting] of this.waitingByConversation) {
-      if (waiting[0]?.input.principalId === input.principalId) {
+      if (waiting[0]?.input.principalId === principalId)
         this.routeWaitingConversation(conversationKey)
-      }
+    }
+    return {
+      session: { ...session },
+      supersededSessionId: previous && previous.sessionId !== sessionId ? previous.sessionId : null
     }
   }
 
-  disconnectDevice(deviceId: string): void {
-    const device = this.devices.get(deviceId)
-    if (device) device.connected = false
+  disconnectSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    session.connected = false
+    if (this.activeSessionByPrincipal.get(session.principalId) === sessionId) {
+      this.activeSessionByPrincipal.delete(session.principalId)
+    }
   }
 
-  reconnectDevice(deviceId: string): void {
-    const device = this.devices.get(deviceId)
-    if (!device) throw new MockGatewayError("DEVICE_REVOKED", "Mock device is unknown")
-    this.order += 1
-    device.connected = true
-    device.lastSeenOrder = this.order
+  getActiveSession(principalId: string): Readonly<MockDesktopSession> | null {
+    const sessionId = this.activeSessionByPrincipal.get(principalId)
+    const session = sessionId ? this.sessions.get(sessionId) : undefined
+    return session?.connected && !session.superseded ? { ...session } : null
   }
 
-  getRoute(conversationKey: string): Readonly<MockRoute> | null {
-    const route = this.routes.get(conversationKey)
-    return route ? { ...route } : null
+  getConversation(conversationKey: string): Readonly<MockConversation> | null {
+    const conversation = this.conversations.get(conversationKey)
+    return conversation ? { ...conversation } : null
   }
 
   ingestText(input: MockInboundText): {
-    status: "deliverable" | "waiting_device" | "duplicate"
+    status: "deliverable" | "waiting_session" | "duplicate"
     event?: RemoteImEventV1
   } {
     const duplicateEventId = this.eventIdByPlatformMessage.get(input.platformMessageId)
@@ -152,48 +177,54 @@ export class MockImGateway {
       return { status: "duplicate", event: stored ? this.copyEvent(stored.event) : undefined }
     }
 
+    const existingConversation = this.conversations.get(input.conversationKey)
+    if (existingConversation && existingConversation.principalId !== input.principalId) {
+      throw new MockGatewayError("PRINCIPAL_MISMATCH", "Conversation belongs to another principal")
+    }
     const conversationSeq = (this.sequenceByConversation.get(input.conversationKey) ?? 0) + 1
     this.sequenceByConversation.set(input.conversationKey, conversationSeq)
     const eventId = randomUUID()
     this.eventIdByPlatformMessage.set(input.platformMessageId, eventId)
-    const route = this.routes.get(input.conversationKey) ?? this.createRoute(input)
-    if (!route) {
+    const session = this.activeSession(input.principalId)
+    if (!session) {
       const waiting = this.waitingByConversation.get(input.conversationKey) ?? []
       waiting.push({ input: { ...input }, eventId, conversationSeq })
       this.waitingByConversation.set(input.conversationKey, waiting)
-      return { status: "waiting_device" }
+      return { status: "waiting_session" }
     }
-
-    const event = this.createEvent(input, eventId, conversationSeq, route)
+    this.ensureConversation(input.conversationKey, input.principalId)
+    const event = this.createEvent(input, eventId, conversationSeq, session)
     return { status: "deliverable", event: this.copyEvent(event) }
   }
 
-  takeDeliveries(deviceId: string, order: "fifo" | "reverse" = "fifo"): RemoteImEventV1[] {
-    const pending = this.pendingDeliveryByDevice.get(deviceId) ?? []
-    this.pendingDeliveryByDevice.set(deviceId, [])
+  takeDeliveries(sessionId: string, order: "fifo" | "reverse" = "fifo"): RemoteImEventV1[] {
+    this.assertActiveSession(sessionId)
+    const pending = this.pendingDeliveryBySession.get(sessionId) ?? []
+    this.pendingDeliveryBySession.set(sessionId, [])
     const deliveries = order === "reverse" ? [...pending].reverse() : pending
     return deliveries.map((event) => this.copyEvent(event))
   }
 
-  redeliver(eventId: string, options: { replaceUnacquiredLease?: boolean } = {}): RemoteImEventV1 {
+  redeliver(eventId: string): RemoteImEventV1 {
     const stored = this.requireEvent(eventId)
-    if (options.replaceUnacquiredLease !== false && !stored.lease.permitAcquired) {
-      stored.lease.revoked = true
-      stored.lease = this.createLease(eventId, stored.deviceId, stored.event.deviceEpoch)
-      stored.event.lease = {
-        id: stored.lease.id,
-        expiresAt: new Date(stored.lease.expiresAt).toISOString()
-      }
+    if (stored.lease.permitAcquired) {
+      throw new MockGatewayError(
+        "EVENT_OUTCOME_UNKNOWN",
+        "A permitted event cannot be automatically re-executed"
+      )
     }
+    const session = this.activeSession(stored.principalId)
+    if (!session) throw new MockGatewayError("DESKTOP_OFFLINE", "Desktop session is offline")
+    this.replaceLease(stored, session)
     stored.event.redelivered = true
-    this.enqueueDelivery(stored.deviceId, stored.event)
+    this.enqueueDelivery(session.sessionId, stored.event)
     return this.copyEvent(stored.event)
   }
 
-  acknowledge(deviceId: string, deviceEpoch: number, ack: RemoteImAckV1): void {
+  acknowledge(sessionId: string, ack: RemoteImAckV1): void {
     assertRemoteImAckV1(ack)
     const stored = this.requireEvent(ack.eventId)
-    this.assertCurrentRoute(stored.event.conversationKey, deviceId, deviceEpoch)
+    this.assertLeaseSession(stored, sessionId)
     if (stored.lease.id !== ack.leaseId || stored.lease.revoked) {
       throw new MockGatewayError("LEASE_REVOKED", "ACK lease is no longer active")
     }
@@ -210,24 +241,15 @@ export class MockImGateway {
     }
   }
 
-  acquirePermit(input: {
-    eventId: string
-    deviceId: string
-    deviceEpoch: number
-    leaseId: string
-  }): MockPermitResult {
+  acquirePermit(input: { eventId: string; sessionId: string; leaseId: string }): MockPermitResult {
     const stored = this.requireEvent(input.eventId)
     try {
-      this.assertCurrentRoute(stored.event.conversationKey, input.deviceId, input.deviceEpoch)
+      this.assertLeaseSession(stored, input.sessionId)
     } catch (error) {
       if (error instanceof MockGatewayError) {
         return { status: "denied", eventId: input.eventId, reasonCode: error.reasonCode }
       }
       throw error
-    }
-    const device = this.devices.get(input.deviceId)
-    if (!device?.connected) {
-      return { status: "denied", eventId: input.eventId, reasonCode: "DEVICE_OFFLINE" }
     }
     if (stored.lease.id !== input.leaseId || stored.lease.revoked) {
       return { status: "denied", eventId: input.eventId, reasonCode: "LEASE_REVOKED" }
@@ -246,26 +268,18 @@ export class MockImGateway {
     }
   }
 
-  renewPermit(input: {
-    eventId: string
-    deviceId: string
-    deviceEpoch: number
-    leaseId: string
-  }): MockPermitResult {
+  renewPermit(input: { eventId: string; sessionId: string; leaseId: string }): MockPermitResult {
     const stored = this.requireEvent(input.eventId)
-    const route = this.routes.get(stored.event.conversationKey)
-    if (
-      !route ||
-      route.deviceId !== input.deviceId ||
-      route.deviceEpoch !== input.deviceEpoch ||
-      stored.lease.id !== input.leaseId ||
-      stored.lease.revoked ||
-      !stored.lease.permitAcquired
-    ) {
-      return { status: "denied", eventId: input.eventId, reasonCode: "LEASE_REVOKED" }
+    try {
+      this.assertLeaseSession(stored, input.sessionId)
+    } catch (error) {
+      if (error instanceof MockGatewayError) {
+        return { status: "denied", eventId: input.eventId, reasonCode: error.reasonCode }
+      }
+      throw error
     }
-    if (!this.devices.get(input.deviceId)?.connected) {
-      return { status: "denied", eventId: input.eventId, reasonCode: "DEVICE_OFFLINE" }
+    if (stored.lease.id !== input.leaseId || stored.lease.revoked || !stored.lease.permitAcquired) {
+      return { status: "denied", eventId: input.eventId, reasonCode: "LEASE_REVOKED" }
     }
     stored.lease.expiresAt = this.now() + 90_000
     stored.event.lease.expiresAt = new Date(stored.lease.expiresAt).toISOString()
@@ -281,39 +295,12 @@ export class MockImGateway {
     this.requireEvent(eventId).lease.revoked = true
   }
 
-  takeover(input: {
-    conversationKey: string
-    expectedEpoch: number
-    newDeviceId: string
-  }): MockRoute {
-    const route = this.routes.get(input.conversationKey)
-    if (!route) throw new MockGatewayError("ROUTE_NOT_FOUND", "Mock route is unknown")
-    if (route.deviceEpoch !== input.expectedEpoch) {
-      throw new MockGatewayError("ROUTE_EPOCH_CONFLICT", "Mock route epoch changed")
-    }
-    const nextDevice = this.devices.get(input.newDeviceId)
-    if (!nextDevice?.connected || nextDevice.principalId !== route.principalId) {
-      throw new MockGatewayError("DEVICE_OFFLINE", "Takeover device is unavailable")
-    }
-    for (const stored of this.events.values()) {
-      if (
-        stored.event.conversationKey === input.conversationKey &&
-        stored.event.deviceEpoch === route.deviceEpoch
-      ) {
-        stored.lease.revoked = true
-      }
-    }
-    route.deviceId = input.newDeviceId
-    route.deviceEpoch += 1
-    return { ...route }
-  }
-
   setNextReplyFault(fault: MockReplyFault | null): void {
     this.nextReplyFault = fault
   }
 
   submitReply(
-    deviceId: string,
+    sessionId: string,
     reply: RemoteImReplyV1
   ): {
     state: "accepted" | "platform_unknown"
@@ -321,16 +308,18 @@ export class MockImGateway {
     platformReplyId?: string
   } {
     assertRemoteImReplyV1(reply)
-    this.assertCurrentRoute(reply.conversationKey, deviceId, reply.expectedDeviceEpoch)
+    const session = this.assertActiveSession(sessionId)
+    const conversation = this.conversations.get(reply.conversationKey)
+    if (!conversation) throw new MockGatewayError("ROUTE_NOT_FOUND", "Conversation is unknown")
+    if (conversation.principalId !== session.principalId) {
+      throw new MockGatewayError("PRINCIPAL_MISMATCH", "Conversation belongs to another principal")
+    }
     if (reply.eventId) {
       const event = this.requireEvent(reply.eventId).event
-      if (
-        event.conversationKey !== reply.conversationKey ||
-        event.deviceEpoch !== reply.expectedDeviceEpoch
-      ) {
+      if (event.conversationKey !== reply.conversationKey) {
         throw new MockGatewayError(
           "REPLY_IDEMPOTENCY_CONFLICT",
-          "Reply event identity differs from its route"
+          "Reply event identity differs from its conversation"
         )
       }
     }
@@ -349,7 +338,6 @@ export class MockImGateway {
         storedReply.reply.deliveryId === reply.deliveryId &&
         (storedReply.reply.segment.count !== reply.segment.count ||
           storedReply.reply.conversationKey !== reply.conversationKey ||
-          storedReply.reply.expectedDeviceEpoch !== reply.expectedDeviceEpoch ||
           storedReply.reply.eventId !== reply.eventId)
       ) {
         throw new MockGatewayError(
@@ -376,7 +364,6 @@ export class MockImGateway {
     const fault = this.nextReplyFault
     this.nextReplyFault = null
     if (fault === "timeout_before_persist") throw new MockGatewaySendTimeout(false)
-
     const stored: StoredMockReply =
       fault === "platform_unknown"
         ? { reply: structuredClone(reply), state: "platform_unknown" }
@@ -394,36 +381,14 @@ export class MockImGateway {
     }
   }
 
-  private createRoute(
-    input: Pick<MockInboundText, "conversationKey" | "principalId">
-  ): MockRoute | null {
-    const candidates = [...this.devices.values()]
-      .filter((device) => device.connected && device.principalId === input.principalId)
-      .sort(
-        (left, right) =>
-          Number(right.preferred) - Number(left.preferred) ||
-          right.lastSeenOrder - left.lastSeenOrder ||
-          left.deviceId.localeCompare(right.deviceId)
-      )
-    const selected = candidates[0]
-    if (!selected) return null
-    const route: MockRoute = {
-      conversationKey: input.conversationKey,
-      principalId: input.principalId,
-      deviceId: selected.deviceId,
-      deviceEpoch: 1
-    }
-    this.routes.set(input.conversationKey, route)
-    return route
-  }
-
   private routeWaitingConversation(conversationKey: string): void {
     const waiting = this.waitingByConversation.get(conversationKey)
-    if (!waiting || waiting.length === 0) return
-    const route = this.createRoute(waiting[0].input)
-    if (!route) return
+    if (!waiting?.length) return
+    const session = this.activeSession(waiting[0].input.principalId)
+    if (!session) return
+    this.ensureConversation(conversationKey, waiting[0].input.principalId)
     for (const pending of waiting) {
-      this.createEvent(pending.input, pending.eventId, pending.conversationSeq, route)
+      this.createEvent(pending.input, pending.eventId, pending.conversationSeq, session)
     }
     this.waitingByConversation.delete(conversationKey)
   }
@@ -432,9 +397,9 @@ export class MockImGateway {
     input: MockInboundText,
     eventId: string,
     conversationSeq: number,
-    route: MockRoute
+    session: MockDesktopSession
   ): RemoteImEventV1 {
-    const lease = this.createLease(eventId, route.deviceId, route.deviceEpoch)
+    const lease = this.createLease(eventId, session)
     const event: RemoteImEventV1 = {
       schemaVersion: 1,
       eventId,
@@ -442,13 +407,12 @@ export class MockImGateway {
       principalId: input.principalId,
       conversationKey: input.conversationKey,
       conversationSeq,
-      deviceEpoch: route.deviceEpoch,
       message: { type: "text", text: input.text },
       occurredAt: input.occurredAt ?? new Date(this.now()).toISOString(),
       lease: { id: lease.id, expiresAt: new Date(lease.expiresAt).toISOString() }
     }
-    this.events.set(eventId, { event, deviceId: route.deviceId, lease })
-    this.enqueueNextFirstDelivery(route.conversationKey)
+    this.events.set(eventId, { event, principalId: input.principalId, lease })
+    this.enqueueNextFirstDelivery(input.conversationKey)
     return event
   }
 
@@ -460,39 +424,94 @@ export class MockImGateway {
         stored.event.conversationSeq === cursor + 1
     )
     if (!next || this.firstDeliveredEventIds.has(next.event.eventId)) return
+    const session = this.activeSession(next.principalId)
+    if (!session) return
+    if (next.lease.sessionId !== session.sessionId) this.replaceLease(next, session)
     this.firstDeliveredEventIds.add(next.event.eventId)
-    this.enqueueDelivery(next.deviceId, next.event)
+    this.enqueueDelivery(session.sessionId, next.event)
   }
 
-  private createLease(eventId: string, deviceId: string, deviceEpoch: number): MockLease {
+  private redeliverUnpermittedEvents(principalId: string, session: MockDesktopSession): void {
+    for (const stored of this.events.values()) {
+      if (
+        stored.principalId !== principalId ||
+        stored.lease.permitAcquired ||
+        stored.lease.sessionId === session.sessionId
+      ) {
+        continue
+      }
+      this.replaceLease(stored, session)
+      stored.event.redelivered = true
+      this.enqueueDelivery(session.sessionId, stored.event)
+    }
+  }
+
+  private replaceLease(stored: StoredMockEvent, session: MockDesktopSession): void {
+    stored.lease.revoked = true
+    stored.lease = this.createLease(stored.event.eventId, session)
+    stored.event.lease = {
+      id: stored.lease.id,
+      expiresAt: new Date(stored.lease.expiresAt).toISOString()
+    }
+  }
+
+  private createLease(eventId: string, session: MockDesktopSession): MockLease {
     return {
       id: randomUUID(),
       eventId,
-      deviceId,
-      deviceEpoch,
+      sessionId: session.sessionId,
+      connectionGeneration: session.connectionGeneration,
       expiresAt: this.now() + 90_000,
       permitAcquired: false,
       revoked: false
     }
   }
 
-  private enqueueDelivery(deviceId: string, event: RemoteImEventV1): void {
-    const pending = this.pendingDeliveryByDevice.get(deviceId) ?? []
+  private enqueueDelivery(sessionId: string, event: RemoteImEventV1): void {
+    const pending = this.pendingDeliveryBySession.get(sessionId) ?? []
     pending.push(this.copyEvent(event))
-    this.pendingDeliveryByDevice.set(deviceId, pending)
+    this.pendingDeliveryBySession.set(sessionId, pending)
   }
 
-  private assertCurrentRoute(conversationKey: string, deviceId: string, deviceEpoch: number): void {
-    const route = this.routes.get(conversationKey)
-    if (!route) throw new MockGatewayError("ROUTE_NOT_FOUND", "Mock route is unknown")
-    if (route.deviceEpoch !== deviceEpoch) {
-      throw new MockGatewayError("ROUTE_EPOCH_CONFLICT", "Mock route epoch changed")
+  private ensureConversation(conversationKey: string, principalId: string): void {
+    const existing = this.conversations.get(conversationKey)
+    if (existing && existing.principalId !== principalId) {
+      throw new MockGatewayError("PRINCIPAL_MISMATCH", "Conversation owner changed")
     }
-    if (route.deviceId !== deviceId) {
-      throw new MockGatewayError(
-        "ROUTE_OWNED_BY_OTHER_DEVICE",
-        "Mock route belongs to another device"
-      )
+    if (!existing) this.conversations.set(conversationKey, { conversationKey, principalId })
+  }
+
+  private activeSession(principalId: string): MockDesktopSession | null {
+    const sessionId = this.activeSessionByPrincipal.get(principalId)
+    const session = sessionId ? this.sessions.get(sessionId) : undefined
+    return session?.connected && !session.superseded ? session : null
+  }
+
+  private assertActiveSession(sessionId: string): MockDesktopSession {
+    const session = this.sessions.get(sessionId)
+    if (!session) {
+      throw new MockGatewayError("DESKTOP_OFFLINE", "Desktop session is offline")
+    }
+    const activeSessionId = this.activeSessionByPrincipal.get(session.principalId)
+    if (session.superseded || (activeSessionId && activeSessionId !== session.sessionId)) {
+      throw new MockGatewayError("SESSION_SUPERSEDED", "Desktop session was superseded")
+    }
+    if (!session.connected || !activeSessionId) {
+      throw new MockGatewayError("DESKTOP_OFFLINE", "Desktop session is offline")
+    }
+    return session
+  }
+
+  private assertLeaseSession(stored: StoredMockEvent, sessionId: string): void {
+    const session = this.assertActiveSession(sessionId)
+    if (stored.principalId !== session.principalId) {
+      throw new MockGatewayError("PRINCIPAL_MISMATCH", "Event belongs to another principal")
+    }
+    if (
+      stored.lease.sessionId !== session.sessionId ||
+      stored.lease.connectionGeneration !== session.connectionGeneration
+    ) {
+      throw new MockGatewayError("LEASE_REVOKED", "Lease belongs to a stale connection")
     }
   }
 

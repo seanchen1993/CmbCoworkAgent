@@ -4969,14 +4969,16 @@ function RemoteFeatureAccessPanel({
   )
   const available =
     status?.settings.enabled === true &&
-    status.identityState === "mapped" &&
+    status.identityState === "verified" &&
     status.settings.remoteAccess === "inbox-and-features"
   const availabilityText = !status
     ? "正在读取远程访问状态…"
     : !status.settings.enabled
       ? "内置统一机器人未启用"
-      : status.identityState !== "mapped"
-        ? "需要先完成企业身份映射"
+      : status.identityState !== "verified"
+        ? status.identityState === "verifying"
+          ? "正在验证企业身份"
+          : "需要先完成企业身份验证"
         : status.settings.remoteAccess !== "inbox-and-features"
           ? "机器人管理中尚未开放 Feature"
           : "可从招乎查看并绑定此 Feature"

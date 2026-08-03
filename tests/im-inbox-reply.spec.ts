@@ -32,8 +32,7 @@ async function testManagedInboxCreationAndReuse(): Promise<void> {
   const conversations = new ImConversationStateStore(dependencies)
   await conversations.ensureConversation({
     conversationKey: "conversation/private/value",
-    principalId: "principal-1",
-    deviceEpoch: 1
+    principalId: "principal-1"
   })
   const threads = new Map<string, ThreadRow>()
   let id = 0
@@ -61,8 +60,7 @@ async function testManagedInboxCreationAndReuse(): Promise<void> {
   try {
     const first = await service.ensureInbox({
       conversationKey: "conversation/private/value",
-      principalId: "principal-1",
-      deviceEpoch: 1
+      principalId: "principal-1"
     })
     assert.equal(first.kind, "inbox")
     const realRoot = await realpath(root)
@@ -74,15 +72,14 @@ async function testManagedInboxCreationAndReuse(): Promise<void> {
     assert.equal(metadata.memoryEnabled, false)
     assert.deepEqual(metadata.imDeliveryContext, {
       provider: "zhaohu",
+      principalId: "principal-1",
       conversationKey: "conversation/private/value",
-      deviceEpoch: 1,
       targetId: first.targetId
     })
 
     const second = await service.ensureInbox({
       conversationKey: "conversation/private/value",
-      principalId: "principal-1",
-      deviceEpoch: 1
+      principalId: "principal-1"
     })
     assert.deepEqual(second, first)
     assert.equal(threads.size, 1)
@@ -110,8 +107,7 @@ function testReplySegmentationAndStableEnvelope(): void {
 
   const event = {
     eventId: "event-stable-id",
-    conversationKey: "conversation-1",
-    deviceEpoch: 3
+    conversationKey: "conversation-1"
   }
   const first = buildImEventReplies({ event, text: "回复".repeat(5_000) })
   const replay = buildImEventReplies({ event, text: "回复".repeat(5_000) })
@@ -128,7 +124,6 @@ async function testConcurrentOutboxDrainUsesSingleSender(): Promise<void> {
     deliveryId: "delivery-1",
     eventId: "event-1",
     conversationKey: "conversation-1",
-    expectedDeviceEpoch: 1,
     idempotencyKey: "delivery-1:reply:0",
     segmentIndex: 0,
     segmentCount: 1,
@@ -184,7 +179,6 @@ async function testSegmentDeliveryStopsBehindUnconfirmedPredecessor(): Promise<v
     deliveryId: "delivery-ordered",
     eventId: "event-ordered",
     conversationKey: "conversation-1",
-    expectedDeviceEpoch: 1,
     idempotencyKey: `delivery-ordered:reply:${segmentIndex}`,
     segmentIndex,
     segmentCount: 2,

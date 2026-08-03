@@ -1,7 +1,5 @@
-import { flushStrict, getThread, updateThread } from "../../db"
 import {
   deleteLegacyChatXRobotCredentials,
-  getBuiltinRobotDeviceIdentity,
   getBuiltinRobotSettings,
   getUserInfo,
   hasLegacyChatXRobotCredentials,
@@ -13,16 +11,12 @@ import type {
   BuiltinRobotGrantableFeature,
   BuiltinRobotRemoteAccessOverview,
   BuiltinRobotSettings,
-  BuiltinRobotStatus,
-  BuiltinRobotTakeoverRequest,
-  BuiltinRobotTakeoverResult
+  BuiltinRobotStatus
 } from "../../types"
 import { notifyRemoteThreadChanged } from "../../agent/renderer-stream-mirror"
 import { imConversationStateStore } from "./conversation-state"
 import { imEventStore } from "./event-store"
 import { ImGatewayWsClient, type ImGatewayWsStatus } from "./gateway-ws-client"
-import { imInboxService } from "./inbox-service"
-import { imSelectionContextStore } from "./selection-context"
 import { ImUnifiedBotService } from "./service"
 import { imFeatureBindingService } from "./feature-binding-service"
 import { imRemoteAccessService } from "./remote-access-service"
@@ -48,18 +42,6 @@ function currentIdentity(): { token: string | null; error: string | null } {
     }
   } catch {
     return { token: null, error: "企业身份信息损坏，请重新登录。" }
-  }
-}
-
-function parseMetadata(raw: string | null): Record<string, unknown> {
-  if (!raw) return {}
-  try {
-    const value = JSON.parse(raw) as unknown
-    return value && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : {}
-  } catch {
-    return {}
   }
 }
 
@@ -155,7 +137,6 @@ export class BuiltinRobotManager {
 
   getStatus(): BuiltinRobotStatus {
     const settings = getBuiltinRobotSettings()
-    const device = getBuiltinRobotDeviceIdentity()
     const identity = currentIdentity()
     const summary = imEventStore.getStatusSummary()
     const routeMap = new Map<string, BuiltinRobotRouteStatus>()
@@ -163,11 +144,7 @@ export class BuiltinRobotManager {
       routeMap.set(conversation.conversationKey, {
         principalId: conversation.principalId,
         conversationKey: conversation.conversationKey,
-        deviceEpoch: conversation.deviceEpoch,
-        state: conversation.state,
-        deviceId: device.deviceId,
-        deviceName: device.deviceName,
-        ownedByCurrentDevice: true
+        state: conversation.state
       })
     }
     for (const route of this.gatewayStatus.routes) routeMap.set(route.conversationKey, route)
@@ -175,16 +152,13 @@ export class BuiltinRobotManager {
     for (const conversation of imConversationStateStore.listConversations()) {
       for (const target of imConversationStateStore.listTargets(conversation.conversationKey)) {
         if (target.snapshot.kind !== "feature") continue
-        const thread = getThread(target.snapshot.threadId)
-        const metadata = parseMetadata(thread?.metadata ?? null)
-        const historical = metadata.remoteState === "historical"
         featureBindings.push({
           conversationKey: conversation.conversationKey,
           bindingId: target.snapshot.bindingId,
           projectId: target.snapshot.projectId,
           featureSlug: target.snapshot.featureSlug,
           threadId: target.snapshot.threadId,
-          state: historical ? "historical" : target.state,
+          state: target.state,
           suspendReason: target.suspendReason,
           activeTarget: conversation.activeTargetId === target.snapshot.targetId
         })
@@ -197,11 +171,11 @@ export class BuiltinRobotManager {
       identityState:
         identity.error || this.gatewayStatus.authenticationFailed
           ? "error"
-          : identity.token
-            ? "mapped"
-            : "missing",
-      deviceId: device.deviceId,
-      deviceName: device.deviceName,
+          : this.gatewayStatus.principalId
+            ? "verified"
+            : identity.token
+              ? "verifying"
+              : "missing",
       sessionId: this.gatewayStatus.sessionId,
       principalId: this.gatewayStatus.principalId,
       lastConnectedAt: this.gatewayStatus.lastConnectedAt,
@@ -222,10 +196,6 @@ export class BuiltinRobotManager {
     return this.getStatus()
   }
 
-  takeover(request: BuiltinRobotTakeoverRequest): Promise<BuiltinRobotTakeoverResult> {
-    return this.enqueue(() => this.takeoverNow(request))
-  }
-
   getRemoteAccessOverview(): BuiltinRobotRemoteAccessOverview {
     const resolved = this.resolveGrantRoute(false)
     return {
@@ -240,7 +210,6 @@ export class BuiltinRobotManager {
         state: grant.state,
         grantVersion: grant.grantVersion,
         conversationKey: grant.conversationKey,
-        deviceEpoch: grant.deviceEpoch,
         suspendReason: grant.suspendReason
       })),
       featureGrants: imRemoteAccessService.listFeatureGrants().map((grant) => ({
@@ -253,13 +222,15 @@ export class BuiltinRobotManager {
         state: grant.state,
         grantVersion: grant.grantVersion,
         conversationKey: grant.conversationKey,
-        deviceEpoch: grant.deviceEpoch,
         suspendReason: grant.suspendReason
       }))
     }
   }
 
-  setThreadRemoteAccess(threadId: string, enabled: boolean): Promise<BuiltinRobotRemoteAccessOverview> {
+  setThreadRemoteAccess(
+    threadId: string,
+    enabled: boolean
+  ): Promise<BuiltinRobotRemoteAccessOverview> {
     return this.enqueue(async () => {
       if (enabled) {
         await imRemoteAccessService.enableThread({
@@ -322,14 +293,11 @@ export class BuiltinRobotManager {
       this.emitStatus()
       return
     }
-    const device = getBuiltinRobotDeviceIdentity()
     const identity = currentIdentity()
     this.managerError = null
     const client = new ImGatewayWsClient({
       url: configuredGatewayUrl,
       token: () => currentIdentity().token,
-      deviceId: device.deviceId,
-      deviceName: device.deviceName,
       appVersion: this.appVersion,
       onRemoteEvent: async (event) => {
         const service = this.service
@@ -406,72 +374,6 @@ export class BuiltinRobotManager {
     this.emitStatus()
   }
 
-  private async takeoverNow(
-    request: BuiltinRobotTakeoverRequest
-  ): Promise<BuiltinRobotTakeoverResult> {
-    if (!request.conversationKey.trim() || !Number.isSafeInteger(request.expectedDeviceEpoch)) {
-      throw new Error("接管参数无效")
-    }
-    if (!this.client?.isAuthenticated()) throw new Error("统一机器人未连接，无法接管")
-    const result = await this.client.requestTakeover(request)
-    if (!result.success || !result.deviceEpoch) return result
-
-    const existing = imConversationStateStore.getConversation(request.conversationKey)
-    const principalId = result.principalId ?? existing?.principalId
-    if (!principalId) throw new Error("网关接管响应缺少企业主体标识")
-
-    if (existing && existing.deviceEpoch === request.expectedDeviceEpoch) {
-      const runningEventId = this.service?.turnQueue.getCurrentEventId(request.conversationKey)
-      if (runningEventId && this.service) {
-        await this.service.handleLeaseRevoked(runningEventId, "ROUTE_TAKEOVER")
-        await this.service.turnQueue.waitForIdle(request.conversationKey)
-      }
-      const oldTargets = imConversationStateStore.listTargets(request.conversationKey)
-      await imRemoteAccessService.suspendRoute(
-        request.conversationKey,
-        request.expectedDeviceEpoch,
-        "ROUTE_TAKEOVER"
-      )
-      await imEventStore.applyDeviceTakeover(request.conversationKey, request.expectedDeviceEpoch)
-      for (const { snapshot } of oldTargets) {
-        const thread = getThread(snapshot.threadId)
-        if (!thread) continue
-        updateThread(snapshot.threadId, {
-          metadata: JSON.stringify({
-            ...parseMetadata(thread.metadata),
-            remoteState: "historical",
-            remoteHistoricalAt: new Date().toISOString(),
-            remoteHistoricalReason: "device_takeover"
-          })
-        })
-      }
-      await imConversationStateStore.resetForDeviceTakeover(
-        request.conversationKey,
-        request.expectedDeviceEpoch,
-        result.deviceEpoch
-      )
-    } else if (!existing) {
-      await imConversationStateStore.ensureConversation({
-        conversationKey: request.conversationKey,
-        principalId,
-        deviceEpoch: result.deviceEpoch
-      })
-    } else if (existing.deviceEpoch !== result.deviceEpoch) {
-      throw new Error("本地设备版本与网关接管结果冲突")
-    }
-
-    await imSelectionContextStore.clearConversation(request.conversationKey)
-    await imInboxService.ensureInbox({
-      conversationKey: request.conversationKey,
-      principalId,
-      deviceEpoch: result.deviceEpoch
-    })
-    await flushStrict()
-    notifyRemoteThreadChanged()
-    this.emitStatus()
-    return result
-  }
-
   private emitStatus(): void {
     if (this.listeners.size === 0) return
     let status: BuiltinRobotStatus
@@ -502,16 +404,13 @@ export class BuiltinRobotManager {
       return { route: null, status: null, reason: "网关尚未返回已验证的企业主体。" }
     }
     const candidates = this.gatewayStatus.routes.filter(
-      (route) =>
-        route.principalId === principalId &&
-        route.state === "active" &&
-        route.ownedByCurrentDevice
+      (route) => route.principalId === principalId && route.state === "active"
     )
     if (candidates.length === 0) {
       return {
         route: null,
         status: null,
-        reason: "请先在招乎中向内置机器人发送一条消息，并确认路由属于本设备。"
+        reason: "请先在招乎中向内置机器人发送一条消息，以建立远程会话。"
       }
     }
     if (candidates.length > 1) {
@@ -521,8 +420,7 @@ export class BuiltinRobotManager {
     return {
       route: {
         principalId,
-        conversationKey: status.conversationKey,
-        deviceEpoch: status.deviceEpoch
+        conversationKey: status.conversationKey
       },
       status: { ...status },
       reason: null

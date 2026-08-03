@@ -99,10 +99,10 @@ function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean 
           left.title === right.title
         : left.kind === "feature" &&
           right.kind === "feature" &&
-        left.bindingId === right.bindingId &&
-        left.grantId === right.grantId &&
-        left.grantVersion === right.grantVersion &&
-        left.projectId === right.projectId &&
+          left.bindingId === right.bindingId &&
+          left.grantId === right.grantId &&
+          left.grantVersion === right.grantVersion &&
+          left.projectId === right.projectId &&
           left.featureSlug === right.featureSlug))
   )
 }
@@ -110,7 +110,7 @@ function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean 
 function metadataMatchesTarget(
   metadata: Record<string, unknown>,
   target: ImTargetSnapshot,
-  event: Pick<ImEventRecord, "conversationKey" | "deviceEpoch">
+  event: Pick<ImEventRecord, "conversationKey" | "principalId">
 ): boolean {
   if (canonicalPath(String(metadata.workspacePath ?? "")) !== canonicalPath(target.workspacePath)) {
     return false
@@ -121,9 +121,9 @@ function metadataMatchesTarget(
   const context = delivery as Record<string, unknown>
   if (
     context.provider !== DEFAULT_IM_CHANNEL_ID ||
+    context.principalId !== event.principalId ||
     context.targetId !== target.targetId ||
     context.conversationKey !== event.conversationKey ||
-    context.deviceEpoch !== event.deviceEpoch ||
     (target.kind === "feature" && context.bindingId !== target.bindingId)
   ) {
     return false
@@ -162,10 +162,9 @@ export class ImRemoteCapabilityGuard {
         message: "消息没有可执行的目标，请重新发送。"
       }
     }
-    this.dependencies.conversationState.assertCurrentRoute(
+    this.dependencies.conversationState.assertConversationOwner(
       event.conversationKey,
-      event.principalId,
-      event.deviceEpoch
+      event.principalId
     )
     const storedTarget = this.dependencies.conversationState
       .listTargets(event.conversationKey)
@@ -185,8 +184,7 @@ export class ImRemoteCapabilityGuard {
     try {
       const route = {
         principalId: event.principalId,
-        conversationKey: event.conversationKey,
-        deviceEpoch: event.deviceEpoch
+        conversationKey: event.conversationKey
       }
       if (snapshot.kind === "thread") {
         this.dependencies.grants.assertActiveThreadGrant({

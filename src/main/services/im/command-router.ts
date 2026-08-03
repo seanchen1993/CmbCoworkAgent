@@ -104,7 +104,6 @@ export class ImCommandRouter {
     command: ParsedImCommand
     conversationKey: string
     principalId: string
-    deviceEpoch: number
   }): Promise<string> {
     try {
       switch (input.command.name) {
@@ -180,12 +179,10 @@ export class ImCommandRouter {
   private async listSessions(input: {
     conversationKey: string
     principalId: string
-    deviceEpoch: number
   }): Promise<string> {
     const targets = await this.dependencies.access.listAuthorizedTargets({
       principalId: input.principalId,
-      conversationKey: input.conversationKey,
-      deviceEpoch: input.deviceEpoch
+      conversationKey: input.conversationKey
     })
     if (targets.length === 0) {
       return "当前没有已授权的会话或 Feature。请先在桌面打开“接入招乎”。"
@@ -235,8 +232,7 @@ export class ImCommandRouter {
     const previous = this.selectedTarget(input.conversationKey)
     const route = {
       principalId: input.principalId,
-      conversationKey: input.conversationKey,
-      deviceEpoch: input.deviceEpoch
+      conversationKey: input.conversationKey
     }
     const target =
       selected.targetKind === "thread_grant"
@@ -265,7 +261,6 @@ export class ImCommandRouter {
   private async switchToInbox(input: {
     conversationKey: string
     principalId: string
-    deviceEpoch: number
   }): Promise<string> {
     const previous = this.selectedTarget(input.conversationKey)
     const inbox = await this.dependencies.inbox.ensureInbox(input)
@@ -296,7 +291,6 @@ export class ImCommandRouter {
         : "无"
     return [
       `当前目标：【${targetLabel(target)}】${selected?.state === "active" ? "" : "（授权不可用，请重新绑定或切回收件箱）"}`,
-      `设备版本：${conversation.deviceEpoch}`,
       `运行状态：${runningEventId ? "IM 任务执行中" : lease?.owner === "desktop" ? "桌面任务执行中" : lease?.owner === "scheduler" ? "定时任务执行中" : "空闲"}`,
       `排队消息：${queued}`,
       `桌面交互：${interaction}`
@@ -327,8 +321,7 @@ export class ImCommandRouter {
       code: input.command.argument,
       decision,
       principalId: input.principalId,
-      conversationKey: input.conversationKey,
-      deviceEpoch: input.deviceEpoch
+      conversationKey: input.conversationKey
     })
   }
 

@@ -6,7 +6,6 @@ export type ApprovalDecisionSource =
       kind: "im"
       principalId: string
       conversationKey: string
-      deviceEpoch: number
     }
 
 export interface ApprovalBrokerRegistration {

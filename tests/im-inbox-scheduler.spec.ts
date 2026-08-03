@@ -25,7 +25,7 @@ const target = {
   workspacePath: "/managed/inbox"
 }
 
-function taskFixture(expectedDeviceEpoch = 1): ScheduledTask {
+function taskFixture(principalId = "principal-1"): ScheduledTask {
   return {
     id: "reminder-1",
     name: "喝水",
@@ -36,8 +36,8 @@ function taskFixture(expectedDeviceEpoch = 1): ScheduledTask {
     workDir: target.workspacePath,
     imDeliveryContext: {
       provider: "zhaohu",
+      principalId,
       conversationKey: "conversation-1",
-      expectedDeviceEpoch,
       inboxThreadId: target.threadId
     },
     frequency: "once",
@@ -93,8 +93,8 @@ function threadRow(): ThreadRow {
       agentMode: "normal",
       imDeliveryContext: {
         provider: "zhaohu",
+        principalId: "principal-1",
         conversationKey: "conversation-1",
-        deviceEpoch: 1,
         targetId: target.targetId
       }
     })
@@ -115,8 +115,7 @@ async function createContext() {
   const eventStore = new ImEventStore(dependencies)
   await conversationState.ensureConversation({
     conversationKey: "conversation-1",
-    principalId: "principal-1",
-    deviceEpoch: 1
+    principalId: "principal-1"
   })
   await conversationState.registerTarget("conversation-1", target, { activate: true })
   const capabilityGuard = new ImRemoteCapabilityGuard({
@@ -170,7 +169,6 @@ async function testScheduledInboxUsesLeaseAndStableProactiveOutbox(): Promise<vo
     assert.equal(executions, 1)
     assert.equal(gateway.replies.length, 1)
     assert.equal(gateway.replies[0].eventId, undefined)
-    assert.equal(gateway.replies[0].expectedDeviceEpoch, 1)
     assert.equal(context.eventStore.listOutbox("sent").length, 1)
     assert.equal(getLocalThreadRunLease(target.threadId), undefined)
 
@@ -187,7 +185,7 @@ async function testScheduledInboxUsesLeaseAndStableProactiveOutbox(): Promise<vo
   }
 }
 
-async function testOldEpochAndOfflineDeferWithoutExecution(): Promise<void> {
+async function testOwnerMismatchAndOfflineDeferWithoutExecution(): Promise<void> {
   const context = await createContext()
   const gateway = new TestGateway()
   let executions = 0
@@ -202,19 +200,22 @@ async function testOldEpochAndOfflineDeferWithoutExecution(): Promise<void> {
     }
   }
   try {
-    const oldEpoch = await executeImInboxScheduledTask(
-      taskFixture(2),
+    const wrongOwner = await executeImInboxScheduledTask(
+      taskFixture("principal-2"),
       new AbortController().signal,
       common
     )
-    assert.deepEqual(oldEpoch, { status: "deferred", reasonCode: "DEVICE_EPOCH_MISMATCH" })
+    assert.deepEqual(wrongOwner, {
+      status: "deferred",
+      reasonCode: "CONVERSATION_OWNER_MISMATCH"
+    })
     gateway.authenticated = false
     const offline = await executeImInboxScheduledTask(
       taskFixture(),
       new AbortController().signal,
       common
     )
-    assert.deepEqual(offline, { status: "deferred", reasonCode: "DEVICE_OFFLINE" })
+    assert.deepEqual(offline, { status: "deferred", reasonCode: "DESKTOP_OFFLINE" })
     assert.equal(executions, 0)
   } finally {
     context.database.close()
@@ -226,7 +227,10 @@ const tests: Array<[string, () => Promise<void>]> = [
     "testScheduledInboxUsesLeaseAndStableProactiveOutbox",
     testScheduledInboxUsesLeaseAndStableProactiveOutbox
   ],
-  ["testOldEpochAndOfflineDeferWithoutExecution", testOldEpochAndOfflineDeferWithoutExecution]
+  [
+    "testOwnerMismatchAndOfflineDeferWithoutExecution",
+    testOwnerMismatchAndOfflineDeferWithoutExecution
+  ]
 ]
 
 async function main(): Promise<void> {

@@ -27,8 +27,6 @@ import type {
   BuiltinRobotRemoteAccessOverview,
   BuiltinRobotSettings,
   BuiltinRobotStatus,
-  BuiltinRobotTakeoverRequest,
-  BuiltinRobotTakeoverResult,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -2172,19 +2170,19 @@ const api = {
         enabled
       }) as Promise<BuiltinRobotRemoteAccessOverview>,
     listGrantableFeatures: (): Promise<BuiltinRobotGrantableFeature[]> =>
-      ipcRenderer.invoke(
-        "builtinRobot:listGrantableFeatures"
-      ) as Promise<BuiltinRobotGrantableFeature[]>,
+      ipcRenderer.invoke("builtinRobot:listGrantableFeatures") as Promise<
+        BuiltinRobotGrantableFeature[]
+      >,
     saveSettings: (updates: Partial<BuiltinRobotSettings>): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:saveSettings", updates) as Promise<BuiltinRobotStatus>,
     reconnect: (): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:reconnect") as Promise<BuiltinRobotStatus>,
     disconnect: (): Promise<BuiltinRobotStatus> =>
       ipcRenderer.invoke("builtinRobot:disconnect") as Promise<BuiltinRobotStatus>,
-    takeover: (request: BuiltinRobotTakeoverRequest): Promise<BuiltinRobotTakeoverResult> =>
-      ipcRenderer.invoke("builtinRobot:takeover", request) as Promise<BuiltinRobotTakeoverResult>,
     cleanupLegacy: (): Promise<BuiltinRobotStatus> =>
-      ipcRenderer.invoke("builtinRobot:cleanupLegacy", { confirmed: true }) as Promise<BuiltinRobotStatus>,
+      ipcRenderer.invoke("builtinRobot:cleanupLegacy", {
+        confirmed: true
+      }) as Promise<BuiltinRobotStatus>,
     onStatus: (callback: (status: BuiltinRobotStatus) => void): (() => void) => {
       const handler = (_event: unknown, status: BuiltinRobotStatus): void => callback(status)
       ipcRenderer.on("builtinRobot:status", handler)

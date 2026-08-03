@@ -19,8 +19,8 @@ export interface ImReplySubmissionResult {
 
 /**
  * Frozen client-side port for Gateway G0/G1. The production WSS adapter owns
- * authentication and the current device id; local services never receive
- * platform credentials or choose a device themselves.
+ * authentication and the active desktop session; local services never receive
+ * platform credentials or choose a route themselves.
  */
 export interface ImGatewayClientPort {
   isAuthenticated(): boolean
@@ -43,8 +43,8 @@ export const unavailableImGatewayClient: ImGatewayClientPort = {
   sendAcknowledgement: async () => {
     throw new ImGatewayUnavailableError()
   },
-  acquireExecutionPermit: async () => ({ status: "denied", reasonCode: "DEVICE_OFFLINE" }),
-  renewExecutionPermit: async () => ({ status: "denied", reasonCode: "DEVICE_OFFLINE" }),
+  acquireExecutionPermit: async () => ({ status: "denied", reasonCode: "DESKTOP_OFFLINE" }),
+  renewExecutionPermit: async () => ({ status: "denied", reasonCode: "DESKTOP_OFFLINE" }),
   submitReply: async () => {
     throw new ImGatewayUnavailableError()
   }

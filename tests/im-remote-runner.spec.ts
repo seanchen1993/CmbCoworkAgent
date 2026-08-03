@@ -71,7 +71,6 @@ function eventFixture(index: number): RemoteImEventV1 {
     principalId: "principal-1",
     conversationKey: "conversation-1",
     conversationSeq: index,
-    deviceEpoch: 1,
     message: { type: "text", text: `message-${index}` },
     occurredAt: `2026-07-23T08:00:${String(index).padStart(2, "0")}.000Z`,
     lease: { id: `lease-${index}`, expiresAt: "2026-07-23T09:00:00.000Z" }
@@ -94,8 +93,7 @@ async function createContext(): Promise<Context> {
   const grants = new ImRemoteGrantStore(dependencies, () => "grant-feature")
   await conversations.ensureConversation({
     conversationKey: "conversation-1",
-    principalId: "principal-1",
-    deviceEpoch: 1
+    principalId: "principal-1"
   })
   await conversations.registerTarget("conversation-1", target, { activate: true })
   return { database: database as never, conversations, events, grants, clock }
@@ -111,8 +109,7 @@ async function queueFeatureEvent(context: Context, index: number) {
   await context.grants.enableFeatureGrant({
     route: {
       principalId: "principal-1",
-      conversationKey: "conversation-1",
-      deviceEpoch: 1
+      conversationKey: "conversation-1"
     },
     projectId: featureTarget.projectId,
     featureSlug: featureTarget.featureSlug,
@@ -190,8 +187,8 @@ function testThreadRow(): ThreadRow {
       memoryEnabled: false,
       imDeliveryContext: {
         provider: "zhaohu",
+        principalId: "principal-1",
         conversationKey: "conversation-1",
-        deviceEpoch: 1,
         targetId: target.targetId
       }
     })
@@ -233,8 +230,8 @@ function featureCapabilityGuard(context: Context): ImRemoteCapabilityGuard {
       },
       imDeliveryContext: {
         provider: "zhaohu",
+        principalId: "principal-1",
         conversationKey: "conversation-1",
-        deviceEpoch: 1,
         targetId: featureTarget.targetId,
         bindingId: featureTarget.bindingId
       }
@@ -562,8 +559,8 @@ function testInboxSchedulerDeliveryContextIsExplicitAndStrict(): void {
     targetKind: "inbox",
     imDeliveryContext: {
       provider: "zhaohu",
-      conversationKey: "conversation-1",
-      deviceEpoch: 7
+      principalId: "principal-1",
+      conversationKey: "conversation-1"
     }
   }
   assert.deepEqual(
@@ -574,8 +571,8 @@ function testInboxSchedulerDeliveryContextIsExplicitAndStrict(): void {
     }),
     {
       provider: "zhaohu",
+      principalId: "principal-1",
       conversationKey: "conversation-1",
-      expectedDeviceEpoch: 7,
       inboxThreadId: "inbox-thread"
     }
   )
@@ -594,11 +591,11 @@ function testInboxSchedulerDeliveryContextIsExplicitAndStrict(): void {
       targetKind: "inbox",
       metadata: {
         ...metadata,
-        imDeliveryContext: { ...metadata.imDeliveryContext, deviceEpoch: 0 }
+        imDeliveryContext: { ...metadata.imDeliveryContext, principalId: "" }
       }
     }),
     undefined,
-    "non-positive epochs retain the previous rejection semantics"
+    "missing enterprise identity is rejected"
   )
 }
 

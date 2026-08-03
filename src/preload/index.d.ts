@@ -20,8 +20,6 @@ import type {
   BuiltinRobotRemoteAccessOverview,
   BuiltinRobotSettings,
   BuiltinRobotStatus,
-  BuiltinRobotTakeoverRequest,
-  BuiltinRobotTakeoverResult,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -1769,7 +1767,6 @@ interface CustomAPI {
     saveSettings: (updates: Partial<BuiltinRobotSettings>) => Promise<BuiltinRobotStatus>
     reconnect: () => Promise<BuiltinRobotStatus>
     disconnect: () => Promise<BuiltinRobotStatus>
-    takeover: (request: BuiltinRobotTakeoverRequest) => Promise<BuiltinRobotTakeoverResult>
     cleanupLegacy: () => Promise<BuiltinRobotStatus>
     onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
   }

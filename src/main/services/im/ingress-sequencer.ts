@@ -76,8 +76,7 @@ export class ImIngressSequencer {
           target ??
           inboxService.ensureInbox({
             conversationKey: event.conversationKey,
-            principalId: event.principalId,
-            deviceEpoch: event.deviceEpoch
+            principalId: event.principalId
           })
         )
       })
@@ -93,8 +92,7 @@ export class ImIngressSequencer {
     return this.runExclusive(event.conversationKey, async () => {
       await this.conversationState.ensureConversation({
         conversationKey: event.conversationKey,
-        principalId: event.principalId,
-        deviceEpoch: event.deviceEpoch
+        principalId: event.principalId
       })
 
       const existing = this.eventStore.getEvent(event.eventId)
@@ -138,8 +136,7 @@ export class ImIngressSequencer {
     return this.runExclusive(event.conversationKey, async () => {
       await this.conversationState.ensureConversation({
         conversationKey: event.conversationKey,
-        principalId: event.principalId,
-        deviceEpoch: event.deviceEpoch
+        principalId: event.principalId
       })
       const existing = this.eventStore.getEvent(event.eventId)
       const snapshot = existing?.targetSnapshot ?? (await this.resolveTarget(event))

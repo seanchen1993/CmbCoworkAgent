@@ -28,8 +28,7 @@ async function createContext(options: { sendFails?: boolean } = {}) {
   const events = new ImEventStore(dependencies)
   const route = {
     principalId: "principal-1",
-    conversationKey: "conversation-1",
-    deviceEpoch: 1
+    conversationKey: "conversation-1"
   }
   await conversations.ensureConversation(route)
   await grants.enableThreadGrant({ route, threadId: "thread-1", title: "桌面会话" })
@@ -91,7 +90,6 @@ async function testStableDesktopDeliveryIsDurableAndIdempotent(): Promise<void> 
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
     assert.equal(outbox[0].content, completion.finalText)
-    assert.equal(outbox[0].expectedDeviceEpoch, 1)
     assert.equal(outbox[0].eventId, null)
     assert(context.persistence.flushCount > 0, "proactive outbox must cross a strict flush")
   } finally {
@@ -116,21 +114,19 @@ async function testRevocationAndRouteChangeFailClosed(): Promise<void> {
 
     const nextGrant = await context.grants.enableThreadGrant({
       route: {
-        principalId: "principal-1",
-        conversationKey: "conversation-1",
-        deviceEpoch: 1
+        principalId: "principal-2",
+        conversationKey: "conversation-1"
       },
       threadId: "thread-1",
       title: "桌面会话"
     })
     assert.equal(nextGrant.state, "active")
-    await context.conversations.resetForDeviceTakeover("conversation-1", 1, 2)
     assert.deepEqual(
       await context.observer.observe({
         source: "desktop",
         threadId: "thread-1",
-        finalAssistantMessageId: "assistant-old-epoch",
-        finalText: "旧设备结果"
+        finalAssistantMessageId: "assistant-wrong-owner",
+        finalText: "错误身份结果"
       }),
       { status: "skipped", reasonCode: "GRANT_ROUTE_STALE" }
     )

@@ -28,7 +28,6 @@ const REMOTE_EXECUTE_MAX_CHARACTERS = 12_000
 interface RemoteApprovalRoute {
   principalId: string
   conversationKey: string
-  deviceEpoch: number
   threadId: string
   workspacePath: string
   label: string
@@ -263,7 +262,6 @@ export class ImRemoteApprovalService {
     decision: "approve" | "reject"
     principalId: string
     conversationKey: string
-    deviceEpoch: number
   }): Promise<string> {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled || !settings.remoteApprovalEnabled) {
@@ -276,8 +274,7 @@ export class ImRemoteApprovalService {
     if (!pendingCode) return "审批短码不存在、已过期或已使用。"
     if (
       pendingCode.route.principalId !== input.principalId ||
-      pendingCode.route.conversationKey !== input.conversationKey ||
-      pendingCode.route.deviceEpoch !== input.deviceEpoch
+      pendingCode.route.conversationKey !== input.conversationKey
     ) {
       return "该审批短码不属于当前招乎会话。"
     }
@@ -301,7 +298,6 @@ export class ImRemoteApprovalService {
         threadId: pendingCode.route.threadId,
         principalId: input.principalId,
         conversationKey: input.conversationKey,
-        deviceEpoch: input.deviceEpoch,
         operation: pendingCode.operation,
         decision: input.decision,
         summary: pendingCode.summary
@@ -324,8 +320,7 @@ export class ImRemoteApprovalService {
       source: {
         kind: "im",
         principalId: input.principalId,
-        conversationKey: input.conversationKey,
-        deviceEpoch: input.deviceEpoch
+        conversationKey: input.conversationKey
       },
       requestId: pendingCode.requestId,
       decision: {
@@ -402,7 +397,6 @@ export class ImRemoteApprovalService {
     const replies = buildImProactiveReplies({
       deliveryId: `approval-request:${registration.request.id}`,
       conversationKey: route.conversationKey,
-      expectedDeviceEpoch: route.deviceEpoch,
       text
     })
     if (
@@ -440,7 +434,6 @@ export class ImRemoteApprovalService {
       buildImProactiveReplies({
         deliveryId: `approval-request:${registration.request.id}`,
         conversationKey: route.conversationKey,
-        expectedDeviceEpoch: route.deviceEpoch,
         text: `【${route.label}】需要在桌面确认\n操作 ${operation} 无法在招乎中完整、安全地展示。`
       })
     )
@@ -461,13 +454,11 @@ export class ImRemoteApprovalService {
       )
       if (
         conversation?.state === "active" &&
-        conversation.principalId === threadGrant.principalId &&
-        conversation.deviceEpoch === threadGrant.deviceEpoch
+        conversation.principalId === threadGrant.principalId
       ) {
         return {
           principalId: threadGrant.principalId,
           conversationKey: threadGrant.conversationKey,
-          deviceEpoch: threadGrant.deviceEpoch,
           threadId,
           workspacePath,
           label: threadGrant.titleSnapshot
@@ -491,15 +482,13 @@ export class ImRemoteApprovalService {
           grant.state !== "active" ||
           grant.grantVersion !== target.snapshot.grantVersion ||
           grant.principalId !== conversation.principalId ||
-          grant.conversationKey !== conversation.conversationKey ||
-          grant.deviceEpoch !== conversation.deviceEpoch
+          grant.conversationKey !== conversation.conversationKey
         ) {
           continue
         }
         return {
           principalId: conversation.principalId,
           conversationKey: conversation.conversationKey,
-          deviceEpoch: conversation.deviceEpoch,
           threadId,
           workspacePath,
           label: `${grant.projectNameSnapshot} / ${grant.featureTitleSnapshot}`
@@ -509,7 +498,6 @@ export class ImRemoteApprovalService {
         return {
           principalId: conversation.principalId,
           conversationKey: conversation.conversationKey,
-          deviceEpoch: conversation.deviceEpoch,
           threadId,
           workspacePath,
           label: "收件箱"

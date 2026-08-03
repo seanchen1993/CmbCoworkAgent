@@ -11,7 +11,6 @@
     "principalId",
     "conversationKey",
     "conversationSeq",
-    "deviceEpoch",
     "message",
     "occurredAt",
     "lease"
@@ -23,7 +22,6 @@
     "principalId": { "type": "string", "minLength": 1 },
     "conversationKey": { "type": "string", "minLength": 1 },
     "conversationSeq": { "type": "integer", "minimum": 1 },
-    "deviceEpoch": { "type": "integer", "minimum": 1 },
     "message": {
       "type": "object",
       "additionalProperties": false,

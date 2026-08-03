@@ -58,7 +58,9 @@ assert(panel.includes("接入招乎"))
 assert(panel.includes("setThreadRemoteAccess"))
 assert(panel.includes("setFeatureRemoteAccess"))
 assert(!panel.includes("inbox-and-features"), "global Feature access toggle is retired")
-assert(panel.includes("强制接管"))
+assert(panel.includes("每个账号只保留一个活动桌面连接"))
+assert(!allSource.includes("deviceEpoch"), "device routing epochs must stay retired")
+assert(!allSource.toLowerCase().includes("takeover"), "device takeover must stay retired")
 
 const preload = read("src/preload/index.ts")
 assert(preload.includes("builtinRobot:"))
@@ -93,7 +95,7 @@ assert(
 assert(
   imRunner.includes("resolveImInboxDeliveryContextForRuntime({") &&
     imRunner.includes("context.provider !== DEFAULT_IM_CHANNEL_ID") &&
-    imRunner.includes("Number.isSafeInteger(context.deviceEpoch)"),
+    imRunner.includes('typeof context.principalId !== "string"'),
   "the IM caller validates and supplies inbox scheduler delivery context"
 )
 assert(
