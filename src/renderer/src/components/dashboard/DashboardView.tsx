@@ -1810,21 +1810,23 @@ function DashboardTabBar({
   onChange,
   projectModeAllowed,
   awardsAdmin,
+  skillEvalAllowed,
   rightContent
 }: {
   activeTab: DashboardMainTab
   onChange: (tab: DashboardMainTab) => void
   projectModeAllowed: boolean
   awardsAdmin: boolean
+  skillEvalAllowed: boolean
   rightContent?: ReactNode
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
     ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
     // 评奖辅助看板仅对管理员名单可见。
-    ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : [])
-    // 技能评估 tab 暂时隐藏（仅移除入口，skill-eval 相关逻辑/内容/类型均保留，需要时取消注释即可恢复）
-    // { id: "skill-eval", label: "技能评估" }
+    ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : []),
+    // 技能评估 tab 仅对 DASHBOARD_SKILL_EVAL 白名单可见。
+    ...(skillEvalAllowed ? ([{ id: "skill-eval", label: "技能评估" }] as const) : [])
   ]
 
   return (
@@ -2643,6 +2645,8 @@ export function DashboardView(): React.JSX.Element {
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   // 评奖辅助看板访问门禁（仅 DASHBOARD_AWARDS_ADMIN 名单）。
   const [awardsAdmin, setAwardsAdmin] = useState(false)
+  // 技能评估 tab 访问门禁（仅 DASHBOARD_SKILL_EVAL 白名单）。
+  const [skillEvalAllowed, setSkillEvalAllowed] = useState(false)
   const [awardSkillContribs, setAwardSkillContribs] = useState<
     DashboardAwardSkillContribution[] | null
   >(null)
@@ -2738,6 +2742,21 @@ export function DashboardView(): React.JSX.Element {
         if (cancelled) return
         setAwardsAdmin(false)
         setActiveMainTab((current) => (current === "awards" ? "overview" : current))
+      })
+
+    window.api.dashboard
+      .isSkillEvalAllowed()
+      .then((allowed) => {
+        if (cancelled) return
+        setSkillEvalAllowed(allowed)
+        if (!allowed) {
+          setActiveMainTab((current) => (current === "skill-eval" ? "overview" : current))
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        setSkillEvalAllowed(false)
+        setActiveMainTab((current) => (current === "skill-eval" ? "overview" : current))
       })
 
     window.api.dashboard
@@ -4843,6 +4862,7 @@ export function DashboardView(): React.JSX.Element {
           onChange={setActiveMainTab}
           projectModeAllowed={projectModeAllowed}
           awardsAdmin={awardsAdmin}
+          skillEvalAllowed={skillEvalAllowed}
           rightContent={
             activeMainTab === "skill-eval" ? (
               <Button
@@ -4952,7 +4972,7 @@ export function DashboardView(): React.JSX.Element {
                 exporting={exporting}
               />
             </div>
-          ) : activeMainTab === "skill-eval" ? (
+          ) : activeMainTab === "skill-eval" && skillEvalAllowed ? (
             <div className="space-y-6 p-6">
               <SkillEvalDashboardPanel
                 data={skillEval}

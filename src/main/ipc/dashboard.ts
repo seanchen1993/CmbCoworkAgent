@@ -872,6 +872,9 @@ const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
 // 评奖辅助看板当前仅开放给这四个 ystId；env 可覆盖，留空则回退到此默认名单，
 // 保证即使未配置环境变量也严格只对这四人可见。
 const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855,231858"
+const DASHBOARD_SKILL_EVAL_IDS_ENV = "VITE_DASHBOARD_SKILL_EVAL_YST_IDS"
+// 技能评估 tab 白名单；env 可覆盖，留空则回退到此默认名单。
+const DASHBOARD_SKILL_EVAL_DEFAULT_IDS = "383331"
 
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
@@ -899,6 +902,13 @@ function getDashboardAwardsAdminIds(): Set<string> {
     (import.meta.env[DASHBOARD_AWARDS_ADMIN_IDS_ENV] as string | undefined) || ""
   ).trim()
   return splitEnvIds(configured || DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS)
+}
+
+function getDashboardSkillEvalAllowedIds(): Set<string> {
+  const configured = String(
+    (import.meta.env[DASHBOARD_SKILL_EVAL_IDS_ENV] as string | undefined) || ""
+  ).trim()
+  return splitEnvIds(configured || DASHBOARD_SKILL_EVAL_DEFAULT_IDS)
 }
 
 function getDashboardAccessContext(): DashboardAccessContext {
@@ -971,6 +981,16 @@ function requireDashboardAwardsAccess(): DashboardAccessContext {
     throw new Error("无评奖辅助看板访问权限")
   }
   return access
+}
+
+// 技能评估 tab 的访问门禁：仅 DASHBOARD_SKILL_EVAL 白名单内的 ystId 可见。
+// DEV 直接放行便于本地预览。
+function isDashboardSkillEvalAllowed(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  if (!access.loggedIn || !access.ystId) return false
+  return getDashboardSkillEvalAllowedIds().has(access.ystId)
 }
 
 function isDashboardAnalysisAgentAllowed(): boolean {
@@ -13776,6 +13796,10 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   _ipcMain.handle("dashboard:isAwardsAdmin", async () => {
     return isDashboardAwardsAdmin()
+  })
+
+  _ipcMain.handle("dashboard:isSkillEvalAllowed", async () => {
+    return isDashboardSkillEvalAllowed()
   })
 
   _ipcMain.handle("dashboard:esQuery", async (_, input: DashboardEsQueryInput) => {
