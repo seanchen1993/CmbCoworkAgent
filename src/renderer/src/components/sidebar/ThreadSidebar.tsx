@@ -67,7 +67,7 @@ const PROJECT_NAME_OVERRIDES_STORAGE_KEY = "threads:projectNameOverrides"
 /** 工作区展开时默认可见的 thread 条数;点"展开显示"每次追加的条数。 */
 const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
-type SidebarTab = "chat" | "project"
+type SidebarTab = "chat" | "project" | "design"
 type ForkDestinationMode = "local" | "workspace"
 
 interface ThreadProject {
@@ -592,7 +592,11 @@ export function ThreadSidebar(): React.JSX.Element {
   const forkingThreadIdRef = useRef<string | null>(null)
   const forkCheckpointRequestRef = useRef(0)
   const activeSidebarTab: SidebarTab =
-    showHarnessBoardView || mainView === "harness" ? "project" : "chat"
+    mainView === "design" || showDesignView
+      ? "design"
+      : showHarnessBoardView || mainView === "harness"
+        ? "project"
+        : "chat"
   const {
     enabled: projectModeEnabled,
     loading: projectModeLoading,
@@ -601,6 +605,10 @@ export function ThreadSidebar(): React.JSX.Element {
   const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
 
   const handleSelectChatTab = useCallback(async (): Promise<void> => {
+    if (mainView === "design" || showDesignView) {
+      setShowDesignView(false)
+      return
+    }
     if (mainView === "harness" || showHarnessBoardView) {
       const previousThread = previousThreadId
         ? threads.find((thread) => thread.thread_id === previousThreadId)
@@ -622,10 +630,18 @@ export function ThreadSidebar(): React.JSX.Element {
     mainView,
     previousThreadId,
     selectThread,
+    setShowDesignView,
     setShowHarnessBoardView,
+    showDesignView,
     showHarnessBoardView,
     threads
   ])
+
+  const handleSelectDesignTab = useCallback((): void => {
+    if (mainView !== "design" && !showDesignView) {
+      setShowDesignView(true)
+    }
+  }, [mainView, setShowDesignView, showDesignView])
 
   const handleSelectProjectTab = useCallback(async (): Promise<void> => {
     if (projectModeEnabled) {
@@ -1163,7 +1179,7 @@ export function ThreadSidebar(): React.JSX.Element {
         <div
           role="tablist"
           aria-label="侧边栏模式"
-          className="mb-2 grid h-8 grid-cols-2 rounded bg-sidebar-accent p-1"
+          className="mb-2 grid h-8 grid-cols-3 rounded bg-sidebar-accent p-1"
         >
           <button
             type="button"
@@ -1210,9 +1226,24 @@ export function ThreadSidebar(): React.JSX.Element {
               )}
             </Tooltip>
           </TooltipProvider>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeSidebarTab === "design"}
+            className={cn(
+              "flex min-w-0 items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              activeSidebarTab === "design"
+                ? "shadow border border-border/70 bg-background text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+            onClick={handleSelectDesignTab}
+          >
+            <Palette className="size-3 shrink-0" />
+            <span className="min-w-0 truncate">设计模式</span>
+          </button>
         </div>
 
-        {activeSidebarTab === "chat" ? (
+        {activeSidebarTab !== "project" ? (
           <>
             <Button
               variant="ghost"
@@ -1255,20 +1286,6 @@ export function ThreadSidebar(): React.JSX.Element {
                 自定义
               </span>
               {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                "w-full justify-start gap-2 text-sm font-semibold",
-                showDesignView && "bg-muted"
-              )}
-              onClick={() => setShowDesignView(!showDesignView)}
-            >
-              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                <Palette className="size-3" />
-              </div>
-              <span className="text-muted-foreground">design</span>
             </Button>
             <Button
               variant="ghost"
@@ -1339,7 +1356,7 @@ export function ThreadSidebar(): React.JSX.Element {
 
       {activeSidebarTab === "project" ? (
         <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
-      ) : activeSidebarTab === "chat" ? (
+      ) : (
         <>
           <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
             <span className="min-w-0 flex-1 truncate">工作区 {threadProjects.length}</span>
@@ -1665,8 +1682,6 @@ export function ThreadSidebar(): React.JSX.Element {
             </div>
           </ScrollArea>
         </>
-      ) : (
-        <div className="min-h-0 flex-1" />
       )}
 
       <div className="px-3 py-2.5 flex items-center justify-center gap-1.5 select-none">

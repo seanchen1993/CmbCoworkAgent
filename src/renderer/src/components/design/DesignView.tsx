@@ -1914,11 +1914,13 @@ export function DesignView(): React.JSX.Element {
   )
   const [exportChoice, setExportChoice] = useState<{
     html: string
-    artifactPath: string
+    artifactPath: string | null
     relatedFileCount: number
     includesMetadata: boolean
+    defaultName: string
   } | null>(null)
   const [exportingPackage, setExportingPackage] = useState(false)
+  const { loadModels, loadProviders } = useAppStore()
   // Toast notifications
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null)
   const toastTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([])
@@ -1931,12 +1933,9 @@ export function DesignView(): React.JSX.Element {
     }, 3000)
     toastTimeoutsRef.current.push(timeout)
   }, [])
-
   // Per-tab session tracking: tabId → { cleanup, sessionId }
   // Stored in a ref so it never triggers re-renders and isn't stale across tabs
   const tabSessionsRef = useRef<Map<string, { cleanup: () => void; sessionId: string }>>(new Map())
-
-  const { loadModels, loadProviders } = useAppStore()
 
   // Canvas refs
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -4675,15 +4674,15 @@ ${noteLines || "无"}${variantNote}`
   }, [linkModalMode, updateTs, activeTabId, linkModalText, handleImportUrl, currentSessionId])
 
   const downloadCurrentDesignHtml = useCallback(
-    (html: string, metadata?: DesignArtifactMetadata | null) => {
-      downloadHtml(html, metadata)
+    (html: string, metadata?: DesignArtifactMetadata | null, fileName?: string) => {
+      downloadHtml(html, metadata, fileName)
       setExportChoice(null)
     },
     []
   )
 
   const downloadCurrentDesignPackage = useCallback(
-    async (artifactPath: string) => {
+    async (artifactPath: string, fileName: string) => {
       if (exportingPackage) return
       setExportingPackage(true)
       try {
@@ -4695,7 +4694,7 @@ ${noteLines || "无"}${variantNote}`
           showToast(result.error || "导出项目包失败")
           return
         }
-        downloadBlob(result.buffer, result.fileName || "design.zip", "application/zip")
+        downloadBlob(result.buffer, getExportFileName(fileName, "zip"), "application/zip")
         setExportChoice(null)
         showToast("项目包已导出")
       } catch (err) {
@@ -4711,9 +4710,17 @@ ${noteLines || "无"}${variantNote}`
     async (state: TabState) => {
       const html = getCurrentDesignHtml(state)
       if (!html.trim()) return
+      const defaultName =
+        state.artifactMetadata?.title?.trim() || state.sourceInfo?.label?.trim() || "design"
 
       if (!state.artifactPath) {
-        downloadCurrentDesignHtml(html, state.artifactMetadata)
+        setExportChoice({
+          html,
+          artifactPath: null,
+          relatedFileCount: 0,
+          includesMetadata: Boolean(state.artifactMetadata),
+          defaultName
+        })
         return
       }
 
@@ -4726,18 +4733,20 @@ ${noteLines || "无"}${variantNote}`
           html,
           artifactPath: info.success ? (info.filePath ?? state.artifactPath) : state.artifactPath,
           relatedFileCount: info.success ? (info.relatedFileCount ?? 0) : 0,
-          includesMetadata: Boolean(state.artifactMetadata)
+          includesMetadata: Boolean(state.artifactMetadata),
+          defaultName
         })
       } catch {
         setExportChoice({
           html,
           artifactPath: state.artifactPath,
           relatedFileCount: 0,
-          includesMetadata: Boolean(state.artifactMetadata)
+          includesMetadata: Boolean(state.artifactMetadata),
+          defaultName
         })
       }
     },
-    [downloadCurrentDesignHtml, workspacePath]
+    [workspacePath]
   )
 
   // ── Render ─────────────────────────────────────────────────
@@ -4872,15 +4881,24 @@ ${noteLines || "无"}${variantNote}`
         onClose={() => setLinkModalOpen(false)}
       />
       <ExportDesignModal
+        key={
+          exportChoice
+            ? `${exportChoice.artifactPath ?? "html"}:${exportChoice.defaultName}:${exportChoice.html.length}`
+            : "closed"
+        }
         open={Boolean(exportChoice)}
+        defaultName={exportChoice?.defaultName ?? "design"}
         relatedFileCount={exportChoice?.relatedFileCount ?? 0}
         includesMetadata={exportChoice?.includesMetadata ?? false}
+        packageAvailable={Boolean(exportChoice?.artifactPath)}
         exportingPackage={exportingPackage}
-        onExportHtml={() => {
-          if (exportChoice) downloadCurrentDesignHtml(exportChoice.html, ts.artifactMetadata)
-        }}
-        onExportPackage={() => {
-          if (exportChoice) void downloadCurrentDesignPackage(exportChoice.artifactPath)
+        onExport={(format, name) => {
+          if (!exportChoice) return
+          if (format === "package" && exportChoice.artifactPath) {
+            void downloadCurrentDesignPackage(exportChoice.artifactPath, name)
+            return
+          }
+          downloadCurrentDesignHtml(exportChoice.html, ts.artifactMetadata, name)
         }}
         onClose={() => {
           if (!exportingPackage) setExportChoice(null)
@@ -4939,6 +4957,7 @@ ${noteLines || "无"}${variantNote}`
       <div style={S.titleBar}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <button
+            type="button"
             onClick={backToGallery}
             style={{
               display: "flex",
@@ -5034,7 +5053,21 @@ ${noteLines || "无"}${variantNote}`
                   : "选择工作目录"}
             </span>
           </button>
-          <button style={S.shareBtn}>Share</button>
+          <button
+            type="button"
+            style={{
+              ...S.shareBtn,
+              cursor: ts.html ? "pointer" : "default",
+              opacity: ts.html ? 1 : 0.5
+            }}
+            onClick={() => {
+              void handleExportDesign(ts)
+            }}
+            disabled={!ts.html}
+            title={ts.html ? "导出设计" : "生成设计后即可导出"}
+          >
+            Share
+          </button>
         </div>
       </div>
 
@@ -6072,7 +6105,7 @@ ${noteLines || "无"}${variantNote}`
 // Utility
 // ─────────────────────────────────────────────────────────
 
-function downloadHtml(html: string, metadata?: DesignArtifactMetadata | null) {
+function downloadHtml(html: string, metadata?: DesignArtifactMetadata | null, fileName = "design") {
   const metadataScript = metadata
     ? `\n<script type="application/design-artifact+json">${JSON.stringify({ ...metadata, exportedAt: new Date().toISOString() }).replace(/<\/script/gi, "<\\/script")}</script>`
     : ""
@@ -6082,7 +6115,18 @@ function downloadHtml(html: string, metadata?: DesignArtifactMetadata | null) {
       : `${html}${metadataScript}`
     : html
   const blob = new Blob([output], { type: "text/html" })
-  downloadBlob(blob, "design.html", "text/html")
+  downloadBlob(blob, getExportFileName(fileName, "html"), "text/html")
+}
+
+function getExportFileName(name: string, extension: "html" | "zip"): string {
+  const baseName = name
+    .trim()
+    .replace(/[<>:"/\\|?*]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/[.]+$/g, "")
+    .slice(0, 80)
+  const safeName = baseName || "design"
+  return safeName.toLowerCase().endsWith(`.${extension}`) ? safeName : `${safeName}.${extension}`
 }
 
 function downloadBlob(data: BlobPart, filename: string, type: string) {

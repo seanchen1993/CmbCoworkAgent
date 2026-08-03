@@ -1,4 +1,7 @@
+import { useState } from "react"
 import type { DesignSystemInfo } from "./types"
+
+type ExportFormat = "html" | "package"
 
 export function CreateDesignModal({
   open,
@@ -433,117 +436,190 @@ export function LinkModal({
 
 export function ExportDesignModal({
   open,
+  defaultName,
   relatedFileCount,
   includesMetadata,
+  packageAvailable,
   exportingPackage,
-  onExportHtml,
-  onExportPackage,
+  onExport,
   onClose
 }: {
   open: boolean
+  defaultName: string
   relatedFileCount: number
   includesMetadata?: boolean
+  packageAvailable: boolean
   exportingPackage: boolean
-  onExportHtml: () => void
-  onExportPackage: () => void
+  onExport: (format: ExportFormat, name: string) => void
   onClose: () => void
 }) {
+  const [exportName, setExportName] = useState(defaultName)
+  const [format, setFormat] = useState<ExportFormat>(packageAvailable ? "package" : "html")
+
   if (!open) return null
+  const trimmedName = exportName.trim()
+  const isPackageExport = format === "package"
+  const primaryLabel = exportingPackage
+    ? "正在导出..."
+    : isPackageExport
+      ? "导出项目包"
+      : "导出 HTML"
+
   return (
     <div
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.35)",
+        background: "rgba(15, 23, 42, 0.38)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 1000
+        zIndex: 1000,
+        padding: 20
       }}
       onClick={onClose}
     >
       <div
         style={{
           background: "#fff",
-          borderRadius: 14,
-          padding: 22,
-          width: 440,
+          borderRadius: 8,
+          border: "1px solid #d9dfe8",
+          padding: 28,
+          width: 520,
+          maxWidth: "100%",
           display: "flex",
           flexDirection: "column",
-          gap: 14,
-          boxShadow: "0 8px 40px rgba(0,0,0,0.18)"
+          gap: 24,
+          boxShadow: "0 20px 52px rgba(15, 23, 42, 0.22)"
         }}
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: "#1a1a1a" }}>
-            选择导出方式
-          </h3>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#172033" }}>导出设计</h3>
+            <p style={{ margin: "6px 0 0", fontSize: 13, color: "#667085", lineHeight: 1.5 }}>
+              为文件命名并选择导出格式
+            </p>
+          </div>
           <button
+            type="button"
+            aria-label="关闭导出窗口"
             onClick={onClose}
             style={{
-              background: "none",
+              display: "flex",
+              width: 28,
+              height: 28,
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
               border: "none",
-              fontSize: 18,
+              borderRadius: 4,
+              fontSize: 22,
               cursor: "pointer",
-              color: "#8a8a8a",
+              color: "#667085",
               lineHeight: 1
             }}
           >
             ×
           </button>
         </div>
-        <p style={{ margin: 0, fontSize: 13, color: "#6a6a6a", lineHeight: 1.7 }}>
-          当前页面包含 {relatedFileCount} 个关联资源
-          {includesMetadata ? "，并包含 artifact.json 元数据" : ""}。可以导出单个
-          HTML，也可以打包原始项目目录。
-        </p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 650, color: "#344054" }}>文件名称</span>
+            <input
+              autoFocus
+              value={exportName}
+              onChange={(event) => setExportName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && trimmedName && !exportingPackage) {
+                  onExport(format, trimmedName)
+                }
+              }}
+              placeholder="输入名称"
+              style={{
+                height: 52,
+                boxSizing: "border-box",
+                padding: "0 14px",
+                borderRadius: 6,
+                border: "1px solid #aeb8c8",
+                background: "#fff",
+                color: "#172033",
+                fontSize: 16,
+                outline: "none",
+                fontFamily: "inherit"
+              }}
+            />
+          </label>
+
+          <label style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 650, color: "#344054" }}>导出格式</span>
+            <select
+              value={format}
+              onChange={(event) => setFormat(event.target.value as ExportFormat)}
+              style={{
+                height: 52,
+                boxSizing: "border-box",
+                padding: "0 14px",
+                borderRadius: 6,
+                border: "1px solid #aeb8c8",
+                background: "#fff",
+                color: "#172033",
+                fontSize: 16,
+                outline: "none",
+                fontFamily: "inherit",
+                cursor: "pointer"
+              }}
+            >
+              {packageAvailable && <option value="package">项目 ZIP 包</option>}
+              <option value="html">HTML 页面</option>
+            </select>
+          </label>
+
+          <p style={{ margin: 0, fontSize: 12, color: "#667085", lineHeight: 1.65 }}>
+            {isPackageExport
+              ? `将导出当前设计、${relatedFileCount} 个关联资源${includesMetadata ? "及 artifact.json 元数据" : ""}。`
+              : `将导出可直接预览的单文件 HTML${includesMetadata ? "，并附带 artifact.json 元数据" : ""}。`}
+          </p>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <button
-            onClick={onExportHtml}
+            type="button"
+            onClick={onClose}
             style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "flex-start",
-              gap: 8,
-              padding: "14px 13px",
-              borderRadius: 12,
-              border: "1px solid #e0ded8",
-              background: "#faf9f6",
+              height: 48,
+              padding: "0 18px",
+              background: "#fff",
+              border: "1px solid #c8d0dc",
+              borderRadius: 6,
               cursor: "pointer",
-              textAlign: "left",
+              color: "#344054",
+              fontSize: 14,
+              fontWeight: 600,
               fontFamily: "inherit"
             }}
           >
-            <span style={{ fontSize: 18 }}>HTML</span>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "#1a1a1a" }}>导出 HTML</span>
-            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>
-              下载当前可预览的单文件 HTML。
-            </span>
+            取消
           </button>
           <button
-            onClick={onExportPackage}
-            disabled={exportingPackage}
+            type="button"
+            onClick={() => onExport(format, trimmedName)}
+            disabled={!trimmedName || exportingPackage}
             style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "flex-start",
-              gap: 8,
-              padding: "14px 13px",
-              borderRadius: 12,
-              border: "1px solid #d4dfef",
-              background: "#f3f7ff",
-              cursor: exportingPackage ? "default" : "pointer",
-              textAlign: "left",
+              flex: 1,
+              height: 48,
+              borderRadius: 6,
+              border: "none",
+              background: trimmedName && !exportingPackage ? "#2f6df6" : "#a9b8d4",
+              color: "#fff",
+              cursor: trimmedName && !exportingPackage ? "pointer" : "default",
               fontFamily: "inherit",
-              opacity: exportingPackage ? 0.7 : 1
+              fontSize: 15,
+              fontWeight: 700
             }}
           >
-            <span style={{ fontSize: 18 }}>{exportingPackage ? "打包中" : "ZIP"}</span>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "#1a1a1a" }}>导出项目包</span>
-            <span style={{ fontSize: 12, color: "#8a8a8a", lineHeight: 1.6 }}>
-              下载 index.html、artifact.json、回滚版本和关联资源目录。
-            </span>
+            {primaryLabel}
           </button>
         </div>
       </div>

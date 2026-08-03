@@ -5,10 +5,13 @@ import {
   GitBranch,
   GripVertical,
   Loader2,
+  MessageSquare,
+  Palette,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
-  PanelRightOpen
+  PanelRightOpen,
+  Workflow
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
 import { TabbedPanel } from "@/components/tabs"
@@ -39,6 +42,7 @@ const DesignView = lazy(() =>
 import { ResizeHandle } from "@/components/ui/resizable"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { useAppStore } from "@/lib/store"
+import { useFeatureGate } from "@/lib/feature-gates"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { initMMJ } from "../js/mmjUtils"
@@ -57,6 +61,7 @@ import {
   unnotifiedReviewCandidates
 } from "@/lib/evolution-notices"
 import { useMyUploadedSkills } from "@/lib/use-my-uploaded-skills"
+import { FEATURE_GATES } from "../../shared/feature-gates"
 interface UserInfoConfig {
   sapId: string
   ystId: string
@@ -179,6 +184,8 @@ function App(): React.JSX.Element {
     subagentFocusView,
     workflowAgentFocusView,
     setShowCustomizeView,
+    setShowDesignView,
+    setShowHarnessBoardView,
     setEvolutionTab,
     setCloudEvolutionUpdates
   } = useAppStore(
@@ -199,10 +206,13 @@ function App(): React.JSX.Element {
       subagentFocusView: state.subagentFocusView,
       workflowAgentFocusView: state.workflowAgentFocusView,
       setShowCustomizeView: state.setShowCustomizeView,
+      setShowDesignView: state.setShowDesignView,
+      setShowHarnessBoardView: state.setShowHarnessBoardView,
       setEvolutionTab: state.setEvolutionTab,
       setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
     }))
   )
+  const { enabled: projectModeEnabled } = useFeatureGate(FEATURE_GATES.projectMode)
   const { ownedSkillKeys } = useMyUploadedSkills()
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
@@ -227,6 +237,13 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+  const selectDesignProjectMode = useCallback(() => {
+    if (!projectModeEnabled) {
+      toast.info("敬请期待")
+      return
+    }
+    setShowHarnessBoardView(true)
+  }, [projectModeEnabled, setShowHarnessBoardView])
   const isThreadWorkerFocusActive =
     mainView === "thread" &&
     Boolean(currentThreadId && workerFocusView?.threadId === currentThreadId)
@@ -788,7 +805,50 @@ function App(): React.JSX.Element {
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {mainView !== "customize" && !isAgentFocusActive && (
+            {mainView === "design" && (
+              <div
+                role="tablist"
+                aria-label="工作模式"
+                className="ml-1 flex h-8 items-center gap-0.5 rounded-md bg-muted p-0.5"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={false}
+                  onClick={() => setShowDesignView(false)}
+                  className="inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-semibold text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                >
+                  <MessageSquare className="size-3 shrink-0" />
+                  对话模式
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={false}
+                  aria-disabled={!projectModeEnabled}
+                  onClick={selectDesignProjectMode}
+                  title={projectModeEnabled ? "切换到项目模式" : "项目模式暂未开放"}
+                  className={`inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors ${
+                    projectModeEnabled
+                      ? "text-muted-foreground hover:bg-background hover:text-foreground"
+                      : "cursor-not-allowed text-muted-foreground/50"
+                  }`}
+                >
+                  <Workflow className="size-3 shrink-0" />
+                  项目模式
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected
+                  className="inline-flex h-7 items-center gap-1 rounded border border-border/70 bg-background px-2 text-xs font-semibold text-foreground shadow-sm"
+                >
+                  <Palette className="size-3 shrink-0" />
+                  设计模式
+                </button>
+              </div>
+            )}
+            {mainView !== "customize" && mainView !== "design" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -940,7 +1000,7 @@ function App(): React.JSX.Element {
                 </button>
               </>
             )}
-            {mainView !== "customize" && !isAgentFocusActive && (
+            {mainView !== "customize" && mainView !== "design" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -1096,14 +1156,6 @@ function App(): React.JSX.Element {
         {/* Design 面板 */}
         {mainView === "design" && (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
-            {!sidebarCollapsed && (
-              <>
-                <div style={{ width: leftWidth }} className="shrink-0">
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
-            )}
             <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
               <Suspense
                 fallback={
