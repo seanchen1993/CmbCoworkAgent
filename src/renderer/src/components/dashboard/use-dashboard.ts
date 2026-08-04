@@ -570,11 +570,23 @@ export interface DashboardProjectModeProject {
   conversationCount: number
   /** Conversations attributed to a workflow node in the Dev group. */
   devStageConversationCount: number
+  /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
+}
+
+export interface DashboardProjectModeExportData {
+  users: DashboardProjectModeTopUser[]
+  projects: DashboardProjectModeProject[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 export type DashboardProjectModeProjectStatus = "active" | "archived"

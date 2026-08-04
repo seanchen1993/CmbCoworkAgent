@@ -20,6 +20,7 @@ interface ImportMetaEnv {
   readonly VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS?: string
   readonly VITE_ADMIN_YST_IDS?: string
   readonly VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS?: string
+  readonly VITE_DASHBOARD_SKILL_EVAL_YST_IDS?: string
   readonly VITE_RENDER_URL?: string
   readonly VITE_PROJECT_MODE_MEMORY_ENABLED?: string
   /** Smart routing Layer 3 classifier — internal fallback model (injected at build time for internal builds) */

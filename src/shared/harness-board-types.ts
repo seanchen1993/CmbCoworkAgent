@@ -47,6 +47,18 @@ export interface HarnessProjectModeSubagentConfig {
   customSubagentFiles: string[]
 }
 
+/** Frozen per-project-session policy for the request_user_input tool. */
+export interface HarnessRequestUserInputConfig {
+  /** Whether the model may configure an automatic response timeout. */
+  allowAutoResolution: boolean
+  /** Applied when the model omits autoResolutionMs. */
+  defaultTimeoutMs?: number
+  /** How the tool resolves a request after its automatic timeout expires. */
+  autoResolutionType: "select_first" | "user_message"
+  /** Model-visible message used when autoResolutionType is user_message. */
+  userMessage?: string
+}
+
 export type HarnessBoardCompatibilityStatus =
   | "compatible"
   | "missing-plugin"

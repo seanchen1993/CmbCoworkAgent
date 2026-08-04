@@ -2,11 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   CheckCircle2,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   ChevronUp,
   Circle,
-  MessageSquareText
+  MessageSquareText,
+  PencilLine
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -143,7 +142,6 @@ export function UserInputRequestDialog({
   if (!activeQuestion) return null
 
   const activeDraft = draftAnswers[activeQuestion.id]
-  const otherSelected = activeDraft?.type === "other"
   const answeredCount = request.questions.filter((question) => {
     const answer = draftAnswers[question.id]
     if (!answer) return false
@@ -233,11 +231,6 @@ export function UserInputRequestDialog({
               )}
             </p>
           </div>
-          {request.questions.length > 1 && (
-            <div className="shrink-0 text-xs text-muted-foreground">
-              {activeIndex + 1}/{request.questions.length}
-            </div>
-          )}
           <Button
             type="button"
             variant="ghost"
@@ -269,116 +262,83 @@ export function UserInputRequestDialog({
                   </div>
                 </div>
 
-                <div className="space-y-2" role="radiogroup" aria-label={activeQuestion.question}>
-                  {activeQuestion.options.map((option, optionIndex) => {
-                    const selected =
-                      activeDraft?.type === "option" && activeDraft.optionIndex === optionIndex
-                    return (
-                      <button
-                        key={`${activeQuestion.id}-${optionIndex}`}
-                        type="button"
-                        role="radio"
-                        aria-checked={selected}
-                        className={cn(
-                          "flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left transition-colors",
-                          selected
-                            ? "border-primary bg-primary/10"
-                            : "border-border bg-background hover:bg-background-interactive"
-                        )}
-                        onClick={() => selectOption(activeQuestion.id, optionIndex)}
-                      >
-                        {selected ? (
-                          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
-                        ) : (
-                          <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                        )}
-                        <span className="min-w-0">
-                          <span className="block break-words text-sm font-medium">
-                            {option.label}
+                <div className="space-y-2">
+                  <div className="space-y-2" role="radiogroup" aria-label={activeQuestion.question}>
+                    {activeQuestion.options.map((option, optionIndex) => {
+                      const selected =
+                        activeDraft?.type === "option" && activeDraft.optionIndex === optionIndex
+                      return (
+                        <button
+                          key={`${activeQuestion.id}-${optionIndex}`}
+                          type="button"
+                          role="radio"
+                          aria-checked={selected}
+                          className={cn(
+                            "flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left transition-colors",
+                            selected
+                              ? "border-primary bg-primary/10"
+                              : "border-border bg-background hover:bg-background-interactive"
+                          )}
+                          onClick={() => selectOption(activeQuestion.id, optionIndex)}
+                        >
+                          {selected ? (
+                            <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
+                          ) : (
+                            <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                          )}
+                          <span className="min-w-0">
+                            <span className="block break-words text-sm font-medium">
+                              {option.label}
+                            </span>
+                            <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
+                              {option.description}
+                            </span>
                           </span>
-                          <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
-                            {option.description}
-                          </span>
-                        </span>
-                      </button>
-                    )
-                  })}
+                        </button>
+                      )
+                    })}
+                  </div>
 
-                  <div
-                    className={cn(
-                      "rounded-md border transition-colors",
-                      otherSelected
-                        ? "border-primary bg-primary/10"
-                        : "border-border bg-background hover:bg-background-interactive"
-                    )}
-                  >
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={otherSelected}
-                      className="flex w-full items-start gap-3 px-3 py-2 text-left"
-                      onClick={() =>
+                  <div className="flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2 transition-colors hover:bg-background-interactive focus-within:border-primary focus-within:bg-primary/10">
+                    <PencilLine className="size-4 shrink-0 text-muted-foreground" />
+                    <input
+                      type="text"
+                      className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                      value={activeDraft?.type === "other" ? activeDraft.text : ""}
+                      aria-label="自定义回答"
+                      placeholder="以上都不是我想要的，我希望："
+                      onChange={(event) =>
                         updateDraft(activeQuestion.id, {
                           type: "other",
-                          text: activeDraft?.type === "other" ? activeDraft.text : ""
+                          text: event.target.value
                         })
                       }
-                    >
-                      {otherSelected ? (
-                        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
-                      ) : (
-                        <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                      )}
-                      <span className="block min-w-0 text-sm font-medium">其他</span>
-                    </button>
-                    {otherSelected && (
-                      <div className="px-3 pb-3 pl-10">
-                        <textarea
-                          className="min-h-16 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-                          value={activeDraft.type === "other" ? activeDraft.text : ""}
-                          onChange={(event) =>
-                            updateDraft(activeQuestion.id, {
-                              type: "other",
-                              text: event.target.value
-                            })
-                          }
-                          autoFocus
-                        />
-                      </div>
-                    )}
+                    />
                   </div>
                 </div>
               </section>
             </div>
 
             <div className="flex items-center justify-between gap-2 border-t border-border px-4 py-3">
-              <div className="flex items-center gap-1">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon-sm"
-                  disabled={activeIndex === 0}
-                  onClick={() => setActiveIndex((prev) => Math.max(0, prev - 1))}
-                  aria-label="上一题"
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon-sm"
-                  disabled={activeIndex >= request.questions.length - 1}
-                  onClick={() =>
-                    setActiveIndex((prev) => Math.min(request.questions.length - 1, prev + 1))
-                  }
-                  aria-label="下一题"
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
-              </div>
+              <nav className="flex items-center gap-1" aria-label="问题导航">
+                {request.questions.map((question, questionIndex) => (
+                  <Button
+                    key={question.id}
+                    type="button"
+                    variant={questionIndex === activeIndex ? "default" : "outline"}
+                    size="icon-sm"
+                    className="size-8"
+                    aria-label={`切换到第 ${questionIndex + 1} 题：${question.header}`}
+                    aria-current={questionIndex === activeIndex ? "step" : undefined}
+                    onClick={() => setActiveIndex(questionIndex)}
+                  >
+                    {questionIndex + 1}
+                  </Button>
+                ))}
+              </nav>
               <div className="flex items-center gap-2">
                 <Button type="button" variant="outline" size="sm" onClick={handleIgnore}>
-                  忽略
+                  跳过全部问题
                 </Button>
                 <Button type="button" size="sm" onClick={handleSubmit} disabled={!canSubmit}>
                   提交

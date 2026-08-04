@@ -87,7 +87,8 @@ import {
   didHarnessSystemConstraintsLoadSuccessfully,
   type HarnessAgentmdLoadStatusItem,
   type HarnessDeployUnitMapping,
-  type HarnessProjectModeSubagentConfig
+  type HarnessProjectModeSubagentConfig,
+  type HarnessRequestUserInputConfig
 } from "../../shared/harness-board-types"
 import {
   checkpointHasInterrupt,
@@ -288,6 +289,7 @@ import {
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
   buildHarnessFeatureAgentContext,
+  DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG,
   markHarnessProjectSystemConstraintsLoaded,
   readHarnessFeatureMetadata,
   resolveHarnessFeatureCurrentStage
@@ -815,6 +817,7 @@ interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
   subagentConfig?: HarnessProjectModeSubagentConfig
+  requestUserInputConfig?: HarnessRequestUserInputConfig
   isHarnessProjectSession?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
@@ -922,6 +925,7 @@ function getHarnessAgentContext(
       pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
       subagentConfig: featureContext.agentConfig?.subagentConfig,
+      requestUserInputConfig: featureContext.agentConfig?.toolConfig?.requestUserInput,
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
@@ -947,7 +951,11 @@ function getHarnessAgentContext(
     return {
       ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
       ...(harnessFeature
-        ? { featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }
+        ? {
+            featureId: harnessFeature.slug,
+            harnessProjectId: harnessFeature.projectId,
+            requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+          }
         : {}),
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
     }

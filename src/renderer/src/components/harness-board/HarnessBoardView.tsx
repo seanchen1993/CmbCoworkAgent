@@ -1926,6 +1926,12 @@ function groupAdaptersByUseScenario(registry: HarnessAdapterRegistryItem[]): Ada
   return Array.from(groups.entries())
     .map(([useScenario, adapters]) => ({ useScenario, adapters }))
     .sort((left, right) => {
+      const leftIsApplicationDevelopment = left.useScenario.includes("应用类研发")
+      const rightIsApplicationDevelopment = right.useScenario.includes("应用类研发")
+      if (leftIsApplicationDevelopment !== rightIsApplicationDevelopment) {
+        return leftIsApplicationDevelopment ? -1 : 1
+      }
+
       const leftIsOther = left.useScenario === OTHER_ADAPTER_SCENARIO
       const rightIsOther = right.useScenario === OTHER_ADAPTER_SCENARIO
       if (leftIsOther && rightIsOther) return 0
@@ -5090,43 +5096,6 @@ function FeatureWorkspaceChangesPanel({
   )
 }
 
-function EnterpriseProjectDetailSummary({
-  entry
-}: {
-  entry?: EnterpriseProjectDetailCacheEntry
-}): React.JSX.Element | null {
-  if (!entry) return null
-
-  if (entry.kind === "miss") {
-    return (
-      <span className="shrink-0 rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
-        项目编号无效
-      </span>
-    )
-  }
-
-  const fields = [
-    ["项目状态", entry.project.status],
-    ["阶段状态", entry.project.phaseStatus],
-    ["结项日期", entry.project.baselineEndDate]
-  ]
-
-  return (
-    <>
-      {fields.map(([label, value]) => (
-        <span
-          key={label}
-          className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground"
-          title={`${label} ${value || "-"}`}
-        >
-          {label}
-          <strong className="ml-1 font-medium text-foreground">{value || "-"}</strong>
-        </span>
-      ))}
-    </>
-  )
-}
-
 const PROJECT_REVIEW_HEADERS: Array<[keyof HarnessProjectReviewItem, string]> = [
   ["title", "标题"],
   ["type", "类型"],
@@ -5643,7 +5612,6 @@ function ProjectDetailPage({
                       {getWorkspaceName(projectRootPath)}
                     </strong>
                   </span>
-                  {/*<EnterpriseProjectDetailSummary entry={enterpriseProjectDetail} />*/}
                   <span className="shrink-0 rounded-full border border-border/70 bg-muted/35 px-2 py-0.5 text-[11px] text-muted-foreground">
                     特性{" "}
                     <strong className="font-medium text-foreground">

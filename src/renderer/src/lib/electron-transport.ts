@@ -457,6 +457,55 @@ const MAX_TRACKED_TRANSCRIPT_SIGNATURE_THREADS = 64
 const SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS = 24_000
 const SUBAGENT_ASSISTANT_SNAPSHOT_MIN_CHARS = 1_024
 const SUBAGENT_ASSISTANT_SNAPSHOT_MAX_INTERVAL_MS = 50
+const MAIN_REASONING_SNAPSHOT_INTERVAL_MS = 50
+
+function hasNonEmptyStreamContent(content: unknown): boolean {
+  if (typeof content === "string") return content.length > 0
+  if (Array.isArray(content)) return content.length > 0
+  return content !== undefined && content !== null
+}
+
+/**
+ * Main-agent reasoning events carry the complete accumulated reasoning string.
+ * They are safe to replace within a short render window, unlike content deltas
+ * and tool-call events whose ordering must remain lossless.
+ */
+function getMainReasoningSnapshotKey(event: StreamEvent): string | undefined {
+  if (event.event === "messages" && Array.isArray(event.data)) {
+    const message = event.data[0]
+    if (!message || typeof message !== "object" || Array.isArray(message)) return undefined
+    const record = message as Record<string, unknown>
+    const id = typeof record.id === "string" ? record.id : ""
+    const reasoning = typeof record.reasoning === "string" ? record.reasoning : ""
+    const toolCalls = Array.isArray(record.tool_calls) ? record.tool_calls : []
+    if (id && reasoning && !hasNonEmptyStreamContent(record.content) && toolCalls.length === 0) {
+      return `message:${id}`
+    }
+    return undefined
+  }
+
+  if (event.event !== "custom" || !event.data || typeof event.data !== "object") {
+    return undefined
+  }
+  const data = event.data as Record<string, unknown>
+  if (data.type !== "coordinator_ai_snapshot_message") return undefined
+  const assistantMessage = data.assistantMessage
+  if (
+    !assistantMessage ||
+    typeof assistantMessage !== "object" ||
+    Array.isArray(assistantMessage)
+  ) {
+    return undefined
+  }
+  const record = assistantMessage as Record<string, unknown>
+  const id = typeof record.id === "string" ? record.id : ""
+  const reasoning = typeof record.reasoning === "string" ? record.reasoning : ""
+  const toolCalls = Array.isArray(record.tool_calls) ? record.tool_calls : []
+  if (id && reasoning && !hasNonEmptyStreamContent(record.content) && toolCalls.length === 0) {
+    return `snapshot:${id}`
+  }
+  return undefined
+}
 
 /**
  * Extract the LangGraph task UUID from a checkpoint_ns.
@@ -1205,7 +1254,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (signal.aborted) return
     let currentAgentMode: TransportAgentMode = agentMode ?? "normal"
 
-    const enqueueStreamEvent = (sdkEvent: StreamEvent): void => {
+    const enqueueImmediateStreamEvent = (sdkEvent: StreamEvent): void => {
       if (resolveNext) {
         const resolve = resolveNext
         resolveNext = null
@@ -1222,6 +1271,37 @@ export class ElectronIPCTransport implements UseStreamTransport {
       const nextQueued = { event: sdkEvent, ...(coalesceKey && { coalesceKey }) }
       eventQueue.push(nextQueued)
       if (coalesceKey) coalescedQueuedEvents.set(coalesceKey, nextQueued)
+    }
+
+    const pendingMainReasoningSnapshots = new Map<string, StreamEvent>()
+    let mainReasoningSnapshotTimer: ReturnType<typeof setTimeout> | null = null
+    const flushPendingMainReasoningSnapshots = (): void => {
+      if (mainReasoningSnapshotTimer) {
+        clearTimeout(mainReasoningSnapshotTimer)
+        mainReasoningSnapshotTimer = null
+      }
+      if (pendingMainReasoningSnapshots.size === 0) return
+      const snapshots = Array.from(pendingMainReasoningSnapshots.values())
+      pendingMainReasoningSnapshots.clear()
+      for (const snapshot of snapshots) enqueueImmediateStreamEvent(snapshot)
+    }
+    const enqueueStreamEvent = (sdkEvent: StreamEvent): void => {
+      const reasoningSnapshotKey = getMainReasoningSnapshotKey(sdkEvent)
+      if (reasoningSnapshotKey) {
+        pendingMainReasoningSnapshots.set(reasoningSnapshotKey, sdkEvent)
+        if (!mainReasoningSnapshotTimer) {
+          mainReasoningSnapshotTimer = setTimeout(
+            flushPendingMainReasoningSnapshots,
+            MAIN_REASONING_SNAPSHOT_INTERVAL_MS
+          )
+        }
+        return
+      }
+
+      // Content/tool boundaries and terminal events must observe the latest
+      // reasoning first, so they synchronously drain the pending snapshots.
+      flushPendingMainReasoningSnapshots()
+      enqueueImmediateStreamEvent(sdkEvent)
     }
     this.deferredStreamEventSink = enqueueStreamEvent
 
@@ -1267,6 +1347,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     let cleanedUp = false
     const abortListener = (): void => {
+      flushPendingMainReasoningSnapshots()
       cleanupOnce()
       isDone = true
       terminalReceived = true
@@ -1295,6 +1376,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const cleanupOnce = (): void => {
       if (cleanedUp) return
       cleanedUp = true
+      if (mainReasoningSnapshotTimer) {
+        clearTimeout(mainReasoningSnapshotTimer)
+        mainReasoningSnapshotTimer = null
+      }
+      pendingMainReasoningSnapshots.clear()
       cleanup()
       signal.removeEventListener("abort", abortListener)
     }

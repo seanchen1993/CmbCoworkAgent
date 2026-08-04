@@ -629,11 +629,22 @@ interface DashboardProjectModeProject {
   featureCount: number
   conversationCount: number
   devStageConversationCount: number
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
+}
+
+interface DashboardProjectModeExportData {
+  users: DashboardProjectModeTopUser[]
+  projects: DashboardProjectModeProject[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -2198,6 +2209,7 @@ interface CustomAPI {
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
     isAwardsAdmin: () => Promise<boolean>
+    isSkillEvalAllowed: () => Promise<boolean>
     awardsSkillContributions: (
       range: { from: string; to: string },
       skillNames: string[]
@@ -2255,6 +2267,10 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
+    projectModeExportData: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },
@@ -2452,8 +2468,26 @@ interface CustomAPI {
       totalTraces: number
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
+    exportUserTraces: (payload: {
+      sapId: string
+      ystId?: string
+      userName: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalItems: number
+      viewMode: DashboardTraceViewMode
+      triggerScope: DashboardTraceTriggerScope
+      projectMode: boolean
+      traces: DashboardTraceDetail[]
+    }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
   }

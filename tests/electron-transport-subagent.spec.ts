@@ -5082,6 +5082,181 @@ async function testRuntimeAgentModeEventUpdatesCurrentStreamParsing(): Promise<v
   }
 }
 
+function mainReasoningMessageEvents(
+  events: SdkEvent[],
+  messageId: string
+): Record<string, unknown>[] {
+  return events
+    .filter((event) => event.event === "messages" && Array.isArray(event.data))
+    .map((event) => asRecord((event.data as unknown[])[0]))
+    .filter(
+      (message) => message.id === messageId && typeof message.reasoning === "string"
+    )
+}
+
+async function testMainReasoningSnapshotsCoalesceWithinThrottleWindow(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            queueMicrotask(() => {
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-coalesced", reasoning: "first" })
+                )
+              )
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-coalesced", reasoning: " second" })
+                )
+              )
+            })
+            const doneTimer = setTimeout(() => callback({ type: "done" }), 140)
+            return () => clearTimeout(doneTimer)
+          }
+        }
+      }
+    }
+
+    const events = await collectStreamEvents(new ElectronIPCTransport(), {
+      input: { messages: [{ type: "human", content: "Think" }] },
+      config: { configurable: { thread_id: "thread-123", model_id: "test-model" } },
+      signal: new AbortController().signal
+    })
+    const reasoningMessages = mainReasoningMessageEvents(events, "main-reasoning-coalesced")
+    assert(
+      reasoningMessages.length === 1 && reasoningMessages[0]?.reasoning === "first second",
+      "reasoning snapshots inside 50ms should collapse to the latest cumulative value"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
+async function testMainReasoningFlushesBeforeToolBoundary(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            queueMicrotask(() => {
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-tool", reasoning: "inspect" })
+                )
+              )
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-tool", reasoning: " files" })
+                )
+              )
+              callback(
+                streamMessageEvent(
+                  aiMessage({
+                    id: "main-reasoning-tool",
+                    toolCalls: [{ id: "read-call", name: "read_file", args: { path: "a.txt" } }]
+                  })
+                )
+              )
+              callback({ type: "done" })
+            })
+            return () => undefined
+          }
+        }
+      }
+    }
+
+    const events = await collectStreamEvents(new ElectronIPCTransport(), {
+      input: { messages: [{ type: "human", content: "Inspect" }] },
+      config: { configurable: { thread_id: "thread-123", model_id: "test-model" } },
+      signal: new AbortController().signal
+    })
+    const reasoningMessages = mainReasoningMessageEvents(events, "main-reasoning-tool")
+    const reasoningIndex = events.findIndex((event) => {
+      if (event.event !== "messages" || !Array.isArray(event.data)) return false
+      return asRecord(event.data[0]).reasoning === "inspect files"
+    })
+    const toolIndex = events.findIndex((event) => {
+      if (event.event !== "messages" || !Array.isArray(event.data)) return false
+      return Array.isArray(asRecord(event.data[0]).tool_calls)
+    })
+    assert(
+      reasoningMessages.length === 1 && reasoningIndex >= 0 && toolIndex > reasoningIndex,
+      "tool start must synchronously flush the latest reasoning before the tool event"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
+async function testMainReasoningFlushesAtStreamEnd(): Promise<void> {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  try {
+    ;(globalThis as { window?: unknown }).window = {
+      api: {
+        agent: {
+          streamAgent: (
+            _threadId: string,
+            _message: string,
+            _command: unknown,
+            callback: (event: unknown) => void
+          ) => {
+            queueMicrotask(() => {
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-end", reasoning: "final" })
+                )
+              )
+              callback(
+                streamMessageEvent(
+                  aiMessageChunk({ id: "main-reasoning-end", reasoning: " thought" })
+                )
+              )
+              callback({ type: "done" })
+            })
+            return () => undefined
+          }
+        }
+      }
+    }
+
+    const events = await collectStreamEvents(new ElectronIPCTransport(), {
+      input: { messages: [{ type: "human", content: "Finish" }] },
+      config: { configurable: { thread_id: "thread-123", model_id: "test-model" } },
+      signal: new AbortController().signal
+    })
+    const reasoningMessages = mainReasoningMessageEvents(events, "main-reasoning-end")
+    const snapshots = customEvents(events, "coordinator_ai_snapshot_message").filter((event) => {
+      const assistantMessage = asRecord(event.assistantMessage)
+      return assistantMessage.id === "main-reasoning-end"
+    })
+    assert(
+      reasoningMessages.length === 1 && reasoningMessages[0]?.reasoning === "final thought",
+      "stream end must retain the latest cumulative reasoning message"
+    )
+    assert(
+      snapshots.length === 1 &&
+        asRecord(snapshots[0]?.assistantMessage).reasoning === "final thought",
+      "stream end must also flush the matching durable reasoning snapshot"
+    )
+  } finally {
+    ;(globalThis as { window?: unknown }).window = previousWindow
+  }
+}
+
 async function testFallbackToolMessageIdIsStableAcrossRepeatedMessages(): Promise<void> {
   const transport = new ElectronIPCTransport()
   const toolResult = streamMessageEvent(
@@ -11781,6 +11956,12 @@ async function run(): Promise<void> {
   console.log("PASS electron transport restores normal values-mode tool messages")
   await testRuntimeAgentModeEventUpdatesCurrentStreamParsing()
   console.log("PASS electron transport updates current stream parsing from agent_mode event")
+  await testMainReasoningSnapshotsCoalesceWithinThrottleWindow()
+  console.log("PASS electron transport coalesces main reasoning snapshots every 50ms")
+  await testMainReasoningFlushesBeforeToolBoundary()
+  console.log("PASS electron transport flushes main reasoning before tool start")
+  await testMainReasoningFlushesAtStreamEnd()
+  console.log("PASS electron transport flushes main reasoning at stream end")
   await testQueuedSubagentSnapshotsCoalesceAndStayBounded()
   console.log("PASS electron transport coalesces bounded queued subagent snapshots")
   await testQueuedFinalCorrectionsPreserveRepairMetadata()

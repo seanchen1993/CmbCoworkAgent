@@ -14,6 +14,26 @@ export function messageVisibleReasoningLength(
   return normalizeVisibleReasoningText(message?.reasoning).length
 }
 
+interface ReasoningAutoCollapseState {
+  isStreaming: boolean
+  reasoningText: string
+  hasVisibleAssistantContent: boolean
+  hasToolCalls: boolean
+}
+
+export function shouldAutoCollapseReasoning({
+  isStreaming,
+  reasoningText,
+  hasVisibleAssistantContent,
+  hasToolCalls
+}: ReasoningAutoCollapseState): boolean {
+  return (
+    isStreaming &&
+    reasoningText.length > 0 &&
+    (hasVisibleAssistantContent || hasToolCalls)
+  )
+}
+
 function getAssistantOrUserVisibleText(content: Message["content"]): string {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
