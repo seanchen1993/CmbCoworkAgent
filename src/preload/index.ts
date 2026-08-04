@@ -191,6 +191,7 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
   ipcRenderer.send(APP_ATTENTION_CHANNEL, { kind, threadId })
@@ -1654,13 +1655,14 @@ const api = {
     list: (): Promise<PetManifest[]> => {
       return ipcRenderer.invoke("pet:list") as Promise<PetManifest[]>
     },
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ): Promise<{ success: boolean; dataUrl?: string; error?: string }> => {
-      return ipcRenderer.invoke("pet:getSpriteDataUrl", directoryId, source) as Promise<{
+    ): Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }> => {
+      return ipcRenderer.invoke("pet:getSpriteBytes", directoryId, source) as Promise<{
         success: boolean
-        dataUrl?: string
+        bytes?: Uint8Array
+        mimeType?: string
         error?: string
       }>
     },
@@ -1677,6 +1679,11 @@ const api = {
     },
     updateSettings: (settings: Partial<PetSettings>): Promise<PetSettings> => {
       return ipcRenderer.invoke("pet:updateSettings", settings) as Promise<PetSettings>
+    },
+    onSettingsChanged: (callback: (settings: PetSettings) => void): (() => void) => {
+      const handler = (_event: unknown, settings: PetSettings): void => callback(settings)
+      ipcRenderer.on(PET_SETTINGS_CHANGED_CHANNEL, handler)
+      return () => ipcRenderer.removeListener(PET_SETTINGS_CHANGED_CHANNEL, handler)
     },
     uploadCustomFolder: (): Promise<{ success: boolean; pet?: PetManifest; error?: string }> => {
       return ipcRenderer.invoke("pet:uploadCustomFolder") as Promise<{
@@ -3212,6 +3219,7 @@ const api = {
     isUncommittedAnalysisAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isUncommittedAnalysisAllowed"),
     isAwardsAdmin: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAwardsAdmin"),
+    isSkillEvalAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isSkillEvalAllowed"),
     awardsSkillContributions: (
       range: { from: string; to: string },
       skillNames: string[]
@@ -3283,6 +3291,11 @@ const api = {
       }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeProjects", range, options),
+    projectModeExportData: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeExportData", range, opts),
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },
@@ -3559,8 +3572,27 @@ const api = {
       traces: unknown[]
     }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportSkillTraces", payload),
+    exportUserTraces: (payload: {
+      sapId: string
+      ystId?: string
+      userName: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalItems: number
+      viewMode: "thread" | "trace"
+      triggerScope: "active" | "all"
+      projectMode: boolean
+      traces: unknown[]
+    }): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke("dashboard:exportUserTraces", payload),
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ): Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke("dashboard:exportExcel", sheets, options)

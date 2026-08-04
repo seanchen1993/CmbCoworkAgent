@@ -14,8 +14,7 @@ import {
 import { trackEvent } from "./event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "./adoption-tracker"
 import { markInAppCommitProcessed } from "./git-hook-service"
-import { getTracesDir } from "../agent/trace/collector"
-import type { AgentTrace } from "../agent/trace/types"
+import { getTracesDir, parseStoredTraceLine } from "../agent/trace/collector"
 import {
   discoverWorkspaceGitRepositories,
   type DiscoveredGitRepository
@@ -668,7 +667,7 @@ async function collectThreadSkillStatsAsync(threadId: string): Promise<string[]>
       for (const line of raw.trim().split("\n")) {
         if (!line.trim()) continue
         try {
-          const trace = JSON.parse(line) as AgentTrace
+          const trace = parseStoredTraceLine(line)
           if (Array.isArray(trace.usedSkills)) {
             for (const skill of trace.usedSkills) skillSet.add(skill)
           }

@@ -24,7 +24,13 @@ if (process.platform === "linux") {
 
 import { join } from "path"
 import { existsSync, rmSync } from "fs"
-import { writeMainLog, writeRendererLog, flushLogs, flushLogsSync } from "./logging"
+import {
+  writeMainLog,
+  writeRendererLog,
+  flushLogs,
+  flushLogsSync,
+  initializeLogRedaction
+} from "./logging"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 import {
@@ -186,19 +192,19 @@ function withEpipeGuard<T extends (...args: unknown[]) => void>(fn: T): T {
 
 function withMainFileLogging<T extends (...args: unknown[]) => void>(level: string, fn: T): T {
   return ((...args: Parameters<T>) => {
-    writeMainLog(level, args)
-    forwardMainLogToRenderer(level, args)
-    fn(...args)
+    const redactedArgs = writeMainLog(level, args)
+    forwardMainLogToRenderer(level, redactedArgs)
+    fn(...(redactedArgs as Parameters<T>))
   }) as T
 }
 
-if (!browserNativeMessagingHostLaunch) {
-  // Native messaging reserves stdout exclusively for length-prefixed protocol frames.
-  console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
-  console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
-  console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
-  console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
-  console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
+// Guard console writes so broken stdout/stderr pipes don't crash main process.
+console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
+console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
+console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
+console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
+console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
+console.trace = withEpipeGuard(withMainFileLogging("DEBUG", console.trace.bind(console)))
 
   // Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
   // or when the renderer window is destroyed while the main process is still logging).
@@ -271,7 +277,7 @@ import { registerBrowserHandlers } from "./ipc/browser"
 import { registerBrowserProfileImportHandlers, stopBrowserProfileImportRuntime } from "./ipc/browser-profile-import"
 import { setGlobalBrowserService } from "./browser/core/browser-service-registry"
 import { stopAllLsp } from "./lsp"
-import { setTraceReporter } from "./agent/trace/collector"
+import { initializeTraceStorageSecurity, setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
@@ -757,6 +763,53 @@ if (browserNativeMessagingHostLaunch) {
       ensureMainWindowVisible,
       applyMacDockIcon
     })
+
+    try {
+      await flushLogs()
+      const logRedaction = initializeLogRedaction()
+      if (logRedaction.failedFiles > 0) {
+        console.warn(
+          `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+        )
+      } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
+        console.log(
+          `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
+        )
+      }
+    } catch (error) {
+      console.warn(
+        `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+
+    try {
+      const traceStorage = initializeTraceStorageSecurity()
+      if (!traceStorage.ready) {
+        console.warn(
+          `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+        )
+      } else if (traceStorage.mode === "plaintext") {
+        console.warn(
+          "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
+        )
+      } else if (traceStorage.migrationSkipped) {
+        console.log(
+          `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
+        )
+      } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
+        console.warn(
+          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
+        )
+      } else {
+        console.log(
+          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
+        )
+      }
+    } catch (error) {
+      console.warn(
+        `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
 
     // Default open or close DevTools by F12 in development
     if (isDev) {

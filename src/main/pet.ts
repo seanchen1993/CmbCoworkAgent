@@ -5,7 +5,12 @@ import { basename, join, relative } from "path"
 import { pathToFileURL } from "url"
 import { getOpenworkDir } from "./storage"
 import { copyDirRecursive } from "./utils/fs"
-import { getPetWindowPlatformPolicy, resizeWindowAroundPetBody } from "./pet-window-policy"
+import {
+  getPetWindowPlatformPolicy,
+  getPetWindowRefreshAction,
+  resizeWindowAroundPetBody,
+  shouldIgnorePetWindowMouseEvents
+} from "./pet-window-policy"
 
 type PetManifest = {
   id: string
@@ -95,7 +100,7 @@ let petDragOffset: { x: number; y: number } | null = null
 let petHoverPollTimer: NodeJS.Timeout | null = null
 let petHovering = false
 let petWindowOptions: PetWindowOptions | null = null
-const completedTaskNotices: Array<{ id: string; threadId: string; title: string }> = []
+let completedTaskNoticeCount = 0
 let petBubbleHideTimer: NodeJS.Timeout | null = null
 let petBubbleVisible = false
 let petWindowLayout: PetWindowLayout = {
@@ -106,17 +111,18 @@ let petWindowLayout: PetWindowLayout = {
 }
 let petWindowIgnoringMouseEvents = false
 let petWindowLayoutChangeUntil = 0
+let petMouseInputPinnedUntil = 0
 let suppressPetClickUntil = 0
 // 拖动窗口会触发高频 move 事件，这个时间戳用于节流状态同步，避免主进程连续 executeJavaScript。
 let lastPetMoveStateAt = 0
-// settings/list/sprite 都是低频变更资源，缓存在主进程内，减少同步 IO 与重复 base64 编码。
+// settings/list 是低频变更资源，缓存在主进程内，减少同步 IO。
 let cachedPetSettings: PetSettings | null = null
 let cachedPetList: PetListItem[] | null = null
-const petSpriteDataUrlCache = new Map<string, string>()
-let petSpriteDataUrlCacheBytes = 0
 
 const PET_SETTINGS_FILE = join(getOpenworkDir(), "pet-settings.json")
+const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 const PET_BUBBLE_AUTO_HIDE_MS = 4200
+const MAX_COMPLETED_TASK_NOTICE_COUNT = 9999
 const PET_PLATFORM_POLICY = getPetWindowPlatformPolicy(process.platform)
 const PET_BODY_WIDTH = 112
 const PET_BODY_HEIGHT = 124
@@ -140,10 +146,9 @@ const PET_WINDOW_COMPACT_LAYOUT: PetWindowLayout = {
   bubbleLeft: 0,
   bubbleTop: 0
 }
-// 设置页预览走 base64 + IPC，限制单图和总缓存，防止自定义超大资源把主进程/renderer 内存撑爆。
+// 设置页预览通过 IPC 临时读取二进制，限制单图大小，防止异常资源造成跨进程内存尖峰。
 const MAX_PREVIEW_SPRITE_BYTES = 8 * 1024 * 1024
 const MAX_RUNTIME_SPRITE_BYTES = 16 * 1024 * 1024
-const MAX_SPRITE_DATA_URL_CACHE_BYTES = 24 * 1024 * 1024
 const DEFAULT_PET_COLUMNS = 8
 const DEFAULT_PET_ROWS = 9
 // 运行时 canvas 直接按帧尺寸分配内存，必须限制异常 pet.json 或超大解码图。
@@ -188,7 +193,7 @@ export function markPetStartupReady(): void {
  *
  * macOS 上 hidden -> showInactive、主窗口重新 focus 时，floating 层级偶发会被后续窗口压住，
  * 因此非 Windows 保留 screen-saver；Windows 使用较低的 floating，减少高层透明窗口的合成压力。
- * moveTop() 只在真正显示/交互时调用，避免 hover 气泡频繁重排窗口栈。
+ * Windows 的 hover 气泡不再调用 moveTop()，避免频繁重排窗口栈触发额外合成。
  */
 function configurePetWindowLayer(window: BrowserWindow | null): void {
   if (!window || window.isDestroyed()) return
@@ -222,18 +227,15 @@ export function registerPetHandlers(ipcMain: IpcMain): void {
     return listPets()
   })
 
-  ipcMain.handle(
-    "pet:getSpriteDataUrl",
-    async (_event, directoryId: string, source?: PetSource) => {
-      const pet = readPetManifest(directoryId, source ?? "builtin")
-      if (!pet) {
-        return { success: false, error: "Pet not found" }
-      }
-      const dataUrl = await readPetSpriteDataUrl(pet)
-      if (!dataUrl) return { success: false, error: "Failed to load pet sprite" }
-      return { success: true, dataUrl }
+  ipcMain.handle("pet:getSpriteBytes", async (_event, directoryId: string, source?: PetSource) => {
+    const pet = readPetManifest(directoryId, source ?? "builtin")
+    if (!pet) {
+      return { success: false, error: "Pet not found" }
     }
-  )
+    const sprite = await readPetSpriteBytes(pet)
+    if (!sprite) return { success: false, error: "Failed to load pet sprite" }
+    return { success: true, ...sprite }
+  })
 
   ipcMain.on("pet:setState", (_event, state: unknown) => {
     if (!isPetState(state)) return
@@ -248,9 +250,13 @@ export function registerPetHandlers(ipcMain: IpcMain): void {
     return readPetSettings()
   })
 
-  ipcMain.handle("pet:updateSettings", async (_event, settings: Partial<PetSettings>) => {
+  ipcMain.handle("pet:updateSettings", async (event, settings: Partial<PetSettings>) => {
+    const previous = readPetSettings()
     const updated = writePetSettings(settings)
-    refreshPetWindowForSettings()
+    if (!arePetSettingsEqual(previous, updated)) {
+      refreshPetWindowForSettings(previous, updated)
+      event.sender.send(PET_SETTINGS_CHANGED_CHANNEL, updated)
+    }
     return updated
   })
 
@@ -258,8 +264,12 @@ export function registerPetHandlers(ipcMain: IpcMain): void {
     return uploadCustomPetFolder()
   })
 
-  ipcMain.handle("pet:deleteCustom", async (_event, directoryId: string) => {
-    return deleteCustomPet(directoryId)
+  ipcMain.handle("pet:deleteCustom", async (event, directoryId: string) => {
+    const result = await deleteCustomPet(directoryId)
+    if (result.success) {
+      event.sender.send(PET_SETTINGS_CHANGED_CHANNEL, readPetSettings())
+    }
+    return result
   })
 }
 
@@ -370,7 +380,7 @@ function normalizePetManifestForWindow(
 /**
  * 检查 spritesheet 文件是否可用于当前场景。
  *
- * 预览和运行时使用不同上限：预览需要跨 IPC 传 base64，所以更严格；运行时直接 file URL 加载，
+ * 预览和运行时使用不同上限：预览需要跨 IPC 传输二进制，所以更严格；运行时直接 file URL 加载，
  * 但仍要防止用户上传极大文件导致解码和绘制成本不可控。
  */
 function isSpriteFileUsable(spritePath: string, maxBytes: number): boolean {
@@ -414,9 +424,14 @@ function writePetSettings(settings: Partial<PetSettings>): PetSettings {
         ? settings.selectedPetKey
         : current.selectedPetKey
   }
+  if (arePetSettingsEqual(current, next)) return current
   writeFileSync(PET_SETTINGS_FILE, JSON.stringify(next, null, 2), "utf8")
   cachedPetSettings = next
   return { ...next }
+}
+
+function arePetSettingsEqual(left: PetSettings, right: PetSettings): boolean {
+  return left.enabled === right.enabled && left.selectedPetKey === right.selectedPetKey
 }
 
 function readPetManifest(directoryId: string, source: PetSource): PetListItem | null {
@@ -469,11 +484,9 @@ function listPets(): PetListItem[] {
   return cachedPetList.map((pet) => ({ ...pet }))
 }
 
-async function readPetSpriteDataUrl(pet: PetListItem): Promise<string | null> {
-  const cacheKey = pet.key
-  const cached = petSpriteDataUrlCache.get(cacheKey)
-  if (cached) return cached
-
+async function readPetSpriteBytes(
+  pet: PetListItem
+): Promise<{ bytes: Uint8Array; mimeType: string } | null> {
   const spritePath = getPetSpritePath(pet)
   if (!spritePath) return null
   try {
@@ -482,49 +495,20 @@ async function readPetSpriteDataUrl(pet: PetListItem): Promise<string | null> {
       return null
     }
     const buffer = await readFile(spritePath)
-    // 宠物窗口使用 data URL 加载本地图片，避免在 sandbox 页面里暴露文件系统路径。
-    const dataUrl = `data:${getMimeType(spritePath)};base64,${buffer.toString("base64")}`
-    cachePetSpriteDataUrl(cacheKey, dataUrl)
-    return dataUrl
+    // Uint8Array 避免 base64 的体积膨胀；设置页绘制首帧后会立即释放 Blob URL。
+    return {
+      bytes: new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+      mimeType: getMimeType(spritePath)
+    }
   } catch (error) {
     console.warn(`[Pets] Failed to read sprite for ${pet.directoryId}:`, error)
     return null
   }
 }
 
-/**
- * 以插入顺序做一个简单 LRU 缓存。
- *
- * data URL 字符串比原始图片更大，且会跨进程复制；缓存命中能减少重复读盘/编码，
- * 总量上限则避免用户打开多个大宠物预览后长期占住内存。
- */
-function cachePetSpriteDataUrl(cacheKey: string, dataUrl: string): void {
-  const existing = petSpriteDataUrlCache.get(cacheKey)
-  if (existing) {
-    petSpriteDataUrlCacheBytes -= existing.length
-    petSpriteDataUrlCache.delete(cacheKey)
-  }
-
-  petSpriteDataUrlCache.set(cacheKey, dataUrl)
-  petSpriteDataUrlCacheBytes += dataUrl.length
-
-  while (
-    petSpriteDataUrlCacheBytes > MAX_SPRITE_DATA_URL_CACHE_BYTES &&
-    petSpriteDataUrlCache.size > 0
-  ) {
-    const oldestKey = petSpriteDataUrlCache.keys().next().value as string | undefined
-    if (!oldestKey) break
-    const oldestValue = petSpriteDataUrlCache.get(oldestKey)
-    if (oldestValue) petSpriteDataUrlCacheBytes -= oldestValue.length
-    petSpriteDataUrlCache.delete(oldestKey)
-  }
-}
-
 function invalidatePetResourceCache(): void {
-  // 上传/删除自定义宠物后，列表和预览缓存都可能过期，统一清掉以免展示旧资源。
+  // 上传/删除自定义宠物后，列表缓存可能过期。
   cachedPetList = null
-  petSpriteDataUrlCache.clear()
-  petSpriteDataUrlCacheBytes = 0
 }
 
 function getPetSpritePath(pet: PetListItem): string | null {
@@ -561,6 +545,7 @@ function closePetWindow(): void {
   petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
   petWindowIgnoringMouseEvents = false
   petWindowLayoutChangeUntil = 0
+  petMouseInputPinnedUntil = 0
   lastPetMoveStateAt = 0
 }
 
@@ -591,14 +576,18 @@ function logPetWindowEvent(message: string): void {
   console.debug(message)
 }
 
-function refreshPetWindowForSettings(): void {
-  closePetWindow()
-  if (readPetSettings().enabled) {
-    setImmediate(() => {
-      createPetWindow()
-      petWindowOptions?.applyMacDockIcon()
-    })
+function refreshPetWindowForSettings(previous: PetSettings, next: PetSettings): void {
+  const action = getPetWindowRefreshAction(previous, next)
+  if (action === "none") return
+  if (action === "close") {
+    closePetWindow()
+    return
   }
+  if (action === "recreate") closePetWindow()
+  setImmediate(() => {
+    createPetWindow()
+    petWindowOptions?.applyMacDockIcon()
+  })
 }
 
 function getSafeCustomPetPath(directoryId: string): string | null {
@@ -672,8 +661,8 @@ async function deleteCustomPet(directoryId: string): Promise<{ success: boolean;
     invalidatePetResourceCache()
     const settings = readPetSettings()
     if (settings.selectedPetKey === makePetKey("custom", directoryId)) {
-      writePetSettings({ selectedPetKey: null })
-      refreshPetWindowForSettings()
+      const updated = writePetSettings({ selectedPetKey: null })
+      refreshPetWindowForSettings(settings, updated)
     }
     return { success: true }
   } catch (error) {
@@ -685,17 +674,6 @@ async function deleteCustomPet(directoryId: string): Promise<{ success: boolean;
 }
 
 /**
- * 规范化完成任务气泡中的任务标题。
- *
- * 气泡空间有限，这里会去掉多余空白，并把过长标题截断，避免桌面悬浮窗文本溢出。
- */
-function trimTaskTitle(title: string): string {
-  const text = title.replace(/\s+/g, " ").trim()
-  if (!text) return "任务"
-  return text.length > 18 ? `${text.slice(0, 18)}...` : text
-}
-
-/**
  * 将待处理任务数量同步到宠物窗口右上角数字 tag。
  *
  * tag 在宠物窗口内部渲染，任务数为 0 时隐藏，避免额外创建独立悬浮窗。
@@ -703,18 +681,18 @@ function trimTaskTitle(title: string): string {
 function updatePetTaskTag(): void {
   if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
   petWindow.webContents
-    .executeJavaScript(`window.setPetTaskCount(${completedTaskNotices.length})`)
+    .executeJavaScript(`window.setPetTaskCount(${completedTaskNoticeCount})`)
     .catch((error) => console.warn("[Pets] Failed to update task tag:", error))
 }
 
 /**
  * 清空所有已完成任务提醒。
  *
- * 用户打开主应用后，不再逐个按线程扣减，而是直接认为完成提醒已被查看并清空气泡队列。
+ * 用户打开主应用后，不再逐个按线程扣减，而是直接认为完成提醒已被查看并清空计数。
  */
 function clearPetCompletedTaskNotices(): void {
-  if (completedTaskNotices.length === 0) return
-  completedTaskNotices.splice(0, completedTaskNotices.length)
+  if (completedTaskNoticeCount === 0) return
+  completedTaskNoticeCount = 0
   updatePetTaskTag()
   hidePetBubble("clear-completed-tasks")
 }
@@ -725,17 +703,14 @@ function clearPetCompletedTaskNotices(): void {
  * 仅在应用窗口不处于焦点、且宠物窗口已经存在时生效；不会为了完成提醒主动创建宠物窗口。
  */
 export function showPetCompletedTaskNotice(threadId: string, title: string): void {
+  void threadId
+  void title
   const focusedWindow = BrowserWindow.getFocusedWindow()
   if (focusedWindow?.isFocused()) return
   if (!petWindow || petWindow.isDestroyed()) return
   if (!readPetSettings().enabled) return
 
-  const taskTitle = trimTaskTitle(title)
-  completedTaskNotices.push({
-    id: `${threadId}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    threadId,
-    title: taskTitle
-  })
+  completedTaskNoticeCount = Math.min(completedTaskNoticeCount + 1, MAX_COMPLETED_TASK_NOTICE_COUNT)
 
   updatePetTaskTag()
   showPetTaskBubble()
@@ -759,7 +734,7 @@ export function createPetWindow(): void {
     return
   }
 
-  // 首次展示会立即出现问候气泡，因此先使用完整尺寸；Windows 在气泡隐藏后收紧到宠物本体。
+  // 窗口始终预留气泡尺寸，避免 Windows 在气泡显示/隐藏时 resize 导致透明窗口闪烁。
   const petWindowWidth = PET_WINDOW_RESERVED_WIDTH
   const petWindowHeight = PET_WINDOW_RESERVED_HEIGHT
   const petWindowMargin = 150
@@ -1171,13 +1146,12 @@ export function createPetWindow(): void {
       canvas.height = ${PET_CANVAS_HEIGHT};
       renderBuffer.width = ${PET_CANVAS_WIDTH};
       renderBuffer.height = ${PET_CANVAS_HEIGHT};
-      frameScanBuffer.width = frameWidth;
-      frameScanBuffer.height = frameHeight;
+      frameScanBuffer.width = Math.min(frameWidth, ${PET_CANVAS_WIDTH});
+      frameScanBuffer.height = Math.min(frameHeight, ${PET_CANVAS_HEIGHT});
       ctx.imageSmoothingEnabled = false;
       renderBufferCtx.imageSmoothingEnabled = false;
       frameScanCtx.imageSmoothingEnabled = false;
-      // 首帧前只扫描当前状态；其余帧在宠物显示后按空闲时间分批补齐。
-      primeVisibleFrameCache(pet.states[currentState] || pet.states.idle);
+      // 首帧只按需扫描到第一个可见帧；其余帧在宠物显示后按空闲时间分批补齐。
       frame = findVisibleFrame(pet.states[currentState] || pet.states.idle, 0);
       renderFrame();
       scheduleNextFrame();
@@ -1187,16 +1161,6 @@ export function createPetWindow(): void {
 
     function getFrameCacheKey(state, frameIndex) {
       return state.y + ":" + frameIndex;
-    }
-
-    function primeVisibleFrameCache(state) {
-      const totalFrames = Math.max(
-        1,
-        Math.min(state.frames || 1, pet.columns || ${DEFAULT_PET_COLUMNS})
-      );
-      for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
-        frameHasPixels(state, frameIndex);
-      }
     }
 
     function releaseFrameScanBuffer() {
@@ -1273,11 +1237,23 @@ export function createPetWindow(): void {
       if (frameScanReleased) return true;
 
       // 扫描阶段读取 alpha，提前标记透明占位帧，状态切换时尽量不再同步读取像素。
-      frameScanCtx.clearRect(0, 0, frameWidth, frameHeight);
-      frameScanCtx.drawImage(sprite, sx, sy, frameWidth, frameHeight, 0, 0, frameWidth, frameHeight);
-      const data = frameScanCtx.getImageData(0, 0, frameWidth, frameHeight).data;
+      const scanWidth = frameScanBuffer.width;
+      const scanHeight = frameScanBuffer.height;
+      frameScanCtx.clearRect(0, 0, scanWidth, scanHeight);
+      frameScanCtx.drawImage(
+        sprite,
+        sx,
+        sy,
+        frameWidth,
+        frameHeight,
+        0,
+        0,
+        scanWidth,
+        scanHeight
+      );
+      const data = frameScanCtx.getImageData(0, 0, scanWidth, scanHeight).data;
       let visiblePixels = 0;
-      for (let i = 3; i < data.length; i += 16) {
+      for (let i = 3; i < data.length; i += 4) {
         if (data[i] > 8) {
           visiblePixels += 1;
           if (visiblePixels > 16) {
@@ -1372,6 +1348,8 @@ export function createPetWindow(): void {
       console.warn("[Pets] Pet window failed to load sprite:", title)
       closePetWindow()
     } else if (title.startsWith("pet-click:")) {
+      petDragOffset = null
+      petMouseInputPinnedUntil = Date.now() + 300
       if (Date.now() < suppressPetClickUntil) return
       showMainWindowFromPet()
     } else if (title.startsWith("pet-task-tag-enter:")) {
@@ -1406,6 +1384,8 @@ export function createPetWindow(): void {
       }
     } else if (title.startsWith("pet-pointer-up:")) {
       petDragOffset = null
+      // 等 Windows 完成拖拽后的 DWM 合成，再恢复透明区域点击穿透。
+      petMouseInputPinnedUntil = Date.now() + 300
     }
   })
   currentWindow.on("move", () => {
@@ -1447,6 +1427,7 @@ export function createPetWindow(): void {
     petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
     petWindowIgnoringMouseEvents = false
     petWindowLayoutChangeUntil = 0
+    petMouseInputPinnedUntil = 0
     lastPetMoveStateAt = 0
     petWindowOptions?.applyMacDockIcon()
   })
@@ -1575,7 +1556,9 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
     `if (window.setPetBubble) window.setPetBubble(${JSON.stringify(message)});`,
     "show pet bubble"
   )
-  keepPetWindowOnTop(petWindow)
+  if (PET_PLATFORM_POLICY.raiseOnBubbleShow) {
+    keepPetWindowOnTop(petWindow)
+  }
   logPetWindowEvent(
     `[Pets] Bubble shown: autoHide=${autoHideMs}ms, window=${petWindow.id}, visible=${petWindow.isVisible()}`
   )
@@ -1604,11 +1587,11 @@ function showPetGreetingBubble(): void {
  * 任务完成时只展示数量汇总，不再展示具体任务内容。
  */
 function showPetTaskBubble(): void {
-  if (completedTaskNotices.length === 0) {
+  if (completedTaskNoticeCount === 0) {
     hidePetBubble("task-bubble-empty")
     return
   }
-  showPetBubble(`主人，有 ${completedTaskNotices.length} 个任务已完成～`)
+  showPetBubble(`主人，有 ${completedTaskNoticeCount} 个任务已完成～`)
 }
 
 /**
@@ -1624,34 +1607,50 @@ function showPetHoverBubbleIfIdle(): void {
 }
 
 /**
- * 隐藏当前统一宠物气泡，并把同一个 BrowserWindow 恢复到宠物本体大小。
+ * 隐藏当前统一宠物气泡，并恢复平台对应的透明区域命中策略。
  */
 function hidePetBubble(reason = "unknown"): void {
   cancelPetBubbleHide()
-  logPetWindowDebug(`[Pets] hidePetBubble invoked, reason=${reason}, currentVisible=${petBubbleVisible}`)
+  logPetWindowDebug(
+    `[Pets] hidePetBubble invoked, reason=${reason}, currentVisible=${petBubbleVisible}`
+  )
 
   petBubbleVisible = false
-  if (!petHovering) {
-    setPetWindowMouseEventsIgnored(true)
-  }
+  const point = screen.getCursorScreenPoint()
+  const petBounds = getPetBodyScreenBounds()
+  const hoveringPet = petBounds ? isPointInBounds(point, petBounds) : false
+  petHovering = hoveringPet
+  setPetWindowMouseEventsIgnored(
+    shouldIgnorePetWindowMouseEvents({
+      dragging: Boolean(petDragOffset) || Date.now() < petMouseInputPinnedUntil,
+      hoveringPet,
+      hoveringBubble: false
+    })
+  )
   runPetWindowScript(`if (window.clearPetBubble) window.clearPetBubble();`, "hide pet bubble")
   setPetWindowBubbleExpanded(false)
 }
 
 function startPetHoverPolling(): void {
   stopPetHoverPolling()
-  // 透明窗口的 pointer 事件在部分平台上不稳定，保留轻量轮询兜底；250ms 足够感知 hover，
-  // 同时比高频轮询更省主进程工作量。
+  // 透明窗口的 pointer 事件在部分平台上不稳定，保留轻量轮询兜底；Windows 需要靠轮询
+  // 从点击穿透状态恢复，因此使用 100ms，其他平台保持低频的 250ms。
   petHoverPollTimer = setInterval(() => {
     if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
     const point = screen.getCursorScreenPoint()
     const petBounds = getPetBodyScreenBounds()
     if (!petBounds) return
     const bubbleBounds = petBubbleVisible ? getPetBubbleScreenBounds() : null
-    // 展示气泡时 BrowserWindow 会扩大；hover 仍只以宠物本体区域为准。
+    // hover 始终只以宠物本体区域为准，不把已经展示的气泡算作宠物 hover。
     const isHovering = isPointInBounds(point, petBounds)
     const isOnBubble = bubbleBounds ? isPointInBounds(point, bubbleBounds) : false
-    setPetWindowMouseEventsIgnored(!isHovering && !isOnBubble)
+    setPetWindowMouseEventsIgnored(
+      shouldIgnorePetWindowMouseEvents({
+        dragging: Boolean(petDragOffset) || Date.now() < petMouseInputPinnedUntil,
+        hoveringPet: isHovering,
+        hoveringBubble: isOnBubble
+      })
+    )
 
     if (isHovering === petHovering) return
     petHovering = isHovering
@@ -1664,7 +1663,7 @@ function startPetHoverPolling(): void {
     petWindow.webContents
       .executeJavaScript(script)
       .catch((error) => console.warn("[Pets] Failed to update hover state:", error))
-  }, 250)
+  }, PET_PLATFORM_POLICY.hoverPollIntervalMs)
 }
 
 function stopPetHoverPolling(): void {

@@ -17,8 +17,6 @@
 import { join } from "path"
 import { homedir } from "os"
 import {
-  mkdirSync,
-  appendFileSync,
   readdirSync,
   readFileSync,
   existsSync,
@@ -47,7 +45,7 @@ import type {
   RoutingTrace
 } from "./types"
 import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
-import { app } from "electron"
+import { app, safeStorage } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
 import { listAllSkills } from "../../ipc/skills"
@@ -68,6 +66,11 @@ import {
 import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
 import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
+import {
+  getTraceLocalStorage,
+  type TraceKeyProtector,
+  type TraceStorageInitializationResult
+} from "./local-storage"
 import {
   appendSkillEvalWindowTurn,
   getSkillEvalWindowAssistantText,
@@ -106,19 +109,46 @@ function getThreadTracesDir(threadId: string): string {
 }
 
 const MAX_TRACES_PER_THREAD = 50
+let traceStorageDisabledLogged = false
+
+function traceLocalStorage() {
+  return getTraceLocalStorage(getTracesRootDir(), safeStorage as TraceKeyProtector | undefined)
+}
 
 function writeTraceFile(trace: AgentTrace): void {
   try {
     const dir = getThreadTracesDir(trace.threadId)
-    mkdirSync(dir, { recursive: true })
     const filePath = join(dir, `${trace.traceId}.jsonl`)
-    appendFileSync(filePath, JSON.stringify(trace) + "\n", "utf-8")
-    console.log(`[Tracer] Written trace ${trace.traceId} to ${filePath}`)
+    const storage = traceLocalStorage()
+    const written = storage.appendJsonLine(filePath, JSON.stringify(trace))
+    if (!written) {
+      if (!traceStorageDisabledLogged) {
+        traceStorageDisabledLogged = true
+        console.warn("[Tracer] Local trace persistence is disabled")
+      }
+      return
+    }
+    console.log(`[Tracer] Written ${storage.mode} trace ${trace.traceId}`)
     // Prune oldest traces if over the per-thread limit.
     pruneOldTraces(trace.threadId)
   } catch (e) {
-    console.warn("[Tracer] Failed to write trace file:", e)
+    if (!traceStorageDisabledLogged) {
+      traceStorageDisabledLogged = true
+      console.warn(
+        `[Tracer] Trace was not persisted: ${e instanceof Error ? e.message : String(e)}`
+      )
+    }
   }
+}
+
+export function parseStoredTraceLine(line: string): AgentTrace {
+  const plaintext = traceLocalStorage().decodeStoredLine(line)
+  return normalizeTrace(JSON.parse(plaintext) as AgentTrace)
+}
+
+/** Initialize encrypted trace storage and migrate legacy plaintext JSONL files. */
+export function initializeTraceStorageSecurity(): TraceStorageInitializationResult {
+  return traceLocalStorage().initialize()
 }
 
 /** Delete the oldest trace files in a thread directory, keeping at most MAX_TRACES_PER_THREAD. */
@@ -1086,7 +1116,7 @@ export function readThreadTraces(threadId: string): AgentTrace[] {
       for (const line of raw.trim().split("\n")) {
         if (!line.trim()) continue
         try {
-          traces.push(normalizeTrace(JSON.parse(line) as AgentTrace))
+          traces.push(parseStoredTraceLine(line))
         } catch {
           /* skip malformed lines */
         }
@@ -1106,7 +1136,7 @@ export function readTraceById(traceId: string): AgentTrace | null {
     const raw = readFileSync(location.filePath, "utf-8")
     for (const line of raw.trim().split("\n")) {
       if (!line.trim()) continue
-      const parsed = normalizeTrace(JSON.parse(line) as AgentTrace)
+      const parsed = parseStoredTraceLine(line)
       if (parsed.traceId === traceId) return parsed
     }
   } catch {
@@ -1140,7 +1170,7 @@ function findTraceLocation(traceId: string): { threadId: string; filePath: strin
         const lines = raw.split("\n").filter((line) => line.trim().length > 0)
         for (const line of lines) {
           try {
-            const parsed = normalizeTrace(JSON.parse(line) as AgentTrace)
+            const parsed = parseStoredTraceLine(line)
             if (parsed.traceId === traceId) return { threadId, filePath }
           } catch {
             // skip malformed lines
@@ -1170,7 +1200,7 @@ export function deleteTraceById(traceId: string): {
     for (const line of lines) {
       if (!line.trim()) continue
       try {
-        const parsed = normalizeTrace(JSON.parse(line) as AgentTrace)
+        const parsed = parseStoredTraceLine(line)
         if (parsed.traceId === traceId) {
           removed = true
           continue

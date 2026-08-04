@@ -2,6 +2,7 @@ import { appendFile, readdir, stat, unlink } from "fs/promises"
 import { existsSync } from "fs"
 import { join, basename } from "path"
 import { getHookLogFilePath, getHookLoggingConfig, resolveHookLogDir } from "../storage"
+import { redactLogValue } from "../log-redaction"
 
 /**
  * Hook execution log persistence — jsonl, one file per local calendar day.
@@ -64,7 +65,10 @@ async function flushNow(): Promise<void> {
     pendingLines = []
     pendingBytes = 0
     try {
-      await appendFile(getHookLogFilePath(), batch, "utf-8")
+      await appendFile(getHookLogFilePath(), batch, {
+        encoding: "utf-8",
+        mode: 0o600
+      })
       consecutiveFlushFailures = 0
     } catch (e) {
       if (consecutiveFlushFailures < MAX_WRITE_RETRIES) {
@@ -104,7 +108,7 @@ export function persistHookExecutionRecord(record: unknown): void {
   if (!cfg.diagnostic) return
   let line: string
   try {
-    line = JSON.stringify(record) + "\n"
+    line = JSON.stringify(redactLogValue(record)) + "\n"
   } catch (e) {
     // Most likely a circular reference somewhere in stdinPayload or stderr —
     // drop silently rather than crash the hook runner.
