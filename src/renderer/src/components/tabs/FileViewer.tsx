@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef } from "react"
+import { useEffect, useState, useMemo, useRef, useCallback } from "react"
 import { Loader2, AlertCircle, FileCode } from "lucide-react"
 import { useThreadState } from "@/lib/thread-context"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
@@ -76,6 +76,34 @@ export function FileViewer({
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
   const lastLoadedReloadTokenRef = useRef<number | undefined>(undefined)
+
+  // Markdown 本地图片读取：相对路径已在 MarkdownPreview 内解析为可读路径，这里返回 base64 内容。
+  const readBinaryDependencyFile = useCallback(
+    async (resolvedPath: string): Promise<string | null> => {
+      if (externalFullPath) {
+        const tokenRes = await window.api.workspace.requestExternalFileRead(resolvedPath)
+        if (!tokenRes.success || !tokenRes.token) {
+          return null
+        }
+        const result = await window.api.workspace.readExternalBinaryFile(tokenRes.token)
+        if (result?.success && typeof result.content === "string") {
+          return result.content
+        }
+        return null
+      }
+
+      const result = threadId
+        ? await window.api.workspace.readBinaryFile(threadId, resolvedPath)
+        : null
+
+      if (result?.success && typeof result.content === "string") {
+        return result.content
+      }
+
+      return null
+    },
+    [externalFullPath, threadId]
+  )
 
   // Reset state when filePath changes
   useEffect(() => {
