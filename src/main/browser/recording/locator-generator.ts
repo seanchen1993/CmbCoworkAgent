@@ -202,12 +202,13 @@ function buildTestIdCandidate(root: string, testId: string | undefined): Locator
 
 function buildSelectorCandidate(root: string, selector: string | undefined): LocatorCandidate | null {
   if (!selector) return null
+  const genericTagOnly = /^[a-z][a-z0-9-]*$/iu.test(selector)
   return buildCandidate(
     "selector",
     `${root}.locator(${quote(selector)})`,
-    70,
+    genericTagOnly ? 25 : 70,
     false,
-    "explicit selector fallback"
+    genericTagOnly ? "generic tag selector fallback" : "explicit selector fallback"
   )
 }
 

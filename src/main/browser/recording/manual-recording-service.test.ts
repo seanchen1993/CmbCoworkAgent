@@ -209,6 +209,56 @@ describe("manual recording service", () => {
     )
   })
 
+  it("prefers the nearest meaningful ancestor when clicking inside decorative icons", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/detail" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "img",
+        tagName: "span",
+        selector: "span"
+      },
+      locatorCandidates: [
+        {
+          role: "img",
+          tagName: "span",
+          selector: "span"
+        },
+        {
+          tagName: "div",
+          target: "编辑",
+          accessibleName: "编辑",
+          textContent: "编辑",
+          selector: "div"
+        },
+        {
+          tagName: "div",
+          testId: "operation-area",
+          target: "operation-area",
+          accessibleName: "编辑",
+          textContent: "编辑",
+          selector: '[data-testid="operation-area"]'
+        }
+      ]
+    })
+
+    const session = stopManualRecording()
+    expect(session.actions).toHaveLength(1)
+    expect(session.actions[0]).toMatchObject({
+      kind: "click",
+      target: "编辑",
+      locator: expect.objectContaining({
+        tagName: "div",
+        accessibleName: "编辑",
+        textContent: "编辑"
+      })
+    })
+    expect(session.script).toContain('await page.getByText("编辑", { exact: true }).click();')
+    expect(session.script).not.toContain('getByTestId("operation-area")')
+  })
+
   it("persists paused draft edits before continuing recording", () => {
     startManualRecording({ threadId: "thread-1" })
     pauseManualRecording()

@@ -927,19 +927,17 @@ export function BrowserAiRecordingControls({
 
         {activeRecordingSource && activeSession ? (
           <>
-            {activeSession.status === "paused" ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={activeRecordingIsBusy}
-                className="h-8 rounded-md px-2 text-[11px] text-muted-foreground hover:text-foreground"
-                onClick={() => openRecordingDialog(activeRecordingSource)}
-              >
-                <FileCode2 className="size-3.5" strokeWidth={1.8} />
-                详情
-              </Button>
-            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={activeRecordingIsBusy}
+              className="h-8 rounded-md px-2 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={() => openRecordingDialog(activeRecordingSource)}
+            >
+              <FileCode2 className="size-3.5" strokeWidth={1.8} />
+              详情
+            </Button>
 
             <Button
               type="button"

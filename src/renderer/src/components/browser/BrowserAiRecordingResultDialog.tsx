@@ -489,7 +489,7 @@ export function BrowserAiRecordingResultDialog({
                     spellCheck={false}
                     value={draftScript}
                     onChange={(e) => onDraftScriptChange(e.target.value)}
-                    className="h-full w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500"
+                    className="h-full min-h-[300px] w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500"
                     placeholder="// No script generated yet."
                   />
                 </div>
