@@ -50,7 +50,8 @@ import type { HookResult } from "../hooks/types"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
-  HarnessProjectModeSubagentConfig
+  HarnessProjectModeSubagentConfig,
+  HarnessRequestUserInputConfig
 } from "../../shared/harness-board-types"
 import {
   createAgent,
@@ -3788,6 +3789,8 @@ export interface CreateAgentRuntimeOptions {
   noSkillEvolutionTool?: boolean
   /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
   enableRequestUserInput?: boolean
+  /** Frozen request_user_input policy for a Harness project feature session. */
+  requestUserInputConfig?: HarnessRequestUserInputConfig
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
   /** Project-mode Solo selection of bundled and explicit user-format subagents. */
@@ -4633,7 +4636,8 @@ The workspace root is: ${workspacePath}`
     extraTools.push(
       createRequestUserInputTool({
         threadId: options.threadId,
-        abortSignal: options.abortSignal
+        abortSignal: options.abortSignal,
+        requestUserInputConfig: options.requestUserInputConfig
       })
     )
   }

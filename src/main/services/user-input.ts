@@ -6,6 +6,8 @@ import { emitAppAttention } from "../app-attention-events"
 interface AutoResolvedUserInputResponse {
   requestId: string
   autoResolved: true
+  answers: UserInputResponse["answers"]
+  message?: string
 }
 
 type UserInputResult = UserInputResponse | AutoResolvedUserInputResponse
@@ -24,6 +26,10 @@ interface RequestUserInputParams {
   threadId: string
   questions: UserInputQuestion[]
   autoResolutionMs?: number
+  autoResolution?: {
+    type: "select_first" | "user_message"
+    message?: string
+  }
   abortSignal?: AbortSignal
 }
 
@@ -80,7 +86,7 @@ function cleanupPending(requestId: string): PendingUserInput | undefined {
 }
 
 export function requestUserInput(params: RequestUserInputParams): Promise<UserInputResult> {
-  const { threadId, questions, autoResolutionMs, abortSignal } = params
+  const { threadId, questions, autoResolutionMs, autoResolution, abortSignal } = params
   if (abortSignal?.aborted) {
     return Promise.reject(new Error("User input request was cancelled before it was shown."))
   }
@@ -144,14 +150,34 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       : setTimeout(() => {
           const pending = cleanupPending(request.requestId)
           if (!pending) return
+          const selectedFirstOption = autoResolution?.type === "select_first"
           sendToThread(threadId, "cancel", {
             requestId: request.requestId,
             reason: "The user input request was automatically resolved."
           })
-          pending.resolve({
+          const answers: UserInputResponse["answers"] = {}
+          if (selectedFirstOption) {
+            for (const question of questions) {
+              const firstOption = question.options[0]
+              if (!firstOption) continue
+              answers[question.id] = {
+                type: "option",
+                questionId: question.id,
+                optionIndex: 0,
+                label: firstOption.label,
+                description: firstOption.description
+              }
+            }
+          }
+          const response: AutoResolvedUserInputResponse = {
             requestId: request.requestId,
-            autoResolved: true
-          })
+            autoResolved: true,
+            answers
+          }
+          if (autoResolution?.type === "user_message" && autoResolution.message) {
+            response.message = autoResolution.message
+          }
+          pending.resolve(response)
         }, autoResolutionMs)
 
     pendingUserInputs.set(request.requestId, {

@@ -108,7 +108,10 @@ import {
   type CheckpointTuple
 } from "@langchain/langgraph-checkpoint"
 import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
-import { buildHarnessFeatureAgentContext } from "../harness-board/service"
+import {
+  buildHarnessFeatureAgentContext,
+  DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
+} from "../harness-board/service"
 import {
   acquireSubagentTranscriptBlobReadPin,
   advanceSubagentTranscriptReferenceEpoch,
@@ -2250,6 +2253,18 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     const threadId = uuid()
     // 先拷贝一份，避免直接修改调用方传入的 metadata 对象。
     const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
+    const harnessFeatureMetadata =
+      nextMetadata.harnessFeature &&
+      typeof nextMetadata.harnessFeature === "object" &&
+      !Array.isArray(nextMetadata.harnessFeature)
+        ? (nextMetadata.harnessFeature as Record<string, unknown>)
+        : undefined
+    if (harnessFeatureMetadata) {
+      nextMetadata.harnessFeature = {
+        ...harnessFeatureMetadata,
+        requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+      }
+    }
 
     // 仅当调用方没有显式传 workspacePath 时，才自动继承最近工作区。
     // 这样可以兼容两种场景：
@@ -2268,11 +2283,26 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }
     }
 
+    let harnessContext: ReturnType<typeof buildHarnessFeatureAgentContext> | null = null
+    try {
+      const workspacePath =
+        typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
+      harnessContext = buildHarnessFeatureAgentContext(nextMetadata, {
+        workspacePath,
+        requestUserInputConfigSource: "plugin"
+      })
+      if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
+        nextMetadata.harnessFeature = {
+          ...harnessFeatureMetadata,
+          requestUserInputConfig: harnessContext.agentConfig.toolConfig.requestUserInput
+        }
+      }
+    } catch (error) {
+      console.warn("[Threads] Failed to resolve Harness request_user_input policy:", error)
+    }
+
     if (!Object.prototype.hasOwnProperty.call(nextMetadata, "agentMode")) {
       try {
-        const workspacePath =
-          typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
-        const harnessContext = buildHarnessFeatureAgentContext(nextMetadata, { workspacePath })
         const initialAgentMode = harnessContext?.agentConfig?.agentMode
         if (initialAgentMode === "solo") {
           nextMetadata.agentMode = "normal"

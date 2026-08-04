@@ -36,6 +36,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessProjectModeSubagentConfig,
+  HarnessRequestUserInputConfig,
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionContextInjectionSource,
@@ -2728,6 +2729,8 @@ export interface HarnessFeatureAgentContext {
 
 export interface HarnessFeatureAgentContextOptions {
   workspacePath?: string
+  /** Resolve tool policy from the plugin while a project feature session is created. */
+  requestUserInputConfigSource?: "plugin" | "session_snapshot"
 }
 
 function isHarnessSessionContextOk(value: unknown): boolean {
@@ -2739,6 +2742,54 @@ export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"
 export interface HarnessAgentConfig {
   agentMode?: HarnessRuntimeAgentMode
   subagentConfig?: HarnessProjectModeSubagentConfig
+  toolConfig?: {
+    requestUserInput?: HarnessRequestUserInputConfig
+  }
+}
+
+export const DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: HarnessRequestUserInputConfig = {
+  allowAutoResolution: false,
+  autoResolutionType: "select_first"
+}
+
+const REQUEST_USER_INPUT_TIMEOUT_MIN_MS = 30_000
+const REQUEST_USER_INPUT_TIMEOUT_MAX_MS = 240_000
+const REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS = 1_000
+
+function normalizeHarnessRequestUserInputConfig(
+  value: unknown
+): HarnessRequestUserInputConfig | undefined {
+  if (!isObject(value)) return undefined
+
+  if (value.allowAutoResolution !== true) {
+    return { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+  }
+
+  const defaultTimeoutMs =
+    typeof value.defaultTimeoutMs === "number" &&
+    Number.isInteger(value.defaultTimeoutMs) &&
+    value.defaultTimeoutMs >= REQUEST_USER_INPUT_TIMEOUT_MIN_MS &&
+    value.defaultTimeoutMs <= REQUEST_USER_INPUT_TIMEOUT_MAX_MS
+      ? value.defaultTimeoutMs
+      : undefined
+  const userMessage = normalizeText(value.userMessage).trim()
+  const autoResolutionType = value.autoResolutionType === "user_message" && userMessage
+    ? "user_message"
+    : "select_first"
+
+  return {
+    allowAutoResolution: true,
+    ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+    autoResolutionType,
+    ...(autoResolutionType === "user_message"
+      ? { userMessage: userMessage.slice(0, REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS) }
+      : {})
+  }
+}
+
+function resolveHarnessRequestUserInputConfig(value: unknown): HarnessRequestUserInputConfig {
+  const normalized = normalizeHarnessRequestUserInputConfig(value)
+  return normalized ?? { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
 }
 
 function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undefined {
@@ -2770,10 +2821,17 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
       }
     : undefined
 
-  if (!agentMode && !subagentConfig) return undefined
+  const requestUserInputConfig = isObject(value.toolConfig)
+    ? normalizeHarnessRequestUserInputConfig(value.toolConfig.requestUserInput)
+    : undefined
+
+  if (!agentMode && !subagentConfig && !requestUserInputConfig) return undefined
   return {
     ...(agentMode ? { agentMode } : {}),
-    ...(subagentConfig ? { subagentConfig } : {})
+    ...(subagentConfig ? { subagentConfig } : {}),
+    ...(requestUserInputConfig
+      ? { toolConfig: { requestUserInput: requestUserInputConfig } }
+      : {})
   }
 }
 
@@ -2897,7 +2955,18 @@ export function buildHarnessFeatureAgentContext(
   const sessionContextInjectResult = usePluginAgentsPrompt
     ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, { sessionWorkspacePath })
     : undefined
-  const agentConfig = sessionContextInjectResult?.agentConfig
+  const pluginAgentConfig = sessionContextInjectResult?.agentConfig
+  const persistedToolConfig = isObject(metadata) && isObject(metadata.harnessFeature)
+    ? metadata.harnessFeature.requestUserInputConfig
+    : undefined
+  const requestUserInputConfig =
+    options.requestUserInputConfigSource === "plugin"
+      ? resolveHarnessRequestUserInputConfig(pluginAgentConfig?.toolConfig?.requestUserInput)
+      : resolveHarnessRequestUserInputConfig(persistedToolConfig)
+  const agentConfig: HarnessAgentConfig = {
+    ...(pluginAgentConfig ?? {}),
+    toolConfig: { requestUserInput: requestUserInputConfig }
+  }
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
   const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
   const additionalWorkspaceRootMappings = resolveHarnessAdditionalWorkspaceRootMappings(
