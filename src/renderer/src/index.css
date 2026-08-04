@@ -752,6 +752,11 @@
   height: auto;
 }
 
+.streaming-markdown pre{
+  width: 100%;
+  overflow: auto;
+}
+
 /* Window drag region for frameless window */
 .app-drag-region {
   -webkit-app-region: drag;
