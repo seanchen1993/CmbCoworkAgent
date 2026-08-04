@@ -4,8 +4,17 @@ import {
   buildVisibleMessageLayout,
   messageHasVisibleRow,
   messageRendersNothing,
-  messageVisibleReasoningLength
+  messageVisibleReasoningLength,
+  shouldAutoCollapseReasoning
 } from "../src/renderer/src/lib/message-display-visibility.ts"
+import {
+  areMessageRenderFieldsEqual,
+  areMessageToolRenderInputsEqual,
+  areToolDerivationMessagesEqual,
+  createToolDerivationMessageSelector,
+  selectToolDerivationMessages
+} from "../src/renderer/src/lib/message-render-stability.ts"
+import { getWorkerToolUiKey } from "../src/renderer/src/lib/worker-tool-result-key.ts"
 import {
   normalizeHookLogTurnId,
   resolveHookLogUserMessage
@@ -253,6 +262,29 @@ function testReasoningGrowthChangesScrollLength(): void {
     messageVisibleReasoningLength({ reasoning: "<think>one two</think>" }),
     7,
     "streamed reasoning growth should change the scroll signature"
+  )
+}
+
+function testStreamingReasoningCollapsesWhenToolCallStarts(): void {
+  assertEqual(
+    shouldAutoCollapseReasoning({
+      isStreaming: true,
+      reasoningText: "thinking",
+      hasVisibleAssistantContent: false,
+      hasToolCalls: false
+    }),
+    false,
+    "reasoning should stay open while it is the only streaming output"
+  )
+  assertEqual(
+    shouldAutoCollapseReasoning({
+      isStreaming: true,
+      reasoningText: "thinking",
+      hasVisibleAssistantContent: false,
+      hasToolCalls: true
+    }),
+    true,
+    "the first tool call should collapse the preceding reasoning"
   )
 }
 
@@ -971,6 +1003,107 @@ function testMessageVisibilityMatchesMessageBubbleBranches(): void {
   )
 }
 
+function testReasoningUpdatesKeepToolDerivationsAndHistoryBubblesStable(): void {
+  const createdAt = new Date("2026-07-20T00:00:00.000Z")
+  const toolCallMessage: Message = {
+    id: "assistant-tool-call",
+    role: "assistant",
+    content: "",
+    tool_calls: [{ id: "call-1", name: "read_file", args: { path: "README.md" } }],
+    created_at: createdAt
+  }
+  const messages: Message[] = [
+    { id: "user", role: "user", content: "inspect", created_at: createdAt },
+    toolCallMessage,
+    {
+      id: "tool-result",
+      role: "tool",
+      content: { ok: true },
+      tool_call_id: "call-1",
+      created_at: createdAt
+    },
+    {
+      id: "active-reasoning",
+      role: "assistant",
+      content: "",
+      reasoning: "first snapshot",
+      created_at: createdAt
+    }
+  ]
+  const updatedMessages = messages.map((message) => ({
+    ...message,
+    created_at: new Date(message.created_at?.getTime() ?? 0)
+  }))
+  updatedMessages[3] = { ...updatedMessages[3], reasoning: "second snapshot" }
+
+  const selectStableToolMessages = createToolDerivationMessageSelector()
+  const initialToolMessages = selectStableToolMessages(messages)
+  const updatedToolMessages = selectStableToolMessages(updatedMessages)
+
+  assertEqual(
+    areToolDerivationMessagesEqual(
+      selectToolDerivationMessages(messages),
+      selectToolDerivationMessages(updatedMessages)
+    ),
+    true,
+    "reasoning-only updates must not invalidate global tool derivations"
+  )
+  assertEqual(
+    updatedToolMessages === initialToolMessages,
+    true,
+    "the tool derivation selector should preserve its array identity across reasoning updates"
+  )
+  assertEqual(
+    areMessageRenderFieldsEqual(messages[1], updatedMessages[1]),
+    true,
+    "a cloned but unchanged history message should keep its memo boundary"
+  )
+  assertEqual(
+    areMessageRenderFieldsEqual(messages[3], updatedMessages[3]),
+    false,
+    "the actively growing reasoning message must still render"
+  )
+
+  const toolKey = getWorkerToolUiKey(toolCallMessage.id, "call-1", 0)
+  const previousInputs = {
+    toolResults: new Map([[toolKey, { content: { ok: true }, is_error: false }]]),
+    toolCallStates: new Map([
+      [
+        toolKey,
+        {
+          id: "call-1",
+          status: "completed" as const,
+          name: "read_file",
+          args: { path: "README.md" },
+          updatedAt: new Date("2026-07-20T00:00:01.000Z")
+        }
+      ]
+    ]),
+    pendingApprovalToolCallKeys: new Set<string>()
+  }
+  const nextInputs = {
+    toolResults: new Map([[toolKey, { content: { ok: true }, is_error: false }]]),
+    toolCallStates: new Map([
+      [
+        toolKey,
+        {
+          id: "call-1",
+          status: "completed" as const,
+          name: "read_file",
+          args: { path: "README.md" },
+          updatedAt: new Date("2026-07-20T00:00:02.000Z")
+        }
+      ]
+    ]),
+    pendingApprovalToolCallKeys: new Set<string>()
+  }
+  assertEqual(
+    areMessageToolRenderInputsEqual(toolCallMessage, previousInputs, nextInputs),
+    true,
+    "new global map identities must not rerender a history bubble when its own tool state is unchanged"
+  )
+}
+
 function testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas(): void {
   const createdAt = new Date("2026-07-20T00:00:00.000Z")
   const sharedId = "scheduler-shared-id"
@@ -1183,6 +1316,10 @@ const tests: Array<[string, () => void]> = [
   ],
   ["testReasoningGrowthChangesScrollLength", testReasoningGrowthChangesScrollLength],
   [
+    "testStreamingReasoningCollapsesWhenToolCallStarts",
+    testStreamingReasoningCollapsesWhenToolCallStarts
+  ],
+  [
     "testQueuedCrossRoleUpdatesUsePersistedKeeperOrder",
     testQueuedCrossRoleUpdatesUsePersistedKeeperOrder
   ],
@@ -1244,6 +1381,10 @@ const tests: Array<[string, () => void]> = [
   [
     "testMessageVisibilityMatchesMessageBubbleBranches",
     testMessageVisibilityMatchesMessageBubbleBranches
+  ],
+  [
+    "testReasoningUpdatesKeepToolDerivationsAndHistoryBubblesStable",
+    testReasoningUpdatesKeepToolDerivationsAndHistoryBubblesStable
   ],
   [
     "testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas",

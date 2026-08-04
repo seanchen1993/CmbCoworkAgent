@@ -101,6 +101,7 @@ import {
   buildVisibleMessageLayout,
   messageHasVisibleRow
 } from "@/lib/message-display-visibility"
+import { createToolDerivationMessageSelector } from "@/lib/message-render-stability"
 import {
   isCoordinatorModeMetadata,
   isMultiModeMetadata,
@@ -1188,6 +1189,11 @@ function isTerminalToolCallStatus(status?: ToolCallStatus): boolean {
     status === "interrupted" ||
     status === "rejected"
   )
+}
+
+function useStableToolDerivationMessages(messages: readonly Message[]): readonly Message[] {
+  const [selectStableMessages] = useState(createToolDerivationMessageSelector)
+  return selectStableMessages(messages)
 }
 
 const THINKING_MESSAGES = [
@@ -3451,9 +3457,10 @@ export function ChatContainer({
     return { showAssistantMeta, hasUserAfterHead }
   }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
 
+  const toolDerivationMessages = useStableToolDerivationMessages(displayMessages)
   const toolResults = useMemo(
-    () => buildToolResultAssociations(displayMessages),
-    [displayMessages]
+    () => buildToolResultAssociations(toolDerivationMessages),
+    [toolDerivationMessages]
   )
 
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
@@ -3467,7 +3474,7 @@ export function ChatContainer({
       call: { id: string; name: string; args: Record<string, unknown> }
     }> = []
 
-    for (const message of displayMessages) {
+    for (const message of toolDerivationMessages) {
       if (!Array.isArray(message.tool_calls)) continue
       message.tool_calls.forEach((toolCall, index) => {
         if (!toolCall?.id) return
@@ -3542,7 +3549,7 @@ export function ChatContainer({
       toolCallDisplayStates: nextStates,
       pendingApprovalToolCallKeys: approvalKeys
     }
-  }, [displayMessages, isLoading, pendingApproval, toolCallStates, toolResults])
+  }, [isLoading, pendingApproval, toolCallStates, toolDerivationMessages, toolResults])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
