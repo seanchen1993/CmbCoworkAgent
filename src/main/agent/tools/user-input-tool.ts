@@ -1,6 +1,7 @@
 import { tool } from "langchain"
 import { z } from "zod"
 import { requestUserInput, UserInputRequestRejectedError } from "../../services/user-input"
+import type { UserInputQuestion } from "../../types"
 import type { HarnessRequestUserInputConfig } from "../../../shared/harness-board-types"
 
 const optionSchema = z.object({
@@ -20,9 +21,13 @@ const questionSchema = z.object({
   question: z.string().min(1).max(500).describe(
     "Single-sentence prompt shown to the user."
   ),
-  options: z.array(optionSchema).min(2).max(5).describe(
-    "Provide 2-5 mutually exclusive choices. Put the recommended option first and suffix its label with '(Recommended)'. Do not include an 'Other' option; the client adds free-form Other automatically."
-  )
+  options: z
+    .array(optionSchema)
+    .min(2)
+    .max(5)
+    .describe(
+      "Provide 2-5 mutually exclusive choices. Put the recommended option first and suffix its label with '(Recommended)'. Do not include a free-form choice such as 'Other', 'I want to add more', or 'Custom answer'; the client adds a text entry automatically."
+    )
 })
 
 const questionsSchema = z.object({
@@ -63,6 +68,25 @@ const requestUserInputWithAutoResolutionSchema = questionsSchema
   })
   .superRefine(validateQuestionIds)
 
+function isFreeformOption(label: string): boolean {
+  const normalized = label.trim().toLowerCase()
+  const compact = normalized.replace(/[\s\p{P}\p{S}]/gu, "")
+
+  return (
+    /^(其他|其它|other)(?:[\s:：,，、\-—_].+|[（(].+[）)])?$/iu.test(normalized) ||
+    /^(不对|不是这样).*(补充|说明|填写|自定义)/u.test(compact) ||
+    /^(我来)?(补充|自定义|填写).*/u.test(compact) ||
+    /^(以上都不|以上均不|都不是|无上述|没有合适)/u.test(compact)
+  )
+}
+
+function removeFreeformOptions(questions: UserInputQuestion[]): UserInputQuestion[] {
+  return questions.map((question) => ({
+    ...question,
+    options: question.options.filter((option) => !isFreeformOption(option.label))
+  }))
+}
+
 interface RequestUserInputToolContext {
   threadId: string
   abortSignal?: AbortSignal
@@ -93,7 +117,7 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
           "The user did not answer within the configured time. Do not infer or assume any option selections; continue with your best judgment."
         const response = await requestUserInput({
           threadId: context.threadId,
-          questions: input.questions,
+          questions: removeFreeformOptions(input.questions),
           autoResolutionMs,
           autoResolution: {
             type: autoResolutionType,
