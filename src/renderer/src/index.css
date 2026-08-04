@@ -503,6 +503,17 @@
   white-space: pre;
 }
 
+/* File preview (.md 文件预览) hljs 代码块背景 */
+.markdown-preview code.hljs {
+  background: rgb(241 245 249 / 0.6);
+  border-radius: 10px;
+}
+
+.dark .markdown-preview code.hljs {
+  background: #334155;
+  border-radius: 10px;
+}
+
 .streaming-markdown-code-pre .hljs-keyword,
 .streaming-markdown-code-pre .hljs-selector-tag,
 .streaming-markdown-code-pre .hljs-built_in,
@@ -696,6 +707,17 @@
 
 .streaming-markdown td code {
   white-space: nowrap;
+}
+
+/* md 文件预览（MarkdownPreview）中表格单元格代码允许换行 */
+.markdown-preview .streaming-markdown td code {
+  white-space: normal;
+}
+
+/* md 文件预览中表格文字强制左对齐，覆盖 GFM 对齐标记（:---: / ---:）产生的中/右对齐 */
+.markdown-preview .streaming-markdown th,
+.markdown-preview .streaming-markdown td {
+  text-align: left !important;
 }
 
 .streaming-markdown th:last-child,
