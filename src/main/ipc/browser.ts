@@ -4,9 +4,36 @@ import { syncPlaywrightMcpConnectorForBrowserCdpConfig } from "../browser/cdp/br
 import { setGlobalBrowserService } from "../browser/core/browser-service-registry"
 import {
   getAiRecording,
+  pauseAiRecording,
+  resumeAiRecording,
   startAiRecording,
-  stopAiRecording
+  stopAiRecording,
+  updateAiRecordingDraft
 } from "../browser/recording/ai-recording-service"
+import {
+  getManualRecording,
+  installManualRecorderForSubtree,
+  pauseManualRecording,
+  resumeManualRecording,
+  startManualRecording,
+  stopManualRecording,
+  updateManualRecordingDraft
+} from "../browser/recording/manual-recording-service"
+import {
+  deleteBrowserScriptLibraryEntry,
+  listBrowserScriptLibraryEntries,
+  readBrowserScriptLibraryScript,
+  saveBrowserScriptLibraryEntry,
+  updateBrowserScriptLibraryEntry
+} from "../browser/recording/browser-script-library-service"
+import type {
+  BrowserRecordingDraftUpdateInput,
+  BrowserScriptLibraryDeleteInput,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput
+} from "../../shared/browser-types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { getBrowserCdpConfigAsync, saveBrowserCdpConfigAsync } from "../storage"
 import { BUILTIN_BROWSER_LOG_PREFIX } from "../../shared/browser-types"
@@ -16,6 +43,7 @@ import type {
   AiRecordingSession,
   BrowserBounds,
   BrowserCdpConfig,
+  ManualRecordingStartOptions,
   BrowserNavigateOptions
 } from "../../shared/browser-types"
 
@@ -80,10 +108,87 @@ export function registerBrowserHandlers(
     (_event, options?: AiRecordingStartOptions): AiRecordingSession => startAiRecording(options)
   )
 
+  ipcMain.handle("browser:pauseAiRecording", (): AiRecordingSession => pauseAiRecording())
+
+  ipcMain.handle(
+    "browser:updateAiRecordingDraft",
+    (_event, input: BrowserRecordingDraftUpdateInput): AiRecordingSession =>
+      updateAiRecordingDraft(input)
+  )
+
+  ipcMain.handle("browser:resumeAiRecording", (): AiRecordingSession => resumeAiRecording())
+
   ipcMain.handle("browser:stopAiRecording", (): AiRecordingSession => stopAiRecording())
 
   ipcMain.handle("browser:getAiRecording", (): AiRecordingSession => getAiRecording())
 
+  ipcMain.handle(
+    "browser:startManualRecording",
+    async (_event, options?: ManualRecordingStartOptions): Promise<AiRecordingSession> => {
+      const session = startManualRecording(options)
+      const webContents = browserService.getWebContents()
+      if (webContents) {
+        await installManualRecorderForSubtree(webContents.mainFrame)
+      }
+      return session
+    }
+  )
+
+  ipcMain.handle("browser:pauseManualRecording", (): AiRecordingSession => pauseManualRecording())
+
+  ipcMain.handle(
+    "browser:updateManualRecordingDraft",
+    (_event, input: BrowserRecordingDraftUpdateInput): AiRecordingSession =>
+      updateManualRecordingDraft(input)
+  )
+
+  ipcMain.handle("browser:resumeManualRecording", async (): Promise<AiRecordingSession> => {
+    const session = resumeManualRecording()
+    const webContents = browserService.getWebContents()
+    if (webContents) {
+      await installManualRecorderForSubtree(webContents.mainFrame)
+    }
+    return session
+  })
+
+  ipcMain.handle("browser:stopManualRecording", (): AiRecordingSession => stopManualRecording())
+
+  ipcMain.handle("browser:getManualRecording", (): AiRecordingSession => getManualRecording())
+
+  ipcMain.handle(
+    "browser:saveScriptLibraryEntry",
+    async (_event, input: BrowserScriptLibrarySaveInput) => {
+      return saveBrowserScriptLibraryEntry(input)
+    }
+  )
+
+  ipcMain.handle(
+    "browser:listScriptLibraryEntries",
+    async (_event, options?: BrowserScriptLibraryListOptions) => {
+      return listBrowserScriptLibraryEntries(options)
+    }
+  )
+
+  ipcMain.handle(
+    "browser:readScriptLibraryScript",
+    async (_event, input: BrowserScriptLibraryReadInput) => {
+      return readBrowserScriptLibraryScript(input)
+    }
+  )
+
+  ipcMain.handle(
+    "browser:updateScriptLibraryEntry",
+    async (_event, input: BrowserScriptLibraryUpdateInput) => {
+      return updateBrowserScriptLibraryEntry(input)
+    }
+  )
+
+  ipcMain.handle(
+    "browser:deleteScriptLibraryEntry",
+    async (_event, input: BrowserScriptLibraryDeleteInput) => {
+      return deleteBrowserScriptLibraryEntry(input)
+    }
+  )
 
   ipcMain.handle(
     "browser:saveCdpConfig",
@@ -102,8 +207,7 @@ export function registerBrowserHandlers(
         sanitized.port = updates.port
       }
       const saved = await saveBrowserCdpConfigAsync(sanitized)
-      const { invalidateCapabilities } =
-        await syncPlaywrightMcpConnectorForBrowserCdpConfig(saved)
+      const { invalidateCapabilities } = await syncPlaywrightMcpConnectorForBrowserCdpConfig(saved)
       if (invalidateCapabilities) {
         await invalidateGlobalMcpCapabilityService("browser:saveCdpConfig")
       }

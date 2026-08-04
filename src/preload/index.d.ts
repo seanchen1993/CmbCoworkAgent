@@ -106,16 +106,24 @@ import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
 import type {
-  AiRecordingSession,
   AiRecordingStartOptions,
+  AiRecordingSession,
   BrowserAttachOptions,
   BrowserBounds,
   BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
   BrowserNavigateOptions,
   BrowserPanelRequest,
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
+  BrowserRecordingDraftUpdateInput,
   BrowserScreenshotResult,
+  ManualRecordingStartOptions,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput,
   BrowserState
 } from "../shared/browser-types"
 import type {
@@ -1693,15 +1701,33 @@ interface CustomAPI {
     clearConsole: () => Promise<BrowserState>
     getState: () => Promise<BrowserState>
     startAiRecording: (options?: AiRecordingStartOptions) => Promise<AiRecordingSession>
+    pauseAiRecording: () => Promise<AiRecordingSession>
+    updateAiRecordingDraft: (input: BrowserRecordingDraftUpdateInput) => Promise<AiRecordingSession>
+    resumeAiRecording: () => Promise<AiRecordingSession>
     stopAiRecording: () => Promise<AiRecordingSession>
     getAiRecording: () => Promise<AiRecordingSession>
+    startManualRecording: (options?: ManualRecordingStartOptions) => Promise<AiRecordingSession>
+    pauseManualRecording: () => Promise<AiRecordingSession>
+    updateManualRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ) => Promise<AiRecordingSession>
+    resumeManualRecording: () => Promise<AiRecordingSession>
+    stopManualRecording: () => Promise<AiRecordingSession>
+    getManualRecording: () => Promise<AiRecordingSession>
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ) => Promise<BrowserScriptLibraryEntry>
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ) => Promise<BrowserScriptLibraryEntry[]>
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
+    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput) => Promise<void>
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
     getCdpConfig: () => Promise<BrowserCdpConfig>
     isProfileImportRuntimeEnabled: () => Promise<boolean>
     saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
     captureScreenshot: () => Promise<BrowserScreenshotResult>
-    importProfileData: (
-      options: BrowserProfileImportOptions
-    ) => Promise<BrowserProfileImportResult>
+    importProfileData: (options: BrowserProfileImportOptions) => Promise<BrowserProfileImportResult>
     disposeAllForRendererUnload: () => void
     onState: (callback: (state: BrowserState) => void) => () => void
     onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void

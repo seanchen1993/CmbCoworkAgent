@@ -149,6 +149,11 @@ export async function preparePlaywrightInAppBrowser(options: {
   const service = options.service === undefined ? getGlobalBrowserService() : options.service
   if (!service) throw new Error("In-app browser service is unavailable")
 
+  const cdpPort = getCurrentBrowserCdpPort()
+  if (cdpPort === null) {
+    throw new Error("Browser CDP endpoint is not configured")
+  }
+
   // 主动请求切到右侧浏览器面板，让 renderer 端挂载 BrowserPanel 并触发 attach。
   service.requestPanel(options.threadId)
 
@@ -210,6 +215,7 @@ export async function invokeMcpToolWithPlaywrightInAppBrowserSupport(options: {
     recordSuccessfulAiBrowserToolCall({
       toolName: options.tool.toolName,
       args: options.args ?? {},
+      resultText: result.text,
       threadId: options.threadId
     })
   }

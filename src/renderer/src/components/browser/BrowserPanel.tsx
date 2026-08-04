@@ -221,7 +221,10 @@ function BrowserProfileImportResultPanel({
                   key={`part-${site.domain}`}
                   className="flex items-center justify-between rounded-sm px-1.5 py-0.5 text-[11px] leading-4 hover:bg-background"
                 >
-                  <span className="min-w-0 truncate text-foreground" title={site.url || site.domain}>
+                  <span
+                    className="min-w-0 truncate text-foreground"
+                    title={site.url || site.domain}
+                  >
                     {site.url || site.domain}
                   </span>
                   <span className="ml-2 shrink-0 tabular-nums text-muted-foreground">
@@ -249,7 +252,10 @@ function BrowserProfileImportResultPanel({
                   key={`rej-${site.domain}`}
                   className="flex items-center justify-between rounded-sm px-1.5 py-0.5 text-[11px] leading-4 hover:bg-background"
                 >
-                  <span className="min-w-0 truncate text-foreground" title={site.url || site.domain}>
+                  <span
+                    className="min-w-0 truncate text-foreground"
+                    title={site.url || site.domain}
+                  >
                     {site.url || site.domain}
                   </span>
                   <span className="ml-2 shrink-0 tabular-nums text-muted-foreground">
@@ -427,7 +433,9 @@ export function BrowserPanel({
   }, [])
 
   useEffect(() => {
-    console.info(`${BROWSER_PANEL_LOG_PREFIX} Subscribing to Browser state channel for ${BROWSER_SESSION_ID}.`)
+    console.info(
+      `${BROWSER_PANEL_LOG_PREFIX} Subscribing to Browser state channel for ${BROWSER_SESSION_ID}.`
+    )
     const unsubscribe = window.api.browser.onState((nextState) => {
       const previousState = lastObservedStateRef.current
       if (!previousState || !browserStatesEqual(previousState, nextState)) {
@@ -442,7 +450,9 @@ export function BrowserPanel({
       }
     })
     return () => {
-      console.info(`${BROWSER_PANEL_LOG_PREFIX} Unsubscribing Browser state channel for ${BROWSER_SESSION_ID}.`)
+      console.info(
+        `${BROWSER_PANEL_LOG_PREFIX} Unsubscribing Browser state channel for ${BROWSER_SESSION_ID}.`
+      )
       unsubscribe()
     }
   }, [applyBrowserState])
@@ -662,7 +672,9 @@ export function BrowserPanel({
         if (!isUrlFocusedRef.current) {
           setUrlInput(nextState.url || target)
         }
-        console.info(`${BROWSER_PANEL_LOG_PREFIX} Initial URL opened as ${nextState.url || target}.`)
+        console.info(
+          `${BROWSER_PANEL_LOG_PREFIX} Initial URL opened as ${nextState.url || target}.`
+        )
       })
       .catch((error) => {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Initial URL open failed: ${formatError(error)}`)
@@ -737,7 +749,9 @@ export function BrowserPanel({
     try {
       const payload = state.consoleEntries
         .map((entry) => {
-          const source = entry.sourceId ? ` ${entry.sourceId}${entry.line ? `:${entry.line}` : ""}` : ""
+          const source = entry.sourceId
+            ? ` ${entry.sourceId}${entry.line ? `:${entry.line}` : ""}`
+            : ""
           return `[${formatConsoleTime(entry.timestamp)}] ${entry.level.toUpperCase()}${source} ${entry.message}`
         })
         .join("\n")
@@ -780,17 +794,16 @@ export function BrowserPanel({
         setBrowserProfileImportSkippedWebsites([])
         if (result.cancelled) return
         if (result.errorCode === "native_host_not_registered") {
-          toast.error(result.error || "Chrome Native Messaging Host 尚未注册，请重启应用", {
+          toast.error(result.error || "请重启应用", {
             duration: 15_000
           })
         } else if (result.errorCode === "extension_not_connected") {
-          const extensionIdHint = result.extensionId ? `；预期扩展 ID：${result.extensionId}` : ""
           toast.error(
-            `Chrome 扩展未连接，请确认扩展已安装并启用，且 Chrome 正在运行${extensionIdHint}`,
+            `Chrome插件未连接！`,
             { duration: 15_000 }
           )
         } else if (result.errorCode === "permission_required") {
-          toast.error("请在 CmbCoworkAgent Chrome 扩展中授权网站 Cookie 访问", {
+          toast.error("Chrome插件未授权！", {
             duration: 15_000
           })
         } else {
@@ -807,10 +820,13 @@ export function BrowserPanel({
       const skipped = (result.skippedCookies ?? 0) + (result.skippedLocalStorage ?? 0)
       const summary = `导入 Cookie ${importedCookies} 条，localStorage ${importedLocalStorage} 条`
       const profileLabel = result.profileDirectory ? `（${result.profileDirectory}）` : ""
-      const message = skipped > 0 ? `${summary}${profileLabel}，跳过 ${skipped} 条` : `${summary}${profileLabel}`
+      const message =
+        skipped > 0 ? `${summary}${profileLabel}，跳过 ${skipped} 条` : `${summary}${profileLabel}`
       if (skippedWebsites.length > 0) {
         const fullList = skippedWebsites.map(formatSkippedWebsite).join("\n")
-        console.info(`${BROWSER_PANEL_LOG_PREFIX} Browser profile import skipped websites:\n${fullList}`)
+        console.info(
+          `${BROWSER_PANEL_LOG_PREFIX} Browser profile import skipped websites:\n${fullList}`
+        )
       }
       if (result.warning) {
         toast.warning(`${result.warning}（${message}）`, { duration: 12_000 })
@@ -818,7 +834,9 @@ export function BrowserPanel({
         toast.success(message, { duration: 10_000 })
       }
     } catch (error) {
-      console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser profile import failed: ${formatError(error)}`)
+      console.error(
+        `${BROWSER_PANEL_LOG_PREFIX} Browser profile import failed: ${formatError(error)}`
+      )
       toast.error("浏览器数据导入失败", { duration: 15_000 })
     } finally {
       setIsImportingBrowserProfile(false)
@@ -856,7 +874,7 @@ export function BrowserPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
-      <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
+      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
         <IconPopoverButton
           className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
           icon={<ArrowLeft className="size-4" strokeWidth={1.8} />}
@@ -1006,12 +1024,17 @@ export function BrowserPanel({
       </div>
 
       {aiRecordingBoxOpen && (
-        <div className="shrink-0 border-t border-border bg-background px-3 py-2">
-          <BrowserAiRecordingControls threadId={threadId} browserCreated={state.created} />
+        <div className="shrink-0 border-t border-border bg-background px-2 py-1">
+          <BrowserAiRecordingControls
+            browserCreated={state.created}
+            currentUrl={state.url}
+            threadId={threadId}
+            workspacePath={workspacePath}
+          />
         </div>
       )}
 
-      <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-background-elevated px-2 py-2">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-background-elevated h-10">
         <div className="flex min-w-0 items-center gap-2">
           <IconPopoverButton
             className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
@@ -1061,20 +1084,20 @@ export function BrowserPanel({
             disabled={isCapturing || !state.created}
             onClick={captureScreenshot}
           />
+          <IconPopoverButton
+            className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+            side="left"
+            icon={<Video className="size-4" strokeWidth={1.8} />}
+            popoverContent="录制自动化脚本"
+            aria-label="录制自动化脚本"
+            aria-pressed={aiRecordingBoxOpen}
+            onClick={() => setAiRecordingBoxOpen((open) => !open)}
+          />
         </div>
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          side="left"
-          icon={<Video className="size-4" strokeWidth={1.8} />}
-          popoverContent="AI 录制自动化脚本"
-          aria-label="AI 录制自动化脚本"
-          aria-pressed={aiRecordingBoxOpen}
-          onClick={() => setAiRecordingBoxOpen((open) => !open)}
-        />
       </div>
 
       {consoleOpen && (
-        <div className="shrink-0 border-t border-border bg-background">
+        <div className="shrink-0 border-t border-border bg-white">
           <div className="flex h-9 items-center justify-between gap-2 px-3 text-[11px] text-muted-foreground">
             <div className="flex min-w-0 items-center gap-2">
               <Terminal className="size-3.5 shrink-0" strokeWidth={1.8} />
@@ -1119,10 +1142,10 @@ export function BrowserPanel({
           </div>
           <div
             ref={consoleScrollerRef}
-            className="h-44 overflow-auto border-t border-border/70 bg-[#0b0f14] px-3 py-2 font-mono text-[11px] leading-5 text-slate-100"
+            className="h-44 overflow-auto border-t border-border/70 bg-white px-3 py-2 font-mono text-[11px] leading-5 text-slate-900"
           >
             {consoleCount === 0 ? (
-              <div className="flex h-full items-center justify-center text-slate-400">
+              <div className="flex h-full items-center justify-center text-slate-500">
                 暂无 console 输出
               </div>
             ) : (
@@ -1149,15 +1172,15 @@ function formatConsoleTime(timestamp: string): string {
 function getConsoleLevelClass(level: BrowserConsoleEntry["level"]): string {
   switch (level) {
     case "error":
-      return "text-rose-300"
+      return "text-rose-600"
     case "warn":
-      return "text-amber-300"
+      return "text-amber-600"
     case "info":
-      return "text-sky-300"
+      return "text-sky-600"
     case "debug":
-      return "text-violet-300"
+      return "text-violet-600"
     default:
-      return "text-slate-300"
+      return "text-slate-600"
   }
 }
 
@@ -1169,7 +1192,7 @@ function ConsoleRow({ entry }: { entry: BrowserConsoleEntry }): React.JSX.Elemen
     <div className="grid grid-cols-[64px_48px_minmax(0,1fr)] gap-3 py-1">
       <span className="text-slate-500">{formatConsoleTime(entry.timestamp)}</span>
       <span className={getConsoleLevelClass(entry.level)}>{entry.level.toUpperCase()}</span>
-      <div className="min-w-0 whitespace-pre-wrap break-words text-slate-100">
+      <div className="min-w-0 whitespace-pre-wrap break-words text-slate-900">
         {sourceLabel && <span className="mr-2 text-slate-500">{sourceLabel}</span>}
         {entry.message}
       </div>

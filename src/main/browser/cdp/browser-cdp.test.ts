@@ -93,7 +93,40 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
         enabled: true,
         lazyLoad: false,
         command: "npx",
-        args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:7777"],
+        args: [
+          "-y",
+          "@playwright/mcp@latest",
+          `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+        ],
+        createdAt: "2026-07-27T00:00:00.000Z",
+        updatedAt: "2026-07-27T00:00:00.000Z"
+      }
+    ])
+
+    await autoRegisterPlaywrightMcpConnector(9222)
+
+    expect(storageMocks.upsertMcpConnector).toHaveBeenCalledWith({
+      id: "connector-1",
+      name: "In-app-browser",
+      kind: "stdio",
+      command: "npx",
+      args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:9222"],
+      env: undefined,
+      enabled: true,
+      lazyLoad: false
+    })
+  })
+
+  it("migrates a synced managed connector away from lazy load", async () => {
+    storageMocks.getMcpConnectors.mockReturnValue([
+      {
+        id: "connector-1",
+        name: "In-app-browser",
+        kind: "stdio",
+        enabled: true,
+        lazyLoad: true,
+        command: "npx",
+        args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:9222"],
         createdAt: "2026-07-27T00:00:00.000Z",
         updatedAt: "2026-07-27T00:00:00.000Z"
       }
@@ -122,7 +155,11 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
         enabled: true,
         lazyLoad: false,
         command: "npx",
-        args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:7777"],
+        args: [
+          "-y",
+          "@playwright/mcp@latest",
+          `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+        ],
         createdAt: "2026-07-27T00:00:00.000Z",
         updatedAt: "2026-07-27T00:00:00.000Z"
       }
@@ -135,7 +172,11 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       name: "In-app-browser",
       kind: "stdio",
       command: "npx",
-      args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:7777"],
+      args: [
+        "-y",
+        "@playwright/mcp@latest",
+        `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+      ],
       env: undefined,
       enabled: false,
       lazyLoad: false
@@ -150,7 +191,10 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
   })
 
   it("enables the managed connector when the card is enabled while CDP is live", async () => {
-    configureBrowserCdpEndpoint({ appendSwitch: vi.fn() }, { enabled: true, port: 7777 })
+    configureBrowserCdpEndpoint({ appendSwitch: vi.fn() }, {
+      enabled: true,
+      port: DEFAULT_BROWSER_CDP_PORT
+    })
     storageMocks.getMcpConnectors.mockReturnValue([
       {
         id: "connector-1",
@@ -159,7 +203,11 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
         enabled: false,
         lazyLoad: false,
         command: "npx",
-        args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:7777"],
+        args: [
+          "-y",
+          "@playwright/mcp@latest",
+          `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+        ],
         createdAt: "2026-07-27T00:00:00.000Z",
         updatedAt: "2026-07-27T00:00:00.000Z"
       }
@@ -176,7 +224,57 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       name: "In-app-browser",
       kind: "stdio",
       command: "npx",
-      args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:7777"],
+      args: [
+        "-y",
+        "@playwright/mcp@latest",
+        `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+      ],
+      env: undefined,
+      enabled: true,
+      lazyLoad: false
+    })
+    expect(result).toEqual({ invalidateCapabilities: true })
+  })
+
+  it("migrates an enabled runtime connector away from lazy load", async () => {
+    configureBrowserCdpEndpoint({ appendSwitch: vi.fn() }, {
+      enabled: true,
+      port: DEFAULT_BROWSER_CDP_PORT
+    })
+    storageMocks.getMcpConnectors.mockReturnValue([
+      {
+        id: "connector-1",
+        name: "In-app-browser",
+        kind: "stdio",
+        enabled: true,
+        lazyLoad: true,
+        command: "npx",
+        args: [
+          "-y",
+          "@playwright/mcp@latest",
+          `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+        ],
+        createdAt: "2026-07-27T00:00:00.000Z",
+        updatedAt: "2026-07-27T00:00:00.000Z"
+      }
+    ])
+
+    const result = await syncPlaywrightMcpConnectorForBrowserCdpConfig({
+      enabled: true,
+      profileImportEnabled: false,
+      port: DEFAULT_BROWSER_CDP_PORT
+    })
+
+    expect(storageMocks.upsertMcpConnector).toHaveBeenCalledWith({
+      id: "connector-1",
+      name: "In-app-browser",
+      kind: "stdio",
+      command: "npx",
+      args: [
+        "-y",
+        "@playwright/mcp@latest",
+        `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+      ],
       env: undefined,
       enabled: true,
       lazyLoad: false
@@ -185,7 +283,10 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
   })
 
   it("disables the managed connector when the card is disabled", async () => {
-    configureBrowserCdpEndpoint({ appendSwitch: vi.fn() }, { enabled: true, port: 7777 })
+    configureBrowserCdpEndpoint({ appendSwitch: vi.fn() }, {
+      enabled: true,
+      port: DEFAULT_BROWSER_CDP_PORT
+    })
     storageMocks.getMcpConnectors.mockReturnValue([
       {
         id: "connector-1",
@@ -194,7 +295,11 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
         enabled: true,
         lazyLoad: false,
         command: "npx",
-        args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:7777"],
+        args: [
+          "-y",
+          "@playwright/mcp@latest",
+          `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+        ],
         createdAt: "2026-07-27T00:00:00.000Z",
         updatedAt: "2026-07-27T00:00:00.000Z"
       }
@@ -203,7 +308,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
     const result = await syncPlaywrightMcpConnectorForBrowserCdpConfig({
       enabled: false,
       profileImportEnabled: false,
-      port: 7777
+      port: DEFAULT_BROWSER_CDP_PORT
     })
 
     expect(storageMocks.upsertMcpConnector).toHaveBeenCalledWith({
@@ -211,7 +316,11 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       name: "In-app-browser",
       kind: "stdio",
       command: "npx",
-      args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:7777"],
+      args: [
+        "-y",
+        "@playwright/mcp@latest",
+        `--cdp-endpoint=http://127.0.0.1:${DEFAULT_BROWSER_CDP_PORT}`
+      ],
       env: undefined,
       enabled: false,
       lazyLoad: false

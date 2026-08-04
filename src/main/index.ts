@@ -1214,11 +1214,19 @@ if (browserNativeMessagingHostLaunch) {
   })
 
   let quitting = false
+  let quitCleanupDone = false
   app.on("will-quit", (e) => {
     console.warn("[Main] will-quit", {
       quitting,
+      quitCleanupDone,
       pet: getPetWindowDebugInfo()
     })
+    if (quitCleanupDone) {
+      // Cleanup already finished during a previous will-quit cycle.
+      // Let Electron quit naturally — this gives Chromium time to properly
+      // release the CDP debug socket, preventing zombie sockets on Windows.
+      return
+    }
     if (quitting) {
       // Re-entry: user pressed Cmd+Q again while cleanup is running. Just block.
       e.preventDefault()
@@ -1258,11 +1266,31 @@ if (browserNativeMessagingHostLaunch) {
     const CLEANUP_TIMEOUT_MS = 10_000
     const FORCE_FLUSH_GRACE_MS = 2_000
     const HARD_EXIT_TIMEOUT_MS = CLEANUP_TIMEOUT_MS + FORCE_FLUSH_GRACE_MS + 500
+    const NATURAL_EXIT_TIMEOUT_MS = 5_000
 
     let exitStarted = false
     let cancelHardExit: (() => void) | null = null
 
-    const exitImmediately = (): void => {
+    const armHardExitDeadline = (timeoutMs: number, reason: string): void => {
+      if (cancelHardExit) {
+        cancelHardExit()
+      }
+      cancelHardExit = scheduleHardDeadline(() => {
+        console.error(reason)
+        flushLogsSync()
+        hardExit()
+      }, timeoutMs)
+    }
+
+    const gracefulExit = (): void => {
+      quitCleanupDone = true
+      // Give Electron/Chromium a short bounded window to quit naturally so the
+      // CDP socket can be released cleanly, but never wait forever here.
+      armHardExitDeadline(NATURAL_EXIT_TIMEOUT_MS, "[Main] Natural quit deadline reached")
+      app.quit()
+    }
+
+    const hardExit = (): void => {
       if (cancelHardExit) {
         cancelHardExit()
         cancelHardExit = null
@@ -1281,20 +1309,17 @@ if (browserNativeMessagingHostLaunch) {
           waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
           waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
         ])
+        hardExit()
       } else {
         await flush()
         await flushLogs()
+        gracefulExit()
       }
-      exitImmediately()
     }
 
     // Independent hard deadline: even if cleanup finishes just before its timer
     // and the normal async flush then stalls, the process still exits.
-    cancelHardExit = scheduleHardDeadline(() => {
-      console.error("[Main] Hard exit deadline reached")
-      flushLogsSync()
-      exitImmediately()
-    }, HARD_EXIT_TIMEOUT_MS)
+    armHardExitDeadline(HARD_EXIT_TIMEOUT_MS, "[Main] Hard exit deadline reached")
 
     // Give async cleanup up to 10s, then switch to bounded best-effort flushes.
     const forceTimer = setTimeout(() => {
