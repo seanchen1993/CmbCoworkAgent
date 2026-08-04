@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import { generateAiRecordingScript, parseAiRecordingScript } from "./browser-ai-recording-script"
+import {
+  generateAiRecordingScript,
+  parseAiRecordingScript
+} from "../../../src/shared/browser-ai-recording-script"
 
 describe("browser ai recording script", () => {
   it("preserves first occurrence hints when round-tripping parsed scripts", () => {

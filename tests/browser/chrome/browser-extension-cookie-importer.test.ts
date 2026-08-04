@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { sanitizeExtensionCookieExport } from "./browser-extension-cookie-importer"
+import { sanitizeExtensionCookieExport } from "../../../src/main/browser/chrome/browser-extension-cookie-importer"
 
 describe("extension cookie importer", () => {
   it("maps Chrome cookies to the browser session format and skips invalid entries", () => {

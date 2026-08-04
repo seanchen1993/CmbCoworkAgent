@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { resolvePlaywrightLocator } from "./locator-generator"
+import { resolvePlaywrightLocator } from "../../../src/main/browser/recording/locator-generator"
 
 describe("locator generator", () => {
   it("prefers test id over other candidates", () => {

@@ -6,8 +6,8 @@ import {
   resetAiRecordingForTests,
   startAiRecording,
   stopAiRecording
-} from "./ai-recording-service"
-import { extractAiRecordingVariableNames } from "../../../shared/browser-ai-recording-script"
+} from "../../../src/main/browser/recording/ai-recording-service"
+import { extractAiRecordingVariableNames } from "../../../src/shared/browser-ai-recording-script"
 
 const LOGIN_SNAPSHOT_RESULT = `### Snapshot
 \`\`\`yaml

@@ -6,9 +6,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   CMB_CHROME_COOKIE_BRIDGE_PROTOCOL_VERSION,
   CMB_CHROME_EXTENSION_ORIGIN
-} from "../../../shared/browser-cookie-bridge"
-import { BrowserCookieBridgeServer } from "./browser-cookie-bridge-server"
-import { encodeNativeMessage, NativeMessageDecoder } from "./native-messaging-framing"
+} from "../../../src/shared/browser-cookie-bridge"
+import { BrowserCookieBridgeServer } from "../../../src/main/browser/chrome/browser-cookie-bridge-server"
+import {
+  encodeNativeMessage,
+  NativeMessageDecoder
+} from "../../../src/main/browser/chrome/native-messaging-framing"
 
 const servers: BrowserCookieBridgeServer[] = []
 const sockets: Socket[] = []

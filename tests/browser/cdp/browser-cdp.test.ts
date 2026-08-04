@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { DEFAULT_BROWSER_CDP_PORT } from "../../../shared/browser-types"
+import { DEFAULT_BROWSER_CDP_PORT } from "../../../src/shared/browser-types"
 
 const storageMocks = vi.hoisted(() => ({
   getBrowserCdpConfig: vi.fn(),
@@ -7,16 +7,16 @@ const storageMocks = vi.hoisted(() => ({
   upsertMcpConnector: vi.fn()
 }))
 
-vi.mock("../../storage", () => storageMocks)
+vi.mock("../../../src/main/storage", () => storageMocks)
 
 import {
   autoRegisterPlaywrightMcpConnector,
   syncPlaywrightMcpConnectorForBrowserCdpConfig
-} from "./browser-playwright-mcp-connector"
+} from "../../../src/main/browser/cdp/browser-playwright-mcp-connector"
 import {
   configureBrowserCdpEndpoint,
   resolveBrowserCdpPort
-} from "./browser-cdp"
+} from "../../../src/main/browser/cdp/browser-cdp"
 
 describe("browser CDP configuration", () => {
   beforeEach(() => {

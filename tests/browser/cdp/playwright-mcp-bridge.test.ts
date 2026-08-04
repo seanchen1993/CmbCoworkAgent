@@ -3,22 +3,25 @@ import type {
   McpCapabilityService,
   McpCapabilityTool,
   McpInvocationResult
-} from "../../mcp/capability-types"
-import { BROWSER_SESSION_ID, type BrowserState } from "../../../shared/browser-types"
-import { DEFAULT_BROWSER_CDP_PORT } from "../../../shared/browser-types"
-import { configureBrowserCdpEndpoint } from "./browser-cdp"
+} from "../../../src/main/mcp/capability-types"
+import {
+  BROWSER_SESSION_ID,
+  DEFAULT_BROWSER_CDP_PORT,
+  type BrowserState
+} from "../../../src/shared/browser-types"
+import { configureBrowserCdpEndpoint } from "../../../src/main/browser/cdp/browser-cdp"
 import {
   getAiRecording,
   resetAiRecordingForTests,
   startAiRecording
-} from "../recording/ai-recording-service"
+} from "../../../src/main/browser/recording/ai-recording-service"
 import {
   autoSelectPlaywrightInAppBrowserTab,
   invokeMcpToolWithPlaywrightInAppBrowserSupport,
   preparePlaywrightInAppBrowser,
   requestPlaywrightInAppBrowserPanelAfterInvoke,
   shouldPreparePlaywrightInAppBrowser
-} from "./playwright-mcp-bridge"
+} from "../../../src/main/browser/cdp/playwright-mcp-bridge"
 
 const playwrightTool: McpCapabilityTool = {
   capabilityId: "connector:playwright:browser_navigate",

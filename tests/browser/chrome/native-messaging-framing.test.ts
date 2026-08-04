@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import { encodeNativeMessage, NativeMessageDecoder } from "./native-messaging-framing"
+import {
+  encodeNativeMessage,
+  NativeMessageDecoder
+} from "../../../src/main/browser/chrome/native-messaging-framing"
 
 describe("native messaging framing", () => {
   it("decodes split and coalesced messages", () => {

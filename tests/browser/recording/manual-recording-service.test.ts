@@ -11,7 +11,7 @@ import {
   startManualRecording,
   stopManualRecording,
   updateManualRecordingDraft
-} from "./manual-recording-service"
+} from "../../../src/main/browser/recording/manual-recording-service"
 
 function createFrame(input: {
   frameToken?: string

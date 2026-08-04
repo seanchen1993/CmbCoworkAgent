@@ -5,7 +5,7 @@ import initSqlJs from "sql.js"
 import { describe, expect, it } from "vitest"
 import {
   readBrowserProfileImportData
-} from "./browser-profile-importer"
+} from "../../../src/main/browser/chrome/browser-profile-importer"
 
 function writeJson(filePath: string, value: unknown): void {
   writeFileSync(filePath, JSON.stringify(value), "utf8")
