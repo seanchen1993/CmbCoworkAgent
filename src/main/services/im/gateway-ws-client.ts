@@ -13,6 +13,7 @@ import type {
   ImGatewayClientPort,
   ImReplySubmissionResult
 } from "./gateway-client"
+import { isImGatewayUrlAllowed } from "./gateway-url"
 import type { ImEventRecord } from "./event-store"
 
 const CONNECT_TIMEOUT_MS = 10_000
@@ -45,6 +46,11 @@ export interface ImGatewayWsStatus {
   principalId: string | null
   lastConnectedAt: string | null
   lastError: string | null
+  lastHandshakeStatus: number | null
+  lastCloseCode: number | null
+  lastCloseReason: string | null
+  lastTransportError: string | null
+  reconnectAttempt: number
   routes: BuiltinRobotRouteStatus[]
 }
 
@@ -109,19 +115,17 @@ function assertOnlyKeys(
   }
 }
 
-function gatewayUrlAllowed(value: string): boolean {
-  try {
-    const parsed = new URL(value)
-    if (parsed.protocol === "wss:") return true
-    return (
-      parsed.protocol === "ws:" &&
-      (parsed.hostname === "127.0.0.1" ||
-        parsed.hostname === "localhost" ||
-        parsed.hostname === "[::1]")
-    )
-  } catch {
-    return false
-  }
+function diagnosticText(value: string, limit = 240): string | null {
+  const text = value.trim()
+  if (!text) return null
+  return text
+    .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "<redacted-jwt>")
+    .slice(0, limit)
+}
+
+function diagnosticCloseReason(value: Buffer): string | null {
+  return diagnosticText(value.toString("utf8"), 160)
 }
 
 export class ImGatewayWsClient implements ImGatewayClientPort {
@@ -150,6 +154,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     principalId: null,
     lastConnectedAt: null,
     lastError: null,
+    lastHandshakeStatus: null,
+    lastCloseCode: null,
+    lastCloseReason: null,
+    lastTransportError: null,
+    reconnectAttempt: 0,
     routes: []
   }
 
@@ -293,11 +302,11 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         sessionId: null,
         principalId: null,
         routes: [],
-        lastError: !token ? "企业身份尚未完成，无法连接统一机器人。" : "统一机器人网关地址未配置。"
+        lastError: !token ? "未登录，无法连接统一机器人。" : "统一机器人网关地址未配置。"
       })
       return
     }
-    if (!gatewayUrlAllowed(url)) {
+    if (!isImGatewayUrlAllowed(url)) {
       this.updateStatus({
         connectionState: "error",
         sessionId: null,
@@ -311,6 +320,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       connectionState: "connecting",
       authenticationFailed: false,
       lastError: null,
+      lastTransportError: null,
       sessionId: null,
       principalId: null,
       routes: []
@@ -342,6 +352,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         socket.close(1000, "stale connection")
         return
       }
+      this.updateStatus({ lastHandshakeStatus: 101 })
       this.helloCommandId = this.sendEnvelope("HELLO", {
         appVersion: this.options.appVersion,
         capabilities: this.options.capabilities ?? ["inbox", "feature", "scheduler", "hitl"]
@@ -365,13 +376,17 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         )
       })
     })
-    socket.on("error", () => {
+    socket.on("error", (error) => {
       if (this.connectionGeneration !== generation || this.socket !== socket) return
       if (this.status.authenticationFailed || this.authenticationRefreshInFlight) return
-      this.updateStatus({ lastError: "统一机器人连接异常。" })
+      this.updateStatus({
+        lastError: "统一机器人连接异常。",
+        lastTransportError: diagnosticText(error.message)
+      })
     })
     socket.on("unexpected-response", (_request, response) => {
       if (this.connectionGeneration !== generation || this.socket !== socket) return
+      this.updateStatus({ lastHandshakeStatus: response.statusCode })
       if (response.statusCode === 401) {
         this.handleAuthenticationRequired()
         return
@@ -384,12 +399,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         principalId: null,
         routes: [],
         lastError: authenticationFailed
-          ? "企业身份认证失败，请重新登录。"
+          ? "登录失效，请重新登录。"
           : `统一机器人网关拒绝连接（${response.statusCode}）。`
       })
       socket.terminate()
     })
-    socket.on("close", () => {
+    socket.on("close", (code, reason) => {
       if (this.connectionGeneration !== generation || this.socket !== socket) return
       this.socket = null
       this.connectionToken = null
@@ -398,6 +413,10 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       if (this.connectTimer) clearTimeout(this.connectTimer)
       this.connectTimer = undefined
       this.stopHeartbeat()
+      this.updateStatus({
+        lastCloseCode: code,
+        lastCloseReason: diagnosticCloseReason(reason)
+      })
       this.rejectPending(
         new ImGatewayCommandError("统一机器人连接已中断", { reasonCode: "DESKTOP_OFFLINE" })
       )
@@ -489,7 +508,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           sessionId,
           principalId,
           lastConnectedAt: new Date(this.now()).toISOString(),
-          lastError: null
+          lastError: null,
+          reconnectAttempt: 0
         })
         this.startHeartbeat(heartbeatIntervalSeconds)
         this.syncCommandId = this.sendCommand("SYNC_REQUEST", {})
@@ -679,13 +699,13 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     }
     if (reasonCode === "SESSION_SUPERSEDED") {
       this.reconnectBlocked = true
-      this.rejectPending(new ImGatewayCommandError("当前企业账号已有新的桌面连接", { reasonCode }))
+      this.rejectPending(new ImGatewayCommandError("当前用户已有新的桌面连接", { reasonCode }))
       this.updateStatus({
         connectionState: "error",
         sessionId: null,
         principalId: null,
         routes: [],
-        lastError: "当前企业账号已由新的桌面连接接替；如需重新连接，请手动点击重连。"
+        lastError: "当前用户已由新的桌面连接接替；如需重新连接，请手动点击重连。"
       })
       this.socket?.close(4001, "session superseded")
       return
@@ -784,6 +804,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     if (this.stopped || this.reconnectBlocked || this.reconnectTimer) return
     const delay = Math.min(RECONNECT_MAX_MS, 1_000 * 2 ** Math.min(this.reconnectAttempt, 6))
     this.reconnectAttempt += 1
+    this.updateStatus({ reconnectAttempt: this.reconnectAttempt })
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
       this.connect()
@@ -807,7 +828,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     const rejectedToken = this.connectionToken
     if (this.stopped || !socket || !rejectedToken) return
 
-    this.rejectPending(new ImGatewayCommandError("企业身份已过期", { reasonCode: "AUTH_REQUIRED" }))
+    this.rejectPending(new ImGatewayCommandError("登录已过期", { reasonCode: "AUTH_REQUIRED" }))
     if (!this.options.onAuthenticationRequired || this.authenticationRefreshAttempted) {
       this.authenticationRefreshInFlight = false
       this.updateStatus({
@@ -816,7 +837,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         sessionId: null,
         principalId: null,
         routes: [],
-        lastError: "企业身份认证失败，请重新登录。"
+        lastError: "登录失效，请重新登录。"
       })
       socket.terminate()
       return
@@ -833,7 +854,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       sessionId: null,
       principalId: null,
       routes: [],
-      lastError: "企业身份已过期，正在刷新…"
+      lastError: "登录已过期，正在刷新…"
     })
     if (socket.readyState === WebSocket.OPEN) {
       socket.close(4003, "authentication required")
@@ -853,7 +874,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
             sessionId: null,
             principalId: null,
             routes: [],
-            lastError: "企业身份刷新失败，请重新登录。"
+            lastError: "登录刷新失败，请重新登录。"
           })
           return
         }
@@ -868,7 +889,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           sessionId: null,
           principalId: null,
           routes: [],
-          lastError: "企业身份刷新失败，请重新登录。"
+          lastError: "登录刷新失败，请重新登录。"
         })
       })
   }

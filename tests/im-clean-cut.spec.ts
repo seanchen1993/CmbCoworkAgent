@@ -58,7 +58,7 @@ assert(panel.includes("接入招乎"))
 assert(panel.includes("setThreadRemoteAccess"))
 assert(panel.includes("setFeatureRemoteAccess"))
 assert(!panel.includes("inbox-and-features"), "global Feature access toggle is retired")
-assert(panel.includes("每个账号只保留一个活动桌面连接"))
+assert(panel.includes("同一用户只保留一个活动桌面连接"))
 assert(!allSource.includes("deviceEpoch"), "device routing epochs must stay retired")
 assert(!allSource.toLowerCase().includes("takeover"), "device takeover must stay retired")
 

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   Bot,
+  Bug,
   CircleAlert,
+  Copy,
   FolderKanban,
   Loader2,
   MessageSquareText,
@@ -13,6 +15,7 @@ import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 import type {
@@ -59,6 +62,9 @@ export function BuiltinRobotPanel(): React.JSX.Element {
   const [grantableFeatures, setGrantableFeatures] = useState<BuiltinRobotGrantableFeature[]>([])
   const [threads, setThreads] = useState<Thread[]>([])
   const [busyAction, setBusyAction] = useState<string | null>(null)
+  const [gatewayUrlDraft, setGatewayUrlDraft] = useState("")
+  const savedGatewayUrl = status?.settings.gatewayUrl
+  const effectiveGatewayUrl = status?.diagnostics.gatewayUrl
 
   const load = useCallback(async () => {
     try {
@@ -81,6 +87,10 @@ export function BuiltinRobotPanel(): React.JSX.Element {
     void load()
     return window.api.builtinRobot.onStatus(setStatus)
   }, [load])
+
+  useEffect(() => {
+    setGatewayUrlDraft(savedGatewayUrl ?? effectiveGatewayUrl ?? "")
+  }, [savedGatewayUrl, effectiveGatewayUrl])
 
   const perform = useCallback(
     async (key: string, operation: () => Promise<BuiltinRobotStatus>, success: string) => {
@@ -147,6 +157,43 @@ export function BuiltinRobotPanel(): React.JSX.Element {
 
   const connected = status.connectionState === "online"
   const identityVerified = status.identityState === "verified"
+  const saveGatewayUrl = (): Promise<void> =>
+    perform(
+      "gateway-url",
+      () =>
+        window.api.builtinRobot.saveSettings({
+          gatewayUrl: gatewayUrlDraft.trim()
+        }),
+      "网关地址已保存并应用"
+    )
+  const copyDiagnostics = async (): Promise<void> => {
+    const snapshot = {
+      capturedAt: new Date().toISOString(),
+      appVersion: status.diagnostics.appVersion,
+      gatewayUrl: status.diagnostics.gatewayUrl,
+      connectionState: status.connectionState,
+      identityState: status.identityState,
+      authenticationFailed: status.diagnostics.authenticationFailed,
+      lastHandshakeStatus: status.diagnostics.lastHandshakeStatus,
+      lastCloseCode: status.diagnostics.lastCloseCode,
+      lastCloseReason: status.diagnostics.lastCloseReason,
+      lastTransportError: status.diagnostics.lastTransportError,
+      reconnectAttempt: status.diagnostics.reconnectAttempt,
+      lastConnectedAt: status.lastConnectedAt,
+      lastError: status.lastError,
+      sessionId: status.sessionId ? shortId(status.sessionId) : null,
+      principalId: status.principalId ? shortId(status.principalId) : null,
+      routeCount: status.routes.length,
+      pendingOutboxCount: status.pendingOutboxCount,
+      eventCounts: status.eventCounts
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2))
+      toast.success("联调信息已复制")
+    } catch {
+      toast.error("复制联调信息失败")
+    }
+  }
 
   return (
     <div className="flex-1 overflow-auto">
@@ -159,7 +206,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
             <div>
               <h2 className="text-lg font-semibold">内置统一机器人</h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                使用企业统一身份连接招乎，无需配置机器人凭据。
+                登录后即可连接招乎，无需配置机器人凭据。
               </p>
             </div>
           </div>
@@ -186,7 +233,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
           <CardHeader>
             <CardTitle>远程连接</CardTitle>
             <CardDescription>
-              使用当前企业账号连接招乎；每个账号只保留一个活动桌面连接。
+              使用当前登录用户连接招乎；同一用户只保留一个活动桌面连接。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -197,16 +244,16 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 ) : (
                   <CircleAlert className="size-4 text-amber-500" />
                 )}
-                企业账号
+                登录状态
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
                 {identityVerified
-                  ? "企业账号已由网关验证"
+                  ? "已登录"
                   : status.identityState === "error"
-                    ? "企业账号验证失败，请重新登录"
+                    ? "登录失效，请重新登录"
                     : status.identityState === "verifying"
-                      ? "登录凭据已就绪，等待网关验证"
-                      : "缺少企业登录凭据，请重新登录"}
+                      ? "已登录，正在连接"
+                      : "未登录"}
               </p>
             </div>
 
@@ -254,6 +301,132 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 <Unplug className="mr-1.5 size-4" /> 断开连接
               </Button>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Bug className="size-4" /> 联调信息
+            </CardTitle>
+            <CardDescription>
+              用于核对 Desktop 与 Java 网关连接，不展示 Token 或消息正文。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2 rounded-md border bg-muted/20 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label htmlFor="builtin-robot-gateway-url" className="text-sm font-medium">
+                  网关地址（联调）
+                </label>
+                <Badge variant="outline">
+                  {status.settings.gatewayUrl
+                    ? "App 配置"
+                    : status.diagnostics.gatewayUrl
+                      ? ".env 默认值"
+                      : "未配置"}
+                </Badge>
+              </div>
+              <Input
+                id="builtin-robot-gateway-url"
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                className="font-mono text-xs"
+                value={gatewayUrlDraft}
+                placeholder="wss://gateway.example.com/ws/desktop"
+                disabled={busyAction !== null}
+                onChange={(event) => setGatewayUrlDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.nativeEvent.isComposing) return
+                  event.preventDefault()
+                  void saveGatewayUrl()
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                保存后立即重连。仅允许 WSS；本机联调可使用 ws://localhost。
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busyAction !== null || !gatewayUrlDraft.trim()}
+                  onClick={() => void saveGatewayUrl()}
+                >
+                  {busyAction === "gateway-url" && <Loader2 className="size-4 animate-spin" />}
+                  保存并重连
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busyAction !== null || status.settings.gatewayUrl === null}
+                  onClick={() =>
+                    void perform(
+                      "gateway-url-reset",
+                      () => window.api.builtinRobot.saveSettings({ gatewayUrl: null }),
+                      "已恢复 .env 默认网关地址"
+                    )
+                  }
+                >
+                  恢复默认
+                </Button>
+              </div>
+            </div>
+
+            <dl className="grid gap-3 text-sm sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <dt className="text-muted-foreground">实际网关地址</dt>
+                <dd className="mt-1 break-all font-mono text-xs">
+                  {status.diagnostics.gatewayUrl ?? "未配置"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">握手状态</dt>
+                <dd className="mt-1 font-mono">{status.diagnostics.lastHandshakeStatus ?? "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">自动重连次数</dt>
+                <dd className="mt-1 font-mono">{status.diagnostics.reconnectAttempt}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">App 版本</dt>
+                <dd className="mt-1 font-mono">{status.diagnostics.appVersion}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">最近关闭</dt>
+                <dd className="mt-1 font-mono">
+                  {status.diagnostics.lastCloseCode ?? "—"}
+                  {status.diagnostics.lastCloseReason
+                    ? ` · ${status.diagnostics.lastCloseReason}`
+                    : ""}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">网关路由数</dt>
+                <dd className="mt-1 font-mono">{status.routes.length}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Session</dt>
+                <dd className="mt-1 font-mono text-xs">
+                  {status.sessionId ? shortId(status.sessionId) : "—"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Principal</dt>
+                <dd className="mt-1 font-mono text-xs">
+                  {status.principalId ? shortId(status.principalId) : "—"}
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-muted-foreground">最近传输错误</dt>
+                <dd className="mt-1 break-all font-mono text-xs">
+                  {status.diagnostics.lastTransportError ?? "—"}
+                </dd>
+              </div>
+            </dl>
+            <Button size="sm" variant="outline" onClick={() => void copyDiagnostics()}>
+              <Copy className="size-4" /> 复制联调信息
+            </Button>
           </CardContent>
         </Card>
 
@@ -382,7 +555,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
 
             <p className="text-xs leading-5 text-muted-foreground">
               招乎只展示会话、项目与 Feature 名称；本地绝对路径、插件路径和工作区配置不会上传。
-              每次执行前都会重新校验企业账号、会话授权和运行模式。
+              每次执行前都会重新校验登录状态、会话授权和运行模式。
             </p>
 
             <div className="flex items-start justify-between gap-4 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">

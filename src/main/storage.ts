@@ -2646,6 +2646,7 @@ const BUILTIN_ROBOT_SETTINGS_FILE = join(OPENWORK_DIR, "builtin-robot-settings.j
 
 const DEFAULT_BUILTIN_ROBOT_SETTINGS: import("./types").BuiltinRobotSettings = {
   enabled: true,
+  gatewayUrl: null,
   remoteAccess: "inbox-only",
   remoteApprovalEnabled: false,
   waitingDesktopTtlMinutes: 10
@@ -2661,6 +2662,10 @@ export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSetting
     >
     return {
       enabled: value.enabled !== false,
+      gatewayUrl:
+        typeof value.gatewayUrl === "string" && value.gatewayUrl.trim()
+          ? value.gatewayUrl.trim()
+          : null,
       remoteAccess:
         value.remoteAccess === "inbox-and-features" ? "inbox-and-features" : "inbox-only",
       remoteApprovalEnabled: value.remoteApprovalEnabled === true,
@@ -2683,6 +2688,12 @@ export function saveBuiltinRobotSettings(
   const current = getBuiltinRobotSettings()
   const next: import("./types").BuiltinRobotSettings = {
     enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
+    gatewayUrl:
+      updates.gatewayUrl === null
+        ? null
+        : typeof updates.gatewayUrl === "string" && updates.gatewayUrl.trim()
+          ? updates.gatewayUrl.trim()
+          : current.gatewayUrl,
     remoteAccess:
       updates.remoteAccess === "inbox-and-features" || updates.remoteAccess === "inbox-only"
         ? updates.remoteAccess

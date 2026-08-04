@@ -18,6 +18,7 @@ import { refreshEnterpriseLogin } from "../enterprise-login-refresh"
 import { imConversationStateStore } from "./conversation-state"
 import { imEventStore } from "./event-store"
 import { ImGatewayWsClient, type ImGatewayWsStatus } from "./gateway-ws-client"
+import { normalizeImGatewayUrlOverride } from "./gateway-url"
 import { ImUnifiedBotService } from "./service"
 import { imFeatureBindingService } from "./feature-binding-service"
 import { imRemoteAccessService } from "./remote-access-service"
@@ -25,13 +26,32 @@ import type { ImGrantRouteIdentity } from "./remote-grant-store"
 
 type StatusListener = (status: BuiltinRobotStatus) => void
 
-function configuredGatewayUrl(): string | null {
+function environmentGatewayUrl(): string | null {
   const env = (
     import.meta as ImportMeta & {
       env?: { VITE_UNIFIED_IM_GATEWAY_WS_URL?: string }
     }
   ).env
   return env?.VITE_UNIFIED_IM_GATEWAY_WS_URL?.trim() || null
+}
+
+function configuredGatewayUrl(): string | null {
+  return getBuiltinRobotSettings().gatewayUrl ?? environmentGatewayUrl()
+}
+
+function diagnosticGatewayUrl(): string | null {
+  const configured = configuredGatewayUrl()
+  if (!configured) return null
+  try {
+    const url = new URL(configured)
+    url.username = ""
+    url.password = ""
+    url.search = ""
+    url.hash = ""
+    return url.toString()
+  } catch {
+    return null
+  }
 }
 
 function currentIdentity(): { token: string | null; error: string | null } {
@@ -42,7 +62,7 @@ function currentIdentity(): { token: string | null; error: string | null } {
       error: null
     }
   } catch {
-    return { token: null, error: "企业身份信息损坏，请重新登录。" }
+    return { token: null, error: "登录信息异常，请重新登录。" }
   }
 }
 
@@ -63,6 +83,11 @@ export class BuiltinRobotManager {
     principalId: null,
     lastConnectedAt: null,
     lastError: null,
+    lastHandshakeStatus: null,
+    lastCloseCode: null,
+    lastCloseReason: null,
+    lastTransportError: null,
+    reconnectAttempt: 0,
     routes: []
   }
   private managerError: string | null = null
@@ -109,11 +134,18 @@ export class BuiltinRobotManager {
   updateSettings(updates: Partial<BuiltinRobotSettings>): Promise<BuiltinRobotStatus> {
     return this.enqueue(async () => {
       const previous = getBuiltinRobotSettings()
-      const settings = saveBuiltinRobotSettings(updates)
+      const normalizedUpdates = {
+        ...updates,
+        ...(updates.gatewayUrl !== undefined
+          ? { gatewayUrl: normalizeImGatewayUrlOverride(updates.gatewayUrl) }
+          : {})
+      }
+      const settings = saveBuiltinRobotSettings(normalizedUpdates)
       if (!settings.enabled) {
         await this.stopNow()
       } else if (
         !previous.enabled ||
+        previous.gatewayUrl !== settings.gatewayUrl ||
         previous.waitingDesktopTtlMinutes !== settings.waitingDesktopTtlMinutes
       ) {
         await this.stopNow()
@@ -187,7 +219,17 @@ export class BuiltinRobotManager {
       ),
       featureBindings,
       eventCounts: summary.eventCounts,
-      pendingOutboxCount: summary.pendingOutboxCount
+      pendingOutboxCount: summary.pendingOutboxCount,
+      diagnostics: {
+        appVersion: this.appVersion,
+        gatewayUrl: diagnosticGatewayUrl(),
+        authenticationFailed: this.gatewayStatus.authenticationFailed,
+        lastHandshakeStatus: this.gatewayStatus.lastHandshakeStatus,
+        lastCloseCode: this.gatewayStatus.lastCloseCode,
+        lastCloseReason: this.gatewayStatus.lastCloseReason,
+        lastTransportError: this.gatewayStatus.lastTransportError,
+        reconnectAttempt: this.gatewayStatus.reconnectAttempt
+      }
     }
   }
 
@@ -414,7 +456,7 @@ export class BuiltinRobotManager {
     }
     const principalId = this.gatewayStatus.principalId
     if (!principalId) {
-      return { route: null, status: null, reason: "网关尚未返回已验证的企业主体。" }
+      return { route: null, status: null, reason: "登录验证尚未完成。" }
     }
     const candidates = this.gatewayStatus.routes.filter(
       (route) => route.principalId === principalId && route.state === "active"

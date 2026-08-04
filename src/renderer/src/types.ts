@@ -511,6 +511,7 @@ export type {
 } from "../../main/hooks/types"
 export type {
   BuiltinRobotConnectionState,
+  BuiltinRobotDiagnostics,
   BuiltinRobotFeatureGrantStatus,
   BuiltinRobotIdentityState,
   BuiltinRobotFeatureBindingStatus,

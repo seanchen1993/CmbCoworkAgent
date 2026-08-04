@@ -176,6 +176,7 @@ npm run dist
 | `VITE_CHATX_HTTP_URL` | ChatX HTTP 回调地址 |
 | `VITE_CHATX_CHANNEL` | ChatX channel |
 | `VITE_CHATX_CALLBACK_URL` | 机器人平台回调地址基址 |
+| `VITE_UNIFIED_IM_GATEWAY_WS_URL` | 内置统一机器人 Desktop WSS 默认地址，当前为 `wss://devclaw-im-gateway.paasst.cmbchina.cn/ws/desktop`；联调时可在 App 的“联调信息”中覆盖 |
 | `VITE_LOGIN_PT` | 登录环境标识 |
 | `VITE_INTRUCTION_URL` | 使用说明地址（前端展示） |
 | `VITE_APP_DOWNLOAD_URL` | 应用下载地址（前端展示） |

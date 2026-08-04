@@ -13,7 +13,7 @@ function loginInfoEndpoint(): string {
   if (configured?.trim()) return configured.trim()
 
   const loginPt = viteEnv.VITE_LOGIN_PT?.trim() || process.env.VITE_LOGIN_PT?.trim()
-  if (!loginPt) throw new Error("未配置登录环境，无法刷新企业登录凭据")
+  if (!loginPt) throw new Error("未配置登录环境，无法刷新登录凭据")
   return `https://archguardservice.paas.${loginPt}.cn/cowork/login-info`
 }
 

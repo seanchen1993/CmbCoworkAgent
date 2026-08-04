@@ -664,6 +664,9 @@ PLATFORM_RESULT_UNKNOWN
 
 ### 9.1 Upgrade 与 HELLO
 
+Desktop WSS 的固定 Upgrade 路径是 `GET /ws/desktop`。当前内网 TLS 入口为
+`wss://devclaw-im-gateway.paasst.cmbchina.cn/ws/desktop`，不得为不同节点或用户生成不同路径。
+
 1. TLS 和 Spring Security 验证 `Authorization: Bearer <ystIdToken>`；Token 缺失、无效或过期时在
    Upgrade 阶段返回 HTTP `401`，身份有效但无网关权限时返回 `403`；
 2. 把已验证 `principalId`、权限和 JWT 到期时间放入 handshake attributes；
@@ -1019,7 +1022,7 @@ gateway:
       clock-skew-seconds: 60
       max-session-seconds: 28800
   websocket:
-    path: /ws/v1/desktop
+    path: /ws/desktop
     hello-timeout-seconds: 10
     heartbeat-seconds: 15
     offline-seconds: 45

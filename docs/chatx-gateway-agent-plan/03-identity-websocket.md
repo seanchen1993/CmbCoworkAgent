@@ -46,6 +46,15 @@ Idempotency-Key: <uuid>
 
 ### Desktop WSS
 
+固定 Upgrade 接口：
+
+```http
+GET /ws/desktop
+Connection: Upgrade
+Upgrade: websocket
+Authorization: Bearer <ystIdToken>
+```
+
 本阶段实现：
 
 - Client -> Gateway：`HELLO`、`HEARTBEAT`、`SYNC_REQUEST`；

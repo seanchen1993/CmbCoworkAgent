@@ -181,12 +181,14 @@ flowchart LR
 ```ts
 interface BuiltinRobotSettings {
   enabled: boolean
+  gatewayUrl: string | null // App 侧联调覆盖；null 时使用构建环境变量
   remoteAccess: "inbox-only" | "inbox-and-features"
 }
 ```
 
 - 企业身份激活完成后默认 `enabled: true`、`remoteAccess: "inbox-only"`；
 - 用户可以断开本设备远程连接；
+- 联调时可以在 App 内覆盖网关地址，配置只保存在本机；恢复默认后继续使用构建环境变量；
 - `inbox-and-features` 代表在收件箱之上开放 Feature，不会关闭收件箱；
 - 项目/Feature/路径信息不上传为配置；
 - UI 只显示连接状态、固定设备状态、远程访问级别和旧凭据清理提示。
@@ -195,7 +197,10 @@ interface BuiltinRobotSettings {
 
 - `ystIdToken` 已确认是标准 JWT；Desktop 继续使用现有企业登录与刷新链路，V1 不新增
   统一凭据管理器；
-- Desktop 在 WSS HTTP Upgrade 中发送 `Authorization: Bearer <ystIdToken>`；
+- Desktop 默认通过构建环境变量 `VITE_UNIFIED_IM_GATEWAY_WS_URL` 读取完整网关地址，固定生产路径为
+  `/ws/desktop`，当前内网地址为 `wss://devclaw-im-gateway.paasst.cmbchina.cn/ws/desktop`；联调期间可在
+  App 的“联调信息”中保存本机覆盖地址，保存后立即重连，清除覆盖后回退到构建环境变量。连接在 WSS
+  HTTP Upgrade 中发送 `Authorization: Bearer <ystIdToken>`；
 - Upgrade 返回 `401`，或已建立的 WSS 收到 `ERROR/AUTH_REQUIRED` 时，Desktop 使用本地已有
   `ystRefreshToken/ystCode` 调用现有 `login-info` 刷新接口；刷新采用进程内单飞，成功后保存
   轮换后的凭据并只重连一次；刷新失败、未返回新 `ystIdToken` 或新 Token 再次被拒绝时停止重试并

@@ -95,6 +95,7 @@ async function createContext(options: { enabled?: boolean } = {}) {
     getThread: (threadId) => (threadId === thread.thread_id ? thread : null),
     getSettings: () => ({
       enabled: options.enabled !== false,
+      gatewayUrl: null,
       remoteAccess: "inbox-only",
       remoteApprovalEnabled: false,
       waitingDesktopTtlMinutes: 10

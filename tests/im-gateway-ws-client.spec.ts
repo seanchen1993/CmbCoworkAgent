@@ -2,6 +2,10 @@ import assert from "node:assert/strict"
 import { WebSocketServer, type WebSocket } from "ws"
 import type { RemoteImEventV1 } from "../src/shared/im-gateway-contract"
 import { ImGatewayWsClient } from "../src/main/services/im/gateway-ws-client"
+import {
+  isImGatewayUrlAllowed,
+  normalizeImGatewayUrlOverride
+} from "../src/main/services/im/gateway-url"
 import type { ImEventRecord } from "../src/main/services/im/event-store"
 
 interface Envelope {
@@ -20,6 +24,17 @@ async function waitFor(predicate: () => boolean, label: string, timeoutMs = 3_00
 }
 
 async function main(): Promise<void> {
+  assert.equal(
+    normalizeImGatewayUrlOverride("  wss://gateway.example.com/ws/desktop  "),
+    "wss://gateway.example.com/ws/desktop"
+  )
+  assert.equal(normalizeImGatewayUrlOverride(null), null)
+  assert.equal(isImGatewayUrlAllowed("ws://localhost:8080/ws/desktop"), true)
+  assert.equal(isImGatewayUrlAllowed("ws://10.0.0.8/ws/desktop"), false)
+  assert.equal(isImGatewayUrlAllowed("wss://user:secret@gateway.example.com/ws/desktop"), false)
+  assert.throws(() => normalizeImGatewayUrlOverride("https://gateway.example.com/ws/desktop"))
+  assert.throws(() => normalizeImGatewayUrlOverride("wss://gateway.example.com/ws#token"))
+
   const insecureRemoteClient = new ImGatewayWsClient({
     url: () => "ws://10.0.0.8/ws",
     token: () => "token",
@@ -145,6 +160,7 @@ async function main(): Promise<void> {
   client.start()
   await waitFor(() => client.isAuthenticated(), "authenticated WSS")
   assert.equal(authorization, "Bearer identity-token-do-not-log")
+  assert.equal(client.getStatus().lastHandshakeStatus, 101)
   assert(receivedTypes.includes("HELLO"))
   await waitFor(() => client.getStatus().routes.length === 1, "route sync")
   assert.equal(client.getStatus().principalId, "opaque-principal")
@@ -246,6 +262,7 @@ async function main(): Promise<void> {
       client.getStatus().lastError?.includes("新的桌面连接") === true,
     "superseded session fence"
   )
+  await waitFor(() => client.getStatus().lastCloseCode === 4001, "superseded close diagnostics")
   await new Promise((resolve) => setTimeout(resolve, 1_200))
   assert.equal(
     receivedTypes.filter((type) => type === "HELLO").length,
@@ -305,6 +322,7 @@ async function main(): Promise<void> {
     "single authentication refresh retry"
   )
   assert.equal(failedRefreshCount, 1, "an invalid refreshed token must not cause a refresh loop")
+  assert.equal(unrecoverableClient.getStatus().lastHandshakeStatus, 401)
   unrecoverableClient.stop()
 
   await new Promise<void>((resolve) => server.close(() => resolve()))

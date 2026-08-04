@@ -59,6 +59,12 @@ function settingsPatch(value: unknown): Partial<BuiltinRobotSettings> {
   const input = value as Record<string, unknown>
   const result: Partial<BuiltinRobotSettings> = {}
   if (typeof input.enabled === "boolean") result.enabled = input.enabled
+  if (Object.hasOwn(input, "gatewayUrl")) {
+    if (input.gatewayUrl !== null && typeof input.gatewayUrl !== "string") {
+      throw new Error("统一机器人网关地址无效")
+    }
+    result.gatewayUrl = input.gatewayUrl === null ? null : input.gatewayUrl.trim()
+  }
   if (input.remoteAccess === "inbox-only" || input.remoteAccess === "inbox-and-features") {
     result.remoteAccess = input.remoteAccess
   }

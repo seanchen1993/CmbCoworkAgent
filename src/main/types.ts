@@ -458,6 +458,8 @@ export interface TaskRunRecord {
 
 export interface BuiltinRobotSettings {
   enabled: boolean
+  /** Optional runtime override. When null, the build-time environment value is used. */
+  gatewayUrl: string | null
   remoteAccess: "inbox-only" | "inbox-and-features"
   remoteApprovalEnabled: boolean
   waitingDesktopTtlMinutes: number
@@ -525,6 +527,17 @@ export interface BuiltinRobotGrantableFeature {
   granted: boolean
 }
 
+export interface BuiltinRobotDiagnostics {
+  appVersion: string
+  gatewayUrl: string | null
+  authenticationFailed: boolean
+  lastHandshakeStatus: number | null
+  lastCloseCode: number | null
+  lastCloseReason: string | null
+  lastTransportError: string | null
+  reconnectAttempt: number
+}
+
 export interface BuiltinRobotStatus {
   settings: BuiltinRobotSettings
   connectionState: BuiltinRobotConnectionState
@@ -538,6 +551,7 @@ export interface BuiltinRobotStatus {
   featureBindings: BuiltinRobotFeatureBindingStatus[]
   eventCounts: Record<string, number>
   pendingOutboxCount: number
+  diagnostics: BuiltinRobotDiagnostics
 }
 
 // Heartbeat types
