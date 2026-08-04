@@ -109,6 +109,34 @@ export function FileViewer({
     [externalFullPath, threadId]
   )
 
+  // Markdown 本地图片读取：相对路径已解析为可读路径，这里返回 base64 内容。
+  const readBinaryDependencyFile = useCallback(
+    async (resolvedPath: string): Promise<string | null> => {
+      if (externalFullPath) {
+        const tokenRes = await window.api.workspace.requestExternalFileRead(resolvedPath)
+        if (!tokenRes.success || !tokenRes.token) {
+          return null
+        }
+        const result = await window.api.workspace.readExternalBinaryFile(tokenRes.token)
+        if (result?.success && typeof result.content === "string") {
+          return result.content
+        }
+        return null
+      }
+
+      const result = threadId
+        ? await window.api.workspace.readBinaryFile(threadId, resolvedPath)
+        : null
+
+      if (result?.success && typeof result.content === "string") {
+        return result.content
+      }
+
+      return null
+    },
+    [externalFullPath, threadId]
+  )
+
   // Reset state when filePath changes
   useEffect(() => {
     setError(null)
@@ -311,6 +339,7 @@ export function FileViewer({
           viewMode={previewMode}
           whiteBackground
           className="markdown-preview"
+          readBinaryFile={readBinaryDependencyFile}
         />
       </div>
     )

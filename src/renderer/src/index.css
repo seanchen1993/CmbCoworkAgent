@@ -503,6 +503,17 @@
   white-space: pre;
 }
 
+/* File preview (.md 文件预览) hljs 代码块背景 */
+.markdown-preview code.hljs {
+  background: rgb(241 245 249 / 0.6);
+  border-radius: 10px;
+}
+
+.dark .markdown-preview code.hljs {
+  background: #334155;
+  border-radius: 10px;
+}
+
 .streaming-markdown-code-pre .hljs-keyword,
 .streaming-markdown-code-pre .hljs-selector-tag,
 .streaming-markdown-code-pre .hljs-built_in,
