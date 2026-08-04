@@ -45,6 +45,18 @@ describe("locator generator", () => {
     expect(result.best.locator).toBe('page.locator(".toolbar .save-button")')
   })
 
+  it("prefers visible text over a generic tag selector", () => {
+    const result = resolvePlaywrightLocator({
+      target: "编辑",
+      accessibleName: "编辑",
+      textContent: "编辑",
+      selector: "div",
+      tagName: "div"
+    })
+
+    expect(result.best.locator).toBe('page.getByText("编辑", { exact: true })')
+  })
+
   it("can infer a role from descriptive target text", () => {
     const result = resolvePlaywrightLocator({
       target: "Actions tab in repository navigation"

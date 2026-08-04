@@ -46,6 +46,7 @@ interface ManualRecorderLocatorPayload {
 interface ManualRecorderClickEvent extends ManualRecorderEventBase {
   type: "click"
   locator?: ManualRecorderLocatorPayload
+  locatorCandidates?: ManualRecorderLocatorPayload[]
   doubleClick?: boolean
   button?: number
 }
@@ -97,6 +98,12 @@ const SUPPORTED_PRESS_KEYS = new Set([
   "ArrowRight"
 ])
 const SENSITIVE_TARGET_PATTERN = /pass(word|code)?|secret|token|密码|口令/i
+const DECORATIVE_ROLE_PATTERN = /^(?:img|presentation|none)$/iu
+const DECORATIVE_TAG_PATTERN = /^(?:svg|path|g|use|defs|symbol|rect|circle|ellipse|line|polyline|polygon)$/iu
+const GENERIC_SELECTOR_PATTERN = /^(?:div|span|p|section|article|main|header|footer|aside|label|ul|ol|li)$/iu
+const CONTAINER_TEST_ID_PATTERN =
+  /(?:^|[-_])(area|container|wrapper|panel|section|group|list|content|body|header|footer|root)(?:$|[-_])/iu
+const INTERACTIVE_TAG_NAMES = new Set(["button", "a", "input", "textarea", "select", "option"])
 
 function now(): string {
   return new Date().toISOString()
@@ -160,6 +167,77 @@ function normalizeLocatorPayload(
   })
     ? locator
     : undefined
+}
+
+function locatorPayloadScore(
+  payload: ManualRecorderLocatorPayload | undefined,
+  candidateIndex: number
+): number {
+  if (!payload) return Number.NEGATIVE_INFINITY
+
+  const rawRole = readString(payload.role)?.toLowerCase()
+  const normalizedRole = normalizeRole(rawRole)
+  const tagName = readString(payload.tagName)?.toLowerCase()
+  const testId = readString(payload.testId)
+  const target = readString(payload.target)
+  const accessibleName = readString(payload.accessibleName)
+  const textContent = readString(payload.textContent)
+  const label = readString(payload.label)
+  const placeholder = readString(payload.placeholder)
+  const selector = readString(payload.selector)
+
+  let score = 0
+  if (tagName && DECORATIVE_TAG_PATTERN.test(tagName)) score -= 120
+  if (rawRole && DECORATIVE_ROLE_PATTERN.test(rawRole)) score -= 80
+
+  if (normalizedRole) score += 120
+  else if (tagName && INTERACTIVE_TAG_NAMES.has(tagName)) score += 110
+
+  if (label) score += 60
+  if (placeholder) score += 60
+  if (accessibleName) score += accessibleName.length <= 40 ? 50 : 20
+  if (textContent) score += textContent.length <= 40 ? 40 : 10
+  if (target && target !== testId) score += target.length <= 40 ? 30 : 10
+
+  if (testId) {
+    score += CONTAINER_TEST_ID_PATTERN.test(testId) ? 5 : 30
+  }
+
+  if (selector) {
+    score += GENERIC_SELECTOR_PATTERN.test(selector) ? 0 : 20
+  }
+
+  if (tagName && (tagName === "div" || tagName === "span" || tagName === "li")) {
+    if (accessibleName || textContent || label || testId) score += 10
+  }
+
+  score -= candidateIndex * 5
+  return score
+}
+
+function selectManualLocatorPayload(
+  fallback: ManualRecorderLocatorPayload | undefined,
+  candidates: ManualRecorderLocatorPayload[] | undefined
+): ManualRecorderLocatorPayload | undefined {
+  const pool =
+    Array.isArray(candidates) && candidates.length > 0
+      ? candidates
+      : fallback
+        ? [fallback]
+        : []
+
+  if (pool.length === 0) return fallback
+
+  let bestPayload: ManualRecorderLocatorPayload | undefined
+  let bestScore = Number.NEGATIVE_INFINITY
+  for (const [index, payload] of pool.entries()) {
+    const score = locatorPayloadScore(payload, index)
+    if (score <= bestScore) continue
+    bestScore = score
+    bestPayload = payload
+  }
+
+  return bestPayload ?? fallback
 }
 
 function isSensitiveTarget(locator: BrowserLocatorMetadata | undefined): boolean {
@@ -391,7 +469,10 @@ function normalizeManualEvent(
       return buildNavigationActionWithSource(url, "implicit")
     }
     case "click": {
-      const locator = normalizeLocatorPayload(event.locator, framePath)
+      const locator = normalizeLocatorPayload(
+        selectManualLocatorPayload(event.locator, event.locatorCandidates),
+        framePath
+      )
       return {
         id: nextActionId(),
         kind: "click",
@@ -697,15 +778,79 @@ export async function installManualRecorder(frame: WebFrameMain): Promise<void> 
       };
     }
 
+    function isDecorativeRole(role) {
+      return role === 'img' || role === 'presentation' || role === 'none';
+    }
+
+    function hasMeaningfulLocator(locator) {
+      if (!locator) return false;
+      const tagName = text(locator.tagName).toLowerCase();
+      const role = text(locator.role).toLowerCase();
+      if (tagName && /^(svg|path|g|use|defs|symbol|rect|circle|ellipse|line|polyline|polygon)$/i.test(tagName)) {
+        return false;
+      }
+      if (role && isDecorativeRole(role)) return false;
+      return Boolean(
+        locator.testId ||
+        locator.label ||
+        locator.placeholder ||
+        locator.accessibleName ||
+        locator.textContent ||
+        locator.target ||
+        (tagName && ['button', 'a', 'input', 'textarea', 'select', 'option'].includes(tagName)) ||
+        (role && !isDecorativeRole(role))
+      );
+    }
+
+    function locatorCandidatesForTarget(target) {
+      if (!(target instanceof Element)) return [];
+
+      const candidates = [];
+      const seen = new Set();
+      let current = target;
+      while (current && current !== document.body && current !== document.documentElement) {
+        const locator = locatorForElement(current);
+        if (hasMeaningfulLocator(locator)) {
+          const key = JSON.stringify(locator);
+          if (!seen.has(key)) {
+            candidates.push(locator);
+            seen.add(key);
+          }
+        }
+
+        const role = text(current.getAttribute('role')).toLowerCase();
+        const tagName = current.tagName.toLowerCase();
+        if (
+          (['button', 'a', 'input', 'textarea', 'select', 'option'].includes(tagName) ||
+            (!!role && !isDecorativeRole(role)) ||
+            current.hasAttribute('tabindex')) &&
+          !isDecorativeRole(role)
+        ) {
+          break;
+        }
+
+        current = current.parentElement;
+      }
+
+      return candidates.slice(0, 6);
+    }
+
     function actionableTarget(target) {
       if (!(target instanceof Element)) return null;
-      return target.closest('button, a, input, textarea, select, option, [role], [tabindex]');
+      const candidates = locatorCandidatesForTarget(target);
+      return candidates.length > 0 ? candidates[0] : null;
     }
 
     document.addEventListener('click', (event) => {
-      const target = actionableTarget(event.target);
-      if (!target) return;
-      emit({ type: 'click', locator: locatorForElement(target), doubleClick: event.detail === 2 });
+      const locatorCandidates = locatorCandidatesForTarget(event.target);
+      const locator = locatorCandidates[0];
+      if (!locator) return;
+      emit({
+        type: 'click',
+        locator,
+        locatorCandidates,
+        doubleClick: event.detail === 2
+      });
     }, true);
 
     function emitTextFill(target) {
@@ -760,8 +905,8 @@ export async function installManualRecorder(frame: WebFrameMain): Promise<void> 
 
     document.addEventListener('keydown', (event) => {
       if (!SUPPORTED_KEYS.has(event.key)) return;
-      const target = event.target instanceof Element ? actionableTarget(event.target) : null;
-      emit({ type: 'press', key: event.key, locator: target ? locatorForElement(target) : undefined });
+      const target = actionableTarget(event.target);
+      emit({ type: 'press', key: event.key, locator: target ?? undefined });
     }, true);
 
     window.addEventListener('hashchange', () => {
