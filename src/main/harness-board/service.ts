@@ -448,22 +448,19 @@ function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): bool
 function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
   if (adapter.type !== "plugin") return null
   const plugins = getPlugins().filter(pluginHasBoardConfig)
+  const adapterId = normalizeText(adapter.id).trim()
+  if (adapterId) {
+    const plugin = plugins.find((item) => pluginAdapterId(item) === adapterId)
+    if (plugin) return plugin
+  }
+
   const adapterName = normalizeText(adapter.name).trim()
   if (adapterName) {
     const plugin = plugins.find((item) => item.name === adapterName)
     if (plugin) return plugin
   }
 
-  const adapterId = normalizeText(adapter.id).trim()
-  if (!adapterId) return null
-  return plugins.find((item) => pluginMatchesAdapterId(item, adapterId)) ?? null
-}
-
-function findPluginByAdapterName(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
-  if (adapter.type !== "plugin") return null
-  const adapterName = normalizeText(adapter.name).trim()
-  if (!adapterName) return null
-  return getPlugins().find((item) => item.name === adapterName) ?? null
+  return null
 }
 
 function hasPullKnowledgeCommand(plugin: PluginMetadata): boolean {
@@ -560,7 +557,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
   const adapter = project["harness-adapter"]
-  return findPluginByAdapterName(adapter)
+  return findPluginForAdapterSnapshot(adapter)
 }
 
 function toTrimmedOutput(value: unknown): string {
@@ -2314,6 +2311,7 @@ export function saveHarnessLeanTokenConfig(input: HarnessLeanTokenConfig): Harne
 function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
   const harnessAdapter = project["harness-adapter"]
   const plugin = findAdapterPlugin(project)
+  const resolvedAdapter = plugin ? pluginToHarnessAdapterSnapshot(plugin) : harnessAdapter
   const boardCompatibility = evaluateBoardPluginCompatibility(
     plugin,
     harnessAdapter.name || harnessAdapter.id
@@ -2336,9 +2334,9 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     sessionWorkspacePath: project.sessionWorkspacePath,
     systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
     harnessAdapter: {
-      id: harnessAdapter.id,
-      name: harnessAdapter.name,
-      type: harnessAdapter.type
+      id: resolvedAdapter.id,
+      name: resolvedAdapter.name,
+      type: resolvedAdapter.type
     },
     creator: project.creator,
     boardCompatibility,
