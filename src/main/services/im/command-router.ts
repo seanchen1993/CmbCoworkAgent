@@ -20,6 +20,10 @@ import {
   type ImRemoteAccessService
 } from "./remote-access-service"
 import { imRemoteApprovalService, type ImRemoteApprovalService } from "./remote-approval-service"
+import {
+  imRemoteUserInputService,
+  type ImRemoteUserInputService
+} from "./remote-user-input-service"
 
 export type ImCommandName =
   | "help"
@@ -31,6 +35,7 @@ export type ImCommandName =
   | "retry"
   | "approve"
   | "reject"
+  | "answer"
   | "retired"
 
 export interface ParsedImCommand {
@@ -49,7 +54,8 @@ const COMMANDS = new Map<string, ImCommandName>([
   ["停止", "stop"],
   ["重试", "retry"],
   ["批准", "approve"],
-  ["拒绝", "reject"]
+  ["拒绝", "reject"],
+  ["回答", "answer"]
 ])
 
 export function parseImCommand(message: string): ParsedImCommand | null {
@@ -67,6 +73,7 @@ interface ImCommandRouterDependencies {
   inbox: ImInboxService
   access: ImRemoteAccessService
   approvals: Pick<ImRemoteApprovalService, "resolveCode">
+  userInputs: Pick<ImRemoteUserInputService, "resolveAnswer">
   selections: ImSelectionContextStore
   abortCurrent: (conversationKey: string) => boolean
   getCurrentEventId: (conversationKey: string) => string | null
@@ -94,6 +101,7 @@ export class ImCommandRouter {
       inbox: dependencies.inbox ?? imInboxService,
       access: dependencies.access ?? imRemoteAccessService,
       approvals: dependencies.approvals ?? imRemoteApprovalService,
+      userInputs: dependencies.userInputs ?? imRemoteUserInputService,
       selections: dependencies.selections ?? imSelectionContextStore,
       abortCurrent: dependencies.abortCurrent ?? (() => false),
       getCurrentEventId: dependencies.getCurrentEventId ?? (() => null)
@@ -125,6 +133,8 @@ export class ImCommandRouter {
           return await this.resolveApproval(input, "approve")
         case "reject":
           return await this.resolveApproval(input, "reject")
+        case "answer":
+          return await this.resolveUserInput(input)
         case "retired":
           return "/项目 和 /功能 已合并为 /会话，请发送 /会话 查看已在桌面授权的目标。"
       }
@@ -172,7 +182,8 @@ export class ImCommandRouter {
       "/停止 — 只停止当前由 IM 发起的任务",
       "/重试 <事件短码> — 显式重试结果未知的事件",
       "/批准 <审批短码> — 一次性批准工具调用（需在桌面设置中开启）",
-      "/拒绝 <审批短码> — 拒绝工具调用（需在桌面设置中开启）"
+      "/拒绝 <审批短码> — 拒绝工具调用（需在桌面设置中开启）",
+      "/回答 <输入短码> <编号> — 回答 Agent 的补充问题"
     ].join("\n")
   }
 
@@ -287,7 +298,7 @@ export class ImCommandRouter {
     const interaction = hasPendingApprovalForRuntimeThread(runtimeTarget.threadId)
       ? "等待桌面审批"
       : hasPendingUserInputForThread(runtimeTarget.threadId)
-        ? "等待桌面补充输入"
+        ? "等待招乎或桌面补充输入"
         : "无"
     return [
       `当前目标：【${targetLabel(target)}】${selected?.state === "active" ? "" : "（授权不可用，请重新绑定或切回收件箱）"}`,
@@ -320,6 +331,14 @@ export class ImCommandRouter {
     return this.dependencies.approvals.resolveCode({
       code: input.command.argument,
       decision,
+      principalId: input.principalId,
+      conversationKey: input.conversationKey
+    })
+  }
+
+  private resolveUserInput(input: Parameters<ImCommandRouter["handle"]>[0]): Promise<string> {
+    return this.dependencies.userInputs.resolveAnswer({
+      argument: input.command.argument,
       principalId: input.principalId,
       conversationKey: input.conversationKey
     })

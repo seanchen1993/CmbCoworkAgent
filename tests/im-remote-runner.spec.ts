@@ -552,6 +552,13 @@ function testInboxPolicyKeepsSchedulerButCutsRemoteRisks(): void {
   assert.equal(policy.disableSubagents, true)
   assert(policy.blockedToolNames?.includes("execute"))
   assert(!policy.blockedToolNames?.includes("manage_scheduler"))
+
+  const interactivePolicy = createImInboxRemotePolicy({ allowRequestUserInput: true })
+  assert.equal(
+    interactivePolicy.disableRequestUserInput,
+    undefined,
+    "ordinary IM inbox turns may ask structured questions while scheduler runs stay non-interactive"
+  )
 }
 
 function testInboxSchedulerDeliveryContextIsExplicitAndStrict(): void {

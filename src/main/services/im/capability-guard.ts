@@ -330,7 +330,7 @@ export class ImRemoteCapabilityGuard {
       return {
         allowed: false,
         reasonCode: "REMOTE_INTERACTION_PENDING",
-        message: "该会话正在等待桌面审批或补充输入，请先在桌面处理。"
+        message: "该会话正在等待审批或补充输入，请先处理当前交互。"
       }
     }
 

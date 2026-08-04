@@ -6,10 +6,11 @@
 > 原则：桌面执行语义不变；IM 可以少能力，但不能形成第二套不受治理的执行语义。
 
 当前交付状态：Gateway route 契约、显式授权、统一 `/会话`、桌面完成推送和默认关闭的
-一次性远程审批均已落地。Coordinator/workflow 依据
+一次性远程审批均已落地；`request_user_input` 已支持纯文本问题推送和 `/回答` 短码回复。Coordinator/workflow 依据
 [`chatx-im-advanced-mode-rfc.md`](./chatx-im-advanced-mode-rfc.md) 继续保持 fail closed。
 
-首版采用文本短码审批，不包含卡片回执和 `/回答` 结构化补充输入；这两项需要 Gateway
+当前交互采用纯文本降级协议，不依赖 Gateway 新契约：审批使用 `/批准`、`/拒绝`，补充输入使用
+`/回答 <输入短码> <编号>` 或 `/回答 <输入短码> 其他 <内容>`。卡片回执仍需 Gateway
 结构化事件契约配合，留在后续增强，不影响当前普通消息和桌面交互路径。
 
 ## 1. 实施边界与顺序
@@ -20,7 +21,8 @@
 2. 阶段 1A：桌面显式授权、统一 `/会话`、绑定已有普通会话、Feature 授权新建会话；
 3. 阶段 1B：桌面成功 Turn 的最终回复主动推送；
 4. 阶段 1C：远程一次性审批；
-5. 阶段 2：coordinator / workflow。
+5. 阶段 1D：`request_user_input` 纯文本回答；
+6. 阶段 2：coordinator / workflow。
 
 阶段 1A/1B 仍只允许 `agentMode === "normal"`。Goal、coordinator、workflow、
 待处理内部通知，以及未完成的桌面审批/结构化输入继续 fail closed。

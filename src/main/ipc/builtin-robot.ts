@@ -10,6 +10,10 @@ import {
   imRemoteApprovalService,
   remoteApprovalDesktopNotice
 } from "../services/im/remote-approval-service"
+import {
+  imRemoteUserInputService,
+  type ImRemoteUserInputAnswerNotice
+} from "../services/im/remote-user-input-service"
 
 function broadcastStatus(status: BuiltinRobotStatus): void {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -32,6 +36,17 @@ function broadcastRemoteApprovalAudit(
       window.webContents.send(`agent:stream:${record.threadId}`, {
         type: "custom",
         data: { type: "hook_notice", message }
+      })
+    }
+  }
+}
+
+function broadcastRemoteUserInputAnswer(notice: ImRemoteUserInputAnswerNotice): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+      window.webContents.send(`agent:stream:${notice.threadId}`, {
+        type: "custom",
+        data: { type: "hook_notice", message: notice.message }
       })
     }
   }
@@ -97,6 +112,7 @@ export function registerBuiltinRobotHandlers(ipcMain: IpcMain): void {
     statusSubscriptionRegistered = true
     builtinRobotManager.subscribe(broadcastStatus)
     imRemoteApprovalService.subscribeAudit(broadcastRemoteApprovalAudit)
+    imRemoteUserInputService.subscribeAnswer(broadcastRemoteUserInputAnswer)
   }
   ipcMain.handle("builtinRobot:getStatus", (): BuiltinRobotStatus => {
     return builtinRobotManager.getStatus()

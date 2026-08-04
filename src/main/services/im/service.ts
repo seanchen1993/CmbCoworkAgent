@@ -13,6 +13,7 @@ import { imEventStore } from "./event-store"
 import { buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
 import { registerImDesktopCompletionReplyDrainer } from "./desktop-completion"
 import { imRemoteApprovalService } from "./remote-approval-service"
+import { imRemoteUserInputService } from "./remote-user-input-service"
 
 /**
  * Headless orchestration boundary used by the production WSS adapter and the
@@ -29,6 +30,7 @@ export class ImUnifiedBotService {
   private readonly unregisterSchedulerGateway: () => void
   private readonly unregisterDesktopCompletionReplyDrainer: () => void
   private readonly unregisterRemoteApprovalReplyDrainer: () => void
+  private readonly unregisterRemoteUserInputReplyDrainer: () => void
   private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
@@ -41,6 +43,9 @@ export class ImUnifiedBotService {
       this.replyClient
     )
     this.unregisterRemoteApprovalReplyDrainer = imRemoteApprovalService.registerReplyDrainer(
+      this.replyClient
+    )
+    this.unregisterRemoteUserInputReplyDrainer = imRemoteUserInputService.registerReplyDrainer(
       this.replyClient
     )
     this.runner = new ImRemoteRunner({
@@ -166,6 +171,7 @@ export class ImUnifiedBotService {
     this.unregisterSchedulerGateway()
     this.unregisterDesktopCompletionReplyDrainer()
     this.unregisterRemoteApprovalReplyDrainer()
+    this.unregisterRemoteUserInputReplyDrainer()
     return this.turnQueue.stop()
   }
 

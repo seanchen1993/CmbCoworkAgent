@@ -218,10 +218,12 @@ export async function setRemoteThreadLifecycle(
   notifyRemoteThreadChanged()
 }
 
-export function createImInboxRemotePolicy(): RemoteTurnPolicy {
+export function createImInboxRemotePolicy(
+  options: { allowRequestUserInput?: boolean } = {}
+): RemoteTurnPolicy {
   return {
     disableSkillEvolution: true,
-    disableRequestUserInput: true,
+    ...(options.allowRequestUserInput ? {} : { disableRequestUserInput: true }),
     disableSubagents: true,
     disableMemoryInjection: true,
     disableTaskTool: true,
@@ -357,9 +359,9 @@ export async function executePreparedRemoteStandardTurn(
         skillHookKeys,
         skillUseTracker,
         onHookResult,
-        enableRequestUserInput: targetKind !== "inbox",
-        allowDeferredUserInputRenderer: targetKind !== "inbox",
-        interactionWaitHooks: targetKind !== "inbox" ? interactionWaitHooks : undefined,
+        enableRequestUserInput: source === "im",
+        allowDeferredUserInputRenderer: source === "im",
+        interactionWaitHooks: source === "im" ? interactionWaitHooks : undefined,
         memoryEnabled: targetKind === "inbox" ? false : undefined,
         imDeliveryContext: resolveImInboxDeliveryContextForRuntime({
           threadId,
@@ -510,7 +512,10 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
     source: "im",
     routingTaskSource: "chat",
     signal,
-    remotePolicy: target.kind === "inbox" ? createImInboxRemotePolicy() : undefined,
+    remotePolicy:
+      target.kind === "inbox"
+        ? createImInboxRemotePolicy({ allowRequestUserInput: true })
+        : undefined,
     interactionWaitHooks
   })
 }
@@ -587,112 +592,110 @@ export class ImRemoteRunner {
       abortExecution(new Error("IM execution permit was revoked"))
     }
     this.activePermitRevocations.set(event.eventId, revokeActivePermit)
-    const interactionWaitHooks: RuntimeInteractionWaitHooks | undefined =
-      target.kind !== "inbox"
-        ? {
-            onWaitStart: async (interaction) => {
-              await serializeInteractionMutation(async () => {
-                const key = `${interaction.kind}:${interaction.id}`
-                if (activeInteractions.has(key)) return
-                activeInteractions.add(key)
-                if (activeInteractions.size > 1) return
-                try {
-                  const latest = this.dependencies.eventStore.getEvent(event.eventId)
-                  if (!latest || latest.state !== "executing") {
-                    throw new Error("IM event cannot enter desktop wait from its current state")
-                  }
-                  const waiting = await this.dependencies.eventStore.markWaitingDesktop(
-                    latest.eventId
-                  )
-                  await this.dependencies.setThreadLifecycle(waiting, "waiting_desktop")
-                  await this.dependencies.eventStore.enqueueProactiveReplies(
-                    buildImProactiveReplies({
-                      deliveryId: `${event.eventId}:waiting-desktop`,
-                      conversationKey: waiting.conversationKey,
-                      text: "任务正在等待桌面确认或补充输入，请在 10 分钟内到对应远程 Thread 处理。",
-                      prefix: this.targetPrefixForEvent(waiting)
-                    })
-                  )
-                  await this.dependencies.gateway.sendAcknowledgement({
-                    type: "waiting_desktop",
-                    eventId: waiting.eventId,
-                    leaseId: waiting.leaseId
-                  })
-                  await this.dependencies.replyClient.sendPending()
-                  waitingTimer = setTimeout(() => {
-                    waitingTimeoutReason = "REMOTE_INTERACTION_TIMEOUT"
-                    abortExecution(
-                      new DOMException("Remote desktop interaction timed out", "AbortError")
-                    )
-                  }, this.dependencies.waitingDesktopTtlMs)
-                } catch (error) {
-                  interactionFailure.current = {
-                    reasonCode: "REMOTE_WAIT_STATE_FAILED",
-                    message: "无法进入桌面确认状态，本轮已安全取消。"
-                  }
-                  abortExecution(
-                    error instanceof Error ? error : new Error("Failed to enter desktop wait")
-                  )
-                  throw error
-                }
-              })
-            },
-            onWaitEnd: async (interaction) => {
-              await serializeInteractionMutation(async () => {
-                const key = `${interaction.kind}:${interaction.id}`
-                if (!activeInteractions.delete(key) || activeInteractions.size > 0) return
-                if (executionAbort.signal.aborted) return
-                try {
-                  const latest = this.dependencies.eventStore.getEvent(event.eventId)
-                  if (!latest || latest.state !== "waiting_desktop") {
-                    throw new Error("IM event is no longer waiting for desktop interaction")
-                  }
-                  const localLease = getLocalThreadRunLease(target.threadId)
-                  if (localLease?.owner !== "im" || localLease.runId !== runId) {
-                    throw new Error("Local IM run lease was lost while waiting for desktop")
-                  }
-                  const renewed = await this.dependencies.gateway.renewExecutionPermit(latest)
-                  if (renewed.status !== "granted" || !renewed.leaseId || !renewed.expiresAt) {
-                    permitRevokedReason = renewed.reasonCode ?? "LEASE_REVOKED"
-                    throw new Error("IM execution permit was revoked while waiting for desktop")
-                  }
-                  const permitted = await this.dependencies.eventStore.renewExecutionPermit({
-                    eventId: latest.eventId,
-                    leaseId: renewed.leaseId,
-                    expiresAt: renewed.expiresAt
-                  })
-                  const capability = await this.dependencies.capabilityGuard.evaluate(permitted)
-                  if (!capability.allowed) {
-                    interactionFailure.current = {
-                      reasonCode: capability.reasonCode,
-                      message: capability.message
-                    }
-                    throw new Error(`IM capability changed while waiting: ${capability.reasonCode}`)
-                  }
-                  const resumed = await this.dependencies.eventStore.resumeFromDesktop(
-                    permitted.eventId
-                  )
-                  await this.dependencies.setThreadLifecycle(resumed, "active")
-                  if (waitingTimer) {
-                    clearTimeout(waitingTimer)
-                    waitingTimer = undefined
-                  }
-                } catch (error) {
-                  if (!permitRevokedReason && !interactionFailure.current) {
-                    interactionFailure.current = {
-                      reasonCode: "REMOTE_WAIT_RESUME_REJECTED",
-                      message: "桌面交互完成，但执行许可或本地运行租约已失效，本轮已取消。"
-                    }
-                  }
-                  abortExecution(
-                    error instanceof Error ? error : new Error("Failed to resume desktop wait")
-                  )
-                  throw error
-                }
-              })
+    const interactionWaitHooks: RuntimeInteractionWaitHooks = {
+      onWaitStart: async (interaction) => {
+        await serializeInteractionMutation(async () => {
+          const key = `${interaction.kind}:${interaction.id}`
+          if (activeInteractions.has(key)) return
+          activeInteractions.add(key)
+          if (activeInteractions.size > 1) return
+          try {
+            const latest = this.dependencies.eventStore.getEvent(event.eventId)
+            if (!latest || latest.state !== "executing") {
+              throw new Error("IM event cannot enter desktop wait from its current state")
             }
+            const waiting = await this.dependencies.eventStore.markWaitingDesktop(latest.eventId)
+            await this.dependencies.setThreadLifecycle(waiting, "waiting_desktop")
+            const waitingMinutes = Math.max(
+              1,
+              Math.ceil(this.dependencies.waitingDesktopTtlMs / 60_000)
+            )
+            await this.dependencies.eventStore.enqueueProactiveReplies(
+              buildImProactiveReplies({
+                deliveryId: `${event.eventId}:waiting-desktop`,
+                conversationKey: waiting.conversationKey,
+                text:
+                  interaction.kind === "user_input"
+                    ? `任务需要补充输入，问题与 /回答 指令将发送到当前招乎会话；也可在 ${waitingMinutes} 分钟内到对应桌面会话处理。`
+                    : `任务正在等待桌面确认；如已开启远程审批，也可在 ${waitingMinutes} 分钟内通过招乎审批指令处理。`,
+                prefix: this.targetPrefixForEvent(waiting)
+              })
+            )
+            await this.dependencies.gateway.sendAcknowledgement({
+              type: "waiting_desktop",
+              eventId: waiting.eventId,
+              leaseId: waiting.leaseId
+            })
+            await this.dependencies.replyClient.sendPending()
+            waitingTimer = setTimeout(() => {
+              waitingTimeoutReason = "REMOTE_INTERACTION_TIMEOUT"
+              abortExecution(new DOMException("Remote desktop interaction timed out", "AbortError"))
+            }, this.dependencies.waitingDesktopTtlMs)
+          } catch (error) {
+            interactionFailure.current = {
+              reasonCode: "REMOTE_WAIT_STATE_FAILED",
+              message: "无法进入桌面确认状态，本轮已安全取消。"
+            }
+            abortExecution(
+              error instanceof Error ? error : new Error("Failed to enter desktop wait")
+            )
+            throw error
           }
-        : undefined
+        })
+      },
+      onWaitEnd: async (interaction) => {
+        await serializeInteractionMutation(async () => {
+          const key = `${interaction.kind}:${interaction.id}`
+          if (!activeInteractions.delete(key) || activeInteractions.size > 0) return
+          if (executionAbort.signal.aborted) return
+          try {
+            const latest = this.dependencies.eventStore.getEvent(event.eventId)
+            if (!latest || latest.state !== "waiting_desktop") {
+              throw new Error("IM event is no longer waiting for desktop interaction")
+            }
+            const localLease = getLocalThreadRunLease(target.threadId)
+            if (localLease?.owner !== "im" || localLease.runId !== runId) {
+              throw new Error("Local IM run lease was lost while waiting for desktop")
+            }
+            const renewed = await this.dependencies.gateway.renewExecutionPermit(latest)
+            if (renewed.status !== "granted" || !renewed.leaseId || !renewed.expiresAt) {
+              permitRevokedReason = renewed.reasonCode ?? "LEASE_REVOKED"
+              throw new Error("IM execution permit was revoked while waiting for desktop")
+            }
+            const permitted = await this.dependencies.eventStore.renewExecutionPermit({
+              eventId: latest.eventId,
+              leaseId: renewed.leaseId,
+              expiresAt: renewed.expiresAt
+            })
+            const capability = await this.dependencies.capabilityGuard.evaluate(permitted)
+            if (!capability.allowed) {
+              interactionFailure.current = {
+                reasonCode: capability.reasonCode,
+                message: capability.message
+              }
+              throw new Error(`IM capability changed while waiting: ${capability.reasonCode}`)
+            }
+            const resumed = await this.dependencies.eventStore.resumeFromDesktop(permitted.eventId)
+            await this.dependencies.setThreadLifecycle(resumed, "active")
+            if (waitingTimer) {
+              clearTimeout(waitingTimer)
+              waitingTimer = undefined
+            }
+          } catch (error) {
+            if (!permitRevokedReason && !interactionFailure.current) {
+              interactionFailure.current = {
+                reasonCode: "REMOTE_WAIT_RESUME_REJECTED",
+                message: "桌面交互完成，但执行许可或本地运行租约已失效，本轮已取消。"
+              }
+            }
+            abortExecution(
+              error instanceof Error ? error : new Error("Failed to resume desktop wait")
+            )
+            throw error
+          }
+        })
+      }
+    }
     let renewalInFlight = false
     const renewTimer = setInterval(() => {
       if (renewalInFlight || executionAbort.signal.aborted) return

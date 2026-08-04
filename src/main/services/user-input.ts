@@ -12,6 +12,9 @@ interface PendingUserInput {
   ackTimeout?: ReturnType<typeof setTimeout>
 }
 
+type PendingUserInputListener = (request: Readonly<UserInputRequest>) => void
+type RemovedUserInputListener = (requestId: string, threadId: string) => void
+
 interface RequestUserInputParams {
   threadId: string
   questions: UserInputQuestion[]
@@ -27,6 +30,8 @@ interface RequestUserInputParams {
 
 const pendingUserInputs = new Map<string, PendingUserInput>()
 const pendingUserInputThreads = new Map<string, string>()
+const pendingUserInputListeners = new Set<PendingUserInputListener>()
+const removedUserInputListeners = new Set<RemovedUserInputListener>()
 const USER_INPUT_ACK_TIMEOUT_MS = 5_000
 
 export function hasPendingUserInputForThread(threadId: string): boolean {
@@ -37,6 +42,16 @@ export function getPendingUserInputForThread(threadId: string): UserInputRequest
   const requestId = pendingUserInputThreads.get(threadId)
   if (!requestId) return null
   return pendingUserInputs.get(requestId)?.request ?? null
+}
+
+export function subscribePendingUserInput(listener: PendingUserInputListener): () => void {
+  pendingUserInputListeners.add(listener)
+  return () => pendingUserInputListeners.delete(listener)
+}
+
+export function subscribeRemovedUserInput(listener: RemovedUserInputListener): () => void {
+  removedUserInputListeners.add(listener)
+  return () => removedUserInputListeners.delete(listener)
 }
 
 export class UserInputRequestRejectedError extends Error {
@@ -81,6 +96,13 @@ function cleanupPending(requestId: string): PendingUserInput | undefined {
     threadId: pending.request.threadId,
     key: `user-input:${requestId}`
   })
+  for (const listener of removedUserInputListeners) {
+    try {
+      listener(requestId, pending.request.threadId)
+    } catch (error) {
+      console.warn("[UserInput] Removed listener failed:", error)
+    }
+  }
   return pending
 }
 
@@ -162,6 +184,13 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       key: `user-input:${request.requestId}`
     })
     sendToThread(threadId, "request", request)
+    for (const listener of pendingUserInputListeners) {
+      try {
+        listener(request)
+      } catch (error) {
+        console.warn("[UserInput] Pending listener failed:", error)
+      }
+    }
   })
 }
 
@@ -175,9 +204,18 @@ export function acknowledgeUserInputRequest(requestId: string, threadId: string)
   return true
 }
 
-export function submitUserInputResponse(response: UserInputResponse): boolean {
+export function submitUserInputResponse(
+  response: UserInputResponse,
+  options: { notifyRenderer?: boolean; reason?: string } = {}
+): boolean {
   const pending = cleanupPending(response.requestId)
   if (!pending) return false
+  if (options.notifyRenderer) {
+    sendToThread(pending.request.threadId, "cancel", {
+      requestId: response.requestId,
+      reason: options.reason ?? "User input was answered outside the desktop renderer."
+    })
+  }
   pending.resolve({
     ...response,
     submittedAt: response.submittedAt ?? new Date().toISOString()

@@ -390,7 +390,8 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 <p className="text-sm font-medium">允许从招乎批准工具调用</p>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
                   默认关闭。开启后仅支持工作区内文件写入和完整展示的命令，且每次只能批准一次； Git
-                  提交、推送和永久授权仍必须回到桌面。
+                  提交、推送和永久授权仍必须回到桌面。Agent 的补充问题可直接使用招乎 `/回答`
+                  指令处理，不受此开关影响。
                 </p>
               </div>
               <Switch
