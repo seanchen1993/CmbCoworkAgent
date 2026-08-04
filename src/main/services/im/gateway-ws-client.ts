@@ -55,6 +55,7 @@ export interface ImGatewayWsClientOptions {
   capabilities?: string[]
   onRemoteEvent: (event: RemoteImEventV1) => void | Promise<void>
   onLeaseRevoked?: (payload: Record<string, unknown>) => void | Promise<void>
+  onAuthenticationRequired?: (rejectedToken: string) => boolean | Promise<boolean>
   onStatusChange?: (status: ImGatewayWsStatus) => void
   now?: () => number
 }
@@ -131,7 +132,10 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined
   private connectTimer: ReturnType<typeof setTimeout> | undefined
   private connectionGeneration = 0
+  private connectionToken: string | null = null
   private reconnectBlocked = false
+  private authenticationRefreshInFlight = false
+  private authenticationRefreshAttempted = false
   private helloCommandId: string | null = null
   private syncCommandId: string | null = null
   private readonly permitCommands = new Map<string, PendingCommand<ImExecutionPermitResult>>()
@@ -170,6 +174,9 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   stop(): void {
     this.stopped = true
     this.connectionGeneration += 1
+    this.connectionToken = null
+    this.authenticationRefreshInFlight = false
+    this.authenticationRefreshAttempted = false
     this.helloCommandId = null
     this.syncCommandId = null
     this.clearTimers()
@@ -320,6 +327,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       return
     }
     this.socket = socket
+    this.connectionToken = token
     this.connectTimer = setTimeout(() => {
       if (
         this.connectionGeneration === generation &&
@@ -359,12 +367,16 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     })
     socket.on("error", () => {
       if (this.connectionGeneration !== generation || this.socket !== socket) return
-      if (this.status.authenticationFailed) return
+      if (this.status.authenticationFailed || this.authenticationRefreshInFlight) return
       this.updateStatus({ lastError: "统一机器人连接异常。" })
     })
     socket.on("unexpected-response", (_request, response) => {
       if (this.connectionGeneration !== generation || this.socket !== socket) return
-      const authenticationFailed = response.statusCode === 401 || response.statusCode === 403
+      if (response.statusCode === 401) {
+        this.handleAuthenticationRequired()
+        return
+      }
+      const authenticationFailed = response.statusCode === 403
       this.updateStatus({
         connectionState: "error",
         authenticationFailed,
@@ -380,6 +392,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     socket.on("close", () => {
       if (this.connectionGeneration !== generation || this.socket !== socket) return
       this.socket = null
+      this.connectionToken = null
       this.helloCommandId = null
       this.syncCommandId = null
       if (this.connectTimer) clearTimeout(this.connectTimer)
@@ -389,6 +402,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         new ImGatewayCommandError("统一机器人连接已中断", { reasonCode: "DESKTOP_OFFLINE" })
       )
       if (this.stopped) return
+      if (this.authenticationRefreshInFlight) return
       if (this.reconnectBlocked) {
         this.updateStatus({
           connectionState: "error",
@@ -467,6 +481,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         if (this.connectTimer) clearTimeout(this.connectTimer)
         this.connectTimer = undefined
         this.reconnectAttempt = 0
+        this.authenticationRefreshInFlight = false
+        this.authenticationRefreshAttempted = false
         this.updateStatus({
           connectionState: "online",
           authenticationFailed: false,
@@ -657,6 +673,10 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     )
     const reasonCode = nonEmptyString(payload.reasonCode)
     if (!reasonCode) throw new ImGatewayProtocolError("ERROR payload is missing reasonCode")
+    if (reasonCode === "AUTH_REQUIRED") {
+      this.handleAuthenticationRequired()
+      return
+    }
     if (reasonCode === "SESSION_SUPERSEDED") {
       this.reconnectBlocked = true
       this.rejectPending(new ImGatewayCommandError("当前企业账号已有新的桌面连接", { reasonCode }))
@@ -779,6 +799,78 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       lastError: message
     })
     this.scheduleReconnect()
+  }
+
+  private handleAuthenticationRequired(): void {
+    const generation = this.connectionGeneration
+    const socket = this.socket
+    const rejectedToken = this.connectionToken
+    if (this.stopped || !socket || !rejectedToken) return
+
+    this.rejectPending(new ImGatewayCommandError("企业身份已过期", { reasonCode: "AUTH_REQUIRED" }))
+    if (!this.options.onAuthenticationRequired || this.authenticationRefreshAttempted) {
+      this.authenticationRefreshInFlight = false
+      this.updateStatus({
+        connectionState: "error",
+        authenticationFailed: true,
+        sessionId: null,
+        principalId: null,
+        routes: [],
+        lastError: "企业身份认证失败，请重新登录。"
+      })
+      socket.terminate()
+      return
+    }
+
+    this.authenticationRefreshAttempted = true
+    this.authenticationRefreshInFlight = true
+    if (this.connectTimer) clearTimeout(this.connectTimer)
+    this.connectTimer = undefined
+    this.stopHeartbeat()
+    this.updateStatus({
+      connectionState: "connecting",
+      authenticationFailed: false,
+      sessionId: null,
+      principalId: null,
+      routes: [],
+      lastError: "企业身份已过期，正在刷新…"
+    })
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.close(4003, "authentication required")
+    } else {
+      socket.terminate()
+    }
+
+    void Promise.resolve()
+      .then(() => this.options.onAuthenticationRequired?.(rejectedToken) ?? false)
+      .then((refreshed) => {
+        if (this.stopped || this.connectionGeneration !== generation) return
+        this.authenticationRefreshInFlight = false
+        if (!refreshed) {
+          this.updateStatus({
+            connectionState: "error",
+            authenticationFailed: true,
+            sessionId: null,
+            principalId: null,
+            routes: [],
+            lastError: "企业身份刷新失败，请重新登录。"
+          })
+          return
+        }
+        this.connect()
+      })
+      .catch(() => {
+        if (this.stopped || this.connectionGeneration !== generation) return
+        this.authenticationRefreshInFlight = false
+        this.updateStatus({
+          connectionState: "error",
+          authenticationFailed: true,
+          sessionId: null,
+          principalId: null,
+          routes: [],
+          lastError: "企业身份刷新失败，请重新登录。"
+        })
+      })
   }
 
   private updateStatus(patch: Partial<ImGatewayWsStatus>): void {

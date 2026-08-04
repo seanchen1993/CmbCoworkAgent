@@ -1,5 +1,6 @@
 import type { IpcMain } from "electron"
-import { getUserInfo, upsertUserInfoConfig, type UserInfoConfig } from "../storage"
+import { getUserInfo, type UserInfoConfig } from "../storage"
+import { refreshEnterpriseLogin } from "../services/enterprise-login-refresh"
 import type {
   TaskCardItem,
   TaskCardsListResult,
@@ -201,9 +202,6 @@ interface TaskCardsCacheEntry {
 
 const taskCardsCache = new Map<string, TaskCardsCacheEntry>()
 let taskCardsRequestSequence = 0
-// The desktop app has one signed-in user per process; share an in-flight refresh
-// so parallel task-card loads do not stampede the login-info endpoint.
-let taskCardsLoginRefreshPromise: Promise<UserInfoConfig | null> | null = null
 
 function normalizeQuery(query?: TaskCardsQuery): NormalizedTaskCardsQuery {
   const pageSize =
@@ -229,18 +227,6 @@ function getTaskCardsEndpoint(): string {
   return configured || process.env.CMB_TASK_CARDS_ENDPOINT || DEFAULT_TASK_CARDS_ENDPOINT
 }
 
-function getLoginInfoEndpoint(): string {
-  const viteEnv = (import.meta.env ?? {}) as Record<string, string | undefined>
-  const configured = viteEnv.VITE_LOGIN_INFO_ENDPOINT?.trim() || process.env.CMB_LOGIN_INFO_ENDPOINT
-  if (configured?.trim()) return configured.trim()
-
-  const loginPt = viteEnv.VITE_LOGIN_PT?.trim() || process.env.VITE_LOGIN_PT?.trim()
-  if (!loginPt) {
-    throw new Error("未配置登录环境，无法刷新任务卡登录凭据")
-  }
-  return `https://archguardservice.paas.${loginPt}.cn/cowork/login-info`
-}
-
 function isTaskCardsMockEnabled(): boolean {
   const viteEnv = (import.meta.env ?? {}) as Record<string, string | undefined>
   return viteEnv.VITE_TASK_CARDS_MOCK === "1" || process.env.CMB_TASK_CARDS_MOCK === "1"
@@ -250,14 +236,6 @@ function createHttpsTaskCardsUrl(endpoint: string): URL {
   const url = new URL(endpoint)
   if (url.protocol !== "https:") {
     throw new Error("任务卡接口必须使用 HTTPS，已拒绝通过明文 HTTP 传输登录令牌")
-  }
-  return url
-}
-
-function createHttpsLoginInfoUrl(endpoint: string): URL {
-  const url = new URL(endpoint)
-  if (url.protocol !== "https:") {
-    throw new Error("登录凭据刷新接口必须使用 HTTPS")
   }
   return url
 }
@@ -285,23 +263,6 @@ function getTaskCardsResponseHeaders(response: Response): Record<string, string>
 function truncateForLog(value: string): string {
   if (value.length <= TASK_CARDS_ERROR_BODY_LOG_LIMIT) return value
   return `${value.slice(0, TASK_CARDS_ERROR_BODY_LOG_LIMIT)}...<truncated>`
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null
-  return value as Record<string, unknown>
-}
-
-function readString(raw: Record<string, unknown>, key: string): string | undefined {
-  const value = raw[key]
-  if (typeof value === "string") {
-    const trimmed = value.trim()
-    return trimmed || undefined
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return String(value)
-  }
-  return undefined
 }
 
 function buildCacheKey(query: NormalizedTaskCardsQuery, userKey: string, endpoint: string): string {
@@ -341,12 +302,10 @@ function emptyResult(
 }
 
 function stripRequestMetadata(result: TaskCardsRequestResult): TaskCardsListResult {
-  const {
-    httpStatus: _httpStatus,
-    requestMethod: _requestMethod,
-    methodFallbackUsed: _methodFallbackUsed,
-    ...publicResult
-  } = result
+  const publicResult = { ...result }
+  delete publicResult.httpStatus
+  delete publicResult.requestMethod
+  delete publicResult.methodFallbackUsed
   return publicResult
 }
 
@@ -420,130 +379,6 @@ function createMockTaskCardsResult(query: NormalizedTaskCardsQuery): TaskCardsLi
       pageNum: query.pageNum
     }
   )
-}
-
-function mergeRefreshedUserInfo(
-  current: UserInfoConfig,
-  body: Record<string, unknown>
-): UserInfoConfig {
-  const nextAccessToken = readString(body, "ystAccessToken")
-  if (!nextAccessToken) {
-    throw new Error("登录凭据刷新响应缺少 ystAccessToken")
-  }
-
-  return {
-    ...current,
-    sapId: readString(body, "sapId") || current.sapId,
-    ystId: readString(body, "ystId") || current.ystId,
-    userName: readString(body, "userName") || current.userName,
-    originOrgId: readString(body, "originOrgId") || current.originOrgId,
-    orgName: readString(body, "orgName") || current.orgName,
-    pathName: readString(body, "pathName") || current.pathName,
-    originPathId: readString(body, "originPathId") || current.originPathId,
-    ystRefreshToken: readString(body, "ystRefreshToken") || current.ystRefreshToken,
-    ystIdToken: readString(body, "ystIdToken") || current.ystIdToken,
-    ystCode: readString(body, "ystCode") || current.ystCode,
-    ystAccessToken: nextAccessToken
-  }
-}
-
-async function requestTaskCardsLoginRefresh(
-  userInfo: UserInfoConfig
-): Promise<UserInfoConfig | null> {
-  const refreshToken = userInfo.ystRefreshToken?.trim()
-  const ystCode = userInfo.ystCode?.trim()
-  if (!refreshToken && !ystCode) {
-    console.warn("[TaskCards] token-refresh:missing-refresh-token")
-    return null
-  }
-
-  const requestId = nextTaskCardsRequestId()
-  const url = createHttpsLoginInfoUrl(getLoginInfoEndpoint())
-  const headers: Record<string, string> = {}
-  if (refreshToken) headers.ystRefreshToken = refreshToken
-  if (ystCode) headers.ystCode = ystCode
-
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), TASK_CARDS_TIMEOUT_MS)
-
-  try {
-    const startedAt = Date.now()
-    console.info("[TaskCards] token-refresh:start", {
-      requestId,
-      url: url.toString(),
-      headers: {
-        ystRefreshToken: refreshToken ? "<redacted>" : undefined,
-        ystCode: ystCode ? "<redacted>" : undefined
-      }
-    })
-
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers,
-      signal: controller.signal
-    })
-    console.info("[TaskCards] token-refresh:response", {
-      requestId,
-      status: response.status,
-      statusText: response.statusText,
-      durationMs: Date.now() - startedAt,
-      headers: getTaskCardsResponseHeaders(response)
-    })
-
-    if (!response.ok) {
-      const responseText = await response.text().catch(() => "")
-      console.warn("[TaskCards] token-refresh:failed", {
-        requestId,
-        status: response.status,
-        statusText: response.statusText,
-        bodyPreview: responseText ? truncateForLog(responseText) : ""
-      })
-      return null
-    }
-
-    const payload = asRecord(await response.json())
-    if (!payload) {
-      throw new Error("登录凭据刷新响应格式异常")
-    }
-
-    const returnCode = readString(payload, "returnCode")
-    if (returnCode !== "SUC0000") {
-      console.warn("[TaskCards] token-refresh:business-failed", {
-        requestId,
-        returnCode,
-        error: readString(payload, "errorMsg")
-      })
-      return null
-    }
-
-    const body = asRecord(payload.body)
-    if (!body) {
-      throw new Error("登录凭据刷新响应缺少 body")
-    }
-
-    const nextUserInfo = mergeRefreshedUserInfo(userInfo, body)
-    upsertUserInfoConfig(nextUserInfo)
-    return nextUserInfo
-  } catch (error) {
-    const aborted = error instanceof Error && error.name === "AbortError"
-    console.warn("[TaskCards] token-refresh:error", {
-      requestId,
-      aborted,
-      message: error instanceof Error ? error.message : String(error)
-    })
-    return null
-  } finally {
-    clearTimeout(timeout)
-  }
-}
-
-async function refreshTaskCardsLogin(userInfo: UserInfoConfig): Promise<UserInfoConfig | null> {
-  if (!taskCardsLoginRefreshPromise) {
-    taskCardsLoginRefreshPromise = requestTaskCardsLoginRefresh(userInfo).finally(() => {
-      taskCardsLoginRefreshPromise = null
-    })
-  }
-  return taskCardsLoginRefreshPromise
 }
 
 async function fetchTaskCardsPage(
@@ -773,7 +608,7 @@ export async function listCurrentUserTaskCards(
         userKey: cacheUserKey
       })
 
-      const refreshedUserInfo = await refreshTaskCardsLogin(userInfo)
+      const refreshedUserInfo = await refreshEnterpriseLogin(userInfo)
       const refreshedAccessToken = refreshedUserInfo?.ystAccessToken?.trim()
       if (!refreshedUserInfo || !refreshedAccessToken) {
         return loginExpiredResult(query)

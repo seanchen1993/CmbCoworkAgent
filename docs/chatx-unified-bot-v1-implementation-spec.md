@@ -196,6 +196,12 @@ interface BuiltinRobotSettings {
 - `ystIdToken` 已确认是标准 JWT；Desktop 继续使用现有企业登录与刷新链路，V1 不新增
   统一凭据管理器；
 - Desktop 在 WSS HTTP Upgrade 中发送 `Authorization: Bearer <ystIdToken>`；
+- Upgrade 返回 `401`，或已建立的 WSS 收到 `ERROR/AUTH_REQUIRED` 时，Desktop 使用本地已有
+  `ystRefreshToken/ystCode` 调用现有 `login-info` 刷新接口；刷新采用进程内单飞，成功后保存
+  轮换后的凭据并只重连一次；刷新失败、未返回新 `ystIdToken` 或新 Token 再次被拒绝时停止重试并
+  提示重新登录；`403` 不通过刷新重试；
+- WSS 建立后不存在逐条消息的 HTTP `401`。网关发现在线 session 的 JWT 到期时，先发送
+  `ERROR/AUTH_REQUIRED`，再关闭该 socket；认证失效时在途命令按连接中断处理，不由客户端盲目重发；
 - Java 网关必须使用 Spring Security Resource Server 独立验证 JWT 签名、允许算法、
   issuer、audience、`exp/nbf` 和主体 claim；客户端当前不存在可复用的本地验签逻辑；
 - 如果 `ystIdToken.aud` 不包含统一机器人网关，必须由身份服务提供 Token Exchange，

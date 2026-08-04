@@ -74,7 +74,10 @@ Desktop 在收到 `WELCOME` 后会立即发送 `SYNC_REQUEST`，因此本阶段�
 - TLS 与 Spring Security 在 Upgrade 时验证 Bearer `ystIdToken`；
 - 校验 JWS 算法 allowlist、issuer、audience、`exp/nbf/iat` 和时钟偏差；
 - `principalId` 只从已验证 Authentication 的冻结 claim 读取；
-- handshake attributes 只保存 principal、权限和 JWT 到期时间，不保存原 JWT。
+- handshake attributes 只保存 principal、权限和 JWT 到期时间，不保存原 JWT；
+- Token 缺失、无效或过期时 Upgrade 返回 HTTP `401`；身份有效但没有网关权限时返回 `403`；
+- Desktop 收到 `401` 后会使用现有企业登录刷新接口刷新一次并重新 Upgrade，第二次 `401` 停止，
+  因此不得用 `401` 表示普通网络错误。
 
 ### IW-02：身份同步
 
@@ -108,13 +111,16 @@ Desktop 在收到 `WELCOME` 后会立即发送 `SYNC_REQUEST`，因此本阶段�
 
 - heartbeat 更新必须同时匹配 session/principal/node/generation/ONLINE/version；
 - 旧 socket 的 heartbeat、命令和 close 不得影响新 session；
-- JWT 到期和 heartbeat 超时使 session 进入终结状态；
+- heartbeat 超时使 session 进入终结状态；JWT 到期时先发送不带 `commandId` 的
+  `ERROR { reasonCode: "AUTH_REQUIRED" }`，再关闭 socket；WSS 建立后不能返回 HTTP `401`；
 - 每个节点按心跳周期核对自己的 socket 和 DB session，节点通知丢失不影响正确性；
 - Desktop 收到 `SESSION_SUPERSEDED` 后不自动重连。
 
 ## 5. 必须测试
 
 - 正常 JWT；坏签名、错误算法/issuer/audience、expired、nbf、缺主体全部拒绝；
+- expired JWT 的 Upgrade 返回 `401`，权限不足返回 `403`；在线 JWT 到期时先发
+  `ERROR/AUTH_REQUIRED` 再断开；
 - HELLO/body/Header 无法伪造 principal；
 - 已冻结 WSS valid/invalid fixture 全部通过；
 - `WELCOME` 后 `SYNC_REQUEST` 收到相关 `SYNC_STATE`；

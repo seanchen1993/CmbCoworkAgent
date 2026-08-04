@@ -31,7 +31,18 @@ async function main(): Promise<void> {
   assert(insecureRemoteClient.getStatus().lastError?.includes("必须使用 WSS"))
   insecureRemoteClient.stop()
 
-  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 })
+  const server = new WebSocketServer({
+    host: "127.0.0.1",
+    port: 0,
+    verifyClient: (info, done) => {
+      const token = String(info.req.headers.authorization ?? "")
+      if (token.startsWith("Bearer expired-token")) {
+        done(false, 401, "Unauthorized")
+        return
+      }
+      done(true)
+    }
+  })
   await new Promise<void>((resolve, reject) => {
     server.once("listening", resolve)
     server.once("error", reject)
@@ -243,6 +254,59 @@ async function main(): Promise<void> {
   )
 
   client.stop()
+
+  let refreshingToken = "expired-token"
+  let authenticationRefreshCount = 0
+  const refreshingClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => refreshingToken,
+    appVersion: "test",
+    onAuthenticationRequired: async () => {
+      authenticationRefreshCount += 1
+      refreshingToken = `refreshed-token-${authenticationRefreshCount}`
+      return true
+    },
+    onRemoteEvent: () => undefined
+  })
+  refreshingClient.start()
+  await waitFor(() => refreshingClient.isAuthenticated(), "authentication refresh after 401")
+  assert.equal(authenticationRefreshCount, 1)
+  assert.equal(authorization, "Bearer refreshed-token-1")
+
+  socket!.send(
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "ERROR",
+      sentAt: new Date().toISOString(),
+      payload: { reasonCode: "AUTH_REQUIRED" }
+    })
+  )
+  await waitFor(() => authenticationRefreshCount === 2, "AUTH_REQUIRED refresh callback")
+  await waitFor(
+    () => refreshingClient.isAuthenticated() && authorization === "Bearer refreshed-token-2",
+    "authentication refresh after session expiry"
+  )
+  refreshingClient.stop()
+
+  let failedRefreshCount = 0
+  const unrecoverableClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "expired-token-still-invalid",
+    appVersion: "test",
+    onAuthenticationRequired: async () => {
+      failedRefreshCount += 1
+      return true
+    },
+    onRemoteEvent: () => undefined
+  })
+  unrecoverableClient.start()
+  await waitFor(
+    () => unrecoverableClient.getStatus().authenticationFailed,
+    "single authentication refresh retry"
+  )
+  assert.equal(failedRefreshCount, 1, "an invalid refreshed token must not cause a refresh loop")
+  unrecoverableClient.stop()
+
   await new Promise<void>((resolve) => server.close(() => resolve()))
   console.log("im-gateway-ws-client.spec.ts passed")
 }

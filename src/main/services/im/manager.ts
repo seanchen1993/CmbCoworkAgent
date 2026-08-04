@@ -14,6 +14,7 @@ import type {
   BuiltinRobotStatus
 } from "../../types"
 import { notifyRemoteThreadChanged } from "../../agent/renderer-stream-mirror"
+import { refreshEnterpriseLogin } from "../enterprise-login-refresh"
 import { imConversationStateStore } from "./conversation-state"
 import { imEventStore } from "./event-store"
 import { ImGatewayWsClient, type ImGatewayWsStatus } from "./gateway-ws-client"
@@ -299,6 +300,18 @@ export class BuiltinRobotManager {
       url: configuredGatewayUrl,
       token: () => currentIdentity().token,
       appVersion: this.appVersion,
+      onAuthenticationRequired: async (rejectedToken) => {
+        const latestStoredToken = currentIdentity().token
+        if (latestStoredToken && latestStoredToken !== rejectedToken) {
+          this.activeIdentityToken = latestStoredToken
+          return true
+        }
+        const refreshedUser = await refreshEnterpriseLogin()
+        const refreshedToken = refreshedUser?.ystIdToken?.trim() || currentIdentity().token
+        if (!refreshedToken || refreshedToken === rejectedToken) return false
+        this.activeIdentityToken = refreshedToken
+        return true
+      },
       onRemoteEvent: async (event) => {
         const service = this.service
         if (!service) return

@@ -664,7 +664,8 @@ PLATFORM_RESULT_UNKNOWN
 
 ### 9.1 Upgrade 与 HELLO
 
-1. TLS 和 Spring Security 验证 `Authorization: Bearer <ystIdToken>`；
+1. TLS 和 Spring Security 验证 `Authorization: Bearer <ystIdToken>`；Token 缺失、无效或过期时在
+   Upgrade 阶段返回 HTTP `401`，身份有效但无网关权限时返回 `403`；
 2. 把已验证 `principalId`、权限和 JWT 到期时间放入 handshake attributes；
 3. 不保存原始 JWT；
 4. socket 建立后要求在 10 秒内收到 HELLO；
@@ -672,6 +673,10 @@ PLATFORM_RESULT_UNKNOWN
 6. 调用 `DesktopSessionService.activate(principalId, nodeId, jwtExpiresAt)`；
 7. 返回 WELCOME；
 8. 唤醒该 principal 的 `WAITING_SESSION` conversation。
+
+Desktop 对 `401` 只会调用现有企业登录刷新接口一次，并携带刷新后的 `ystIdToken` 重新 Upgrade；
+第二次 `401` 会停止自动重试。因此网关不得用 `401` 表示可重试的网络故障，也不得把 `403` 当成
+Token 过期。
 
 ### 9.2 `activate` 事务
 
@@ -717,7 +722,9 @@ session_id + principal_id + node_id + connection_generation + state=ONLINE 全�
 ```
 
 socket close 也只 CAS 自己那条 session。旧连接晚到的 close 不能把新 session 标为 OFFLINE。
-后台每 15 秒心跳，45 秒未更新标为 EXPIRED；JWT 到期时主动关闭并要求重新认证。
+后台每 15 秒心跳，45 秒未更新标为 EXPIRED。已建立 WSS 的 JWT 到期时，网关先发送不带
+`commandId` 的 `ERROR { reasonCode: "AUTH_REQUIRED" }`，再关闭该 socket；此时已经完成 Upgrade，
+不能再返回 HTTP `401`。Desktop 刷新成功后会建立一个新 session，旧 session 的 fencing 规则不变。
 
 ### 9.4 多实例 socket 发送
 
