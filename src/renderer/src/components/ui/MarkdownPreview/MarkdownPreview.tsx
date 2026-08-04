@@ -1,5 +1,5 @@
-import { useState, useCallback } from "react"
-import ReactMarkdown from "react-markdown"
+import { useState, useCallback, useEffect, useMemo } from "react"
+import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkBreaks from "remark-breaks"
 import rehypeHighlight from "rehype-highlight"
@@ -18,6 +18,140 @@ interface MarkdownPreviewProps {
   defaultExpanded?: boolean
   whiteBackground?: boolean
   viewMode?: "preview" | "source"
+  /**
+   * 读取本地图片（相对路径已解析为可读路径），返回 base64 内容。
+   * 未提供时本地相对路径图片按原样渲染（一般会裂图）。
+   */
+  readBinaryFile?: (resolvedPath: string) => Promise<string | null>
+}
+
+// Hoisted to module scope so prop identities stay stable across renders.
+// Wide tables must scroll horizontally instead of overflowing the preview
+// (same treatment as StreamingMarkdown / DashboardAnalysisMarkdown).
+const MARKDOWN_COMPONENTS: Components = {
+  // `node` is destructured out so it isn't spread onto the DOM element.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  table({ node: _node, children, ...props }) {
+    return (
+      <div className="streaming-markdown-table-wrap">
+        <table {...props}>{children}</table>
+      </div>
+    )
+  }
+}
+
+// 常见图片扩展名 -> MIME，用于把 base64 拼成 data URL。
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  bmp: "image/bmp",
+  ico: "image/x-icon",
+  avif: "image/avif"
+}
+
+function hasProtocol(value: string): boolean {
+  return /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(value) || value.startsWith("//")
+}
+
+function stripQueryAndHash(value: string): string {
+  const queryIndex = value.indexOf("?")
+  const hashIndex = value.indexOf("#")
+  let end = value.length
+  if (queryIndex >= 0) end = Math.min(end, queryIndex)
+  if (hashIndex >= 0) end = Math.min(end, hashIndex)
+  return value.slice(0, end)
+}
+
+function safeDecodeUri(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+/**
+ * 把 markdown 文件里的相对图片路径解析为可读取的路径。
+ * - mdPath 为绝对路径时返回绝对路径（外部文件走 requestExternalFileRead）；
+ * - mdPath 为工作区相对路径时返回工作区相对路径（走 readBinaryFile）。
+ * 支持 `./`、`../`、子目录；越界（`..` 超出根）时收敛到根。
+ */
+function resolveMarkdownImagePath(mdPath: string, src: string): string | null {
+  const raw = stripQueryAndHash(src.trim())
+  if (!raw || raw.startsWith("#") || raw.startsWith("/")) return null
+  if (hasProtocol(raw)) return null
+
+  const normalized = safeDecodeUri(raw).replace(/\\/g, "/")
+  if (!normalized) return null
+
+  const mdNormalized = mdPath.replace(/\\/g, "/")
+  // 绝对路径（/xxx）需要保留前导 `/`，拼回结果时补上。
+  const isAbsolute = mdNormalized.startsWith("/")
+  const segments = mdNormalized.split("/")
+  segments.pop() // 去掉 md 文件名，剩下的都是目录段
+  const baseSegments = segments.filter(Boolean)
+
+  for (const segment of normalized.split("/")) {
+    if (!segment || segment === ".") continue
+    if (segment === "..") {
+      baseSegments.pop()
+      continue
+    }
+    baseSegments.push(segment)
+  }
+
+  let resolved = baseSegments.join("/")
+  if (isAbsolute) resolved = `/${resolved}`
+  return resolved || null
+}
+
+function MarkdownImage({
+  src,
+  alt,
+  mdPath,
+  readBinaryFile,
+  ...props
+}: {
+  src?: string
+  alt?: string
+  mdPath: string
+  readBinaryFile?: (resolvedPath: string) => Promise<string | null>
+} & React.ImgHTMLAttributes<HTMLImageElement>): React.JSX.Element {
+  const [dataUrl, setDataUrl] = useState<string | undefined>(undefined)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!src) return
+
+    // 远程/内联图片直接渲染，无需本地读取。
+    if (hasProtocol(src) || src.startsWith("data:")) {
+      setDataUrl(src)
+      return
+    }
+    if (!readBinaryFile) return
+
+    const resolved = resolveMarkdownImagePath(mdPath, src)
+    if (!resolved) return
+
+    readBinaryFile(resolved)
+      .then((base64) => {
+        if (cancelled || !base64) return
+        const ext = resolved.split(".").pop()?.toLowerCase() ?? ""
+        const mime = IMAGE_MIME_BY_EXT[ext] ?? "image/png"
+        setDataUrl(`data:${mime};base64,${base64}`)
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [src, mdPath, readBinaryFile])
+
+  return <img src={dataUrl ?? src ?? ""} alt={alt ?? ""} {...props} />
 }
 
 export function MarkdownPreview({
@@ -28,12 +162,34 @@ export function MarkdownPreview({
   showModeToggle = true,
   defaultExpanded = true,
   whiteBackground = false,
-  viewMode
+  viewMode,
+  readBinaryFile
 }: MarkdownPreviewProps) {
   const [copySuccess, setCopySuccess] = useState(false)
   const [isExpanded, setIsExpanded] = useState(defaultExpanded)
   const [internalViewMode, setInternalViewMode] = useState<"preview" | "source">("preview")
   const currentViewMode = viewMode ?? internalViewMode
+
+  // img 需要访问当前文件的 path 和读取回调，无法用模块级常量组件，按实例组装。
+  const markdownComponents = useMemo<Components>(
+    () => ({
+      ...MARKDOWN_COMPONENTS,
+      // `node` is destructured out so it isn't spread onto the DOM element.
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      img({ node: _node, src, alt, ...props }) {
+        return (
+          <MarkdownImage
+            src={src}
+            alt={alt}
+            mdPath={path ?? ""}
+            readBinaryFile={readBinaryFile}
+            {...props}
+          />
+        )
+      }
+    }),
+    [path, readBinaryFile]
+  )
 
   const toggleExpanded = useCallback(() => {
     setIsExpanded(!isExpanded)
@@ -168,6 +324,7 @@ export function MarkdownPreview({
           >
             <div className="streaming-markdown text-sm leading-relaxed overflow-auto">
               <ReactMarkdown
+                components={markdownComponents}
                 rehypePlugins={[rehypeHighlight]}
                 remarkPlugins={[remarkGfm, remarkBreaks]}
               >
