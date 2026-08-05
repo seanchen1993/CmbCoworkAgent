@@ -6,16 +6,21 @@ import type { DrawNote, DrawPoint, DrawStroke, DrawToolMode, DraftDrawNote } fro
 export interface ResolvedDrawStroke extends DrawStroke {
   resolvedPoints?: DrawPoint[]
   orphaned?: boolean
+  /** 1-based region number shown on the canvas; matches the "[区域 N]" label in the prompt. */
+  regionIndex?: number
 }
 
 export interface ResolvedDrawNote extends DrawNote {
   resolvedPoint?: DrawPoint
   orphaned?: boolean
+  /** Region number this note is bound to, when it explains a stroke. */
+  regionIndex?: number
 }
 
 export interface ResolvedDraftDrawNote extends DraftDrawNote {
   resolvedPoint?: DrawPoint
   orphaned?: boolean
+  regionIndex?: number
 }
 
 function getPointerDrawPoint(
@@ -158,19 +163,32 @@ export function DrawLayer({
       }}
     >
       <svg width="100%" height="100%" style={{ display: "block", overflow: "visible" }}>
-        {strokes.map((stroke) => (
-          <path
-            key={stroke.id}
-            d={pointsToSvgPath(toScreenDrawPoints(stroke.resolvedPoints ?? stroke.points, scrollX, scrollY, scale))}
-            fill="none"
-            stroke={stroke.color}
-            strokeWidth={Math.max(2, stroke.width * scale)}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            opacity={stroke.orphaned ? 0.55 : 0.9}
-            strokeDasharray={stroke.orphaned ? "8 6" : undefined}
-          />
-        ))}
+        {strokes.map((stroke) => {
+          const screenPoints = toScreenDrawPoints(stroke.resolvedPoints ?? stroke.points, scrollX, scrollY, scale)
+          return (
+            <g key={stroke.id}>
+              <path
+                d={pointsToSvgPath(screenPoints)}
+                fill="none"
+                stroke={stroke.color}
+                strokeWidth={Math.max(2, stroke.width * scale)}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={stroke.orphaned ? 0.55 : 0.9}
+                strokeDasharray={stroke.orphaned ? "8 6" : undefined}
+              />
+              {stroke.regionIndex !== undefined && screenPoints.length > 0 && (
+                <StrokeRegionLabel
+                  index={stroke.regionIndex}
+                  x={Math.min(...screenPoints.map((point) => point.x))}
+                  y={Math.min(...screenPoints.map((point) => point.y))}
+                  color={stroke.color}
+                  faded={stroke.orphaned}
+                />
+              )}
+            </g>
+          )
+        })}
         {draft.length > 0 && (
           <path
             d={pointsToSvgPath(toScreenDrawPoints(draft, scrollX, scrollY, scale))}
@@ -190,6 +208,7 @@ export function DrawLayer({
           y={((note.resolvedPoint?.y ?? note.pageY) - scrollY) * scale}
           text={note.text}
           orphaned={note.orphaned}
+          regionIndex={note.regionIndex}
         />
       ))}
       {draftNote && (
@@ -344,7 +363,43 @@ function drawIconBtnStyle(disabled: boolean, tone: "light" | "accent"): React.CS
   }
 }
 
-function DrawNoteBadge({ x, y, text, orphaned }: { x: number; y: number; text: string; orphaned?: boolean }) {
+/** Small "N" chip pinned to a stroke's top-left corner, matching "[区域 N]" in the prompt. */
+function StrokeRegionLabel({
+  index,
+  x,
+  y,
+  color,
+  faded,
+}: {
+  index: number
+  x: number
+  y: number
+  color: string
+  faded?: boolean
+}) {
+  const r = 9
+  const cx = x - r - 2
+  const cy = y - r - 2
+  return (
+    <g opacity={faded ? 0.55 : 0.95} pointerEvents="none">
+      <circle cx={cx} cy={cy} r={r} fill={color} />
+      <text
+        x={cx}
+        y={cy}
+        textAnchor="middle"
+        dominantBaseline="central"
+        fill="#fff"
+        fontSize={11}
+        fontWeight={700}
+        fontFamily="inherit"
+      >
+        {index}
+      </text>
+    </g>
+  )
+}
+
+function DrawNoteBadge({ x, y, text, orphaned, regionIndex }: { x: number; y: number; text: string; orphaned?: boolean; regionIndex?: number }) {
   return (
     <div
       style={{
@@ -366,6 +421,23 @@ function DrawNoteBadge({ x, y, text, orphaned }: { x: number; y: number; text: s
         whiteSpace: "pre-wrap",
       }}
     >
+      {regionIndex !== undefined && (
+        <span
+          style={{
+            display: "inline-block",
+            marginRight: 6,
+            padding: "1px 6px",
+            borderRadius: 999,
+            background: "#cc785c",
+            color: "#fff",
+            fontSize: 11,
+            fontWeight: 700,
+            verticalAlign: "1px",
+          }}
+        >
+          区域 {regionIndex}
+        </span>
+      )}
       {text}
     </div>
   )

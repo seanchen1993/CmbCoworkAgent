@@ -27,7 +27,7 @@ import {
 import { DesignGallery } from "./DesignGallery"
 import { CreateDesignModal, ExportDesignModal, LinkModal } from "./DesignModals"
 import { ElementPropsPanel } from "./ElementPropsPanel"
-import { getDrawElementLabel } from "./drawUtils"
+import { getDrawElementLabel, pickStrokeIdForNotePoint } from "./drawUtils"
 import { PulsingDot } from "./common"
 import { MessageBubble } from "./MessageBubble"
 import { QuestionsPanel } from "./QuestionsPanel"
@@ -1185,6 +1185,28 @@ function resolveAnchoredStrokePoints(doc: Document | null, stroke: DrawStroke): 
     x: win.scrollX + rect.left + rect.width * point.xRatio,
     y: win.scrollY + rect.top + rect.height * point.yRatio
   }))
+}
+
+/**
+ * Resolve each stroke to its current page coordinates, then apply the pure binding rule
+ * in {@link pickStrokeIdForNotePoint}.
+ */
+function findStrokeForNotePoint(
+  doc: Document | null,
+  strokes: DrawStroke[],
+  point: DrawPoint,
+  anchor: DesignElementAnchor | undefined
+): string | undefined {
+  const anchorElement = resolveAnchorElement(doc, anchor)
+  return pickStrokeIdForNotePoint(
+    strokes.map((stroke) => ({
+      id: stroke.id,
+      points: resolveAnchoredStrokePoints(doc, stroke),
+      anchorElement: resolveAnchorElement(doc, stroke.anchor)
+    })),
+    point,
+    anchorElement
+  )
 }
 
 function getAnchoredElementSummary(anchor: DesignElementAnchor | undefined): string {
@@ -3970,15 +3992,18 @@ ${commentLines}${variantNote}`
 
   const handleDrawNoteDraft = useCallback(
     (point: DrawPoint) => {
-      const anchor = getPointAnchor(iframeRef.current?.contentDocument ?? null, point)
-      updateTs(activeTabId, {
+      const doc = iframeRef.current?.contentDocument ?? null
+      const anchor = getPointAnchor(doc, point)
+      const elements = anchor?.label ? [anchor.label] : collectDrawElementLabels([point])
+      updateTs(activeTabId, (prev) => ({
         draftDrawNote: {
           pageX: point.x,
           pageY: point.y,
           anchor,
-          elements: anchor?.label ? [anchor.label] : collectDrawElementLabels([point])
+          elements,
+          strokeId: findStrokeForNotePoint(doc, prev.drawStrokes, point, anchor)
         }
-      })
+      }))
     },
     [activeTabId, updateTs, collectDrawElementLabels]
   )
@@ -3999,7 +4024,8 @@ ${commentLines}${variantNote}`
           anchor: prev.draftDrawNote.anchor,
           text: value,
           elements: prev.draftDrawNote.elements,
-          createdAt: Date.now()
+          createdAt: Date.now(),
+          strokeId: prev.draftDrawNote.strokeId
         }
         return {
           drawNotes: [...prev.drawNotes, note],
@@ -4036,7 +4062,22 @@ ${commentLines}${variantNote}`
         drawElementHints: [
           ...prev.drawElementHints.filter((item) => item.strokeId !== anchoredStroke.id),
           hint
-        ]
+        ],
+        // Note-first flow: when a new stroke appears, re-evaluate ALL notes against ALL strokes.
+        // This ensures nested frames obey "smallest area wins" regardless of draw order.
+        drawNotes: prev.drawNotes.map((note) => {
+          const notePoint = resolveAnchorPagePoint(doc, note.anchor) ?? {
+            x: note.pageX,
+            y: note.pageY
+          }
+          const strokeId = findStrokeForNotePoint(
+            doc,
+            [...prev.drawStrokes, anchoredStroke],
+            notePoint,
+            note.anchor
+          )
+          return strokeId ? { ...note, strokeId } : { ...note, strokeId: undefined }
+        })
       }))
     },
     [activeTabId, updateTs, collectDrawElementHint]
@@ -4057,6 +4098,12 @@ ${commentLines}${variantNote}`
         drawElementHints: removedStroke
           ? prev.drawElementHints.filter((hint) => hint.strokeId !== removedStroke.id)
           : prev.drawElementHints,
+        // Keep the note's text, just drop the link — undoing a stroke shouldn't delete what was written.
+        drawNotes: removedStroke
+          ? prev.drawNotes.map((note) =>
+              note.strokeId === removedStroke.id ? { ...note, strokeId: undefined } : note
+            )
+          : prev.drawNotes,
         draftDrawNote: null
       }
     })
@@ -4107,10 +4154,41 @@ ${commentLines}${variantNote}`
       const doc = iframeRef.current?.contentDocument ?? null
       const instruction = userInstruction.trim()
       const instructionLine = instruction
-        ? `\n用户补充说明：${instruction}\n`
-        : "\n用户没有补充文字时，请优先遵循黄色 note 的文本，并把红色绘制区域理解为需要重点优化或修正的 UI 区域。\n"
-      const strokeLines = state.drawStrokes
-        .filter((stroke) => stroke.points.length > 0)
+        ? `\n适用于全部标记的用户补充说明：${instruction}\n`
+        : "\n用户没有补充整体说明。请以每个标记区域自带的用户说明为准；没有说明的区域，按需要重点优化或修正的 UI 区域处理。\n"
+
+      // Render one note's detail lines, indented under its owning region.
+      const describeNote = (note: DrawNote, label: string, indent: string): string => {
+        const elementText =
+          note.elements.length > 0 ? `；接近元素：${note.elements.join(", ")}` : ""
+        const resolvedPoint = resolveAnchorPagePoint(doc, note.anchor)
+        const pageX = resolvedPoint?.x ?? note.pageX
+        const pageY = resolvedPoint?.y ?? note.pageY
+        const anchorText = getAnchoredElementSummary(note.anchor)
+        const orphanText = note.anchor && !resolvedPoint ? "；anchor 未找到，已退回旧坐标" : ""
+        return `${indent}${label}：${note.text}\n${indent}  （note 坐标 x:${Math.round(pageX)}, y:${Math.round(pageY)}${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}）`
+      }
+
+      // Only strokes that actually render become regions; notes must bucket against the same
+      // list, otherwise a note owned by a skipped stroke would vanish from the prompt entirely.
+      const regionStrokes = state.drawStrokes.filter((stroke) => stroke.points.length > 0)
+
+      const notesByStroke = new Map<string, DrawNote[]>()
+      const looseNotes: DrawNote[] = []
+      for (const note of state.drawNotes) {
+        const ownerId = note.strokeId
+        const owner = ownerId ? regionStrokes.find((stroke) => stroke.id === ownerId) : undefined
+        if (!owner) {
+          looseNotes.push(note)
+          continue
+        }
+        const bucket = notesByStroke.get(owner.id)
+        if (bucket) bucket.push(note)
+        else notesByStroke.set(owner.id, [note])
+      }
+
+      // Each region + its notes form one self-contained instruction unit.
+      const regionBlocks = regionStrokes
         .map((stroke, index) => {
           const resolvedPoints = resolveAnchoredStrokePoints(doc, stroke)
           const xs = resolvedPoints.map((point) => point.x)
@@ -4124,30 +4202,38 @@ ${commentLines}${variantNote}`
           const anchorText = getAnchoredElementSummary(stroke.anchor)
           const orphanText =
             stroke.anchor && resolvedPoints === stroke.points ? "；anchor 未找到，已退回旧坐标" : ""
-          return `[${index + 1}] ${stroke.color} 画笔，粗细 ${stroke.width}px，区域 x:${minX}-${maxX}, y:${minY}-${maxY}，${resolvedPoints.length} 个点${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}`
+          const header = `[区域 ${index + 1}] 区域 x:${minX}-${maxX}, y:${minY}-${maxY}；${stroke.color} 画笔，粗细 ${stroke.width}px，${resolvedPoints.length} 个点${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}`
+          const ownNotes = notesByStroke.get(stroke.id) ?? []
+          const body =
+            ownNotes.length > 0
+              ? ownNotes
+                  .map((note, noteIndex) =>
+                    describeNote(
+                      note,
+                      ownNotes.length > 1 ? `用户说明 ${noteIndex + 1}` : "用户说明",
+                      "  "
+                    )
+                  )
+                  .join("\n")
+              : "  用户没有为该区域写说明，请把它当作需要重点优化或修正的 UI 区域。"
+          return `${header}\n${body}`
         })
-        .join("\n")
-      const noteLines = state.drawNotes
-        .map((note, index) => {
-          const elementText =
-            note.elements.length > 0 ? `；接近元素：${note.elements.join(", ")}` : ""
-          const resolvedPoint = resolveAnchorPagePoint(doc, note.anchor)
-          const pageX = resolvedPoint?.x ?? note.pageX
-          const pageY = resolvedPoint?.y ?? note.pageY
-          const anchorText = getAnchoredElementSummary(note.anchor)
-          const orphanText = note.anchor && !resolvedPoint ? "；anchor 未找到，已退回旧坐标" : ""
-          return `[${index + 1}] note 坐标 x:${Math.round(pageX)}, y:${Math.round(pageY)}${elementText}${anchorText ? `；锚点：${anchorText}` : ""}${orphanText}\n内容：${note.text}`
-        })
+        .join("\n\n")
+
+      const looseNoteLines = looseNotes
+        .map((note, index) => describeNote(note, `[note ${index + 1}] 内容`, ""))
         .join("\n")
 
-      const prompt = `用户通过 Draw 模式直接在设计预览上做了标记。请把红色画线理解为视觉指向和编辑意图：线条圈出的、划过的或指向的区域是需要重点调整的区域。黄色 note 是用户在页面任意位置添加的明确文本指令，优先按 note 内容执行。不要把画线或 note 本身渲染进最终页面。请根据标记位置对当前设计做有针对性的视觉优化，保持未标记区域尽量不变。
+      const looseSection =
+        looseNotes.length > 0
+          ? `\n\n未绑定到任何绘制区域的独立 note（按坐标/锚点自行定位）：\n${looseNoteLines}`
+          : ""
+
+      const prompt = `用户通过 Draw 模式直接在设计预览上做了标记。红色画线表示视觉指向和编辑意图：线条圈出的、划过的或指向的区域是需要重点调整的区域。每个「区域」及其下方的用户说明属于同一条指令——该说明只描述这个区域要怎么改，不要把它套用到其他区域。有用户说明时优先按说明执行。不要把画线或 note 本身渲染进最终页面。请根据标记位置对当前设计做有针对性的视觉优化，保持未标记区域尽量不变。
 ${instructionLine}
 
-红色绘制标记：
-${strokeLines || "无"}
-
-黄色 note：
-${noteLines || "无"}${variantNote}`
+标记区域：
+${regionBlocks || "无"}${looseSection}${variantNote}`
 
       return { prompt }
     },
@@ -5690,13 +5776,20 @@ ${noteLines || "无"}${variantNote}`
                     const scaledContentHeight =
                       Math.max(visibleHeight / (zoom / 100), ts.iframeContentHeight || 0) *
                       (zoom / 100)
+                    // Region numbers must match buildDrawPrompt's "[区域 N]" labels, so this uses
+                    // the same filter and ordering the prompt does.
+                    const regionNumberByStroke = new Map<string, number>()
+                    ts.drawStrokes
+                      .filter((stroke) => stroke.points.length > 0)
+                      .forEach((stroke, index) => regionNumberByStroke.set(stroke.id, index + 1))
                     const resolvedDrawStrokes: ResolvedDrawStroke[] = ts.drawStrokes.map(
                       (stroke) => {
                         const resolvedPoints = resolveAnchoredStrokePoints(iframeDoc, stroke)
                         return {
                           ...stroke,
                           resolvedPoints,
-                          orphaned: Boolean(stroke.anchor && resolvedPoints === stroke.points)
+                          orphaned: Boolean(stroke.anchor && resolvedPoints === stroke.points),
+                          regionIndex: regionNumberByStroke.get(stroke.id)
                         }
                       }
                     )
@@ -5706,7 +5799,10 @@ ${noteLines || "无"}${variantNote}`
                       return {
                         ...note,
                         resolvedPoint,
-                        orphaned: Boolean(note.anchor && !resolvedPoint)
+                        orphaned: Boolean(note.anchor && !resolvedPoint),
+                        regionIndex: note.strokeId
+                          ? regionNumberByStroke.get(note.strokeId)
+                          : undefined
                       }
                     })
                     const draftDrawPoint = resolveAnchorPagePoint(
@@ -5717,7 +5813,10 @@ ${noteLines || "无"}${variantNote}`
                       ? {
                           ...ts.draftDrawNote,
                           resolvedPoint: draftDrawPoint ?? undefined,
-                          orphaned: Boolean(ts.draftDrawNote.anchor && !draftDrawPoint)
+                          orphaned: Boolean(ts.draftDrawNote.anchor && !draftDrawPoint),
+                          regionIndex: ts.draftDrawNote.strokeId
+                            ? regionNumberByStroke.get(ts.draftDrawNote.strokeId)
+                            : undefined
                         }
                       : null
 

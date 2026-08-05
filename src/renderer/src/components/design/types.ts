@@ -110,6 +110,8 @@ export interface DrawNote {
   text: string
   elements: string[]
   createdAt: number
+  /** Stroke this note explains, when the note landed on/near one. Undefined = standalone note. */
+  strokeId?: string
 }
 
 export interface DraftDrawNote {
@@ -117,6 +119,7 @@ export interface DraftDrawNote {
   pageY: number
   anchor?: DesignElementAnchor
   elements: string[]
+  strokeId?: string
 }
 
 export interface ElementStyles {
