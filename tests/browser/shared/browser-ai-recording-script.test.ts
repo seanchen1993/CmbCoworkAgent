@@ -90,6 +90,35 @@ test("manual recorded flow", async ({ page }) => {
     )
   })
 
+  it("prefers href selectors for duplicate links", () => {
+    const script = generateAiRecordingScript(
+      [
+        {
+          id: "workflow-link",
+          timestamp: "2026-08-04T00:00:00.000Z",
+          kind: "click",
+          target: "Build Electron App",
+          doubleClick: false,
+          locator: {
+            role: "link",
+            accessibleName: "Build Electron App",
+            target: "Build Electron App",
+            selector: 'a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"]',
+            tagName: "a",
+            matchCount: 2,
+            nth: 1
+          }
+        }
+      ],
+      { source: "manual" }
+    )
+
+    expect(script).toContain(
+      'await page.locator("a[href=\\"/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml\\"]:visible").click();'
+    )
+    expect(script).not.toContain(".nth(1)")
+  })
+
   it("replays file-input clicks as direct setInputFiles calls", () => {
     const script = generateAiRecordingScript(
       [

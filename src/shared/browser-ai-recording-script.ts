@@ -283,6 +283,10 @@ function buildChoiceLabelSelector(selector: string): string {
 }
 
 function applyOccurrenceHint(locator: string, source: LocatorSource): string {
+  if (/\.locator\(\s*["']a\[\s*href\s*=/iu.test(locator)) {
+    return locator
+  }
+
   if (typeof source.nth === "number" && Number.isInteger(source.nth) && source.nth >= 0) {
     return `${locator}.nth(${source.nth})`
   }
@@ -384,12 +388,19 @@ function buildSelectorCandidate(
 ): LocatorCandidate | null {
   if (!selector) return null
   const genericTagOnly = /^[a-z][a-z0-9-]*$/iu.test(selector)
+  const anchorHrefSelector = /^\s*a\[\s*href\s*=/iu.test(selector)
+  const normalizedSelector =
+    anchorHrefSelector && !/:visible\s*$/iu.test(selector) ? `${selector}:visible` : selector
   return buildCandidate(
     "selector",
-    `${root}.locator(${quote(selector)})`,
-    genericTagOnly ? 25 : 70,
-    false,
-    genericTagOnly ? "generic tag selector fallback" : "explicit selector fallback"
+    `${root}.locator(${quote(normalizedSelector)})`,
+    anchorHrefSelector ? 98 : genericTagOnly ? 25 : 70,
+    anchorHrefSelector,
+    anchorHrefSelector
+      ? "anchor href selector"
+      : genericTagOnly
+        ? "generic tag selector fallback"
+        : "explicit selector fallback"
   )
 }
 

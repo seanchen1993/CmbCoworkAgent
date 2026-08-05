@@ -111,9 +111,13 @@ export function buildManualRecorderInjectionScript() {
     }
 
     function selectorForElement(element) {
-      if (element.id) return '#' + cssEscape(element.id);
       const testId = text(element.getAttribute("data-testid"));
       if (testId) return '[data-testid="' + testId.replace(/"/g, '\\"') + '"]';
+      if (element.tagName.toLowerCase() === "a") {
+        const href = text(element.getAttribute("href"));
+        if (href) return 'a[href="' + href.replace(/"/g, '\\"') + '"]:visible';
+      }
+      if (element.id) return '#' + cssEscape(element.id);
       const name = text(element.getAttribute("name"));
       if (name) {
         const tagName = element.tagName.toLowerCase();

@@ -71,6 +71,13 @@ describe("manual recording service", () => {
     expect(script).toMatch(/nth = candidateIndex/u)
   })
 
+  it("prefers href selectors for anchors in the injected recorder", () => {
+    const script = buildManualRecorderInjectionScript()
+    expect(script).toContain('if (element.tagName.toLowerCase() === "a") {')
+    expect(script).toContain('const href = text(element.getAttribute("href"));')
+    expect(script).toContain('a[href="')
+  })
+
   it("starts with the current page and generates a manual recording draft", () => {
     const session = startManualRecording({
       currentUrl: "https://example.com/dashboard",
@@ -142,6 +149,30 @@ describe("manual recording service", () => {
     expect(session.script).toContain(
       'await page.getByRole("button", { name: "登录", exact: true }).click();'
     )
+  })
+
+  it("keeps workflow links on href selectors instead of occurrence hints", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://github.com/seanchen1993/CmbCoworkAgent/actions" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "link",
+        accessibleName: "Build Electron App",
+        target: "Build Electron App",
+        selector: 'a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"]',
+        tagName: "a",
+        matchCount: 2,
+        nth: 1
+      }
+    })
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      'await page.locator("a[href=\\"/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml\\"]:visible").click();'
+    )
+    expect(session.script).not.toContain(".nth(1)")
   })
 
   it("clicks radio cards through their visible label instead of the hidden input", () => {

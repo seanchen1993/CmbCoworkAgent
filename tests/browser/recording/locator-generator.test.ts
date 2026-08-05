@@ -89,6 +89,22 @@ describe("locator generator", () => {
     expect(result.best.locator).toBe('page.getByRole("tab", { name: "Actions", exact: true })')
   })
 
+  it("prefers href selectors for links with duplicate labels", () => {
+    const result = resolvePlaywrightLocator({
+      role: "link",
+      accessibleName: "Build Electron App",
+      target: "Build Electron App",
+      selector: 'a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"]',
+      tagName: "a",
+      matchCount: 2,
+      nth: 1
+    })
+
+    expect(result.best.locator).toBe(
+      'page.locator("a[href=\\"/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml\\"]:visible")'
+    )
+  })
+
   it("prefers an input selector over textbox role metadata for file inputs", () => {
     const result = resolvePlaywrightLocator({
       target: "avatar",
