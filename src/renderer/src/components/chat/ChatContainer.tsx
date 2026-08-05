@@ -391,6 +391,30 @@ type WelcomeSkillTreeNode = {
   children: WelcomeSkillTreeNode[]
 }
 
+function interruptionNoticeCopy(event: string, action: string): {
+  title: string
+  explanation: string
+} {
+  if (event.startsWith("Failure fuse")) {
+    return {
+      title: "工具失败熔断已停止本轮",
+      explanation:
+        "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
+    }
+  }
+  if (event.startsWith("Tool-call loop")) {
+    return {
+      title: "重复工具调用熔断已停止本轮",
+      explanation:
+        "这是重复工具调用熔断结果，不是 Hook 策略或应用崩溃。你可以调整策略后发送新消息继续对话。"
+    }
+  }
+  return {
+    title: action === "halt" ? "Hook 已停止本轮" : "Hook 已阻断本轮",
+    explanation: "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"
+  }
+}
+
 function getWelcomeSkillTreePath(skill: SkillMetadata): string {
   const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
   return String(skill.relativePath || id || skill.name || "")
@@ -6614,6 +6638,9 @@ export function ChatContainer({
     messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
   const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
   const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+  const interruptionNotice = hookInterruption
+    ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
+    : null
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -6879,11 +6906,7 @@ export function ChatContainer({
                       <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
                       <div className="flex-1 min-w-0">
                         <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {hookInterruption.event.startsWith("Failure fuse")
-                            ? "工具失败熔断已停止本轮"
-                            : hookInterruption.action === "halt"
-                              ? "Hook 已停止本轮"
-                              : "Hook 已阻断本轮"}
+                          {interruptionNotice?.title}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
                           <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
@@ -6900,9 +6923,7 @@ export function ChatContainer({
                           </div>
                         )}
                         <div className="text-xs text-muted-foreground mt-2">
-                          {hookInterruption.event.startsWith("Failure fuse")
-                            ? "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
-                            : "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"}
+                          {interruptionNotice?.explanation}
                         </div>
                       </div>
                       <button

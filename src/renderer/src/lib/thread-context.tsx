@@ -3949,6 +3949,35 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           toast.warning(`工具失败熔断已停止本轮：${reason}`)
           break
         }
+        case "action_stationarity_tripped": {
+          const reason =
+            (typeof data.reason === "string" && data.reason.trim()) ||
+            "完全相同的工具调用连续出现，已停止本轮以避免继续空转"
+          const toolName =
+            typeof data.toolName === "string" && data.toolName.trim() ? data.toolName : undefined
+          const details = [
+            toolName ? `tool=${toolName}` : undefined,
+            typeof data.count === "number" && typeof data.threshold === "number"
+              ? `count=${data.count}/${data.threshold}`
+              : undefined,
+            typeof data.fingerprint === "string" && data.fingerprint.trim()
+              ? `fingerprint=${data.fingerprint}`
+              : undefined
+          ].filter((item): item is string => Boolean(item))
+          updateThreadState(threadId, () => ({
+            error: null,
+            errorDetail: null,
+            hookInterruption: {
+              event: toolName ? `Tool-call loop: ${toolName}` : "Tool-call loop",
+              action: "halt",
+              reason,
+              systemMessage: details.length > 0 ? details.join("\n") : undefined,
+              timestamp: new Date()
+            }
+          }))
+          toast.warning(`重复工具调用熔断已停止本轮：${reason}`)
+          break
+        }
         case "auto_commit_result":
           if (data.result) {
             const message = formatAutoCommitText(data.result)

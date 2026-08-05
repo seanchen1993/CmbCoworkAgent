@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, shell } from "electron"
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -537,6 +537,23 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: "deny" }
+  })
+
+  // Electron does not provide an application context menu automatically.
+  // Use native edit roles so labels, clipboard behavior, shortcuts, and
+  // enabled states follow the OS for editable fields and selected read-only text.
+  mainWindow.webContents.on("context-menu", (_event, params) => {
+    const window = mainWindow
+    const hasSelectedText = params.selectionText.trim().length > 0
+    if ((!params.isEditable && !hasSelectedText) || !window || window.isDestroyed()) return
+
+    Menu.buildFromTemplate([
+      { role: "cut", enabled: params.editFlags.canCut },
+      { role: "copy", enabled: params.editFlags.canCopy },
+      { role: "paste", enabled: params.editFlags.canPaste },
+      { type: "separator" },
+      { role: "selectAll", enabled: params.editFlags.canSelectAll }
+    ]).popup({ window })
   })
 
   // A renderer reload destroys the in-flight stream consumer while the agent

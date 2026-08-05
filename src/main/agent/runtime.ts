@@ -215,6 +215,12 @@ import {
   createMalformedToolCallGuardMiddleware,
   createMalformedToolCallRecoveryMiddleware
 } from "./malformed-tool-call-recovery"
+import {
+  areAgentLoopGuardsEnabled,
+  clearActionStationarityTurn,
+  createActionStationarityMiddleware,
+  getActionStationarityHaltError
+} from "./action-stationarity"
 import { createLspTool } from "./tools/lsp-tool"
 import { detectJavaProject } from "../lsp"
 import {
@@ -936,9 +942,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
       console.warn("[Runtime] Failed to notify renderer about injected messages:", error)
     }
   }
-  return completedAssistantIdentity
-    ? { completedAssistantIdentity }
-    : undefined
+  return completedAssistantIdentity ? { completedAssistantIdentity } : undefined
 })
 
 const BASE_PROMPT =
@@ -1650,6 +1654,24 @@ function appendRegistrySubagentAccessDescription(
  * renderer cannot import from main, so keep the three in sync.
  */
 export const SUBAGENT_OWNER_METADATA_KEY = SOLO_TASK_OWNER_METADATA_KEY
+export const ACTION_STATIONARITY_OWNER_CONFIG_KEY = "cmb_action_stationarity_owner"
+
+let idlessTaskInvocationSequence = 0
+
+function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId?: unknown }): {
+  explicit?: string
+  stationarity: string
+} {
+  const normalizeId = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() ? value.trim() : undefined
+  const explicit = normalizeId(config?.toolCall?.id) ?? normalizeId(config?.toolCallId)
+  if (explicit) return { explicit, stationarity: explicit }
+
+  idlessTaskInvocationSequence += 1
+  return {
+    stationarity: `idless-task-${idlessTaskInvocationSequence}`
+  }
+}
 
 /**
  * Wrap deepagents' internal `task` tool so each subagent invocation stamps its
@@ -1660,24 +1682,35 @@ export const SUBAGENT_OWNER_METADATA_KEY = SOLO_TASK_OWNER_METADATA_KEY
  * with the ToolCall as input re-establishes `config.toolCall` inside it (see
  * @langchain/core tools `invoke`), preserving its Command/result contract.
  */
-function wrapTaskToolWithOwnerMetadata(
+export function wrapTaskToolWithOwnerMetadata(
   taskTool: DynamicStructuredTool,
   soloTaskTraceManager?: SoloTaskTraceManager
 ): DynamicStructuredTool {
   return tool(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async (input: Record<string, unknown>, config: any) => {
-      const ownerId: string | undefined = config?.toolCall?.id
-      const patchedConfig = ownerId
-        ? {
-            ...config,
-            metadata: { ...(config?.metadata ?? {}), [SUBAGENT_OWNER_METADATA_KEY]: ownerId },
-            configurable: {
-              ...(config?.configurable ?? {}),
-              [SUBAGENT_OWNER_METADATA_KEY]: ownerId
+      const invocationOwner = taskInvocationOwnerId(config)
+      const ownerId = invocationOwner.explicit
+      const patchedConfig = {
+        ...config,
+        // Only a real tool-call id may be exposed as renderer attribution.
+        // The generated fallback exists solely inside configurable so an
+        // id-less invocation receives its own stationarity scope without
+        // pretending to be a UI task id.
+        ...(ownerId
+          ? {
+              metadata: {
+                ...(config?.metadata ?? {}),
+                [SUBAGENT_OWNER_METADATA_KEY]: ownerId
+              }
             }
-          }
-        : config
+          : {}),
+        configurable: {
+          ...(config?.configurable ?? {}),
+          [ACTION_STATIONARITY_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
+          ...(ownerId ? { [SUBAGENT_OWNER_METADATA_KEY]: ownerId } : {})
+        }
+      }
       const taskInput =
         config?.toolCall?.args && typeof config.toolCall.args === "object"
           ? (config.toolCall.args as Record<string, unknown>)
@@ -1790,6 +1823,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
     soloTaskTraceManager,
+    actionStationarityTurnId,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
     // when a tool throws. Closed-over context (threadId / workspace /
     // hookScope / onHookResult) lives at the createAgentRuntime layer; this
@@ -1810,6 +1844,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [k: string]: any
   } = params
+
+  const loopGuardsEnabled = areAgentLoopGuardsEnabled()
 
   // --- systemPrompt handling (identical to original) ---
   const finalSystemPrompt = systemPrompt
@@ -2124,6 +2160,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   // Re-throw (let the run stop) only for:
   //   - GraphBubbleUp: HITL / subgraph control flow
   //   - AbortError: user cancellation
+  //   - ActionStationarityHaltError: a child-agent protection stop
   //   - programmer errors (TypeError / ReferenceError): code bugs we
   //     want surfaced instead of silently retrying
   //   - MiddlewareError: a sibling wrapToolCall middleware threw — its
@@ -2147,6 +2184,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     if (isGraphBubbleUp(error) || isAbortError(error)) return null
     if (isHookHaltError(error)) return null
     if (isFailureFuseHaltError(error)) return null
+    if (getActionStationarityHaltError(error)) return null
     if (isProgrammerError(error)) return null
     if (MiddlewareError.isInstance(error)) return null
 
@@ -2180,6 +2218,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       try {
         return await handler(request)
       } catch (error) {
+        // Protection halts are control flow, not tool failures. Propagate
+        // before PostToolUseFailure/failure-fuse accounting can misclassify
+        // or replace the dedicated stationarity halt.
+        if (getActionStationarityHaltError(error)) throw error
+
         const toolName = request.toolCall?.name
         const toolCallId = request.toolCall?.id
 
@@ -2256,6 +2299,15 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     // FIRST for the same reason as the main agent: reject recovered-malformed
     // calls before any tool lifecycle (hooks/fuse/task-mmd) can observe them.
     createMalformedToolCallGuardMiddleware(),
+    ...(loopGuardsEnabled
+      ? [
+          createActionStationarityMiddleware({
+            turnId: actionStationarityTurnId,
+            ownerConfigKey: ACTION_STATIONARITY_OWNER_CONFIG_KEY,
+            requireOwner: true
+          })
+        ]
+      : []),
     todoListMiddleware(),
     createFsMiddleware(),
     ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
@@ -2435,6 +2487,18 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // task-mmd must not observe a tool that never runs. Mirrors Claude Code's
       // validate-before-permissions order.
       createMalformedToolCallGuardMiddleware(),
+      ...(loopGuardsEnabled
+        ? [
+            // Grok-style action-stationarity guard: observe the complete normalized
+            // tool-call batch, nudge after 8 identical calls, and halt after 16.
+            // Separate instances are used for the main graph and task-subagent stack;
+            // the middleware isolates shared task subagents by their stamped owner id.
+            createActionStationarityMiddleware({
+              turnId: actionStationarityTurnId,
+              ownerConfigKey: SUBAGENT_OWNER_METADATA_KEY
+            })
+          ]
+        : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
       ...postFsToolDocStripMiddleware,
@@ -3869,6 +3933,11 @@ export interface CreateAgentRuntimeOptions {
   onCoordinatorNotificationAction?: (notificationIds: string[]) => void
   /** Renderer user message id that owns this chat turn, used to group hook logs. */
   hookTurnId?: string
+  /**
+   * Tool-loop state lifecycle. Foreground runtimes default to hookTurnId;
+   * detached workers and workflow leaves supply an independently owned id.
+   */
+  actionStationarityTurnId?: string
   /** Factory for diagnostic "matched but scope-filtered" hook rows. */
   onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   /** Run-scoped plugin/skill activation state for hook resolution. */
@@ -3950,6 +4019,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
     hookTurnId,
+    actionStationarityTurnId = hookTurnId,
     onHookSkippedFactory,
     hookScope: providedHookScope,
     skillHookKeys,
@@ -4756,6 +4826,7 @@ The workspace root is: ${workspacePath}`
               subagentOptions.shellAccess === "read_only" || subagentOptions.shellAccess === "none"
             const subagentRuntime = await createAgentRuntime({
               threadId: subagentOptions.threadId,
+              actionStationarityTurnId: subagentOptions.threadId,
               approvalThreadId: threadId,
               workspacePath,
               modelId: subagentOptions.modelId,
@@ -4812,6 +4883,7 @@ The workspace root is: ${workspacePath}`
             return subagentRuntime as unknown as WorkflowSubagentRuntime
           },
           cleanupThread: async (workflowThreadId: string): Promise<void> => {
+            clearActionStationarityTurn(workflowThreadId, workflowThreadId)
             // Kill any run_in_background tasks the subagent started so they don't
             // outlive the run (coordinator workers cancel theirs the same way via
             // cancelBackgroundTasks — without this a backgrounded process leaks
@@ -5001,6 +5073,8 @@ The workspace root is: ${workspacePath}`
   }
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
+    const workerActionStationarityTurnId =
+      `${workerInput.workerThreadId}:turn:${workerInput.workerTurn}`
     const workerSubagent = buildCoordinatorWorkerSubagents(
       coordinatorWorkerProjectInstructions || undefined,
       undefined,
@@ -5300,6 +5374,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         try {
           workerAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
             modelId: candidateId,
@@ -5372,6 +5447,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           const nextCandidate = remainingWorkerCandidates.shift()!
           workerAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
             modelId: nextCandidate,
@@ -5425,6 +5501,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
 Access limits: read-only handoff continuation. Do not modify files, run commands, or call tools. Return only the concise final handoff covering files changed or inspected, commands run and results, remaining risks, and any verification still needed.`
           const handoffAgent = await createAgentRuntime({
             threadId: workerInput.workerThreadId,
+            actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
             modelId: usedWorkerModelId ?? modelId,
@@ -5529,6 +5606,10 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       workerTraceError = describeToolError(error)
       throw error
     } finally {
+      clearActionStationarityTurn(
+        workerInput.workerThreadId,
+        workerActionStationarityTurnId
+      )
       if (workerTracer) {
         const tracerToFinish = workerTracer
         runTraceSideEffect("CoordinatorWorker", () => {
@@ -5846,6 +5927,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     threadId: options.threadId,
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
     soloTaskTraceManager,
+    actionStationarityTurnId,
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
     onFailureFuseNotice,
