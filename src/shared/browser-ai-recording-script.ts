@@ -726,6 +726,20 @@ function normalizeVariableDisplayName(value: string | undefined): string {
   return value?.trim() ?? ""
 }
 
+function deriveVariableDisplayName(
+  identifier: string,
+  rawDisplayName?: string
+): string {
+  const normalizedCommentDisplayName = normalizeVariableDisplayName(
+    rawDisplayName?.replace(/^变量[-_]/u, "")
+  )
+  if (normalizedCommentDisplayName) {
+    return normalizedCommentDisplayName
+  }
+
+  return toPromptVariableName(identifier).replace(/^变量-/u, "")
+}
+
 function buildVariableDescriptorMap(
   actions: AiRecordedBrowserAction[],
   variableActionIds?: Iterable<string>,
@@ -849,7 +863,7 @@ function parseScriptLiteralExpression(value: string): ParsedScriptLiteral {
 
 function parseVariableDeclarationLine(line: string): AiRecordingScriptVariable | null {
   const match =
-    /^const\s+(变量_[\p{L}\p{N}_]+)\s*(?::\s*(string\[\]))?\s*=\s*(.+?)\s*;\s*\/\/\s*(.+)$/u.exec(
+    /^const\s+(变量_[\p{L}\p{N}_]+)\s*(?::\s*(string\[\]))?\s*=\s*(.+?)(?:\s*;)?(?:\s*\/\/\s*(.+))?\s*$/u.exec(
       line
     )
   if (!match) return null
@@ -859,7 +873,7 @@ function parseVariableDeclarationLine(line: string): AiRecordingScriptVariable |
     return null
   }
 
-  const displayName = normalizeVariableDisplayName(match[4]!.replace(/^变量[-_]/u, ""))
+  const displayName = deriveVariableDisplayName(match[1]!, match[4])
   if (!displayName) return null
   return {
     identifier: match[1]!,

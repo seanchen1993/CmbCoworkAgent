@@ -599,13 +599,6 @@ export function BrowserAiRecordingControls({
     [currentRecording.libraryDisplayName, currentRecording.libraryFileName]
   )
 
-  const currentPlaybackLabel = useMemo(() => {
-    const trimmedSaveDisplayName = saveDisplayName.trim()
-    return (
-      currentRecordingLibraryTarget?.displayName || trimmedSaveDisplayName || DEFAULT_PLAYBACK_LABEL
-    )
-  }, [currentRecordingLibraryTarget, saveDisplayName])
-
   const confirmSaveToLibrary = useCallback(async () => {
     if (!draftScript.trim()) {
       toast.error("当前没有可保存的脚本内容")
@@ -1166,13 +1159,6 @@ export function BrowserAiRecordingControls({
         canSaveDraft={canSaveCurrentDraft}
         isDraftSaveSubmitting={isDraftSaveSubmitting}
         onSaveDraft={() => void persistRecordingDraft(recordingDialogSource)}
-        isExecuteSubmitting={isPlaybackBusy}
-        onExecuteScript={() =>
-          void requestScriptExecution(draftScript, {
-            label: currentPlaybackLabel,
-            fileName: currentRecording.libraryFileName || currentPlaybackLabel
-          })
-        }
         saveDisplayName={saveDisplayName}
         onSaveDisplayNameChange={setSaveDisplayName}
         isSaveSubmitting={isSaveSubmitting}

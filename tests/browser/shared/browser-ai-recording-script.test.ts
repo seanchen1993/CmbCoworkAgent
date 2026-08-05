@@ -247,6 +247,39 @@ test("manual recorded flow", async ({ page }) => {
     ).toContain('const 变量_目标地址 = "https://example.com/login"; // 变量-目标地址')
   })
 
+  it("recognizes variable declarations without comments or semicolons", () => {
+    const script = `import { test } from "@playwright/test";
+
+const 变量_目标地址 = ""
+
+test("manual recorded flow", async ({ page }) => {
+  await page.goto(变量_目标地址);
+});
+`
+
+    const parsed = parseAiRecordingScript(script, "manual")
+    expect(parsed.actions).toEqual([
+      expect.objectContaining({
+        kind: "navigate",
+        url: "目标地址"
+      })
+    ])
+    expect(parsed.variableActionNames).toEqual({
+      "manual-seed-action-1": "目标地址"
+    })
+
+    expect(extractAiRecordingVariables(script)).toEqual([
+      {
+        identifier: "变量_目标地址",
+        displayName: "目标地址",
+        isArray: false
+      }
+    ])
+    expect(
+      applyAiRecordingVariableValues(script, { 变量_目标地址: "https://example.com/login" })
+    ).toContain('const 变量_目标地址 = "https://example.com/login"; // 变量-目标地址')
+  })
+
   it("clicks radio-card choices via their visible label wrapper", () => {
     const script = generateAiRecordingScript(
       [

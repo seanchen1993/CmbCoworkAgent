@@ -1,4 +1,4 @@
-import { Download, FileCode2, Loader2, Play, Save, Sparkles } from "lucide-react"
+import { Download, FileCode2, Loader2, Save, Sparkles } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
+import { BrowserScriptEditor } from "./BrowserScriptEditor"
 import type {
   AiRecordedBrowserAction,
   AiRecordingSession,
@@ -34,8 +35,6 @@ interface BrowserAiRecordingResultDialogProps {
   canSaveDraft: boolean
   isDraftSaveSubmitting: boolean
   onSaveDraft: () => void
-  isExecuteSubmitting: boolean
-  onExecuteScript: () => void
   saveDisplayName: string
   onSaveDisplayNameChange: (value: string) => void
   isSaveSubmitting: boolean
@@ -138,8 +137,6 @@ export function BrowserAiRecordingResultDialog({
   canSaveDraft,
   isDraftSaveSubmitting,
   onSaveDraft,
-  isExecuteSubmitting,
-  onExecuteScript,
   saveDisplayName,
   onSaveDisplayNameChange,
   isSaveSubmitting,
@@ -475,44 +472,14 @@ export function BrowserAiRecordingResultDialog({
             </div>
 
             <div className="min-h-0 flex-1 p-4 pt-3  ">
-              <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-900/80 bg-[#0b0f14] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-                <div className="flex items-center justify-between border-b border-white/10 bg-[#11161d] px-4 py-2 text-[11px] text-slate-400">
-                  <div className="flex items-center gap-2">
-                    <FileCode2 className="size-3.5" strokeWidth={1.8} />
-                    <span>playwright.spec.ts 草稿 (可编辑)</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-7 rounded-md px-2 text-[11px] text-slate-200 hover:bg-white/5"
-                      disabled={!aiRecordingScriptReady || isExecuteSubmitting}
-                      onClick={onExecuteScript}
-                    >
-                      {isExecuteSubmitting ? (
-                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                      ) : (
-                        <Play className="size-3.5" strokeWidth={1.8} />
-                      )}
-                      内置浏览器执行
-                    </Button>
-                    <span className="font-mono tabular-nums">
-                      {aiRecordingScriptReady ? `${aiRecordingScriptLineCount} lines` : "waiting"}
-                    </span>
-                  </div>
-                </div>
-                <div className="h-[300px] flex-1  px-4 py-4 font-mono text-[12px] leading-6 text-slate-100">
-                  <textarea
-                    aria-label="Playwright 脚本草稿编辑器"
-                    spellCheck={false}
-                    value={draftScript}
-                    onChange={(e) => onDraftScriptChange(e.target.value)}
-                    className="h-full min-h-[300px] w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500"
-                    placeholder="// No script generated yet."
-                  />
-                </div>
-              </div>
+              <BrowserScriptEditor
+                className="h-full min-h-[420px]"
+                contentClassName="h-[300px] min-h-[300px]"
+                title={<span>playwright.spec.ts 草稿 (可编辑)</span>}
+                value={draftScript}
+                onChange={onDraftScriptChange}
+                ariaLabel="Playwright 脚本草稿编辑器"
+              />
             </div>
           </div>
         </div>

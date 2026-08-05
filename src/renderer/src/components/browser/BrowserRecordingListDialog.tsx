@@ -16,6 +16,7 @@ import type {
   BrowserRecordingSource,
   BrowserScriptLibraryEntry
 } from "../../../../shared/browser-types"
+import { BrowserScriptEditor } from "./BrowserScriptEditor"
 
 export interface BrowserRecordingListDialogProps {
   open: boolean
@@ -206,6 +207,7 @@ export function BrowserRecordingListDialog({
   const detailViewActive = Boolean(selectedEntry && !error && !isLoading)
   const detailScriptValue = detailViewActive ? detailScript : ""
   const detailDisplayNameValue = detailViewActive ? detailDisplayName : ""
+  const detailScriptLineCount = detailScriptValue.trim().length > 0 ? detailScriptValue.split(/\r?\n/u).length : 0
   const detailDirty =
     detailViewActive &&
     (detailScript !== detailInitialScript || detailDisplayName !== detailInitialDisplayName)
@@ -531,29 +533,6 @@ export function BrowserRecordingListDialog({
                       variant="outline"
                       className="h-8 rounded-lg text-[11px]"
                       disabled={
-                        !detailViewActive ||
-                        !detailScriptValue.trim() ||
-                        !detailDisplayNameValue.trim() ||
-                        detailLoading ||
-                        isSaveLoading ||
-                        isSaveAsLoading ||
-                        isContinueLoading
-                      }
-                      onClick={() => void handleCopyDetailScript()}
-                    >
-                      {detailCopied ? (
-                        <Check className="size-3.5" strokeWidth={1.8} />
-                      ) : (
-                        <Copy className="size-3.5" strokeWidth={1.8} />
-                      )}
-                      {detailCopied ? "已复制" : "复制内容"}
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-8 rounded-lg text-[11px]"
-                      disabled={
                         !selectedEntry ||
                         !detailDirty ||
                         !detailScriptValue.trim() ||
@@ -619,8 +598,10 @@ export function BrowserRecordingListDialog({
               </div>
             </div>
             <div className="min-h-0 flex-1 p-4">
-              <div className="flex h-[60vh] min-h-0 flex-col overflow-hidden rounded-xl border border-slate-900/80 bg-[#0b0f14] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-                <div className="flex items-center justify-between border-b border-white/10 bg-[#11161d] px-4 py-2 text-[11px] text-slate-400">
+              <BrowserScriptEditor
+                className="h-[60vh] min-h-[420px]"
+                textareaClassName="disabled:cursor-wait"
+                title={
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="truncate font-mono">
                       {selectedEntry?.fileName ?? "playwright.spec.ts"}
@@ -631,34 +612,49 @@ export function BrowserRecordingListDialog({
                       </span>
                     ) : null}
                   </div>
-                  {detailLoading || isSaveLoading || isSaveAsLoading || isContinueLoading ? (
+                }
+                headerRight={
+                  detailLoading || isSaveLoading || isSaveAsLoading || isContinueLoading ? (
                     <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                  ) : null}
-                </div>
-                <div className="h-full  px-4 py-4 font-mono text-[12px] leading-6 text-slate-100">
-                  <textarea
-                    aria-label="录制脚本编辑器"
-                    spellCheck={false}
-                    value={detailScriptValue}
-                    disabled={!detailViewActive || detailLoading}
-                    onChange={(event) => {
-                      const nextScript = event.target.value
-                      setDetailScript(nextScript)
-                      if (selectedEntry) {
-                        saveDetailDraft(
-                          selectedEntry.fileName,
-                          nextScript,
-                          detailInitialScript,
-                          detailDisplayName,
-                          detailInitialDisplayName
-                        )
-                      }
-                    }}
-                    className="h-full min-h-[52vh] w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500 disabled:cursor-wait"
-                    placeholder={detailLoading ? "正在读取脚本内容..." : "// Script content"}
-                  />
-                </div>
-              </div>
+                  ) : (
+                    <div className="flex shrink-0 items-center gap-2">
+                      <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                        {detailScriptLineCount > 0 ? `${detailScriptLineCount} lines` : "waiting"}
+                      </span>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="size-6 rounded-md text-slate-300 hover:bg-white/5 hover:text-white"
+                        disabled={!detailViewActive || !detailScriptValue.trim()}
+                        onClick={() => void handleCopyDetailScript()}
+                      >
+                        {detailCopied ? (
+                          <Check className="size-3.5" strokeWidth={1.8} />
+                        ) : (
+                          <Copy className="size-3.5" strokeWidth={1.8} />
+                        )}
+                      </Button>
+                    </div>
+                  )
+                }
+                value={detailScriptValue}
+                disabled={!detailViewActive || detailLoading}
+                onChange={(nextScript) => {
+                  setDetailScript(nextScript)
+                  if (selectedEntry) {
+                    saveDetailDraft(
+                      selectedEntry.fileName,
+                      nextScript,
+                      detailInitialScript,
+                      detailDisplayName,
+                      detailInitialDisplayName
+                    )
+                  }
+                }}
+                ariaLabel="录制脚本编辑器"
+                placeholder={detailLoading ? "正在读取脚本内容..." : "// Script content"}
+              />
             </div>
           </div>
         </div>
