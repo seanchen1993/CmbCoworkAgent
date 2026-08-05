@@ -135,6 +135,27 @@ export function buildManualRecorderInjectionScript() {
       const placeholder = text(element.getAttribute("placeholder"));
       const accessibleName = label || text(element.getAttribute("aria-label")) || safeText(element.innerText || element.textContent, 80);
       const inputType = tagName === "input" ? text(element.getAttribute("type")).toLowerCase() || "text" : undefined;
+      let matchCount;
+      let nth;
+      if (role && accessibleName && !text(element.getAttribute("data-testid"))) {
+        const matches = Array.from(document.querySelectorAll("*")).filter((candidate) => {
+          if (!(candidate instanceof Element)) return false;
+          if (roleForElement(candidate) !== role) return false;
+          const candidateLabel = labelForElement(candidate);
+          const candidateAccessibleName =
+            candidateLabel ||
+            text(candidate.getAttribute("aria-label")) ||
+            safeText(candidate.innerText || candidate.textContent, 80);
+          return candidateAccessibleName === accessibleName;
+        });
+        if (matches.length > 1) {
+          const candidateIndex = matches.indexOf(element);
+          if (candidateIndex >= 0) {
+            matchCount = matches.length;
+            nth = candidateIndex;
+          }
+        }
+      }
       return {
         target: targetForElement(element),
         role,
@@ -145,7 +166,9 @@ export function buildManualRecorderInjectionScript() {
         textContent: safeText(element.innerText || element.textContent, 80),
         selector: selectorForElement(element),
         tagName,
-        inputType
+        inputType,
+        matchCount,
+        nth
       };
     }
 

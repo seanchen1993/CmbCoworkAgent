@@ -64,6 +64,13 @@ describe("manual recording service", () => {
     expect(script).toMatch(/emitTextFill\(target\);/u)
   })
 
+  it("captures occurrence hints for duplicate role locators in the injected recorder", () => {
+    const script = buildManualRecorderInjectionScript()
+    expect(script).toMatch(/matches\.length > 1/u)
+    expect(script).toMatch(/matchCount = matches\.length/u)
+    expect(script).toMatch(/nth = candidateIndex/u)
+  })
+
   it("starts with the current page and generates a manual recording draft", () => {
     const session = startManualRecording({
       currentUrl: "https://example.com/dashboard",
@@ -407,6 +414,59 @@ describe("manual recording service", () => {
     )
     expect(session.script.indexOf('.press("Enter")')).toBeLessThan(
       session.script.lastIndexOf('.press("Enter")')
+    )
+  })
+
+  it("keeps duplicate role targets distinct by recording their occurrence index", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/search" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "button",
+        accessibleName: "Search",
+        target: "Search",
+        tagName: "button",
+        selector: "button",
+        matchCount: 2,
+        nth: 0
+      }
+    })
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "button",
+        accessibleName: "Search",
+        target: "Search",
+        tagName: "button",
+        selector: "button",
+        matchCount: 2,
+        nth: 1
+      }
+    })
+
+    const session = stopManualRecording()
+    expect(session.actions).toHaveLength(2)
+    expect(session.actions[0]).toMatchObject({
+      kind: "click",
+      locator: expect.objectContaining({
+        matchCount: 2,
+        nth: 0
+      })
+    })
+    expect(session.actions[1]).toMatchObject({
+      kind: "click",
+      locator: expect.objectContaining({
+        matchCount: 2,
+        nth: 1
+      })
+    })
+    expect(session.script).toContain(
+      'await page.getByRole("button", { name: "Search", exact: true }).nth(0).click();'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("button", { name: "Search", exact: true }).nth(1).click();'
     )
   })
 

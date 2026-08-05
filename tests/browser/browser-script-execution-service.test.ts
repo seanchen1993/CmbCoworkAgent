@@ -110,6 +110,42 @@ test("manual recorded flow", async ({ page }) => {
     dispose()
   })
 
+  it("replays nth-disambiguated locators against the in-app browser page", async () => {
+    const click = vi.fn(async () => undefined)
+    const nth = vi.fn(() => ({
+      click
+    }))
+    const getByRole = vi.fn(() => ({
+      nth
+    }))
+    const page = {
+      getByRole,
+      title: vi.fn(async () => "Example"),
+      url: vi.fn(() => "https://example.com")
+    }
+    const context = {
+      pages: vi.fn(() => [page])
+    }
+    const browser = {
+      contexts: vi.fn(() => [context]),
+      disconnect: vi.fn()
+    }
+    playwrightMocks.connectOverCDP.mockResolvedValue(browser)
+
+    await executeRecordingScriptInBuiltinBrowser({
+      script: `import { test } from "@playwright/test";
+
+test("manual recorded flow", async ({ page }) => {
+  await page.getByRole("button", { name: "Search" }).nth(1).click();
+});
+`
+    })
+
+    expect(getByRole).toHaveBeenCalledWith("button", { name: "Search" })
+    expect(nth).toHaveBeenCalledWith(1)
+    expect(click).toHaveBeenCalledOnce()
+  })
+
   it("selects the BrowserPanel target instead of the first Electron page", async () => {
     const appPage = {
       getByRole: vi.fn(),

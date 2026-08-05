@@ -42,6 +42,8 @@ interface ManualRecorderLocatorPayload {
   selector?: string
   tagName?: string
   inputType?: string
+  matchCount?: number
+  nth?: number
 }
 
 interface ManualRecorderClickEvent extends ManualRecorderEventBase {
@@ -113,6 +115,11 @@ function readStringArray(value: unknown): string[] {
   })
 }
 
+function readNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return undefined
+  return value
+}
+
 function normalizeRole(value: unknown): BrowserLocatorMetadata["role"] {
   const role = readString(value)?.toLowerCase()
   if (!role) return undefined
@@ -172,7 +179,12 @@ function normalizeLocatorPayload(
     selector: readString(payload.selector),
     tagName: readString(payload.tagName),
     inputType: readString(payload.inputType),
-    framePath: framePath.length > 0 ? framePath : undefined
+    framePath: framePath.length > 0 ? framePath : undefined,
+    matchCount: (() => {
+      const matchCount = readNonNegativeInteger(payload.matchCount)
+      return matchCount && matchCount > 1 ? matchCount : undefined
+    })(),
+    nth: readNonNegativeInteger(payload.nth)
   }
 
   return Object.values(locator).some((value) => {
@@ -285,7 +297,9 @@ function actionTargetKey(action: AiRecordedBrowserAction): string {
           accessibleName: locator.accessibleName,
           textContent: locator.textContent,
           selector: locator.selector,
-          framePath: locator.framePath
+          framePath: locator.framePath,
+          matchCount: locator.matchCount,
+          nth: locator.nth
         }
       : null
   })
