@@ -7,7 +7,10 @@ import {
   startAiRecording,
   stopAiRecording
 } from "../../../src/main/browser/recording/ai-recording-service"
-import { extractAiRecordingVariableNames } from "../../../src/shared/browser-ai-recording-script"
+import {
+  extractAiRecordingVariableNames,
+  parseAiRecordingScript
+} from "../../../src/shared/browser-ai-recording-script"
 
 const LOGIN_SNAPSHOT_RESULT = `### Snapshot
 \`\`\`yaml
@@ -82,16 +85,19 @@ describe("AI recording service", () => {
     expect(session.actions[3]).toMatchObject({
       kind: "fill",
       target: "Password input",
-      value: "",
+      value: "super-secret",
       sensitive: true
     })
     expect(session.script).toContain('await page.goto("https://example.com/login");')
-    expect(session.script).toContain('await page.getByRole("button", { name: "Login" }).click();')
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Email" }).fill("final@example.com");'
+      'await page.getByRole("button", { name: "Login", exact: true }).click();'
     )
-    expect(session.script).toContain('process.env.PLAYWRIGHT_TEST_PASSWORD ?? ""')
-    expect(session.script).not.toContain("super-secret")
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "Email", exact: true }).fill("final@example.com");'
+    )
+    expect(session.script).toContain(
+      'await page.getByRole("textbox", { name: "Password", exact: true }).fill("super-secret");'
+    )
   })
 
   it("ignores unsupported tools but records calls from any thread", () => {
@@ -164,11 +170,13 @@ describe("AI recording service", () => {
     const session = stopAiRecording()
 
     expect(session.actions).toHaveLength(3)
-    expect(session.script).toContain('await page.getByRole("tab", { name: "Actions" }).click();')
-    expect(session.script.match(/getByRole\("tab", \{ name: "Actions" \}\)/g)).toHaveLength(1)
+    expect(session.script).toContain(
+      'await page.getByRole("tab", { name: "Actions", exact: true }).click();'
+    )
+    expect(session.script.match(/getByRole\("tab", \{ name: "Actions", exact: true \}\)/g)).toHaveLength(1)
     expect(session.script.match(/Branch selector/g)).toHaveLength(1)
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Search" }).press("Enter");'
+      'await page.getByRole("textbox", { name: "Search", exact: true }).press("Enter");'
     )
   })
 
@@ -206,19 +214,128 @@ describe("AI recording service", () => {
     expect(session.actions[2]).toMatchObject({
       kind: "fill",
       target: "Password input",
-      value: "",
+      value: "my-secret",
       sensitive: true
     })
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Username" }).fill("john.doe");'
+      'await page.getByRole("textbox", { name: "Username", exact: true }).fill("john.doe");'
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Email" }).fill("john@example.com");'
+      'await page.getByRole("textbox", { name: "Email", exact: true }).fill("john@example.com");'
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Password" }).fill(process.env.PLAYWRIGHT_TEST_PASSWORD ?? "");'
+      'await page.getByRole("textbox", { name: "Password", exact: true }).fill("my-secret");'
     )
-    expect(session.script).not.toContain("my-secret")
+  })
+
+  it("infers spinbutton locators for numeric fill fields", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_fill_form",
+      threadId: "thread-1",
+      args: {
+        fields: [
+          {
+            label: "年龄",
+            name: "年龄",
+            tagName: "input",
+            inputType: "number",
+            value: "11"
+          }
+        ]
+      }
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.actions).toEqual([
+      expect.objectContaining({
+        kind: "fill",
+        target: "年龄",
+        value: "11",
+        locator: expect.objectContaining({
+          role: "spinbutton",
+          inputType: "number"
+        })
+      })
+    ])
+    expect(session.script).toContain(
+      'await page.getByRole("spinbutton", { name: "年龄", exact: true }).fill("11");'
+    )
+  })
+
+  it("infers slider locators for range fill fields", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_fill_form",
+      threadId: "thread-1",
+      args: {
+        fields: [
+          {
+            label: "编程经验（年）",
+            name: "编程经验（年）",
+            tagName: "input",
+            type: "range",
+            value: "6"
+          }
+        ]
+      }
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.actions).toEqual([
+      expect.objectContaining({
+        kind: "fill",
+        target: "编程经验（年）",
+        value: "6",
+        locator: expect.objectContaining({
+          role: "slider",
+          inputType: "range"
+        })
+      })
+    ])
+    expect(session.script).toContain(
+      'await page.getByRole("slider", { name: "编程经验（年）", exact: true }).fill("6");'
+    )
+  })
+
+  it("clicks radio-card choices through their visible label wrapper", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_click",
+      threadId: "thread-1",
+      args: {
+        target: "🎨 设计师 做设计的人",
+        role: "radio",
+        label: "🎨 设计师 做设计的人",
+        selector: 'input[name="role"][value="designer"]',
+        tagName: "input",
+        inputType: "radio"
+      }
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.actions).toEqual([
+      expect.objectContaining({
+        kind: "click",
+        target: "🎨 设计师 做设计的人",
+        locator: expect.objectContaining({
+          role: "radio",
+          selector: 'input[name="role"][value="designer"]',
+          inputType: "radio"
+        })
+      })
+    ])
+    expect(session.script).toContain(
+      'await page.locator("label:has(input[name=\\"role\\"][value=\\"designer\\"])").click();'
+    )
+    expect(session.script).not.toContain('getByLabel("🎨 设计师 做设计的人").click()')
+    expect(session.script).not.toContain('getByRole("radio"')
   })
 
   it("uses richer locator metadata when available", () => {
@@ -292,10 +409,10 @@ await page.getByRole('textbox', { name: '邮箱' }).fill('test@qq.com');
       })
     })
     expect(session.script).toContain(
-      'await page.getByRole("combobox", { name: "用户名 (支持自动补全)" }).fill("mktui");'
+      'await page.getByRole("combobox", { name: "用户名 (支持自动补全)", exact: true }).fill("mktui");'
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "邮箱" }).fill("test@qq.com");'
+      'await page.getByRole("textbox", { name: "邮箱", exact: true }).fill("test@qq.com");'
     )
     expect(session.script).not.toContain("TODO_SELECTOR")
   })
@@ -330,7 +447,40 @@ await page.getByText('分支选项 release', { exact: true }).click();
         accessibleName: "release"
       })
     })
-    expect(session.script).toContain('await page.getByRole("option", { name: "release" }).click();')
+    expect(session.script).toContain(
+      'await page.getByRole("option", { name: "release", exact: true }).click();'
+    )
+  })
+
+  it("uses semantic role locators for menuitem radio options", () => {
+    startAiRecording({ threadId: "thread-1" })
+
+    recordSuccessfulAiBrowserToolCall({
+      toolName: "browser_click",
+      threadId: "thread-1",
+      args: {
+        role: "menuitemradio",
+        element: "fix/bug-doc-qyang",
+        ariaLabel: "fix/bug-doc-qyang",
+        selector: 'button[name="branch"]'
+      }
+    })
+
+    const session = stopAiRecording()
+
+    expect(session.actions).toHaveLength(1)
+    expect(session.actions[0]).toMatchObject({
+      kind: "click",
+      target: "fix/bug-doc-qyang",
+      locator: expect.objectContaining({
+        role: "menuitemradio",
+        accessibleName: "fix/bug-doc-qyang"
+      })
+    })
+    expect(session.script).toContain(
+      'await page.getByRole("menuitemradio", { name: "fix/bug-doc-qyang", exact: true }).click();'
+    )
+    expect(session.script).not.toContain('locator("button[name=\\"branch\\"]")')
   })
 
   it("records file chooser uploads and replays them after the triggering click", () => {
@@ -362,7 +512,7 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
       'const fileChooserPromise1 = page.waitForEvent("filechooser");'
     )
     expect(session.script).toContain(
-      'await page.getByRole("button", { name: "Upload document" }).click();'
+      'await page.getByRole("button", { name: "Upload document", exact: true }).click();'
     )
     expect(session.script).toContain("const fileChooser1 = await fileChooserPromise1;")
     expect(session.script).toContain('await fileChooser1.setFiles("/tmp/fixtures/contract.pdf");')
@@ -416,7 +566,7 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
 
     expect(session.actions).toHaveLength(2)
     expect(session.script.match(/test@qq\.com/g)).toHaveLength(1)
-    expect(session.script.match(/PLAYWRIGHT_TEST_PASSWORD/g)).toHaveLength(1)
+    expect(session.script.match(/123456/g)).toHaveLength(1)
   })
 
   it("returns a placeholder script when no actions were captured", () => {
@@ -439,7 +589,7 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
         timestamp: "2026-07-30T00:00:01.000Z",
         kind: "fill" as const,
         target: "密码输入框",
-        value: "",
+        value: "123456",
         sensitive: true
       }
     ]
@@ -455,10 +605,10 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
     expect(script).toContain('const 变量_用户名 = ""; // 变量-用户名')
     expect(script).toContain('const 变量_密码 = ""; // 变量-密码')
     expect(script).toContain(
-      'await page.getByRole("textbox", { name: "用户名输入框" }).fill(变量_用户名);'
+      'await page.getByRole("textbox", { name: "用户名输入框", exact: true }).fill(变量_用户名);'
     )
     expect(script).toContain(
-      'await page.getByRole("textbox", { name: "密码输入框" }).fill(变量_密码);'
+      'await page.getByRole("textbox", { name: "密码输入框", exact: true }).fill(变量_密码);'
     )
     expect(script).not.toContain("recorded@example.com")
     expect(extractAiRecordingVariableNames(script)).toEqual(["变量-用户名", "变量-密码"])
@@ -501,7 +651,54 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
     expect(script).toContain('const 变量_流水线名称 = ""; // 变量-流水线名称')
     expect(script).toContain('const 变量_分支名 = ""; // 变量-分支名')
     expect(script).toContain("await page.getByText(变量_流水线名称, { exact: true }).click();")
-    expect(script).toContain('await page.getByRole("option", { name: 变量_分支名 }).click();')
+    expect(script).toContain(
+      'await page.getByRole("option", { name: 变量_分支名, exact: true }).click();'
+    )
     expect(extractAiRecordingVariableNames(script)).toEqual(["变量-流水线名称", "变量-分支名"])
+  })
+
+  it("parses generated exact role locators with literal fill values back into recording actions", () => {
+    const script = `import { test } from "@playwright/test";
+
+test("manual recorded flow", async ({ page }) => {
+  // Review generated locators before committing this test.
+  await page.getByRole("textbox", { name: "密码", exact: true }).click();
+  await page.getByRole("textbox", { name: "密码", exact: true }).fill("12345678");
+  await page.getByRole("textbox", { name: "确认密码", exact: true }).fill("12345678");
+});
+`
+
+    const parsed = parseAiRecordingScript(script, "manual")
+
+    expect(parsed.actions).toEqual([
+      expect.objectContaining({
+        kind: "click",
+        target: "密码",
+        locator: expect.objectContaining({
+          role: "textbox",
+          accessibleName: "密码"
+        })
+      }),
+      expect.objectContaining({
+        kind: "fill",
+        target: "密码",
+        value: "12345678",
+        sensitive: true,
+        locator: expect.objectContaining({
+          role: "textbox",
+          accessibleName: "密码"
+        })
+      }),
+      expect.objectContaining({
+        kind: "fill",
+        target: "确认密码",
+        value: "12345678",
+        sensitive: true,
+        locator: expect.objectContaining({
+          role: "textbox",
+          accessibleName: "确认密码"
+        })
+      })
+    ])
   })
 })

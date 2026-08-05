@@ -4,8 +4,12 @@ export type LocatorRole =
   | "combobox"
   | "link"
   | "menuitem"
+  | "menuitemcheckbox"
+  | "menuitemradio"
   | "option"
   | "radio"
+  | "slider"
+  | "spinbutton"
   | "switch"
   | "tab"
   | "textbox"
@@ -55,6 +59,12 @@ export interface LocatorResolution {
 
 const ROLE_PATTERNS: Array<{ pattern: RegExp; role: LocatorRole }> = [
   { pattern: /\bradio button\b|\b单选框\b/iu, role: "radio" },
+  { pattern: /\bslider\b|\b滑块\b|\b范围滑块\b|\b拖动条\b/iu, role: "slider" },
+  {
+    pattern:
+      /\bspinbutton\b|\bnumber input\b|\bnumber field\b|\bnumeric input\b|\bnumeric field\b|\b数字输入框\b|\b数值输入框\b|\b数字框\b|\b数值框\b/iu,
+    role: "spinbutton"
+  },
   {
     pattern: /\btext field\b|\btextbox\b|\btext input\b|\binput\b|\b输入框\b|\b文本框\b/iu,
     role: "textbox"
@@ -65,6 +75,8 @@ const ROLE_PATTERNS: Array<{ pattern: RegExp; role: LocatorRole }> = [
   { pattern: /\blink\b|\b链接\b/iu, role: "link" },
   { pattern: /\btab\b|\b标签页\b/iu, role: "tab" },
   { pattern: /\bswitch\b|\b开关\b/iu, role: "switch" },
+  { pattern: /\bmenuitemradio\b|\b菜单单选项\b/iu, role: "menuitemradio" },
+  { pattern: /\bmenuitemcheckbox\b|\b菜单复选项\b/iu, role: "menuitemcheckbox" },
   { pattern: /\bmenu item\b|\bmenuitem\b|\b菜单项\b/iu, role: "menuitem" },
   { pattern: /\boption\b|\b选项\b/iu, role: "option" }
 ]
@@ -122,6 +134,44 @@ function buildFrameRoot(framePath: string[] | undefined): string {
   }, "page")
 }
 
+function isFileInputLocatorSource(
+  source: Pick<LocatorSource, "tagName" | "inputType" | "selector">
+): boolean {
+  const tagName = source.tagName ? normalizeText(source.tagName).toLowerCase() : ""
+  const inputType = source.inputType ? normalizeText(source.inputType).toLowerCase() : ""
+  const selector = source.selector ? normalizeText(source.selector).toLowerCase() : ""
+
+  if (inputType === "file") return true
+  if (tagName !== "input") return false
+
+  return /\[type\s*=\s*["']?file["']?\]/u.test(selector)
+}
+
+function inferRoleFromInputMetadata(
+  inputType: string | undefined,
+  tagName: string | undefined
+): LocatorRole | undefined {
+  const normalizedTagName = tagName ? normalizeText(tagName).toLowerCase() : ""
+  const normalizedInputType = inputType ? normalizeText(inputType).toLowerCase() : ""
+
+  if (normalizedTagName === "textarea") return "textbox"
+  if (normalizedTagName !== "input") return undefined
+
+  if (normalizedInputType === "range") return "slider"
+  if (normalizedInputType === "number") return "spinbutton"
+  if (normalizedInputType === "checkbox") return "checkbox"
+  if (normalizedInputType === "radio") return "radio"
+  if (
+    normalizedInputType === "button" ||
+    normalizedInputType === "submit" ||
+    normalizedInputType === "reset"
+  ) {
+    return "button"
+  }
+
+  return undefined
+}
+
 function buildCandidate(
   kind: LocatorCandidateKind,
   locator: string,
@@ -169,7 +219,7 @@ function buildRoleCandidate(
 
   return buildCandidate(
     "role",
-    `${root}.getByRole(${quote(role)}, { name: ${quote(name)} })`,
+    `${root}.getByRole(${quote(role)}, { name: ${quote(name)}, exact: true })`,
     score,
     true,
     reason
@@ -286,6 +336,7 @@ export function resolvePlaywrightLocator(
   options: LocatorBuildOptions = {}
 ): LocatorResolution {
   const root = buildFrameRoot(source.framePath)
+  const fileInputLocator = isFileInputLocatorSource(source)
   const candidates: LocatorCandidate[] = []
   const normalizedLabel = source.label ? normalizeText(source.label) : undefined
   const normalizedPlaceholder = source.placeholder ? normalizeText(source.placeholder) : undefined
@@ -297,7 +348,8 @@ export function resolvePlaywrightLocator(
   const normalizedSelector = source.selector ? normalizeText(source.selector) : undefined
   const derivedTarget = deriveTargetName(source.target)
   const normalizedTarget = derivedTarget.name
-  const role = source.role ?? derivedTarget.inferredRole ?? options.defaultRole
+  const inferredInputRole = inferRoleFromInputMetadata(source.inputType, source.tagName)
+  const role = source.role ?? inferredInputRole ?? derivedTarget.inferredRole ?? options.defaultRole
   const roleName =
     normalizedAccessibleName ??
     normalizedLabel ??
@@ -307,16 +359,24 @@ export function resolvePlaywrightLocator(
   pushCandidate(candidates, buildTestIdCandidate(root, normalizedTestId))
   pushCandidate(candidates, buildLabelCandidate(root, normalizedLabel))
   pushCandidate(candidates, buildPlaceholderCandidate(root, normalizedPlaceholder))
-  pushCandidate(
-    candidates,
-    buildRoleCandidate(
-      root,
-      role,
-      roleName,
-      source.role ? "explicit role metadata" : derivedTarget.inferredRole ? "inferred role from target" : "default role",
-      source.role ? 96 : derivedTarget.inferredRole ? 86 : 82
+  if (!fileInputLocator) {
+    pushCandidate(
+      candidates,
+      buildRoleCandidate(
+        root,
+        role,
+        roleName,
+        source.role
+          ? "explicit role metadata"
+          : inferredInputRole
+            ? "inferred role from input type"
+          : derivedTarget.inferredRole
+            ? "inferred role from target"
+            : "default role",
+        source.role ? 96 : inferredInputRole ? 90 : derivedTarget.inferredRole ? 86 : 82
+      )
     )
-  )
+  }
   pushCandidate(candidates, buildSelectorCandidate(root, normalizedSelector))
   pushCandidate(candidates, buildTextCandidate(root, normalizedText ?? normalizedTarget))
   pushCandidate(candidates, buildCssCandidate(root, source.tagName, source.inputType))

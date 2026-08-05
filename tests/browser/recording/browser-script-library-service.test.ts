@@ -8,7 +8,8 @@ import {
   readBrowserScriptLibraryScript,
   resetBrowserScriptLibraryForTests,
   saveBrowserScriptLibraryEntry,
-  setBrowserScriptLibraryRootForTests
+  setBrowserScriptLibraryRootForTests,
+  updateBrowserScriptLibraryEntry
 } from "../../../src/main/browser/recording/browser-script-library-service"
 
 let libraryRoot = ""
@@ -60,12 +61,12 @@ describe("browser script library service", () => {
     expect(manifest.entries).toHaveLength(2)
   })
 
-  it("filters mappings by workspace while preserving the saved metadata", async () => {
+  it("lists all mappings regardless of workspace hint", async () => {
     await saveBrowserScriptLibraryEntry({
       displayName: "工作区 A",
       description: "A 描述",
       recordingSource: "manual",
-      script: "A",
+      script: `const 变量_目标地址 = ""; // 变量-目标地址`,
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
     })
@@ -82,11 +83,49 @@ describe("browser script library service", () => {
 
     expect(entries).toEqual([
       expect.objectContaining({
+        displayName: "工作区 B",
+        description: "B 描述",
+        recordingSource: "ai",
+        threadId: "thread-b",
+        hasVariables: false,
+        workspacePath: resolve("/tmp/workspace-b")
+      }),
+      expect.objectContaining({
         displayName: "工作区 A",
         description: "A 描述",
         recordingSource: "manual",
         threadId: "thread-a",
+        hasVariables: true,
         workspacePath: resolve("/tmp/workspace-a")
+      })
+    ])
+  })
+
+  it("updates the script and display name in the existing library entry", async () => {
+    const entry = await saveBrowserScriptLibraryEntry({
+      displayName: "旧名称",
+      recordingSource: "manual",
+      script: "old script",
+      threadId: "thread-a",
+      workspacePath: "/tmp/workspace-a"
+    })
+
+    await updateBrowserScriptLibraryEntry({
+      fileName: entry.fileName,
+      displayName: "新名称",
+      script: "new script"
+    })
+
+    await expect(readBrowserScriptLibraryScript({ fileName: entry.fileName })).resolves.toBe(
+      "new script"
+    )
+    await expect(
+      listBrowserScriptLibraryEntries({ workspacePath: "/tmp/workspace-a" })
+    ).resolves.toEqual([
+      expect.objectContaining({
+        fileName: entry.fileName,
+        displayName: "新名称",
+        recordingSource: "manual"
       })
     ])
   })

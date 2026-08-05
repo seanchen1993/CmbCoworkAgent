@@ -1,17 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import {
-  Check,
-  Copy,
-  FileCode2,
-  FolderOpen,
-  Loader2,
-  Play,
-  RotateCcw,
-  Save,
-  Trash2
-} from "lucide-react"
+import { flushSync } from "react-dom"
+import { Check, Copy, FolderOpen, Loader2, Play, RotateCcw, Save, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import {
   Dialog,
   DialogContent,
@@ -19,26 +11,37 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
+import { isSameWorkspacePath } from "../../../../shared/workspace-path"
 import type {
   BrowserRecordingSource,
   BrowserScriptLibraryEntry
 } from "../../../../shared/browser-types"
 
-interface BrowserRecordingListDialogProps {
+export interface BrowserRecordingListDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  hasWorkspace: boolean
+  isPlaybackRunning: boolean
   isLoading: boolean
   error: string | null
   entries: BrowserScriptLibraryEntry[]
   currentThreadId?: string | null
+  currentWorkspacePath?: string | null
   loadingFileName: string | null
-  loadingAction: "detail" | "execution" | "save" | "continue" | "delete" | null
+  loadingAction: "detail" | "execution" | "save" | "saveAs" | "continue" | "delete" | null
   onRefresh: () => void
   onReadScript: (entry: BrowserScriptLibraryEntry) => Promise<string>
-  onSaveScript: (entry: BrowserScriptLibraryEntry, script: string) => Promise<void>
+  onSaveScript: (
+    entry: BrowserScriptLibraryEntry,
+    script: string,
+    displayName: string
+  ) => Promise<void>
+  onSaveAsScript: (
+    entry: BrowserScriptLibraryEntry,
+    script: string,
+    displayName: string
+  ) => Promise<BrowserScriptLibraryEntry>
   onContinueRecording: (entry: BrowserScriptLibraryEntry, script: string) => Promise<void>
-  onCopyExecution: (entry: BrowserScriptLibraryEntry) => void
+  onExecuteScript: (entry: BrowserScriptLibraryEntry, script: string) => Promise<void>
   onDelete: (entry: BrowserScriptLibraryEntry) => void
 }
 
@@ -67,108 +70,117 @@ const PAGE_SIZE = 10
 interface DetailDraftState {
   initialScript: string
   script: string
+  initialDisplayName: string
+  displayName: string
 }
 
 export function BrowserRecordingListDialog({
   open,
   onOpenChange,
-  hasWorkspace,
+  isPlaybackRunning,
   isLoading,
   error,
   entries,
   currentThreadId,
+  currentWorkspacePath,
   loadingFileName,
   loadingAction,
   onRefresh,
   onReadScript,
   onSaveScript,
+  onSaveAsScript,
   onContinueRecording,
-  onCopyExecution,
+  onExecuteScript,
   onDelete
 }: BrowserRecordingListDialogProps): React.JSX.Element {
   const [selectedFileName, setSelectedFileName] = useState<string | null>(null)
   const [detailScript, setDetailScript] = useState("")
   const [detailInitialScript, setDetailInitialScript] = useState("")
+  const [detailDisplayName, setDetailDisplayName] = useState("")
+  const [detailInitialDisplayName, setDetailInitialDisplayName] = useState("")
   const [detailCopied, setDetailCopied] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
+  const [displayNameFilter, setDisplayNameFilter] = useState("")
   const detailDraftsRef = useRef<Record<string, DetailDraftState>>({})
 
   const saveDetailDraft = useCallback(
-    (fileName: string, script: string, initialScript: string): void => {
+    (
+      fileName: string,
+      script: string,
+      initialScript: string,
+      displayName: string,
+      initialDisplayName: string
+    ): void => {
       detailDraftsRef.current = {
         ...detailDraftsRef.current,
         [fileName]: {
           initialScript,
-          script
+          script,
+          initialDisplayName,
+          displayName
         }
       }
     },
     []
   )
 
-  const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE))
-  const currentPageSafe = Math.min(currentPage, totalPages)
+  const normalizedDisplayNameFilter = displayNameFilter.trim().toLocaleLowerCase()
+  const filteredEntries = entries.filter(
+    (entry) =>
+      !normalizedDisplayNameFilter ||
+      entry.displayName.toLocaleLowerCase().includes(normalizedDisplayNameFilter)
+  )
+  const totalPages = Math.max(1, Math.ceil(filteredEntries.length / PAGE_SIZE))
+  const currentPageSafe = Math.max(1, Math.min(currentPage, totalPages))
   const pageStart = (currentPageSafe - 1) * PAGE_SIZE
-  const currentEntries = entries.slice(pageStart, pageStart + PAGE_SIZE)
+  const currentEntries = filteredEntries.slice(pageStart, pageStart + PAGE_SIZE)
+  const selectedEntry =
+    currentEntries.find((entry) => entry.fileName === selectedFileName) ?? currentEntries[0] ?? null
 
   useEffect(() => {
-    setCurrentPage(1)
-  }, [open, hasWorkspace, error, isLoading])
-
-  useEffect(() => {
-    if (currentPage > totalPages) {
-      setCurrentPage(totalPages)
-    }
-  }, [currentPage, totalPages])
-
-  useEffect(() => {
-    if (!open || !hasWorkspace || error || isLoading || entries.length === 0) {
-      setSelectedFileName(null)
-      setDetailScript("")
-      setDetailInitialScript("")
-      setDetailCopied(false)
-      setDetailLoading(false)
-      return
-    }
-
-    const pageEntries = entries.slice(pageStart, pageStart + PAGE_SIZE)
-    setSelectedFileName((current) => {
-      if (current && pageEntries.some((entry) => entry.fileName === current)) {
-        return current
-      }
-      return pageEntries[0]?.fileName ?? null
-    })
-  }, [open, hasWorkspace, error, isLoading, entries, pageStart])
-
-  useEffect(() => {
-    const selectedEntry = entries.find((entry) => entry.fileName === selectedFileName) ?? null
-    if (!selectedEntry) {
-      setDetailScript("")
-      setDetailInitialScript("")
-      setDetailCopied(false)
-      setDetailLoading(false)
-      return
-    }
+    if (!selectedEntry || error || isLoading) return
 
     const cachedDraft = detailDraftsRef.current[selectedEntry.fileName]
+    let cancelled = false
+
     if (cachedDraft) {
-      setDetailScript(cachedDraft.script)
-      setDetailInitialScript(cachedDraft.initialScript)
-      setDetailCopied(false)
-      setDetailLoading(false)
-      return
+      const cachedDraftTimer = window.setTimeout(() => {
+        if (cancelled) return
+        setDetailScript(cachedDraft.script)
+        setDetailInitialScript(cachedDraft.initialScript)
+        setDetailDisplayName(cachedDraft.displayName)
+        setDetailInitialDisplayName(cachedDraft.initialDisplayName)
+        setDetailCopied(false)
+        setDetailLoading(false)
+      }, 0)
+      return () => {
+        cancelled = true
+        window.clearTimeout(cachedDraftTimer)
+      }
     }
 
-    let cancelled = false
-    setDetailLoading(true)
-    setDetailCopied(false)
+    const loadingTimer = window.setTimeout(() => {
+      if (!cancelled) {
+        setDetailCopied(false)
+        setDetailLoading(true)
+      }
+    }, 0)
+
     void onReadScript(selectedEntry)
       .then((script) => {
         if (cancelled) return
         setDetailScript(script)
         setDetailInitialScript(script)
-        saveDetailDraft(selectedEntry.fileName, script, script)
+        setDetailDisplayName(selectedEntry.displayName)
+        setDetailInitialDisplayName(selectedEntry.displayName)
+        saveDetailDraft(
+          selectedEntry.fileName,
+          script,
+          script,
+          selectedEntry.displayName,
+          selectedEntry.displayName
+        )
       })
       .catch(() => {
         // parent callback already reports the failure
@@ -179,13 +191,14 @@ export function BrowserRecordingListDialog({
 
     return () => {
       cancelled = true
+      window.clearTimeout(loadingTimer)
     }
-  }, [entries, onReadScript, saveDetailDraft, selectedFileName])
+  }, [error, isLoading, onReadScript, saveDetailDraft, selectedEntry])
 
   const handleCopyDetailScript = async (): Promise<void> => {
-    if (!detailScript.trim()) return
+    if (!detailScriptValue.trim()) return
     try {
-      await navigator.clipboard.writeText(detailScript)
+      await navigator.clipboard.writeText(detailScriptValue)
       setDetailCopied(true)
       window.setTimeout(() => setDetailCopied(false), 1500)
       toast.success("脚本内容已复制")
@@ -194,8 +207,12 @@ export function BrowserRecordingListDialog({
     }
   }
 
-  const selectedEntry = entries.find((entry) => entry.fileName === selectedFileName) ?? null
-  const detailDirty = detailScript !== detailInitialScript
+  const detailViewActive = Boolean(selectedEntry && !error && !isLoading)
+  const detailScriptValue = detailViewActive ? detailScript : ""
+  const detailDisplayNameValue = detailViewActive ? detailDisplayName : ""
+  const detailDirty =
+    detailViewActive &&
+    (detailScript !== detailInitialScript || detailDisplayName !== detailInitialDisplayName)
   const isSaveLoading =
     Boolean(selectedEntry) &&
     loadingFileName === selectedEntry?.fileName &&
@@ -204,17 +221,48 @@ export function BrowserRecordingListDialog({
     Boolean(selectedEntry) &&
     loadingFileName === selectedEntry?.fileName &&
     loadingAction === "continue"
+  const isSaveAsLoading =
+    Boolean(selectedEntry) &&
+    loadingFileName === selectedEntry?.fileName &&
+    loadingAction === "saveAs"
 
   const handleSaveDetailScript = async (): Promise<void> => {
-    if (!selectedEntry || !detailDirty) return
-    await onSaveScript(selectedEntry, detailScript)
-    setDetailInitialScript(detailScript)
-    saveDetailDraft(selectedEntry.fileName, detailScript, detailScript)
+    const displayName = detailDisplayNameValue.trim()
+    if (!selectedEntry || !detailDirty || !detailScriptValue.trim() || !displayName) return
+    await onSaveScript(selectedEntry, detailScriptValue, displayName)
+    setDetailInitialScript(detailScriptValue)
+    setDetailDisplayName(displayName)
+    setDetailInitialDisplayName(displayName)
+    saveDetailDraft(
+      selectedEntry.fileName,
+      detailScriptValue,
+      detailScriptValue,
+      displayName,
+      displayName
+    )
+  }
+
+  const handleSaveAsScript = async (): Promise<void> => {
+    const displayName = detailDisplayNameValue.trim()
+    if (!selectedEntry || !detailScriptValue.trim() || !displayName) return
+    const savedEntry = await onSaveAsScript(selectedEntry, detailScriptValue, displayName)
+    setSelectedFileName(savedEntry.fileName)
+    setDetailScript(detailScriptValue)
+    setDetailInitialScript(detailScriptValue)
+    setDetailDisplayName(savedEntry.displayName)
+    setDetailInitialDisplayName(savedEntry.displayName)
+    saveDetailDraft(
+      savedEntry.fileName,
+      detailScriptValue,
+      detailScriptValue,
+      savedEntry.displayName,
+      savedEntry.displayName
+    )
   }
 
   const handleContinueRecording = async (): Promise<void> => {
-    if (!selectedEntry || !detailScript.trim()) return
-    await onContinueRecording(selectedEntry, detailScript)
+    if (!selectedEntry || !detailScriptValue.trim()) return
+    await onContinueRecording(selectedEntry, detailScriptValue)
   }
 
   return (
@@ -230,7 +278,7 @@ export function BrowserRecordingListDialog({
                 <div>
                   <DialogTitle className="text-base">录制列表</DialogTitle>
                   <DialogDescription className="mt-1 text-[12px] leading-5">
-                    当前工作区已保存的录制脚本。
+                    所有已保存的录制脚本。
                   </DialogDescription>
                 </div>
               </div>
@@ -256,11 +304,7 @@ export function BrowserRecordingListDialog({
         <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
           <div className="flex-1 flex min-h-0 flex-1 flex-col border-b border-border/70 lg:border-b-0 lg:border-r">
             <div className="min-h-0 flex-1 overflow-auto p-5">
-              {!hasWorkspace ? (
-                <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-                  当前会话还没有选择工作区，暂时无法筛选脚本文件。
-                </div>
-              ) : error ? (
+              {error ? (
                 <div className="rounded-xl border border-status-warning/30 bg-status-warning/10 px-4 py-5 text-sm text-status-warning">
                   {error}
                 </div>
@@ -269,175 +313,220 @@ export function BrowserRecordingListDialog({
                   <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
                   正在读取脚本文件...
                 </div>
-              ) : entries.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-                  当前工作区还没有保存过浏览器脚本。
-                </div>
               ) : (
                 <div className="space-y-3">
-                  <div className="overflow-x-auto rounded-xl border border-border/70">
-                    <table className="w-full  border-collapse text-left text-[12px]">
-                      <thead className="bg-muted/45 text-[11px] font-medium text-muted-foreground">
-                        <tr>
-                          <th className="border-b border-border/70 px-3 py-2.5">是否本会话</th>
-                          <th className="border-b border-border/70 px-3 py-2.5">中文</th>
-                          <th className="w-[92px] min-w-[92px] max-w-[92px] border-b border-border/70 px-3 py-2.5">
-                            录制类型
-                          </th>
-                          <th className="w-[170px] min-w-[170px] max-w-[170px] border-b border-border/70 px-3 py-2.5">
-                            时间
-                          </th>
-                          <th className="border-b border-border/70 px-3 py-2.5 text-right">操作</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {currentEntries.map((entry) => {
-                          const isCurrentThread = Boolean(
-                            currentThreadId && entry.threadId === currentThreadId
-                          )
-                          const isEntryLoading = loadingFileName === entry.fileName
-                          const isDetailLoading =
-                            detailLoading && selectedFileName === entry.fileName
-                          const isExecutionLoading = isEntryLoading && loadingAction === "execution"
-                          const isDeleteLoading = isEntryLoading && loadingAction === "delete"
-                          const isSelected = selectedFileName === entry.fileName
-
-                          return (
-                            <tr
-                              key={entry.fileName}
-                              className={[
-                                "border-b border-border/60 last:border-0 hover:bg-muted/25",
-                                isSelected ? "bg-primary/5" : ""
-                              ].join(" ")}
-                              onClick={() => setSelectedFileName(entry.fileName)}
-                            >
-                              <td className="px-3 py-3">
-                                {isCurrentThread ? (
-                                  <span className="flex">
-                                    是 <Check className="ml-2 size-4 text-green-500" />
-                                  </span>
-                                ) : (
-                                  <span>否</span>
-                                )}
-                              </td>
-                              <td
-                                className="max-w-40 px-3 py-3 font-medium text-foreground"
-                                title={entry.displayName}
-                              >
-                                <span className="block truncate">{entry.displayName}</span>
-                              </td>
-                              <td
-                                className="w-[92px] min-w-[92px] max-w-[92px] truncate px-3 py-3 text-[11px] text-foreground"
-                                title={formatRecordingSource(entry.recordingSource)}
-                              >
-                                {formatRecordingSource(entry.recordingSource)}
-                              </td>
-                              <td
-                                className="px-3 py-3 text-[11px] text-muted-foreground"
-                                title={entry.createdAt}
-                              >
-                                {formatRecordingTime(entry.createdAt)}
-                              </td>
-                              <td className="px-3 py-3">
-                                <div className="flex justify-end gap-2">
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-8 rounded-lg text-[11px]"
-                                    disabled={isEntryLoading}
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      setSelectedFileName(entry.fileName)
-                                    }}
-                                  >
-                                    {isDetailLoading ? (
-                                      <Loader2
-                                        className="size-3.5 animate-spin"
-                                        strokeWidth={1.8}
-                                      />
-                                    ) : (
-                                      <FileCode2 className="size-3.5" strokeWidth={1.8} />
-                                    )}
-                                    查看详情
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-8 rounded-lg text-[11px]"
-                                    disabled={isEntryLoading}
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onCopyExecution(entry)
-                                    }}
-                                  >
-                                    {isExecutionLoading ? (
-                                      <Loader2
-                                        className="size-3.5 animate-spin"
-                                        strokeWidth={1.8}
-                                      />
-                                    ) : (
-                                      <Copy className="size-3.5" strokeWidth={1.8} />
-                                    )}
-                                    内置浏览器执行
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-8 rounded-lg text-[11px]"
-                                    disabled={isEntryLoading}
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      onDelete(entry)
-                                    }}
-                                  >
-                                    {isDeleteLoading ? (
-                                      <Loader2
-                                        className="size-3.5 animate-spin"
-                                        strokeWidth={1.8}
-                                      />
-                                    ) : (
-                                      <Trash2 className="size-3.5" strokeWidth={1.8} />
-                                    )}
-                                    删除
-                                  </Button>
-                                </div>
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
+                  <div className="rounded-xl border border-border/70 bg-muted/20 p-3">
+                    <Input
+                      value={displayNameFilter}
+                      onChange={(event) => {
+                        setDisplayNameFilter(event.target.value)
+                        setCurrentPage(1)
+                      }}
+                      placeholder="输入文件中文名筛选"
+                      className="h-9 rounded-lg border-border/80 bg-background text-sm shadow-none"
+                    />
                   </div>
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
-                    <span>
-                      共 {entries.length} 条，当前第 {currentPageSafe}/{totalPages} 页
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-7 rounded-md px-2 text-[11px]"
-                        disabled={currentPageSafe <= 1}
-                        onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                      >
-                        上一页
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-7 rounded-md px-2 text-[11px]"
-                        disabled={currentPageSafe >= totalPages}
-                        onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-                      >
-                        下一页
-                      </Button>
+                  {filteredEntries.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+                      没有匹配当前中文名筛选的脚本。
                     </div>
-                  </div>
+                  ) : (
+                    <>
+                      <div className="overflow-x-auto rounded-xl border border-border/70">
+                        <table className="w-full  border-collapse text-left text-[12px]">
+                          <thead className="bg-muted/45 text-[11px] font-medium text-muted-foreground">
+                            <tr>
+                              <th className="border-b border-border/70 px-3 py-2.5">是否本会话</th>
+                              <th className="border-b border-border/70 px-3 py-2.5">
+                                是否本工作区
+                              </th>
+                              <th className="border-b border-border/70 px-3 py-2.5">中文</th>
+                              <th className="w-[92px] min-w-[92px] max-w-[92px] border-b border-border/70 px-3 py-2.5">
+                                录制类型
+                              </th>
+                              <th className="w-[92px] min-w-[92px] max-w-[92px] border-b border-border/70 px-3 py-2.5">
+                                存在变量
+                              </th>
+                              <th className="w-[170px] min-w-[170px] max-w-[170px] border-b border-border/70 px-3 py-2.5">
+                                时间
+                              </th>
+                              <th className="border-b border-border/70 px-3 py-2.5 text-right">
+                                操作
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {currentEntries.map((entry) => {
+                              const isCurrentThread = Boolean(
+                                currentThreadId && entry.threadId === currentThreadId
+                              )
+                              const hasCurrentWorkspace = Boolean(currentWorkspacePath?.trim())
+                              const isCurrentWorkspace = hasCurrentWorkspace
+                                ? isSameWorkspacePath(entry.workspacePath, currentWorkspacePath)
+                                : null
+                              const isEntryLoading = loadingFileName === entry.fileName
+                              const isExecutionLoading =
+                                isEntryLoading && loadingAction === "execution"
+                              const isDeleteLoading = isEntryLoading && loadingAction === "delete"
+                              const isSelected = selectedFileName === entry.fileName
+
+                              return (
+                                <tr
+                                  key={entry.fileName}
+                                  className={[
+                                    "border-b border-border/60 last:border-0 hover:bg-primary/5 cursor-pointer",
+                                    isSelected ? "bg-primary/5" : ""
+                                  ].join(" ")}
+                                  onClick={() => setSelectedFileName(entry.fileName)}
+                                >
+                                  <td className="px-3 py-3">
+                                    {isCurrentThread ? (
+                                      <span className="flex">
+                                        是 <Check className="ml-2 size-4 text-green-500" />
+                                      </span>
+                                    ) : (
+                                      <span>否</span>
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-3">
+                                    {isCurrentWorkspace === null ? (
+                                      <span className="text-muted-foreground">未选择</span>
+                                    ) : isCurrentWorkspace ? (
+                                      <span className="flex">
+                                        是 <Check className="ml-2 size-4 text-green-500" />
+                                      </span>
+                                    ) : (
+                                      <span>否</span>
+                                    )}
+                                  </td>
+                                  <td
+                                    className="max-w-40 px-3 py-3 font-medium text-foreground"
+                                    title={entry.displayName}
+                                  >
+                                    <span className="block truncate">{entry.displayName}</span>
+                                  </td>
+                                  <td
+                                    className="w-[92px] min-w-[92px] max-w-[92px] truncate px-3 py-3 text-[11px] text-foreground"
+                                    title={formatRecordingSource(entry.recordingSource)}
+                                  >
+                                    {formatRecordingSource(entry.recordingSource)}
+                                  </td>
+                                  <td
+                                    className="px-3 py-3 text-[11px]"
+                                    title={
+                                      entry.hasVariables === undefined
+                                        ? "无法读取脚本内容"
+                                        : entry.hasVariables
+                                          ? "存在变量"
+                                          : "不存在变量"
+                                    }
+                                  >
+                                    {entry.hasVariables === undefined ? (
+                                      <span className="text-muted-foreground">未知</span>
+                                    ) : entry.hasVariables ? (
+                                      <span className="text-emerald-500">有</span>
+                                    ) : (
+                                      <span className="text-muted-foreground">无</span>
+                                    )}
+                                  </td>
+                                  <td
+                                    className="px-3 py-3 text-[11px] text-muted-foreground"
+                                    title={entry.createdAt}
+                                  >
+                                    {formatRecordingTime(entry.createdAt)}
+                                  </td>
+                                  <td className="px-3 py-3">
+                                    <div className="flex justify-end gap-2">
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-8 rounded-lg text-[11px]"
+                                        disabled={isEntryLoading || isPlaybackRunning}
+                                        onClick={async (event) => {
+                                          event.stopPropagation()
+                                          flushSync(() => onOpenChange(false))
+                                          try {
+                                            const script =
+                                              selectedEntry?.fileName === entry.fileName &&
+                                              !detailLoading
+                                                ? detailScriptValue
+                                                : await onReadScript(entry)
+                                            await onExecuteScript(entry, script)
+                                          } catch {
+                                            // Parent handlers already surface the error.
+                                          }
+                                        }}
+                                      >
+                                        {isExecutionLoading ? (
+                                          <Loader2
+                                            className="size-3.5 animate-spin"
+                                            strokeWidth={1.8}
+                                          />
+                                        ) : (
+                                          <Play className="size-3.5" strokeWidth={1.8} />
+                                        )}
+                                        内置浏览器执行
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-8 rounded-lg text-[11px]"
+                                        disabled={isEntryLoading}
+                                        onClick={(event) => {
+                                          event.stopPropagation()
+                                          onDelete(entry)
+                                        }}
+                                      >
+                                        {isDeleteLoading ? (
+                                          <Loader2
+                                            className="size-3.5 animate-spin"
+                                            strokeWidth={1.8}
+                                          />
+                                        ) : (
+                                          <Trash2 className="size-3.5" strokeWidth={1.8} />
+                                        )}
+                                        删除
+                                      </Button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+                        <span>
+                          共 {filteredEntries.length}/{entries.length} 条，当前第 {currentPageSafe}/
+                          {totalPages} 页
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 rounded-md px-2 text-[11px]"
+                            disabled={currentPageSafe <= 1}
+                            onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                          >
+                            上一页
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 rounded-md px-2 text-[11px]"
+                            disabled={currentPageSafe >= totalPages}
+                            onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                          >
+                            下一页
+                          </Button>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -447,21 +536,61 @@ export function BrowserRecordingListDialog({
             <div className="border-b border-border/70 px-5 py-4">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex-1 min-w-0">
-                  <DialogTitle className="text-base">{selectedEntry?.displayName}</DialogTitle>
+                  <DialogTitle className="text-base">编辑录制脚本</DialogTitle>
                   <DialogDescription className="mt-1 text-[12px] leading-5">
                     {selectedEntry
-                      ? "左侧列表选中项的脚本内容，可直接编辑、保存或基于当前版本继续录制。"
+                      ? "可编辑脚本内容和文件中文名；保存修改会更新当前文件，另存为会创建新的脚本文件。"
                       : "请选择一条录制查看脚本。"}
                   </DialogDescription>
+                  {selectedEntry ? (
+                    <div className="mt-3 flex max-w-xl items-center gap-2">
+                      <label
+                        htmlFor="browser-script-library-display-name"
+                        className="shrink-0 text-xs font-medium text-foreground"
+                      >
+                        文件中文名
+                      </label>
+                      <Input
+                        id="browser-script-library-display-name"
+                        value={detailDisplayNameValue}
+                        disabled={
+                          !detailViewActive ||
+                          detailLoading ||
+                          isSaveLoading ||
+                          isSaveAsLoading ||
+                          isContinueLoading
+                        }
+                        onChange={(event) => {
+                          const nextDisplayName = event.target.value
+                          setDetailDisplayName(nextDisplayName)
+                          saveDetailDraft(
+                            selectedEntry.fileName,
+                            detailScript,
+                            detailInitialScript,
+                            nextDisplayName,
+                            detailInitialDisplayName
+                          )
+                        }}
+                        placeholder="请输入文件中文名"
+                        className="h-8 rounded-lg border-border/80 bg-background text-xs shadow-none"
+                      />
+                    </div>
+                  ) : null}
                 </div>
-                <div className="gap-2">
+                <div className="flex shrink-0 items-center gap-2">
                   <Button
                     type="button"
                     size="sm"
                     variant="outline"
                     className="h-8 rounded-lg text-[11px]"
                     disabled={
-                      !detailScript.trim() || detailLoading || isSaveLoading || isContinueLoading
+                      !detailViewActive ||
+                      !detailScriptValue.trim() ||
+                      !detailDisplayNameValue.trim() ||
+                      detailLoading ||
+                      isSaveLoading ||
+                      isSaveAsLoading ||
+                      isContinueLoading
                     }
                     onClick={() => void handleCopyDetailScript()}
                   >
@@ -477,7 +606,15 @@ export function BrowserRecordingListDialog({
                     size="sm"
                     variant="outline"
                     className="h-8 rounded-lg text-[11px]"
-                    disabled={!selectedEntry || !detailDirty || detailLoading || isContinueLoading}
+                    disabled={
+                      !selectedEntry ||
+                      !detailDirty ||
+                      !detailScriptValue.trim() ||
+                      !detailDisplayNameValue.trim() ||
+                      detailLoading ||
+                      isSaveAsLoading ||
+                      isContinueLoading
+                    }
                     onClick={() => void handleSaveDetailScript()}
                   >
                     {isSaveLoading ? (
@@ -490,9 +627,36 @@ export function BrowserRecordingListDialog({
                   <Button
                     type="button"
                     size="sm"
+                    variant="outline"
                     className="h-8 rounded-lg text-[11px]"
                     disabled={
-                      !selectedEntry || !detailScript.trim() || detailLoading || isSaveLoading
+                      !selectedEntry ||
+                      !detailScriptValue.trim() ||
+                      !detailDisplayNameValue.trim() ||
+                      detailLoading ||
+                      isSaveLoading ||
+                      isSaveAsLoading ||
+                      isContinueLoading
+                    }
+                    onClick={() => void handleSaveAsScript()}
+                  >
+                    {isSaveAsLoading ? (
+                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Copy className="size-3.5" strokeWidth={1.8} />
+                    )}
+                    另存为
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-8 rounded-lg text-[11px]"
+                    disabled={
+                      !selectedEntry ||
+                      !detailScriptValue.trim() ||
+                      detailLoading ||
+                      isSaveLoading ||
+                      isSaveAsLoading
                     }
                     onClick={() => void handleContinueRecording()}
                   >
@@ -519,7 +683,7 @@ export function BrowserRecordingListDialog({
                       </span>
                     ) : null}
                   </div>
-                  {detailLoading || isSaveLoading || isContinueLoading ? (
+                  {detailLoading || isSaveLoading || isSaveAsLoading || isContinueLoading ? (
                     <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
                   ) : null}
                 </div>
@@ -527,13 +691,19 @@ export function BrowserRecordingListDialog({
                   <textarea
                     aria-label="录制脚本编辑器"
                     spellCheck={false}
-                    value={detailScript}
-                    disabled={detailLoading}
+                    value={detailScriptValue}
+                    disabled={!detailViewActive || detailLoading}
                     onChange={(event) => {
                       const nextScript = event.target.value
                       setDetailScript(nextScript)
                       if (selectedEntry) {
-                        saveDetailDraft(selectedEntry.fileName, nextScript, detailInitialScript)
+                        saveDetailDraft(
+                          selectedEntry.fileName,
+                          nextScript,
+                          detailInitialScript,
+                          detailDisplayName,
+                          detailInitialDisplayName
+                        )
                       }
                     }}
                     className="h-full min-h-[52vh] w-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500 disabled:cursor-wait"

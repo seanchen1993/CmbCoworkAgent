@@ -12,7 +12,7 @@ describe("locator generator", () => {
 
     expect(result.best.locator).toBe('page.getByTestId("login-submit")')
     expect(result.candidates[1]?.locator).toBe(
-      'page.getByRole("button", { name: "登录" })'
+      'page.getByRole("button", { name: "登录", exact: true })'
     )
   })
 
@@ -23,7 +23,31 @@ describe("locator generator", () => {
       label: "邮箱地址"
     })
 
-    expect(result.best.locator).toBe('page.getByRole("textbox", { name: "邮箱地址" })')
+    expect(result.best.locator).toBe('page.getByRole("textbox", { name: "邮箱地址", exact: true })')
+  })
+
+  it("infers spinbutton locators for numeric inputs", () => {
+    const result = resolvePlaywrightLocator({
+      target: "年龄",
+      label: "年龄",
+      tagName: "input",
+      inputType: "number"
+    })
+
+    expect(result.best.locator).toBe('page.getByRole("spinbutton", { name: "年龄", exact: true })')
+  })
+
+  it("infers slider locators for range inputs", () => {
+    const result = resolvePlaywrightLocator({
+      target: "编程经验（年）",
+      label: "编程经验（年）",
+      tagName: "input",
+      inputType: "range"
+    })
+
+    expect(result.best.locator).toBe(
+      'page.getByRole("slider", { name: "编程经验（年）", exact: true })'
+    )
   })
 
   it("builds frameLocator roots when frame metadata is present", () => {
@@ -62,6 +86,19 @@ describe("locator generator", () => {
       target: "Actions tab in repository navigation"
     })
 
-    expect(result.best.locator).toBe('page.getByRole("tab", { name: "Actions" })')
+    expect(result.best.locator).toBe('page.getByRole("tab", { name: "Actions", exact: true })')
+  })
+
+  it("prefers an input selector over textbox role metadata for file inputs", () => {
+    const result = resolvePlaywrightLocator({
+      target: "avatar",
+      role: "textbox",
+      accessibleName: "avatar",
+      selector: 'input[name="avatar"]',
+      tagName: "input",
+      inputType: "file"
+    })
+
+    expect(result.best.locator).toBe('page.locator("input[name=\\"avatar\\"]")')
   })
 })

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
+import { extractAiRecordingVariables } from "../../../shared/browser-ai-recording-script"
 import type {
   BrowserScriptLibraryDeleteInput,
   BrowserScriptLibraryEntry,
@@ -215,14 +216,22 @@ export async function saveBrowserScriptLibraryEntry(
 export async function listBrowserScriptLibraryEntries(
   options: BrowserScriptLibraryListOptions = {}
 ): Promise<BrowserScriptLibraryEntry[]> {
-  const workspacePath = normalizeText(options.workspacePath)
-  const workspaceFilter = workspacePath ? resolve(workspacePath) : null
+  void options
   const manifest = await readManifest()
-  const filteredEntries = workspaceFilter
-    ? manifest.entries.filter((entry) => entry.workspacePath === workspaceFilter)
-    : manifest.entries
-
-  return [...filteredEntries].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  const entries = [...manifest.entries].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  return Promise.all(
+    entries.map(async (entry) => {
+      try {
+        const script = await readFile(getScriptPath(entry.fileName), "utf8")
+        return {
+          ...entry,
+          hasVariables: extractAiRecordingVariables(script).length > 0
+        }
+      } catch {
+        return entry
+      }
+    })
+  )
 }
 
 export async function readBrowserScriptLibraryScript(
@@ -246,25 +255,56 @@ export async function updateBrowserScriptLibraryEntry(
 ): Promise<void> {
   const fileName = assertSafeFileName(input.fileName)
   const script = typeof input.script === "string" ? input.script : ""
+  const shouldUpdateDisplayName = input.displayName !== undefined
+  const displayName = shouldUpdateDisplayName ? normalizeText(input.displayName) : undefined
 
   if (!script.trim()) {
     throw new Error("脚本内容不能为空")
   }
+  if (shouldUpdateDisplayName && !displayName) {
+    throw new Error("请输入文件中文名")
+  }
 
   return runSerializedMutation(async () => {
     const manifest = await readManifest()
-    const entryExists = manifest.entries.some((entry) => entry.fileName === fileName)
-    if (!entryExists) {
+    const currentEntry = manifest.entries.find((entry) => entry.fileName === fileName)
+    if (!currentEntry) {
       throw new Error("脚本文件不存在，可能已被删除")
     }
 
+    const scriptPath = getScriptPath(fileName)
+    let previousScript: string
     try {
-      await writeFile(getScriptPath(fileName), script, "utf8")
+      previousScript = await readFile(scriptPath, "utf8")
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code === "ENOENT") {
         throw new Error("脚本文件不存在，可能已被删除")
       }
+      console.warn(`${BROWSER_LIBRARY_LOG_PREFIX} Failed to read script ${fileName}:`, error)
+      throw new Error("读取脚本内容失败，请稍后重试")
+    }
+
+    const nextEntry =
+      displayName && displayName !== currentEntry.displayName
+        ? {
+            ...currentEntry,
+            displayName
+          }
+        : currentEntry
+
+    try {
+      await writeFile(scriptPath, script, "utf8")
+      if (nextEntry !== currentEntry) {
+        await writeManifest({
+          version: 1,
+          entries: manifest.entries.map((entry) =>
+            entry.fileName === fileName ? nextEntry : entry
+          )
+        })
+      }
+    } catch (error) {
+      await writeFile(scriptPath, previousScript, "utf8").catch(() => undefined)
       console.warn(`${BROWSER_LIBRARY_LOG_PREFIX} Failed to update script ${fileName}:`, error)
       throw new Error("保存脚本内容失败，请稍后重试")
     }

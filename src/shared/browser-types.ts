@@ -33,6 +33,7 @@ export interface BrowserState {
 export const BUILTIN_BROWSER_LOG_PREFIX = "[内置浏览器]"
 export const BROWSER_SESSION_ID = "app-browser"
 export const BROWSER_PANEL_REQUEST_CHANNEL = "browser:panel-request"
+export const BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL = "browser:script-execution-state"
 
 export interface BrowserLocatorMetadata {
   target?: string
@@ -174,6 +175,7 @@ export interface BrowserScriptLibraryEntry {
   description: string
   displayName: string
   fileName: string
+  hasVariables?: boolean
   recordingSource: BrowserRecordingSource
   threadId: string
   workspacePath: string
@@ -190,6 +192,7 @@ export interface BrowserScriptLibraryDeleteInput {
 export interface BrowserScriptLibraryUpdateInput {
   fileName: string
   script: string
+  displayName?: string | null
 }
 
 export interface BrowserRecordingDraftUpdateInput {
@@ -200,6 +203,19 @@ export interface BrowserScriptLibraryReadInput {
   fileName: string
 }
 
+export type BrowserScriptExecutionStatus = "idle" | "running" | "completed" | "error" | "cancelled"
+
+export interface BrowserScriptExecutionState {
+  status: BrowserScriptExecutionStatus
+  fileName?: string
+  label?: string
+  threadId?: string | null
+  startedAt?: string
+  endedAt?: string
+  error?: string
+  progressPercent?: number
+}
+
 export interface BrowserScriptLibrarySaveInput {
   description?: string | null
   displayName: string
@@ -207,6 +223,15 @@ export interface BrowserScriptLibrarySaveInput {
   script: string
   threadId?: string | null
   workspacePath: string
+}
+
+export interface BrowserScriptExecutionInput {
+  script: string
+  fileName?: string | null
+  label?: string | null
+  threadId?: string | null
+  workspacePath?: string | null
+  variableValues?: Record<string, string | string[]>
 }
 
 export const DEFAULT_BROWSER_CDP_PORT = 38127

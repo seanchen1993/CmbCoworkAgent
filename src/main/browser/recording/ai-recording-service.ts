@@ -117,8 +117,12 @@ const LOCATOR_ROLES: LocatorRole[] = [
   "combobox",
   "link",
   "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
   "option",
   "radio",
+  "slider",
+  "spinbutton",
   "switch",
   "tab",
   "textbox"
@@ -128,6 +132,25 @@ function readLocatorRole(value: unknown): LocatorRole | undefined {
   const text = readString(value)?.toLowerCase()
   if (!text) return undefined
   return LOCATOR_ROLES.find((role) => role === text)
+}
+
+function inferLocatorRoleFromMetadata(input: {
+  inputType?: string
+  tagName?: string
+}): LocatorRole | undefined {
+  const tagName = readString(input.tagName)?.toLowerCase()
+  const inputType = readString(input.inputType)?.toLowerCase()
+
+  if (tagName === "textarea") return "textbox"
+  if (tagName !== "input") return undefined
+
+  if (inputType === "range") return "slider"
+  if (inputType === "number") return "spinbutton"
+  if (inputType === "checkbox") return "checkbox"
+  if (inputType === "radio") return "radio"
+  if (inputType === "button" || inputType === "submit" || inputType === "reset") return "button"
+
+  return undefined
 }
 
 function parseQuotedValue(value: string, start = 0): { value: string; end: number } | null {
@@ -275,7 +298,14 @@ function buildSnapshotMetadata(
     accessibleName: node.name,
     textContent: node.role === "text" ? node.inlineText : undefined,
     placeholder: node.placeholder,
-    inputType: role === "textbox" ? "text" : undefined
+    inputType:
+      role === "textbox"
+        ? "text"
+        : role === "spinbutton"
+          ? "number"
+          : role === "slider"
+            ? "range"
+            : undefined
   }
 }
 
@@ -283,21 +313,29 @@ function buildArgsMetadata(
   args: Record<string, unknown>,
   fallbackTarget?: string
 ): BrowserLocatorMetadata | undefined {
+  const tagName = readString(args.tagName) ?? readString(args.tag)
+  const rawType = readString(args.type)?.toLowerCase()
+  const inferredInputType =
+    rawType === "range" || rawType === "number" || rawType === "checkbox" || rawType === "radio"
+      ? rawType
+      : undefined
+  const inputType = readString(args.inputType) ?? readString(args.input_type) ?? inferredInputType
   const metadata: BrowserLocatorMetadata = {
     target: fallbackTarget ?? getTarget(args),
     role:
       readLocatorRole(args.role) ??
       readLocatorRole(args.ariaRole) ??
       readLocatorRole(args.controlType) ??
-      readLocatorRole(args.type),
+      readLocatorRole(args.type) ??
+      inferLocatorRoleFromMetadata({ tagName, inputType }),
     label: readString(args.label),
     placeholder: readString(args.placeholder),
     testId: readString(args.testId) ?? readString(args.testid) ?? readString(args["data-testid"]),
     accessibleName: readString(args.accessibleName) ?? readString(args.ariaLabel),
     textContent: readString(args.textContent),
     selector: readString(args.selector),
-    tagName: readString(args.tagName) ?? readString(args.tag),
-    inputType: readString(args.inputType) ?? readString(args.input_type),
+    tagName,
+    inputType,
     framePath: (() => {
       const values = readStringArray(args.framePath ?? args.frameSelectors ?? args.frames)
       return values.length > 0 ? values : undefined
@@ -439,7 +477,7 @@ function normalizeToolCall(options: {
           {
             kind: "fill",
             target,
-            value: sensitive ? "" : getValue(args),
+            value: getValue(args),
             sensitive,
             locator
           },
@@ -483,7 +521,7 @@ function normalizeToolCall(options: {
             {
               kind: "fill",
               target: fieldTarget,
-              value: sensitive ? "" : value,
+              value,
               sensitive,
               locator: fieldLocator
             },

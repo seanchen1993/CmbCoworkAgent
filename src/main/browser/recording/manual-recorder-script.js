@@ -17,6 +17,10 @@ export function buildManualRecorderInjectionScript() {
 
     const PREFIX = ${JSON.stringify(MANUAL_RECORDER_EVENT_PREFIX)};
     const SUPPORTED_KEYS = new Set(${JSON.stringify(Array.from(SUPPORTED_PRESS_KEYS))});
+    const IME_ENTER_SUPPRESS_WINDOW_MS = 300;
+    const composingTargets = new WeakSet();
+    const recentlyComposedTargets = new WeakMap();
+    const pendingCommittedFillTimers = new WeakMap();
 
     function text(value) {
       return typeof value === "string" ? value.trim() : "";
@@ -55,7 +59,11 @@ export function buildManualRecorderInjectionScript() {
         const type = text(element.getAttribute("type")).toLowerCase();
         if (type === "checkbox") return "checkbox";
         if (type === "radio") return "radio";
+        if (type === "range") return "slider";
+        if (type === "number") return "spinbutton";
         if (type === "button" || type === "submit" || type === "reset") return "button";
+        if (type === "file") return "";
+        if (element.hasAttribute("list")) return "combobox";
         return "textbox";
       }
       return "";
@@ -107,7 +115,15 @@ export function buildManualRecorderInjectionScript() {
       const testId = text(element.getAttribute("data-testid"));
       if (testId) return '[data-testid="' + testId.replace(/"/g, '\\"') + '"]';
       const name = text(element.getAttribute("name"));
-      if (name) return element.tagName.toLowerCase() + '[name="' + name.replace(/"/g, '\\"') + '"]';
+      if (name) {
+        const tagName = element.tagName.toLowerCase();
+        const type = text(element.getAttribute("type")).toLowerCase();
+        const value = text(element.getAttribute("value"));
+        if ((type === "radio" || type === "checkbox") && value) {
+          return tagName + '[name="' + name.replace(/"/g, '\\"') + '"][value="' + value.replace(/"/g, '\\"') + '"]';
+        }
+        return tagName + '[name="' + name.replace(/"/g, '\\"') + '"]';
+      }
       return element.tagName.toLowerCase();
     }
 
@@ -190,6 +206,42 @@ export function buildManualRecorderInjectionScript() {
       return candidates.slice(0, 6);
     }
 
+    function markCompositionStart(target) {
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+        composingTargets.add(target);
+        const pendingTimer = pendingCommittedFillTimers.get(target);
+        if (pendingTimer !== undefined) {
+          window.clearTimeout(pendingTimer);
+          pendingCommittedFillTimers.delete(target);
+        }
+      }
+    }
+
+    function markCompositionEnd(target) {
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+        composingTargets.delete(target);
+        recentlyComposedTargets.set(target, Date.now());
+        const pendingTimer = pendingCommittedFillTimers.get(target);
+        if (pendingTimer !== undefined) {
+          window.clearTimeout(pendingTimer);
+        }
+        const timerId = window.setTimeout(() => {
+          pendingCommittedFillTimers.delete(target);
+          if (!document.contains(target)) return;
+          emitTextFill(target);
+        }, 0);
+        pendingCommittedFillTimers.set(target, timerId);
+      }
+    }
+
+    function recentlyComposed(target) {
+      if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+        return false;
+      }
+      const timestamp = recentlyComposedTargets.get(target);
+      return typeof timestamp === "number" && Date.now() - timestamp <= IME_ENTER_SUPPRESS_WINDOW_MS;
+    }
+
     function actionableTarget(target) {
       if (!(target instanceof Element)) return null;
       const candidates = locatorCandidatesForTarget(target);
@@ -208,6 +260,14 @@ export function buildManualRecorderInjectionScript() {
       });
     }, true);
 
+    document.addEventListener('compositionstart', (event) => {
+      markCompositionStart(event.target);
+    }, true);
+
+    document.addEventListener('compositionend', (event) => {
+      markCompositionEnd(event.target);
+    }, true);
+
     function emitTextFill(target) {
       emit({ type: 'fill', locator: locatorForElement(target), value: target.value });
     }
@@ -215,6 +275,7 @@ export function buildManualRecorderInjectionScript() {
     document.addEventListener('input', (event) => {
       const target = event.target;
       if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+      if (event.isComposing || composingTargets.has(target)) return;
       if (target instanceof HTMLInputElement) {
         if (target.type === 'file' || target.type === 'checkbox' || target.type === 'radio') {
           return;
@@ -260,6 +321,8 @@ export function buildManualRecorderInjectionScript() {
 
     document.addEventListener('keydown', (event) => {
       if (!SUPPORTED_KEYS.has(event.key)) return;
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === "Enter" && recentlyComposed(event.target)) return;
       const target = actionableTarget(event.target);
       emit({ type: 'press', key: event.key, locator: target ?? undefined });
     }, true);

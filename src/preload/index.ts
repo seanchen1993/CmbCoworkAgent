@@ -105,6 +105,8 @@ import type {
   BrowserPanelRequest,
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
+  BrowserScriptExecutionInput,
+  BrowserScriptExecutionState,
   BrowserScreenshotResult,
   ManualRecordingStartOptions,
   BrowserScriptLibraryEntry,
@@ -115,6 +117,7 @@ import type {
   BrowserScriptLibraryUpdateInput,
   BrowserState
 } from "../shared/browser-types"
+import { BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL } from "../shared/browser-types"
 import {
   APP_ATTENTION_CHANNEL,
   getAgentStreamAttentionKind,
@@ -2063,6 +2066,12 @@ const api = {
       ipcRenderer.invoke("browser:updateScriptLibraryEntry", input) as Promise<void>,
     deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput): Promise<void> =>
       ipcRenderer.invoke("browser:deleteScriptLibraryEntry", input) as Promise<void>,
+    executeRecordingScript: (input: BrowserScriptExecutionInput): Promise<void> =>
+      ipcRenderer.invoke("browser:executeRecordingScript", input) as Promise<void>,
+    getScriptExecutionState: (): Promise<BrowserScriptExecutionState> =>
+      ipcRenderer.invoke("browser:getScriptExecutionState") as Promise<BrowserScriptExecutionState>,
+    cancelRecordingScriptExecution: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:cancelRecordingScriptExecution") as Promise<boolean>,
     getCdpConfig: (): Promise<BrowserCdpConfig> =>
       ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
     isProfileImportRuntimeEnabled: (): Promise<boolean> =>
@@ -2098,6 +2107,17 @@ const api = {
       ipcRenderer.on(BROWSER_PANEL_REQUEST_CHANNEL, handler)
       return () => {
         ipcRenderer.removeListener(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      }
+    },
+    onScriptExecutionState: (
+      callback: (state: BrowserScriptExecutionState) => void
+    ): (() => void) => {
+      const handler = (_: unknown, state: BrowserScriptExecutionState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, handler)
       }
     }
   },

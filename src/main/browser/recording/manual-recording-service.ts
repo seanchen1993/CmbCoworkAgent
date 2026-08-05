@@ -122,8 +122,12 @@ function normalizeRole(value: unknown): BrowserLocatorMetadata["role"] {
     case "combobox":
     case "link":
     case "menuitem":
+    case "menuitemcheckbox":
+    case "menuitemradio":
     case "option":
     case "radio":
+    case "slider":
+    case "spinbutton":
     case "switch":
     case "tab":
     case "textbox":
@@ -131,6 +135,24 @@ function normalizeRole(value: unknown): BrowserLocatorMetadata["role"] {
     default:
       return undefined
   }
+}
+
+function inferRoleFromLocatorPayload(
+  payload: Pick<ManualRecorderLocatorPayload, "tagName" | "inputType">
+): BrowserLocatorMetadata["role"] {
+  const tagName = readString(payload.tagName)?.toLowerCase()
+  const inputType = readString(payload.inputType)?.toLowerCase()
+
+  if (tagName === "textarea") return "textbox"
+  if (tagName !== "input") return undefined
+
+  if (inputType === "range") return "slider"
+  if (inputType === "number") return "spinbutton"
+  if (inputType === "checkbox") return "checkbox"
+  if (inputType === "radio") return "radio"
+  if (inputType === "button" || inputType === "submit" || inputType === "reset") return "button"
+
+  return undefined
 }
 
 function normalizeLocatorPayload(
@@ -141,7 +163,7 @@ function normalizeLocatorPayload(
 
   const locator: BrowserLocatorMetadata = {
     target: readString(payload.target),
-    role: normalizeRole(payload.role),
+    role: normalizeRole(payload.role) ?? inferRoleFromLocatorPayload(payload),
     label: readString(payload.label),
     placeholder: readString(payload.placeholder),
     testId: readString(payload.testId),
@@ -484,7 +506,7 @@ function normalizeManualEvent(
         source: "manual",
         timestamp,
         target: locator?.target,
-        value: sensitive ? "" : (readString(event.value) ?? ""),
+        value: readString(event.value) ?? "",
         sensitive,
         locator
       }

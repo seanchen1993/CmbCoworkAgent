@@ -1,4 +1,4 @@
-import { Download, FileCode2, Loader2, Save, Sparkles } from "lucide-react"
+import { Download, FileCode2, Loader2, Play, Save, Sparkles } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -34,6 +34,8 @@ interface BrowserAiRecordingResultDialogProps {
   canSaveDraft: boolean
   isDraftSaveSubmitting: boolean
   onSaveDraft: () => void
+  isExecuteSubmitting: boolean
+  onExecuteScript: () => void
   saveDisplayName: string
   onSaveDisplayNameChange: (value: string) => void
   isSaveSubmitting: boolean
@@ -99,6 +101,7 @@ function getAiRecordedActionTone(kind: AiRecordedBrowserAction["kind"]): string 
 
 function canAiRecordedActionUseVariable(action: AiRecordedBrowserAction): boolean {
   switch (action.kind) {
+    case "navigate":
     case "fill":
     case "selectOption":
     case "fileUpload":
@@ -135,6 +138,8 @@ export function BrowserAiRecordingResultDialog({
   canSaveDraft,
   isDraftSaveSubmitting,
   onSaveDraft,
+  isExecuteSubmitting,
+  onExecuteScript,
   saveDisplayName,
   onSaveDisplayNameChange,
   isSaveSubmitting,
@@ -220,7 +225,7 @@ export function BrowserAiRecordingResultDialog({
               <p className="text-sm font-medium text-foreground">步骤列表</p>
               <p className="mt-1 text-[11px] text-muted-foreground">
                 共 {aiRecordingActionCount}{" "}
-                步，默认全选；输入、选择、上传和点击文本步骤可标记为变量，并手动填写变量名。
+                步，默认全选；导航、输入、选择、上传和点击文本步骤可标记为变量，并手动填写变量名。
               </p>
             </div>
             <div className="max-h-[58vh] space-y-2.5 overflow-auto px-3 py-3">
@@ -479,9 +484,26 @@ export function BrowserAiRecordingResultDialog({
                     <FileCode2 className="size-3.5" strokeWidth={1.8} />
                     <span>playwright.spec.ts 草稿 (可编辑)</span>
                   </div>
-                  <span className="font-mono tabular-nums">
-                    {aiRecordingScriptReady ? `${aiRecordingScriptLineCount} lines` : "waiting"}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 rounded-md px-2 text-[11px] text-slate-200 hover:bg-white/5"
+                      disabled={!aiRecordingScriptReady || isExecuteSubmitting}
+                      onClick={onExecuteScript}
+                    >
+                      {isExecuteSubmitting ? (
+                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                      ) : (
+                        <Play className="size-3.5" strokeWidth={1.8} />
+                      )}
+                      内置浏览器执行
+                    </Button>
+                    <span className="font-mono tabular-nums">
+                      {aiRecordingScriptReady ? `${aiRecordingScriptLineCount} lines` : "waiting"}
+                    </span>
+                  </div>
                 </div>
                 <div className="h-[300px] flex-1  px-4 py-4 font-mono text-[12px] leading-6 text-slate-100">
                   <textarea
