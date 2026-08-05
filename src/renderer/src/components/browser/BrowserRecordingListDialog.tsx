@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { Check, Copy, FolderOpen, Loader2, Play, RotateCcw, Save, Trash2 } from "lucide-react"
+import { Check, Copy, Loader2, Play, RotateCcw, Save, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
@@ -264,21 +264,9 @@ export function BrowserRecordingListDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] max-w-[96vw] gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
-        <DialogHeader className="border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 py-4">
+        <DialogHeader className="border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <div className="flex items-center gap-3">
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
-                  <FolderOpen className="size-4" strokeWidth={1.9} />
-                </div>
-                <div>
-                  <DialogTitle className="text-base">录制列表</DialogTitle>
-                  <DialogDescription className="mt-1 text-[12px] leading-5">
-                    所有已保存的录制脚本。
-                  </DialogDescription>
-                </div>
-              </div>
-            </div>
+            <DialogTitle className="text-base">录制列表</DialogTitle>
             <Button
               type="button"
               size="sm"
@@ -496,7 +484,7 @@ export function BrowserRecordingListDialog({
 
           <div className="flex min-h-0 w-full min-w-0 flex-col lg:w-1/2 lg:flex-none">
             <div className="border-b border-border/70 px-5 py-4">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col gap-3">
                 <div className="flex-1 min-w-0">
                   <DialogTitle className="text-base">编辑录制脚本</DialogTitle>
                   <DialogDescription className="mt-1 text-[12px] leading-5">
@@ -504,132 +492,130 @@ export function BrowserRecordingListDialog({
                       ? "可编辑脚本内容和文件中文名；保存修改会更新当前文件，另存为会创建新的脚本文件。"
                       : "请选择一条录制查看脚本。"}
                   </DialogDescription>
-                  {selectedEntry ? (
-                    <div className="mt-3 flex max-w-xl items-center gap-2">
-                      <label
-                        htmlFor="browser-script-library-display-name"
-                        className="shrink-0 text-xs font-medium text-foreground"
-                      >
-                        文件中文名
-                      </label>
-                      <Input
-                        id="browser-script-library-display-name"
-                        value={detailDisplayNameValue}
-                        disabled={
-                          !detailViewActive ||
-                          detailLoading ||
-                          isSaveLoading ||
-                          isSaveAsLoading ||
-                          isContinueLoading
-                        }
-                        onChange={(event) => {
-                          const nextDisplayName = event.target.value
-                          setDetailDisplayName(nextDisplayName)
-                          saveDetailDraft(
-                            selectedEntry.fileName,
-                            detailScript,
-                            detailInitialScript,
-                            nextDisplayName,
-                            detailInitialDisplayName
-                          )
-                        }}
-                        placeholder="请输入文件中文名"
-                        className="h-8 rounded-lg border-border/80 bg-background text-xs shadow-none"
-                      />
-                    </div>
-                  ) : null}
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-8 rounded-lg text-[11px]"
-                    disabled={
-                      !detailViewActive ||
-                      !detailScriptValue.trim() ||
-                      !detailDisplayNameValue.trim() ||
-                      detailLoading ||
-                      isSaveLoading ||
-                      isSaveAsLoading ||
-                      isContinueLoading
-                    }
-                    onClick={() => void handleCopyDetailScript()}
-                  >
-                    {detailCopied ? (
-                      <Check className="size-3.5" strokeWidth={1.8} />
-                    ) : (
-                      <Copy className="size-3.5" strokeWidth={1.8} />
-                    )}
-                    {detailCopied ? "已复制" : "复制内容"}
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-8 rounded-lg text-[11px]"
-                    disabled={
-                      !selectedEntry ||
-                      !detailDirty ||
-                      !detailScriptValue.trim() ||
-                      !detailDisplayNameValue.trim() ||
-                      detailLoading ||
-                      isSaveAsLoading ||
-                      isContinueLoading
-                    }
-                    onClick={() => void handleSaveDetailScript()}
-                  >
-                    {isSaveLoading ? (
-                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                    ) : (
-                      <Save className="size-3.5" strokeWidth={1.8} />
-                    )}
-                    保存修改
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-8 rounded-lg text-[11px]"
-                    disabled={
-                      !selectedEntry ||
-                      !detailScriptValue.trim() ||
-                      !detailDisplayNameValue.trim() ||
-                      detailLoading ||
-                      isSaveLoading ||
-                      isSaveAsLoading ||
-                      isContinueLoading
-                    }
-                    onClick={() => void handleSaveAsScript()}
-                  >
-                    {isSaveAsLoading ? (
-                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                    ) : (
-                      <Copy className="size-3.5" strokeWidth={1.8} />
-                    )}
-                    另存为
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-8 rounded-lg text-[11px]"
-                    disabled={
-                      !selectedEntry ||
-                      !detailScriptValue.trim() ||
-                      detailLoading ||
-                      isSaveLoading ||
-                      isSaveAsLoading
-                    }
-                    onClick={() => void handleContinueRecording()}
-                  >
-                    {isContinueLoading ? (
-                      <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-                    ) : (
-                      <Play className="size-3.5" strokeWidth={1.8} />
-                    )}
-                    继续录制
-                  </Button>
-                </div>
+                {selectedEntry ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label
+                      htmlFor="browser-script-library-display-name"
+                      className="shrink-0 text-xs font-medium text-foreground"
+                    >
+                      文件中文名
+                    </label>
+                    <Input
+                      id="browser-script-library-display-name"
+                      value={detailDisplayNameValue}
+                      disabled={
+                        !detailViewActive ||
+                        detailLoading ||
+                        isSaveLoading ||
+                        isSaveAsLoading ||
+                        isContinueLoading
+                      }
+                      onChange={(event) => {
+                        const nextDisplayName = event.target.value
+                        setDetailDisplayName(nextDisplayName)
+                        saveDetailDraft(
+                          selectedEntry.fileName,
+                          detailScript,
+                          detailInitialScript,
+                          nextDisplayName,
+                          detailInitialDisplayName
+                        )
+                      }}
+                      placeholder="请输入文件中文名"
+                      className="h-8 w-[240px] rounded-lg border-border/80 bg-background text-xs shadow-none"
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 rounded-lg text-[11px]"
+                      disabled={
+                        !detailViewActive ||
+                        !detailScriptValue.trim() ||
+                        !detailDisplayNameValue.trim() ||
+                        detailLoading ||
+                        isSaveLoading ||
+                        isSaveAsLoading ||
+                        isContinueLoading
+                      }
+                      onClick={() => void handleCopyDetailScript()}
+                    >
+                      {detailCopied ? (
+                        <Check className="size-3.5" strokeWidth={1.8} />
+                      ) : (
+                        <Copy className="size-3.5" strokeWidth={1.8} />
+                      )}
+                      {detailCopied ? "已复制" : "复制内容"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 rounded-lg text-[11px]"
+                      disabled={
+                        !selectedEntry ||
+                        !detailDirty ||
+                        !detailScriptValue.trim() ||
+                        !detailDisplayNameValue.trim() ||
+                        detailLoading ||
+                        isSaveAsLoading ||
+                        isContinueLoading
+                      }
+                      onClick={() => void handleSaveDetailScript()}
+                    >
+                      {isSaveLoading ? (
+                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                      ) : (
+                        <Save className="size-3.5" strokeWidth={1.8} />
+                      )}
+                      保存修改
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 rounded-lg text-[11px]"
+                      disabled={
+                        !selectedEntry ||
+                        !detailScriptValue.trim() ||
+                        !detailDisplayNameValue.trim() ||
+                        detailLoading ||
+                        isSaveLoading ||
+                        isSaveAsLoading ||
+                        isContinueLoading
+                      }
+                      onClick={() => void handleSaveAsScript()}
+                    >
+                      {isSaveAsLoading ? (
+                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                      ) : (
+                        <Copy className="size-3.5" strokeWidth={1.8} />
+                      )}
+                      另存为
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-8 rounded-lg text-[11px]"
+                      disabled={
+                        !selectedEntry ||
+                        !detailScriptValue.trim() ||
+                        detailLoading ||
+                        isSaveLoading ||
+                        isSaveAsLoading
+                      }
+                      onClick={() => void handleContinueRecording()}
+                    >
+                      {isContinueLoading ? (
+                        <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
+                      ) : (
+                        <Play className="size-3.5" strokeWidth={1.8} />
+                      )}
+                      继续录制
+                    </Button>
+                  </div>
+                ) : null}
               </div>
             </div>
             <div className="min-h-0 flex-1 p-4">

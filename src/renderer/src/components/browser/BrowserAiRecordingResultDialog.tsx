@@ -397,9 +397,6 @@ export function BrowserAiRecordingResultDialog({
                       type="text"
                       value={saveDisplayName}
                       onChange={(e) => onSaveDisplayNameChange(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") onConfirmSave()
-                      }}
                       placeholder="文件中文名（必填）"
                       className="h-9 rounded-lg border-border/80 bg-background text-xs shadow-none placeholder:text-muted-foreground/80"
                     />
