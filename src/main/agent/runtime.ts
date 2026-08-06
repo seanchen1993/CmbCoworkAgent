@@ -32,7 +32,7 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 
-import { ChatOpenAI } from "@langchain/openai"
+import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import {
@@ -1781,6 +1781,7 @@ function stampSubagentOwnerMetadata<T>(
 export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
   const {
     model = "claude-sonnet-4-5-20250929",
+    summarizationModel = model,
     tools = [],
     systemPrompt,
     middleware: customMiddleware = [],
@@ -1906,11 +1907,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   }
   const mainSummarizationOptions = {
     ...summarizationBaseOptions,
-    model: configureContextCompactionModel(model, onContextCompaction)
+    model: configureContextCompactionModel(summarizationModel, onContextCompaction)
   }
   const subagentSummarizationOptions = {
     ...summarizationBaseOptions,
-    model: configureContextCompactionModel(model)
+    model: configureContextCompactionModel(summarizationModel)
   }
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
@@ -3688,7 +3689,40 @@ async function runWorkerStopHooksWithRevision({
 /** Default fetch (no UI hooks) for model instances without a UI context (e.g. skill generation). */
 const defaultRetryingFetch = createRetryingFetch()
 
-function getModelInstance(
+type ModelInstancePurpose = "agent" | "context-compaction"
+
+function localCompactionTokenCount(content: unknown): number {
+  let text: string
+  if (typeof content === "string") {
+    text = content
+  } else {
+    try {
+      text = JSON.stringify(content) ?? ""
+    } catch {
+      text = String(content ?? "")
+    }
+  }
+  return Math.ceil(text.length / 4)
+}
+
+function configureLocalCompactionTokenEstimation(model: ChatOpenAI): ChatOpenAI {
+  const completions = (
+    model as unknown as {
+      completions?: { getNumTokens: (content: unknown) => Promise<number> }
+    }
+  ).completions
+  if (!completions) return model
+
+  // LangChain's streaming invoke() estimates usage after the SSE completes and
+  // otherwise downloads a Tiktoken vocabulary. Compaction does not consume
+  // that estimate, so keep this bookkeeping local, deterministic, and offline.
+  completions.getNumTokens = async (content: unknown): Promise<number> =>
+    localCompactionTokenCount(content)
+  return model
+}
+
+/** @internal Exported for protocol-level tests. */
+export function getModelInstance(
   customConfig: {
     id: string
     model: string
@@ -3704,7 +3738,8 @@ function getModelInstance(
     thinkingEffort?: "high" | "max"
   },
   retryHooks?: ModelRetryHooks,
-  maxRetryAttempts?: number
+  maxRetryAttempts?: number,
+  purpose: ModelInstancePurpose = "agent"
 ): ChatOpenAI {
   const apiKey = customConfig.apiKey
   if (!apiKey) {
@@ -3727,6 +3762,9 @@ function getModelInstance(
   const baseFields = {
     model: resolvedModel,
     apiKey,
+    // Keep the established agent protocol unchanged. Context compaction uses a
+    // separate model instance because its invoke() must consume SSE internally.
+    ...(purpose === "context-compaction" ? { streaming: true } : {}),
     maxTokens: maxOutputTokens,
     temperature,
     topP,
@@ -3753,23 +3791,32 @@ function getModelInstance(
     }
   }
 
+  let model: ChatOpenAI
   if (enableThinking && customConfig.interleavedThinking) {
-    return new ChatOpenAI({
+    model = new ChatOpenAI({
       ...baseFields,
       completions: new InterleavedThinkingChatOpenAICompletions(baseFields, {
         exposeReasoning: enableThinking
       })
     } as never)
-  }
-
-  if (enableThinking) {
-    return new ChatOpenAI({
+  } else if (enableThinking) {
+    model = new ChatOpenAI({
       ...baseFields,
       completions: new ReasoningDisplayChatOpenAICompletions(baseFields)
     } as never)
+  } else if (purpose === "context-compaction") {
+    // ChatOpenAI.withConfig() rebuilds the wrapper from its original fields.
+    // Keep the compaction completions explicit so the local token counter below
+    // survives the tags/callback binding applied by configureContextCompactionModel().
+    model = new ChatOpenAI({
+      ...baseFields,
+      completions: new ChatOpenAICompletions(baseFields)
+    } as never)
+  } else {
+    model = new ChatOpenAI(baseFields)
   }
 
-  return new ChatOpenAI(baseFields)
+  return purpose === "context-compaction" ? configureLocalCompactionTokenEstimation(model) : model
 }
 
 type AgentsPromptLoader = "plugin" | "cmbdevclaw"
@@ -4101,6 +4148,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
 
   const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts)
+  const contextCompactionModel = getModelInstance(
+    customConfig,
+    retryHooks,
+    maxRetryAttempts,
+    "context-compaction"
+  )
   console.log("[Runtime] Model instance created")
 
   // Open agent-type registry → deepagents task-tool subagents for the Solo main
@@ -5880,6 +5933,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
 
   const agent = createDeepAgent({
     model,
+    summarizationModel: contextCompactionModel,
     tools: mainTools,
     subagentDefaultTools: workerTools,
     subagents: coordinatorSubagents,
