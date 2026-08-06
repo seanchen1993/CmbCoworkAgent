@@ -710,6 +710,21 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       this.socket?.close(4001, "session superseded")
       return
     }
+    if (reasonCode === "ROBOT_OPEN_ID_NOT_CONFIGURED") {
+      this.reconnectBlocked = true
+      this.rejectPending(new ImGatewayCommandError("网关尚未配置统一机器人 OpenID", { reasonCode }))
+      this.helloCommandId = null
+      this.syncCommandId = null
+      this.updateStatus({
+        connectionState: "error",
+        sessionId: null,
+        principalId: null,
+        routes: [],
+        lastError: "统一机器人网关尚未配置机器人 OpenID；配置完成后请手动重连。"
+      })
+      this.socket?.close(4002, "robot OpenID is not configured")
+      return
+    }
     const eventId = nonEmptyString(payload.eventId)
     const permitPending = commandId ? this.permitCommands.get(commandId) : undefined
     if (permitPending) {

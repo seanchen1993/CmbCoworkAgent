@@ -465,7 +465,7 @@ export class BuiltinRobotManager {
       return {
         route: null,
         status: null,
-        reason: "请先在招乎中向内置机器人发送一条消息，以建立远程会话。"
+        reason: "网关尚未建立默认远程会话，请检查机器人 OpenID 配置后重连。"
       }
     }
     if (candidates.length > 1) {

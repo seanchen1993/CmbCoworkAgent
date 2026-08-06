@@ -71,13 +71,29 @@ async function main(): Promise<void> {
   const remoteEvents: RemoteImEventV1[] = []
   const revokedEventIds: string[] = []
   let mismatchNextPermit = false
+  let missingRobotHelloCount = 0
   server.on("connection", (connected, request) => {
     socket = connected
-    authorization = String(request.headers.authorization ?? "")
+    const connectionAuthorization = String(request.headers.authorization ?? "")
+    authorization = connectionAuthorization
     connected.on("message", (raw) => {
       const envelope = JSON.parse(String(raw)) as Envelope
       receivedTypes.push(envelope.type)
       if (envelope.type === "HELLO") {
+        if (connectionAuthorization === "Bearer missing-robot-token") {
+          missingRobotHelloCount += 1
+          connected.send(
+            JSON.stringify({
+              schemaVersion: 1,
+              type: "ERROR",
+              commandId: envelope.commandId,
+              sentAt: new Date().toISOString(),
+              payload: { reasonCode: "ROBOT_OPEN_ID_NOT_CONFIGURED" }
+            })
+          )
+          connected.close(1008, "robot OpenID is not configured")
+          return
+        }
         connected.send(
           JSON.stringify({
             schemaVersion: 1,
@@ -324,6 +340,21 @@ async function main(): Promise<void> {
   assert.equal(failedRefreshCount, 1, "an invalid refreshed token must not cause a refresh loop")
   assert.equal(unrecoverableClient.getStatus().lastHandshakeStatus, 401)
   unrecoverableClient.stop()
+
+  const missingRobotClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "missing-robot-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  missingRobotClient.start()
+  await waitFor(
+    () => missingRobotClient.getStatus().lastError?.includes("机器人 OpenID") === true,
+    "missing robot OpenID diagnostic"
+  )
+  await new Promise((resolve) => setTimeout(resolve, 1_200))
+  assert.equal(missingRobotHelloCount, 1, "gateway configuration errors must not reconnect-loop")
+  missingRobotClient.stop()
 
   await new Promise<void>((resolve) => server.close(() => resolve()))
   console.log("im-gateway-ws-client.spec.ts passed")
